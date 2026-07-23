@@ -13,8 +13,9 @@ use tairix_abi::net::{
     SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    decode_counters_reply, decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceFactsRecord,
-    NetInterfaceStateRecord, NetstackRequest, IF_NAME_LEN, NETSTACK_MAX_REPLY,
+    decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceStateRecord, NetstackRequest, IF_NAME_LEN,
+    NETSTACK_MAX_REPLY,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -256,9 +257,12 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
     }));
 
     // The counters observed the exchange.
-    let counters = stack.counters(name("wan")).expect("counters");
+    let records = stack.counters_records(0, 8);
+    let counters = records[0].counters;
+    assert_eq!(records[0].name, name("wan"));
     assert!(counters.tx_frames >= 2, "ARP request + echo request");
     assert!(counters.rx_frames >= 2, "ARP reply + echo reply");
+    assert!(counters.tx_bytes > 0 && counters.rx_bytes > 0);
 }
 
 #[test]
@@ -346,7 +350,6 @@ fn admin_surface_is_denied_without_net_admin() {
             dest: [0; 16],
             next_hop: Some(v4_bytes(V4_B)),
         },
-        NetstackRequest::Counters { iface: name("wan") },
     ] {
         // A broker capability does not open the admin surface.
         assert_eq!(
@@ -361,7 +364,7 @@ fn admin_surface_is_denied_without_net_admin() {
             Err(Errno::PermissionDenied)
         );
     }
-    assert_eq!(sink.ids(), vec![16_002; 4], "every denial is audited");
+    assert_eq!(sink.ids(), vec![16_002; 3], "every denial is audited");
 }
 
 #[test]
@@ -375,6 +378,10 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
             limit: 8,
         },
         NetstackRequest::InterfaceState {
+            offset: 0,
+            limit: 8,
+        },
+        NetstackRequest::InterfaceCounters {
             offset: 0,
             limit: 8,
         },
@@ -392,7 +399,7 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
             Err(Errno::PermissionDenied)
         );
     }
-    assert_eq!(sink.ids(), vec![16_002; 2]);
+    assert_eq!(sink.ids(), vec![16_002; 3]);
 }
 
 #[test]
@@ -538,14 +545,22 @@ fn facts_page_reports_the_device_report() {
 }
 
 #[test]
-fn counters_reply_round_trips() {
+fn counters_page_round_trips() {
     let mut stack = managed_stack();
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
-    let request = NetstackRequest::Counters { iface: name("wan") };
-    let len = serve_ok(&mut stack, &admin(), &request, &mut reply);
-    let counters = decode_counters_reply(&reply[..len]).expect("counters");
-    assert_eq!(counters.rx_frames, 0);
-    assert_eq!(counters.tx_frames, 0);
+    // Counters are a broker read (SYSINFO_INTROSPECT), paged like state.
+    let request = NetstackRequest::InterfaceCounters {
+        offset: 0,
+        limit: 8,
+    };
+    let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
+    let (count, body) =
+        decode_page_reply(&reply[..len], NetInterfaceCountersRecord::WIRE_LEN).expect("page");
+    assert_eq!(count, 1);
+    let record = NetInterfaceCountersRecord::from_bytes(body).expect("record");
+    assert_eq!(record.name, name("wan"));
+    assert_eq!(record.counters.rx_frames, 0);
+    assert_eq!(record.counters.tx_frames, 0);
 }
 
 #[test]

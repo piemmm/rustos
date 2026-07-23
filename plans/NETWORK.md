@@ -1277,12 +1277,33 @@ the whole is too large for one change and each leaves the tree working.
   defects. `README.md` support-matrix rows record the per-arch offload
   state.
 
-### N8 — `ping`/`ss`-class command apps + observability `[ ]`
+### N8 — `ping`/`ss`-class command apps + observability `[~]`
+
+#### N8a — per-interface counters through the System Information API `[x]`
+- `lib/net::StackCounters` carries honest byte accounting (`rx_bytes`,
+  `tx_bytes`) beside the frame/drop/ICMP/reassembly counters; bytes are
+  counted at the single receive entry and the single transmit funnel.
+  A pre-existing IGMP/MLD transmit double-count (both the membership
+  emit *and* the shared frame funnel incremented `tx_frames`) is fixed —
+  the funnel is now the one counting point — with a regression test.
+- Counters reach user space exactly like interface state: the new paged
+  `NetstackRequest::InterfaceCounters` op (gated `CAP_SYSINFO_INTROSPECT`
+  at the broker, replacing the old admin-only per-iface `Counters` op)
+  returns name-keyed `NetInterfaceCountersRecord`s; `sysinfod` forwards
+  it through `SysinfoQueryId::NET_INTERFACE_COUNTERS` (id 21, gated
+  `CAP_SYSINFO_GLOBAL`, audited); `lib/procinfo` resolves
+  `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}` and the stack-wide
+  defence aggregates `stats:net/stack/{icmp-errors,icmp-suppressed,
+  reassembly-evicted}` (summed across interfaces). Every layer is
+  fail-closed and host-tested; the engine keeps one honest per-direction
+  `dropped` bucket rather than a fabricated errors/dropped split.
+
+#### N8b — `ping`/`ss`-class command apps + rates + posture docs `[ ]`
 - System command apps (`ping` — v4+v6, coreutils/iputils-familiar
   surface per §16.7; a socket/interface inspection tool following `ss`
-  conventions) as `.app` bundles with Help/ trees; stack counters and
-  socket tables exposed through the System Information API (§16.6)
-  behind `CAP_SYSINFO_GLOBAL` — never a `/proc` shape.
+  conventions) as `.app` bundles with Help/ trees; socket tables and the
+  windowed rate queries (`stats:net/<iface>/rx.pps?window=1s`) exposed
+  through the System Information API (§16.6) — never a `/proc` shape.
 - Docs: user-facing `docs/src/userland/networking.md`; the security
   posture page `docs/src/security/network.md` (threat model ↔ defence
   table, the §19.4 event-id registry for network events).
@@ -1344,9 +1365,10 @@ existing namespaces (§2.2 — one resolver, no second path). Unprivileged
 callers may read their own sockets' counters; interface-wide and
 stack-wide queries declare `CAP_SYSINFO_GLOBAL` (and `CAP_SYSINFO_HW`
 where hardware identity is exposed). Landed in N3 (interface facts/state,
-with the admin surface), completed in N8 (counters, rates, `ss`-class
-tooling reads the same queries), and extended by N9 for bond members
-(§6.3).
+with the admin surface) and N8a (per-interface + stack-wide counters via
+`NET_INTERFACE_COUNTERS` → `stats:net/…`); the windowed rates and the
+`ss`-class tooling that reads the same queries are N8b, and N9 extends it
+for bond members (§6.3).
 
 ## 6. Configuration: `/System/Settings/Network`, `configure net.*`, bonding and failover
 

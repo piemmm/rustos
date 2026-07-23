@@ -349,10 +349,21 @@ pub struct StackOutput {
 pub struct StackCounters {
     /// Frames handed to [`Stack::on_frame`].
     pub rx_frames: u64,
-    /// Received frames dropped by validation or lack of a handler.
+    /// Bytes handed to [`Stack::on_frame`] (every received frame's whole
+    /// Ethernet length, counted before validation — the honest total the
+    /// device delivered, dropped frames included).
+    pub rx_bytes: u64,
+    /// Received frames dropped by validation or lack of a handler. The
+    /// engine fails closed identically on a malformed frame and on one it
+    /// does not accept, so this single bucket is the honest receive-drop
+    /// count: there is deliberately no separate "errors" counter that
+    /// would split a distinction the receive path does not draw.
     pub rx_dropped: u64,
     /// Frames emitted for transmission.
     pub tx_frames: u64,
+    /// Bytes emitted for transmission (every emitted frame's whole
+    /// Ethernet length).
+    pub tx_bytes: u64,
     /// ICMP/`ICMPv6` errors emitted.
     pub icmp_errors_sent: u64,
     /// ICMP/`ICMPv6` errors suppressed by the rate limiter.
@@ -708,6 +719,7 @@ impl Stack {
     ) -> StackOutput {
         let mut out = StackOutput::default();
         self.counters.rx_frames += 1;
+        self.counters.rx_bytes += frame_bytes.len() as u64;
         let Some(frame) = EthernetFrame::parse(frame_bytes) else {
             self.counters.rx_dropped += 1;
             return out;
@@ -1451,6 +1463,7 @@ impl Stack {
         }
         frame[ETHERNET_HEADER_LEN..].copy_from_slice(packet);
         self.counters.tx_frames += 1;
+        self.counters.tx_bytes += frame.len() as u64;
         out.frames.push(TxFrame {
             offload,
             bytes: frame,
@@ -2677,7 +2690,6 @@ impl Stack {
             return;
         }
         packet[header_len..].copy_from_slice(body);
-        self.counters.tx_frames += 1;
         self.push_frame(out, ipv4_multicast_mac(&dest), ETHERTYPE_IPV4, &packet);
     }
 
@@ -2717,7 +2729,6 @@ impl Stack {
         if icmp.write(context, &mut message).is_none() {
             return;
         }
-        self.counters.tx_frames += 1;
         self.send_ipv6_packet_opt(
             out,
             source,

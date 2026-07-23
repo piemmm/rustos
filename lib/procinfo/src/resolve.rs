@@ -21,8 +21,11 @@
 //! `info:mem/{physical,page-size}`,
 //! `info:limits/<kind>/{soft,hard}`, `stats:uptime`, `stats:mem/*`, and
 //! `stats:limits/<kind>`) plus the network-interface queries `netstack`
-//! answers through the broker (`info:net/<iface>/{mac,mtu,kind}` and
-//! `state:net/<iface>/{link,address}`, `plans/NETWORK.md` §5).
+//! answers through the broker (`info:net/<iface>/{mac,mtu,kind}`,
+//! `state:net/<iface>/{link,address}`, and
+//! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}` plus the
+//! stack-wide `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`
+//! defence aggregates, `plans/NETWORK.md` §5).
 
 use alloc::string::{String, ToString};
 
@@ -30,8 +33,8 @@ use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
-    NetInterfaceStateRecord, IF_NAME_LEN,
+    NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuLoadRecord, IrqRecord, KernelMemoryStats, MemoryPressureStats,
@@ -438,35 +441,46 @@ fn resolve_stats(
         // an unknown line id fails closed inside the helper.
         ["irq", "count"] => irq_total_count_metric(reference, now, transport),
         ["irq", index, "count"] => irq_line_count_metric(reference, now, transport, index),
-        // The caller's own live usage of one of its limited resources: a
-        // measurement, so a gauge (it rises and falls and never resets over
-        // the life of the process). Byte-denominated resources report
-        // [`Unit::Bytes`]; the rest are a dimensionless [`Unit::Count`]. The
-        // query is ungated and self-scoped, so the usage is unprivileged.
-        ["limits", kind_name] => {
-            let kind = LimitKind::from_name(kind_name).ok_or(ResolveInfoError::UnknownSelector)?;
-            let usage = usage_for(kind, transport)?;
-            let mut name = String::from("limits/");
-            name.push_str(kind_name);
-            let metric = Metric::new(
-                &name,
-                MetricKind::Gauge,
-                unit_for_limit(kind),
-                usage,
-                now,
-                None,
-                ResetBehavior::Never,
-            )
-            .map_err(|_| ResolveInfoError::Malformed)?;
-            envelope(
-                reference,
-                now,
-                Authorization::Unprivileged,
-                ResponsePayload::Metric(metric),
-            )
-        }
+        // Live network counters: the stack-wide defence aggregates and
+        // the per-interface receive/transmit totals (`stats:net/…`).
+        ["net", rest @ ..] => resolve_net_stats(reference, now, transport, rest),
+        // The caller's own live usage of one of its limited resources.
+        ["limits", kind_name] => limit_usage_metric(reference, now, transport, kind_name),
         _ => Err(ResolveInfoError::UnknownSelector),
     }
+}
+
+/// The caller's own live usage of one of its limited resources: a
+/// measurement, so a gauge (it rises and falls and never resets over the
+/// life of the process). Byte-denominated resources report [`Unit::Bytes`];
+/// the rest are a dimensionless [`Unit::Count`]. The query is ungated and
+/// self-scoped, so the usage is unprivileged.
+fn limit_usage_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    kind_name: &str,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let kind = LimitKind::from_name(kind_name).ok_or(ResolveInfoError::UnknownSelector)?;
+    let usage = usage_for(kind, transport)?;
+    let mut name = String::from("limits/");
+    name.push_str(kind_name);
+    let metric = Metric::new(
+        &name,
+        MetricKind::Gauge,
+        unit_for_limit(kind),
+        usage,
+        now,
+        None,
+        ResetBehavior::Never,
+    )
+    .map_err(|_| ResolveInfoError::Malformed)?;
+    envelope(
+        reference,
+        now,
+        Authorization::Unprivileged,
+        ResponsePayload::Metric(metric),
+    )
 }
 
 /// Refuse a guard, facet, or query parameter: none of the resources this
@@ -925,6 +939,168 @@ fn net_state_for(
     )
 }
 
+/// Resolve a `stats:net/…` reference: the stack-wide defence aggregates
+/// (`stats:net/stack/<leaf>`) or one interface's counters
+/// (`stats:net/<iface>/<leaf>`). `stack` is matched first, so it is a
+/// reserved interface name in this namespace.
+fn resolve_net_stats(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    rest: &[&str],
+) -> Result<ResourceResponse, ResolveInfoError> {
+    match rest {
+        ["stack", leaf] => net_stack_metric(reference, now, transport, leaf),
+        [iface, leaf] => net_iface_metric(reference, now, transport, iface, leaf),
+        _ => Err(ResolveInfoError::UnknownSelector),
+    }
+}
+
+/// Resolve one interface's `stats:net/<iface>/<leaf>` counter. The leaf is
+/// validated before the (privileged) query so a bogus selector fails
+/// closed without probing the interface table.
+fn net_iface_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    iface: &str,
+    leaf: &str,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    // Choose the counter and its unit before touching the service; an
+    // unrecognised leaf is an unknown selector, not an empty read.
+    let unit = match leaf {
+        "rx.bytes" | "tx.bytes" => Unit::Bytes,
+        "rx.packets" | "rx.dropped" | "tx.packets" | "tx.dropped" => Unit::Count,
+        _ => return Err(ResolveInfoError::UnknownSelector),
+    };
+    let counters = net_counters_for(transport, iface)?.counters;
+    let value = match leaf {
+        "rx.packets" => counters.rx_frames,
+        "rx.bytes" => counters.rx_bytes,
+        "rx.dropped" => counters.rx_dropped,
+        "tx.packets" => counters.tx_frames,
+        "tx.bytes" => counters.tx_bytes,
+        // The remaining validated leaf is `tx.dropped`: frames dropped
+        // because their next hop could not be resolved (the engine's
+        // genuine transmit-drop bucket).
+        _ => counters.pending_dropped,
+    };
+    let mut name = String::from("net/");
+    name.push_str(iface);
+    name.push('/');
+    name.push_str(leaf);
+    net_counter_metric(reference, now, &name, unit, value)
+}
+
+/// Resolve a `stats:net/stack/<leaf>` defence aggregate: the sum of a
+/// stack-wide counter across every managed interface. These are the
+/// counters a denial-of-service in progress (an ICMP-error storm, a
+/// reassembly-eviction flood) becomes visible on.
+fn net_stack_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    leaf: &str,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    // Validate the leaf before the privileged query (fail closed).
+    if !matches!(
+        leaf,
+        "icmp-errors" | "icmp-suppressed" | "reassembly-evicted"
+    ) {
+        return Err(ResolveInfoError::UnknownSelector);
+    }
+    let records = all_net_counters(transport)?;
+    let value = records.iter().fold(0u64, |acc, record| {
+        let add = match leaf {
+            "icmp-errors" => record.counters.icmp_errors_sent,
+            "icmp-suppressed" => record.counters.icmp_errors_suppressed,
+            _ => record.counters.reassembly_expired,
+        };
+        acc.saturating_add(add)
+    });
+    let mut name = String::from("net/stack/");
+    name.push_str(leaf);
+    net_counter_metric(reference, now, &name, Unit::Count, value)
+}
+
+/// Build one `CAP_SYSINFO_GLOBAL`-gated boot-reset counter metric — the
+/// envelope every `stats:net` counter shares.
+fn net_counter_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    name: &str,
+    unit: Unit,
+    value: u64,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let metric = Metric::new(
+        name,
+        MetricKind::Counter,
+        unit,
+        value,
+        now,
+        None,
+        ResetBehavior::Boot,
+    )
+    .map_err(|_| ResolveInfoError::Malformed)?;
+    envelope(
+        reference,
+        now,
+        Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+        ResponsePayload::Metric(metric),
+    )
+}
+
+/// Page [`SysinfoQueryId::NET_INTERFACE_COUNTERS`] until the record whose
+/// alias is `iface` is found.
+fn net_counters_for(
+    transport: &dyn Transport,
+    iface: &str,
+) -> Result<NetInterfaceCountersRecord, ResolveInfoError> {
+    find_net_record(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_COUNTERS,
+        NetInterfaceCountersRecord::WIRE_LEN,
+        NetInterfaceCountersRecord::from_bytes,
+        |record| if_name_matches(&record.name, iface),
+    )
+}
+
+/// Collect every interface's counters record (for a stack-wide sum).
+fn all_net_counters(
+    transport: &dyn Transport,
+) -> Result<Vec<NetInterfaceCountersRecord>, ResolveInfoError> {
+    let mut records = Vec::new();
+    let mut offset: u32 = 0;
+    loop {
+        let request = NetInterfaceListRequest {
+            offset,
+            limit: NET_PAGE_LIMIT,
+            flags: 0,
+        };
+        let reply = call(
+            transport,
+            SysinfoQueryId::NET_INTERFACE_COUNTERS,
+            &request.to_le_bytes(),
+        )
+        .map_err(map_call_error)?;
+        let record_len = NetInterfaceCountersRecord::WIRE_LEN;
+        if reply.len() % record_len != 0 {
+            return Err(ResolveInfoError::Malformed);
+        }
+        let count = reply.len() / record_len;
+        for chunk in reply.chunks_exact(record_len) {
+            records.push(
+                NetInterfaceCountersRecord::from_bytes(chunk)
+                    .map_err(|_| ResolveInfoError::Malformed)?,
+            );
+        }
+        if count < NET_PAGE_LIMIT as usize {
+            return Ok(records);
+        }
+        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
+    }
+}
+
 /// Page one interface-record query until `matches` selects a record; an
 /// exhausted table fails closed as an unknown selector.
 fn find_net_record<R>(
@@ -1238,8 +1414,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::net_ipc::{
-        NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
-        NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+        NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
+        NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
@@ -1522,6 +1698,15 @@ mod tests {
                 SysinfoQueryId::NET_INTERFACE_STATE => {
                     let req = NetInterfaceListRequest::from_bytes(payload)?;
                     let records = alloc::vec![fixture_net_state()];
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_INTERFACE_COUNTERS => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let records = alloc::vec![fixture_net_counters()];
                     let encoders: Vec<_> = records
                         .iter()
                         .map(|record| move || record.to_le_bytes())
@@ -2285,6 +2470,111 @@ mod tests {
             addr_count: 2,
             addrs,
         }
+    }
+
+    /// The interface-counters record the fixture serves for `wan`.
+    fn fixture_net_counters() -> NetInterfaceCountersRecord {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceCountersRecord {
+            name,
+            counters: tairix_abi::net_ipc::NetCounters {
+                rx_frames: 1000,
+                rx_bytes: 1_500_000,
+                rx_dropped: 7,
+                tx_frames: 800,
+                tx_bytes: 900_000,
+                icmp_errors_sent: 3,
+                icmp_errors_suppressed: 5,
+                reassembly_expired: 2,
+                pending_dropped: 4,
+            },
+        }
+    }
+
+    #[test]
+    fn stats_net_interface_counters_are_global_gated_and_render() {
+        let fixture = Fixture::new();
+        for (selector, expected, unit) in [
+            ("stats:net/wan/rx.packets", 1000u64, Unit::Count),
+            ("stats:net/wan/rx.bytes", 1_500_000, Unit::Bytes),
+            ("stats:net/wan/rx.dropped", 7, Unit::Count),
+            ("stats:net/wan/tx.packets", 800, Unit::Count),
+            ("stats:net/wan/tx.bytes", 900_000, Unit::Bytes),
+            ("stats:net/wan/tx.dropped", 4, Unit::Count),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            assert_eq!(
+                r.authorization,
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+            );
+            assert_eq!(r.query(), selector);
+            match r.payload {
+                ResponsePayload::Metric(m) => {
+                    assert_eq!(m.value, expected);
+                    assert_eq!(m.unit, unit);
+                    assert_eq!(m.kind, MetricKind::Counter);
+                    assert_eq!(m.reset_behavior, ResetBehavior::Boot);
+                }
+                _ => panic!("expected metric"),
+            }
+        }
+    }
+
+    #[test]
+    fn stats_net_stack_aggregates_defence_counters() {
+        let fixture = Fixture::new();
+        for (selector, expected) in [
+            ("stats:net/stack/icmp-errors", 3u64),
+            ("stats:net/stack/icmp-suppressed", 5),
+            ("stats:net/stack/reassembly-evicted", 2),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            assert_eq!(
+                r.authorization,
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+            );
+            match r.payload {
+                ResponsePayload::Metric(m) => {
+                    assert_eq!(m.value, expected);
+                    assert_eq!(m.kind, MetricKind::Counter);
+                }
+                _ => panic!("expected metric"),
+            }
+        }
+    }
+
+    #[test]
+    fn stats_net_unknown_interface_or_leaf_fails_closed() {
+        let fixture = Fixture::new();
+        // An unknown leaf is rejected before the interface table is probed.
+        assert_eq!(
+            resolve_str("stats:net/wan/rx.errors", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("stats:net/stack/syn-cookies", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        // A valid leaf on an absent interface exhausts the table.
+        assert_eq!(
+            resolve_str("stats:net/lan9/rx.packets", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+    }
+
+    #[test]
+    fn stats_net_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_COUNTERS);
+        assert_eq!(
+            resolve_str("stats:net/wan/rx.packets", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+        assert_eq!(
+            resolve_str("stats:net/stack/icmp-errors", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
     }
 
     #[test]

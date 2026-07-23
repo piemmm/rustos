@@ -49,6 +49,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `CPU_LOAD`              | `CAP_SYSINFO_KERNEL`   | yes     |
 | `NET_INTERFACE_FACTS`   | `CAP_SYSINFO_HW`       | yes     |
 | `NET_INTERFACE_STATE`   | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_INTERFACE_COUNTERS`| `CAP_SYSINFO_GLOBAL`   | yes     |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are

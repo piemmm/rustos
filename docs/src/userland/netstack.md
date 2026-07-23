@@ -94,12 +94,20 @@ event-driven with no polling.
 
 ## Observability
 
-`info:net/<iface>/{mac,mtu,kind}` and
-`state:net/<iface>/{link,address}` resolve through `lib/procinfo`'s
-userspace resolver onto the `NET_INTERFACE_FACTS` /
-`NET_INTERFACE_STATE` sysinfo queries — never a `/proc` shape, never
-text scraping (`plans/NETWORK.md` §5). Addresses render canonically
-(dotted-quad v4; RFC 5952 v6) with their SLAAC/DAD state annotated.
+`info:net/<iface>/{mac,mtu,kind}`,
+`state:net/<iface>/{link,address}`, and
+`stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}` resolve through
+`lib/procinfo`'s userspace resolver onto the `NET_INTERFACE_FACTS` /
+`NET_INTERFACE_STATE` / `NET_INTERFACE_COUNTERS` sysinfo queries — never
+a `/proc` shape, never text scraping (`plans/NETWORK.md` §5). Addresses
+render canonically (dotted-quad v4; RFC 5952 v6) with their SLAAC/DAD
+state annotated. The per-interface counters are monotonic since boot; a
+denial-of-service in progress is visible through the stack-wide
+aggregates `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`,
+summed across every managed interface. The counter reads are gated on
+`CAP_SYSINFO_GLOBAL` (system-wide network metrics), like the address
+state; the engine keeps one honest `dropped` bucket per direction rather
+than a fabricated errors/dropped split.
 
 ## Capabilities
 

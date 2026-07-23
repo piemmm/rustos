@@ -14,8 +14,9 @@ use alloc::vec::Vec;
 use tairix_abi::driver::net::{DeviceFacts, LinkState};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
-    validate_if_name, NetAddrFamily, NetAddrState, NetCountersReply, NetIfAddr, NetIfKind,
-    NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    validate_if_name, NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN,
+    NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -202,23 +203,32 @@ impl Netstack {
         }
     }
 
-    /// A named interface's monotonic stack counters.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NotFound`] — no interface bears `name`.
-    pub fn counters(&self, name: [u8; IF_NAME_LEN]) -> Result<NetCountersReply, Errno> {
-        let index = self.find(name).ok_or(Errno::NotFound)?;
-        let c = self.interfaces[index].stack.counters();
-        Ok(NetCountersReply {
-            rx_frames: c.rx_frames,
-            rx_dropped: c.rx_dropped,
-            tx_frames: c.tx_frames,
-            icmp_errors_sent: c.icmp_errors_sent,
-            icmp_errors_suppressed: c.icmp_errors_suppressed,
-            reassembly_expired: c.reassembly_expired,
-            pending_dropped: c.pending_dropped,
-        })
+    /// The whole table's live stack counters, one record per interface,
+    /// from `offset` in table order.
+    #[must_use]
+    pub fn counters_records(&self, offset: u32, limit: u16) -> Vec<NetInterfaceCountersRecord> {
+        self.interfaces
+            .iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|i| {
+                let c = i.stack.counters();
+                NetInterfaceCountersRecord {
+                    name: i.name,
+                    counters: NetCounters {
+                        rx_frames: c.rx_frames,
+                        rx_bytes: c.rx_bytes,
+                        rx_dropped: c.rx_dropped,
+                        tx_frames: c.tx_frames,
+                        tx_bytes: c.tx_bytes,
+                        icmp_errors_sent: c.icmp_errors_sent,
+                        icmp_errors_suppressed: c.icmp_errors_suppressed,
+                        reassembly_expired: c.reassembly_expired,
+                        pending_dropped: c.pending_dropped,
+                    },
+                }
+            })
+            .collect()
     }
 
     /// Originate a UDP datagram from every interface that can carry it,

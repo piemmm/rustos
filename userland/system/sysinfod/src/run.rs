@@ -49,8 +49,9 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::net_ipc::{
-        decode_page_reply, NetInterfaceFactsRecord, NetInterfaceStateRecord, NetstackRequest,
-        NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        decode_page_reply, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+        NetInterfaceStateRecord, NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX,
+        NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, CrashRecord,
@@ -264,6 +265,13 @@ mod program {
             page_netstack(NetstackStatePage)
         }
 
+        fn net_interface_counters(
+            &self,
+            _caller: &Caller,
+        ) -> Result<Vec<NetInterfaceCountersRecord>, Errno> {
+            page_netstack(NetstackCountersPage)
+        }
+
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
@@ -351,6 +359,19 @@ mod program {
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetInterfaceStateRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The interface-counters page.
+    struct NetstackCountersPage;
+    impl NetstackPage for NetstackCountersPage {
+        type Record = NetInterfaceCountersRecord;
+        const RECORD_LEN: usize = NetInterfaceCountersRecord::WIRE_LEN;
+        fn request(offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::InterfaceCounters { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetInterfaceCountersRecord::from_bytes(chunk)
         }
     }
 

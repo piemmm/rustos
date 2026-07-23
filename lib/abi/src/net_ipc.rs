@@ -153,10 +153,13 @@ pub enum NetstackRequest {
         /// The gateway, or `None` for an on-link route.
         next_hop: Option<[u8; 16]>,
     },
-    /// Read a named interface's stack counters (admin surface).
-    Counters {
-        /// The interface's admin-chosen alias, NUL-padded.
-        iface: [u8; IF_NAME_LEN],
+    /// Page the whole system's interface stack counters (sysinfo
+    /// broker).
+    InterfaceCounters {
+        /// First interface index to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
     },
     /// Page the whole system's interface facts (sysinfo broker).
     InterfaceFacts {
@@ -202,8 +205,8 @@ const OP_IF_LIST: u16 = 1;
 const OP_ADDR_ADD: u16 = 2;
 /// Wire operation discriminant of [`NetstackRequest::RouteAdd`].
 const OP_ROUTE_ADD: u16 = 3;
-/// Wire operation discriminant of [`NetstackRequest::Counters`].
-const OP_COUNTERS: u16 = 4;
+/// Wire operation discriminant of [`NetstackRequest::InterfaceCounters`].
+const OP_IF_COUNTERS: u16 = 4;
 /// Wire operation discriminant of [`NetstackRequest::InterfaceFacts`].
 const OP_IF_FACTS: u16 = 5;
 /// Wire operation discriminant of [`NetstackRequest::InterfaceState`].
@@ -255,9 +258,10 @@ impl NetstackRequest {
                     out[43..59].copy_from_slice(&gateway);
                 }
             }
-            Self::Counters { iface } => {
-                put_u16(&mut out, 6, OP_COUNTERS);
-                out[8..24].copy_from_slice(&iface);
+            Self::InterfaceCounters { offset, limit } => {
+                put_u16(&mut out, 6, OP_IF_COUNTERS);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
             }
             Self::InterfaceFacts { offset, limit } => {
                 put_u16(&mut out, 6, OP_IF_FACTS);
@@ -350,23 +354,17 @@ impl NetstackRequest {
                     next_hop,
                 })
             }
-            OP_COUNTERS => {
-                reserved_zero(bytes, 24)?;
-                Ok(Self::Counters {
-                    iface: if_name(bytes)?,
-                })
-            }
-            OP_IF_FACTS | OP_IF_STATE => {
+            OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS => {
                 reserved_zero(bytes, 14)?;
                 let offset = read_u32(bytes, 8);
                 let limit = read_u16(bytes, 12);
                 if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
                     return Err(Errno::LengthOutOfRange);
                 }
-                Ok(if op == OP_IF_FACTS {
-                    Self::InterfaceFacts { offset, limit }
-                } else {
-                    Self::InterfaceState { offset, limit }
+                Ok(match op {
+                    OP_IF_FACTS => Self::InterfaceFacts { offset, limit },
+                    OP_IF_STATE => Self::InterfaceState { offset, limit },
+                    _ => Self::InterfaceCounters { offset, limit },
                 })
             }
             OP_BIND_DRIVER => {
@@ -698,16 +696,22 @@ impl NetInterfaceStateRecord {
     }
 }
 
-/// One interface's monotonic stack counters (the `Counters` reply
-/// payload; `stats:net`, plan §5).
+/// One interface's monotonic stack counters (the counter payload of a
+/// [`NetInterfaceCountersRecord`]; `stats:net`, plan §5).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct NetCountersReply {
+pub struct NetCounters {
     /// Frames received from the device.
     pub rx_frames: u64,
+    /// Bytes received from the device (every received frame's whole
+    /// Ethernet length, dropped frames included).
+    pub rx_bytes: u64,
     /// Received frames dropped by validation or lack of a handler.
     pub rx_dropped: u64,
     /// Frames emitted for transmission.
     pub tx_frames: u64,
+    /// Bytes emitted for transmission (every emitted frame's whole
+    /// Ethernet length).
+    pub tx_bytes: u64,
     /// ICMP/`ICMPv6` errors emitted.
     pub icmp_errors_sent: u64,
     /// ICMP/`ICMPv6` errors suppressed by the rate limiter.
@@ -718,11 +722,11 @@ pub struct NetCountersReply {
     pub pending_dropped: u64,
 }
 
-/// Number of `u64` counters in a [`NetCountersReply`].
-const COUNTERS_FIELDS: usize = 7;
+/// Number of `u64` counters in a [`NetCounters`].
+const COUNTERS_FIELDS: usize = 9;
 
-impl NetCountersReply {
-    /// Encoded payload size: seven little-endian `u64` counters.
+impl NetCounters {
+    /// Encoded payload size: nine little-endian `u64` counters.
     pub const WIRE_LEN: usize = COUNTERS_FIELDS * 8;
 
     /// Encode `self` little-endian.
@@ -731,8 +735,10 @@ impl NetCountersReply {
         let mut out = [0u8; Self::WIRE_LEN];
         for (index, value) in [
             self.rx_frames,
+            self.rx_bytes,
             self.rx_dropped,
             self.tx_frames,
+            self.tx_bytes,
             self.icmp_errors_sent,
             self.icmp_errors_suppressed,
             self.reassembly_expired,
@@ -757,13 +763,57 @@ impl NetCountersReply {
         }
         Ok(Self {
             rx_frames: read_u64(bytes, 0),
-            rx_dropped: read_u64(bytes, 8),
-            tx_frames: read_u64(bytes, 16),
-            icmp_errors_sent: read_u64(bytes, 24),
-            icmp_errors_suppressed: read_u64(bytes, 32),
-            reassembly_expired: read_u64(bytes, 40),
-            pending_dropped: read_u64(bytes, 48),
+            rx_bytes: read_u64(bytes, 8),
+            rx_dropped: read_u64(bytes, 16),
+            tx_frames: read_u64(bytes, 24),
+            tx_bytes: read_u64(bytes, 32),
+            icmp_errors_sent: read_u64(bytes, 40),
+            icmp_errors_suppressed: read_u64(bytes, 48),
+            reassembly_expired: read_u64(bytes, 56),
+            pending_dropped: read_u64(bytes, 64),
         })
+    }
+}
+
+/// One interface's stack counters keyed by its name
+/// (`stats:net/<iface>/…`, plan §5): the response record of the
+/// interface-counters page.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceCountersRecord {
+    /// The interface's admin-chosen alias, NUL-padded.
+    pub name: [u8; IF_NAME_LEN],
+    /// The interface's monotonic stack counters.
+    pub counters: NetCounters,
+}
+
+impl NetInterfaceCountersRecord {
+    /// Encoded size: the name (16) followed by the counter payload.
+    pub const WIRE_LEN: usize = IF_NAME_LEN + NetCounters::WIRE_LEN;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..IF_NAME_LEN].copy_from_slice(&self.name);
+        out[IF_NAME_LEN..].copy_from_slice(&self.counters.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::OutOfRange`] — an invalid interface name.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut name = [0u8; IF_NAME_LEN];
+        name.copy_from_slice(&bytes[..IF_NAME_LEN]);
+        validate_if_name(&name)?;
+        let counters = NetCounters::from_bytes(&bytes[IF_NAME_LEN..])?;
+        Ok(Self { name, counters })
     }
 }
 
@@ -840,48 +890,6 @@ pub fn decode_page_reply(bytes: &[u8], record_len: usize) -> Result<(u16, &[u8])
     Ok((count, &body[..need]))
 }
 
-/// Encode a `Counters` outcome: the status frame followed by the
-/// counter payload on success, the status frame alone on refusal.
-///
-/// # Errors
-///
-/// [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
-pub fn encode_counters_reply(
-    result: Result<NetCountersReply, Errno>,
-    out: &mut [u8],
-) -> Result<usize, Errno> {
-    match result {
-        Ok(counters) => {
-            let total = STATUS_REPLY_LEN + NetCountersReply::WIRE_LEN;
-            if out.len() < total {
-                return Err(Errno::BufferTooSmall);
-            }
-            out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Ok(())));
-            out[STATUS_REPLY_LEN..total].copy_from_slice(&counters.to_le_bytes());
-            Ok(total)
-        }
-        Err(err) => {
-            if out.len() < STATUS_REPLY_LEN {
-                return Err(Errno::BufferTooSmall);
-            }
-            out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Err(err)));
-            Ok(STATUS_REPLY_LEN)
-        }
-    }
-}
-
-/// Decode a `Counters` reply.
-///
-/// # Errors
-///
-/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the reply.
-/// * The decoded [`Errno`] itself, when the service refused the
-///   request.
-pub fn decode_counters_reply(bytes: &[u8]) -> Result<NetCountersReply, Errno> {
-    decode_status_reply(&bytes[..bytes.len().min(STATUS_REPLY_LEN)])?;
-    NetCountersReply::from_bytes(&bytes[STATUS_REPLY_LEN..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,7 +941,10 @@ mod tests {
                 dest: [0x21; 16],
                 next_hop: None,
             },
-            NetstackRequest::Counters { iface: name("wan") },
+            NetstackRequest::InterfaceCounters {
+                offset: 5,
+                limit: 12,
+            },
             NetstackRequest::InterfaceFacts {
                 offset: 3,
                 limit: 8,
@@ -1176,22 +1187,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn counters_reply_round_trips_ok_and_error() {
-        let counters = NetCountersReply {
+    fn sample_counters() -> NetCounters {
+        NetCounters {
             rx_frames: 1,
+            rx_bytes: 1500,
             rx_dropped: 2,
             tx_frames: 3,
+            tx_bytes: 4096,
             icmp_errors_sent: 4,
             icmp_errors_suppressed: 5,
             reassembly_expired: 6,
             pending_dropped: 7,
+        }
+    }
+
+    #[test]
+    fn counters_record_round_trips_and_fails_closed() {
+        let record = NetInterfaceCountersRecord {
+            name: name("wan"),
+            counters: sample_counters(),
         };
-        let mut out = [0u8; STATUS_REPLY_LEN + NetCountersReply::WIRE_LEN];
-        let len = encode_counters_reply(Ok(counters), &mut out).expect("encode");
-        assert_eq!(decode_counters_reply(&out[..len]), Ok(counters));
-        let len = encode_counters_reply(Err(Errno::NotFound), &mut out).expect("encode");
-        assert_eq!(decode_counters_reply(&out[..len]), Err(Errno::NotFound));
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetInterfaceCountersRecord::from_bytes(&bytes), Ok(record));
+        // A malformed name fails closed.
+        let mut bad_name = bytes;
+        bad_name[0] = 0xFF;
+        assert_eq!(
+            NetInterfaceCountersRecord::from_bytes(&bad_name),
+            Err(Errno::OutOfRange)
+        );
+        // A truncated record fails closed.
+        assert_eq!(
+            NetInterfaceCountersRecord::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

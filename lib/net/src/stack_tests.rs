@@ -910,6 +910,38 @@ fn joining_v4_group_emits_igmp_report_with_router_alert() {
 }
 
 #[test]
+fn counters_track_bytes_and_count_each_emitted_frame_once() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    a.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join");
+    // Drive the membership traffic and tally what actually reached the wire.
+    let mut emitted_frames = 0u64;
+    let mut emitted_bytes = 0u64;
+    for s in 0..40 {
+        let out = a.advance(t(s));
+        emitted_frames += out.frames.len() as u64;
+        emitted_bytes += out.frames.iter().map(|f| f.bytes.len() as u64).sum::<u64>();
+    }
+    assert!(
+        emitted_frames > 0,
+        "a v4 join emits at least one IGMP report"
+    );
+    let counters = a.counters();
+    // Every emitted frame — IGMP reports included — is counted exactly once.
+    // This guards against the IGMP/MLD transmit double-count.
+    assert_eq!(counters.tx_frames, emitted_frames);
+    assert_eq!(counters.tx_bytes, emitted_bytes);
+
+    // A received frame's whole Ethernet length is counted, dropped or not.
+    let frame = v4_group_udp_frame(b"hello");
+    let before = a.counters();
+    let _ = a.on_frame(&frame, t(40));
+    let after = a.counters();
+    assert_eq!(after.rx_frames, before.rx_frames + 1);
+    assert_eq!(after.rx_bytes, before.rx_bytes + frame.len() as u64);
+}
+
+#[test]
 fn joined_group_receives_udp_and_others_are_dropped() {
     let mut a = stack(MAC_A, IID_A);
     a.set_ipv4_config(V4_A, 24, None).expect("configure");

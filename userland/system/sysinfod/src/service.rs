@@ -2,7 +2,9 @@
 //! capability-checked, audited, and answered.
 
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
-use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+use tairix_abi::net_ipc::{
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+};
 use tairix_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashRecord,
     CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
@@ -177,6 +179,8 @@ fn dispatch(
         net_facts_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_STATE {
         net_state_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_INTERFACE_COUNTERS {
+        net_counters_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
@@ -338,6 +342,26 @@ fn net_state_list(
         request.limit as usize,
         records.len(),
         NetInterfaceStateRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`NetInterfaceListRequest`] and page the interface-counter
+/// records into `response`.
+fn net_counters_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceListRequest::from_bytes(payload)?;
+    let records = source.net_interface_counters(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetInterfaceCountersRecord::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -550,7 +574,9 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
-    use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+    use tairix_abi::net_ipc::{
+        NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+    };
     use tairix_abi::sysinfo::NetInterfaceListRequest;
     use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket,
@@ -896,6 +922,12 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetInterfaceStateRecord>, Errno> {
             Ok(alloc::vec![fixture_net_state()])
+        }
+        fn net_interface_counters(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetInterfaceCountersRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_counters()])
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
             Ok(alloc::vec![
@@ -1447,6 +1479,63 @@ mod tests {
             addr_count: 1,
             addrs,
         }
+    }
+
+    /// The interface-counters record the fixture serves.
+    fn fixture_net_counters() -> NetInterfaceCountersRecord {
+        let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceCountersRecord {
+            name,
+            counters: tairix_abi::net_ipc::NetCounters {
+                rx_frames: 128,
+                rx_bytes: 190_000,
+                rx_dropped: 2,
+                tx_frames: 96,
+                tx_bytes: 140_000,
+                icmp_errors_sent: 1,
+                icmp_errors_suppressed: 0,
+                reassembly_expired: 0,
+                pending_dropped: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn net_interface_counters_is_gated_audited_and_round_trips() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_INTERFACE_COUNTERS, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, NetInterfaceCountersRecord::WIRE_LEN);
+        let record = NetInterfaceCountersRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record, fixture_net_counters());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
     }
 
     #[test]
