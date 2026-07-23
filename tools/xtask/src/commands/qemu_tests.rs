@@ -374,22 +374,29 @@ const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
 const SESSION_USERNAME_LINE: &str = "root\n";
 
 /// The over-long username line the spawn-session verticals type at the login
-/// view's `Username:` field: the account format's `MAX_USERNAME_LEN` bound
-/// plus one character, then Enter. The extra character trips the view's
-/// `LengthOutOfRange` refusal, so login records the console error and exits
-/// fail-closed (the reap→relaunch witness). The trailing newline makes it a
-/// *complete* line, so the reader receives it whether the console is in the
-/// view's raw discipline (per-keystroke delivery) or the kernel's cooked line
-/// discipline (which buffers a partial line until Enter): a no-newline
-/// over-long line stalls a cooked reader forever, which is exactly the
-/// intermittent x86_64 COM1 failure this newline forecloses. The byte array is
-/// generated from the shared bound and its fixed ASCII payload is valid UTF-8
-/// by construction.
-const OVERLONG_USERNAME_BYTES: [u8; tairix_users::MAX_USERNAME_LEN + 2] = {
-    let mut bytes = [b'x'; tairix_users::MAX_USERNAME_LEN + 2];
-    bytes[tairix_users::MAX_USERNAME_LEN + 1] = b'\n';
-    bytes
-};
+/// view's `Username:` field: exactly the account format's `MAX_USERNAME_LEN`
+/// bound plus one character, and nothing more. Login draws the login box in
+/// the console's raw discipline (`round_begin` selects it once per process,
+/// before any field is read), so the view sees every keystroke and refuses
+/// the field the instant one character beyond the bound arrives
+/// (`LengthOutOfRange`) — it never waits for a terminating newline. Login
+/// then records the console error and exits fail-closed, and `init` reaps and
+/// relaunches it (the reap→relaunch witness the vertical proves).
+///
+/// The payload deliberately carries **no** trailing byte past the one that
+/// trips the refusal. That last `'x'` is both the byte that triggers the
+/// exit *and* the final byte of the serial step, so the harness records the
+/// step as fully sent (`serial_step` reaches its end) in the same instant it
+/// writes the byte login needs to fail — strictly before login can consume
+/// it, refuse, and exit. A trailing newline (or any extra byte) would be a
+/// byte login never reads before exiting: the harness would still be dribbling
+/// it out one byte per tick when the guest's own PASS finisher fires on the
+/// relaunch, leaving the final step "incomplete" and failing the run
+/// non-deterministically. Keeping the last byte the refusal trigger removes
+/// that race by construction. The byte array is generated from the shared
+/// bound and its fixed ASCII payload is valid UTF-8 by construction.
+const OVERLONG_USERNAME_BYTES: [u8; tairix_users::MAX_USERNAME_LEN + 1] =
+    [b'x'; tairix_users::MAX_USERNAME_LEN + 1];
 
 /// String view of [`OVERLONG_USERNAME_BYTES`] for the serial dialogue table.
 const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BYTES) {
@@ -5816,18 +5823,28 @@ mod tests {
 
     #[test]
     fn spawn_session_overlong_username_tracks_the_account_format_bound() {
-        // One character past the bound, then Enter: the payload trips the
-        // view's `LengthOutOfRange` refusal and the trailing newline makes the
-        // line complete so a cooked-discipline reader delivers it too.
+        // Exactly one character past the bound, and nothing else: the payload
+        // is `MAX_USERNAME_LEN + 1` printable characters with no trailing
+        // newline (or any other byte). Login reads the field in the raw
+        // discipline (`round_begin` selects it before any read), so the view
+        // refuses the instant the over-bound character arrives — it never
+        // waits for Enter. Keeping the refusal-triggering character the *last*
+        // byte of the serial step is what makes the vertical deterministic:
+        // the harness marks the step fully sent the moment it writes that
+        // byte, strictly before login can consume it and exit, so login's
+        // fail-closed exit (and the PASS finisher that rides its relaunch)
+        // can never win the race against a still-unsent trailing byte. A
+        // trailing newline here is exactly the byte login never reads before
+        // exiting, and its re-introduction is the flaky failure this guards.
         assert_eq!(
             super::OVERLONG_USERNAME.len(),
-            tairix_users::MAX_USERNAME_LEN + 2
+            tairix_users::MAX_USERNAME_LEN + 1
         );
-        assert!(super::OVERLONG_USERNAME.ends_with('\n'));
-        assert!(super::OVERLONG_USERNAME
-            .bytes()
-            .take(tairix_users::MAX_USERNAME_LEN + 1)
-            .all(|byte| byte == b'x'));
+        assert!(
+            !super::OVERLONG_USERNAME.ends_with('\n'),
+            "a trailing newline is the unconsumed byte that reintroduces the flaky race"
+        );
+        assert!(super::OVERLONG_USERNAME.bytes().all(|byte| byte == b'x'));
     }
 
     #[test]

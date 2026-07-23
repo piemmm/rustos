@@ -45,9 +45,11 @@
 //!    the `Password` label repaints it — which happens only if login read
 //!    the username line whole and advanced (the per-keystroke-crash
 //!    regression witness) — then, after the authenticator refuses and the
-//!    view paints the red `1 failed attempt` line, a 513-byte line — one
-//!    byte past login's 512-byte `INPUT_LINE_MAX` validation bound. The
-//!    view refuses the over-long line whole (`LengthOutOfRange`), login
+//!    view paints the red `1 failed attempt` line, a username one character
+//!    past the account format's `MAX_USERNAME_LEN` validation bound (and
+//!    nothing more — the last character is the byte that trips the refusal,
+//!    so the serial step is fully delivered before login can act on it). The
+//!    view refuses the over-long username whole (`LengthOutOfRange`), login
 //!    records the console error, and exits fail-closed (audited
 //!    `SyscallInvoked` #4 of the supervision chain). `init`'s `wait` then
 //!    reaps it and reads its code.

@@ -137,7 +137,7 @@ impl<'a> Login<'a> {
             Err(err) => Err(err),
         };
         outcome.map_err(|err| {
-            self.audit_console_error(stage);
+            self.audit_console_error(stage, err);
             LoginError::Console(err)
         })
     }
@@ -345,14 +345,21 @@ impl<'a> Login<'a> {
         );
     }
 
-    fn audit_console_error(&self, stage: &str) {
+    fn audit_console_error(&self, stage: &str, err: Errno) {
+        let mut code = DecBuf::new();
         self.emit(
             Level::Error,
             events::CONSOLE_ERROR,
-            &[Field {
-                key: "stage",
-                value: tairix_log::FieldValue::Str(stage),
-            }],
+            &[
+                Field {
+                    key: "stage",
+                    value: tairix_log::FieldValue::Str(stage),
+                },
+                Field {
+                    key: "errno",
+                    value: tairix_log::FieldValue::Str(code.format(i128::from(err.as_i32()))),
+                },
+            ],
         );
     }
 }
