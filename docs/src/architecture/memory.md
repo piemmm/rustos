@@ -1828,6 +1828,45 @@ compressed memory.
   evidence and comfort, and stops immediately under pressure; both are
   fail-closed no-ops on an empty tier.
 
+## 7s. Performance evidence (`ramzip`)
+
+`plans/SWAPSWAPSWAP.md` §19 requires the tier to ship with performance
+evidence, reported as estimates rather than guarantees. The evidence
+lives beside the tier as host benchmark tests
+(`kernel/mem::ramzip::tier::tests::bench_evidence_*`), following the
+repository's established style (`kernel/core`'s `bench_evidence_*`): the
+*deterministic assertions* prove the work the tier is meant to do, and
+the *printed wall-clock figures* are estimates for threshold tuning. They
+run over the same production shapes as every other tier test — a real
+`FrameAllocator`, `SimPhysMap`, and `HostPageTable` — so the numbers
+reflect the actual compress → seal → store → fault → restore pipeline,
+not a stub.
+
+- **Memory saved (deterministic).** Compressing 48 cold, compressible
+  anonymous pages represents their full logical size (196 608 B) while the
+  tier's accounted footprint (stored ciphertext + metadata) stays far
+  below it; the test asserts *over half* is saved and observes ≈ 94 %
+  (≈ 12.5 KiB stored for 192 KiB logical) on the developer host. This is
+  the reason the tier exists, and it is checked, not merely timed.
+- **Move-only, leak-free round trip (deterministic).** After faulting
+  every page back in, no compressed entry is retained, the ledger balances
+  to zero, and the frame allocator returns to its pre-compression free
+  count — the write half never leaves a duplicate copy or a leaked frame.
+- **Latency estimates.** Compress-out and fault-in are timed on a Pi-class
+  2 MiB profile and a desktop-scaled 4 MiB profile (both from the one
+  harness via `Env::with_total_frames`), and the fault-clustering restore,
+  severe-band compression, and worst-case incompressible-page refusal are
+  timed separately, so a future threshold change can be judged against
+  real figures. On the developer host the 48-page compress-out and
+  fault-in each run in the sub-millisecond range and a single
+  incompressible-page refusal in tens of microseconds; these are
+  estimates, and the band watermarks and caps (§7h, `ramzip::caps`) stay
+  implementation constants, never ABI.
+- **Worst-case and both pressure bands.** The incompressible workload is
+  refused (`CompressRefusal::Incompressible`, never stored raw), and
+  compression is exercised under both the moderate (ordinary relief) and
+  severe (emergency growth) bands the handoff opens.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

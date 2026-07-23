@@ -5833,11 +5833,20 @@ VM mechanism, `kernel/mem::ramzip`;
   when comfortable and nothing under pressure; warm-up restores near recent
   faults only with locality evidence and comfort and stops instantly under
   pressure; both are fail-closed no-ops on an empty tier.
+- **Performance evidence (b5): done — the §19 requirement is met.** Host
+  benchmark tests (`kernel/mem::ramzip::tier::tests::bench_evidence_*`) prove
+  the work avoided — a compressible cold page shrinks far below its logical
+  size (≈ 94 % saved observed) and a move-only fault-in leaves no duplicate
+  copy or leaked frame — and print compress-out / fault-in / cluster /
+  severe-band / incompressible-refusal latency *estimates* across a Pi-class
+  (2 MiB) and a desktop-scaled (4 MiB) RAM profile from one harness
+  (`docs/src/architecture/memory.md` §7s). The caps and band watermarks stay
+  implementation constants, never ABI.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
-- Benchmarks beyond the host suites (per-page latency on real boards,
-  Pi-class small-RAM profile) belong with the enablement work, where
-  real workloads exist to measure.
+- Per-page latency measured on real boards under real workloads remains
+  future work alongside SWAP5, where such workloads exist to measure; the
+  host suite above supplies the pre-hardware evidence.
 
 ---
 

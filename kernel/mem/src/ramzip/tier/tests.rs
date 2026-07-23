@@ -50,10 +50,17 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
+        Self::with_total_frames(TOTAL_FRAMES)
+    }
+
+    /// A test machine with `total` backing frames, so a benchmark can
+    /// represent both a small (Pi-class) and a larger (desktop) RAM
+    /// profile from the one harness.
+    fn with_total_frames(total: usize) -> Self {
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             start: crate::frame::PhysAddr::new(0),
-            length: (TOTAL_FRAMES * PAGE_SIZE) as u64,
+            length: (total * PAGE_SIZE) as u64,
             kind: RegionKind::Usable,
         });
         let frames: &'static FrameAllocator = std::boxed::Box::leak(std::boxed::Box::new(
@@ -63,7 +70,7 @@ impl Env {
         Self {
             frames,
             pressure,
-            physmap: SimPhysMap::new(crate::frame::PhysAddr::new(0), TOTAL_FRAMES * PAGE_SIZE),
+            physmap: SimPhysMap::new(crate::frame::PhysAddr::new(0), total * PAGE_SIZE),
             space: AddressSpace::new(HostPageTable::new()),
             held: Vec::new(),
         }
@@ -71,11 +78,15 @@ impl Env {
 
     /// Hold frames until the sampled band reaches `band` exactly.
     fn press_to(&mut self, band: PressureBand) {
+        // Bound the loop by the machine's own frame count, not the
+        // default-machine constant, so a larger-RAM profile can be
+        // pressed down too.
+        let total_frames = FreeMemorySource::total_bytes(self.frames) / PAGE_SIZE;
         let mut guard = 0;
         while self.pressure.sample() != band {
             self.held.push(self.frames.alloc().expect("pressure frame"));
             guard += 1;
-            assert!(guard <= TOTAL_FRAMES, "band {band:?} never reached");
+            assert!(guard <= total_frames, "band {band:?} never reached");
         }
     }
 
@@ -729,4 +740,213 @@ fn counters_track_attempts_and_acceptances() {
     assert_eq!(counters.rejected_policy, 1);
     try_fault(&mut env, &mut ramzip, page).expect("fault");
     assert_eq!(ramzip.ledger().counters().fault_ins, 1);
+}
+
+// -------------------------------------------------------------------------
+// Performance evidence (`plans/SWAPSWAPSWAP.md` section 19).
+//
+// Following the repository's established benchmark-evidence style
+// (`kernel/core::reclaim_integration_tests::bench_evidence_*`): the
+// deterministic assertions prove the *work avoided* — a compressible
+// cold page shrinks far below its logical size, and a move-only fault-in
+// leaves no duplicate copy or leaked frame — while the printed wall-clock
+// figures are estimates for threshold tuning, never assertions. They run
+// on the host over the same production shapes every other tier test uses
+// (a real `FrameAllocator`, `SimPhysMap`, and `HostPageTable`).
+// -------------------------------------------------------------------------
+
+/// Compress `pages` for a single task at the env's current band,
+/// re-holding a frame per acceptance so the freed frame does not relax
+/// the gauge out of the compression band, and return how many were
+/// accepted. Mirrors the re-hold discipline of the cap-enforcement test.
+fn compress_run(env: &mut Env, ramzip: &mut Ramzip, pages: &[Page]) -> usize {
+    let mut accepted = 0;
+    for &page in pages {
+        match try_compress(env, ramzip, page, TASK) {
+            Ok(()) => {
+                accepted += 1;
+                env.held.push(env.frames.alloc().expect("re-hold frame"));
+            }
+            Err(_) => break,
+        }
+    }
+    accepted
+}
+
+/// Map an anonymous page filled with PRNG noise (incompressible by
+/// construction), so a benchmark can measure the worst-case refusal cost.
+fn map_incompressible_page(env: &mut Env, page_number: u64) -> Page {
+    let frame = env.frames.alloc().expect("frame");
+    let page = page_at(page_number);
+    let bytes = env.frame_bytes_mut(frame);
+    let mut state = 0x1234_5678_9ABC_DEF0_u64 ^ page_number;
+    for byte in bytes.iter_mut() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        *byte = (state >> 33).to_le_bytes()[0];
+    }
+    env.space.map(page, frame, user_rw()).expect("map");
+    page
+}
+
+#[test]
+fn bench_evidence_memory_saved_and_move_only_round_trip() {
+    const PAGES: u64 = 48;
+
+    let mut env = Env::new();
+    let mut ramzip = tier(&env);
+    let pages: Vec<Page> = (300..300 + PAGES).map(|n| env.map_page(n, 0x30)).collect();
+    // Free count with the pages mapped: compress-out frees each frame and
+    // fault-in re-maps it, so a leak-free round trip returns to exactly this.
+    let baseline = env.frames.free_frames();
+
+    // Compress-out latency under moderate pressure (the ordinary
+    // pressure-relief band).
+    env.press_to(PressureBand::Moderate);
+    let started = std::time::Instant::now();
+    let accepted = compress_run(&mut env, &mut ramzip, &pages);
+    let compress_time = started.elapsed();
+    assert_eq!(accepted, pages.len(), "every eligible cold page compressed");
+
+    // Memory saved (deterministic): the tier represents the full logical
+    // size of the pages, but its accounted footprint is far smaller — the
+    // whole point of the tier. A conservative "over half saved" bound.
+    let logical = ramzip.ledger().logical_bytes();
+    let footprint = ramzip.ledger().footprint();
+    let compressed = ramzip.ledger().compressed_bytes();
+    assert_eq!(logical, pages.len() * PAGE_SIZE, "logical bytes tracked");
+    assert!(
+        footprint.saturating_mul(2) < logical,
+        "compressible cold pages shrink far below their logical size \
+         (footprint {footprint} B vs logical {logical} B)"
+    );
+
+    // Decompression (fault-in) latency, with plenty of free memory so
+    // fault-in never competes for frames.
+    env.relax();
+    let started = std::time::Instant::now();
+    for &page in &pages {
+        try_fault(&mut env, &mut ramzip, page).expect("fault");
+    }
+    let fault_time = started.elapsed();
+
+    // Move-only invariant: restoring every page leaves no duplicate
+    // compressed copy, no ledger charge, and no leaked frame.
+    assert_eq!(
+        ramzip.ledger().entries(),
+        0,
+        "no entry retained after restore"
+    );
+    assert_eq!(ramzip.ledger().footprint(), 0, "books balance to zero");
+    assert_eq!(env.frames.free_frames(), baseline, "no frame leak");
+
+    std::eprintln!(
+        "ramzip bench estimate (not a guarantee): Pi-class 2 MiB profile, \
+         {PAGES} compressible pages: compress-out {compress_time:?}, \
+         fault-in {fault_time:?}; memory saved {saved}% \
+         (logical {logical} B -> compressed {compressed} B, stored+meta {footprint} B)",
+        saved = 100 - (footprint.saturating_mul(100) / logical.max(1))
+    );
+}
+
+#[test]
+fn bench_evidence_larger_ram_profile_round_trip() {
+    // 4 MiB machine: a desktop/laptop-scaled profile alongside the
+    // Pi-class default, so the estimate covers both ends of the range
+    // the plan asks for (section 19).
+    const FRAMES: usize = 1024;
+    const PAGES: u64 = 48;
+
+    let mut env = Env::with_total_frames(FRAMES);
+    let mut ramzip = tier(&env);
+    let pages: Vec<Page> = (600..600 + PAGES).map(|n| env.map_page(n, 0x50)).collect();
+
+    env.press_to(PressureBand::Moderate);
+    let started = std::time::Instant::now();
+    let accepted = compress_run(&mut env, &mut ramzip, &pages);
+    let compress_time = started.elapsed();
+    assert_eq!(accepted, pages.len());
+
+    env.relax();
+    let started = std::time::Instant::now();
+    for &page in &pages {
+        try_fault(&mut env, &mut ramzip, page).expect("fault");
+    }
+    let fault_time = started.elapsed();
+    assert_eq!(ramzip.ledger().entries(), 0);
+
+    std::eprintln!(
+        "ramzip bench estimate (not a guarantee): desktop 4 MiB profile, \
+         {PAGES} compressible pages: compress-out {compress_time:?}, \
+         fault-in {fault_time:?}"
+    );
+}
+
+#[test]
+fn bench_evidence_cluster_severe_and_incompressible_cost() {
+    let mut env = Env::new();
+    let mut ramzip = tier(&env);
+
+    // A contiguous run so fault clustering has neighbours to restore.
+    let pages: Vec<Page> = (400..416).map(|n| env.map_page(n, 0x22)).collect();
+    env.press_to(PressureBand::Moderate);
+    assert_eq!(
+        compress_run(&mut env, &mut ramzip, &pages),
+        pages.len(),
+        "the contiguous run compressed"
+    );
+
+    // Fault-in *with* clustering: a demand fault on the middle page,
+    // then the opportunistic cluster restore around it (comfortable
+    // memory), timed separately from the demand fault so the estimate
+    // isolates the clustering cost.
+    env.relax();
+    let mid = pages[pages.len() / 2];
+    try_fault(&mut env, &mut ramzip, mid).expect("demand fault");
+    let started = std::time::Instant::now();
+    let restored = {
+        let pressure = &env.pressure;
+        let mut ctx = ctx!(env);
+        ramzip.cluster_after_fault(pressure, &mut ctx, mid)
+    };
+    let cluster_time = started.elapsed();
+    assert!(
+        restored > 0,
+        "clustering restored neighbours when comfortable"
+    );
+
+    // CPU cost under severe pressure (the emergency-growth band): compress
+    // a fresh batch there. Severe raises the cap toward the hard cap, so a
+    // small run is admitted.
+    let severe_pages: Vec<Page> = (440..456).map(|n| env.map_page(n, 0x33)).collect();
+    env.press_to(PressureBand::Severe);
+    let started = std::time::Instant::now();
+    let severe_accepted = compress_run(&mut env, &mut ramzip, &severe_pages);
+    let severe_time = started.elapsed();
+    assert!(
+        severe_accepted > 0,
+        "compression is admitted under severe pressure"
+    );
+
+    // Worst-case incompressible workload: the refusal cost (compress,
+    // discover the page will not shrink, and reject it without storing).
+    env.relax();
+    let noise = map_incompressible_page(&mut env, 500);
+    env.press_to(PressureBand::Moderate);
+    let started = std::time::Instant::now();
+    let verdict = try_compress(&mut env, &mut ramzip, noise, TASK + 9);
+    let reject_time = started.elapsed();
+    assert_eq!(
+        verdict,
+        Err(CompressRefusal::Incompressible),
+        "incompressible pages are refused, never stored raw"
+    );
+
+    std::eprintln!(
+        "ramzip bench estimate (not a guarantee): cluster restore of \
+         {restored} neighbours {cluster_time:?}; {severe_accepted} pages \
+         compressed under severe pressure {severe_time:?}; \
+         one incompressible-page refusal {reject_time:?}"
+    );
 }

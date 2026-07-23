@@ -36,7 +36,15 @@ cortex-a72 without HAFDBS and the riscv64 run pins `svade=true,svadu=false`
 so the software fault paths are genuinely exercised), so ramzip reclaims
 cold anonymous pages end to end on all three. wasm32 keeps the fail-closed
 `Unsupported` default (no per-page referenced bit).
-See `.junie/swapswap-progress.md` b3.
+See `.junie/swapswap-progress.md` b1–b5.
+The section 19 performance evidence is now in place: host benchmark tests
+(`kernel/mem::ramzip::tier::tests::bench_evidence_*`) prove the work
+avoided — a compressible cold page shrinks far below its logical size
+(≈ 94 % saved observed) and a move-only fault-in leaves no duplicate copy
+or leaked frame — and print compress/fault/cluster/severe/incompressible
+latency *estimates* across a Pi-class and a desktop RAM profile
+(`docs/src/architecture/memory.md` §7s). The band watermarks and caps
+stay implementation constants, never ABI.
 SWAP5 (the optional lower-tier block swap) remains a separately approved
 future design (section 15)  
 Target: TAIRiX  
