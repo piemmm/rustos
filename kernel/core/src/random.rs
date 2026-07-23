@@ -34,9 +34,11 @@ use tairix_abi::Errno;
 use tairix_arch_api::SchedulerArch;
 use tairix_kernel_irq::IrqDispatchObserver;
 use tairix_rng::{
-    EntropyError, EntropySource, InterruptEntropyPool, InterruptPoolSource, JitterSource,
-    MixedPair, OutputReserve, ReserveError, TimeSource,
+    BootSeedSource, EntropyError, EntropySource, InterruptEntropyPool, InterruptPoolSource,
+    JitterSource, MixedPair, OutputReserve, ReserveError, TimeSource, MAX_BOOT_SEED_LEN,
 };
+use tairix_sync::SpinLock;
+use zeroize::Zeroize;
 
 /// Object-safe view of the kernel's CSPRNG output reserve.
 ///
@@ -204,15 +206,85 @@ impl<A: SchedulerArch + Send + Sync> IrqDispatchObserver for IrqEntropyObserver<
 }
 
 /// The kernel's entropy: the platform hardware RNG XOR-mixed with an
-/// independent CPU-timing-jitter source *and* the asynchronous
-/// interrupt-arrival-timing pool ([`IRQ_ENTROPY_POOL`]), so no source is
-/// trusted alone. XOR is entropy-preserving for independent inputs, so a
-/// backdoored, stuck, or observable hardware source cannot lower the seed's
-/// quality below what the other two contribute, and vice versa. The interrupt
-/// pool contributes nothing at boot (it fails closed until interrupts have
-/// flowed) and folds in fresh timing on every reseed for forward secrecy.
-pub type KernelEntropy<A> =
-    MixedPair<MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>, InterruptPoolSource<'static>>;
+/// independent CPU-timing-jitter source, the asynchronous
+/// interrupt-arrival-timing pool ([`IRQ_ENTROPY_POOL`]), *and* the
+/// firmware-provided boot seed ([`BootSeedSource`]), so no source is trusted
+/// alone. XOR is entropy-preserving for independent inputs, so a backdoored,
+/// stuck, or observable source cannot lower the seed's quality below what the
+/// others contribute, and vice versa. The interrupt pool contributes nothing
+/// at boot (it fails closed until interrupts have flowed) and folds in fresh
+/// timing on every reseed for forward secrecy; the boot seed is a one-shot
+/// contribution consumed at the initial seed and wiped, so it is the source
+/// of last resort that lets the reserve seed on an emulated/virtualised
+/// machine whose CPU offers neither a hardware RNG nor usable timing jitter.
+pub type KernelEntropy<A> = MixedPair<
+    MixedPair<MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>, InterruptPoolSource<'static>>,
+    BootSeedSource,
+>;
+
+/// Write-once latch holding the firmware/bootloader boot seed until the
+/// CSPRNG is seeded from it.
+///
+/// The architecture boot path captures the seed it discovered — the device
+/// tree's `/chosen/rng-seed` on an FDT platform — into this latch through
+/// [`capture_boot_entropy_seed`], and [`take_boot_seed_source`] moves it into
+/// the one-shot [`BootSeedSource`] the reserve seeds from, wiping the latch.
+/// The latch keeps `lib/rng` and the seeding logic architecture-neutral: the
+/// only per-arch part is *reading* the seed from the platform's boot data.
+struct BootSeedLatch {
+    seed: [u8; MAX_BOOT_SEED_LEN],
+    /// Valid seed length in `seed`; `0` means no seed captured.
+    len: usize,
+    /// Set once the seed has been moved into the reserve, so a late or
+    /// duplicate capture cannot resurrect consumed material.
+    taken: bool,
+}
+
+/// The one boot-seed latch, written once at boot and consumed once at seed
+/// time. Guarded by a spinlock because the capture (early boot, one CPU) and
+/// the take (the seeding step) are distinct call sites; the critical section
+/// is a short byte copy, never a steady-state spin.
+static BOOT_SEED: SpinLock<BootSeedLatch> = SpinLock::new(BootSeedLatch {
+    seed: [0u8; MAX_BOOT_SEED_LEN],
+    len: 0,
+    taken: false,
+});
+
+/// Capture up to [`MAX_BOOT_SEED_LEN`] bytes of firmware-provided boot-seed
+/// material for the kernel CSPRNG seed.
+///
+/// Called by the architecture boot path with the bytes it read from the
+/// platform's boot data (e.g. the FDT `/chosen/rng-seed`). Write-once: an
+/// empty slice, a second capture, or a capture after the seed was consumed is
+/// ignored, so no path can overwrite or resurrect the seed. The bytes are
+/// *input material* only — [`seed_entropy_reserve`](crate::init) XOR-mixes
+/// them with every other source and the DRBG conditions the result before any
+/// caller sees output; they are never trusted alone.
+pub fn capture_boot_entropy_seed(bytes: &[u8]) {
+    let mut latch = BOOT_SEED.lock();
+    if latch.taken || latch.len != 0 || bytes.is_empty() {
+        return;
+    }
+    let n = bytes.len().min(MAX_BOOT_SEED_LEN);
+    latch.seed[..n].copy_from_slice(&bytes[..n]);
+    latch.len = n;
+}
+
+/// Move the captured boot seed into a one-shot [`BootSeedSource`], wiping the
+/// latch. Returns [`BootSeedSource::empty`] when no seed was captured (the
+/// common case on a machine with a working hardware RNG), so the mix simply
+/// gains a source that contributes nothing.
+pub(crate) fn take_boot_seed_source() -> BootSeedSource {
+    let mut latch = BOOT_SEED.lock();
+    if latch.taken || latch.len == 0 {
+        return BootSeedSource::empty();
+    }
+    let source = BootSeedSource::new(&latch.seed[..latch.len]);
+    latch.seed.zeroize();
+    latch.len = 0;
+    latch.taken = true;
+    source
+}
 
 /// The reserve type the kernel installs once seeded, over the mixed
 /// [`KernelEntropy`] source, default-capacity like [`BootReserve`] so both
@@ -475,5 +547,87 @@ mod tests {
         let mut unseeded = OutputReserve::<_>::new();
         assert!(unseeded.seed(mixed).is_err());
         assert!(!unseeded.is_ready());
+    }
+
+    #[test]
+    fn four_way_mix_seeds_from_the_boot_seed_alone() {
+        // The exact production `KernelEntropy` shape with the firmware boot
+        // seed as the fourth source: hardware dead (no `FEAT_RNG`), jitter
+        // dead (deterministic emulated counter), interrupt pool empty (no
+        // IRQs yet) — precisely the QEMU/emulated-machine boot. The boot seed
+        // alone must seed the reserve, so `random_get`, the per-boot machine
+        // id, and the ramzip sealing key all become available instead of the
+        // reserve staying forever unseeded.
+        use super::ArchEntropy;
+        use tairix_rng::{
+            BootSeedSource, InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair,
+            OutputReserve,
+        };
+
+        let pool = InterruptEntropyPool::new();
+        let interrupt = InterruptPoolSource::new(&pool);
+        let hw_jitter = MixedPair::new(
+            ArchEntropy::new(&DEAD_PORT),
+            JitterSource::new(lockstep_clock()),
+        );
+        let boot_seed = BootSeedSource::new(&[0x5Au8; 32]);
+        let mixed = MixedPair::new(MixedPair::new(hw_jitter, interrupt), boot_seed);
+        let mut reserve = OutputReserve::<_>::new();
+        reserve
+            .seed(mixed)
+            .expect("the boot seed alone seeds the four-way mix");
+        let mut out = [0u8; 16];
+        RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
+        assert_ne!(out, [0u8; 16]);
+    }
+
+    #[test]
+    fn four_way_mix_fails_closed_when_every_source_is_dead() {
+        // Hardware dead, jitter dead, interrupt pool empty, and *no* boot seed
+        // (an empty source): the seed must still fail closed and the reserve
+        // stay unseeded — the boot seed rescues only a machine that actually
+        // provided one, never weakens the fail-closed guarantee.
+        use super::ArchEntropy;
+        use tairix_rng::{
+            BootSeedSource, InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair,
+            OutputReserve,
+        };
+
+        let pool = InterruptEntropyPool::new();
+        let interrupt = InterruptPoolSource::new(&pool);
+        let hw_jitter = MixedPair::new(
+            ArchEntropy::new(&DEAD_PORT),
+            JitterSource::new(lockstep_clock()),
+        );
+        let mixed = MixedPair::new(
+            MixedPair::new(hw_jitter, interrupt),
+            BootSeedSource::empty(),
+        );
+        let mut unseeded = OutputReserve::<_>::new();
+        assert!(unseeded.seed(mixed).is_err());
+        assert!(!unseeded.is_ready());
+    }
+
+    #[test]
+    fn boot_seed_latch_captures_once_then_yields_a_source_and_wipes() {
+        // The write-once latch: a capture makes `take` yield a seeded source,
+        // and a second `take` yields an empty one (the seed is consumed and
+        // wiped, never resurrected). This test is the sole toucher of the
+        // process-global `BOOT_SEED` latch.
+        use super::{capture_boot_entropy_seed, take_boot_seed_source};
+
+        capture_boot_entropy_seed(&[0x11u8; 32]);
+        // A second capture is ignored (write-once).
+        capture_boot_entropy_seed(&[0x22u8; 32]);
+        let first = take_boot_seed_source();
+        assert!(
+            first.has_seed(),
+            "the captured seed is handed to the source"
+        );
+        let second = take_boot_seed_source();
+        assert!(
+            !second.has_seed(),
+            "a consumed latch yields an empty source, never a replay"
+        );
     }
 }

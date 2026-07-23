@@ -737,7 +737,8 @@ fn wait_secondary_online<A: KernelArch + 'static>(
 /// reserve unseeded.
 fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
     use crate::random::{
-        ArchEntropy, ArchTicks, IrqEntropyObserver, SeededReserve, IRQ_ENTROPY_POOL,
+        take_boot_seed_source, ArchEntropy, ArchTicks, IrqEntropyObserver, SeededReserve,
+        IRQ_ENTROPY_POOL,
     };
     use tairix_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
 
@@ -783,11 +784,6 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
         let mut probe = [0u8; 8];
         jitter.fill(&mut probe).is_ok()
     };
-    let sources = if jitter_healthy {
-        "hardware+jitter"
-    } else {
-        "hardware"
-    };
 
     // Add the asynchronous interrupt-arrival-timing pool as a third,
     // independent source. It contributes nothing at boot (it fails closed
@@ -795,7 +791,30 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
     // for forward secrecy; the interrupt observer that feeds it is installed
     // below, only once a seeded reserve exists to drain it.
     let interrupt = InterruptPoolSource::new(&IRQ_ENTROPY_POOL);
-    let mixed = MixedPair::new(MixedPair::new(hardware, jitter), interrupt);
+
+    // Fold in the firmware-provided boot seed (the FDT `/chosen/rng-seed`) as
+    // a fourth, independent source. It is the source of last resort: on an
+    // emulated or virtualised machine the CPU exposes no hardware RNG and its
+    // cycle counter is deterministic, so both `hardware` and `jitter` above
+    // fail closed, and without the boot seed the reserve would never seed at
+    // all — leaving `random_get`, the per-boot machine id, and the ramzip
+    // sealing key all unavailable. It is a one-shot contribution consumed
+    // here and wiped; later reseeds draw fresh entropy from the interrupt
+    // pool. XOR-mixed like every source, so it can never lower the quality a
+    // real hardware RNG contributes on a machine that has one.
+    let boot_seed = take_boot_seed_source();
+    let boot_seed_present = boot_seed.has_seed();
+    let sources = match (jitter_healthy, boot_seed_present) {
+        (true, true) => "hardware+jitter+bootseed",
+        (true, false) => "hardware+jitter",
+        (false, true) => "hardware+bootseed",
+        (false, false) => "hardware",
+    };
+
+    let mixed = MixedPair::new(
+        MixedPair::new(MixedPair::new(hardware, jitter), interrupt),
+        boot_seed,
+    );
     let mut reserve: SeededReserve<A> = SeededReserve::new();
     match reserve.seed(mixed) {
         Ok(()) => {

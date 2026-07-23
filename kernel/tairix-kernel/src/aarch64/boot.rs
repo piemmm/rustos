@@ -584,6 +584,16 @@ pub fn boot(
         // so a whole-tree traversal is safe.
         if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
             arch.classify_from_fdt(&fdt);
+            // Capture the firmware-provided boot seed (`/chosen/rng-seed`) so
+            // `kernel_core::kernel_main` can fold it into the CSPRNG seed. On
+            // an emulated cortex-a72 (no `FEAT_RNG`) with a deterministic
+            // cycle counter this is the only usable entropy source, so
+            // without it the reserve — and ramzip's sealing key with it —
+            // would never seed. Input material only, XOR-mixed and DRBG-
+            // conditioned kernel-side; never trusted alone.
+            if let Some(seed) = fdt.chosen_rng_seed() {
+                tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+            }
         }
     }
     // Install the secondary-start mechanism the firmware tree declares

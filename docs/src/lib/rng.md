@@ -150,23 +150,46 @@ closed — never an unbounded spin (§2.1).
 At boot, `kernel/core` reaches the source through `KernelArch::platform_entropy`
 and seeds the reserve once — but **never from the hardware RNG alone**, per
 §22's "no single source is trusted alone". It wraps the hardware handle as an
-`EntropySource` (`ArchEntropy`) and XOR-mixes it with *two* independent
-software sources — a CPU-timing-jitter source (next section)
-and the asynchronous interrupt-arrival-timing pool (the section after) —
-through nested `MixedPair`s (`KernelEntropy<A> = MixedPair<MixedPair<ArchEntropy,
-JitterSource<ArchTicks<A>>>, InterruptPoolSource<'static>>`),
-builds a `SeededReserve<A>` over that mix, and swaps it in for the
-`NullEntropy` boot reserve. Because the mix owns all three sources, every
-automatic reseed re-draws from *all* of them, not just the hardware source. The
-decision is audited (`EntropyReserveSeeded` records the seed-time contributors
-`sources = hardware+jitter` or, when the platform offers no usable timing
-jitter, `hardware` — the interrupt pool contributes nothing at boot and joins
-at reseed; `EntropyReserveUnseeded` records a cause). XOR is entropy-preserving
-for independent inputs, so a backdoored, stuck, or observable hardware RNG
-cannot lower the seed's quality below the other sources' contribution, and vice
-versa; only if *every* source is unavailable does the reserve stay unseeded
-and `random_get` keep failing closed — the kernel never weakens to predictable
-output.
+`EntropySource` (`ArchEntropy`) and XOR-mixes it with *three* independent
+sources — a CPU-timing-jitter source (next section), the asynchronous
+interrupt-arrival-timing pool (the section after), and the firmware-provided
+**boot seed** (below) — through nested `MixedPair`s (`KernelEntropy<A> =
+MixedPair<MixedPair<MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>,
+InterruptPoolSource<'static>>, BootSeedSource>`), builds a `SeededReserve<A>`
+over that mix, and swaps it in for the `NullEntropy` boot reserve. Because the
+mix owns the reseeding sources, every automatic reseed re-draws from them (the
+one-shot boot seed excepted — it is consumed once and then contributes the XOR
+identity). The decision is audited (`EntropyReserveSeeded` records the
+seed-time contributors — `hardware+jitter`, `hardware+jitter+bootseed`,
+`hardware+bootseed`, or `hardware` — while `EntropyReserveUnseeded` records a
+cause). XOR is entropy-preserving for independent inputs, so a backdoored,
+stuck, or observable hardware RNG cannot lower the seed's quality below the
+other sources' contribution, and vice versa; only if *every* source is
+unavailable does the reserve stay unseeded and `random_get` keep failing
+closed — the kernel never weakens to predictable output.
+
+### Boot seed: the firmware `rng-seed`, source of last resort
+
+Boot firmware and loaders hand the kernel a block of random seed material at
+hand-off — the device tree's `/chosen/rng-seed` on an FDT platform (U-Boot, the
+Raspberry Pi firmware, **and QEMU's `virt` board, which always publishes one**).
+The architecture boot path reads it (`Fdt::chosen_rng_seed`) and captures it
+into a write-once latch (`kernel/core`'s `capture_boot_entropy_seed`), and the
+seeding step moves it into a one-shot `BootSeedSource` (`lib/rng`) that expands
+it with SHA-256 in counter mode, then zeroises the retained copy.
+
+It is the source of **last resort**: on an emulated or virtualised machine the
+guest CPU exposes no on-die hardware RNG *and* its cycle counter advances
+deterministically, so both `ArchEntropy` and `JitterSource` fail their health
+tests and the interrupt pool is still empty at seed time — without the boot
+seed the reserve would never seed at all, leaving `random_get`, the per-boot
+machine id, encrypted swap, and the `ramzip` compressed-memory tier's sealing
+key all unavailable. Consumed once and wiped (matching the well-established
+kernel practice of folding the boot `rng-seed` in once and erasing it), it is
+XOR-mixed like every other source, so it can never lower the quality a real
+hardware RNG contributes on a machine that has one; a machine that provided no
+seed simply gains a source that contributes nothing, and the fail-closed
+guarantee is untouched.
 
 ## Timing-jitter entropy: the independent second source
 

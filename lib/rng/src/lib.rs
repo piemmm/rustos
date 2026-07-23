@@ -81,6 +81,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod bootseed;
 pub mod csprng;
 pub mod drbg;
 pub mod entropy;
@@ -91,6 +92,7 @@ pub mod jitter;
 pub mod rand;
 pub mod reserve;
 
+pub use bootseed::{BootSeedSource, MAX_BOOT_SEED_LEN};
 pub use csprng::{CsRng, DEFAULT_RESEED_INTERVAL};
 pub use drbg::{DrbgError, HmacDrbg, DRBG_OUTLEN, RESEED_INTERVAL};
 pub use entropy::{CombinedSource, EntropyError, EntropySource, MixedPair};

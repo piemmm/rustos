@@ -401,6 +401,19 @@ impl<'a> Fdt<'a> {
         self.property(path, name).and_then(read_int_cells)
     }
 
+    /// The firmware-provided random seed from `/chosen/rng-seed`, if present.
+    ///
+    /// Boot firmware and loaders (U-Boot, the Raspberry Pi firmware, and
+    /// QEMU's `virt` board) place a block of entropy in the device tree's
+    /// `/chosen` node for the kernel to fold into its CSPRNG seed — the
+    /// well-established hand-off every general-purpose kernel consumes. The
+    /// raw property bytes are returned verbatim (an empty property yields
+    /// `Some(&[])`); the caller conditions them and never trusts them alone.
+    #[must_use]
+    pub fn chosen_rng_seed(&self) -> Option<&'a [u8]> {
+        self.property(&[b"chosen"], b"rng-seed")
+    }
+
     /// Single pass over the structure block collecting the timebase
     /// frequency.
     fn walk(&self) -> Result<WalkResult, FdtError> {
@@ -1402,6 +1415,42 @@ mod tests {
             fdt.property_u64(&[b"chosen"], b"two-cell"),
             Some(0x0123_4567_89ab_cdef)
         );
+    }
+
+    #[test]
+    fn chosen_rng_seed_reads_the_seed_bytes_when_present() {
+        let seed: [u8; 32] = core::array::from_fn(|i| {
+            let byte = u8::try_from(i).unwrap_or(0);
+            byte.wrapping_mul(7).wrapping_add(3)
+        });
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("chosen");
+        b.prop("rng-seed", &seed);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.chosen_rng_seed(), Some(&seed[..]));
+    }
+
+    #[test]
+    fn chosen_rng_seed_is_none_without_the_property() {
+        // A `/chosen` with an unrelated property, and a tree with no
+        // `/chosen` at all, both yield `None` rather than a guessed value.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("chosen");
+        b.prop("stdout-path", b"/serial\0");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.chosen_rng_seed(), None);
+
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.chosen_rng_seed(), None);
     }
 
     #[test]
