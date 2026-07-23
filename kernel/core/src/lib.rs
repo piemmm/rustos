@@ -78,6 +78,7 @@ pub mod bootinfo;
 pub mod callreg;
 pub mod console;
 mod cpu_state;
+pub mod crash;
 pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;

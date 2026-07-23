@@ -17,6 +17,7 @@
 //! here once.
 
 use tairix_abi::SYSCALL_MAX_ARGS;
+use tairix_arch_api::backtrace::UserRegisterFrame;
 use tairix_kernel_core::{
     reschedule_current, DispatchCallbackSlot, DispatchOutcome, RescheduleAction, UserFaultOutcome,
 };
@@ -140,15 +141,33 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
 ///
 /// Shared by every architecture's user-fault callback so the lookup →
 /// resolve → terminate sequence has one definition.
-pub fn resolve_user_fault_via_slot(
+///
+/// `regs` is a raw pointer to the faulting *user* register frame the
+/// architecture port captured at trap entry (or null on a port that does
+/// not capture one). It is narrowed to `Option<&UserRegisterFrame>` here —
+/// the single site that turns the trap-ABI raw pointer into a borrow — so
+/// the hook records a post-mortem crash record with a backtrace. A null
+/// pointer becomes `None` and the resolver still classifies and terminates,
+/// just without a backtrace.
+///
+/// # Safety
+///
+/// `regs`, when non-null, must point to a valid [`UserRegisterFrame`] that
+/// lives for the duration of the call (the arch port builds it on its own
+/// trap stack and holds it across this call).
+pub unsafe fn resolve_user_fault_via_slot(
     slot: &DispatchCallbackSlot,
     fault_va: u64,
     write: bool,
+    regs: *const UserRegisterFrame,
 ) -> bool {
     let Some(hook) = slot.get() else {
         return false;
     };
-    match hook.resolve_user_fault(fault_va, write) {
+    // SAFETY: the caller guarantees `regs` is null or a valid frame live for
+    // this call; `as_ref` yields `None` for null and never dereferences it.
+    let regs = unsafe { regs.as_ref() };
+    match hook.resolve_user_fault(fault_va, write, regs) {
         UserFaultOutcome::Resolved => true,
         UserFaultOutcome::Terminated { cpu } => {
             // The task is dead (exit recorded, resources reclaimed):
@@ -182,7 +201,12 @@ mod tests {
         fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
             self.outcome
         }
-        fn resolve_user_fault(&self, _fault_va: u64, write: bool) -> UserFaultOutcome {
+        fn resolve_user_fault(
+            &self,
+            _fault_va: u64,
+            write: bool,
+            _regs: Option<&UserRegisterFrame>,
+        ) -> UserFaultOutcome {
             // Mirror the production hook's invariant: a write is never
             // resolved, so a `Resolved` disposition under `write` is a
             // scaffolding bug worth failing loudly on.
@@ -328,7 +352,11 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
+        // SAFETY: a null frame pointer is the documented "no captured
+        // frame" case; `resolve_user_fault_via_slot` narrows it to `None`.
+        assert!(unsafe {
+            resolve_user_fault_via_slot(&slot, 0xF000_1000, false, core::ptr::null())
+        });
     }
 
     #[test]
@@ -337,8 +365,13 @@ mod tests {
         // path), and an `Unhandled` disposition does the same — for reads
         // and writes alike.
         let empty = DispatchCallbackSlot::new();
-        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000, false));
-        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000, true));
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe {
+            resolve_user_fault_via_slot(&empty, 0xF000_1000, false, core::ptr::null())
+        });
+        assert!(!unsafe {
+            resolve_user_fault_via_slot(&empty, 0xF000_1000, true, core::ptr::null())
+        });
 
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
@@ -347,7 +380,10 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe {
+            resolve_user_fault_via_slot(&slot, 0xF000_1000, false, core::ptr::null())
+        });
     }
 
     #[test]
@@ -362,7 +398,10 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe {
+            resolve_user_fault_via_slot(&slot, 0xF000_1000, false, core::ptr::null())
+        });
     }
 
     #[test]
@@ -380,7 +419,10 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_2000, true));
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe {
+            resolve_user_fault_via_slot(&slot, 0xF000_2000, true, core::ptr::null())
+        });
     }
 
     #[test]

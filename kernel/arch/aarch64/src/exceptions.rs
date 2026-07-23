@@ -43,6 +43,25 @@
 /// slot, so the epilogue's `msr ELR_EL1` + `eret` resume at the fix-up.
 pub const ELR_FRAME_INDEX: usize = crate::syscall_entry::SAVED_GPRS;
 
+/// Index of the saved `SP_EL0` (the interrupted EL0 stack pointer) in the
+/// trampoline's register frame: `vectors.s` stores it two words past
+/// `ELR_EL1` (ELR at 248, `SPSR_EL1` at 256, `SP_EL0` at byte offset 264).
+/// The user-fault crash path reads it as the faulting stack pointer.
+pub const SP_EL0_FRAME_INDEX: usize = ELR_FRAME_INDEX + 2;
+
+/// Index of the saved frame pointer (`x29`) in the register frame — a GP
+/// register, so at its own number.
+pub const FP_FRAME_INDEX: usize = 29;
+
+/// Stable names of the 31 saved general-purpose registers (`x0`..`x30`),
+/// in frame-index order, for the user-fault crash record's register
+/// snapshot. `x30` is the link register; `x29` the frame pointer.
+pub const GP_REG_NAMES: [&str; crate::syscall_entry::SAVED_GPRS] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "x29", "x30",
+];
+
 /// Exception kinds the vector table tags each entry with, matching the
 /// `mov x0, #N` immediates in `vectors.s` (entry index `0..16`).
 pub mod kind {
@@ -314,6 +333,36 @@ fn read_elr() -> u64 {
     elr
 }
 
+/// Build the faulting-thread [`UserRegisterFrame`] from the saved EL0
+/// trampoline `frame`.
+///
+/// The saved frame carries `x0`..`x30` (indices `0..=30`), the faulting
+/// `ELR_EL1` (pc) at [`ELR_FRAME_INDEX`], and `SP_EL0` (the interrupted
+/// user stack pointer) at [`SP_EL0_FRAME_INDEX`]; the frame pointer is
+/// `x29` at [`FP_FRAME_INDEX`]. AArch64 always saves the fp on trap entry,
+/// so the frame is marked `fp_valid` and the crash path can follow the
+/// AAPCS64 frame-pointer chain using [`crate::backtrace::Backtracer::LAYOUT`].
+///
+/// # Safety
+///
+/// `frame` must be the live `[u64; …]` register frame `vectors.s` built for
+/// a lower-EL entry, which saves the full GP set plus `ELR/SPSR/SP_EL0`;
+/// every index read here lies within it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+unsafe fn user_register_frame(frame: *const u64) -> tairix_arch_api::backtrace::UserRegisterFrame {
+    use tairix_arch_api::backtrace::{RegisterSnapshot, UserRegisterFrame};
+    // SAFETY: the caller guarantees `frame` addresses the live saved frame.
+    let read = |i: usize| unsafe { *frame.add(i) };
+    let pc = read(ELR_FRAME_INDEX);
+    let sp = read(SP_EL0_FRAME_INDEX);
+    let fp = read(FP_FRAME_INDEX);
+    let mut snapshot = RegisterSnapshot::new(pc, sp, fp);
+    for (index, name) in GP_REG_NAMES.iter().enumerate() {
+        snapshot = snapshot.with(name, read(index));
+    }
+    UserRegisterFrame::new(snapshot, crate::backtrace::Backtracer::LAYOUT, true)
+}
+
 /// Handle an IRQ: acknowledge the GIC, dispatch the timer PPI to the
 /// scheduler-tick path (or an IPI / device interrupt to its handler),
 /// complete the interrupt, then — for **any** interrupt taken from EL0 —
@@ -493,7 +542,20 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // as with no resolver installed (fail closed).
         if kind == kind::LOWER_SYNC && crate::fault::is_lower_el_data_abort(esr) {
             if let Some(resolver) = crate::fault::user_fault_resolver() {
-                if resolver(read_far(), crate::fault::is_write_data_abort(esr)) {
+                // Capture the faulting EL0 register frame from the saved
+                // trampoline frame so the resolver can record a post-mortem
+                // crash record with a backtrace. The frame lives on this
+                // kernel stack for the duration of the resolver call.
+                // SAFETY: `frame` is the live `[u64; …]` register frame the
+                // trampoline built for this lower-EL entry, which saved the
+                // full GP set plus ELR/SPSR/SP_EL0 (`vectors.s`); every index
+                // read is within it.
+                let user_frame = unsafe { user_register_frame(frame) };
+                if resolver(
+                    read_far(),
+                    crate::fault::is_write_data_abort(esr),
+                    &user_frame,
+                ) {
                     return;
                 }
             }
@@ -561,6 +623,21 @@ mod tests {
         // x0..x30; a desync here would make the fix-up rewrite corrupt a
         // GP register instead of the return address.
         assert_eq!(ELR_FRAME_INDEX * 8, 248);
+    }
+
+    #[test]
+    fn user_fault_frame_indices_match_the_trampoline_layout() {
+        // `vectors.s` saves SPSR_EL1 at byte 256 and SP_EL0 at byte 264,
+        // straight after ELR_EL1 (248); x29 (the frame pointer) is a GP
+        // register at its own index. A desync here would make the crash
+        // record read a wrong sp/fp.
+        assert_eq!(SP_EL0_FRAME_INDEX * 8, 264);
+        assert_eq!(FP_FRAME_INDEX, 29);
+        // One name per saved GP register, in frame-index order.
+        assert_eq!(GP_REG_NAMES.len(), crate::syscall_entry::SAVED_GPRS);
+        assert_eq!(GP_REG_NAMES[0], "x0");
+        assert_eq!(GP_REG_NAMES[29], "x29");
+        assert_eq!(GP_REG_NAMES[30], "x30");
     }
 
     #[test]

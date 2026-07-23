@@ -28,6 +28,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use tairix_arch_api::backtrace::UserRegisterFrame;
+
 /// `scause` cause code for an Instruction page fault (privileged spec
 /// table 4.2).
 pub const SCAUSE_INSTRUCTION_PAGE_FAULT: u64 = 12;
@@ -153,7 +155,14 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
 /// exit action — exactly like a rescheduling syscall, so the task dies
 /// and the hart never halts. Like every trap-path callback it is a bare
 /// `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(stval: u64, write: bool) -> bool;
+///
+/// `regs` is a pointer to the faulting U-mode register frame the trap
+/// handler captured from the saved [`crate::trap::TrapFrame`] (or null if
+/// unavailable), threaded so the resolver can record a post-mortem crash
+/// record with a backtrace. The callee narrows it to
+/// `Option<&UserRegisterFrame>` and never dereferences a null pointer.
+pub type UserFaultResolveFn =
+    extern "C" fn(stval: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -267,7 +276,11 @@ mod tests {
         assert!(!is_store_page_fault(8));
     }
 
-    extern "C" fn host_user_fault_resolver(_stval: u64, _write: bool) -> bool {
+    extern "C" fn host_user_fault_resolver(
+        _stval: u64,
+        _write: bool,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
         false
     }
 

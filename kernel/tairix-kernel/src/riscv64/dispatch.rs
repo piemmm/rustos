@@ -76,8 +76,24 @@ pub extern "C" fn production_dispatch(
 /// task-fatal fault (any write, or an unresolvable read) never returns
 /// (the helper suspends the reclaimed task with an exit action);
 /// `false` sends the trap handler to its fatal path (fail closed).
-pub extern "C" fn production_user_fault(stval: u64, write: bool) -> bool {
-    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, stval, write)
+///
+/// `regs` is the faulting U-mode register frame the trap handler captured
+/// from the saved trap frame; it is forwarded so the resolver can record a
+/// post-mortem crash record with a backtrace.
+// The callback must stay a bare safe `extern "C" fn` to match the arch
+// port's `UserFaultResolveFn` type; the raw-pointer deref happens only
+// inside the guarded `unsafe` block below, whose SAFETY note carries the
+// trap-handler-upheld contract. — the deref is contained and justified.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn production_user_fault(
+    stval: u64,
+    write: bool,
+    regs: *const tairix_arch_api::backtrace::UserRegisterFrame,
+) -> bool {
+    // SAFETY: the trap handler builds the frame on its own kernel stack and
+    // holds it live across this call, or passes null; the slot helper
+    // narrows the pointer with `as_ref` and never dereferences null.
+    unsafe { crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, stval, write, regs) }
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid

@@ -53,11 +53,11 @@ mod program {
         NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
-        encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, IntrospectDomain,
-        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
-        RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
-        UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
-        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, CrashRecord,
+        IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+        MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord,
+        SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
@@ -269,6 +269,15 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.chunks_exact(IrqRecord::WIRE_LEN) {
                 records.push(IrqRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn crashes(&self, _caller: &Caller) -> Result<Vec<CrashRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::Crashes, CrashRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(CrashRecord::WIRE_LEN) {
+                records.push(CrashRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

@@ -39,12 +39,20 @@ fn trap_frame_layout_matches_trap_s_offsets() {
     assert_eq!(offset_of!(TrapFrame, a0), 64);
     assert_eq!(offset_of!(TrapFrame, a5), 104);
     assert_eq!(offset_of!(TrapFrame, a7), 120);
+    // The callee-saved set (s0=fp .. s11) the vector saves for the
+    // user-fault crash backtrace, appended after the caller-saved GPRs.
+    assert_eq!(offset_of!(TrapFrame, s0), 128);
+    assert_eq!(offset_of!(TrapFrame, s11), 216);
     // The return-state CSRs the redesigned vector saves, appended after
     // the GP registers (their offsets are pinned by the `OFF_*` `.equ`s
     // in `trap.s`).
-    assert_eq!(offset_of!(TrapFrame, sepc), 128);
-    assert_eq!(offset_of!(TrapFrame, sstatus), 136);
-    assert_eq!(offset_of!(TrapFrame, user_sp), 144);
+    assert_eq!(offset_of!(TrapFrame, sepc), 224);
+    assert_eq!(offset_of!(TrapFrame, sstatus), 232);
+    assert_eq!(offset_of!(TrapFrame, user_sp), 240);
+    // The struct packs 31 u64 fields (248 bytes, offset 240 + 8); the asm
+    // reserves TRAP_FRAME_SIZE = 256 so the kernel stack stays 16-byte
+    // aligned, the top 8 bytes being alignment padding.
+    assert_eq!(core::mem::size_of::<TrapFrame>(), 248);
 }
 
 /// Records the (number, args) it was handed and returns a fixed value.

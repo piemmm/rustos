@@ -41,7 +41,7 @@
 # SAFETY-INVARIANTs:
 #   1. `.align 2` keeps the vector 4-byte aligned so `stvec` direct mode
 #      (mode bits = 0) addresses it correctly.
-#   2. The frame is 16-byte aligned (160 bytes) per the riscv64 ABI; the
+#   2. The frame is 16-byte aligned (256 bytes) per the riscv64 ABI; the
 #      `offset_of!` asserts in `syscall_entry_tests.rs` pin every field
 #      offset against the stores/loads below.
 #   3. Interrupts stay disabled for the whole handler (hardware clears
@@ -49,10 +49,10 @@
 #      from `sstatus.SPIE`), so no nested trap occurs while `sscratch`
 #      is transiently 0 mid-handler.
 
-.equ TRAP_FRAME_SIZE, 160
-.equ OFF_SEPC,    128
-.equ OFF_SSTATUS, 136
-.equ OFF_USP,     144
+.equ TRAP_FRAME_SIZE, 256
+.equ OFF_SEPC,    224
+.equ OFF_SSTATUS, 232
+.equ OFF_USP,     240
 
 # Save the caller-saved integer registers into the frame at `sp`.
 .macro SAVE_GPRS
@@ -72,6 +72,22 @@
     sd      a5, 104(sp)
     sd      a6, 112(sp)
     sd      a7, 120(sp)
+    # Callee-saved set (s0=fp .. s11): saved so the user-fault crash
+    # backtrace can follow the frame-pointer chain from s0. The Rust
+    # handler preserves these per the C ABI, so restoring the saved copies
+    # is a correct no-op; saving them makes the faulting frame complete.
+    sd      s0, 128(sp)
+    sd      s1, 136(sp)
+    sd      s2, 144(sp)
+    sd      s3, 152(sp)
+    sd      s4, 160(sp)
+    sd      s5, 168(sp)
+    sd      s6, 176(sp)
+    sd      s7, 184(sp)
+    sd      s8, 192(sp)
+    sd      s9, 200(sp)
+    sd      s10, 208(sp)
+    sd      s11, 216(sp)
 .endm
 
 # Restore the caller-saved integer registers from the frame at `sp`.
@@ -92,6 +108,18 @@
     ld      a5, 104(sp)
     ld      a6, 112(sp)
     ld      a7, 120(sp)
+    ld      s0, 128(sp)
+    ld      s1, 136(sp)
+    ld      s2, 144(sp)
+    ld      s3, 152(sp)
+    ld      s4, 160(sp)
+    ld      s5, 168(sp)
+    ld      s6, 176(sp)
+    ld      s7, 184(sp)
+    ld      s8, 192(sp)
+    ld      s9, 200(sp)
+    ld      s10, 208(sp)
+    ld      s11, 216(sp)
 .endm
 
 .section .text

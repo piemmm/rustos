@@ -45,6 +45,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use tairix_arch_api::backtrace::UserRegisterFrame;
+
 /// IDT vector the CPU raises for a page fault (`#PF`, Intel SDM Vol 3A
 /// Table 6-1).
 pub const PAGE_FAULT_VECTOR: u8 = 14;
@@ -201,7 +203,15 @@ fn clear_fault_handler_for_tests() {
 /// completes on that stack — exactly like a rescheduling syscall, so the
 /// task dies and the CPU never halts. Like every trap-path callback it
 /// is a bare `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(faulting_addr: u64, write: bool) -> bool;
+///
+/// `regs` is a pointer to the faulting user register frame the `#PF`
+/// dispatcher built from the saved GPR block and the interrupt frame's
+/// user `rsp` (or null if unavailable), threaded so the resolver can
+/// record a post-mortem crash record with a backtrace. The callee narrows
+/// it to `Option<&UserRegisterFrame>` and never dereferences a null
+/// pointer.
+pub type UserFaultResolveFn =
+    extern "C" fn(faulting_addr: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -329,6 +339,12 @@ pub unsafe extern "C" fn page_fault_isr() {
         "mov %cr2, %rsi",
         "movq 128(%rsp), %rdx",
         "leaq 128(%rsp), %rcx",
+        // %r8 <- &SavedRegs (the base of the 15-GPR block, = %rsp before
+        // the alignment pad), %r9 <- the interrupted user %rsp from the CPU
+        // iret frame (at 152(%rsp): error 120, rip 128, cs 136, rflags 144,
+        // rsp 152), so the dispatcher can build the faulting register frame.
+        "movq %rsp, %r8",
+        "movq 152(%rsp), %r9",
         "subq $8, %rsp",
         "call {dispatch}",
         "addq $8, %rsp",
@@ -391,6 +407,8 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
     faulting_addr: u64,
     rip: u64,
     rip_slot: *mut u64,
+    saved: *const crate::interrupts::SavedRegs,
+    user_rsp: u64,
 ) {
     if !is_user(error_code) {
         if let Some(fixup) = crate::uaccess::kernel_fixup_for(rip) {
@@ -421,7 +439,16 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
             unsafe {
                 core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
             }
-            let resolved = resolver(faulting_addr, is_write(error_code));
+            // Build the faulting user register frame from the saved GPR
+            // block, the faulting `rip`, and the interrupt frame's user
+            // `rsp`, so the resolver can record a post-mortem crash record
+            // with a backtrace. The frame lives on this kernel stack across
+            // the resolver call.
+            // SAFETY: `saved` is the stub-provided address of the live
+            // 15-GPR `SavedRegs` block on this kernel stack; it is valid for
+            // the duration of the call.
+            let user_frame = unsafe { user_register_frame(saved, rip, user_rsp) };
+            let resolved = resolver(faulting_addr, is_write(error_code), &user_frame);
             // SAFETY: as above — the matching swap restoring the user GS
             // the `iretq` (or the fatal path) proceeds under.
             unsafe {
@@ -436,6 +463,47 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         Some(handler) => handler(error_code, faulting_addr, rip),
         None => crate::qemu_exit::exit_failure(),
     }
+}
+
+/// Build the faulting user register frame from the saved GPR block, the
+/// faulting `rip`, and the interrupted user `rsp`.
+///
+/// `pc` is `rip`, `sp` is the user `rsp` from the CPU iret frame, and the
+/// frame pointer is `rbp`; the System V AMD64 frame layout
+/// ([`crate::backtrace::Backtracer::LAYOUT`]) drives the crash-path fp
+/// walk, so the frame is marked `fp_valid`.
+///
+/// # Safety
+///
+/// `saved` must point to the live 15-GPR [`crate::interrupts::SavedRegs`]
+/// block the `#PF` stub persisted on this kernel stack; it is read once
+/// here and outlives the read.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn user_register_frame(
+    saved: *const crate::interrupts::SavedRegs,
+    rip: u64,
+    user_rsp: u64,
+) -> UserRegisterFrame {
+    use tairix_arch_api::backtrace::RegisterSnapshot;
+    // SAFETY: the caller guarantees `saved` addresses the live saved block.
+    let s = unsafe { &*saved };
+    let snapshot = RegisterSnapshot::new(rip, user_rsp, s.rbp)
+        .with("rax", s.rax)
+        .with("rbx", s.rbx)
+        .with("rcx", s.rcx)
+        .with("rdx", s.rdx)
+        .with("rsi", s.rsi)
+        .with("rdi", s.rdi)
+        .with("rbp", s.rbp)
+        .with("r8", s.r8)
+        .with("r9", s.r9)
+        .with("r10", s.r10)
+        .with("r11", s.r11)
+        .with("r12", s.r12)
+        .with("r13", s.r13)
+        .with("r14", s.r14)
+        .with("r15", s.r15);
+    UserRegisterFrame::new(snapshot, crate::backtrace::Backtracer::LAYOUT, true)
 }
 
 #[cfg(test)]
@@ -502,7 +570,11 @@ mod tests {
         assert!(!is_user_data_fault(PF_ERR_USER | PF_ERR_INSTR));
     }
 
-    extern "C" fn host_user_fault_resolver(_faulting_addr: u64, _write: bool) -> bool {
+    extern "C" fn host_user_fault_resolver(
+        _faulting_addr: u64,
+        _write: bool,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
         false
     }
 

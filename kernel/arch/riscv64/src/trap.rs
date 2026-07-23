@@ -90,6 +90,31 @@ pub struct TrapFrame {
     pub a6: u64,
     /// Argument register / syscall number a7 (x17).
     pub a7: u64,
+    /// Saved frame pointer s0 (x8) — the callee-saved register the
+    /// user-fault crash backtrace follows.
+    pub s0: u64,
+    /// Saved callee-saved register s1 (x9).
+    pub s1: u64,
+    /// Saved callee-saved register s2 (x18).
+    pub s2: u64,
+    /// Saved callee-saved register s3 (x19).
+    pub s3: u64,
+    /// Saved callee-saved register s4 (x20).
+    pub s4: u64,
+    /// Saved callee-saved register s5 (x21).
+    pub s5: u64,
+    /// Saved callee-saved register s6 (x22).
+    pub s6: u64,
+    /// Saved callee-saved register s7 (x23).
+    pub s7: u64,
+    /// Saved callee-saved register s8 (x24).
+    pub s8: u64,
+    /// Saved callee-saved register s9 (x25).
+    pub s9: u64,
+    /// Saved callee-saved register s10 (x26).
+    pub s10: u64,
+    /// Saved callee-saved register s11 (x27).
+    pub s11: u64,
     /// Saved `sepc`: the interrupted PC (the `ecall` address on the
     /// syscall path). The handler advances it past the `ecall` so the
     /// asm epilogue's `sret` resumes at the following instruction.
@@ -333,6 +358,58 @@ pub unsafe fn wait_for_interrupt() {
     }
 }
 
+/// Build the faulting-thread [`tairix_arch_api::backtrace::UserRegisterFrame`]
+/// from the saved [`TrapFrame`].
+///
+/// `pc` is the saved `sepc`, `sp` the interrupted `user_sp`, and the frame
+/// pointer is `s0` (the callee-saved register the vector now persists), so
+/// the crash path can follow the riscv64 frame-pointer chain
+/// ([`crate::backtrace::Backtracer::LAYOUT`]); the frame is marked
+/// `fp_valid`. The full integer register file is carried by name.
+///
+/// # Safety
+///
+/// `frame` must point to the live [`TrapFrame`] the asm vector built, valid
+/// for the duration of the read.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn user_register_frame(
+    frame: *const TrapFrame,
+) -> tairix_arch_api::backtrace::UserRegisterFrame {
+    use tairix_arch_api::backtrace::{RegisterSnapshot, UserRegisterFrame};
+    // SAFETY: the caller guarantees `frame` addresses the live saved frame.
+    let f = unsafe { &*frame };
+    let snapshot = RegisterSnapshot::new(f.sepc, f.user_sp, f.s0)
+        .with("ra", f.ra)
+        .with("t0", f.t0)
+        .with("t1", f.t1)
+        .with("t2", f.t2)
+        .with("t3", f.t3)
+        .with("t4", f.t4)
+        .with("t5", f.t5)
+        .with("t6", f.t6)
+        .with("a0", f.a0)
+        .with("a1", f.a1)
+        .with("a2", f.a2)
+        .with("a3", f.a3)
+        .with("a4", f.a4)
+        .with("a5", f.a5)
+        .with("a6", f.a6)
+        .with("a7", f.a7)
+        .with("s0", f.s0)
+        .with("s1", f.s1)
+        .with("s2", f.s2)
+        .with("s3", f.s3)
+        .with("s4", f.s4)
+        .with("s5", f.s5)
+        .with("s6", f.s6)
+        .with("s7", f.s7)
+        .with("s8", f.s8)
+        .with("s9", f.s9)
+        .with("s10", f.s10)
+        .with("s11", f.s11);
+    UserRegisterFrame::new(snapshot, crate::backtrace::Backtracer::LAYOUT, true)
+}
+
 /// Rust entry invoked by the asm trap vector.
 ///
 /// Reads `scause` and dispatches:
@@ -454,7 +531,15 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
                     unsafe {
                         core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
                     }
-                    if resolver(stval, write_fault) {
+                    // Capture the faulting U-mode register frame from the
+                    // saved trap frame so the resolver can record a
+                    // post-mortem crash record with a backtrace. It lives on
+                    // this kernel stack across the resolver call.
+                    // SAFETY: `frame` is the live saved-register frame the
+                    // asm vector passed, which now saves the callee-saved
+                    // set (incl. s0=fp) as well as the caller-saved GPRs.
+                    let user_frame = unsafe { user_register_frame(frame) };
+                    if resolver(stval, write_fault, &user_frame) {
                         return;
                     }
                 }

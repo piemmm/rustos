@@ -28,6 +28,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use tairix_arch_api::backtrace::UserRegisterFrame;
+
 /// Shift of the `ESR_ELx.EC` (exception class) field (bits `[31:26]`,
 /// ARM ARM D17.2.37).
 pub const ESR_EC_SHIFT: u64 = 26;
@@ -188,7 +190,14 @@ fn clear_fault_handler_for_tests() {
 /// completes on that stack — exactly like a rescheduling syscall, so the
 /// task dies and the CPU never halts. Like every trap-path callback it
 /// is a bare `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(far: u64, write: bool) -> bool;
+///
+/// `regs` is a pointer to the faulting EL0 register frame the vector
+/// captured from the saved trampoline frame (or null if it could not),
+/// threaded so the resolver can record a post-mortem crash record with a
+/// backtrace. The callee narrows it to `Option<&UserRegisterFrame>` and
+/// never dereferences a null pointer.
+pub type UserFaultResolveFn =
+    extern "C" fn(far: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -308,7 +317,11 @@ mod tests {
         panic!("host test handler must never be invoked");
     }
 
-    extern "C" fn host_user_fault_resolver(_far: u64, _write: bool) -> bool {
+    extern "C" fn host_user_fault_resolver(
+        _far: u64,
+        _write: bool,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
         false
     }
 

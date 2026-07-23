@@ -191,8 +191,19 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// fault runs the resident production hook's `resolve_file_fault` path and
 /// a store (or unresolvable load) kills the faulting task through the
 /// production fault-exit path.
-extern "C" fn file_map_user_fault(stval: u64, write: bool) -> bool {
-    resolve_user_fault_via_slot(&DISPATCH_SLOT, stval, write)
+// The callback matches the arch `UserFaultResolveFn` type (a bare safe
+// `extern "C" fn`); the raw pointer is only forwarded into the guarded
+// `unsafe` call below, which narrows it with `as_ref`. — contained.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+extern "C" fn file_map_user_fault(
+    stval: u64,
+    write: bool,
+    regs: *const tairix_arch_api::backtrace::UserRegisterFrame,
+) -> bool {
+    // SAFETY: the trap handler builds the frame on its kernel stack and
+    // holds it live across this call, or passes null; the slot helper
+    // narrows the pointer with `as_ref` and never dereferences null.
+    unsafe { resolve_user_fault_via_slot(&DISPATCH_SLOT, stval, write, regs) }
 }
 
 /// The in-guest read-only filesystem double: serves exactly the one

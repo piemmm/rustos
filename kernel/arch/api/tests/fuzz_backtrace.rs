@@ -21,6 +21,15 @@
 //!   [`tairix_arch_api::backtrace::MAX_FRAMES`] frames, whatever the fp,
 //!   layout, bounds, or memory contents.
 //!
+//! The reader is [fallible](StackReader::read_word): a user-fault
+//! backtrace walks the crashing task's *untrusted* stack, where a
+//! structurally valid address can still be unmapped and the copy-in read
+//! fails. The harness therefore also, on a per-iteration random cut,
+//! returns [`None`] from a point in the address space onward, so the
+//! `None`-terminated walk path is fuzzed for the same two invariants: a
+//! failed read ends the walk cleanly and never provokes an out-of-bounds
+//! read.
+//!
 //! No external fuzz runner: a per-run-seeded LCG (seed drawn and logged by
 //! `tairix_fuzzseed`) fills a backing "stack" with random words and drives
 //! the walk from random start frame pointers with random frame layouts and
@@ -48,10 +57,14 @@ struct FuzzStack {
     base: u64,
     words: [u64; WORDS],
     bounds: StackBounds,
+    /// Addresses at or above this are "unmapped": [`read_word`] returns
+    /// [`None`] for them, modelling an untrusted user stack whose page is
+    /// not resident. `u64::MAX` means "every in-bounds word is readable".
+    unreadable_from: u64,
 }
 
 impl StackReader for FuzzStack {
-    fn read_word(&self, addr: u64) -> u64 {
+    fn read_word(&self, addr: u64) -> Option<u64> {
         assert!(
             self.bounds.contains_word(addr),
             "walk read {addr:#x} outside the bounds it was given"
@@ -64,8 +77,14 @@ impl StackReader for FuzzStack {
             self.base,
             end
         );
+        // Model an unmapped user page: the bounds/alignment asserts above
+        // still fire (the walk must honour bounds even for a word it will
+        // then fail to read), but the value is unavailable.
+        if addr >= self.unreadable_from {
+            return None;
+        }
         let idx = word_index(addr, self.base);
-        self.words[idx]
+        Some(self.words[idx])
     }
 }
 
@@ -148,10 +167,20 @@ fn walking_any_frame_chain_terminates_and_stays_in_bounds() {
             _ => 0,                                           // null
         };
 
+        // On roughly half of iterations, make the address space unreadable
+        // from a random word onward so the fallible (None-terminated) walk
+        // path is exercised; otherwise every in-bounds word is readable.
+        let unreadable_from = if next() & 1 == 0 {
+            base + bounded(next(), words_u64()) * 8
+        } else {
+            u64::MAX
+        };
+
         let stack = FuzzStack {
             base,
             words,
             bounds,
+            unreadable_from,
         };
 
         let mut emitted = 0usize;

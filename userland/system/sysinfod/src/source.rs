@@ -14,9 +14,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
-    MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
-    SystemIdentity, Uptime, UserDirectoryRecord,
+    CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
+    MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
+    ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
@@ -252,4 +252,15 @@ pub trait SysinfoSource {
     /// `offset`/`limit` paging; ordering must be stable across paged calls
     /// (ascending line order is).
     fn irqs(&self, caller: &Caller) -> Result<Vec<IrqRecord>, Errno>;
+
+    /// Return the post-mortem crash-record store: one record per recorded
+    /// user-fault kill, newest first.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed: the
+    /// record carries absolute general-purpose register values — the
+    /// privileged-debugger datum, the same boundary as
+    /// [`kernel_memory_stats`](Self::kernel_memory_stats). The owned list is
+    /// returned whole and [`crate::serve`] applies the `offset`/`limit`
+    /// paging; ordering (newest first) is stable across paged calls.
+    fn crashes(&self, caller: &Caller) -> Result<Vec<CrashRecord>, Errno>;
 }

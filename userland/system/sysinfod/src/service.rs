@@ -4,9 +4,9 @@
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use tairix_abi::sysinfo::{
-    spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
-    HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest, MountRecord,
-    NetInterfaceListRequest, ProcessListRequest, ProcessRecord, ReclaimClassRecord,
+    spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashRecord,
+    CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
+    MountRecord, NetInterfaceListRequest, ProcessListRequest, ProcessRecord, ReclaimClassRecord,
     ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
     SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
@@ -179,6 +179,8 @@ fn dispatch(
         net_state_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::CRASH_RECORD {
+        crash_record_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -420,6 +422,26 @@ fn irq_list(
     )
 }
 
+/// Decode the [`CrashRecordRequest`], apply paging, and pack the selected
+/// [`CrashRecord`]s into `response`.
+fn crash_record_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = CrashRecordRequest::from_bytes(payload)?;
+    let records = source.crashes(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        CrashRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`SeatListRequest`], apply paging, and pack the selected
 /// [`SeatRecord`]s into `response`.
 fn seat_list(
@@ -531,11 +553,12 @@ mod tests {
     use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
     use tairix_abi::sysinfo::NetInterfaceListRequest;
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
-        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
-        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket,
+        CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest,
+        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability,
+        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
         MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
         SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
@@ -683,6 +706,27 @@ mod tests {
                 preemptions: 2,
             },
         ]
+    }
+
+    /// A crash record with a distinct pid and name, a load-relative pc, and
+    /// two backtrace frames, so paging and decode are checkable.
+    fn fixture_crash(pid: u64, name: &[u8]) -> CrashRecord {
+        let mut rec = CrashRecord::new(
+            ProcId::KERNEL,
+            pid,
+            1000,
+            1000,
+            true,
+            CrashFaultClass::Wild,
+            CrashFaultBucket::NullPage,
+            0x18,
+            name,
+        )
+        .unwrap();
+        rec.set_registers(0x40, 0x7fff_0000, 0x7fff_0100, true, true);
+        rec.push_frame(0x40);
+        rec.push_frame(0x120);
+        rec
     }
 
     /// In-memory fixture standing in for the kernel's live state.
@@ -867,6 +911,12 @@ mod tests {
                     owner: 13,
                     count: 200_000,
                 },
+            ])
+        }
+        fn crashes(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CrashRecord>, Errno> {
+            Ok(alloc::vec![
+                fixture_crash(2, b"crasher"),
+                fixture_crash(3, b"other"),
             ])
         }
         fn resource_limits(
@@ -1592,6 +1642,65 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::IRQ_LIST, &end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn crash_record_is_gated_on_kernel_audited_and_pages() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = CrashRecordRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CRASH_RECORD, &request.to_le_bytes());
+        let mut resp = [0u8; 4096];
+
+        // Denied without `CAP_SYSINFO_KERNEL` (the record carries absolute
+        // register values); the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_KERNEL` holder: both
+        // records, newest first, with their identity and load-relative pc.
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * CrashRecord::WIRE_LEN);
+        let first = CrashRecord::from_bytes(&resp[..CrashRecord::WIRE_LEN]).unwrap();
+        let second = CrashRecord::from_bytes(&resp[CrashRecord::WIRE_LEN..n]).unwrap();
+        assert_eq!(first.pid, 2);
+        assert_eq!(first.name_bytes(), b"crasher");
+        assert!(first.is_write());
+        assert!(first.load_base_known());
+        assert_eq!(first.pc, 0x40);
+        assert_eq!(first.frames(), &[0x40, 0x120]);
+        assert_eq!(second.pid, 3);
+        assert_eq!(second.name_bytes(), b"other");
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // Paging past the last record returns the empty terminator.
+        let end = CrashRecordRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::CRASH_RECORD, &end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

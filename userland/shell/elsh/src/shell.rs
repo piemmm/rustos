@@ -532,6 +532,16 @@ impl<'a> Shell<'a> {
                         .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
                     self.env.set_last_status(shell_status);
                 } else {
+                    // A child the kernel killed for an unresolvable memory
+                    // fault exits `139`: state it loudly on stderr rather
+                    // than leaving the user only an opaque `$?` (fail loud).
+                    // The status stays `139` for scripts to test.
+                    if let Some(reason) = fault_kill_reason(status) {
+                        self.console.write_stderr(&format!(
+                            "shell: {}: {reason}\n",
+                            program_name(commands)
+                        ));
+                    }
                     self.env.set_last_status(status);
                 }
             }
@@ -588,6 +598,11 @@ impl<'a> Shell<'a> {
                 if let Some((reason, _)) = async_load_failure(code) {
                     self.console
                         .write_stderr(&format!("shell: {}: {reason}\n", job.command));
+                } else if let Some(reason) = fault_kill_reason(code) {
+                    // A background child killed by a memory fault: state it
+                    // on stderr so the failure is never silent (fail loud).
+                    self.console
+                        .write_stderr(&format!("shell: {}: {reason}\n", job.command));
                 }
             }
         }
@@ -625,6 +640,20 @@ fn async_load_failure(code: i32) -> Option<(&'static str, i32)> {
         };
         (reason, status)
     })
+}
+
+/// The shell exit status a task killed by an unresolvable memory fault
+/// carries: `128 + SIGSEGV (11)`, the conventional "segmentation fault"
+/// code. The kernel records it for every user-fault kill.
+const FAULT_KILL_STATUS: i32 = 139;
+
+/// If `code` is the fault-kill status, the terse "why" to state on the
+/// crashed command's `stderr` so a segfault is never a silent, opaque `$?`
+/// (fail loud). The breadcrumb states only the class every user understands;
+/// the precise cause (read vs write, near-null vs wild) and the backtrace
+/// live in the capability-gated crash record, never on the terminal.
+fn fault_kill_reason(code: i32) -> Option<&'static str> {
+    (code == FAULT_KILL_STATUS).then_some("killed by fault (segmentation fault)")
 }
 
 /// Negate an exit status when `negated` (the `!` pipeline prefix): 0 becomes
@@ -843,6 +872,46 @@ mod tests {
 
         assert_eq!(shell.environment().last_status(), 3);
         assert!(console.stderr().is_empty());
+    }
+
+    #[test]
+    fn foreground_fault_kill_is_reported_loudly_and_keeps_status_139() {
+        // A child the kernel kills for an unresolvable memory fault exits
+        // 139 (128 + SIGSEGV). The shell states it loudly on stderr, never
+        // leaving the user only an opaque `$?`, and keeps 139 for scripts.
+        let host = ScriptedHost::new();
+        host.set_wait(Pid::new(100), WaitOutcome::Exited(139));
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("crasher").unwrap();
+
+        assert!(console
+            .stderr()
+            .contains("shell: crasher: killed by fault (segmentation fault)"));
+        assert_eq!(shell.environment().last_status(), 139);
+        // The breadcrumb never carries an address, register, or secret.
+        assert!(!console.stderr().contains("0x"));
+    }
+
+    #[test]
+    fn background_fault_kill_is_reported_loudly() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("crasher &").unwrap();
+        assert_eq!(shell.jobs().len(), 1);
+        console.clear();
+
+        host.queue_poll(Pid::new(100), WaitOutcome::Exited(139));
+        shell.run_line("echo hi").unwrap();
+
+        assert!(console.stdout().contains("[1] Done crasher\n"));
+        assert!(console
+            .stderr()
+            .contains("shell: crasher: killed by fault (segmentation fault)"));
+        assert!(shell.jobs().is_empty());
     }
 
     #[test]

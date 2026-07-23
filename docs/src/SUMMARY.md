@@ -11,6 +11,7 @@
 - [System overview](./architecture/overview.md)
 - [Kernel entry, init order, and panic policy](./architecture/kernel.md)
 - [Kernel panic diagnostics (registers + backtrace)](./architecture/panic-diagnostics.md)
+- [User-fault kill diagnostics (identity, cause, offset)](./architecture/fault-diagnostics.md)
 - [Kernel synchronisation primitives](./architecture/sync.md)
 - [Kernel memory subsystem](./architecture/memory.md)
 - [Kernel scheduler](./architecture/scheduler.md)

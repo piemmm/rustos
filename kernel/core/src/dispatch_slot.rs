@@ -47,6 +47,7 @@
 //! `kernel/sync::once`). Per-CPU syscalls observe `Some(hook)` from
 //! the moment `set` returns.
 
+use tairix_arch_api::backtrace::UserRegisterFrame;
 use tairix_kernel_syscall::{RawArgs, SyscallResult};
 use tairix_sync::OnceCell;
 
@@ -209,10 +210,22 @@ pub trait DispatchHook: Sync {
     ///   attributed to a task (no current task on this CPU): the port
     ///   falls back to its fatal path (halt), exactly as before.
     ///
+    /// `regs` is the faulting *user* register frame the architecture port
+    /// captured at trap entry, threaded through so the hook can record a
+    /// post-mortem crash record (identity, load-relative backtrace, register
+    /// snapshot) for a killed task. It is `None` on a port that does not (yet)
+    /// save the frame, or on a fault the port cannot attribute; the resolver
+    /// then still classifies and terminates, just without a backtrace.
+    ///
     /// The default refuses every fault as [`UserFaultOutcome::Unhandled`],
     /// so a hook built without a file-mapping resolver can never fabricate
     /// memory.
-    fn resolve_user_fault(&self, _fault_va: u64, _write: bool) -> UserFaultOutcome {
+    fn resolve_user_fault(
+        &self,
+        _fault_va: u64,
+        _write: bool,
+        _regs: Option<&UserRegisterFrame>,
+    ) -> UserFaultOutcome {
         UserFaultOutcome::Unhandled
     }
 }

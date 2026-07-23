@@ -64,13 +64,16 @@ fn reset_panic_guard() {
 struct RawStackReader;
 
 impl StackReader for RawStackReader {
-    fn read_word(&self, addr: u64) -> u64 {
+    fn read_word(&self, addr: u64) -> Option<u64> {
         // SAFETY: the neutral `walk` validated `addr` is 8-byte aligned and
         // that its whole word lies within the current CPU's kernel-stack
         // bounds before calling. Such an address is live, mapped kernel
         // stack, so the read cannot fault. The read is volatile so the
-        // compiler cannot elide or reorder it on the panic path.
-        unsafe { core::ptr::read_volatile(addr as *const u64) }
+        // compiler cannot elide or reorder it on the panic path. This
+        // reader is over the kernel's own trusted stack, so it always
+        // yields a value — the fallible return exists for the user-stack
+        // reader, which reads an untrusted address space.
+        Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
     }
 }
 

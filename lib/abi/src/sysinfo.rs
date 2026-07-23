@@ -214,6 +214,24 @@ impl SysinfoQueryId {
     /// carries.
     pub const IRQ_LIST: Self = Self(19);
 
+    /// Read the post-mortem crash record of each user task killed by an
+    /// unresolvable memory fault: one [`CrashRecord`] per recorded crash
+    /// (faulting identity, cause class, the load-relative `pc` and
+    /// backtrace, the register file), paged by a [`CrashRecordRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited. The record is the
+    /// privileged-debugger analogue of a Linux kernel oops: it carries the
+    /// absolute general-purpose register *values* — the one datum expressed
+    /// absolute anywhere in this diagnostics surface — so it is gated on
+    /// the same kernel-introspection capability as
+    /// [`Self::KERNEL_MEMORY_STATS`], never handed to an unprivileged
+    /// reader. Even behind the gate the faulting `pc`, the backtrace
+    /// frames, and the fault address are expressed as **program-relative /
+    /// region-relative offsets**, so the record symbolicates offline
+    /// against the unstripped binary without becoming an address-space
+    /// layout oracle.
+    pub const CRASH_RECORD: Self = Self(20);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -300,6 +318,10 @@ pub enum IntrospectDomain {
     /// [`IrqRecord`], with the syscall's `arg` naming the record offset to
     /// page from.
     Irqs = 14,
+    /// The post-mortem crash-record store: every recorded user-fault kill,
+    /// one packed [`CrashRecord`], with the syscall's `arg` naming the
+    /// record offset to page from.
+    Crashes = 15,
 }
 
 impl IntrospectDomain {
@@ -329,6 +351,7 @@ impl IntrospectDomain {
             12 => Ok(Self::Ramzip),
             13 => Ok(Self::CpuLoad),
             14 => Ok(Self::Irqs),
+            15 => Ok(Self::Crashes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -501,6 +524,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::IRQ_LIST,
         name: "irq_list",
         required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CRASH_RECORD,
+        name: "crash_record",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
         audit: true,
     },
 ];
@@ -2999,6 +3028,552 @@ impl IrqRecord {
     }
 }
 
+/// Maximum number of backtrace frames a [`CrashRecord`] carries.
+///
+/// The user-stack unwinder is hard-capped at 64 frames, but the innermost
+/// frames are what a post-mortem needs; the crash record retains the
+/// deepest-into-the-fault 32, which is ample for a `ps`/oops-style dump and
+/// keeps the fixed record size bounded. A backtrace longer than this is
+/// truncated at the *outermost* end (the recorded frames are frame 0
+/// upward), which is documented, never silent corruption.
+pub const CRASH_MAX_FRAMES: usize = 32;
+
+/// Maximum number of named general-purpose registers a [`CrashRecord`]
+/// carries. Sized for the widest Tier-1 register file (riscv64's 31 GP
+/// registers plus the pc); a port with fewer fills fewer slots.
+pub const CRASH_MAX_REGS: usize = 32;
+
+/// Fixed byte width of a register name inside a [`CrashNamedReg`].
+///
+/// Every Tier-1 register mnemonic (`rax`, `x30`, `s11`, …) fits in eight
+/// ASCII bytes; the name is right-padded with `0x00`.
+pub const CRASH_REG_NAME_LEN: usize = 8;
+
+/// Coarse class of *why* the resolver refused the faulting access, as
+/// carried in a [`CrashRecord`]. A closed set, decoded fail-closed.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum CrashFaultClass {
+    /// A stack-growth fault the resolver could not back (frame exhaustion).
+    Stack = 0,
+    /// Stack growth refused because the task's `StackBytes` soft bound is
+    /// exhausted.
+    StackLimit = 1,
+    /// A miss inside a live file mapping the resolver refused (past
+    /// end-of-file, or a write to a read-only mapping).
+    FileRegion = 2,
+    /// A miss inside a reserved anonymous region the resolver could not
+    /// back (deterministic OOM fatal to this task).
+    Anon = 3,
+    /// Outside every mapping the task owns.
+    #[default]
+    Wild = 4,
+}
+
+impl CrashFaultClass {
+    /// Raw on-wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a discriminant, failing closed on an unknown value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any value outside the closed set.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Stack),
+            1 => Ok(Self::StackLimit),
+            2 => Ok(Self::FileRegion),
+            3 => Ok(Self::Anon),
+            4 => Ok(Self::Wild),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Coarse, non-leaking locality of the faulting address in a
+/// [`CrashRecord`] — a distance from a fixed anchor, never an absolute
+/// virtual address. A closed set, decoded fail-closed.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum CrashFaultBucket {
+    /// Within the first page: a null-pointer dereference. `fault_offset` is
+    /// the byte offset from virtual address 0.
+    NullPage = 0,
+    /// Just below the stack guard page: an overflow past the guard.
+    /// `fault_offset` is the distance below the reserved span.
+    BelowStackGuard = 1,
+    /// A bounded run past the end of an owned mapping. `fault_offset` is the
+    /// distance past the region end.
+    PastRegion = 2,
+    /// Genuinely far from every mapping; `fault_offset` is meaningless (`0`).
+    #[default]
+    Wild = 3,
+}
+
+impl CrashFaultBucket {
+    /// Raw on-wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a discriminant, failing closed on an unknown value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any value outside the closed set.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::NullPage),
+            1 => Ok(Self::BelowStackGuard),
+            2 => Ok(Self::PastRegion),
+            3 => Ok(Self::Wild),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One named general-purpose register value inside a [`CrashRecord`].
+///
+/// The register **value** is absolute — this is the privileged-debugger
+/// datum the whole record is capability-gated for. The name is a fixed
+/// eight-byte ASCII field, right-padded with `0x00`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CrashNamedReg {
+    name_len: u8,
+    name: [u8; CRASH_REG_NAME_LEN],
+    /// The register's absolute value at fault entry.
+    pub value: u64,
+}
+
+impl CrashNamedReg {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = CRASH_REG_NAME_LEN + 8;
+
+    /// Build a named register, copying up to [`CRASH_REG_NAME_LEN`] bytes of
+    /// `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `name` exceeds [`CRASH_REG_NAME_LEN`];
+    /// the name is never silently truncated.
+    pub fn new(name: &[u8], value: u64) -> Result<Self, Errno> {
+        if name.len() > CRASH_REG_NAME_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = [0u8; CRASH_REG_NAME_LEN];
+        buf[..name.len()].copy_from_slice(name);
+        let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(Self {
+            name_len,
+            name: buf,
+            value,
+        })
+    }
+
+    /// Borrow the valid prefix of the register name.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..CRASH_REG_NAME_LEN].copy_from_slice(&self.name);
+        put_u64(&mut out, CRASH_REG_NAME_LEN, self.value);
+        out
+    }
+
+    /// Decode from `bytes`, recovering the name length from the trailing
+    /// `0x00` padding.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is short.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut name = [0u8; CRASH_REG_NAME_LEN];
+        name.copy_from_slice(&bytes[..CRASH_REG_NAME_LEN]);
+        // The name length is the ASCII prefix before the first NUL pad byte;
+        // it is at most CRASH_REG_NAME_LEN, so the width conversion is exact.
+        let name_len = u8::try_from(
+            name.iter()
+                .position(|&b| b == 0)
+                .unwrap_or(CRASH_REG_NAME_LEN),
+        )
+        .unwrap_or(0);
+        Ok(Self {
+            name_len,
+            name,
+            value: read_u64(bytes, CRASH_REG_NAME_LEN),
+        })
+    }
+}
+
+/// Request payload for [`SysinfoQueryId::CRASH_RECORD`].
+///
+/// The response is a sequence of [`CrashRecord`]s paged with
+/// `offset`/`limit`, exactly like the other list queries.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CrashRecordRequest {
+    /// Index of the first crash record to return.
+    pub offset: u32,
+    /// Maximum number of [`CrashRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl CrashRecordRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`CrashRecordRequest`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// [`CrashRecord::flags`] bit: the fatal access was a **store** (`true`) as
+/// opposed to a load.
+pub const CRASH_FLAG_WRITE: u8 = 1 << 0;
+/// [`CrashRecord::flags`] bit: [`CrashRecord::pc`] and every backtrace frame
+/// are **program-relative offsets** (the PIE load base was known). When
+/// clear, they are absolute addresses — an honest degradation that only
+/// affects offline symbolication convenience, still behind the capability
+/// gate.
+pub const CRASH_FLAG_LOAD_BASE_KNOWN: u8 = 1 << 1;
+/// [`CrashRecord::flags`] bit: [`CrashRecord::fp`] was a usable frame
+/// pointer, so the backtrace followed the frame-pointer chain. When clear,
+/// the port did not save the fp at trap entry and the backtrace is `pc`
+/// only.
+pub const CRASH_FLAG_FP_VALID: u8 = 1 << 2;
+/// The union of all defined [`CrashRecord::flags`] bits; any other bit set
+/// on the wire fails the decode closed.
+pub const CRASH_FLAG_ALL: u8 = CRASH_FLAG_WRITE | CRASH_FLAG_LOAD_BASE_KNOWN | CRASH_FLAG_FP_VALID;
+
+/// One recorded user-fault kill inside a [`SysinfoQueryId::CRASH_RECORD`]
+/// response.
+///
+/// The privileged-debugger post-mortem of a task killed by an unresolvable
+/// memory fault. Identity ([`proc_id`](Self::proc_id) / [`pid`](Self::pid) /
+/// name / uid / gid) and cause ([`fault_class`](Self::fault_class),
+/// [`fault_bucket`](Self::fault_bucket), the `write` flag) are attested by
+/// the kernel from the dying task's own state, never a caller claim.
+///
+/// # Leak policy
+///
+/// The faulting [`pc`](Self::pc) and every [`frame`](Self::frames) are
+/// **program-relative offsets** when [`CRASH_FLAG_LOAD_BASE_KNOWN`] is set,
+/// and [`fault_offset`](Self::fault_offset) is a **distance** from the anchor
+/// [`fault_bucket`](Self::fault_bucket) names — never an absolute virtual
+/// address. The register **values** ([`sp`](Self::sp), [`fp`](Self::fp), and
+/// each [`CrashNamedReg`]) are the one absolute datum, which is why the whole
+/// query is gated on `CAP_SYSINFO_KERNEL`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CrashRecord {
+    /// Kernel-attested, unforgeable process-instance identity of the crashed
+    /// task (survives numeric PID reuse).
+    pub proc_id: ProcId,
+    /// Numeric task id at crash time (reused across lifetimes; display only).
+    pub pid: u64,
+    /// Faulting distance from the [`fault_bucket`](Self::fault_bucket)
+    /// anchor, or `0` for [`CrashFaultBucket::Wild`].
+    pub fault_offset: u64,
+    /// Faulting program counter — program-relative when
+    /// [`CRASH_FLAG_LOAD_BASE_KNOWN`] is set, else absolute.
+    pub pc: u64,
+    /// Faulting stack pointer (absolute).
+    pub sp: u64,
+    /// Faulting frame pointer (absolute); meaningful only when
+    /// [`CRASH_FLAG_FP_VALID`] is set.
+    pub fp: u64,
+    /// Owning user id of the crashed task.
+    pub uid: u32,
+    /// Owning primary group id of the crashed task.
+    pub gid: u32,
+    /// State bits: [`CRASH_FLAG_WRITE`] / [`CRASH_FLAG_LOAD_BASE_KNOWN`] /
+    /// [`CRASH_FLAG_FP_VALID`].
+    pub flags: u8,
+    /// Why the resolver refused the access.
+    pub fault_class: CrashFaultClass,
+    /// Where the faulting address sat, relative to the task's mappings.
+    pub fault_bucket: CrashFaultBucket,
+    name_len: u8,
+    frame_count: u16,
+    reg_count: u16,
+    name: [u8; PROCESS_NAME_MAX],
+    frames: [u64; CRASH_MAX_FRAMES],
+    regs: [CrashNamedReg; CRASH_MAX_REGS],
+}
+
+impl CrashRecord {
+    /// Byte offset of the inline `name` field.
+    const NAME_OFF: usize = 72;
+    /// Byte offset of the inline `frames` array.
+    const FRAMES_OFF: usize = Self::NAME_OFF + PROCESS_NAME_MAX;
+    /// Byte offset of the inline `regs` array.
+    const REGS_OFF: usize = Self::FRAMES_OFF + CRASH_MAX_FRAMES * 8;
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = Self::REGS_OFF + CRASH_MAX_REGS * CrashNamedReg::WIRE_LEN;
+
+    /// Construct a record for the crashed task's identity, with an empty
+    /// backtrace and register set (populate them with [`Self::push_frame`]
+    /// and [`Self::push_reg`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `name` exceeds [`PROCESS_NAME_MAX`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        proc_id: ProcId,
+        pid: u64,
+        uid: u32,
+        gid: u32,
+        write: bool,
+        fault_class: CrashFaultClass,
+        fault_bucket: CrashFaultBucket,
+        fault_offset: u64,
+        name: &[u8],
+    ) -> Result<Self, Errno> {
+        if name.len() > PROCESS_NAME_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut name_buf = [0u8; PROCESS_NAME_MAX];
+        name_buf[..name.len()].copy_from_slice(name);
+        let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(Self {
+            proc_id,
+            pid,
+            fault_offset,
+            pc: 0,
+            sp: 0,
+            fp: 0,
+            uid,
+            gid,
+            flags: if write { CRASH_FLAG_WRITE } else { 0 },
+            fault_class,
+            fault_bucket,
+            name_len,
+            frame_count: 0,
+            reg_count: 0,
+            name: name_buf,
+            frames: [0u64; CRASH_MAX_FRAMES],
+            regs: [CrashNamedReg::default(); CRASH_MAX_REGS],
+        })
+    }
+
+    /// Record the faulting register anchors, marking `pc` program-relative
+    /// (`load_base_known`) and `fp` usable (`fp_valid`) honestly.
+    pub fn set_registers(
+        &mut self,
+        pc: u64,
+        sp: u64,
+        fp: u64,
+        load_base_known: bool,
+        fp_valid: bool,
+    ) {
+        self.pc = pc;
+        self.sp = sp;
+        self.fp = fp;
+        if load_base_known {
+            self.flags |= CRASH_FLAG_LOAD_BASE_KNOWN;
+        }
+        if fp_valid {
+            self.flags |= CRASH_FLAG_FP_VALID;
+        }
+    }
+
+    /// Append one backtrace frame offset, returning `false` (dropped) when
+    /// the fixed record is already full — never panics, never grows.
+    pub fn push_frame(&mut self, frame: u64) -> bool {
+        let i = self.frame_count as usize;
+        if i >= CRASH_MAX_FRAMES {
+            return false;
+        }
+        self.frames[i] = frame;
+        self.frame_count += 1;
+        true
+    }
+
+    /// Append one named register, returning `false` (dropped) when the fixed
+    /// record is already full.
+    pub fn push_reg(&mut self, reg: CrashNamedReg) -> bool {
+        let i = self.reg_count as usize;
+        if i >= CRASH_MAX_REGS {
+            return false;
+        }
+        self.regs[i] = reg;
+        self.reg_count += 1;
+        true
+    }
+
+    /// `true` if the fatal access was a store.
+    #[must_use]
+    pub const fn is_write(&self) -> bool {
+        self.flags & CRASH_FLAG_WRITE != 0
+    }
+
+    /// `true` if [`Self::pc`] and the frames are program-relative offsets.
+    #[must_use]
+    pub const fn load_base_known(&self) -> bool {
+        self.flags & CRASH_FLAG_LOAD_BASE_KNOWN != 0
+    }
+
+    /// `true` if [`Self::fp`] was a usable frame pointer.
+    #[must_use]
+    pub const fn fp_valid(&self) -> bool {
+        self.flags & CRASH_FLAG_FP_VALID != 0
+    }
+
+    /// Borrow the valid prefix of the name buffer.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+
+    /// Borrow the recorded backtrace frames (frame 0 upward).
+    #[must_use]
+    pub fn frames(&self) -> &[u64] {
+        &self.frames[..self.frame_count as usize]
+    }
+
+    /// Borrow the recorded register file.
+    #[must_use]
+    pub fn regs(&self) -> &[CrashNamedReg] {
+        &self.regs[..self.reg_count as usize]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..16].copy_from_slice(&self.proc_id.to_le_bytes());
+        put_u64(&mut out, 16, self.pid);
+        put_u32(&mut out, 24, self.uid);
+        put_u32(&mut out, 28, self.gid);
+        out[32] = self.flags;
+        out[33] = self.fault_class.as_u8();
+        out[34] = self.fault_bucket.as_u8();
+        out[35] = self.name_len;
+        put_u16(&mut out, 36, self.frame_count);
+        put_u16(&mut out, 38, self.reg_count);
+        put_u64(&mut out, 40, self.fault_offset);
+        put_u64(&mut out, 48, self.pc);
+        put_u64(&mut out, 56, self.sp);
+        put_u64(&mut out, 64, self.fp);
+        out[Self::NAME_OFF..Self::FRAMES_OFF].copy_from_slice(&self.name);
+        for (i, &frame) in self.frames.iter().enumerate() {
+            put_u64(&mut out, Self::FRAMES_OFF + i * 8, frame);
+        }
+        for (i, reg) in self.regs.iter().enumerate() {
+            let base = Self::REGS_OFF + i * CrashNamedReg::WIRE_LEN;
+            out[base..base + CrashNamedReg::WIRE_LEN].copy_from_slice(&reg.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any structurally invalid
+    /// record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if the slice is short.
+    /// * [`Errno::OutOfRange`] for an unknown [`CrashFaultClass`] /
+    ///   [`CrashFaultBucket`].
+    /// * [`Errno::LengthOutOfRange`] if `name_len` exceeds
+    ///   [`PROCESS_NAME_MAX`] or a count exceeds its array bound.
+    /// * [`Errno::BadMagic`] if a reserved `flags` bit is set.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let proc_id = ProcId::from_bytes(&bytes[0..16])?;
+        let flags = bytes[32];
+        if flags & !CRASH_FLAG_ALL != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let fault_class = CrashFaultClass::from_u8(bytes[33])?;
+        let fault_bucket = CrashFaultBucket::from_u8(bytes[34])?;
+        let name_len = bytes[35];
+        if name_len as usize > PROCESS_NAME_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let frame_count = read_u16(bytes, 36);
+        let reg_count = read_u16(bytes, 38);
+        if frame_count as usize > CRASH_MAX_FRAMES || reg_count as usize > CRASH_MAX_REGS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut name = [0u8; PROCESS_NAME_MAX];
+        name.copy_from_slice(&bytes[Self::NAME_OFF..Self::FRAMES_OFF]);
+        let mut frames = [0u64; CRASH_MAX_FRAMES];
+        for (i, frame) in frames.iter_mut().enumerate() {
+            *frame = read_u64(bytes, Self::FRAMES_OFF + i * 8);
+        }
+        let mut regs = [CrashNamedReg::default(); CRASH_MAX_REGS];
+        for (i, reg) in regs.iter_mut().enumerate() {
+            let base = Self::REGS_OFF + i * CrashNamedReg::WIRE_LEN;
+            *reg = CrashNamedReg::from_bytes(&bytes[base..base + CrashNamedReg::WIRE_LEN])?;
+        }
+        Ok(Self {
+            proc_id,
+            pid: read_u64(bytes, 16),
+            fault_offset: read_u64(bytes, 40),
+            pc: read_u64(bytes, 48),
+            sp: read_u64(bytes, 56),
+            fp: read_u64(bytes, 64),
+            uid: read_u32(bytes, 24),
+            gid: read_u32(bytes, 28),
+            flags,
+            fault_class,
+            fault_bucket,
+            name_len,
+            frame_count,
+            reg_count,
+            name,
+            frames,
+            regs,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3012,6 +3587,10 @@ mod tests {
         RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
+    };
+    use super::{
+        CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, CrashRecordRequest,
+        CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
     use crate::driver::filesystem::MountFlags;
@@ -3040,6 +3619,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::NET_INTERFACE_FACTS.as_u16(), 17);
         assert_eq!(SysinfoQueryId::NET_INTERFACE_STATE.as_u16(), 18);
         assert_eq!(SysinfoQueryId::IRQ_LIST.as_u16(), 19);
+        assert_eq!(SysinfoQueryId::CRASH_RECORD.as_u16(), 20);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -3096,12 +3676,13 @@ mod tests {
             (12, IntrospectDomain::Ramzip),
             (13, IntrospectDomain::CpuLoad),
             (14, IntrospectDomain::Irqs),
+            (15, IntrospectDomain::Crashes),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(15), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(16), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -3274,13 +3855,15 @@ mod tests {
             Some(CapabilityId::SYSINFO_HW)
         );
         assert!(spec_for(SysinfoQueryId::IRQ_LIST).unwrap().audit);
-        // The four kernel-statistics queries share KERNEL_MEMORY_STATS's
-        // boundary: gated on CAP_SYSINFO_KERNEL and audited.
+        // The kernel-introspection queries share KERNEL_MEMORY_STATS's
+        // boundary: gated on CAP_SYSINFO_KERNEL and audited. The crash
+        // record joins them because it carries absolute register values.
         for id in [
             SysinfoQueryId::MEMORY_PRESSURE,
             SysinfoQueryId::RECLAIM_STATS,
             SysinfoQueryId::RAMZIP_STATS,
             SysinfoQueryId::CPU_LOAD,
+            SysinfoQueryId::CRASH_RECORD,
         ] {
             let spec = spec_for(id).unwrap();
             assert_eq!(
@@ -4187,5 +4770,185 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 0x02;
         assert_eq!(IrqRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn crash_fault_class_and_bucket_round_trip_and_fail_closed() {
+        for c in [
+            CrashFaultClass::Stack,
+            CrashFaultClass::StackLimit,
+            CrashFaultClass::FileRegion,
+            CrashFaultClass::Anon,
+            CrashFaultClass::Wild,
+        ] {
+            assert_eq!(CrashFaultClass::from_u8(c.as_u8()), Ok(c));
+        }
+        assert_eq!(CrashFaultClass::from_u8(5), Err(Errno::OutOfRange));
+        for b in [
+            CrashFaultBucket::NullPage,
+            CrashFaultBucket::BelowStackGuard,
+            CrashFaultBucket::PastRegion,
+            CrashFaultBucket::Wild,
+        ] {
+            assert_eq!(CrashFaultBucket::from_u8(b.as_u8()), Ok(b));
+        }
+        assert_eq!(CrashFaultBucket::from_u8(4), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn crash_named_reg_round_trips_and_recovers_name_length() {
+        let reg = CrashNamedReg::new(b"x29", 0xDEAD_BEEF).expect("fits");
+        let decoded = CrashNamedReg::from_bytes(&reg.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, reg);
+        assert_eq!(decoded.name_bytes(), b"x29");
+        assert_eq!(decoded.value, 0xDEAD_BEEF);
+        // A full-width eight-byte name has no NUL pad; the length is the
+        // whole field.
+        let full = CrashNamedReg::new(b"abcdefgh", 1).expect("fits");
+        assert_eq!(full.name_bytes(), b"abcdefgh");
+        assert_eq!(
+            CrashNamedReg::from_bytes(&full.to_le_bytes())
+                .unwrap()
+                .name_bytes(),
+            b"abcdefgh"
+        );
+        // Over-long names are refused, never truncated.
+        assert_eq!(
+            CrashNamedReg::new(&[b'r'; CRASH_REG_NAME_LEN + 1], 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            CrashNamedReg::from_bytes(&[0u8; CrashNamedReg::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn crash_record_request_round_trips_and_rejects_reserved() {
+        let req = CrashRecordRequest {
+            offset: 3,
+            limit: 4,
+            flags: 0,
+        };
+        assert_eq!(CrashRecordRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(CrashRecordRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            CrashRecordRequest::from_bytes(&[0u8; CrashRecordRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn crash_record_round_trips_with_frames_and_registers() {
+        let mut rec = CrashRecord::new(
+            ProcId::from_raw([
+                0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            42,
+            1000,
+            1000,
+            true,
+            CrashFaultClass::Wild,
+            CrashFaultBucket::NullPage,
+            0x18,
+            b"crasher",
+        )
+        .expect("fits");
+        rec.set_registers(0x40, 0x7FFF_0000, 0x7FFF_0100, true, true);
+        assert!(rec.push_frame(0x40));
+        assert!(rec.push_frame(0x120));
+        assert!(rec.push_reg(CrashNamedReg::new(b"x0", 0xAA).unwrap()));
+        assert!(rec.push_reg(CrashNamedReg::new(b"x1", 0xBB).unwrap()));
+
+        let decoded = CrashRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.name_bytes(), b"crasher");
+        assert_eq!(decoded.pid, 42);
+        assert!(decoded.is_write());
+        assert!(decoded.load_base_known());
+        assert!(decoded.fp_valid());
+        assert_eq!(decoded.fault_class, CrashFaultClass::Wild);
+        assert_eq!(decoded.fault_bucket, CrashFaultBucket::NullPage);
+        assert_eq!(decoded.fault_offset, 0x18);
+        assert_eq!(decoded.pc, 0x40);
+        assert_eq!(decoded.frames(), &[0x40, 0x120]);
+        assert_eq!(decoded.regs().len(), 2);
+        assert_eq!(decoded.regs()[1].name_bytes(), b"x1");
+        assert_eq!(decoded.regs()[1].value, 0xBB);
+    }
+
+    #[test]
+    fn crash_record_fills_are_bounded_and_flags_default_clear() {
+        let mut rec = CrashRecord::new(
+            ProcId::KERNEL,
+            1,
+            0,
+            0,
+            false,
+            CrashFaultClass::Anon,
+            CrashFaultBucket::Wild,
+            0,
+            b"",
+        )
+        .expect("empty name fits");
+        // A read fault leaves the write flag clear, and no registers were
+        // recorded, so load-base/fp flags stay clear too.
+        assert!(!rec.is_write());
+        assert!(!rec.load_base_known());
+        assert!(!rec.fp_valid());
+        // Fill both arrays to capacity; the next push is dropped, never a
+        // panic or an overflow.
+        for i in 0..CRASH_MAX_FRAMES as u64 {
+            assert!(rec.push_frame(i));
+        }
+        assert!(!rec.push_frame(999));
+        assert_eq!(rec.frames().len(), CRASH_MAX_FRAMES);
+        for _ in 0..CRASH_MAX_REGS {
+            assert!(rec.push_reg(CrashNamedReg::new(b"r", 0).unwrap()));
+        }
+        assert!(!rec.push_reg(CrashNamedReg::new(b"r", 0).unwrap()));
+        assert_eq!(rec.regs().len(), CRASH_MAX_REGS);
+        // Still round-trips at capacity.
+        assert_eq!(CrashRecord::from_bytes(&rec.to_le_bytes()), Ok(rec));
+    }
+
+    #[test]
+    fn crash_record_fails_closed_on_corrupt_wire() {
+        let rec = CrashRecord::new(
+            ProcId::from_raw([7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            9,
+            0,
+            0,
+            false,
+            CrashFaultClass::Wild,
+            CrashFaultBucket::Wild,
+            0,
+            b"x",
+        )
+        .expect("fits");
+        assert_eq!(
+            CrashRecord::from_bytes(&[0u8; CrashRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Undefined flag bit.
+        let mut bytes = rec.to_le_bytes();
+        bytes[32] = 0xF0;
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        // Unknown fault class / bucket.
+        let mut bytes = rec.to_le_bytes();
+        bytes[33] = 9;
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        let mut bytes = rec.to_le_bytes();
+        bytes[34] = 9;
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        // A frame count beyond the array bound is refused.
+        let mut bytes = rec.to_le_bytes();
+        super::put_u16(&mut bytes, 36, u16::try_from(CRASH_MAX_FRAMES + 1).unwrap());
+        assert_eq!(
+            CrashRecord::from_bytes(&bytes),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 }

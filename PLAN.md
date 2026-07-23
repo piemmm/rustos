@@ -6411,3 +6411,47 @@ can see *why* a rule exists without diffing the charter's history.
   between an ISR and a syscall-reachable path MUST be an `IrqSafeSpinLock` or
   the ISR side must be lock-free with a deferred drain — a plain `SpinLock`
   shared with an ISR is a single-CPU self-deadlock. Documentation only.
+
+## FIX-WILD — Debuggable user-fault kills (`plans/FIX-WILD.md`)  **[DONE]**
+
+The user-fault kill path is now fully debuggable, at zero running-program
+cost (all work runs only on a task already dying). Delivered:
+
+- **Stage 1** (already landed): `AuditEvent::TaskFaultKilled` carries the
+  kernel-attested `name`/`proc_id`, the `write` flag, and a coarse
+  non-leaking `fault_offset` locality bucket.
+- **`UserRegisterFrame` ABI** (`tairix_arch_api::backtrace`): the
+  self-describing faulting-register frame (snapshot + `FrameLayout` +
+  honest `fp_valid`), threaded by `*const` through the user-fault resolver
+  on every port — `UserFaultResolveFn`, `DispatchHook::resolve_user_fault`,
+  `dispatch_core::resolve_user_fault_via_slot`, and the integration test
+  kernels — as one atomic 4-target change. Each port builds it from the
+  register state it already saves at trap entry; **riscv64's `trap.s` was
+  extended to persist the callee-saved set (incl. `s0`=fp)** so its
+  fp-backtrace works too (frame grew to 256 B; offsets re-pinned by the
+  `offset_of!` asserts).
+- **PIE load base** recorded per task (`AddressSpaceRegistry::set_load_base`/
+  `load_base`), so the crash `pc` and every frame are load-relative offsets.
+- **Crash record + user-stack walk** (`kernel/core/src/crash.rs`): a
+  bounded newest-first `CrashStore` and a `copy_in`-backed
+  `UserStackReader: StackReader` over the *one* shared unwinder
+  (`tairix_arch_api::backtrace::walk`) — a corrupt/unmapped user fp ends
+  the walk cleanly, never faulting the kernel. `record_fault_exit` builds
+  the record allocation-free from the threaded register frame.
+- **`SysinfoQueryId::CRASH_RECORD` (id 20)** + `IntrospectDomain::Crashes`
+  (id 15) + `CrashRecord`/`CrashNamedReg`/`CrashFaultClass`/
+  `CrashFaultBucket`/`CrashRecordRequest` in `lib/abi/src/sysinfo.rs`,
+  served from the kernel crash store (like the seat/IRQ domains) and
+  brokered by `sysinfod`. **Gated on the existing `CAP_SYSINFO_KERNEL`**
+  (no new capability, §5.2): it is the sole datum carrying absolute
+  register values, so it matches the kernel-oops privilege boundary and
+  never touches the shared audit log. C headers regenerated
+  (`cargo xtask c-header`).
+- **Stage 3 breadcrumb**: `elsh` states `shell: <name>: killed by fault
+  (segmentation fault)` on `stderr` for a fault-killed child (status 139),
+  keeping `$?` = 139, carrying no address/register/secret.
+
+Leak policy held throughout: the audit log and the breadcrumb carry only
+non-leaking cause classes/offsets; absolute register values live only in
+the `CAP_SYSINFO_KERNEL`-gated crash record, and even there `pc`/frames are
+load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.

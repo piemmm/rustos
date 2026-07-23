@@ -235,6 +235,22 @@ pub struct AddressSpaceRegistry {
     /// minted to it). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's pending delegations.
     fd_delegations: BTreeMap<TaskId, TaskFdDelegations>,
+    /// Each live task's PIE load base — the lowest user virtual address
+    /// its relocated program image occupies. Recorded at admission by the
+    /// spawn path (the lowest relocated segment vaddr) and used only by the
+    /// user-fault crash path to express a faulting `pc` and every backtrace
+    /// frame as a **program-relative offset** (`addr - load_base`) instead
+    /// of an absolute virtual address, so a privileged crash record never
+    /// publishes the task's address-space layout and the offsets resolve
+    /// offline against the unstripped binary. Co-located with the address
+    /// space for the same reason as [`Self::stack_spans`]: it shares the
+    /// exact per-process lifecycle and is keyed by the same kernel-trusted
+    /// [`TaskId`]. A task with no entry (a kernel task, or one whose image
+    /// was loaded at a base the spawn path did not record) has no load base
+    /// and its offsets degrade to absolute values only inside the
+    /// capability-gated record. Dropped at [`withdraw`](Self::withdraw) so
+    /// a reused id never inherits a dead task's base.
+    load_bases: BTreeMap<TaskId, u64>,
 }
 
 /// One live demand-paged file mapping of a task: the region `file_map`
@@ -333,6 +349,79 @@ impl StackSpan {
     #[must_use]
     pub fn in_growth_room(&self, va: u64) -> bool {
         va >= self.reserve_base && va < self.committed_base
+    }
+}
+
+/// Bounded byte window past a region's end (or below the stack guard)
+/// within which a fatal fault is described as a small, region-relative
+/// offset rather than a genuinely wild access.
+///
+/// 64 KiB — a handful of pages: wide enough to catch a realistic buffer
+/// overrun or an off-by-a-stride bug, narrow enough that the offset it
+/// publishes ("0x40 past *a* region") discloses a *distance*, never a
+/// location.
+pub const NEAR_REGION_WINDOW: u64 = 64 * 1024;
+
+/// Where a fatal user fault landed relative to the address space the task
+/// legitimately owns, as a coarse, non-leaking descriptor.
+///
+/// This exists for the one diagnostics-policy line the fault path must
+/// never cross: a fault-kill record may say *how far* a fault was from
+/// something the task owns, but never *where* that something (or the
+/// fault) lives, so the shared, hash-chained audit log never becomes an
+/// address-space-layout oracle. Every variant carries at most an offset —
+/// a distance from a fixed anchor (virtual address 0, the stack guard, a
+/// region end) — never an absolute virtual address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultLocality {
+    /// Within the first page: a null-pointer dereference. `offset` is
+    /// measured from virtual address 0, so it reveals nothing about
+    /// layout.
+    NullPage {
+        /// Distance of the fault above virtual address 0.
+        offset: u64,
+    },
+    /// A bounded distance below the reserved stack span's guard page — a
+    /// stack overflow that ran past the guard. `distance` is how far below
+    /// the reserve base the fault landed, not the base itself.
+    BelowStackGuard {
+        /// Distance the fault landed below the stack reserve base.
+        distance: u64,
+    },
+    /// A bounded distance past the end of a specific mapping the task
+    /// owns. `offset` is that distance; the region it is relative to is
+    /// deliberately not identified.
+    PastRegion {
+        /// Distance of the fault past the nearest owned region's end.
+        offset: u64,
+    },
+    /// Genuinely far from every mapping and from the null page — no
+    /// meaningful offset to report.
+    Wild,
+}
+
+impl FaultLocality {
+    /// Stable, non-leaking bucket name for the audit `fault_offset` field.
+    #[must_use]
+    pub fn bucket(self) -> &'static str {
+        match self {
+            Self::NullPage { .. } => "null_page",
+            Self::BelowStackGuard { .. } => "below_stack_guard",
+            Self::PastRegion { .. } => "region",
+            Self::Wild => "wild",
+        }
+    }
+
+    /// The region-relative offset (or distance) this locality carries, or
+    /// `None` for [`Self::Wild`], which has no meaningful anchor. Never an
+    /// absolute address.
+    #[must_use]
+    pub fn offset(self) -> Option<u64> {
+        match self {
+            Self::NullPage { offset } | Self::PastRegion { offset } => Some(offset),
+            Self::BelowStackGuard { distance } => Some(distance),
+            Self::Wild => None,
+        }
     }
 }
 
@@ -585,6 +674,7 @@ impl AddressSpaceRegistry {
             anon_regions: BTreeMap::new(),
             stack_spans: BTreeMap::new(),
             fd_delegations: BTreeMap::new(),
+            load_bases: BTreeMap::new(),
             default_limits: LimitSet::DEFAULT,
             pinned: BTreeSet::new(),
         }
@@ -697,6 +787,7 @@ impl AddressSpaceRegistry {
         let had_file_regions = self.file_regions.remove(&task).is_some();
         let had_anon_regions = self.anon_regions.remove(&task).is_some();
         let had_stack_span = self.stack_spans.remove(&task).is_some();
+        let had_load_base = self.load_bases.remove(&task).is_some();
         let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_pin
@@ -710,6 +801,7 @@ impl AddressSpaceRegistry {
             || had_file_regions
             || had_anon_regions
             || had_stack_span
+            || had_load_base
             || had_fd_delegations
     }
 
@@ -1094,6 +1186,33 @@ impl AddressSpaceRegistry {
             .map_or(0, StackSpan::committed_bytes)
     }
 
+    /// Record `task`'s PIE load base — the lowest user virtual address its
+    /// relocated program image occupies.
+    ///
+    /// Called by the spawner when it admits a process, with the base the
+    /// image builder derived (the lowest relocated segment vaddr). The
+    /// `task` argument is the kernel-trusted id the admission path minted,
+    /// never a caller-supplied value. Replacing an existing record is
+    /// permitted, mirroring [`Self::set_stack_span`]; a task whose base is
+    /// never recorded simply has crash offsets expressed absolute rather
+    /// than load-relative (a diagnostics-quality degradation only, never a
+    /// correctness or security one — an absent base leaks nothing).
+    pub fn set_load_base(&mut self, task: TaskId, load_base: u64) {
+        self.load_bases.insert(task, load_base);
+    }
+
+    /// Resolve `task`'s recorded PIE load base, or `None` when none was
+    /// recorded.
+    ///
+    /// The user-fault crash path reads this to express a faulting `pc` and
+    /// every backtrace frame as a program-relative offset. The `task`
+    /// argument is the kernel-trusted id of the faulting CPU's current
+    /// task.
+    #[must_use]
+    pub fn load_base(&self, task: TaskId) -> Option<u64> {
+        self.load_bases.get(&task).copied()
+    }
+
     /// Record `task`'s live demand-paged file mapping `region`, keyed by its
     /// base address.
     ///
@@ -1210,6 +1329,82 @@ impl AddressSpaceRegistry {
         // `pages * PAGE_SIZE` cannot overflow: the reservation was validated
         // to fit the address space at `mem_map` time.
         va < base + pages * PAGE_SIZE as u64
+    }
+
+    /// Describe where the fatal fault at `va` landed relative to `task`'s
+    /// own address space, as the coarse, non-leaking [`FaultLocality`] the
+    /// fault-kill record carries.
+    ///
+    /// This is the sole place the diagnostics leak-policy is enforced for
+    /// the audit record: the returned value carries at most a *distance*
+    /// from a fixed anchor (virtual address 0, the stack guard, a region
+    /// end), never an absolute virtual address, so the shared audit log
+    /// never publishes address-space layout. Precedence is most-specific
+    /// first — a null-page dereference, then a below-guard stack overflow,
+    /// then a bounded run past an owned region's end, and finally a
+    /// genuinely wild access. Runs on the dying-task fault path (never a
+    /// hot path) and allocates nothing.
+    #[must_use]
+    pub fn classify_fault_locality(&self, task: TaskId, va: u64) -> FaultLocality {
+        // A dereference through (or near) a null pointer: the offset from
+        // virtual address 0 reveals nothing about layout.
+        if va < PAGE_SIZE as u64 {
+            return FaultLocality::NullPage { offset: va };
+        }
+        // Just below the reserved stack span's guard page: a stack
+        // overflow that ran past the guard. The distance below the reserve
+        // base is a relative measure, not the base itself.
+        if let Some(span) = self.stack_spans.get(&task) {
+            let reserve_base = span.reserve_base();
+            if va < reserve_base {
+                let distance = reserve_base - va;
+                if distance <= NEAR_REGION_WINDOW {
+                    return FaultLocality::BelowStackGuard { distance };
+                }
+            }
+        }
+        // A small bounded distance past the end of a mapping the task
+        // owns; the region it is relative to is never identified.
+        if let Some(end) = self.nearest_region_end_at_or_below(task, va) {
+            let offset = va - end;
+            if offset <= NEAR_REGION_WINDOW {
+                return FaultLocality::PastRegion { offset };
+            }
+        }
+        FaultLocality::Wild
+    }
+
+    /// The greatest region end (`base + len`) at or below `va` across
+    /// every mapping `task` owns — file mappings, anonymous mappings, and
+    /// the committed stack — or `None` when the task owns nothing ending at
+    /// or below `va`.
+    ///
+    /// Iterates the task's own regions only (bounded by its address-space
+    /// limits) and runs on the dying-task fault path, never a hot path. A
+    /// region that *covers* `va` (its end is strictly above `va`) is
+    /// excluded — that is a miss inside a live mapping, described by the
+    /// `fault_class`, not a run past a region end.
+    fn nearest_region_end_at_or_below(&self, task: TaskId, va: u64) -> Option<u64> {
+        let mut best: Option<u64> = None;
+        let mut consider = |end: u64| {
+            if end <= va {
+                best = Some(best.map_or(end, |b: u64| b.max(end)));
+            }
+        };
+        if let Some(regions) = self.file_regions.get(&task) {
+            for region in regions.values() {
+                consider(region.base.saturating_add(region.len));
+            }
+        }
+        if let Some(regions) = self.anon_regions.get(&task) {
+            for (&base, &pages) in regions {
+                consider(base.saturating_add(pages.saturating_mul(PAGE_SIZE as u64)));
+            }
+        }
+        if let Some(span) = self.stack_spans.get(&task) {
+            consider(span.top());
+        }
+        best
     }
 
     /// Open a file/directory descriptor for `task`, recording the resolved
@@ -2464,5 +2659,155 @@ mod tests {
         assert!(reg.withdraw(TaskId(6)));
         assert!(reg.stack_span(TaskId(6)).is_none());
         assert_eq!(reg.stack_committed_bytes(TaskId(6)), 0);
+    }
+
+    #[test]
+    fn unrecorded_load_base_resolves_to_none() {
+        let reg = AddressSpaceRegistry::new();
+        assert!(reg.load_base(TaskId(2)).is_none());
+    }
+
+    #[test]
+    fn set_load_base_then_resolve_returns_the_owners_base() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_load_base(TaskId(2), 0x20_0000);
+        assert_eq!(reg.load_base(TaskId(2)), Some(0x20_0000));
+        // Keyed by the owning task; a different id has no base.
+        assert!(reg.load_base(TaskId(3)).is_none());
+        // Replacing is permitted (a reused id re-admitted at a new base).
+        reg.set_load_base(TaskId(2), 0x40_0000);
+        assert_eq!(reg.load_base(TaskId(2)), Some(0x40_0000));
+    }
+
+    #[test]
+    fn withdraw_drops_the_load_base_so_a_reused_id_starts_clean() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_load_base(TaskId(6), 0x20_0000);
+        assert!(reg.withdraw(TaskId(6)));
+        assert!(reg.load_base(TaskId(6)).is_none());
+    }
+
+    #[test]
+    fn fault_locality_accessors_carry_only_distances() {
+        assert_eq!(
+            FaultLocality::NullPage { offset: 0x18 }.bucket(),
+            "null_page"
+        );
+        assert_eq!(
+            FaultLocality::NullPage { offset: 0x18 }.offset(),
+            Some(0x18)
+        );
+        assert_eq!(
+            FaultLocality::BelowStackGuard { distance: 0x40 }.bucket(),
+            "below_stack_guard"
+        );
+        assert_eq!(
+            FaultLocality::BelowStackGuard { distance: 0x40 }.offset(),
+            Some(0x40)
+        );
+        assert_eq!(FaultLocality::PastRegion { offset: 0x8 }.bucket(), "region");
+        assert_eq!(
+            FaultLocality::PastRegion { offset: 0x8 }.offset(),
+            Some(0x8)
+        );
+        assert_eq!(FaultLocality::Wild.bucket(), "wild");
+        assert_eq!(FaultLocality::Wild.offset(), None);
+    }
+
+    #[test]
+    fn classify_fault_locality_names_a_null_page_dereference() {
+        let reg = AddressSpaceRegistry::new();
+        // Anywhere in the first page, offset measured from VA 0.
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0),
+            FaultLocality::NullPage { offset: 0 }
+        );
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x18),
+            FaultLocality::NullPage { offset: 0x18 }
+        );
+        // The very first byte of the second page is no longer the null page.
+        assert_ne!(
+            reg.classify_fault_locality(TaskId(2), PAGE_SIZE as u64)
+                .bucket(),
+            "null_page"
+        );
+    }
+
+    #[test]
+    fn classify_fault_locality_names_a_below_guard_stack_overflow() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A stack span with a high reserve base so a fault far below it can
+        // be tested without underflowing.
+        let reserve_base = 0x20_0000u64;
+        let span = StackSpan::new(reserve_base, reserve_base + 0x4000, reserve_base + 0x8000)
+            .expect("well-formed");
+        reg.set_stack_span(TaskId(2), span);
+        // A fault a little below the reserve base is an overflow that ran
+        // past the guard page.
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), reserve_base - 0x40),
+            FaultLocality::BelowStackGuard { distance: 0x40 }
+        );
+        // Far below the reserve base (past the window) is genuinely wild,
+        // not attributed to the stack.
+        assert_eq!(
+            reg.classify_fault_locality(
+                TaskId(2),
+                reserve_base - (NEAR_REGION_WINDOW + PAGE_SIZE as u64)
+            ),
+            FaultLocality::Wild
+        );
+    }
+
+    #[test]
+    fn classify_fault_locality_measures_a_bounded_run_past_a_region() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A file region [0x10_0000, 0x10_4000): a small run past its end
+        // is reported as a region-relative offset, the region unnamed.
+        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x10_4000 + 0x40),
+            FaultLocality::PastRegion { offset: 0x40 }
+        );
+        // One byte past the end is offset 0.
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x10_4000),
+            FaultLocality::PastRegion { offset: 0 }
+        );
+        // Far past the region (beyond the window) is wild.
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x10_4000 + NEAR_REGION_WINDOW + 1),
+            FaultLocality::Wild
+        );
+        // A fault inside the live region is not a run *past* it (the
+        // fault_class describes the miss); locality falls through to wild.
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x10_2000),
+            FaultLocality::Wild
+        );
+    }
+
+    #[test]
+    fn classify_fault_locality_uses_the_nearest_owned_region_end() {
+        let mut reg = AddressSpaceRegistry::new();
+        // Two regions and an anonymous mapping; the nearest end at or below
+        // the fault wins, so the reported offset is the smallest true
+        // distance.
+        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000)); // end 0x104000
+        reg.record_anon_region(TaskId(2), 0x20_0000, 4); // end 0x204000
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x20_4000 + 0x10),
+            FaultLocality::PastRegion { offset: 0x10 }
+        );
+    }
+
+    #[test]
+    fn classify_fault_locality_is_wild_with_no_regions() {
+        let reg = AddressSpaceRegistry::new();
+        assert_eq!(
+            reg.classify_fault_locality(TaskId(2), 0x9999_0000),
+            FaultLocality::Wild
+        );
     }
 }

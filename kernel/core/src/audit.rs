@@ -134,16 +134,33 @@ pub enum AuditEvent {
     ///
     /// Emitted by the fault-kill path
     /// (`KernelSyscallHandlers::record_fault_exit`, a crate-private
-    /// method) so a crashing program is visible on the
-    /// system log, not only via its `wait` status. The record carries the
-    /// task id and a coarse `fault_class` (`stack_limit` — stack growth
-    /// refused because the task's `StackBytes` soft bound is exhausted;
-    /// `stack` — growth room the resolver could not back, e.g. frame
-    /// exhaustion; `file_region` — a miss inside a live file mapping the
-    /// resolver refused, e.g. past end-of-file; `wild` — an address
-    /// outside every mapping, including the stack guard page below the
-    /// reserved span), and deliberately **not** the raw faulting address
-    /// (diagnostics policy: no address-space layout leakage onto the log).
+    /// method) so a crashing program is visible on the system log, not
+    /// only via its `wait` status. The record carries a debuggable
+    /// post-mortem while never leaking address-space layout:
+    ///
+    /// * `task` — the reusable scheduler id.
+    /// * `name` / `proc_id` — the faulting task's kernel-attested
+    ///   executable basename and CSPRNG-minted process-instance identity
+    ///   (never caller-supplied), so a crash names *which* program and
+    ///   stays correlatable after the task id is recycled.
+    /// * `write` — whether the fatal access was a store (`true`) or a load
+    ///   (`false`).
+    /// * `fault_class` — a coarse class of *why* the resolver refused the
+    ///   access (`stack_limit` — stack growth refused because the task's
+    ///   `StackBytes` soft bound is exhausted; `stack` — growth room the
+    ///   resolver could not back, e.g. frame exhaustion; `file_region` — a
+    ///   miss inside a live file mapping the resolver refused, e.g. past
+    ///   end-of-file; `anon` — a miss inside a reserved anonymous region;
+    ///   `wild` — an address outside every mapping).
+    /// * `fault_offset` — a coarse, non-leaking locality bucket
+    ///   (`null_page`, `below_stack_guard`, `region`, or `wild`); when it
+    ///   carries a distance, `region_offset` holds that value — a
+    ///   *distance* from a fixed anchor (virtual address 0, the stack
+    ///   guard, a region end), **never** an absolute virtual address.
+    ///
+    /// The raw faulting address is deliberately **never** on the record
+    /// (diagnostics policy: no address-space layout leakage onto the
+    /// shared, hash-chained log).
     TaskFaultKilled,
     /// A task ended itself with a **nonzero** exit status.
     ///

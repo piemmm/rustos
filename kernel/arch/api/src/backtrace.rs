@@ -132,6 +132,56 @@ pub struct FrameLayout {
     pub return_addr_offset: i16,
 }
 
+/// A self-describing, arch-neutral snapshot of a *faulting user thread's*
+/// register state, captured by the architecture port at trap entry.
+///
+/// Where [`RegisterSnapshot`] alone is what the kernel-panic path needs
+/// (it walks its own trusted kernel stack, whose [`FrameLayout`] and
+/// [`StackBounds`] the port supplies through [`CpuStateCapture`]), a
+/// *user*-fault crash record must carry everything needed to walk the
+/// crashing task's **user** stack from kernel context without any live
+/// access to the port handle: the register file, the port's frame
+/// layout, and an honest statement of whether the frame pointer is
+/// usable. Bundling the three makes the value fully self-describing, so
+/// the user-fault resolver can thread it by shared reference through the
+/// (architecture-neutral) resolver ABI and the kernel core never needs to
+/// know which port it came from.
+///
+/// The value is `Copy` and fixed-size (it embeds only `Copy`, fixed-size
+/// members), so the fault path threads it without touching the heap — the
+/// fault path must never allocate.
+#[derive(Copy, Clone, Debug)]
+pub struct UserRegisterFrame {
+    /// The faulting thread's general-purpose register file: `pc`/`sp`/`fp`
+    /// plus the named GP set, exactly as [`RegisterSnapshot`] carries them.
+    pub snapshot: RegisterSnapshot,
+    /// The architecture's frame-pointer layout ([`CpuStateCapture::frame_layout`]),
+    /// so the neutral [`walk`] can follow the user frame chain without a
+    /// port handle.
+    pub layout: FrameLayout,
+    /// Whether `snapshot.fp` is a usable frame pointer for an fp-walk.
+    ///
+    /// A port that saves the whole GP frame (incl. the fp register) at
+    /// trap entry sets this `true`. A port that does not yet save the fp
+    /// register sets it `false`, and the user-stack walk honestly degrades
+    /// to reporting `pc`/`sp` only rather than following a frame pointer it
+    /// does not actually hold (fail closed — never a fabricated chain).
+    pub fp_valid: bool,
+}
+
+impl UserRegisterFrame {
+    /// Bundle a captured user register file with the port's frame layout
+    /// and an honest `fp_valid` flag.
+    #[must_use]
+    pub const fn new(snapshot: RegisterSnapshot, layout: FrameLayout, fp_valid: bool) -> Self {
+        Self {
+            snapshot,
+            layout,
+            fp_valid,
+        }
+    }
+}
+
 /// A half-open kernel-stack address range `[low, high)` the unwinder is
 /// permitted to read while walking, in ascending address order.
 ///
@@ -292,20 +342,35 @@ impl BacktraceProfile {
     }
 }
 
-/// A bounds-validated reader of one 64-bit stack word.
+/// A bounds-validated, **fallible** reader of one 64-bit stack word.
 ///
 /// [`walk`] validates every address (non-null, aligned, within the
-/// supplied [`StackBounds`]) **before** calling [`Self::read_word`], so an
-/// implementation may assume the address is safe to read. The production
-/// reader in `kernel/core` dereferences the raw kernel address; host tests
-/// read from a simulated stack image, which is what makes the otherwise
-/// pointer-chasing unwinder testable off-target.
+/// supplied [`StackBounds`]) **before** calling [`Self::read_word`]. That
+/// is sufficient for a reader over memory the caller *knows* is mapped —
+/// the kernel-panic reader dereferences its own trusted, in-bounds kernel
+/// stack and can always return [`Some`]. It is **not** sufficient for a
+/// reader over an *untrusted* address space: a user-fault backtrace walks
+/// the crashing task's user stack from kernel context, where an address
+/// can pass every structural check ([`StackBounds`], alignment,
+/// monotonicity) and still be unmapped, freshly reclaimed, or a
+/// deliberately corrupt pointer. Such a reader copies the word in through
+/// the capability-checked user-access path and returns [`None`] when the
+/// copy faults, so the unwinder ends the walk cleanly instead of the
+/// kernel taking a fault inside the fault handler.
+///
+/// The return type is therefore [`Option`]: [`Some`] is the word, [`None`]
+/// ends the walk. A reader must **never** itself fault, panic, or block —
+/// it fails closed by returning [`None`].
 pub trait StackReader {
-    /// Read the 64-bit word at `addr`.
+    /// Read the 64-bit word at `addr`, or return [`None`] if it cannot be
+    /// read.
     ///
     /// `addr` is guaranteed by [`walk`] to be 8-byte aligned and to have
-    /// its whole 8-byte extent inside the walk's [`StackBounds`].
-    fn read_word(&self, addr: u64) -> u64;
+    /// its whole 8-byte extent inside the walk's [`StackBounds`]. A reader
+    /// over trusted, known-mapped memory always returns [`Some`]; a reader
+    /// over an untrusted address space returns [`None`] rather than
+    /// dereferencing a pointer it cannot prove is safe.
+    fn read_word(&self, addr: u64) -> Option<u64>;
 }
 
 /// The post-mortem CPU-state handle an architecture port exposes.
@@ -410,8 +475,15 @@ pub fn walk<R: StackReader + ?Sized>(
             break;
         }
 
-        let ret_addr = reader.read_word(ret_addr_addr);
-        let caller_fp = reader.read_word(saved_fp_addr);
+        // A read may fail even for a structurally valid address when the
+        // reader is over an untrusted address space (an unmapped or
+        // reclaimed user page): end the walk cleanly, never fault.
+        let Some(ret_addr) = reader.read_word(ret_addr_addr) else {
+            break;
+        };
+        let Some(caller_fp) = reader.read_word(saved_fp_addr) else {
+            break;
+        };
 
         // A zero return address is the conventional chain terminator
         // (the outermost frame's saved return address); stop cleanly.
@@ -482,9 +554,9 @@ pub mod conformance {
     }
 
     impl StackReader for MockStack {
-        fn read_word(&self, addr: u64) -> u64 {
+        fn read_word(&self, addr: u64) -> Option<u64> {
             let i = self.index_of(addr);
-            self.words.get(i).copied().unwrap_or(0)
+            Some(self.words.get(i).copied().unwrap_or(0))
         }
     }
 
@@ -652,7 +724,7 @@ mod tests {
     }
 
     impl StackReader for Mem {
-        fn read_word(&self, addr: u64) -> u64 {
+        fn read_word(&self, addr: u64) -> Option<u64> {
             // Fail loudly in tests if the walker ever reads out of bounds —
             // that would be the very fault-in-fault-handler bug we defend
             // against. `get` returns None rather than panicking on the
@@ -662,7 +734,7 @@ mod tests {
                 i < self.words.len(),
                 "walker read out of bounds at {addr:#x}"
             );
-            self.words[i]
+            Some(self.words[i])
         }
     }
 
@@ -685,6 +757,38 @@ mod tests {
         }
         let got = collect(&mem, fp(0), FP_HIGH_LAYOUT);
         assert_eq!(got, std::vec![0xAA01, 0xAA02, 0xAA03]);
+    }
+
+    #[test]
+    fn user_register_frame_bundles_snapshot_layout_and_fp_validity() {
+        // A `UserRegisterFrame` is a self-describing bundle: the neutral
+        // walk can follow the frame chain using only the frame's own
+        // embedded `layout` and `snapshot.fp`, with no port handle.
+        let base = 0x1_0000u64;
+        let mut mem = Mem::new(base, 64);
+        let fp = |i: u64| base + (i + 1) * 64;
+        for i in 0..2u64 {
+            let caller = if i < 1 { fp(i + 1) } else { 0 };
+            mem.set(fp(i), caller);
+            mem.set(fp(i) + 8, 0xD00D + i);
+        }
+        let snapshot = RegisterSnapshot::new(0xF000, fp(0) + 8, fp(0)).with("x0", 7);
+        let frame = UserRegisterFrame::new(snapshot, FP_HIGH_LAYOUT, true);
+        assert!(frame.fp_valid);
+        assert_eq!(frame.snapshot.fp, fp(0));
+        assert_eq!(frame.snapshot.named()[0].value, 7);
+
+        let mut got = std::vec::Vec::new();
+        walk(&mem, frame.snapshot.fp, frame.layout, mem.bounds(), |ra| {
+            got.push(ra);
+        });
+        assert_eq!(got, std::vec![0xD00D, 0xD00E]);
+
+        // An honest `fp_valid = false` is preserved so a consumer degrades
+        // to `pc`/`sp` only rather than trusting a frame pointer the port
+        // did not actually save.
+        let no_fp = UserRegisterFrame::new(snapshot, FP_HIGH_LAYOUT, false);
+        assert!(!no_fp.fp_valid);
     }
 
     #[test]
@@ -752,6 +856,48 @@ mod tests {
         // must reject it *before* any read (Mem::read_word would assert).
         let got = collect(&mem, base + 0x10_0000, FP_HIGH_LAYOUT);
         assert!(got.is_empty());
+    }
+
+    /// A reader over an untrusted address space signals an unreadable
+    /// word (an unmapped/reclaimed user page) by returning `None`. The
+    /// walk must emit the frames read so far and end cleanly — it must
+    /// never treat `None` as a value, and never fault. This is the crux
+    /// of the user-stack unwind safety contract.
+    struct FailingAt {
+        mem: Mem,
+        fail_addr: u64,
+    }
+
+    impl StackReader for FailingAt {
+        fn read_word(&self, addr: u64) -> Option<u64> {
+            if addr == self.fail_addr {
+                None
+            } else {
+                self.mem.read_word(addr)
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_word_ends_the_walk_cleanly() {
+        let base = 0x1_0000u64;
+        let mut mem = Mem::new(base, 64);
+        let fp = |i: u64| base + (i + 1) * 64;
+        for i in 0..3u64 {
+            let caller = if i < 2 { fp(i + 1) } else { 0 };
+            mem.set(fp(i), caller);
+            mem.set(fp(i) + 8, 0xAA00 + i + 1);
+        }
+        // Make the second frame's return-address word unreadable: the
+        // first frame is emitted, then the walk stops on the failed read.
+        let bounds = mem.bounds();
+        let reader = FailingAt {
+            mem,
+            fail_addr: fp(1) + 8,
+        };
+        let mut got = std::vec::Vec::new();
+        walk(&reader, fp(0), FP_HIGH_LAYOUT, bounds, |ra| got.push(ra));
+        assert_eq!(got, std::vec![0xAA01]);
     }
 
     #[test]
