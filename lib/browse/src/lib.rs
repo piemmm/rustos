@@ -34,8 +34,9 @@
 //!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
-//!   enable state, and the [`breadcrumbs`] path bar
-//!   (`plans/NEW-FILEMANAGER.md` `FM4b`).
+//!   enable state, the [`breadcrumbs`] path bar
+//!   (`plans/NEW-FILEMANAGER.md` `FM4b`), and the manager-only [`ManagerTool`]
+//!   write-tool vocabulary the read-only picker never composes.
 //! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
 //!   right-anchored crumb layout the painter and the pointer hit-test share.
 //! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
@@ -62,8 +63,8 @@
 //!   display-ready summary of a node's `fs_stat` metadata the file manager's
 //!   Properties panel shows (`plans/NEW-FILEMANAGER.md` FM8).
 //! * [`mkdir`](mod@mkdir) — the new-folder [`MkdirError`]/[`validate_new_dir_name`]
-//!   model committed through the `fs_mkdir` seam
-//!   (`plans/NEW-FILEMANAGER.md` `FM7b`).
+//!   model and the [`suggest_new_dir_name`] placeholder-name helper, committed
+//!   through the `fs_mkdir` seam (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`mode_edit`](mod@mode_edit) — the [`ModeError`]/[`validate_mode`]
 //!   permission-change model committed through the `fs_set_mode` seam
 //!   (`plans/NEW-FILEMANAGER.md` `FM8b`).
@@ -110,8 +111,8 @@ pub mod vfs;
 pub use activate::Activation;
 pub use browser::Browser;
 pub use chrome::{
-    apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ToolbarCommand,
-    ToolbarModel, CONTEXT_COMMANDS, TOOLBAR_COMMANDS,
+    apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ManagerTool,
+    ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
@@ -122,7 +123,7 @@ pub use execute::{
 pub use format::{format_date, format_datetime, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
-pub use mkdir::{validate_new_dir_name, MkdirError};
+pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
 pub use properties::Properties;

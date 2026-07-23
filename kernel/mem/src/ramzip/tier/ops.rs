@@ -526,6 +526,50 @@ impl Ramzip {
         }
         Ok(())
     }
+
+    /// Drop every compressed entry belonging to `space_id`, releasing
+    /// its ledger charges and freeing its sealed blobs, and return the
+    /// number purged.
+    ///
+    /// Called when an address space is torn down (its owning
+    /// [`crate::live::LiveSpace`] drops): a global pool must not keep a
+    /// dead task's entries — their space id would never fault them back
+    /// in, so their RAM and ledger charge would leak. The sealed blobs
+    /// are freed as their `Entry` values drop (their bytes are
+    /// ciphertext, already scrubbed of plaintext at seal time), so no
+    /// separate zeroisation is needed here.
+    pub fn purge_space(&mut self, space_id: u64) -> usize {
+        // Collect the doomed keys first (a range over the space's id),
+        // then remove and un-charge each — the two-phase walk avoids
+        // mutating the map while iterating it.
+        let doomed: alloc::vec::Vec<u64> = self
+            .entries
+            .range((space_id, u64::MIN)..=(space_id, u64::MAX))
+            .map(|((_, page), _)| *page)
+            .collect();
+        let mut purged = 0;
+        for page in doomed {
+            if let Some(entry) = self.entries.remove(&(space_id, page)) {
+                if self
+                    .ledger
+                    .release(
+                        entry.task,
+                        PAGE_SIZE,
+                        entry.charged_compressed,
+                        entry.charged_stored,
+                        ENTRY_METADATA_BYTES,
+                    )
+                    .is_err()
+                {
+                    // The books no longer balance; poison admission but
+                    // keep purging (the memory is still being freed).
+                    self.poisoned = true;
+                }
+                purged += 1;
+            }
+        }
+        purged
+    }
 }
 
 #[cfg(any(test, feature = "host-tests"))]

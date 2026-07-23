@@ -27,18 +27,24 @@
 //!
 //! # Enablement
 //!
-//! The tier is complete as the arch-neutral VM mechanism (host-proven
-//! over the same [`AddressSpace`](crate::vmm::AddressSpace) /
-//! [`PhysMap`](crate::phys::PhysMap) surfaces production uses).
-//! Switching it on for arbitrary *running* tasks additionally needs a
-//! restartable user page-fault path in the architecture ports — a task
-//! touching a compressed page must trap, restore, and resume — which no
-//! port provides yet; that prerequisite is staged in `PLAN.md`, and
-//! nothing here may be weakened to work around its absence.
+//! The tier is a single process-global pool (the `global` module): its entries
+//! are keyed by `(space id, page)`, its ledger tracks a per-task
+//! breakdown, and its caps derive from total physical RAM. Boot
+//! constructs one instance from the platform entropy path and installs
+//! it ([`install`]); the live user page-fault path restores a
+//! compressed page on demand and the pressure sweep compresses cold
+//! anonymous pages out, both through the owning
+//! [`LiveSpace`](crate::live::LiveSpace) (which holds the
+//! [`AddressSpace`](crate::vmm::AddressSpace) the tier moves pages in
+//! and out of). A port that cannot identify cold pages
+//! ([`AccessTracking`](tairix_arch_api::mmu::AccessTracking) not
+//! `Supported`) reclaims nothing there — fail closed, never a false
+//! cold classification.
 
 mod audit;
 mod caps;
 mod eligibility;
+mod global;
 mod ledger;
 mod store;
 mod tier;
@@ -47,5 +53,8 @@ mod warm;
 pub use audit::{log_ramzip_failure, RamzipAuditEvent};
 pub use caps::{decompression_floor, RamzipCaps};
 pub use eligibility::{eligibility, Ineligible, PageCandidate, PageKind};
+pub use global::{
+    global, global_stats, install, stats_of, RamzipFaultOutcome, RamzipReclaimSummary,
+};
 pub use ledger::{LedgerError, RamzipCounters, RamzipLedger, TaskUsage};
 pub use tier::{escalate_refusal, CompressRefusal, FaultError, Ramzip, VmContext, WarmOutcome};

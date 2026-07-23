@@ -18,10 +18,17 @@
 //! call), which surfaces as [`MkdirError::Refused`] with the kernel's own
 //! [`Errno`].
 
+use alloc::format;
+use alloc::string::String;
+
 use tairix_abi::Errno;
 use tairix_path::PathError;
 
 use crate::entry::Entry;
+
+/// The base name a freshly-made folder is given before the user renames it —
+/// the seed [`suggest_new_dir_name`] disambiguates against existing siblings.
+pub const NEW_FOLDER_BASE: &str = "New Folder";
 
 /// Why a new folder was not created.
 ///
@@ -103,4 +110,34 @@ pub fn validate_new_dir_name(name: &str, siblings: &[Entry]) -> Result<(), Mkdir
         return Err(MkdirError::Clash);
     }
     Ok(())
+}
+
+/// Suggest a default folder name that does not clash with any of `siblings`.
+///
+/// The file manager creates a new folder with a placeholder name and then opens
+/// the inline rename on it, so the placeholder must not collide with an existing
+/// entry (which [`Browser::create_directory`](crate::Browser::create_directory)
+/// would refuse as a [`Clash`](MkdirError::Clash)). This returns
+/// [`NEW_FOLDER_BASE`] when it is free, otherwise the base with the smallest
+/// numeric suffix (`New Folder 2`, `New Folder 3`, …) that no sibling carries.
+///
+/// Pure and total: it performs no I/O and always terminates. There are only
+/// `siblings.len()` existing names, so by the pigeonhole principle a free suffix
+/// is found within `siblings.len() + 1` candidates — the search is bounded by
+/// the real listing, not an arbitrary constant. The returned name is a valid
+/// leaf name; the VFS still has the final say when the create is attempted.
+#[must_use]
+pub fn suggest_new_dir_name(siblings: &[Entry]) -> String {
+    let taken = |name: &str| siblings.iter().any(|entry| entry.name() == name);
+    if !taken(NEW_FOLDER_BASE) {
+        return String::from(NEW_FOLDER_BASE);
+    }
+    let mut suffix: u64 = 2;
+    loop {
+        let candidate = format!("{NEW_FOLDER_BASE} {suffix}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }

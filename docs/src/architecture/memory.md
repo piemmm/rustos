@@ -1247,9 +1247,11 @@ text-scrape file. The export is the one arch-neutral memory-statistics
 registry (`kernel/core::memstats::MEM_STATS`): the boot path publishes
 the single system pressure gauge through it, every production cache
 registers its `Arc<CacheAccounting>` ledger at construction
-(observation-only, lock-free reads of saturating diagnostics), and a
-future live `ramzip` tier installs its stats feed there — until it does,
-the query truthfully reports an idle tier.
+(observation-only, lock-free reads of saturating diagnostics), and the
+process-global `ramzip` tier's stats feed is installed there by the boot
+path (`memstats::install_global_ramzip_stats`, reading
+`ramzip::global_stats`, §7p) — reporting a truthful idle all-zero tier
+until one is installed and populated.
 
 - **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
   per-owner counter surface — each cache is charged to exactly one
@@ -1650,6 +1652,108 @@ and its architecture-neutral core lands here (staged in
   pages are cold up to budget, a referenced page gets a second chance and
   the cleared bit makes a still-idle page cold next pass, the clock hand
   rotates, and a backend without a referenced bit fails closed).
+
+## 7p. Live tier wiring (global pool, fault-in, boot install)
+
+The §7n mechanism is wired into the running system as a single
+**process-global** pool (`kernel/mem::ramzip::global`, an
+`OnceCell<SpinLock<Ramzip>>`): one instance, keyed by `(space_id, page)`
+with a per-task ledger and total-RAM-derived caps, matching how the tier
+was designed (per-task fairness across one shared pool, not a tier per
+process). The global free-memory decompression-floor check on every
+`compress_out` upholds the reserve invariant, so the per-space band caps
+are a fairness bound rather than the safety bound.
+
+- **Ownership.** `kernel/mem::LiveSpace<P, M>` (the retained per-task live
+  address space) carries a `space_id` (a monotonic id, PID-style) and its
+  own `ColdPageScanner`, and exposes two object-safe `LiveUserSpace`
+  operations that take the tier lock explicitly: `ramzip_fault_in`
+  (move-only restore; `Fatal` on authentication/decode/OOM — fail closed,
+  audited, no plaintext) and `ramzip_reclaim` (candidate set = resident
+  *placed-anonymous* pages the heap-window allocator proves anonymous;
+  `ColdPageScanner` decides cold, failing closed on a non-`Supported`
+  backend; the tier's own gates admit). `LiveSpace::drop` purges the
+  global tier of the dead space's entries (no leak of RAM or ledger
+  charge).
+- **Fault path.** `kernel/core::resolve_user_fault` offers
+  `resolve_ramzip_fault` **before** the anonymous handler — a compressed
+  page is reserved anonymous memory the anon handler would otherwise
+  re-zero — and republishes the restored page to the registry snapshot as
+  the anon path does. `Fatal` terminates only the faulting task; `NoEntry`
+  (or no installed tier) falls through.
+- **Boot install.** `init.rs::install_ramzip_tier` brings the tier online
+  in the CSPRNG-reserve-seed success branch: caps from discovered RAM, the
+  per-boot key drawn from the seeded reserve through a
+  `RandomReserve → seal::EntropySource` adapter, fail closed (a failed draw
+  leaves no tier, and the compressed path stays inert). The `RAMZIP_STATS`
+  feed is registered by `memstats::install_global_ramzip_stats`.
+- **Tested.** `kernel/mem::ramzip::global` stats projection tests and the
+  `LiveSpace` live-wiring tests over `HostPageTable` (which is
+  `Supported`): compress→fault round-trip restoring exact bytes,
+  placed-anonymous-only candidate selection, Normal-pressure refusal,
+  `NoEntry` fall-through, `want`-budget honouring, and a frame-neutral
+  reclaim+fault cycle.
+
+## 7q. Compress-out trigger (foreground direct reclaim)
+
+The compress-out half is driven by **foreground direct reclaim**: TAIRiX
+compresses cold pages out at demand-fault time, in the faulting task's own
+context, exactly as a general-purpose kernel reclaims on the page-allocator
+slow path. There is no separate reclaim daemon to schedule or wake — the
+moment a task is about to commit another frame is precisely the moment to
+free some, and making the *faulting* task reclaim its *own* cold pages
+charges the cost to whoever is driving pressure (per-task fairness,
+`plans/SWAPSWAPSWAP.md` sections 6, 10).
+
+- **The trigger.** `kernel/core::resolve_user_fault` calls
+  `KernelSyscallHandlers::ramzip_direct_reclaim` once, before it resolves
+  the fault (so freed frames are available to back it). The step samples
+  the shared pressure gauge (`memstats::MEM_STATS.current_pressure`) and
+  asks `pressure::ramzip_reclaim_batch(band)` for a bounded page budget:
+  **zero at normal/mild** (cheaper cache reclaim owns those bands) and
+  **zero at critical** (escalation hands off to the VM policy, not more
+  compression), **32 pages at moderate** and **128 at severe**. A zero
+  budget returns after a single gauge read, so the fault path pays almost
+  nothing off the compression bands.
+- **The template.** The task's compression template is built from facts
+  the kernel owns: a **pinned** task (`aspaces.is_pinned`) yields nothing
+  (its pages must stay resident) and a **real-time** task
+  (`sched.sched_class(..).is_realtime()`) is latency-critical and never
+  compressed. Ordinary anonymous-heap sensitivity is covered by the tier's
+  eligibility gate — kernel secrets never live in a task's placed-anonymous
+  window.
+- **Bounded, fail-closed, never a spin.** The sweep compresses at most the
+  band's batch of the faulting task's cold placed-anonymous pages through
+  `LiveSpace::ramzip_reclaim` (which now short-circuits *before* its O(n)
+  candidate walk when the port exposes no referenced bit, so direct reclaim
+  is near-free there too). The tier's own gates (handoff ordering against
+  the clean+transform `reclaimable_residue`, caps, per-task share,
+  decompression floor, eligibility) decide what is actually admitted; a
+  refused page stays resident. Nothing loops or retries — one bounded pass
+  per fault.
+- **Snapshot republish.** A sweep that compressed any page freed its frame
+  and dropped its PTE, so the registry snapshot is re-frozen once
+  afterwards (several pages changed at once), the batched analogue of the
+  per-page republish `resolve_ramzip_fault` does on restore, keeping the
+  copy path from ever reading a freed frame.
+- **Still gated on the referenced bit (§7o).** Real ports declare
+  `AccessTracking` non-`Supported` today, so the cold-page scanner shows
+  nothing cold and direct reclaim compresses nothing on hardware until a
+  port lands its referenced bit (its own QEMU vertical). The trigger,
+  policy, template, residue gate, and snapshot republish are complete and
+  host-tested now, so enabling a port is the only remaining step for
+  end-to-end compress-out on that port. On `HostPageTable` (which *is*
+  `Supported`) the whole path is exercised today.
+- **Tested.** `pressure::ramzip_reclaim_batch` band mapping (zero off the
+  compression bands, severe reclaims harder than moderate, non-zero only
+  where the handoff opens), `memstats::current_pressure` (none until the
+  gauge is created, then the one shared gauge) and
+  `memstats::ramzip_reclaimable_residue` (only clean-file + transform bytes,
+  payload and metadata), the `LiveSpace::ramzip_reclaim` access-tracking
+  early-out, and the `KernelSyscallHandlers::ramzip_direct_reclaim`
+  fail-closed no-op before the tier is installed. The end-to-end
+  compress→fault behaviour the trigger drives is the §7p `LiveSpace`
+  live-wiring suite.
 
 ## 8. Testing strategy
 

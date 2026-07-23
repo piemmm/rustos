@@ -354,11 +354,15 @@ fn render_surface<S: DirectorySource>(
     shell: &DesktopShell,
 ) -> Option<tairix_wm::Surface> {
     let theme = shell.session().active_theme();
+    // The picker is strictly read-only: it hands the renderer no manager write
+    // tools, so it never draws or resolves one (a New Folder tool is the file
+    // manager's alone, never the trusted picker's — no write authority here).
     render(
         browser,
         theme,
         picker_font(theme),
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
+        &[],
     )
 }
 

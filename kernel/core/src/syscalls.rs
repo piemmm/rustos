@@ -101,8 +101,8 @@ use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
 use tairix_kernel_mem::{
-    copy_in, copy_out, FrameAllocator, Page, PhysMap, UaccessError, UserAddressSpace, VirtAddr,
-    PAGE_SIZE,
+    copy_in, copy_out, FrameAllocator, Page, PageCandidate, PhysMap, RamzipFaultOutcome,
+    UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::Priority;
 use tairix_kernel_sec::{
@@ -1831,6 +1831,134 @@ where
             // Frame exhaustion or an uninstalled producer: fatal to the task
             // and only the task (deterministic OOM, never a panic).
             Err(_) => false,
+        }
+    }
+
+    /// Resolve a user-mode fault at `fault_va` as the restore of a page
+    /// the compressed-memory tier (`ramzip`) parked under pressure.
+    ///
+    /// Offered **before** [`Self::resolve_anon_fault`]: a compressed page
+    /// is *reserved* anonymous memory, so the anonymous handler would
+    /// otherwise re-zero it and destroy the compressed contents. When a
+    /// tier is installed (boot installs one from the platform entropy
+    /// path) and it holds an entry for the faulting page, the page is
+    /// decrypted, authenticated, decompressed, and remapped, and the
+    /// restored page is republished to the registry snapshot exactly as
+    /// the anonymous path does. [`RamzipFaultOutcome::NoEntry`] (no
+    /// entry, or no installed tier) falls through;
+    /// [`RamzipFaultOutcome::Fatal`] means the entry was unrecoverable
+    /// (fail closed, no plaintext, already audited) and the task is
+    /// terminated by the resolver.
+    ///
+    /// `task` is the kernel-trusted current task of the faulting CPU.
+    #[must_use]
+    pub fn resolve_ramzip_fault(&self, task: SecTaskId, fault_va: u64) -> RamzipFaultOutcome {
+        let Some(tier) = tairix_kernel_mem::ramzip::global() else {
+            return RamzipFaultOutcome::NoEntry;
+        };
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let outcome = crate::kthread::with_current_live_space(cpu, |live| {
+            live.ramzip_fault_in(tier, fault_va, self.log_sink)
+        });
+        match outcome {
+            Some(RamzipFaultOutcome::Handled) => {
+                // The restore remapped one page with a fresh frame; publish
+                // it to the registry snapshot so the copy path never reads
+                // the stale (freed) frame the page held before compression.
+                // A single-page delta keeps this O(log n); a snapshot that
+                // cannot absorb the delta falls back to a full re-freeze.
+                let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+                let applied = Page::from_addr(VirtAddr::new(page_va))
+                    .ok()
+                    .and_then(|page| {
+                        crate::kthread::with_current_live_space(cpu, |live| {
+                            live.translate_page(page)
+                        })
+                        .map(|mapping| (page, mapping))
+                    })
+                    .is_some_and(|(page, mapping)| {
+                        self.aspaces.write().note_faulted_page(task, page, mapping)
+                    });
+                if !applied {
+                    self.refreeze_task_aspace(task);
+                }
+                RamzipFaultOutcome::Handled
+            }
+            Some(fatal @ RamzipFaultOutcome::Fatal(_)) => fatal,
+            // No entry, no live space on this CPU, or any future
+            // non-restoring outcome: fall through to the anon handler.
+            _ => RamzipFaultOutcome::NoEntry,
+        }
+    }
+
+    /// Compress a bounded batch of the faulting task's own cold anonymous
+    /// pages out into the `ramzip` tier when memory pressure calls for it.
+    ///
+    /// This is TAIRiX's foreground **direct reclaim**: run in the faulting
+    /// task's own context at demand-fault time — the moment it is about to
+    /// commit another frame — exactly as a general-purpose kernel reclaims
+    /// on the page-allocator slow path. It is the compress-out half of the
+    /// tier ([`Self::resolve_ramzip_fault`] restores parked pages; this
+    /// parks cold ones), and reclaiming the *faulting* task's own cold
+    /// pages makes the task that is driving pressure pay for relieving it
+    /// (per-task fairness, `plans/SWAPSWAPSWAP.md` sections 6, 10).
+    ///
+    /// It is a no-op that costs at most one pressure sample unless a tier
+    /// is installed, the shared pressure gauge exists, and the sampled
+    /// band is one where compression is the answer (moderate/severe). At
+    /// normal/mild pressure cheaper cache reclaim handles the load; at
+    /// critical pressure the VM policy owns escalation, not more
+    /// compression; a pinned or real-time task yields nothing; and a port
+    /// with no referenced bit reclaims nothing (fail closed, never a spin).
+    ///
+    /// A sweep that compressed any page freed its frame and dropped its
+    /// PTE, so the registry snapshot is re-frozen once afterwards (several
+    /// pages changed at once) to keep the copy path from reading a freed
+    /// frame — the same republish [`Self::resolve_ramzip_fault`] does per
+    /// restored page, batched here.
+    ///
+    /// `task` is the kernel-trusted current task of the faulting CPU.
+    pub fn ramzip_direct_reclaim(&self, task: SecTaskId) {
+        // The tier and the shared gauge must both exist; before boot wires
+        // them there is nothing to reclaim into and no pressure to read.
+        let Some(tier) = tairix_kernel_mem::ramzip::global() else {
+            return;
+        };
+        let Some(pressure) = crate::memstats::MEM_STATS.current_pressure() else {
+            return;
+        };
+        // One sample decides the batch: zero at normal/mild (cheaper
+        // reclaim handles those) and zero at critical (escalation owns
+        // it), so the common case pays a single gauge read and returns.
+        let band = pressure.sample();
+        let want = tairix_kernel_mem::ramzip_reclaim_batch(band);
+        if want == 0 {
+            return;
+        }
+        // Build the compression template from facts the kernel owns for
+        // this task: a pinned task's pages must stay resident (it yields
+        // nothing), and a real-time task is latency-critical and never
+        // compressed. The per-page "is it cold?" decision belongs to the
+        // scanner, and the sensitivity of ordinary anonymous heap is
+        // covered by the tier's eligibility gate — kernel secrets never
+        // live in a task's placed-anonymous window.
+        let pinned = self.aspaces.read().is_pinned(task);
+        let latency_critical =
+            matches!(self.sched.sched_class(task.0), Ok(class) if class.is_realtime());
+        let template = PageCandidate {
+            pinned,
+            latency_critical,
+            ..PageCandidate::cold_anonymous()
+        };
+        let residue = crate::memstats::MEM_STATS.ramzip_reclaimable_residue();
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let compressed = crate::kthread::with_current_live_space(cpu, |live| {
+            live.ramzip_reclaim(tier, pressure, residue, want, template, self.log_sink)
+                .compressed
+        })
+        .unwrap_or(0);
+        if compressed > 0 {
+            self.refreeze_task_aspace(task);
         }
     }
 
@@ -9143,6 +9271,14 @@ where
             return UserFaultOutcome::Unhandled;
         };
         let task = SecTaskId(sched_task_id);
+        // Foreground direct reclaim: before this fault commits another
+        // frame, compress a bounded batch of the faulting task's own cold
+        // anonymous pages out into the `ramzip` tier if memory pressure
+        // calls for it (the same task driving pressure pays to relieve it).
+        // A no-op costing at most one pressure sample at shallow pressure,
+        // for a pinned/real-time task, on a port with no referenced bit, or
+        // before boot wires the tier — never a spin.
+        self.handlers.ramzip_direct_reclaim(task);
         // Stack growth is offered first, for reads and writes alike (a
         // stack push is a write), so the write-fatal file rule below can
         // never kill a legitimate growth fault. The resolver itself bounds
@@ -9150,6 +9286,23 @@ where
         // limit (fail closed).
         if self.handlers.resolve_stack_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
+        }
+        // A page the compressed-memory tier parked is offered **before**
+        // plain anonymous backing: a compressed page is reserved anonymous
+        // memory, so `resolve_anon_fault` would otherwise re-zero it and
+        // destroy the compressed contents. A restore makes the page
+        // resident (retry); an unrecoverable entry (authentication or
+        // decode failure, already audited) is fatal to the task, exactly
+        // as a wild access is; no entry (or no installed tier) falls
+        // through to the anonymous handler.
+        match self.handlers.resolve_ramzip_fault(task, fault_va) {
+            RamzipFaultOutcome::Handled => return UserFaultOutcome::Resolved,
+            RamzipFaultOutcome::Fatal(_) => {
+                self.handlers.record_fault_exit(task, fault_va, write, regs);
+                return UserFaultOutcome::Terminated { cpu };
+            }
+            // NoEntry (and any future non-restoring outcome): fall through.
+            _ => {}
         }
         // Demand-paged anonymous memory (`mem_map`) is offered next, for
         // reads and writes alike (anonymous memory is writable), so the
@@ -19012,6 +19165,25 @@ mod tests {
         fn freeze(&self) -> FrozenAddressSpace {
             self.space.freeze()
         }
+        fn ramzip_fault_in(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _va: u64,
+            _sink: &dyn Sink,
+        ) -> RamzipFaultOutcome {
+            RamzipFaultOutcome::NoEntry
+        }
+        fn ramzip_reclaim(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _residue: usize,
+            _want: usize,
+            _template: tairix_kernel_mem::PageCandidate,
+            _sink: &dyn Sink,
+        ) -> tairix_kernel_mem::RamzipReclaimSummary {
+            tairix_kernel_mem::RamzipReclaimSummary::default()
+        }
     }
 
     /// The metal regression for the login `spawn err=18` (`BadAddress`):
@@ -20975,6 +21147,26 @@ mod tests {
         let ctl = Box::leak(Box::new(UnsupportedController));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng);
         (aspaces, h)
+    }
+
+    /// Direct reclaim is fail-closed before boot wires the tier: with no
+    /// installed `ramzip` tier (the host-test default — only the boot path
+    /// installs one) it returns at its first guard, touching no
+    /// address-space state and never panicking. The compress-out behaviour
+    /// itself is covered end to end by the `kernel/mem` live-wiring tests
+    /// over a locally constructed tier; the QEMU verticals exercise it
+    /// against a real installed tier and a published live space.
+    #[test]
+    fn ramzip_direct_reclaim_is_a_safe_no_op_without_an_installed_tier() {
+        let (aspaces, h) = pin_fixture();
+        aspaces
+            .write()
+            .charge_aspace_bytes(SecTaskId(5), 3 * PAGE_SIZE as u64);
+        let before = aspaces.read().mapped_aspace_bytes(SecTaskId(5));
+        // No global tier installed: a no-op that changes nothing.
+        h.ramzip_direct_reclaim(SecTaskId(5));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(5)), before);
+        assert!(!aspaces.read().is_pinned(SecTaskId(5)));
     }
 
     /// `mem_pin` marks the kernel-trusted caller, is idempotent, and
