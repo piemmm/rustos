@@ -5754,16 +5754,28 @@ VM mechanism, `kernel/mem::ramzip`;
   (registered in `cargo xtask fuzz`) driving random
   compress→tamper/truncate→fault cycles.
 
-**Remaining (staged):**
-- **Restartable user page faults (prerequisite for live-task
-  enablement).** Every port's fault hook is terminal today (a user
-  fault parks/kills), so a *running* task cannot transparently fault a
-  compressed page back in. Enabling `ramzip` for arbitrary live tasks
-  requires the arch ports to support trap → `fault_in` → resume (and
-  the accessed-bit/page-replacement plumbing that identifies genuinely
-  cold pages). Until that lands, the tier is a complete, fully tested
-  VM mechanism with no production switch-on; nothing in it may be
-  weakened to work around the missing prerequisite.
+**Live-task enablement (staged in `.junie/swapswap-progress.md`):**
+- **Restartable user page faults — already present.** A running task
+  *can* trap → resolve → resume: `kernel/core::resolve_user_fault`
+  makes a not-present user page resident (stack growth, demand-paged
+  anonymous `mem_map`, read-only file mappings — reads and writes) and
+  returns so the port retries the faulting instruction. The earlier
+  "every port's fault hook is terminal" note was stale; the missing
+  piece for `ramzip` is a `resolve_ramzip_fault` step that restores a
+  compressed entry through `Ramzip::fault_in`.
+- **Cold-page identification — arch-neutral core landed (b1).** The
+  page-replacement referenced-bit facility is now in the Arch HAL: the
+  `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed`
+  primitive with its honest `AccessTracking` declaration (fail closed
+  when a port exposes no referenced bit), the `HostPageTable` software
+  model, and the `kernel/mem::coldscan` second-chance (clock) cold-page
+  scanner (host-tested). Concrete per-port Access-Flag support (aarch64
+  first — `AccessTracking::Pending` today; HAFDBS or a software
+  Access-Flag-fault path is b1a) and the pressure-driven compress-out /
+  `resolve_ramzip_fault` wiring (b2) remain staged.
+- Until the per-port AF and wiring land, the tier stays a complete,
+  fully tested VM mechanism with no production switch-on; nothing in it
+  may be weakened to work around a still-`Pending` port.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
 - Benchmarks beyond the host suites (per-page latency on real boards,

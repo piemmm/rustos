@@ -8,11 +8,21 @@ compress-before-encrypt authenticated store over the shared
 decompression-floor preservation, move-only fault-in, bounded
 clustering and warm-up, deterministic thrash detection and escalation;
 see `PLAN.md` §SWAPSWAPSWAP and `docs/src/architecture/memory.md` §7n
-for the done-state summaries). Enabling it for arbitrary *running*
-tasks awaits the restartable-user-page-fault prerequisite staged in
-`PLAN.md` (every port's fault hook is terminal today), and SWAP5 (the
-optional lower-tier block swap) remains a separately approved future
-design (section 15)  
+for the done-state summaries). Switching it on for arbitrary *running*
+tasks needs two things, staged in `.junie/swapswap-progress.md`: the
+restartable user page-fault path (which **already exists** — the arch
+ports resolve a not-present user fault through
+`kernel/core::resolve_user_fault` and resume the faulting instruction;
+the earlier "every port's fault hook is terminal" note was stale), and
+**cold-page identification** — a page-replacement referenced-bit
+facility. That facility's arch-neutral core is now in place: the
+`tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed` primitive
+with its honest `AccessTracking` declaration, and the
+`kernel/mem::coldscan` second-chance (clock) cold-page scanner (fail
+closed on any port without a referenced bit). The concrete per-port
+Access-Flag implementation (aarch64 first) and the live compress-out /
+`fault_in` wiring remain staged there. SWAP5 (the optional lower-tier
+block swap) remains a separately approved future design (section 15)  
 Target: TAIRiX  
 Primary code area: `kernel/mem`  
 Secondary code areas: `kernel/sched`, `kernel/sec`, `kernel/core`, `lib/crypto`, `lib/log`, and existing `lib/abi` diagnostics only if a current caller requires them  

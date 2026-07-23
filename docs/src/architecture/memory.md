@@ -1600,6 +1600,57 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   mapping fault-killed with exit 139 — each observed by a parent through
   the production `spawn` + `wait`.
 
+## 7o. Cold-page identification (referenced bit + `coldscan`)
+
+Switching the §7n `ramzip` tier on for arbitrary *running* tasks needs a
+way to tell a page the task still uses from one it has abandoned, so
+compression relieves pressure instead of evicting a hot page straight
+back into a fault. That is a page-replacement referenced-bit facility,
+and its architecture-neutral core lands here (staged in
+`.junie/swapswap-progress.md`).
+
+- **The HAL primitive.** `tairix_arch_api::mmu::AddressSpace` gains
+  `test_and_clear_accessed(vaddr)` — read *and clear* the leaf's
+  per-page referenced (accessed) bit, returning whether it had been set,
+  and invalidate the page's TLB entry so the next access re-sets it — plus
+  an honest `access_tracking()` declaration (`AccessTracking::Supported`
+  / `Unsupported(reason)` / `Pending(reason)`, the same honesty discipline
+  as `BlockSplit`, memory tagging, and side-channel mitigation). The
+  default is fail-closed: a port that does not maintain a referenced bit
+  declares it non-`Supported` and `test_and_clear_accessed` returns
+  `MapError::Unsupported`. The MMU conformance vertical
+  (`mmu::conformance::run_all`) checks the declaration is honest — a
+  non-supported port must carry a non-empty justification and must fail
+  the primitive closed rather than fabricate an access verdict.
+- **The scanner.** `kernel/mem::coldscan::ColdPageScanner` is the classic
+  **second-chance (clock)** page-replacement scan built on that primitive.
+  It keeps a rotating clock hand across passes and, for each candidate
+  page in clock order, reads-and-clears the referenced bit: a page found
+  *set* was touched since the last pass and is given a second chance (its
+  bit is now cleared, it stays mapped); a page found *clear* went
+  untouched across a full pass and is returned as a cold reclaim
+  candidate, up to the caller's budget. On a port whose `access_tracking`
+  is not `Supported` the scan returns `ColdScanError::Unsupported` and the
+  tier reclaims nothing there — reclaim is safe by omission, never by
+  guessing (the fail-closed rule; a false-cold classification would cause
+  the very thrash the tier avoids). This is the same approximation Linux
+  page reclaim uses, with no per-page timestamp and no hot-path
+  allocation beyond the returned list.
+- **Per-port state.** aarch64 currently declares the facility
+  `Pending`: reporting the Access Flag (AF, bit 10) honestly means
+  *managing* it (hardware AF via ARMv8.1 HAFDBS + `TCR_EL1.HA`, absent on
+  the cortex-a57/a72 the boards and the default QEMU CPU expose, or a
+  software Access-Flag-fault handler), a boot/exception-path change with
+  its own QEMU vertical staged as b1a. x86_64 (PTE bit 5), riscv64 (PTE
+  `A` bit), and wasm32 remain on the fail-closed default until their b3
+  slices. The `HostPageTable` double models the bit in software, so the
+  scanner is fully host-tested today.
+- **Tested.** `kernel/arch/api` mmu conformance (honest declaration,
+  fail-open rejection), `kernel/mem::coldscan` host tests (untouched
+  pages are cold up to budget, a referenced page gets a second chance and
+  the cleared bit makes a still-idle page cold next pass, the clock hand
+  rotates, and a backend without a referenced bit fails closed).
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

@@ -29,7 +29,7 @@
 use alloc::collections::BTreeMap;
 use core::fmt;
 
-use tairix_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
+use tairix_arch_api::mmu::{AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags};
 use tairix_arch_api::tlb::TlbShootdown;
 
 use crate::error::AllocError;
@@ -481,6 +481,34 @@ impl<P: PageTable> AddressSpace<P> {
         self.live.keys().copied()
     }
 
+    /// This space's backend declaration of whether it reports a per-page
+    /// referenced bit — the honesty the cold-page scanner
+    /// ([`crate::coldscan`]) consults before it classifies any page cold.
+    #[must_use]
+    pub fn access_tracking(&self) -> AccessTracking {
+        self.table.access_tracking()
+    }
+
+    /// Read and clear the referenced (accessed) bit for `page`, returning
+    /// whether it had been touched since the previous clear.
+    ///
+    /// The referenced-bit half of a clock / second-chance page-replacement
+    /// scan (`plans/SWAPSWAPSWAP.md`): the backend clears the bit and
+    /// invalidates the page's TLB entry so the next access re-sets it, so a
+    /// later probe reading it still-clear proves the page is genuinely cold.
+    ///
+    /// # Errors
+    ///
+    /// [`PageTableError::Unsupported`] on a backend whose
+    /// [`Self::access_tracking`] is not [`AccessTracking::Supported`]
+    /// (fail closed — no fabricated verdict), [`PageTableError::NotMapped`]
+    /// if `page` has no live leaf, or [`PageTableError::Misaligned`].
+    pub fn test_and_clear_accessed(&mut self, page: Page) -> Result<bool, PageTableError> {
+        self.table
+            .test_and_clear_accessed(page.start().as_u64())
+            .map_err(from_map_error)
+    }
+
     /// Return every allocator-drawn page-table frame of the backend to its
     /// frame source, leaving this space unusable — the forwarding view of
     /// [`tairix_arch_api::mmu::AddressSpace::reclaim_table_frames`], called
@@ -504,6 +532,15 @@ impl<P: PageTable> AddressSpace<P> {
     #[must_use]
     pub fn table(&self) -> &P {
         &self.table
+    }
+
+    /// Mutable access to the backend, for tests only (e.g. to drive a
+    /// `HostPageTable`'s modelled referenced bit through `mark_accessed`).
+    /// Never compiled into production kernel builds, so the map/unmap
+    /// bookkeeping invariant cannot be bypassed at runtime.
+    #[cfg(any(test, feature = "host-tests"))]
+    pub fn table_mut_for_test(&mut self) -> &mut P {
+        &mut self.table
     }
 
     /// Freeze this address space's live mappings into a registry-storable
@@ -658,6 +695,13 @@ impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
 #[derive(Debug, Default)]
 pub struct HostPageTable {
     entries: BTreeMap<u64, (u64, PageFlags)>,
+    /// The referenced (accessed) bit each live leaf carries, modelling a
+    /// hardware access flag in pure software so the cold-page scanner
+    /// (`crate::coldscan`) is host-testable. `true` = touched since the
+    /// last [`HalAddressSpace::test_and_clear_accessed`]. A fresh mapping
+    /// starts untouched; a test simulates a CPU access with
+    /// [`Self::mark_accessed`].
+    accessed: BTreeMap<u64, bool>,
     /// Counts how many times [`TlbShootdown::flush_page`] has been
     /// called, so tests can assert the TLB-flush discipline is correct.
     pub(crate) flush_count: usize,
@@ -670,7 +714,18 @@ impl HostPageTable {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            accessed: BTreeMap::new(),
             flush_count: 0,
+        }
+    }
+
+    /// Simulate a CPU touching the leaf mapping `vaddr`, setting its
+    /// modelled referenced bit exactly as hardware (or the software
+    /// access-flag-fault path) would on a real port. A no-op if `vaddr`
+    /// has no live leaf.
+    pub fn mark_accessed(&mut self, vaddr: u64) {
+        if let Some(bit) = self.accessed.get_mut(&vaddr) {
+            *bit = true;
         }
     }
 }
@@ -691,6 +746,9 @@ impl HalAddressSpace for HostPageTable {
             return Err(MapError::AlreadyMapped);
         }
         self.entries.insert(vaddr, (paddr, flags));
+        // A fresh mapping has not been referenced yet; a test drives the
+        // referenced bit explicitly through `mark_accessed`.
+        self.accessed.insert(vaddr, false);
         Ok(())
     }
 
@@ -703,6 +761,7 @@ impl HalAddressSpace for HostPageTable {
             return Err(MapError::Misaligned);
         }
         let (paddr, _) = self.entries.remove(&vaddr).ok_or(MapError::NotMapped)?;
+        self.accessed.remove(&vaddr);
         Ok(paddr)
     }
 
@@ -719,6 +778,26 @@ impl HalAddressSpace for HostPageTable {
         tairix_arch_api::mmu::BlockSplit::Unsupported(
             "host page-table double tracks single 4 KiB entries; no coarse blocks",
         )
+    }
+
+    fn access_tracking(&self) -> AccessTracking {
+        // The double models a per-leaf referenced bit in software, so the
+        // cold-page scanner can be exercised on host hardware.
+        AccessTracking::Supported
+    }
+
+    fn test_and_clear_accessed(&mut self, vaddr: u64) -> Result<bool, MapError> {
+        if vaddr & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        let bit = self.accessed.get_mut(&vaddr).ok_or(MapError::NotMapped)?;
+        let was = *bit;
+        *bit = false;
+        // Clearing the referenced bit requires invalidating the leaf's TLB
+        // entry on a real port so the next access re-sets it; the double
+        // models that by charging a flush.
+        self.flush_count += 1;
+        Ok(was)
     }
 
     unsafe fn activate(&self) {

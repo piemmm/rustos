@@ -32,7 +32,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
-use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
+use tairix_arch_api::mmu::{
+    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags,
+};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
@@ -1652,6 +1654,26 @@ impl MmuAddressSpace for AddressSpace {
 
     fn root_phys(&self) -> u64 {
         self.root_phys
+    }
+
+    fn access_tracking(&self) -> AccessTracking {
+        // The per-page referenced bit the cold-page scanner
+        // (`kernel/mem::coldscan`) needs is the Access Flag (AF, bit 10).
+        // Reporting it honestly on aarch64 requires *managing* AF rather
+        // than the current eager-set policy: either hardware AF updates
+        // (ARMv8.1 HAFDBS, absent on the cortex-a57/a72 the boards and the
+        // default QEMU CPU expose) enabled through TCR_EL1.HA, or a
+        // software Access-Flag-fault handler that sets AF on the data
+        // abort a cleared flag raises. Neither has landed, and enabling
+        // one is a boot/exception-path change with its own QEMU vertical,
+        // so aarch64 declares the facility Pending rather than pretend a
+        // referenced bit it does not yet maintain. Fail closed: the
+        // default `test_and_clear_accessed` returns `Unsupported`, so the
+        // scanner reclaims nothing here until the concrete AF path lands
+        // (`plans/SWAPSWAPSWAP.md` b1a).
+        AccessTracking::Pending(
+            "AF management (HAFDBS or software AF-fault) lands in plans/SWAPSWAPSWAP.md b1a",
+        )
     }
 
     fn block_split_support(&self) -> BlockSplit {

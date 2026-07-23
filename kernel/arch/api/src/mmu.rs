@@ -257,6 +257,65 @@ impl BlockSplit {
     }
 }
 
+/// A port's honest declaration of whether it can report which pages a
+/// task has recently touched — the referenced-bit source the
+/// page-replacement scanner (`kernel/mem::coldscan`) needs to tell a
+/// genuinely cold page from a hot one before the compressed-memory tier
+/// (`plans/SWAPSWAPSWAP.md`) reclaims it.
+///
+/// This mirrors the honesty discipline of [`BlockSplit`],
+/// [`crate::memtag::Tagging`], and [`crate::sidechannel::Mitigation`]: a
+/// port never pretends a referenced bit exists. When the declaration is
+/// not [`AccessTracking::Supported`], [`AddressSpace::test_and_clear_accessed`]
+/// fails closed with [`MapError::Unsupported`] and the scanner refuses to
+/// classify *any* page cold on that port — reclaim is safe by omission,
+/// never by guessing a page is unused.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AccessTracking {
+    /// The port reports and clears a per-page referenced (accessed) bit
+    /// ([`AddressSpace::test_and_clear_accessed`] does real work).
+    Supported,
+    /// The port's translation regime exposes no referenced bit at all
+    /// (the payload is the justification; it must be non-empty).
+    Unsupported(&'static str),
+    /// The port *could* report a referenced bit but the primitive has not
+    /// landed yet (the payload is the tracking note — the plan stage that
+    /// will deliver it; it must be non-empty).
+    Pending(&'static str),
+}
+
+impl AccessTracking {
+    /// `true` if the port reports and clears a per-page referenced bit.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+
+    /// `true` if the port has a tracked [`AccessTracking::Pending`] gap.
+    #[must_use]
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+
+    /// `true` if the declaration is release-ready: either supported or a
+    /// justified [`AccessTracking::Unsupported`]. A
+    /// [`AccessTracking::Pending`] gap is honest but not release-ready.
+    #[must_use]
+    pub const fn is_release_ready(self) -> bool {
+        matches!(self, Self::Supported | Self::Unsupported(_))
+    }
+
+    /// The explanatory note for a non-supported declaration, or `None`
+    /// when supported.
+    #[must_use]
+    pub const fn detail(self) -> Option<&'static str> {
+        match self {
+            Self::Supported => None,
+            Self::Unsupported(reason) | Self::Pending(reason) => Some(reason),
+        }
+    }
+}
+
 /// The per-process / bootstrap address-space handle an architecture port
 /// exposes.
 ///
@@ -309,6 +368,47 @@ pub trait AddressSpace {
     /// Physical address of this space's root translation table — the
     /// value programmed into `CR3` / `satp` / `TTBR0_EL1`.
     fn root_phys(&self) -> u64;
+
+    /// This port's honest declaration of whether it can report a per-page
+    /// referenced (accessed) bit through [`Self::test_and_clear_accessed`]
+    /// — the source `kernel/mem::coldscan` uses to find genuinely cold
+    /// pages for the compressed-memory tier (`plans/SWAPSWAPSWAP.md`).
+    ///
+    /// The default is fail-closed: a port that has not implemented the
+    /// referenced bit declares it [`AccessTracking::Unsupported`], so the
+    /// scanner never classifies a page cold on it. A port with a hardware
+    /// access flag (or a software access-flag-fault scheme) overrides this
+    /// with [`AccessTracking::Supported`].
+    fn access_tracking(&self) -> AccessTracking {
+        AccessTracking::Unsupported("port exposes no per-page referenced bit")
+    }
+
+    /// Read and clear the per-page referenced (accessed) bit for the 4 KiB
+    /// leaf mapping `vaddr`, returning whether the page had been accessed
+    /// since the previous clear.
+    ///
+    /// This is the referenced-bit half of a clock / second-chance
+    /// page-replacement scan: clearing the bit and invalidating the page's
+    /// TLB entry means the hardware (or the software access-flag-fault
+    /// path) re-sets it on the next access, so a later probe that still
+    /// reads it clear proves the page went untouched in between — a
+    /// genuinely cold page the compressed-memory tier may reclaim. The
+    /// implementation performs the TLB invalidation itself; the caller
+    /// guarantees the owning task is quiesced on other CPUs when the
+    /// result drives a reclaim (the same exclusivity the tier's move path
+    /// relies on).
+    ///
+    /// # Errors
+    ///
+    /// * [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned.
+    /// * [`MapError::NotMapped`] if `vaddr` has no live 4 KiB leaf.
+    /// * [`MapError::Unsupported`] on a port whose [`Self::access_tracking`]
+    ///   is not [`AccessTracking::Supported`] — asking it to report a
+    ///   referenced bit fails closed rather than fabricating one.
+    fn test_and_clear_accessed(&mut self, vaddr: u64) -> Result<bool, MapError> {
+        let _ = vaddr;
+        Err(MapError::Unsupported)
+    }
 
     /// This port's honest declaration of whether it can re-express a
     /// coarse (large-page / block) mapping at 4 KiB granularity via
@@ -451,7 +551,7 @@ pub trait AddressSpace {
 /// port-specific mappable address pair — the same precedent as
 /// [`crate::irq::conformance`] and [`crate::timer::conformance`].
 pub mod conformance {
-    use super::{AddressSpace, BlockSplit, MapError, PageFlags};
+    use super::{AccessTracking, AddressSpace, BlockSplit, MapError, PageFlags};
 
     /// Run the entire [`AddressSpace`] conformance suite against `space`,
     /// using `va` / `pa` as a port-specific 4 KiB-aligned virtual/physical
@@ -480,6 +580,33 @@ pub mod conformance {
         maps_translates_then_refuses_a_double_map(space, va, pa);
         unmaps_then_translates_to_nothing(space, va, pa);
         block_split_declaration_is_honest(space, va);
+        access_tracking_declaration_is_honest(space, va);
+    }
+
+    /// The port's [`AddressSpace::access_tracking`] is honest: a
+    /// non-supported declaration carries a non-empty justification (a
+    /// referenced bit is never pretended), and a port that does *not*
+    /// support it fails [`AddressSpace::test_and_clear_accessed`] closed
+    /// with [`MapError::Unsupported`] rather than fabricating an
+    /// access verdict the cold-page scanner would then trust. A supporting
+    /// port's positive behaviour needs a real referenced bit the portable
+    /// suite cannot set, so it is proven by that port's own host tests and
+    /// its `memory_isolation`/reclaim QEMU vertical, not here.
+    fn access_tracking_declaration_is_honest<A: AddressSpace + ?Sized>(space: &mut A, va: u64) {
+        let support = space.access_tracking();
+        if let Some(reason) = support.detail() {
+            assert!(
+                !reason.trim().is_empty(),
+                "a non-supported access-tracking declaration must carry a non-empty justification"
+            );
+        }
+        if !matches!(support, AccessTracking::Supported) {
+            assert_eq!(
+                space.test_and_clear_accessed(va),
+                Err(MapError::Unsupported),
+                "a port without access tracking must fail test_and_clear_accessed closed"
+            );
+        }
     }
 
     /// The port's [`AddressSpace::block_split_support`] is honest: a
@@ -608,7 +735,7 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{AddressSpace, BlockSplit, MapError, PageFlags};
+        use super::super::{AccessTracking, AddressSpace, BlockSplit, MapError, PageFlags};
         use super::run_all;
 
         /// A faithful host double: it honours the same fail-closed
@@ -846,6 +973,54 @@ pub mod conformance {
             let mut space = EmptyJustificationAddressSpace::default();
             run_all(&mut space, 0x10_0000_0000, 0x20_0000);
         }
+
+        /// A port that declares access tracking unsupported yet returns a
+        /// concrete access verdict from `test_and_clear_accessed` is
+        /// fail-open: the cold-page scanner would trust a fabricated bit
+        /// and could reclaim a hot page. The conformance vertical must
+        /// catch it.
+        #[derive(Default)]
+        struct FailOpenAccessAddressSpace {
+            inner: CellAddressSpace,
+        }
+
+        impl AddressSpace for FailOpenAccessAddressSpace {
+            fn map_page(
+                &mut self,
+                vaddr: u64,
+                paddr: u64,
+                flags: PageFlags,
+            ) -> Result<(), MapError> {
+                self.inner.map_page(vaddr, paddr, flags)
+            }
+            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+                self.inner.translate(vaddr)
+            }
+            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+                self.inner.unmap(vaddr)
+            }
+            fn root_phys(&self) -> u64 {
+                self.inner.root_phys()
+            }
+            fn block_split_support(&self) -> BlockSplit {
+                BlockSplit::Unsupported("no coarse blocks")
+            }
+            fn access_tracking(&self) -> AccessTracking {
+                AccessTracking::Unsupported("claims no referenced bit")
+            }
+            fn test_and_clear_accessed(&mut self, _vaddr: u64) -> Result<bool, MapError> {
+                // Bug: claims unsupported yet fabricates a verdict.
+                Ok(false)
+            }
+            unsafe fn activate(&self) {}
+        }
+
+        #[test]
+        #[should_panic(expected = "must fail test_and_clear_accessed closed")]
+        fn suite_rejects_a_fail_open_access_tracking() {
+            let mut space = FailOpenAccessAddressSpace::default();
+            run_all(&mut space, 0x10_0000_0000, 0x20_0000);
+        }
     }
 }
 
@@ -901,5 +1076,26 @@ mod tests {
         // A Pending gap is honest but not release-ready.
         assert!(!pending.is_release_ready());
         assert_eq!(pending.detail(), Some("lands in plans/PI.md G3"));
+    }
+
+    #[test]
+    fn access_tracking_helpers_classify_each_declaration() {
+        assert!(AccessTracking::Supported.is_supported());
+        assert!(!AccessTracking::Supported.is_pending());
+        assert!(AccessTracking::Supported.is_release_ready());
+        assert_eq!(AccessTracking::Supported.detail(), None);
+
+        let unsupported = AccessTracking::Unsupported("no referenced bit");
+        assert!(!unsupported.is_supported());
+        assert!(!unsupported.is_pending());
+        assert!(unsupported.is_release_ready());
+        assert_eq!(unsupported.detail(), Some("no referenced bit"));
+
+        let pending = AccessTracking::Pending("software AF fault in b1a");
+        assert!(!pending.is_supported());
+        assert!(pending.is_pending());
+        // A Pending gap is honest but not release-ready.
+        assert!(!pending.is_release_ready());
+        assert_eq!(pending.detail(), Some("software AF fault in b1a"));
     }
 }
