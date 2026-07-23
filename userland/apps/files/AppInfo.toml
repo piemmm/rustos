@@ -6,12 +6,15 @@
 # The capability list is the bundle's request: CAP_CONSOLE_WRITE for its
 # fail-loud stderr diagnostics, CAP_FS_ACCESS for the directory listings
 # it browses (every read is still permission-checked per inode under the
-# launching user's identity), and CAP_SHM to create and grant the
-# zero-copy window frame region the desktop session maps. The launched
+# launching user's identity), CAP_SHM to create and grant the zero-copy
+# window frame region the desktop session maps, and CAP_PROC_SPAWN to
+# launch an activated <Name>.app bundle through the ordinary signed
+# app-load gate (double-click / Enter on a bundle spawns its own Run —
+# never a private path; plans/NEW-FILEMANAGER.md FM6b). The launched
 # process receives this set intersected with the launching user's
 # grants, never more.
 id = "os.tairix.files"
 name = "files"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN"]

@@ -819,13 +819,18 @@ mod tests {
 
     // The windowed file browser `files` (plans/APPWIN.md AW3): console
     // write for its fail-loud diagnostics, filesystem reach for the
-    // listings it browses, and CAP_SHM to create and grant the
-    // zero-copy window frame region the desktop session maps. Not an
-    // embedded spawn-floor program, so the list lives only in this pin.
+    // listings it browses, CAP_SHM to create and grant the zero-copy
+    // window frame region the desktop session maps, and CAP_PROC_SPAWN
+    // to launch an activated <Name>.app bundle through the ordinary
+    // signed app-load gate (plans/NEW-FILEMANAGER.md FM6b — double-click
+    // / Enter on a bundle spawns its own Run, never a private path).
+    // Not an embedded spawn-floor program, so the list lives only in
+    // this pin.
     const FILES_BROWSER_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
         CapabilityId::SHM,
+        CapabilityId::PROC_SPAWN,
     ];
 
     // The windowed terminal `terminal` (plans/APPWIN.md AW4): console

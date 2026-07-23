@@ -22,7 +22,12 @@
 //!   and the `WindowEvents` typed wait over the parked source.
 //!
 //! Keyboard navigation drives the browser (`Down`/`Up` select, `Enter`
-//! opens a directory, `Backspace` goes up); `F2` renames the selected
+//! activates the selection — it descends into a directory or launches a
+//! selected `<Name>.app` bundle by spawning the bundle's own `Run` through
+//! the ordinary signed app-load gate (asynchronously, with the launched
+//! child reaped on the wait-set's any-child member so it is never left a
+//! zombie), and a launch refusal is stated fail-loud on `stderr`;
+//! `Backspace` goes up); `F2` renames the selected
 //! item through an inline `lib/controls` text field, committing over
 //! `fs_rename` under the user's own identity (a refusal is stated in the
 //! field, never a silent failure or a fabricated success); `Ctrl+X`/`Ctrl+C`
@@ -51,7 +56,9 @@ extern crate alloc;
 #[cfg(freestanding)]
 mod program {
 
+    use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
+    use core::cell::RefCell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
@@ -60,8 +67,8 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        CapabilityId, Errno, Origin, ProcId, UnlinkFlags, WaitSetOp, WaitSourceKind,
-        ORIGIN_WIRE_LEN,
+        load_failure_reason, CapabilityId, Errno, Origin, ProcId, UnlinkFlags, WaitFlags,
+        WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_owner_control,
@@ -69,11 +76,11 @@ mod program {
         OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Browser, Clipboard,
-        ClipboardOp, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeletePlan, DeleteWalk,
-        DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem, PasteStrategy, Properties,
-        RenameError, ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_WIDTH,
+        paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Activation, Browser,
+        Clipboard, ClipboardOp, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeletePlan,
+        DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem, PasteStrategy,
+        Properties, RenameError, ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -119,6 +126,11 @@ mod program {
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
 
+    /// The wait-set token of the any-child member: a bundle the file manager
+    /// launched has exited, so it is reaped promptly (never left a zombie,
+    /// and never a busy-poll — the member is drained the instant it wakes).
+    const CHILD_TOKEN: u64 = 2;
+
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
     const OWNER_ID_MAX_DIGITS: usize = 10;
@@ -159,21 +171,121 @@ mod program {
         }
     }
 
+    /// The file manager's launched children: the application bundles it
+    /// spawned when the user activated a `<Name>.app`, tracked by PID so each
+    /// is reaped when it exits (never left a zombie) and a load refusal is
+    /// named in the fail-loud diagnosis.
+    ///
+    /// Launching is asynchronous: [`spawn`](tairix_rt::spawn) admits the child
+    /// and returns its PID before the bundle's image is loaded, so a load
+    /// refusal (a missing, unverified, or malformed bundle) surfaces later as
+    /// the child's reserved `LOAD_*` exit status, reported by
+    /// [`reap`](Self::reap) under the bundle name. The launched app is the
+    /// user's own — it runs under the launching user's identity and receives
+    /// only the manager's manifest set intersected with that user's grants, so
+    /// launching grants no ambient authority.
+    struct Launcher {
+        /// PID → bundle leaf name, for every launched child not yet reaped.
+        /// Bounded by the children in flight; an entry is removed when its
+        /// child is reaped, so it never grows beyond that.
+        in_flight: BTreeMap<u64, String>,
+    }
+
+    impl Launcher {
+        /// An idle launcher with no children in flight.
+        fn new() -> Self {
+            Self {
+                in_flight: BTreeMap::new(),
+            }
+        }
+
+        /// Launch the application bundle whose directory is `bundle_path` (the
+        /// validated absolute path the activation named, e.g. `/Apps/Notes.app`)
+        /// by spawning its own `Run` binary through the ordinary signed
+        /// app-load gate — never a private path.
+        ///
+        /// The spawn is admitted immediately and the child loads on its own
+        /// task, so the event loop never blocks behind a load. A synchronous
+        /// refusal (a stripped spawn capability or a malformed path, decided
+        /// before any child exists) is stated fail-loud on `stderr` at once; a
+        /// load refusal that only shows once the image is read surfaces later
+        /// through [`reap`](Self::reap). Either way the file manager carries on
+        /// — a refused launch is an answer, not a crash (§2.24).
+        fn launch(&mut self, bundle_path: &str) {
+            let label = bundle_leaf(bundle_path);
+            let mut run_path = String::from(bundle_path);
+            run_path.push_str("/Run");
+            let ret = tairix_rt::spawn(run_path.as_bytes());
+            if ret < 0 {
+                report_error(&alloc::format!("could not launch {label}"));
+                return;
+            }
+            #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
+            self.in_flight.insert(ret as u64, label);
+        }
+
+        /// Reap every child that has exited, naming a load refusal in the
+        /// fail-loud diagnosis.
+        ///
+        /// Non-blocking and drained fully: the loop ends the instant no zombie
+        /// remains (the non-blocking `wait` yields nothing once none is left),
+        /// so a burst of exits is handled in one wake and nothing spins. A
+        /// clean exit, or an ordinary non-zero exit outside the reserved
+        /// `LOAD_*` band, is the launched app's own business and is not
+        /// reported as a launch failure.
+        fn reap(&mut self) {
+            loop {
+                let mut status = WaitStatus::Exited(0);
+                let pid = tairix_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
+                if pid <= 0 {
+                    // No child ready (WouldBlock) or none left: stop draining.
+                    return;
+                }
+                #[allow(clippy::cast_sign_loss)] // guarded by `pid > 0`.
+                let label = self.in_flight.remove(&(pid as u64));
+                if let WaitStatus::Exited(code) = status {
+                    if let Some(reason) = load_failure_reason(code) {
+                        let name = label.as_deref().unwrap_or("an application");
+                        report_error(&alloc::format!("{name} failed to launch: {reason}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bundle directory's leaf name (`/Apps/Notes.app` → `Notes.app`) — the
+    /// label the fail-loud launch diagnosis names, carrying no path prefix
+    /// beyond the bundle name the user already sees. An empty or `/`-only path
+    /// (which the validated activation path never produces) falls back to the
+    /// whole string rather than an empty name.
+    fn bundle_leaf(bundle_path: &str) -> String {
+        let leaf = bundle_path.rsplit('/').find(|part| !part.is_empty());
+        String::from(leaf.unwrap_or(bundle_path))
+    }
+
     /// The production [`EventSource`]: drain the app's own event
     /// mailbox, parking on the wait-set whenever it is empty, and accept
     /// only events whose kernel-attested sender is the desktop session
     /// named by the create reply — anything else is dropped (fail
     /// closed), so no other process can feed the app forged input.
-    struct RtEventSource {
+    ///
+    /// The same wait-set carries the any-child member ([`CHILD_TOKEN`]): a
+    /// launched bundle exiting wakes the park, and the source reaps it in place
+    /// before re-parking, so a child is never left a zombie and the wake never
+    /// degrades into a busy-poll.
+    struct RtEventSource<'a> {
         /// The app's event-mailbox endpoint id.
         endpoint: u64,
         /// The wait-set handle the app parks on.
         set: u64,
         /// The only sender whose events are accepted.
         server: ProcId,
+        /// The launched-bundle bookkeeping reaped on a [`CHILD_TOKEN`] wake,
+        /// shared with the activation path that spawns.
+        launcher: &'a RefCell<Launcher>,
     }
 
-    impl EventSource for RtEventSource {
+    impl EventSource for RtEventSource<'_> {
         fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
@@ -196,10 +308,18 @@ mod program {
                     }
                     Err(err) if errno_from(err) == Errno::WouldBlock => {
                         // Nothing queued: park until the session's next
-                        // delivery wakes the wait-set — never a spin.
+                        // delivery — or a launched bundle's exit — wakes the
+                        // wait-set, never a spin.
                         let mut token = 0u64;
                         if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                             return Err(Errno::NotFound);
+                        }
+                        // A child-exit wake reaps the exited bundle(s) in
+                        // place before re-parking, so a launched app is never
+                        // left a zombie and the ready child member cannot spin
+                        // the park (it is drained the instant it fires).
+                        if token == CHILD_TOKEN {
+                            self.launcher.borrow_mut().reap();
                         }
                     }
                     Err(err) => return Err(errno_from(err)),
@@ -344,6 +464,7 @@ mod program {
     fn apply_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
         theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
@@ -388,12 +509,16 @@ mod program {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
             } => {
-                // Alt+Enter opens the Properties overlay, Delete opens the
-                // delete confirmation, and Ctrl+X/C/V drive the clipboard
-                // verbs (all need the overlay/clipboard state); every other
-                // navigation-mode key is handled by the shared `apply_nav_key`.
+                // Alt+Enter opens the Properties overlay, a plain Enter
+                // activates the selection (needs the launcher for a bundle
+                // launch), Delete opens the delete confirmation, and
+                // Ctrl+X/C/V drive the clipboard verbs (all need the
+                // overlay/clipboard/launcher state); every other navigation-
+                // mode key is handled by the shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
+                } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
+                    activate(browser, launcher, font, theme, viewport)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
@@ -541,7 +666,8 @@ mod program {
     /// Handle one key press in navigation mode (not renaming, not showing the
     /// Properties overlay), reporting whether the view changed (it never asks
     /// the app to close). Mirrors [`apply_rename_key`]'s shape; Alt+Enter
-    /// (Properties) is handled by the caller, which owns the overlay state.
+    /// (Properties) and a plain Enter (activation, which needs the launcher)
+    /// are handled by the caller, which owns the overlay and launcher state.
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
@@ -584,12 +710,6 @@ mod program {
                 tairix_browse::render::reveal_selection(browser, font, theme, viewport);
                 (true, false)
             }
-            KeyValue::Named(NamedKeyCode::Enter) => {
-                // Opening a file (or an unreadable directory) is a refused
-                // no-op today: the browser lists, it does not launch. The
-                // listing stays as it was.
-                (browser.open_selected().is_ok(), false)
-            }
             KeyValue::Named(NamedKeyCode::Backspace) => (browser.go_up().unwrap_or(false), false),
             // F2 begins an in-place rename of the selected item; with nothing
             // selected (an empty directory) it is a no-op.
@@ -597,6 +717,47 @@ mod program {
                 begin_rename(browser, rename, font, theme, viewport)
             }
             _ => (false, false),
+        }
+    }
+
+    /// Activate the selected entry — the one dispatch-by-kind decision `Enter`
+    /// drives, over the shared [`Browser::activate_selected`] so the file
+    /// manager and the trusted picker act on the same [`Activation`]. The
+    /// engine decides *what* the target is; the launch stays here, in the app's
+    /// own capability-checked tail under the user's identity.
+    ///
+    /// * [`Activation::Descended`] — the engine descended into a directory (its
+    ///   own transactional, fail-closed navigation); the selection is revealed
+    ///   and the view repainted, exactly as a breadcrumb-click navigation is.
+    /// * [`Activation::LaunchBundle`] — the entry is a `<Name>.app` bundle,
+    ///   launched through the ordinary signed app-load gate ([`Launcher`]),
+    ///   asynchronously so the event loop never blocks behind the load.
+    ///   Launching changes nothing on screen, so nothing repaints.
+    /// * [`Activation::OpenFile`] — opening a data file in its associated
+    ///   viewer is a later stage (the file hand-off / "Open With…"); until it
+    ///   is wired, activating a file leaves the listing exactly as it was,
+    ///   never a fabricated action.
+    ///
+    /// A refused activation (an unreadable directory the engine could not
+    /// descend into) leaves the browser where it was and repaints nothing
+    /// (fail closed).
+    fn activate<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        launcher: &RefCell<Launcher>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> (bool, bool) {
+        match browser.activate_selected() {
+            Ok(Activation::Descended) => {
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                (true, false)
+            }
+            Ok(Activation::LaunchBundle { path }) => {
+                launcher.borrow_mut().launch(&path);
+                (false, false)
+            }
+            Ok(Activation::OpenFile { .. }) | Err(_) => (false, false),
         }
     }
 
@@ -1679,6 +1840,20 @@ mod program {
         {
             return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
         }
+        // The any-child member: a bundle the file manager launched exiting
+        // wakes the park so it is reaped promptly (never left a zombie). Adding
+        // it needs no capability — a process may always wait on its own
+        // children — so a refusal here is a genuine bring-up failure.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Child,
+            WAITSET_CHILD_ANY,
+            CHILD_TOKEN,
+        ) != 0
+        {
+            return Err(fail(EXIT_NO_EVENTS, "child wait refused"));
+        }
         Ok((event_endpoint, set))
     }
 
@@ -1784,12 +1959,19 @@ mod program {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
+        // --- The launched-bundle bookkeeping: shared between the event
+        // source (which reaps an exited bundle on a child-exit wake) and the
+        // activation path below (which spawns one), so a launch and its reap
+        // agree on the same in-flight set.
+        let launcher = RefCell::new(Launcher::new());
+
         // --- The event loop: park, apply, repaint. A dead channel ends
         // the app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
             endpoint: event_endpoint,
             set,
             server,
+            launcher: &launcher,
         });
         loop {
             let event = match events.wait() {
@@ -1799,7 +1981,8 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let (changed, close) = apply_event(&mut browser, &mut overlays, theme, &mode, &event);
+            let (changed, close) =
+                apply_event(&mut browser, &mut overlays, &launcher, theme, &mode, &event);
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);

@@ -232,9 +232,27 @@ engine holds **no** launch or open authority of its own: it decides *what* the
 target is and *what should happen*, never performing the spawn or the
 `fs_open` — those stay in the app's own capability-checked tail under the
 launching user's identity (so the read-only picker composes the same
-`Browser` and simply never launches). Acting on the launch/open decisions in
-the `files.app` `Run` binary — the spawn, the CU6 `fd_grant` hand-off of a
-file to its viewer, and "Open With…" — is FM6b.
+`Browser` and simply never launches).
+
+The `files.app` `Run` binary acts on this decision when the user presses
+`Enter`: a `Descended` reveals the selection and repaints, and a
+`LaunchBundle { path }` **launches the bundle** — its own `Launcher` spawns the
+bundle's own `Run` (`<path>/Run`) through the ordinary signed app-load gate
+(`CAP_PROC_SPAWN`, added to the manifest in the stage that first uses it),
+under the launching user's identity and with no ambient authority. The launch
+is **asynchronous and non-blocking** (`plans/FIX-DESKTOP.md`): `spawn` admits
+the child and returns its PID before the image loads, so the event loop never
+freezes behind a load; a synchronous refusal is stated fail-loud on `stderr` at
+once, and a load refusal that only shows once the image is read surfaces later
+as the child's reserved `LOAD_*` exit status, named by the reap (the shared
+`load_failure_reason` wording). The manager **reaps** every launched child on a
+new any-child wait-set member, drained in the event source's park branch the
+instant it fires, so a launched app is never left a zombie and the wake never
+degrades into a busy-poll (`AGENTS.md` §2.23). Acting on a regular file's
+`OpenFile` decision — the CU6 `fd_grant` hand-off of the file to its associated
+viewer, and "Open With…" — remains the rest of FM6b (it needs a new
+grant-to-spawned-child mechanism the tree does not yet have); activating a file
+today leaves the listing unchanged rather than fabricating an action.
 
 ### "Open With…" — the type→bundle association
 
@@ -334,7 +352,10 @@ panicking (`AGENTS.md` §2.9).
 `files.app`'s entry point (`plans/APPWIN.md` AW3) wires `VfsDirectorySource`
 over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
-with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
+with the keyboard (`Down`/`Up` select, `Enter` activates the selection —
+descending into a directory or launching a selected `<Name>.app` bundle
+(spawning its own `Run` through the signed load gate, async, the launched
+child reaped on the wait-set's any-child member; see *Activating an entry*),
 `Backspace` climbs, `F2` renames the selected item, `Ctrl+Shift+N` makes a new
 folder, and the toolbar accelerators `Alt+←/→/↑` and `F5`) and the pointer: a
 primary-button press first checks the manager-only write tools

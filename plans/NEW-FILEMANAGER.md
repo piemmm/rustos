@@ -46,9 +46,14 @@ FM7b's app-side move/copy verbs (`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut/copy/paste
 driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` /
 copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
-+ the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`)
++ the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
+and FM6b's app-side bundle launch (`Enter` → `Browser::activate_selected` →
+descend a directory or spawn a `<Name>.app` bundle's own `Run` through the
+signed load gate under `CAP_PROC_SPAWN`, async and non-blocking, with launched
+children reaped on an any-child wait-set member)
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
-FM6b app-side spawn/delegation, the FM7b progress-indicator + mid-run cancel
+rest of FM6b (the `OpenFile`/"Open With…" viewer hand-off), the FM7b
+progress-indicator + mid-run cancel
 follow-up (delete and copy alike),
 and FM9 are
 `planned`. The starting point is
@@ -78,11 +83,17 @@ decision — descend / launch a bundle / open a file, host-proven) is done, and
 so now is **FM6b's pure type→bundle "open with" association model** (the
 `lib/browse::open_with` module — the `BundleSource` enumeration seam, the
 extension→MIME `mime_for_name` classifier, and `applications_for`, host-proven
-like FM6a). The rest of **FM6b** (the app-side spawn of a launched bundle, the
-CU6 `fd_grant` hand-off of a file to its associated viewer wired onto that
-model, and the async non-blocking launch) is `planned`, since it needs the
-`CAP_PROC_SPAWN` manifest grant and the spawn/delegation wiring that the pure
-engine model does not.
+like FM6a). **FM6b's app-side bundle launch is now done too**: `Enter` on the
+selection dispatches through `Browser::activate_selected`, and a `LaunchBundle`
+spawns the `<Name>.app` bundle's own `Run` through the ordinary signed load
+gate under the `CAP_PROC_SPAWN` grant this stage added (async and
+non-blocking, with launched children reaped on an any-child wait-set member).
+The rest of **FM6b** — the CU6 `fd_grant` hand-off of a data file to its
+associated viewer (`OpenFile`) and the "Open With…" menu over the done
+association model — stays `planned`: it needs a *new* grant-to-spawned-child
+mechanism (the viewer obtains a file only via the session's `PickFile`
+delegation today), which the pure engine model and the bundle-launch path do
+not.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -97,15 +108,17 @@ engine model does not.
   the engine.
 
 - **The app is its own process with its own bounded authority (§4, §5.2).**
-  `files.app` holds exactly its manifest ∩ ceiling set. Today that is
-  `CAP_FS_ACCESS` (read/list) + `CAP_SHM` + `CAP_CONSOLE_WRITE`. Write-side
+  `files.app` holds exactly its manifest ∩ ceiling set: `CAP_FS_ACCESS`
+  (read/list) + `CAP_SHM` + `CAP_CONSOLE_WRITE`, plus `CAP_PROC_SPAWN` (added
+  in FM6b, the stage that first launches a bundle). Write-side
   operations (rename/move/copy/delete/mkdir) are ordinary §5.3-checked VFS
   calls under the launching user's own identity — they need **no new
   capability**: the per-inode owner/mode/ACL model already gates them, and
   a refused write fails closed with a stated reason (§2.24), never a
-  fabricated success. Launching another app is a `CAP_PROC_SPAWN` request
-  added to the manifest **only** in the stage (FM6) that first uses it,
-  never ahead of it (§2.4).
+  fabricated success. Launching another app is the `CAP_PROC_SPAWN` request
+  added to the manifest **only** in the stage (FM6b) that first uses it,
+  never ahead of it (§2.4); the child still loads through the ordinary signed
+  load gate and runs as the launching user (no ambient authority).
 
 - **No ambient authority; every operation is the user's own (§4, §5.4).**
   The file manager performs a write only through a path the user directly
@@ -500,31 +513,52 @@ case-insensitivity, unknown/dotfile fail-closed, `handles`, match / single /
 none / unrecognised, seam refusal). Docs: `docs/src/desktop/apps.md`,
 `lib/browse/README.md` + rustdoc.
 
+**The app-side bundle launch is done.** The `files.app` `Run` binary now
+dispatches a plain `Enter` on the selection through the shared
+`Browser::activate_selected` (the one dispatch-by-kind decision the trusted
+picker also acts on, §2.2): `Descended` reveals the selection and repaints (as
+a breadcrumb navigation does), and `LaunchBundle { path }` launches the
+`<Name>.app` bundle through the ordinary signed app-load gate — the manager's
+own `Launcher` spawns the bundle's own `Run` (`<path>/Run`, never a private
+path) via `tairix_rt::spawn`, under the launching user's identity, with the
+`CAP_PROC_SPAWN` grant added to `AppInfo.toml` (and the kernel
+`FILES_BROWSER_REQUEST` pin) in *this* stage (§2.4). The launch is **async and
+non-blocking** (`plans/FIX-DESKTOP.md`): `spawn` admits the child and returns
+its PID before the image loads, so the event loop never freezes behind a load;
+a synchronous refusal (a stripped capability, a malformed path) is stated
+fail-loud on `stderr` at once, and a load refusal that only shows once the image
+is read surfaces later as the child's reserved `LOAD_*` exit status, named by
+the reap (the shared `tairix_abi::load_failure_reason` wording, §2.2, §2.24).
+The manager **reaps** every launched child on a new any-child wait-set member
+(`CHILD_TOKEN`), drained in the event source's park branch the instant it fires,
+so a launched app is never left a zombie and the wake never degrades into a
+busy-poll (§2.23). Only the write/spawn-capable file manager builds and drives
+this; the read-only picker composes the same `Browser` and never launches.
+The app wiring rides the FM9 autoload vertical; the freestanding `Run` builds
+and clippy-clean cross-compiled, and the manifest grant is pinned by the kernel
+`appinfo_sources_match_the_embedded_registry` host test.
+
 The remaining app-side wiring (still `planned`):
 
-- **The app dispatches Enter/double-click through `Browser::activate_selected`**:
-  `Descended` repaints; `LaunchBundle`/`OpenFile` drive the launch below.
-- **Launch via the app loader, never a private path (§16.5, §18).** The
-  manager requests `CAP_PROC_SPAWN` (added to `AppInfo.toml` in *this*
-  stage, §2.4) and spawns through the ordinary load gate — for a `.app`
-  bundle, the bundle's own `Run`; for a data file, the app the file's
-  type/extension associates with, resolved through the shared bundle
-  lookup (`plans/APPS.md` command-word resolution + `AppInfo` MIME
-  associations, §16.5) — **not** a hard-coded table in the manager.
-- **Handing a file to a viewer reuses CU6 delegation (`plans/APPWIN.md`
-  AW5).** The manager `fs_open`s the file read-only and `fd_grant`s the
-  one-shot descriptor to the spawned viewer, exactly as the session
-  picker does — the viewer needs no filesystem capability of its own
-  (least privilege, §5.2). Write-capable "open" is a future, separately
-  gated concern (not built speculatively, §2.4).
+- **Open a data file in its associated viewer (`OpenFile`).** Activating a
+  regular file today leaves the listing unchanged (an honest no-op, never a
+  fabricated action); wiring it needs a *new* hand-off mechanism the tree does
+  not yet have. The viewer obtains its file only by asking the *session* for a
+  pick (`PickFile` → the session `fd_grant`s to the viewer's window owner →
+  `FilePicked`); there is no path for the file manager to hand a file to a child
+  it spawned. The intended shape (`plans/APPWIN.md` AW5 CU6) is: the manager
+  `fs_open`s the file read-only, spawns the associated viewer, `fd_grant`s the
+  one-shot descriptor to the child's attested PID, and forwards the handle to
+  it — so the viewer needs no filesystem capability of its own (least
+  privilege, §5.2). That grant-to-spawned-child plumbing (and the ordering/race
+  discipline it needs) is its own increment.
 - **"Open With…"** draws the bundles the done `open_with` model returns as a
-  `lib/controls` `Menu` — no invented registry, no crash on an empty result
-  (§2.24). The remaining work is only the app-side `BundleSource` backed by the
-  real app store (each bundle's `AppInfo` MIME table) and the menu that lists
-  `applications_for`'s result; the matching model itself is landed above.
-- **Async, non-blocking launch (`plans/FIX-DESKTOP.md`).** The spawn must
-  not freeze the manager's window; it stays responsive and parked while
-  the child starts. Host tests: the app-store `BundleSource`, the grant-to-child seam.
+  `lib/controls` `Menu`; the remaining work is only the app-side `BundleSource`
+  backed by the real app store and the menu that lists `applications_for`'s
+  result. It lands with the `OpenFile` hand-off above (both spawn a viewer).
+- **Double-click activation.** Activation is keyboard-driven (`Enter`) today;
+  a pointer double-click needs press-time tracking and lands with the pointer
+  refinements, not as speculative state now (§2.4).
 
 ### FM7a — the selection + clipboard model `[x]`
 

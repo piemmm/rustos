@@ -29,8 +29,12 @@ One `shm_create`d frame region granted to the reserved window endpoint
 app **parks** on through its wait-set (every accepted event
 authenticated against the kernel-attested session identity the create
 reply named), and the `WindowClient` calls over `ipc_call`. Keyboard
-navigation drives the browser (`Down`/`Up` select, `Enter` opens a
-directory, `Backspace` goes up); `F2` renames the selected item,
+navigation drives the browser (`Down`/`Up` select, `Enter` activates the
+selection — descends into a directory or launches a selected `<Name>.app`
+bundle by spawning the bundle's own `Run` through the ordinary signed
+app-load gate (asynchronously, with the launched child reaped on the
+wait-set's any-child member so it is never left a zombie; a refusal stated
+fail-loud on `stderr`), `Backspace` goes up); `F2` renames the selected item,
 `Ctrl+Shift+N` makes a new folder, `Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut, copy,
 and paste the selection (a same-volume move is one `fs_rename`, a
 cross-volume move copies-then-deletes, a copy streams in bounded chunks),
@@ -45,8 +49,10 @@ reserved code and a stated reason on `stderr`.
 
 `CAP_CONSOLE_WRITE` (fail-loud diagnostics), `CAP_FS_ACCESS` (its
 directory listings — every read still permission-checked per inode
-under the launching user's identity), and `CAP_SHM` (the granted window
-frame region). See `AppInfo.toml`.
+under the launching user's identity), `CAP_SHM` (the granted window
+frame region), and `CAP_PROC_SPAWN` (launching an activated `<Name>.app`
+bundle through the signed load gate; the child runs as the launching user,
+no ambient authority). See `AppInfo.toml`.
 
 ## Test surface
 
