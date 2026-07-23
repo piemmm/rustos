@@ -203,6 +203,24 @@ impl<S: DirectorySource> Browser<S> {
         self.selected_entry().map(Entry::name)
     }
 
+    /// Spell the validated absolute path of the selected entry — the node a
+    /// read-only `fs_stat` (the Properties view) or an open acts on — or
+    /// `None` when the directory is empty.
+    ///
+    /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]), so
+    /// the stat/open can
+    /// never name a different node than the browser shows; a name that cannot
+    /// be spelled as a valid, bounded absolute path is a fail-closed
+    /// [`BrowseError::Source`]. The engine only *names* the target — reading
+    /// its metadata stays in the caller's own capability-checked tail under
+    /// the user's identity, so composing this grants nothing and the
+    /// read-only picker builds the same path.
+    #[must_use]
+    pub fn selected_target_path(&self) -> Option<Result<String, BrowseError>> {
+        let name = String::from(self.selected_name()?);
+        Some(self.child_target_path(&name))
+    }
+
     /// Move the selection to `index`.
     ///
     /// # Errors

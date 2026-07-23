@@ -31,11 +31,12 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-and FM8a's properties view model
+FM8a's properties view model, and FM8b's drawn read-only properties panel +
+its `Alt+Enter`/`Escape` app wiring
 are done**; the rest of the FM4b drawn chrome (the context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
-spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
-properties panel + permission editing, and FM9 are
+spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's permission
+editing, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -585,13 +586,35 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
   higher-bit masking). Docs: `docs/src/desktop/apps.md`, `lib/browse`
   README + rustdoc, `tairix_abi::fs::mode_string` rustdoc.
 
-### FM8b — the drawn properties panel + permission editing `[ ]`
+### FM8b — the drawn properties panel + permission editing `[~]`
 
-- **A Properties panel** (`lib/controls` `Panel`) painting the done FM8a
-  `Properties` model for the selected item — name, kind, size + on-disk
-  `allocated`, the four `Time64` stamps, owner uid/gid, and mode bits — all
-  straight from `fs_stat` (§21, 64-bit-native throughout), no fabricated
-  fields.
+Split (§2.19) into the drawn read-only panel (done) and permission editing
+(still `planned`, since it needs the `fs_set_mode` write path the read-only
+view does not).
+
+**The drawn Properties panel is done.** `render::draw_properties` paints the
+done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
+the view — name (title), kind, size + on-disk `allocated`, permissions
+(symbolic + octal), owner uid/gid, and the four `Time64` stamps — all straight
+from `fs_stat` (§21, 64-bit-native throughout), no fabricated fields.
+`render::properties_rows` is the one host-tested definition of which fields
+appear and how each reads, so the drawn panel and its tests never disagree
+(§2.2); the panel clips so a too-small window shows what fits rather than
+panicking (§2.9). The `files.app` `Run` binary opens the overlay with
+`Alt+Enter` on the selected item — spelling its path through the new public
+`Browser::selected_target_path` and reading its metadata with one
+capability-checked `fs_stat` under the user's own identity (**no new
+capability**) — and dismisses it with `Escape`; while open the overlay owns the
+window (keys do not navigate behind it). Showing properties is an incidental,
+refusable action: a stat the VFS refuses is stated on `stderr` and leaves the
+overlay closed — an answer, not a crash, never a fabricated summary (§2.24,
+§5.4). Host-tested in `lib/browse` (`properties_rows` field set/order + bundle
+labelling, `properties_panel_rect` centering/clamp, `draw_properties` paints /
+degenerate no-panic, and `selected_target_path` spelling + empty-directory
+`None`). Docs: `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
+
+The remaining FM8b work (still `planned`):
+
 - **Editing mode/ownership** where the user is authorised: mode via a
   clear permission control, committed through `fs_set_mode`; a refused
   change is an honest in-UI answer (§2.24). Ownership change is shown but

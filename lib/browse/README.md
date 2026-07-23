@@ -157,8 +157,8 @@ can never diverge in navigation semantics, listing policy, or look.
   date-and-time spelling, blank at the epoch for the same reason) — the
   file-listing convention shared by both views.
 - **Properties** (`properties`, `plans/NEW-FILEMANAGER.md` FM8): the pure
-  view model behind the Properties panel, host-proven ahead of the drawn
-  panel. `Properties::from_stat` turns an entry's name, its browser
+  view model behind the Properties panel. `Properties::from_stat` turns an
+  entry's name, its browser
   `EntryKind`, and the node's `fs_stat` `FileStat` into the display fields the
   panel shows — a human kind label (`Folder` / `File` / `Application`), the
   apparent and on-disk sizes (via `format_size`), the raw and octal mode, the
@@ -168,7 +168,13 @@ can never diverge in navigation semantics, listing policy, or look.
   keeps none — no fabricated wall time). It reads nothing and holds no
   authority: the app performs the one capability-checked `fs_stat` under the
   user's own identity and hands the result here, so the read-only picker
-  builds the same view.
+  builds the same view. The drawn overlay (FM8b) is the renderer's
+  `draw_properties`: a shared `lib/controls` `Panel` centered over the view
+  painting `properties_rows` (the one definition of which fields appear —
+  Kind, Size, Permissions, Owner, and the four stamps), which the files app
+  opens with `Alt+Enter` and dismisses with `Escape`. `Browser::selected_target_path`
+  is the shared spelling of the selected node's absolute path the `fs_stat`
+  acts on.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the
@@ -198,8 +204,12 @@ can never diverge in navigation semantics, listing policy, or look.
   gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
   an overlay (the in-place rename editor) sits exactly over it.
-  `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the files app,
-  the picker, and the QEMU vertical's host-side assertions share.
+  `selection_rect`'s sibling `draw_properties` draws the FM8b Properties
+  overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
+  the selected node's `Properties`, clipped so a too-small window shows what
+  fits rather than panicking. `WIN_WIDTH`/`WIN_HEIGHT` are the one
+  browser-view geometry the files app, the picker, and the QEMU vertical's
+  host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — each component checked by the shared
   `tairix_path::validate_file_name` rule, the same rule the rename editor

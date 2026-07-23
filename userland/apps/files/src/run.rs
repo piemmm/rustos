@@ -47,16 +47,16 @@ mod program {
     use alloc::string::{String, ToString};
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::fs::FS_NAME_MAX;
+    use tairix_abi::fs::{OpenFlags, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
-    use tairix_browse::render::render;
+    use tairix_browse::render::{draw_properties, render};
     use tairix_browse::{
-        validate_new_name, Browser, DirectorySource, RenameError, ToolbarCommand,
-        VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH,
+        validate_new_name, Browser, DirectorySource, EntryKind, Properties, RenameError,
+        ToolbarCommand, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
@@ -190,6 +190,7 @@ mod program {
     fn present_frame<S, T>(
         browser: &Browser<S>,
         rename: Option<&TextField>,
+        properties: Option<&Properties>,
         theme: &Theme,
         client: &mut WindowClient<T>,
         window: u64,
@@ -216,6 +217,12 @@ mod program {
                 field.render(&mut surface, bounds, Scale::ONE, theme, font);
             }
         }
+        // With the Properties overlay open, draw it centered on top of the
+        // view (the shared drawn panel painting the already-authorised
+        // metadata). Rename and Properties are never open together.
+        if let Some(props) = properties {
+            draw_properties(&mut surface, props, theme, font, viewport);
+        }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -237,6 +244,7 @@ mod program {
     fn apply_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
+        properties: &mut Option<Properties>,
         theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
@@ -245,9 +253,28 @@ mod program {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
 
         // A close request ends the app whatever mode it is in; an open rename
-        // edit is simply abandoned (nothing was written).
+        // edit or properties overlay is simply abandoned (nothing was written).
         if let WindowEvent::CloseRequested { .. } = event {
             return (false, true);
+        }
+
+        // Properties mode: the overlay owns the window. `Escape` dismisses it;
+        // every other event is swallowed so a keystroke never navigates the
+        // view behind it. It is read-only, so nothing is committed either way.
+        if properties.is_some() {
+            if let WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } = event
+            {
+                *properties = None;
+                return (true, false);
+            }
+            return (false, false);
         }
 
         // Rename mode: the inline editor owns the keyboard. Its keys never
@@ -292,6 +319,13 @@ mod program {
                     browser.select_previous();
                     tairix_browse::render::reveal_selection(browser, font, theme, viewport);
                     (true, false)
+                }
+                // Alt+Enter opens the Properties overlay for the selected
+                // item; with nothing selected (an empty directory) it is a
+                // no-op. Checked before the bare Enter arm so the modifier
+                // wins.
+                KeyValue::Named(NamedKeyCode::Enter) if modifiers.alt => {
+                    begin_properties(browser, properties)
                 }
                 KeyValue::Named(NamedKeyCode::Enter) => {
                     // Opening a file (or an unreadable directory) is a
@@ -445,6 +479,53 @@ mod program {
         field.set_focused(true);
         *rename = Some(field);
         (true, false)
+    }
+
+    /// Open the Properties overlay for the selected item: name its path
+    /// through the shared spelling, read its metadata with one
+    /// capability-checked `fs_stat` under the user's own identity, and store
+    /// the display-ready [`Properties`] the overlay paints. With nothing
+    /// selected (an empty directory) it is a no-op.
+    ///
+    /// Showing properties is an incidental, refusable action: if the item can
+    /// no longer be named or its metadata cannot be read (it vanished, or is
+    /// unreadable), the refusal is stated on `stderr` and the overlay simply
+    /// stays closed — an answer, not a crash, and never a fabricated summary
+    /// (§2.24, §5.4). A directory or sealed bundle is opened with the
+    /// directory flag, a regular file read-only; `stat` needs only a live
+    /// handle either way.
+    fn begin_properties<S: DirectorySource>(
+        browser: &Browser<S>,
+        properties: &mut Option<Properties>,
+    ) -> (bool, bool) {
+        let Some(entry) = browser.selected_entry() else {
+            return (false, false);
+        };
+        let kind = entry.kind();
+        let name = entry.name().to_string();
+        let Some(Ok(path)) = browser.selected_target_path() else {
+            let _ = tairix_rt::stderr(b"files: cannot name the selected item\n");
+            return (false, false);
+        };
+        let flags = if matches!(kind, EntryKind::File) {
+            OpenFlags::READ
+        } else {
+            OpenFlags::DIRECTORY
+        };
+        let stat = match tairix_rt::File::open(path.as_bytes(), flags) {
+            Ok(file) => file.stat(),
+            Err(err) => Err(err),
+        };
+        match stat {
+            Ok(stat) => {
+                *properties = Some(Properties::from_stat(name, kind, &stat));
+                (true, false)
+            }
+            Err(_) => {
+                let _ = tairix_rt::stderr(b"files: properties unavailable for that item\n");
+                (false, false)
+            }
+        }
     }
 
     /// Feed one key to the open rename editor. A submit commits the new name
@@ -677,9 +758,14 @@ mod program {
         // mode; the event loop threads it so the editor state and the painted
         // overlay stay in step.
         let mut rename: Option<TextField> = None;
+        // The Properties overlay, when open (`Alt+Enter`). `None` otherwise;
+        // the event loop threads it so the read-only panel and the painted
+        // overlay stay in step.
+        let mut properties: Option<Properties> = None;
         if present_frame(
             &browser,
             rename.as_ref(),
+            properties.as_ref(),
             theme,
             &mut client,
             window,
@@ -706,7 +792,14 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let (changed, close) = apply_event(&mut browser, &mut rename, theme, &mode, &event);
+            let (changed, close) = apply_event(
+                &mut browser,
+                &mut rename,
+                &mut properties,
+                theme,
+                &mode,
+                &event,
+            );
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);
@@ -716,6 +809,7 @@ mod program {
                 && present_frame(
                     &browser,
                     rename.as_ref(),
+                    properties.as_ref(),
                     theme,
                     &mut client,
                     window,

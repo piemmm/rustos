@@ -2449,3 +2449,194 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
         None
     );
 }
+
+// --- FM8b: the drawn Properties overlay + selected_target_path ------------
+
+use crate::properties::Properties;
+use crate::render::{draw_properties, properties_panel_rect, properties_rows, PROPERTY_ROW_COUNT};
+use tairix_abi::fs::{FileId, FileStat};
+use tairix_abi::NodeTimes;
+
+/// A `FileStat` fixture with the given kind and mode; a 1.5 KiB file taking
+/// 4 KiB on disk, owned by uid 1000 / gid 100, with a kept access time left at
+/// the epoch (so the blank-stamp path is exercised).
+fn props_stat(kind: FileKind, mode: u32) -> FileStat {
+    FileStat {
+        kind,
+        size: 1536,
+        allocated: 4096,
+        mode,
+        uid: 1000,
+        gid: 100,
+        id: FileId::NONE,
+        times: NodeTimes {
+            created: Time64::from_secs(1_609_459_200),
+            modified: Time64::from_secs(1_609_459_200 + 3661),
+            accessed: Time64::UNIX_EPOCH,
+            changed: Time64::from_secs(1_700_000_000),
+        },
+    }
+}
+
+#[test]
+fn properties_rows_lists_every_field_in_order_from_the_model() {
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+    let rows = properties_rows(&props);
+    // Exactly the sized-for field count, and in the documented order.
+    assert_eq!(rows.len(), PROPERTY_ROW_COUNT);
+    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    assert_eq!(
+        labels,
+        [
+            "Kind",
+            "Size",
+            "Permissions",
+            "Owner",
+            "Created",
+            "Modified",
+            "Accessed",
+            "Changed",
+        ]
+    );
+    let value = |name: &str| -> String {
+        rows.iter()
+            .find(|(label, _)| *label == name)
+            .map(|(_, v)| v.clone())
+            .expect("field present")
+    };
+    assert_eq!(value("Kind"), "File");
+    assert_eq!(value("Size"), "1.5 KiB (4.0 KiB on disk)");
+    assert_eq!(value("Permissions"), "-rw-r--r-- (0644)");
+    assert_eq!(value("Owner"), "uid 1000 / gid 100");
+    assert_eq!(value("Modified"), "2021-01-01 01:01:01");
+    // A stamp the backing does not keep renders blank, never a fabricated
+    // wall time.
+    assert_eq!(value("Accessed"), "");
+}
+
+#[test]
+fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
+    // A `<Name>.app` bundle is labelled "Application" but is a directory on
+    // disk, so the permission string still leads with `d`.
+    let props = Properties::from_stat(
+        "Editor.app",
+        crate::entry::EntryKind::Bundle,
+        &props_stat(FileKind::Directory, 0o755),
+    );
+    let rows = properties_rows(&props);
+    let kind = rows.iter().find(|(l, _)| *l == "Kind").unwrap().1.clone();
+    let perms = rows
+        .iter()
+        .find(|(l, _)| *l == "Permissions")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(kind, "Application");
+    assert_eq!(perms, "drwxr-xr-x (0755)");
+}
+
+#[test]
+fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+
+    // A generous window: the panel fits and is centered within it.
+    let vp = Rect::new(0, 0, 480, 320);
+    let rect = properties_panel_rect(vp, font, &theme);
+    assert!(rect.width > 0 && rect.height > 0);
+    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
+    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
+    assert!(
+        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
+    );
+    // Centered: equal margins on each axis (within one pixel of integer split).
+    let margin_x = rect.origin.x;
+    let right_margin =
+        i32::try_from(vp.width).unwrap() - (rect.origin.x + i32::try_from(rect.width).unwrap());
+    assert!((margin_x - right_margin).abs() <= 1);
+
+    // A window smaller than the panel would like still yields a drawable rect
+    // clamped to the window, never a zero or over-size rectangle (no panic).
+    let tiny = Rect::new(0, 0, 20, 16);
+    let small = properties_panel_rect(tiny, font, &theme);
+    assert!(small.width >= 1 && small.width <= tiny.width);
+    assert!(small.height >= 1 && small.height <= tiny.height);
+}
+
+#[test]
+fn draw_properties_paints_into_the_surface_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let props = Properties::from_stat(
+        "Documents",
+        crate::entry::EntryKind::Directory,
+        &props_stat(FileKind::Directory, 0o755),
+    );
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    // A blank base to compare against: after drawing the overlay the surface
+    // is no longer uniform, proving the panel actually painted.
+    let before = surface.pixels().to_vec();
+    draw_properties(&mut surface, &props, &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_properties(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2));
+}
+
+#[test]
+fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Default sort: the four view-binding directories in name order.
+    browser
+        .select(
+            browser
+                .entries()
+                .iter()
+                .position(|e| e.name() == "System")
+                .expect("System listed"),
+        )
+        .expect("select System");
+    assert_eq!(
+        browser.selected_target_path(),
+        Some(Ok("/System".to_string()))
+    );
+
+    // Nested: the path reflects the current directory, not just the leaf.
+    let system = browser
+        .entries()
+        .iter()
+        .position(|e| e.name() == "System")
+        .expect("System listed");
+    browser.open_index(system).expect("descend into System");
+    let first = browser.selected_name().expect("a selection").to_string();
+    assert_eq!(
+        browser.selected_target_path(),
+        Some(Ok(alloc::format!("/System/{first}")))
+    );
+
+    // The empty /System/Fonts has no selection, hence no target path.
+    let mut b2 = Browser::open_root(MockFs::fixture()).expect("root");
+    b2.open_index(
+        b2.entries()
+            .iter()
+            .position(|e| e.name() == "System")
+            .unwrap(),
+    )
+    .expect("enter System");
+    b2.open_index(
+        b2.entries()
+            .iter()
+            .position(|e| e.name() == "Fonts")
+            .unwrap(),
+    )
+    .expect("enter Fonts");
+    assert_eq!(b2.selected_target_path(), None);
+}

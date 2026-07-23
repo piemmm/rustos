@@ -399,7 +399,7 @@ launching user's own identity, so the read-only picker never runs it.
 The Properties panel (`plans/NEW-FILEMANAGER.md` FM8) shows one selected node's
 metadata. That view is modelled purely in `lib/browse::properties`, host-tested
 without a kernel exactly as the rename, activation, and clipboard models are;
-the drawn panel that paints it is a later increment.
+the drawn panel that paints it is described below.
 
 `Properties::from_stat(name, kind, stat)` turns an entry's name, its browser
 `EntryKind`, and the `fs_stat` `FileStat` the app read for it into the
@@ -420,6 +420,34 @@ permission string's leading type indicator reads from the structural
 directory's `d`. The model reads nothing and holds no authority: the app
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
+
+### The drawn properties panel
+
+The drawn overlay (`plans/NEW-FILEMANAGER.md` FM8b) paints that model as a
+shared `lib/controls` `Panel` centered over the current view, so it is one
+coherent themed surface rather than a browser-private box (`AGENTS.md` §2.2).
+`render::properties_rows` is the one definition of *which* fields appear and how
+each reads — Kind, Size (apparent plus on-disk), Permissions (symbolic plus
+octal), Owner, and the four timestamps — host-tested so the drawn panel and its
+tests can never disagree about the field set; `render::draw_properties` draws
+the panel titled with the node's name and lays those rows out as muted-label /
+solid-value columns, clipping so a window too small for the whole panel shows
+what fits rather than panicking (`AGENTS.md` §2.9). The panel reads only the
+already-authorised `Properties` and holds no authority.
+
+The `files.app` `Run` binary opens the overlay with **`Alt+Enter`** on the
+selected item: it names the item's path through the shared
+`Browser::selected_target_path` spelling and reads its metadata with one
+capability-checked `fs_stat` under the user's own identity (`fs_open` with the
+directory flag for a folder or sealed bundle, read-only for a file — `stat`
+needs only a live handle), then shows the panel. While the overlay is open it
+owns the window — **`Escape`** dismisses it and every other keystroke is
+swallowed rather than navigating the view behind it. Showing properties is an
+incidental, refusable action: if the item can no longer be named or its
+metadata cannot be read (it vanished, or is unreadable), the refusal is stated
+on `stderr` and the overlay stays closed — an answer, not a crash, and never a
+fabricated summary (`AGENTS.md` §2.24, §5.4). Editing mode and ownership from
+the panel is a later increment (FM8b's permission editing).
 
 ## Terminal emulator (`tairix-terminal`)
 
