@@ -77,6 +77,9 @@
 //! * [`owner_edit`](mod@owner_edit) — the [`OwnerError`]/[`validate_owner`]
 //!   ownership-change model ([`OwnerChange`]) committed through the privileged
 //!   `fs_set_owner` seam (`plans/NEW-FILEMANAGER.md` `FM8b`).
+//! * [`progress`](mod@progress) — the [`ProgressModel`] progress + latched-cancel
+//!   state of a long delete/copy the file manager drives interleaved with its
+//!   event loop (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
 //!   rename model the file manager's first write operation is built on.
 //! * [`render`](mod@render) — painting the current directory into a
@@ -111,6 +114,7 @@ pub mod mkdir;
 pub mod mode_edit;
 pub mod open_with;
 pub mod owner_edit;
+pub mod progress;
 pub mod properties;
 pub mod rename;
 pub mod render;
@@ -142,6 +146,7 @@ pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOL
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
+pub use progress::{ProgressModel, ProgressOp};
 pub use properties::Properties;
 pub use rename::{validate_new_name, RenameError};
 pub use render::render;

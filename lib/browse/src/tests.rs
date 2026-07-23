@@ -4376,3 +4376,123 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
         None
     );
 }
+
+// --- FM7b: the long-operation progress + cancel surface -------------------
+
+use crate::progress::{ProgressModel, ProgressOp};
+use crate::render::{
+    build_progress_cancel, draw_progress_dialog, progress_cancel_at, progress_dialog_rect,
+};
+
+#[test]
+fn progress_model_reports_the_honest_count_and_never_a_percentage() {
+    let mut model = ProgressModel::new(ProgressOp::Delete);
+    assert_eq!(model.done(), 0);
+    // Zero and plural counts read naturally; the verb matches the operation.
+    assert_eq!(model.status_line(), "0 items removed");
+    model.set_done(1);
+    assert_eq!(model.status_line(), "1 item removed");
+    model.set_done(42);
+    assert_eq!(model.status_line(), "42 items removed");
+    // No fabricated percentage anywhere in the caption (§2.24).
+    assert!(!model.status_line().contains('%'));
+
+    // A copy model reads with the copy verb.
+    let mut copy = ProgressModel::new(ProgressOp::Copy);
+    copy.set_done(3);
+    assert_eq!(copy.status_line(), "3 items copied");
+    assert!(copy.title().starts_with("Copying"));
+    assert!(model.title().starts_with("Deleting"));
+}
+
+#[test]
+fn progress_cancel_is_latched_and_shown() {
+    let mut model = ProgressModel::new(ProgressOp::Delete);
+    assert!(!model.is_cancel_requested());
+    model.request_cancel();
+    assert!(model.is_cancel_requested());
+    // The title reflects the pending cancel while the current step finishes.
+    assert!(model.title().starts_with("Cancelling"));
+    // The latch cannot be reverted by a second request.
+    model.request_cancel();
+    assert!(model.is_cancel_requested());
+    // The Cancel button reads differently once cancel is latched (disabled), so
+    // a second press cannot re-request what is already stopping.
+    let running = ProgressModel::new(ProgressOp::Delete);
+    assert_ne!(
+        build_progress_cancel(&model).state(),
+        build_progress_cancel(&running).state()
+    );
+}
+
+#[test]
+fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+
+    let vp = Rect::new(0, 0, 480, 320);
+    let rect = progress_dialog_rect(vp, font, &theme);
+    assert!(rect.width > 0 && rect.height > 0);
+    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
+    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
+    assert!(
+        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
+    );
+    // A window smaller than the panel still yields a drawable clamped rect (no
+    // panic).
+    let tiny = Rect::new(0, 0, 20, 16);
+    let small = progress_dialog_rect(tiny, font, &theme);
+    assert!(small.width >= 1 && small.width <= tiny.width);
+    assert!(small.height >= 1 && small.height <= tiny.height);
+}
+
+#[test]
+fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let mut model = ProgressModel::new(ProgressOp::Copy);
+    model.set_done(7);
+
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    draw_progress_dialog(&mut surface, &model, &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_progress_dialog(&mut tiny, &model, &theme, font, Rect::new(0, 0, 2, 2));
+}
+
+#[test]
+fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+
+    // Scanning the whole window, the Cancel hit-test resolves true for a
+    // contiguous, reachable region and false everywhere else — so the drawn
+    // button and the hit-test agree on exactly one target (§2.2).
+    let mut hits = 0u32;
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if progress_cancel_at(vp, font, &theme, Point::new(x, y)) {
+                hits += 1;
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    assert!(hits > 0, "the Cancel button is reachable");
+
+    // A click well outside the panel resolves nothing (fail closed).
+    assert!(!progress_cancel_at(vp, font, &theme, Point::new(-5, -5)));
+    // On a window too small to place the button, nothing resolves (fail
+    // closed) rather than placing a phantom button.
+    let tiny = Rect::new(0, 0, 20, 16);
+    assert!(!progress_cancel_at(tiny, font, &theme, Point::new(5, 5)));
+}

@@ -47,6 +47,11 @@ driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` 
 copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
+FM7b's app-side delete **progress + cancel** (the confirmed removal handed to an
+interleaved `advance_delete` operation the event loop drives a bounded slice at a
+time, drawing the shared `lib/browse::progress` panel and honouring a
+non-blocking mid-run cancel, so a large recursive delete never freezes the
+window, §2.23),
 FM6b's app-side bundle launch (`Enter` → `Browser::activate_selected` →
 descend a directory or spawn a `<Name>.app` bundle's own `Run` through the
 signed load gate under `CAP_PROC_SPAWN`, async and non-blocking, with launched
@@ -60,7 +65,7 @@ are done** — completing FM4b's drawn chrome; the rest of FM6b (the
 `OpenFile`/"Open With…" viewer hand-off, whose correct race-free spawn-time
 `FdWire::Handle` design is recorded in FM6b below), the FM7b
 progress-indicator + mid-run cancel
-follow-up (delete and copy alike),
+follow-up for **copy/paste** (delete's progress + cancel is done),
 and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
@@ -812,16 +817,43 @@ the read-only picker never pastes. The engine models are host-tested in
 autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 `run.rs` rustdoc.
 
+**Progress + cancel for the Delete verb is done.** The interactive Delete no
+longer drives its `DeleteWalk` to completion in one blocking pass: the confirmed
+removal is handed to an interleaved **operation** the event loop advances a
+bounded slice at a time (`advance_delete`, `OPERATION_STEP_BUDGET` steps per
+turn), repainting a modal progress panel and polling the event mailbox
+*non-blocking* for a mid-run cancel or a close between slices, so a large
+recursive delete never freezes the window and never busy-spins — the walk is
+genuine pending work, so continuously stepping it is not a spin (§2.23). The
+drawn surface is the shared `lib/browse::progress` model (`ProgressModel` —
+op kind, the honest rising count from `DeleteWalk::removed`, and a *latched*
+cancel) painted by `render::draw_progress_dialog` as a `lib/controls` `Panel` +
+an indeterminate `Progress` trace (a "working" bar, no fabricated percentage
+since the total is unknown until the reads reveal it, §2.24) + a Cancel
+`Button`; `render::progress_cancel_at` is the mirror hit-test resolving a click
+to the drawn button (fail closed off it, §2.2/§5.4). A latched cancel stops the
+walk at the next step boundary (never mid-node), and either a completed or a
+cancelled/refused run re-lists so a partial removal is shown honestly (§2.24).
+The one shared `advance_delete` drive is *also* what the cross-volume-move
+cleanup (`delete_source`) runs — driven synchronously to completion there — so a
+move's cleanup and an interactive delete can never diverge (§2.2). The blocking
+and the non-blocking event paths share one `accept_frame` sender-attestation
+(§2.2). Host-tested in `lib/browse` (the `ProgressModel` count/verb/no-percentage,
+the latched cancel + disabled Cancel button, `progress_dialog_rect`
+centering/clamp, `draw_progress_dialog` paint/degenerate-no-panic, and the
+`progress_cancel_at` full-window mirror + fail-closed); the app drive interleaving
+rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
+README + rustdoc, `files.app` `run.rs` rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
-- **Progress + cancel** for long operations (delete and copy alike): a bounded
-  progress indicator (`lib/controls` `Progress`) driven by `DeleteWalk::removed`
-  / the copy cursor, and a Cancel that stops at the next step/chunk boundary
-  with the window staying parked/responsive throughout (§2.23). The Delete verb
-  drives its walk to completion synchronously today; interleaving the drive with
-  the event loop (an incremental step budget per wake) and drawing the progress/
-  cancel surface is this separately-staged increment — the walk already holds
-  its exact position between steps, so no engine change is needed.
+- **Progress + cancel for copy/paste.** The `Ctrl+V` paste drive
+  (`run_paste`) is still synchronous. Interleaving it with the event loop
+  (a `CopyWalk`/`CopyCursor`-backed operation reusing the same progress
+  panel and cancel poll the delete drive now has) is the remaining slice of
+  this item, staged as its own increment (§2.19) — the drawn surface and the
+  `ProgressModel`/`ProgressOp::Copy` case already exist, so it is app-side
+  interleaving only, no new engine or surface work.
 - Host tests: the engine-side selection ranges, clipboard state machine,
   move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
   **done** in `lib/browse` (FM7a + the `execute` model above); the progress/

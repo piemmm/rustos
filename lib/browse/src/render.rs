@@ -29,8 +29,11 @@ use alloc::vec::Vec;
 use tairix_controls::button::{Button, ButtonContent};
 use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use tairix_controls::state::{AuthorityState, ControlRole, ControlState, SelectionState};
+use tairix_controls::state::{
+    ActivityState, AuthorityState, ControlRole, ControlState, SelectionState,
+};
 use tairix_controls::text::TextField;
+use tairix_controls::value::Progress;
 use tairix_controls::{
     Card, Checkbox, IconButton, Menu, MenuItem, Panel, ScrollBar, TableCell, TableRow, Toolbar,
 };
@@ -48,6 +51,7 @@ use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
+use crate::progress::ProgressModel;
 use crate::properties::Properties;
 use crate::source::DirectorySource;
 
@@ -1206,13 +1210,29 @@ pub fn build_delete_dialog(plan: &DeletePlan) -> Dialog {
 /// the same rectangle (§2.2).
 #[must_use]
 pub fn delete_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    // Title bar, up to two message lines, and the action-button band, with
+    // margins — generous so the buttons are not clipped at a normal size.
+    centered_overlay_rect(viewport, font, theme, 6)
+}
+
+/// A centered, clamped modal-overlay rectangle within `viewport`, sized to a
+/// title bar plus `content_lines` text rows and four-fifths of the window
+/// width, clamped so a small window still yields a drawable — if clipped —
+/// rectangle rather than a panic (§2.9).
+///
+/// The one sizing definition the delete-confirmation dialog and the progress
+/// panel share, so their placement stays consistent and cannot drift (§2.2).
+fn centered_overlay_rect(
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    content_lines: u32,
+) -> Rect {
     let line = row_height(font);
     let title = Scale::ONE
         .scale_length(theme.metrics().title_bar_height)
         .max(1);
-    // Title bar, up to two message lines, and the action-button band, with
-    // margins — generous so the buttons are not clipped at a normal size.
-    let content = line.saturating_mul(6);
+    let content = line.saturating_mul(content_lines);
     let height = title.saturating_add(content).min(viewport.height.max(1));
     let width = viewport
         .width
@@ -1279,6 +1299,131 @@ pub fn delete_dialog_action_at(
         }
     }
     None
+}
+
+/// The centered, clamped bounds of the long-operation progress panel within
+/// `viewport`.
+///
+/// One definition so [`draw_progress_dialog`] and [`progress_cancel_at`] place
+/// and hit-test the same rectangle (§2.2), sized like the delete-confirmation
+/// dialog so the two modal surfaces sit consistently.
+#[must_use]
+pub fn progress_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    centered_overlay_rect(viewport, font, theme, 6)
+}
+
+/// The Cancel-button rectangle within the progress panel's `content` area —
+/// bottom-right, sized to the "Cancel" label plus padding, clamped to the
+/// content so a small window never places it off the panel. The one definition
+/// [`draw_progress_dialog`] paints and [`progress_cancel_at`] hit-tests, so a
+/// click resolves to exactly the drawn button (§2.2).
+fn progress_cancel_rect(content: Rect, font: BitmapFont) -> Rect {
+    let pad = font.text_width("  ").max(LABEL_PADDING);
+    let width = font
+        .text_width("Cancel")
+        .saturating_add(pad.saturating_mul(2))
+        .min(content.width);
+    let height = row_height(font).min(content.height);
+    let x = content
+        .left()
+        .saturating_add(to_i32(content.width.saturating_sub(width)));
+    let y = content
+        .top()
+        .saturating_add(to_i32(content.height.saturating_sub(height)));
+    Rect::new(x, y, width, height)
+}
+
+/// Build the progress panel's [`Progress`] trace for `model`: an indeterminate
+/// "working" bar captioned with the model's honest running count.
+///
+/// The total is unknown until the driving walk's reads reveal it, so the trace
+/// is [`ActivityState::Working`] (a bounded moving segment) rather than a
+/// fabricated percentage (§2.24). Its moving-segment phase is derived from the
+/// count, so the bar advances on real job-progress events, never an idle
+/// animation loop (§2.23).
+#[must_use]
+pub fn build_progress(model: &ProgressModel) -> Progress {
+    let mut progress = Progress::new().with_label(model.status_line());
+    progress.set_state(ControlState::idle().with_activity(ActivityState::Working));
+    // A permille phase that turns over as items are processed — motion is
+    // driven by real progress, not a timer.
+    let phase = u16::try_from(model.done() % 1000).unwrap_or(0);
+    progress.set_phase(phase);
+    progress
+}
+
+/// Build the progress panel's Cancel [`Button`] for `model`: enabled while the
+/// run is in progress, disabled once a cancel has already been latched (so a
+/// second press cannot re-request what is already stopping).
+#[must_use]
+pub fn build_progress_cancel(model: &ProgressModel) -> Button {
+    let mut button = Button::new(
+        ButtonContent::Label(String::from("Cancel")),
+        ControlRole::Neutral,
+    );
+    if model.is_cancel_requested() {
+        button.set_state(ControlState::disabled());
+    }
+    button
+}
+
+/// Draw the long-operation progress panel for `model` centered in `viewport`,
+/// on top of the current view: a titled [`Panel`], an indeterminate progress
+/// trace captioned with the honest running count, and a Cancel button.
+///
+/// Every blit clips, so a window too small for the whole panel simply shows
+/// what fits rather than panicking (§2.9). It reads only the passed-in model
+/// and draws — it performs no I/O and holds no authority (§4, §5.4). Only the
+/// write-capable file manager drives a long operation, so only it draws this;
+/// the read-only picker never does.
+pub fn draw_progress_dialog(
+    surface: &mut Surface,
+    model: &ProgressModel,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+) {
+    let bounds = progress_dialog_rect(viewport, font, theme);
+    let panel = Panel::new(model.title());
+    panel.render(surface, bounds, Scale::ONE, theme, font);
+    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
+        return;
+    };
+    let bar = Rect::new(content.left(), content.top(), content.width, row_height(font));
+    build_progress(model).render(surface, bar, Scale::ONE, theme, font);
+    let cancel_rect = progress_cancel_rect(content, font);
+    build_progress_cancel(model).render(surface, cancel_rect, Scale::ONE, theme, font);
+}
+
+/// Whether the progress panel's Cancel button is drawn at window-local pixel
+/// `point`.
+///
+/// Mirrors [`draw_progress_dialog`]'s placement through the shared
+/// [`progress_dialog_rect`] and the same private cancel-button rectangle it
+/// paints, so a click resolves to exactly the drawn button (§2.2). A click
+/// anywhere but the button — or on
+/// a panel too small to place it — returns `false`, changing nothing (fail
+/// closed, §5.4).
+#[must_use]
+pub fn progress_cancel_at(
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> bool {
+    let bounds = progress_dialog_rect(viewport, font, theme);
+    // The content area is title-text-independent, so an empty-title panel
+    // mirrors the titled panel [`draw_progress_dialog`] draws.
+    let Some(content) = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme) else {
+        return false;
+    };
+    let rect = progress_cancel_rect(content, font);
+    if rect.width == 0 || rect.height == 0 {
+        return false;
+    }
+    let right = rect.left().saturating_add(to_i32(rect.width));
+    let bottom = rect.top().saturating_add(to_i32(rect.height));
+    point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
 }
 
 /// Build the drawn right-click context [`Menu`] for `model`: one [`MenuItem`]

@@ -72,16 +72,16 @@ mod program {
     };
     use tairix_browse::render::{
         build_context_menu, build_delete_dialog, context_menu_command_at, delete_dialog_action_at,
-        draw_context_menu, draw_delete_dialog, draw_owner_control, draw_properties_editable,
-        manager_tool_at, owner_field_at, permission_cell_at, render, OwnerField,
-        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        draw_context_menu, draw_delete_dialog, draw_owner_control, draw_progress_dialog,
+        draw_properties_editable, manager_tool_at, owner_field_at, permission_cell_at,
+        progress_cancel_at, render, OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Activation, Browser,
         Clipboard, ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
         DeleteAction, DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange,
-        PasteItem, PasteStrategy, Properties, RenameError, ToolbarCommand, VfsDirectorySource,
-        VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
+        ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -287,26 +287,27 @@ mod program {
         launcher: &'a RefCell<Launcher>,
     }
 
+    /// Whether a received mailbox frame is a genuine event from the desktop
+    /// session: exactly one [`WindowEvent`] wide and from the kernel-attested
+    /// `server` origin. A short frame or a foreign sender is dropped — the
+    /// mailbox is open to any capable sender, so the attested origin is the
+    /// authentication (fail closed). The one definition the blocking
+    /// [`RtEventSource::next`] wait and the non-blocking
+    /// [`poll_operation_event`] share, so they can never diverge (§2.2).
+    fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
+        len == WindowEvent::WIRE_LEN
+            && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
+    }
+
     impl EventSource for RtEventSource<'_> {
         fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
                 match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
                     Ok(len) => {
-                        // A short frame or a foreign sender is dropped,
-                        // never delivered: the mailbox is open to any
-                        // capable sender, so the kernel-attested origin
-                        // is the authentication.
-                        if len != WindowEvent::WIRE_LEN {
-                            continue;
+                        if accept_frame(len, &sender, self.server) {
+                            return Ok(());
                         }
-                        let Ok(origin) = Origin::from_bytes(&sender) else {
-                            continue;
-                        };
-                        if origin.proc_id() != self.server {
-                            continue;
-                        }
-                        return Ok(());
                     }
                     Err(err) if errno_from(err) == Errno::WouldBlock => {
                         // Nothing queued: park until the session's next
@@ -359,6 +360,25 @@ mod program {
         plan: DeletePlan,
     }
 
+    /// A running long file operation the event loop drives interleaved with
+    /// input (`plans/NEW-FILEMANAGER.md` `FM7b`): the driving walk plus its
+    /// progress + latched-cancel display state.
+    ///
+    /// `None` unless a confirmed delete is in progress. It owns the window while
+    /// it runs — no navigation happens behind it — and the event loop advances
+    /// it a bounded slice at a time ([`advance_delete`]), repainting the
+    /// progress panel and polling (non-blocking) for a mid-run cancel, so a
+    /// large recursive removal never freezes the window and never busy-spins
+    /// (§2.23). A latched cancel stops the walk at the next step boundary.
+    struct Operation {
+        /// The recursive-removal cursor, driven a bounded slice at a time; it
+        /// holds its exact position between steps, so a cancel or preemption
+        /// loses no work.
+        walk: DeleteWalk,
+        /// The progress + latched-cancel display state the panel renders.
+        progress: ProgressModel,
+    }
+
     /// The open right-click context menu: the built [`Menu`] and the
     /// window-local point it is anchored at.
     ///
@@ -390,6 +410,10 @@ mod program {
         delete: Option<DeleteConfirm>,
         /// The right-click context menu, when open (secondary-button press).
         menu: Option<ContextMenu>,
+        /// The running long file operation (a recursive delete), when one is in
+        /// progress. While it is set the event loop drives it interleaved with
+        /// input rather than parking, showing progress and honouring a cancel.
+        operation: Option<Operation>,
         /// The held cut/copy clipboard, captured by `Ctrl+X`/`Ctrl+C` and
         /// consumed by `Ctrl+V`. It lives in the app (not the browser), so it
         /// survives navigating to the paste target; a `Cut` is cleared once
@@ -468,6 +492,11 @@ mod program {
         // above; drawing it last keeps it topmost regardless.
         if let Some(ctx) = overlays.menu.as_ref() {
             draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, theme, font, viewport);
+        }
+        // A running long operation's progress + cancel panel is modal: drawn
+        // last so it is topmost while the walk runs interleaved with input.
+        if let Some(operation) = overlays.operation.as_ref() {
+            draw_progress_dialog(&mut surface, &operation.progress, theme, font, viewport);
         }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -659,9 +688,7 @@ mod program {
         // The delete-confirmation dialog is the topmost modal: while it is up
         // it owns the window, so it is handled before anything else.
         if overlays.delete.is_some() {
-            return Some(apply_delete_event(
-                browser, overlays, font, theme, viewport, event,
-            ));
+            return Some(apply_delete_event(overlays, font, theme, viewport, event));
         }
         if overlays.owner.is_some() {
             return Some(match event {
@@ -823,13 +850,14 @@ mod program {
     /// Handle one event while the delete-confirmation dialog owns the window.
     ///
     /// `Escape` (or a click on Cancel) dismisses the dialog and changes
-    /// nothing; `Enter` (or a click on Delete) carries out the captured plan
-    /// under the user's own identity and re-lists. A click that lands on
-    /// neither button, and every non-decision event, leaves the dialog open
-    /// (fail closed). The removal is the user's own capability-checked
-    /// `fs_unlink`s — no new capability, no ambient authority (§4, §5.4).
-    fn apply_delete_event<S: DirectorySource>(
-        browser: &mut Browser<S>,
+    /// nothing; `Enter` (or a click on Delete) hands the confirmed removal to
+    /// the interleaved operation runner — the event loop then carries it out a
+    /// bounded slice at a time, showing progress and honouring a cancel. A
+    /// click that lands on neither button, and every non-decision event, leaves
+    /// the dialog open (fail closed). The removal is the user's own
+    /// capability-checked `fs_unlink`s — no new capability, no ambient
+    /// authority (§4, §5.4).
+    fn apply_delete_event(
         overlays: &mut Overlays,
         font: BitmapFont,
         theme: &Theme,
@@ -873,51 +901,80 @@ mod program {
                 let Some(confirm) = overlays.delete.take() else {
                     return (false, false);
                 };
-                run_delete(&confirm.plan);
-                // Re-list so the view reflects what actually remains — a partial
-                // removal left by a refusal is shown honestly (§2.24). A failed
-                // re-list leaves the browser where it was (fail closed).
-                let _ = browser.refresh();
+                // Hand the removal to the interleaved operation runner: the
+                // event loop drives it a bounded slice at a time, showing
+                // progress and honouring a mid-run cancel, so a large recursive
+                // delete never freezes the window (§2.23). The plan was captured
+                // at open time, so a listing change cannot move what it targets;
+                // the view is re-listed when the operation finishes.
+                overlays.operation = Some(Operation {
+                    walk: DeleteWalk::from_plan(&confirm.plan),
+                    progress: ProgressModel::new(ProgressOp::Delete),
+                });
                 (true, false)
             }
         }
     }
 
-    /// Carry out `plan` by driving a [`DeleteWalk`] to completion: read each
-    /// directory (`fs_readdir`) and unlink each node (`fs_unlink`,
-    /// depth-first, so contents go before their container) under the user's
-    /// own identity.
+    /// The number of walk steps a running [`Operation`] advances between
+    /// repaints and cancel polls.
     ///
-    /// It is bounded and fail closed: the walk caps its recursion depth, and
-    /// the first refused read or unlink stops the removal, states the reason on
-    /// `stderr` (fail loud, §2.24), and returns — leaving the walk's own
-    /// position untouched and whatever was already removed removed, never a
-    /// fabricated success (§5.4). No new capability is involved: every syscall
-    /// is the ordinary §5.3-checked write the user could perform themselves.
-    fn run_delete(plan: &DeletePlan) {
-        let mut walk = DeleteWalk::from_plan(plan);
-        loop {
+    /// Large enough that the whole-window repaint is amortised over many nodes,
+    /// small enough that a cancel is honoured promptly (§2.23) — a fixed tuning
+    /// bound, not a hardware-scaled capacity (§24.4).
+    const OPERATION_STEP_BUDGET: u32 = 64;
+
+    /// The disposition of a poll taken while a long operation runs.
+    enum OperationControl {
+        /// The user asked to cancel (Escape, or a click on the Cancel button).
+        Cancel,
+        /// The desktop asked the window to close.
+        Close,
+        /// Nothing that affects the running operation.
+        Ignore,
+    }
+
+    /// Advance the running delete `operation` by up to [`OPERATION_STEP_BUDGET`]
+    /// steps, returning `true` once it has finished — completed, cancelled at a
+    /// step boundary, or stopped fail-closed on a refusal.
+    ///
+    /// Each step reads a directory (`fs_readdir`) or unlinks a node
+    /// (`fs_unlink`, depth-first so contents go before their container) under
+    /// the user's own identity — the ordinary §5.3-checked writes the user
+    /// could perform themselves, no new capability — and updates the honest
+    /// progress count from the walk's own figure. A latched cancel stops at the
+    /// next boundary (never mid-node); the first refused read or unlink stops
+    /// the removal, states the reason on `stderr` (fail loud, §2.24), and
+    /// leaves whatever was already removed removed rather than a fabricated
+    /// success (§5.4). The walk holds its exact position between calls, so a
+    /// bounded slice per event-loop turn keeps the window responsive without
+    /// losing or repeating work (§2.23).
+    fn advance_delete(operation: &mut Operation) -> bool {
+        for _ in 0..OPERATION_STEP_BUDGET {
+            if operation.progress.is_cancel_requested() {
+                return true;
+            }
             // Copy the current step out so the walk is free to be mutated.
-            let step = walk.next_action().map(|action| match action {
+            let step = operation.walk.next_action().map(|action| match action {
                 DeleteAction::List(path) => (true, path.to_vec(), false),
                 DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
             });
             let Some((is_list, path, is_directory)) = step else {
-                return;
+                return true;
             };
             if is_list {
                 let Ok(children) = read_children(&path) else {
                     report_delete_refused(&path);
-                    return;
+                    return true;
                 };
-                if walk.expand(&children).is_err() {
+                if operation.walk.expand(&children).is_err() {
                     report_error("delete stopped: a folder is nested too deep");
-                    return;
+                    return true;
                 }
             } else {
                 let Ok(spelled) = tairix_browse::vfs::absolute_path(&path) else {
                     report_error("delete stopped: a path could not be spelled");
-                    return;
+                    return true;
                 };
                 let flags = if is_directory {
                     UnlinkFlags::DIRECTORY
@@ -926,13 +983,71 @@ mod program {
                 };
                 if tairix_rt::fs_unlink(spelled.as_bytes(), flags) != 0 {
                     report_delete_refused(&path);
-                    return;
+                    return true;
                 }
-                if walk.complete_removal().is_err() {
+                if operation.walk.complete_removal().is_err() {
                     report_error("delete stopped: internal walk error");
-                    return;
+                    return true;
                 }
             }
+            operation.progress.set_done(operation.walk.removed());
+        }
+        false
+    }
+
+    /// Poll (non-blocking) the app's event mailbox for one genuine session
+    /// event while a long operation runs, without parking on the wait-set.
+    ///
+    /// Returns `Ok(Some(event))` for an accepted event, `Ok(None)` when the
+    /// mailbox is empty or the frame is dropped (foreign sender, short, or
+    /// malformed), and `Err` only when the channel itself fails. It shares
+    /// [`accept_frame`] with the blocking [`RtEventSource::next`], so the two
+    /// authenticate a sender identically (§2.2).
+    fn poll_operation_event(endpoint: u64, server: ProcId) -> Result<Option<WindowEvent>, Errno> {
+        let mut frame = [0u8; WindowEvent::WIRE_LEN];
+        let mut sender = [0u8; ORIGIN_WIRE_LEN];
+        match tairix_rt::ipc_recv(endpoint, &mut frame, &mut sender) {
+            Ok(len) => {
+                if accept_frame(len, &sender, server) {
+                    Ok(WindowEvent::from_bytes(&frame).ok())
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(err) if errno_from(err) == Errno::WouldBlock => Ok(None),
+            Err(err) => Err(errno_from(err)),
+        }
+    }
+
+    /// Classify a polled `event` while a long operation runs: a close request,
+    /// a cancel (Escape, or a primary press on the progress panel's Cancel
+    /// button), or nothing that affects the run. A press anywhere but the
+    /// Cancel button is ignored, so nothing navigates behind the modal panel
+    /// (fail closed, §5.4).
+    fn operation_control(
+        event: &WindowEvent,
+        theme: &Theme,
+        mode: &DisplayMode,
+    ) -> OperationControl {
+        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        match event {
+            WindowEvent::CloseRequested { .. } => OperationControl::Close,
+            WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => OperationControl::Cancel,
+            WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
+                Some(point) if progress_cancel_at(viewport, font, theme, point) => {
+                    OperationControl::Cancel
+                }
+                _ => OperationControl::Ignore,
+            },
+            _ => OperationControl::Ignore,
         }
     }
 
@@ -1255,15 +1370,27 @@ mod program {
     }
 
     /// Remove a cross-volume move's source once its copy has fully succeeded,
-    /// by driving the shared delete path (`run_delete`) over a one-item
-    /// [`DeletePlan`] under the user's own identity. Any refusal is stated on
-    /// `stderr` by `run_delete` itself, so a copied-but-not-removed source is
-    /// reported, never silently left (§2.24).
+    /// by driving the shared delete walk ([`advance_delete`]) over a one-item
+    /// [`DeletePlan`] under the user's own identity — the same one removal
+    /// definition the interactive Delete verb runs, so a move's cleanup and a
+    /// delete can never diverge (§2.2). The paste path is not yet interleaved
+    /// (progress + cancel for copy/paste is a staged follow-up), so the walk is
+    /// driven to completion here in one synchronous loop rather than across
+    /// event-loop turns. Any refusal is stated on `stderr` by `advance_delete`
+    /// itself, so a copied-but-not-removed source is reported, never silently
+    /// left (§2.24).
     fn delete_source(source: &[String], is_directory: bool) -> Result<(), &'static str> {
         let Some(plan) = DeletePlan::new(alloc::vec![(source.to_vec(), is_directory)]) else {
             return Err("a moved source could not be removed");
         };
-        run_delete(&plan);
+        let mut operation = Operation {
+            walk: DeleteWalk::from_plan(&plan),
+            progress: ProgressModel::new(ProgressOp::Delete),
+        };
+        // Each call advances a bounded slice; loop until the walk finishes
+        // (completed or stopped fail-closed on a refusal). No cancel is ever
+        // requested, so this drives to completion.
+        while !advance_delete(&mut operation) {}
         Ok(())
     }
 
@@ -2036,6 +2163,7 @@ mod program {
             owner: None,
             delete: None,
             menu: None,
+            operation: None,
             clipboard: None,
             can_chown: tairix_rt::self_origin()
                 .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
@@ -2045,6 +2173,7 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
+    #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the flow.
     fn main() -> i32 {
         // --- The browser over the live, capability-checked listing call.
         let source = VfsDirectorySource::new(|path: &str| {
@@ -2140,6 +2269,73 @@ mod program {
             launcher: &launcher,
         });
         loop {
+            // A running long operation (a recursive delete) owns the window:
+            // drive it a bounded slice at a time, repaint the progress, and
+            // poll (non-blocking) for a mid-run cancel or a close — never
+            // parking while there is genuine work to do, and returning to the
+            // parked wait the instant the operation finishes (§2.23).
+            if overlays.operation.is_some() {
+                let finished = overlays.operation.as_mut().is_some_and(advance_delete);
+                if present_frame(
+                    &browser,
+                    &overlays,
+                    theme,
+                    &mut client,
+                    window,
+                    frames,
+                    &mode,
+                )
+                .is_err()
+                {
+                    return fail(EXIT_CHANNEL_LOST, "present refused");
+                }
+                if finished {
+                    // Re-list so the view reflects what actually remains — a
+                    // partial removal (a refusal or a cancel) is shown honestly
+                    // (§2.24); a failed re-list leaves the browser put (fail
+                    // closed).
+                    overlays.operation = None;
+                    let _ = browser.refresh();
+                    // Reap any launched bundle that exited while the operation
+                    // ran (the wait-set was not parked on during it).
+                    launcher.borrow_mut().reap();
+                    if present_frame(
+                        &browser,
+                        &overlays,
+                        theme,
+                        &mut client,
+                        window,
+                        frames,
+                        &mode,
+                    )
+                    .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
+                // Poll (non-blocking) for a cancel or a close while the walk
+                // runs; anything else is ignored so nothing navigates behind
+                // the modal progress panel.
+                match poll_operation_event(event_endpoint, server) {
+                    Ok(Some(event)) => match operation_control(&event, theme, &mode) {
+                        OperationControl::Cancel => {
+                            if let Some(operation) = overlays.operation.as_mut() {
+                                operation.progress.request_cancel();
+                            }
+                        }
+                        OperationControl::Close => {
+                            let _ = client.close(window);
+                            return 0;
+                        }
+                        OperationControl::Ignore => {}
+                    },
+                    Ok(None) => {}
+                    Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
+                }
+                continue;
+            }
+
             let event = match events.wait() {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is

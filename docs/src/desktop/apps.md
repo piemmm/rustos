@@ -578,9 +578,30 @@ the first refused read or unlink stops it, states the reason on `stderr` (fail
 loud, `AGENTS.md` §2.24), and leaves whatever was already removed removed rather
 than a fabricated success; the view is then re-listed so a partial removal is
 shown honestly (`AGENTS.md` §5.4). Only the file manager builds and drives this
-— the read-only picker never deletes. (A bounded progress indicator and a
-mid-run Cancel for a long removal are a separately-staged follow-up; the verb
-itself is complete.)
+— the read-only picker never deletes.
+
+A long removal shows **progress** and can be **cancelled**. Rather than driving
+the `DeleteWalk` to completion in one blocking pass, the confirmed removal is
+handed to an *interleaved operation* the event loop advances a bounded slice at
+a time (`advance_delete`, up to `OPERATION_STEP_BUDGET` steps per turn): between
+slices it repaints a modal progress panel and polls the event mailbox
+*non-blocking* for a mid-run cancel or a close, so a large recursive delete
+never freezes the window and never busy-spins — continuously stepping the walk
+is genuine pending work, not a spin (`AGENTS.md` §2.23). The panel is the shared
+`lib/browse::progress` model (`ProgressModel` — the operation kind, the honest
+rising `DeleteWalk::removed` count, and a *latched* cancel) drawn by
+`render::draw_progress_dialog` as a `lib/controls` `Panel`, an indeterminate
+`Progress` "working" trace (no fabricated percentage, since the total is unknown
+until the reads reveal it, `AGENTS.md` §2.24), and a Cancel `Button`;
+`render::progress_cancel_at` mirrors the button geometry so a click resolves to
+exactly the drawn Cancel (fail closed off it, `AGENTS.md` §2.2, §5.4). A cancel
+is latched and stops the walk at the next step boundary — never mid-node — and a
+completed or cancelled/refused run alike re-lists so what actually remains is
+shown honestly. The same `advance_delete` drive is also what the
+cross-volume-move cleanup runs (there synchronously to completion), so a move's
+cleanup and an interactive delete share one removal definition (`AGENTS.md`
+§2.2). Progress + cancel for the copy/paste drive is a separately-staged
+follow-up reusing this same panel.
 
 ### The cut / copy / paste verbs
 

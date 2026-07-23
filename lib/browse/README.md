@@ -321,6 +321,20 @@ can never diverge in navigation semantics, listing policy, or look.
   edited. Only the file manager calls it — and only where the launching user
   holds `CAP_FS_CHOWN` (read from the kernel-attested `self_origin`), so a
   session that cannot use it is never shown it.
+- **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
+  pure display + cancel *state* of a long file operation the file manager
+  drives interleaved with its event loop. `ProgressModel` carries the
+  operation kind (`ProgressOp::Delete`/`Copy`), the honest rising count the
+  driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied`), and a
+  *latched* cancel; its `title`/`status_line` never fabricate a percentage,
+  since the total is unknown until the walk's reads reveal it. The drawn
+  surface is the renderer's `draw_progress_dialog` (a `lib/controls` `Panel`,
+  an indeterminate `Progress` "working" trace captioned with the count, and a
+  Cancel `Button`), with `progress_cancel_at` the mirror hit-test resolving a
+  click to the drawn Cancel (fail closed off it). The model holds no authority
+  and does no I/O, so the read-only picker (which never deletes or copies)
+  never builds one. The delete drive is wired end to end in the files app; the
+  copy/paste drive reuses the same panel in a staged follow-up.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the
