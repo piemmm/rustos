@@ -62,6 +62,15 @@ pub struct Cbi<T: MsdTransport> {
     interface_number: u8,
     /// The completion-block spelling the device's command set uses.
     status: CbiStatus,
+    /// Sense captured in-band from the last failed command's completion
+    /// interrupt. A UFI device reports the failing command's ASC/ASCQ in
+    /// its completion block (CBI 1.1 §3.4.3.1.1), so the command layer
+    /// reads the sense directly through [`ScsiTransport::take_sense`] and
+    /// never issues a separate `REQUEST SENSE` — the redundant round trip
+    /// real UFI floppies do not answer reliably. `None` for the typed
+    /// [`CbiStatus::CommandStatus`] spelling, whose completion carries no
+    /// sense.
+    sense: Option<Sense>,
 }
 
 impl<T: MsdTransport> Cbi<T> {
@@ -72,6 +81,7 @@ impl<T: MsdTransport> Cbi<T> {
             transport,
             interface_number,
             status,
+            sense: None,
         }
     }
 
@@ -115,7 +125,10 @@ impl<T: MsdTransport> Cbi<T> {
     }
 
     /// Read and interpret the command-completion interrupt block,
-    /// returning whether the command passed.
+    /// returning whether the command passed. A failed UFI command's block
+    /// carries the ASC/ASCQ of the failure (CBI 1.1 §3.4.3.1.1), captured
+    /// as in-band sense so the command layer never issues a separate
+    /// `REQUEST SENSE`.
     ///
     /// # Errors
     ///
@@ -129,7 +142,17 @@ impl<T: MsdTransport> Cbi<T> {
             return Err(self.recover(Errno::LengthOutOfRange));
         }
         match self.status {
-            CbiStatus::UfiSense => Ok(block[0] == 0 && block[1] == 0),
+            CbiStatus::UfiSense => {
+                if block[0] == 0 && block[1] == 0 {
+                    Ok(true)
+                } else {
+                    // The completion block is the sense: capture it so the
+                    // command layer reads it in-band, never over a separate
+                    // REQUEST SENSE round trip.
+                    self.sense = Some(Sense::from_ufi_completion(block[0], block[1]));
+                    Ok(false)
+                }
+            }
             CbiStatus::CommandStatus => {
                 if block[0] != 0 {
                     return Err(self.recover(Errno::BadMagic));
@@ -163,6 +186,8 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
         if cb.is_empty() || cb.len() > CBI_COMMAND_LEN {
             return Err(Errno::OutOfRange);
         }
+        // A stale capture must never explain a later command's failure.
+        self.sense = None;
         let mut block = [0u8; CBI_COMMAND_LEN];
         block[..cb.len()].copy_from_slice(cb);
 
@@ -211,11 +236,17 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
         Ok(1)
     }
 
-    /// The UFI completion block carries only ASC/ASCQ, not a full sense
-    /// triple; the command layer issues `REQUEST SENSE` for the whole
-    /// story.
+    /// A UFI device reports the failing command's ASC/ASCQ in its
+    /// completion interrupt (CBI 1.1 §3.4.3.1.1), so hand that in-band
+    /// capture to the command layer — exactly as UAS delivers autosense —
+    /// rather than making it issue a separate `REQUEST SENSE` a real UFI
+    /// floppy does not answer reliably. The sense key is recovered from the
+    /// ASC ([`Sense::from_ufi_completion`]). `None` for the typed
+    /// [`CbiStatus::CommandStatus`] spelling, whose completion carries no
+    /// sense, and for a control-STALL refusal that read no completion at
+    /// all — the command layer then falls back to `REQUEST SENSE`.
     fn take_sense(&mut self) -> Option<Sense> {
-        None
+        self.sense.take()
     }
 
     fn scrub(&mut self) {

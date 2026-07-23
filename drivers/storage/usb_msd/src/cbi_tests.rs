@@ -67,19 +67,17 @@ fn a_write_moves_the_out_phase_over_bulk() {
 
 #[test]
 fn a_nonzero_completion_is_a_failed_command_with_sense() {
+    // The UFI completion block IS the sense: a WRITE PROTECTED ASC (0x27)
+    // is read in-band, so no separate REQUEST SENSE round trip is issued.
     let mut dev = ScriptedDevice::new();
     dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
     dev.interrupts.push_back(vec![0x27, 0x00]); // ASC: WRITE PROTECTED
-                                                // The REQUEST SENSE that follows: DATA PROTECT.
-    let mut sense = vec![0u8; 18];
-    sense[0] = 0x70;
-    sense[2] = 0x07;
-    sense[12] = 0x27;
-    dev.in_steps.push_back(InStep::Data(sense));
-    dev.interrupts.push_back(PASSED.to_vec());
     let mut scsi = floppy(dev);
     let mut buf = [0u8; 512];
     assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::PermissionDenied));
+    // Exactly one command reached the wire (the READ); the verdict came
+    // from its completion block, not a follow-up REQUEST SENSE.
+    assert_eq!(device(&scsi).control_outs.len(), 1);
 }
 
 #[test]
@@ -106,15 +104,12 @@ fn a_stalled_data_phase_still_reads_the_completion() {
     let mut dev = ScriptedDevice::new();
     dev.in_steps.push_back(InStep::Stall);
     dev.interrupts.push_back(vec![0x3A, 0x00]); // MEDIUM NOT PRESENT
-    let mut sense = vec![0u8; 18];
-    sense[0] = 0x70;
-    sense[2] = 0x02; // NOT READY
-    sense[12] = 0x3A;
-    dev.in_steps.push_back(InStep::Data(sense));
-    dev.interrupts.push_back(PASSED.to_vec());
     let mut scsi = floppy(dev);
     let mut buf = [0u8; 512];
+    // The stalled data phase still reads the completion, whose ASC (0x3A,
+    // medium not present) maps to NOT READY in-band — no REQUEST SENSE.
     assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).control_outs.len(), 1);
 }
 
 #[test]
@@ -195,6 +190,28 @@ fn an_oversize_command_block_is_refused_before_the_wire() {
         Err(Errno::OutOfRange)
     );
     assert!(cbi.transport().control_outs.is_empty());
+}
+
+#[test]
+fn a_not_ready_floppy_drains_via_in_band_sense_without_request_sense() {
+    // Regression: a real UFI floppy (a Mitsumi SmartDisk FDD) returns a
+    // start-of-day not-ready / UNIT ATTENTION on TEST UNIT READY, and does
+    // not reliably answer a separate REQUEST SENSE. The bounded ready drain
+    // must read the sense in-band from the completion block and keep
+    // draining until the unit is ready, never issuing a REQUEST SENSE whose
+    // failure would abort bring-up (the observed `errno 0xc` metal defect).
+    let mut dev = ScriptedDevice::new();
+    // TEST UNIT READY carries no data phase: script completion blocks only.
+    dev.interrupts.push_back(vec![0x3A, 0x00]); // not ready (medium not present)
+    dev.interrupts.push_back(vec![0x28, 0x00]); // unit attention (media change)
+    dev.interrupts.push_back(PASSED.to_vec()); // ready
+    let mut scsi = floppy(dev);
+    assert_eq!(scsi.ready_after_drain(0, 8), Ok(true));
+    // Three TEST UNIT READY commands reached the wire and nothing else: no
+    // REQUEST SENSE (which would need a bulk data phase the script never
+    // provides and, on the real drive, would fail the command).
+    assert_eq!(device(&scsi).control_outs.len(), 3);
+    assert!(device(&scsi).in_steps.is_empty());
 }
 
 #[test]

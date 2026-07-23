@@ -140,6 +140,31 @@ const SENSE_KEY_UNIT_ATTENTION: u8 = 0x06;
 /// Sense key: the medium is write-protected.
 const SENSE_KEY_DATA_PROTECT: u8 = 0x07;
 
+impl Sense {
+    /// Reconstruct fixed-format sense from a UFI command-completion
+    /// interrupt block, which carries only the additional sense code and
+    /// qualifier (USB Mass Storage CBI 1.1 §3.4.3.1.1) rather than the full
+    /// sense triple. The sense key is recovered from the ASC using the SCSI
+    /// additional-sense-code assignments (SPC-4 Annex F / SBC-3): each of
+    /// these codes is only ever reported under one key — write protection
+    /// under DATA PROTECT, a not-ready or no-medium state under NOT READY, a
+    /// media-change or power-on/reset notification under UNIT ATTENTION, and
+    /// a rejected command or CDB field under ILLEGAL REQUEST. Any other code
+    /// carries no recovered key (`0`), so it surfaces as an unclassified
+    /// device fault rather than a guessed category (fail closed).
+    #[must_use]
+    pub fn from_ufi_completion(asc: u8, ascq: u8) -> Self {
+        let key = match asc {
+            0x27 => SENSE_KEY_DATA_PROTECT,
+            0x04 | 0x3A => SENSE_KEY_NOT_READY,
+            0x28 | 0x29 => SENSE_KEY_UNIT_ATTENTION,
+            0x20 | 0x21 | 0x24 | 0x26 => SENSE_KEY_ILLEGAL_REQUEST,
+            _ => 0,
+        };
+        Self { key, asc, ascq }
+    }
+}
+
 /// What a LUN's standard INQUIRY reported.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Inquiry {

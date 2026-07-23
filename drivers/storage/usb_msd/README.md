@@ -34,8 +34,9 @@ binary works behind any host controller that speaks the URB transport
 3. Discovers the units (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS,
    exactly one for CBI), then per LUN: `INQUIRY` (non-disk units are
    skipped), a **bounded** `TEST UNIT READY` ready drain (sense consumed
-   per failed attempt — UAS delivers it in-band, BOT/CBI via
-   `REQUEST SENSE`), `READ CAPACITY(10)`/`(16)` (validated geometry;
+   per failed attempt — UAS and CBI/UFI deliver it in-band, the transport's
+   own completion carrying the sense; BOT via `REQUEST SENSE`),
+   `READ CAPACITY(10)`/`(16)` (validated geometry;
    16-byte form past the 32-bit LBA horizon), and the write-protect bit
    (`MODE SENSE(6)` for the transparent set, `MODE SENSE(10)` for UFI).
 4. Publishes one **storage-class** hardware-tree node per ready LUN, carrying
@@ -54,8 +55,14 @@ binary works behind any host controller that speaks the URB transport
      control-OUT channel (a control STALL is the "command not accepted"
      answer), the bulk data phase, the two-byte completion interrupt (UFI
      ASC/ASCQ or the typed status spelling), and the Command Block Reset on
-     a malformed or out-of-step completion. UFI floppies have no
-     `SYNCHRONIZE CACHE`; a flush succeeds without a wire round trip.
+     a malformed or out-of-step completion. A UFI floppy reports the
+     failing command's ASC/ASCQ **in its completion interrupt** (CBI 1.1
+     §3.4.3.1.1), so the sense is read in-band through `take_sense` exactly
+     as UAS delivers autosense — never over a separate `REQUEST SENSE`,
+     which a real UFI floppy (e.g. the Mitsumi SmartDisk FDD) does not
+     answer reliably and whose failure otherwise aborted bring-up. UFI
+     floppies have no `SYNCHRONIZE CACHE`; a flush succeeds without a wire
+     round trip.
    - **UAS** (`src/uas.rs`): tag-checked Command/Read-Ready/Write-Ready/
      Sense IU sequencing over the four pipes (USB 2.0 non-stream
      operation), with autosense delivered in-band and every hostile IU
@@ -106,7 +113,8 @@ mismatch and corrupt-CSW reset recovery, CSW-stall retry, stalled data
 phases, short reads, sense mapping, capacity validation including a
 100 TB-class unit, multi-LUN), `src/cbi_tests.rs` (ADSC framing, the
 stall-as-refusal answer, both completion spellings, Command Block Reset,
-the floppy geometry), `src/uas_tests.rs` (IU sequencing, tag checking,
+the floppy geometry, in-band UFI sense with no `REQUEST SENSE`, and the
+not-ready ready drain), `src/uas_tests.rs` (IU sequencing, tag checking,
 autosense in both sense formats, hostile IUs, `REPORT LUNS`),
 `src/desc_tests.rs` (transport classification and hostile descriptor
 streams, including UAS Pipe Usage validation), and `src/serve.rs` (the

@@ -286,7 +286,11 @@ assumed), then drives one transport-neutral SCSI command layer
   in place by the URB layer), the data phase over the bulk pair, and the
   two-byte command-completion interrupt (UFI ASC/ASCQ, or the typed
   status spelling for non-UFI sets); a malformed or out-of-step
-  completion runs the spec's Command Block Reset.
+  completion runs the spec's Command Block Reset. A UFI failure's
+  ASC/ASCQ is read **in-band** from that completion interrupt (like UAS
+  autosense), so the command layer never issues a separate `REQUEST
+  SENSE` — a real UFI floppy does not answer one reliably, and depending
+  on it aborted floppy bring-up on hardware.
 - **USB Attached SCSI** (`08:06:62`): the four Pipe-Usage-named bulk
   pipes with tag-checked Command / Read-Ready / Write-Ready / Sense IU
   sequencing (USB 2.0 non-stream operation) and in-band autosense; every
@@ -298,7 +302,9 @@ assumed), then drives one transport-neutral SCSI command layer
 
 Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly
 one for CBI; up to 16) the bring-up runs `INQUIRY` (non-disk types are
-skipped), a bounded ready drain (the sense consumed per failed attempt),
+skipped), a bounded ready drain (the start-of-day not-ready / UNIT
+ATTENTION states drained, the sense consumed per failed attempt — in-band
+for UAS and CBI/UFI, via `REQUEST SENSE` for BOT),
 `READ CAPACITY(10)`/`(16)` with a fully validated geometry (power-of-two
 block size 512–4096; the 16-byte form covers units past the 32-bit LBA
 horizon), and the command set's write-protect bit — enforced driver-side

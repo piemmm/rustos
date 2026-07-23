@@ -898,7 +898,11 @@ nodes by their own compatible keys, which is data, not bus coupling
   `cbi.rs` (`Cbi`: the 12-byte command block over the ADSC control-OUT
   channel, a control STALL as the "command not accepted" answer, the
   bulk data phase, the two-byte completion interrupt in both spellings —
-  UFI ASC/ASCQ and the typed status — and the Command Block Reset), and
+  UFI ASC/ASCQ and the typed status — and the Command Block Reset; a UFI
+  failure's ASC/ASCQ is captured from the completion interrupt and read
+  **in-band** via `take_sense`, exactly as UAS delivers autosense, so no
+  separate `REQUEST SENSE` is issued — a real UFI floppy does not answer
+  one reliably), and
   `uas.rs` (`Uas` over the `UasPipes` seam: tag-checked Command /
   Read-Ready / Write-Ready / Sense IU sequencing, USB 2.0 non-stream
   operation, in-band autosense in fixed and descriptor formats,
@@ -943,8 +947,9 @@ nodes by their own compatible keys, which is data, not bus coupling
   ring.
 - Host-proven end to end over scripted doubles: the shared SCSI layer
   (per-set CDB spelling, MODE SENSE forms, flush semantics, the bounded
-  ready drain, autosense vs `REQUEST SENSE`), each transport's framing
-  and recovery trails, descriptor classification incl. hostile streams,
+  ready drain, UAS/CBI-UFI in-band sense vs BOT `REQUEST SENSE`), each
+  transport's framing and recovery trails, descriptor classification
+  incl. hostile streams,
   and the engine's control-OUT delivery, EP0 stall recovery, and
   second-pair capture. Live path: Pi 4 metal acceptance (QEMU models no
   Pi USB — the D2/D3/D4 precedent).
