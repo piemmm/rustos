@@ -30,10 +30,12 @@ which the drift guard enforces.
 `in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
-model, FM7a's selection + clipboard model, and FM7b's pure paste-execution model
+model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
+and FM8a's properties view model
 are done**; the rest of the FM4b drawn chrome (the context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
-spawn/delegation, the FM7b app-side move/copy/delete verbs, and FM8–FM9 are
+spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
+properties panel + permission editing, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -548,18 +550,53 @@ The remaining app-side verbs (still `planned`):
   work adds partial-failure recovery, delete confirm/refuse, and mkdir+rename
   over the VFS seams.
 
-### FM8 — properties and permissions `[ ]`
+### FM8a — the properties view model `[x]`
 
-- **A Properties panel** (`lib/controls` `Panel`) for the selected item:
-  name, kind, size + on-disk `allocated`, the four `Time64` stamps,
-  owner uid/gid, and mode bits — all straight from `fs_stat` (§21,
-  64-bit-native throughout), no fabricated fields.
+Done (§2.19 — the pure model host-proven ahead of the drawn panel, exactly as
+FM6a/FM6b/FM7a/FM7b's pure models landed): the `lib/browse::properties` module.
+`Properties::from_stat(name, kind, stat)` turns an entry's name, its browser
+`EntryKind`, and the node's `fs_stat` `FileStat` into the display-ready fields
+the panel renders — a human kind label (`Folder`/`File`/`Application`, so a
+sealed `<Name>.app` bundle reads distinctly from an ordinary directory), the
+apparent `size` and on-disk `allocated` bytes (both via the shared
+`format_size`, never one derived from the other), the raw mode + its
+four-digit octal spelling, the ten-character permission string, the owning
+uid/gid, and the four `Time64` stamps rendered as `YYYY-MM-DD HH:MM:SS` by the
+new `format::format_datetime`. Every field is straight from `fs_stat` (§21,
+64-bit-native), no fabricated field: a stamp the backing does not keep is the
+epoch and renders blank, never a made-up `1970-01-01` wall time.
+
+- **The permission spelling is one shared definition (§2.2).** The
+  `drwxr-xr-x` mapping is the new `tairix_abi::fs::mode_string` — an alloc-free
+  `[u8; 10]` producer in the ABI crate that owns the mode bits — so the
+  properties view and `ls -l` can never disagree on what a mode means. The
+  private duplicate that lived in the `ls` app is deleted and `ls` now
+  delegates to it (§2.14). The permission string's leading type indicator
+  reads from the structural `FileStat::kind`, so a bundle is *labelled*
+  "Application" yet honestly shows a directory's `d`.
+- **The model holds no authority.** The app performs the one
+  capability-checked `fs_stat` under the user's own identity and hands the
+  result here; the model reads nothing, so composing it grants nothing and the
+  read-only picker builds the same view (§4, §5.4).
+- Host-tested: `lib/browse` (regular-file / directory / bundle summaries,
+  timestamp render + epoch-blank, octal masking) and `lib/browse::format`
+  (`format_datetime` date+time, epoch-blank, sub-second, pre-1970/post-2038),
+  and `lib/abi` (`mode_string` kind indicator + triads + empty/full/private +
+  higher-bit masking). Docs: `docs/src/desktop/apps.md`, `lib/browse`
+  README + rustdoc, `tairix_abi::fs::mode_string` rustdoc.
+
+### FM8b — the drawn properties panel + permission editing `[ ]`
+
+- **A Properties panel** (`lib/controls` `Panel`) painting the done FM8a
+  `Properties` model for the selected item — name, kind, size + on-disk
+  `allocated`, the four `Time64` stamps, owner uid/gid, and mode bits — all
+  straight from `fs_stat` (§21, 64-bit-native throughout), no fabricated
+  fields.
 - **Editing mode/ownership** where the user is authorised: mode via a
   clear permission control, committed through `fs_set_mode`; a refused
   change is an honest in-UI answer (§2.24). Ownership change is shown but
   only offered when the user holds the authority (no ambient escalation,
-  §4). Host tests: stat rendering (incl. epoch stamps), mode edit
-  commit/refuse.
+  §4). Host tests: mode edit commit/refuse.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 
@@ -589,7 +626,8 @@ FM7. FM6a models the activation decision (host-proven); FM6b (launch/open) acts
 on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7 is
 split (§2.19): FM7a models the selection + clipboard in the engine
 (host-proven); FM7b executes the verbs in the app and depends on FM4b's
-selection/menu. FM8 and FM9 close out. Each
+selection/menu. FM8 is split the same way: FM8a models the properties view
+(host-proven); FM8b paints it and adds permission editing. FM9 closes out. Each
 lands fully gated; a stage that turns out larger than one clean increment is
 split and staged here, never shipped half-done "for now" (§2.19).
 

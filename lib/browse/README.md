@@ -151,9 +151,24 @@ can never diverge in navigation semantics, listing policy, or look.
   never disagree. `ViewMode` selects the view; toggling preserves the
   selection and re-reads nothing.
 - **Column formatting** (`format`): `format_size` (binary units — `1.5
-  MiB`) and `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
-  epoch so a stampless file is never given a fabricated date), the
+  MiB`), `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
+  epoch so a stampless file is never given a fabricated date), and
+  `format_datetime` (the properties view's `YYYY-MM-DD HH:MM:SS`
+  date-and-time spelling, blank at the epoch for the same reason) — the
   file-listing convention shared by both views.
+- **Properties** (`properties`, `plans/NEW-FILEMANAGER.md` FM8): the pure
+  view model behind the Properties panel, host-proven ahead of the drawn
+  panel. `Properties::from_stat` turns an entry's name, its browser
+  `EntryKind`, and the node's `fs_stat` `FileStat` into the display fields the
+  panel shows — a human kind label (`Folder` / `File` / `Application`), the
+  apparent and on-disk sizes (via `format_size`), the raw and octal mode, the
+  ten-character permission string (the shared `tairix_abi::fs::mode_string`
+  spelling, so it never disagrees with `ls -l`), the owning uid/gid, and the
+  four `Time64` stamps rendered with `format_datetime` (blank when the backing
+  keeps none — no fabricated wall time). It reads nothing and holds no
+  authority: the app performs the one capability-checked `fs_stat` under the
+  user's own identity and hands the result here, so the read-only picker
+  builds the same view.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the

@@ -202,6 +202,7 @@ pub fn note_change(id: FileId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, PoisonError};
 
     fn id(node: u64) -> FileId {
         FileId {
@@ -210,11 +211,21 @@ mod tests {
         }
     }
 
-    // The registry is a global; each test uses distinct node numbers and
-    // cleans up its own entries so the suite does not interfere with itself.
+    // The registry and `MEMBER_COUNT` are process-global. Per-node isolation
+    // keeps generations from colliding, but a test that asserts on the shared
+    // system-wide member total would still race another test adding or
+    // removing a member concurrently, so the registry tests run one at a time
+    // under this guard (recovering a poisoned lock so one failure does not
+    // wedge the rest).
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     #[test]
     fn watch_add_baselines_at_zero_and_change_advances_it() {
+        let _serial = serial();
         let f = id(0x1001);
         assert_eq!(current_generation(f), 0, "unwatched reads zero");
         let baseline = watch_add(f);
@@ -233,6 +244,7 @@ mod tests {
 
     #[test]
     fn a_second_member_baselines_at_the_current_generation() {
+        let _serial = serial();
         let f = id(0x1002);
         let _a = watch_add(f);
         note_change(f);
@@ -244,6 +256,7 @@ mod tests {
 
     #[test]
     fn note_change_on_an_unwatched_node_is_a_no_op() {
+        let _serial = serial();
         let f = id(0x1003);
         note_change(f);
         assert_eq!(
@@ -255,6 +268,7 @@ mod tests {
 
     #[test]
     fn watchers_present_tracks_member_count() {
+        let _serial = serial();
         let f = id(0x1004);
         let g = id(0x1005);
         let before = MEMBER_COUNT.load(Ordering::Relaxed);
@@ -272,6 +286,7 @@ mod tests {
 
     #[test]
     fn park_registration_keeps_the_entry_alive_without_a_member() {
+        let _serial = serial();
         let f = id(0x1006);
         park_add(f, 42);
         note_change(f);

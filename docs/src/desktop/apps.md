@@ -394,6 +394,33 @@ succeeded, so a failed copy loses no data. The engine does no I/O; the app
 performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
 launching user's own identity, so the read-only picker never runs it.
 
+### The properties model
+
+The Properties panel (`plans/NEW-FILEMANAGER.md` FM8) shows one selected node's
+metadata. That view is modelled purely in `lib/browse::properties`, host-tested
+without a kernel exactly as the rename, activation, and clipboard models are;
+the drawn panel that paints it is a later increment.
+
+`Properties::from_stat(name, kind, stat)` turns an entry's name, its browser
+`EntryKind`, and the `fs_stat` `FileStat` the app read for it into the
+display-ready fields the panel renders: a human kind label (`Folder` / `File` /
+`Application` — the `EntryKind` distinguishes a sealed `<Name>.app` bundle from
+an ordinary directory), the apparent `size` and on-disk `allocated` bytes (both
+via the shared `format_size`, never one derived from the other), the raw mode
+and its four-digit octal spelling, the ten-character permission string
+(`drwxr-xr-x`), the owning uid/gid, and the four `Time64` stamps rendered as
+`YYYY-MM-DD HH:MM:SS` through `format_datetime`. Every field comes straight
+from `fs_stat`; a stamp the backing does not keep is `Time64::UNIX_EPOCH`,
+which renders blank rather than as a fabricated `1970-01-01` wall time
+(`AGENTS.md` §21). The permission string is the one shared
+`tairix_abi::fs::mode_string` spelling — the same definition `ls -l` renders —
+so the two can never disagree on what a mode means (`AGENTS.md` §2.2); the
+permission string's leading type indicator reads from the structural
+`FileStat::kind`, so a bundle is *labelled* "Application" yet honestly shows a
+directory's `d`. The model reads nothing and holds no authority: the app
+performs the one capability-checked `fs_stat` under the user's own identity and
+hands the result here, so the trusted picker composes the same view.
+
 ## Terminal emulator (`tairix-terminal`)
 
 The terminal emulator hosts the system shell and shows its output on a

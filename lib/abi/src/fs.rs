@@ -113,6 +113,45 @@ impl FileKind {
     }
 }
 
+/// The ten-byte POSIX long-format mode string for a node, e.g. `drwxr-xr-x`.
+///
+/// The first byte is the kind indicator — `d` for a directory, `-` for a
+/// regular file — and the next nine are the owner/group/other `rwx` triads
+/// taken from the low nine bits of `mode`: a set bit renders as its
+/// `r`/`w`/`x` letter, a clear bit as `-`. Every byte is ASCII, so the array
+/// is valid UTF-8 by construction and a caller may render it as a string
+/// without a fallible decode.
+///
+/// This is the single definition of the mapping so the `ls` long format and
+/// the file manager's properties view can never disagree on what a mode
+/// means. Only the nine permission bits are rendered; the higher mode bits
+/// (setuid/setgid/sticky) are not part of this spelling.
+#[must_use]
+pub const fn mode_string(kind: FileKind, mode: u32) -> [u8; 10] {
+    const PERMISSIONS: [(u32, u8); 9] = [
+        (0o400, b'r'),
+        (0o200, b'w'),
+        (0o100, b'x'),
+        (0o040, b'r'),
+        (0o020, b'w'),
+        (0o010, b'x'),
+        (0o004, b'r'),
+        (0o002, b'w'),
+        (0o001, b'x'),
+    ];
+    let mut out = [b'-'; 10];
+    out[0] = if kind.is_dir() { b'd' } else { b'-' };
+    let mut i = 0;
+    while i < PERMISSIONS.len() {
+        let (bit, ch) = PERMISSIONS[i];
+        if mode & bit != 0 {
+            out[i + 1] = ch;
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Flags accepted by [`fs_open`](crate::SyscallNumber::FS_OPEN).
 ///
 /// A `#[repr(transparent)]` newtype over the `u32` flags register, mirroring
@@ -632,12 +671,28 @@ impl core::iter::FusedIterator for DirEntries<'_> {}
 mod tests {
     extern crate alloc;
     use super::{
-        DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags, UnlinkFlags,
-        FS_NAME_MAX,
+        mode_string, DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags,
+        UnlinkFlags, FS_NAME_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
+
+    #[test]
+    fn mode_string_renders_kind_and_permission_triads() {
+        // A directory renders its kind indicator and full rwx set.
+        assert_eq!(&mode_string(FileKind::Directory, 0o755), b"drwxr-xr-x");
+        // A regular file leads with `-`.
+        assert_eq!(&mode_string(FileKind::Regular, 0o644), b"-rw-r--r--");
+        // No permission bits: only the kind indicator, all triads cleared.
+        assert_eq!(&mode_string(FileKind::Regular, 0), b"----------");
+        // Every permission bit set.
+        assert_eq!(&mode_string(FileKind::Regular, 0o777), b"-rwxrwxrwx");
+        // A private file (owner read/write only).
+        assert_eq!(&mode_string(FileKind::Regular, 0o600), b"-rw-------");
+        // Higher (setuid/setgid/sticky) bits do not affect the nine triads.
+        assert_eq!(&mode_string(FileKind::Regular, 0o7644), b"-rw-r--r--");
+    }
 
     #[test]
     fn file_kind_round_trips_and_rejects_unknown() {

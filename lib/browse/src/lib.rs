@@ -55,7 +55,11 @@
 //! * [`layout`](mod@layout) — the [`ListView`]/[`GridView`] item-view geometry
 //!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
 //!   definition the renderer and the pointer hit-test share), plus [`ViewMode`].
-//! * [`format`](mod@format) — the size/date column formatting.
+//! * [`format`](mod@format) — the size/date column formatting and the
+//!   properties view's date-and-time spelling.
+//! * [`properties`](mod@properties) — the [`Properties`] view model: the
+//!   display-ready summary of a node's `fs_stat` metadata the file manager's
+//!   Properties panel shows (`plans/NEW-FILEMANAGER.md` FM8).
 //! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
 //!   rename model the file manager's first write operation is built on.
 //! * [`render`](mod@render) — painting the current directory into a
@@ -86,6 +90,7 @@ pub mod format;
 pub mod icon;
 pub mod layout;
 pub mod open_with;
+pub mod properties;
 pub mod rename;
 pub mod render;
 pub mod select;
@@ -104,10 +109,11 @@ pub use error::BrowseError;
 pub use execute::{
     paste_strategy, CopyChunk, CopyCursor, CopyError, PasteStrategy, VolumeId, COPY_CHUNK_LEN,
 };
-pub use format::{format_date, format_size};
+pub use format::{format_date, format_datetime, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
+pub use properties::Properties;
 pub use rename::{validate_new_name, RenameError};
 pub use render::render;
 pub use select::Selection;

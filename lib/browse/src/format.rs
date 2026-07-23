@@ -70,6 +70,41 @@ pub fn format_date(modified: Time64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Render an instant as an ISO calendar date *and* wall-clock time
+/// (`YYYY-MM-DD HH:MM:SS`), or the empty string when the instant is the epoch.
+///
+/// This is the properties-view spelling of a timestamp, where the exact time
+/// of day matters (a listing column uses the shorter date-only
+/// [`format_date`]). The epoch is left blank for the same reason: a backing
+/// that keeps no stamp of a given kind reports [`Time64::UNIX_EPOCH`], and
+/// showing `1970-01-01 00:00:00` for every such node would be a fabricated
+/// wall time. The date is the same proleptic-Gregorian conversion
+/// [`format_date`] uses, so the two never disagree on a calendar day; the
+/// time of day is the floored second-of-day, correct for pre-epoch instants
+/// too.
+#[must_use]
+pub fn format_datetime(stamp: Time64) -> String {
+    if stamp.secs() == Time64::UNIX_EPOCH.secs()
+        && stamp.subsec_nanos() == Time64::UNIX_EPOCH.subsec_nanos()
+    {
+        return String::new();
+    }
+    let (year, month, day) = civil_from_secs(stamp.secs());
+    let (hour, minute, second) = time_of_day(stamp.secs());
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+/// The floored `(hour, minute, second)` of the day an instant falls in.
+///
+/// Uses Euclidean remainder so the second-of-day is always in `0..86_400`,
+/// matching the floored-day convention of [`civil_from_secs`]: one second
+/// before the epoch is `23:59:59` of the previous civil day, not `-1`.
+fn time_of_day(secs: i64) -> (i64, i64, i64) {
+    const SECS_PER_DAY: i64 = 86_400;
+    let sod = secs.rem_euclid(SECS_PER_DAY);
+    (sod / 3600, (sod % 3600) / 60, sod % 60)
+}
+
 /// Convert signed seconds since the Unix epoch into a proleptic-Gregorian
 /// `(year, month, day)`, flooring to the civil day that contains the instant.
 ///
@@ -95,7 +130,7 @@ fn civil_from_secs(secs: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_secs, format_date, format_size};
+    use super::{civil_from_secs, format_date, format_datetime, format_size};
     use tairix_abi::time::Time64;
 
     #[test]
@@ -140,6 +175,41 @@ mod tests {
         assert_eq!(format_date(Time64::from_secs(-1)), "1969-12-31");
         // Far after 2038 (the 32-bit boundary) still renders.
         assert_eq!(format_date(Time64::from_secs(4_102_444_800)), "2100-01-01");
+    }
+
+    #[test]
+    fn datetime_renders_the_epoch_blank_never_a_fabricated_time() {
+        assert_eq!(format_datetime(Time64::UNIX_EPOCH), "");
+    }
+
+    #[test]
+    fn datetime_renders_date_and_wall_clock_time() {
+        // 2021-01-01T00:00:00Z.
+        assert_eq!(
+            format_datetime(Time64::from_secs(1_609_459_200)),
+            "2021-01-01 00:00:00"
+        );
+        // A stamp mid-day shows the floored hour/minute/second.
+        assert_eq!(
+            format_datetime(Time64::from_secs(1_609_459_200 + 13 * 3600 + 37 * 60 + 5)),
+            "2021-01-01 13:37:05"
+        );
+        // Sub-second precision does not appear in the second-resolution render.
+        assert_eq!(
+            format_datetime(Time64::new(1_609_459_200, 999_999_999).expect("canonical")),
+            "2021-01-01 00:00:00"
+        );
+        // One second before the epoch is 23:59:59 of the previous civil day,
+        // never a negative field.
+        assert_eq!(
+            format_datetime(Time64::from_secs(-1)),
+            "1969-12-31 23:59:59"
+        );
+        // Far after 2038 still renders with the time of day.
+        assert_eq!(
+            format_datetime(Time64::from_secs(4_102_444_800 + 59)),
+            "2100-01-01 00:00:59"
+        );
     }
 
     #[test]

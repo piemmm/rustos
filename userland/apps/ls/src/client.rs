@@ -1296,24 +1296,15 @@ fn human_size(size: u64, base: u64) -> String {
 }
 
 /// The ten-character long-format mode string, e.g. `drwxr-xr-x`.
+///
+/// The permission-bit spelling is the one shared `tairix_abi::fs::mode_string`
+/// definition, so `ls -l` and the file manager's properties view never
+/// disagree on what a mode means; the bytes it returns are always ASCII.
 fn mode_string(meta: Metadata) -> String {
-    const PERMISSIONS: [(u32, char); 9] = [
-        (0o400, 'r'),
-        (0o200, 'w'),
-        (0o100, 'x'),
-        (0o040, 'r'),
-        (0o020, 'w'),
-        (0o010, 'x'),
-        (0o004, 'r'),
-        (0o002, 'w'),
-        (0o001, 'x'),
-    ];
-    let mut s = String::with_capacity(10);
-    s.push(if meta.kind.is_dir() { 'd' } else { '-' });
-    for (bit, ch) in PERMISSIONS {
-        s.push(if meta.mode & bit != 0 { ch } else { '-' });
-    }
-    s
+    tairix_abi::fs::mode_string(meta.kind, meta.mode)
+        .iter()
+        .map(|&b| b as char)
+        .collect()
 }
 
 /// Emit the `fs.hidden_entries_omitted` advisory (fd 3) when the default
