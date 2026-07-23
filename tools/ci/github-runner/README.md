@@ -83,6 +83,22 @@ soaks, just register the `soak`-labelled instance there.
 - Outbound HTTPS to GitHub (to pull jobs). Per AGENTS.md §19.3 this governs the
   build host, not TAIRiX itself; keep `Cargo.lock` committed so source-hash
   pinning stays meaningful.
+- **QEMU build toolchain**, installed **once as admin**. The QEMU integration
+  tests need a QEMU new enough for the riscv64 vertical's pinned `-cpu
+  rv64,svade=true` (QEMU >= 9.1); no distro ships that build, so the
+  `Install pinned QEMU` workflow step builds the pinned version from
+  GPG-verified official source into the runner's persistent cache via
+  `tools/ci/install-qemu.sh`. That build runs as the (rootless) runner user,
+  so its build-time dependencies must already be present on the host. On
+  Debian/Ubuntu, once:
+  ```sh
+  sudo apt-get install -y build-essential ninja-build meson python3-venv \
+    pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev flex bison
+  ```
+  The build lands once in the persistent cache and every later run reuses it;
+  `install-qemu.sh` fails closed with the exact missing packages if a
+  prerequisite is absent. The pinned QEMU version is the single `QEMU_VERSION`
+  line in that script — bump it there to move QEMU.
 
 ## Register the runner
 

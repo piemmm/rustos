@@ -132,6 +132,18 @@ jobs:
           "$TAIRIX_CC_CLANG" --version
           "$TAIRIX_CC_LLD" --version
 
+      # The QEMU integration tests spawn `qemu-system-<arch>` by bare name, so
+      # PATH must resolve a QEMU new enough for the riscv64 vertical's pinned
+      # `-cpu rv64,svade=true` (QEMU >= 9.1). A distro QEMU older than that
+      # fails every riscv64 QEMU test with "Property 'rv64-riscv-cpu.svade'
+      # not found". No distro ships the pin and the runner has no root, so —
+      # exactly like the clang/lld step above — build the pinned QEMU once from
+      # GPG-verified official source into the runner's persistent cache and put
+      # it on PATH. The version and its build-time host prerequisites live in
+      # tools/ci/install-qemu.sh (one source of truth); the step is idempotent.
+      - name: Install pinned QEMU
+        run: tools/ci/install-qemu.sh
+
       # Start every run from a clean slate: the self-hosted runner persists
       # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
       # the soak builds so it compiles from scratch and stale outputs can

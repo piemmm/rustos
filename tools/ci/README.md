@@ -13,6 +13,7 @@ belongs in a *named* `cargo xtask` subcommand (`tools/xtask`), not here.
 | `lib.sh` | Sourced by the others. Puts the pinned toolchain on `PATH`, resolves the repo root, sets the log directory, and (opt-in) syncs the checkout. |
 | `ci-run.sh` | Run one `cargo xtask` subcommand, logging to a timestamped file. Default subcommand is `ci` (the full per-PR gate, §7). |
 | `soak.sh` | Run the nightly 24 h soaks (§19.6 fuzz, §19.7 proptest, and the §7 repeated-test soak) with every harness/model/the test matrix **in parallel**, one log per job. |
+| `install-qemu.sh` | Provision the one pinned QEMU version the QEMU integration tests need (built from GPG-verified official source, cached on the runner). Idempotent; called by the GitHub workflows. A distro QEMU is too old for the riscv64 `svade` CPU pin. |
 | `crontab.sample` | Ready-to-edit `crontab` for any cron-based host (Linux/Unix/macOS). |
 | `systemd/*.{service,timer}` | systemd user units for a Linux host (preferred over cron on systemd distros). |
 | `launchd/*.plist.sample` | `launchd` LaunchAgents for a macOS host (preferred over cron on laptops). |
@@ -68,17 +69,28 @@ missed while the host was asleep.
 ### GitHub Actions
 
 The repo also ships GitHub Actions workflows so CI is driven by GitHub directly,
-not only by a standalone builder:
+not only by a standalone builder. All three run on a **self-hosted Linux**
+runner (the repo is public, so no `pull_request` trigger ever puts untrusted
+code on a machine we own — see `github-runner/README.md`):
 
-- `.github/workflows/ci.yml` runs the full per-PR gate (`cargo xtask ci`) on a
-  **GitHub-hosted** `ubuntu-latest` runner — free and ephemeral.
-- `.github/workflows/soak.yml` runs the nightly 24 h soaks (`soak.sh all`:
-  fuzz, proptest, and the repeated-test soak) on a **self-hosted Linux**
-  runner, because a 24 h job exceeds the GitHub-hosted per-job time cap.
+- `.github/workflows/ci.yml` runs the full per-PR gate (`cargo xtask ci`) plus
+  the `>= 120 s` parallel soak on every push to `master`.
+- `.github/workflows/ci-long.yml` runs the exhaustive flake hunt
+  (`cargo xtask ci-long`, 2 × 20 executions of every test) on demand
+  (`workflow_dispatch`), on its own `long`-labelled runner instance.
+- `.github/workflows/soak.yml` runs the nightly seven-hour soak window
+  (`soak.sh all`: fuzz, proptest, and the repeated-test soak) on its own
+  `soak`-labelled runner instance, because a multi-hour job exceeds the
+  GitHub-hosted per-job time cap.
 
-See `tools/ci/github-runner/README.md` to register and install the self-hosted
-Linux runner as a systemd service. A given host runs *either* a standalone
-builder (cron/systemd/launchd above) *or* a GitHub Actions runner — not both.
+Each workflow provisions the pinned build toolchains it needs into the runner's
+persistent cache — the clang/lld the CCOMPAT tests require and, via
+`install-qemu.sh`, the QEMU the integration tests require (a distro QEMU is too
+old for the riscv64 `svade` CPU pin). See `tools/ci/github-runner/README.md` to
+register and install the self-hosted Linux runner(s) as a systemd service, and
+for the one-time host prerequisites those provisioning steps assume. A given
+host runs *either* a standalone builder (cron/systemd/launchd above) *or* a
+GitHub Actions runner — not both.
 
 ## The 24 h soaks, in parallel
 
