@@ -71,19 +71,21 @@ mod program {
         WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
-        build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_owner_control,
-        draw_properties_editable, manager_tool_at, owner_field_at, permission_cell_at, render,
-        OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        build_context_menu, build_delete_dialog, context_menu_command_at, delete_dialog_action_at,
+        draw_context_menu, draw_delete_dialog, draw_owner_control, draw_properties_editable,
+        manager_tool_at, owner_field_at, permission_cell_at, render, OwnerField,
+        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Activation, Browser,
-        Clipboard, ClipboardOp, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeletePlan,
-        DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem, PasteStrategy,
-        Properties, RenameError, ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS,
-        WIN_HEIGHT, WIN_WIDTH,
+        Clipboard, ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
+        DeleteAction, DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange,
+        PasteItem, PasteStrategy, Properties, RenameError, ToolbarCommand, VfsDirectorySource,
+        VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
+    use tairix_controls::Menu;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{Key, Modifiers, NamedKey};
@@ -357,6 +359,22 @@ mod program {
         plan: DeletePlan,
     }
 
+    /// The open right-click context menu: the built [`Menu`] and the
+    /// window-local point it is anchored at.
+    ///
+    /// `None` unless the user right-clicked; the event loop threads it so the
+    /// painted menu and the anchor its hit-test mirrors stay in step. It opens
+    /// only in navigation mode (no other overlay is up), owns input while
+    /// open, and performs nothing itself — a chosen command runs the user's
+    /// own verb, exactly the paths the toolbar and keyboard drive.
+    struct ContextMenu {
+        /// The window-local right-click point the menu is placed at and
+        /// hit-tested against (one anchor, so paint and click agree).
+        anchor: Point,
+        /// The drawn menu, built from the shared context-menu model.
+        menu: Menu,
+    }
+
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
     /// reflect stay in step. At most one of `rename`/`properties`/`delete` is
@@ -370,6 +388,8 @@ mod program {
         owner: Option<OwnerEditor>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
+        /// The right-click context menu, when open (secondary-button press).
+        menu: Option<ContextMenu>,
         /// The held cut/copy clipboard, captured by `Ctrl+X`/`Ctrl+C` and
         /// consumed by `Ctrl+V`. It lives in the app (not the browser), so it
         /// survives navigating to the paste target; a `Cut` is cleared once
@@ -443,6 +463,12 @@ mod program {
         if let Some(confirm) = overlays.delete.as_ref() {
             draw_delete_dialog(&mut surface, &confirm.dialog, theme, font, viewport);
         }
+        // The right-click context menu draws last, on top of the view. It opens
+        // only in navigation mode, so it never overlaps the modal overlays
+        // above; drawing it last keeps it topmost regardless.
+        if let Some(ctx) = overlays.menu.as_ref() {
+            draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, theme, font, viewport);
+        }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -476,6 +502,14 @@ mod program {
         // edit or properties overlay is simply abandoned (nothing was written).
         if let WindowEvent::CloseRequested { .. } = event {
             return (false, true);
+        }
+
+        // The right-click context menu owns input while it is open (it opens
+        // only in navigation mode, so no other overlay is up); it needs the
+        // launcher for a context-menu Open, so it is handled here rather than
+        // in the launcher-less modal router.
+        if overlays.menu.is_some() {
+            return apply_menu_event(browser, overlays, launcher, font, theme, viewport, event);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
@@ -554,6 +588,12 @@ mod program {
             // coordinates: a primary-button press navigates (a path-bar crumb)
             // or selects (an item); every other pointer action is a no-op.
             WindowEvent::Pointer { x, y, action, .. } => {
+                // A secondary-button (right-click) press opens the context
+                // menu on the item under the pointer; its commands are the
+                // user's own verbs, so it needs the overlay/launcher state.
+                if let Some(point) = secondary_press_point(*action, *x, *y) {
+                    return open_context_menu(browser, overlays, font, theme, viewport, point);
+                }
                 // A primary click on a manager write tool (New Folder) is
                 // dispatched here because the write path needs the rename
                 // state; all read-only pointer routing (toolbar commands,
@@ -1319,6 +1359,131 @@ mod program {
         (false, false)
     }
 
+    /// The window-local [`Point`] of a **secondary**-button (right-click)
+    /// press, or `None` for any other pointer action — the mirror of
+    /// [`press_point`] for the button that opens the right-click context menu.
+    fn secondary_press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
+        if action != PointerAction::Pressed(PointerButtonCode::Secondary) {
+            return None;
+        }
+        Some(Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        ))
+    }
+
+    /// Open the right-click context menu at window-local `point`.
+    ///
+    /// The item under the pointer is selected first so the menu's commands act
+    /// on what was clicked; a right-click on empty space (or the chrome) clears
+    /// the selection so the menu offers only the directory-scoped Paste. The
+    /// menu is built from the shared [`ContextMenuModel`] with the app's own
+    /// held-clipboard state, so an inapplicable command renders disabled. The
+    /// menu itself performs nothing — a chosen command runs the user's own
+    /// permission-checked verb in [`dispatch_context_command`], no new
+    /// authority.
+    fn open_context_menu<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        point: Point,
+    ) -> (bool, bool) {
+        if let Some(index) =
+            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
+        {
+            let _ = browser.select(index);
+        } else {
+            browser.clear_selection();
+        }
+        let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
+        overlays.menu = Some(ContextMenu {
+            anchor: point,
+            menu: build_context_menu(model),
+        });
+        (true, false)
+    }
+
+    /// Handle one event while the right-click context menu owns the window.
+    ///
+    /// `Escape` dismisses it. A primary-button press on an enabled command runs
+    /// that command's verb (and closes the menu); a press off the menu, or on
+    /// a disabled row, simply dismisses it (fail closed — a disabled row never
+    /// acts, §5.4). Every other event leaves the menu open.
+    fn apply_menu_event<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> (bool, bool) {
+        match event {
+            WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
+                overlays.menu = None;
+                (true, false)
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let Some(point) = press_point(*action, *x, *y) else {
+                    return (false, false);
+                };
+                // Take the menu out (closing it) so the dispatch can borrow the
+                // overlays mutably; a press off an enabled row is a plain
+                // dismiss.
+                let Some(ctx) = overlays.menu.take() else {
+                    return (false, false);
+                };
+                match context_menu_command_at(&ctx.menu, ctx.anchor, viewport, font, theme, point) {
+                    Some(command) => dispatch_context_command(
+                        browser, overlays, launcher, font, theme, viewport, command,
+                    ),
+                    None => (true, false),
+                }
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// Run the verb a chosen [`ContextCommand`] names, over the exact same app
+    /// paths the toolbar and keyboard drive, so the right-click menu can never
+    /// diverge from them (§2.2). Every verb is the user's own permission-
+    /// checked action under their identity — the menu adds no authority.
+    fn dispatch_context_command<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        command: ContextCommand,
+    ) -> (bool, bool) {
+        match command {
+            ContextCommand::Open => activate(browser, launcher, font, theme, viewport),
+            ContextCommand::Rename => {
+                begin_rename(browser, &mut overlays.rename, font, theme, viewport)
+            }
+            ContextCommand::Cut => {
+                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Cut)
+            }
+            ContextCommand::Copy => {
+                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Copy)
+            }
+            ContextCommand::Paste => {
+                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Paste)
+            }
+            ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
+        }
+    }
+
     /// Run a toolbar `command` against the browser through the one shared
     /// [`tairix_browse::apply_command`] dispatch (so a toolbar click and its
     /// keyboard accelerator can never diverge), revealing the selection and
@@ -1870,6 +2035,7 @@ mod program {
             properties: None,
             owner: None,
             delete: None,
+            menu: None,
             clipboard: None,
             can_chown: tairix_rt::self_origin()
                 .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),

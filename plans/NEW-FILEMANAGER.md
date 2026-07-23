@@ -47,12 +47,18 @@ driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` 
 copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
-and FM6b's app-side bundle launch (`Enter` → `Browser::activate_selected` →
+FM6b's app-side bundle launch (`Enter` → `Browser::activate_selected` →
 descend a directory or spawn a `<Name>.app` bundle's own `Run` through the
 signed load gate under `CAP_PROC_SPAWN`, async and non-blocking, with launched
-children reaped on an any-child wait-set member)
-are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
-rest of FM6b (the `OpenFile`/"Open With…" viewer hand-off), the FM7b
+children reaped on an any-child wait-set member),
+and FM4b's drawn context menu (a secondary-button press opens a
+`lib/controls::Menu` painted from the shared `ContextMenuModel`, routed through
+`dispatch_context_command` to the *same* Open/Rename/Cut/Copy/Paste/Properties
+verbs the toolbar and keyboard drive, fail-closed on a disabled row or a press
+off the menu)
+are done** — completing FM4b's drawn chrome; the rest of FM6b (the
+`OpenFile`/"Open With…" viewer hand-off, whose correct race-free spawn-time
+`FdWire::Handle` design is recorded in FM6b below), the FM7b
 progress-indicator + mid-run cancel
 follow-up (delete and copy alike),
 and FM9 are
@@ -74,9 +80,12 @@ pointer routing wired onto it (a primary-button press climbs a crumb via
 action (breadcrumb navigation) already exists (§2.4). Its **drawn clickable
 toolbar** is now done too — its commands (Back/Forward/Up/Refresh/ToggleView/
 Sort) and their actions already exist, so it needs no speculative surface. The
-remaining FM4b chrome (the context menu) still lands *with* the actions its
-entries gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so no menu
-entry is built as speculative surface ahead of the behaviours it invokes (§2.4).
+**drawn context menu is now done** — a secondary-button press paints the shared
+`ContextMenuModel` as a `lib/controls::Menu` routed to the existing
+Open/Rename/Cut/Copy/Paste/Properties verbs. `OpenWith` was staged *out* of
+`CONTEXT_COMMANDS` (it has no app verb until FM6b's file→viewer hand-off), so no
+menu entry is built as speculative surface ahead of the behaviour it invokes
+(§2.4); it re-joins the set with that stage, as Delete and New Folder did.
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven) is done, and
@@ -88,12 +97,16 @@ selection dispatches through `Browser::activate_selected`, and a `LaunchBundle`
 spawns the `<Name>.app` bundle's own `Run` through the ordinary signed load
 gate under the `CAP_PROC_SPAWN` grant this stage added (async and
 non-blocking, with launched children reaped on an any-child wait-set member).
-The rest of **FM6b** — the CU6 `fd_grant` hand-off of a data file to its
-associated viewer (`OpenFile`) and the "Open With…" menu over the done
-association model — stays `planned`: it needs a *new* grant-to-spawned-child
-mechanism (the viewer obtains a file only via the session's `PickFile`
-delegation today), which the pure engine model and the bundle-launch path do
-not.
+The rest of **FM6b** — handing a data file to its associated viewer (`OpenFile`)
+and the "Open With…" chooser over the done association model — stays `planned`.
+The correct mechanism is the race-free spawn-time `spawn_attached` +
+`FdWire::Handle` inheritance (the manager `fs_open`s the file read-only and the
+kernel clones that read-only open description into the spawned viewer, which
+reads it with no filesystem capability of its own); this supersedes the earlier
+fd_grant-after-spawn sketch (`fd_grant`/`fd_redeem` remain the picker's post-hoc
+delegation to an already-running window owner). See FM6b below for the full
+design and the remaining app-side work (the viewer's inherited-document startup
+path, the app-store `BundleSource`, and the chooser).
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -312,7 +325,7 @@ Done. The host-testable navigation *model* the FM4b chrome will drive, added to
   test-only source accessor. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`.
 
-### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[~]`
+### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[x]`
 
 The app frame, entirely `lib/controls`/`lib/browse::render` widgets over the
 theme, painting the FM4a model. **A drawn surface lands with the action it
@@ -421,13 +434,34 @@ never resolves a write tool, and `suggest_new_dir_name` disambiguation) and
 `lib/icon` (the `NewFolder` glyph). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/icon` README + rustdoc.
 
-The remaining drawn chrome (still `planned`):
+**The drawn context menu is done.** A secondary-button (right-click) press
+selects the item under the pointer (or clears the selection on empty space, so
+only the directory-scoped Paste is offered) and opens a `lib/controls::Menu`
+painted from the done `ContextMenuModel`: `render::build_context_menu` builds one
+`MenuItem` per `chrome::CONTEXT_COMMANDS` entry (its `ContextCommand::label()` +
+`shortcut()` caption, rendered *disabled* — not hidden — when the model reports
+it inapplicable, so the menu's shape is stable), `render::context_menu_rect`
+anchors it at the click and clamps it inside the window, `render::draw_context_menu`
+paints it last (topmost), and `render::context_menu_command_at` is the mirror
+hit-test returning **only an enabled command** (fail closed on a disabled row
+or a press off the menu, §5.4). The `files.app` `Run` binary routes a chosen
+command through `dispatch_context_command` to the *exact same* app verbs the
+toolbar and keyboard already drive — Open (`activate`), Rename (FM5),
+Cut/Copy/Paste (FM7), Properties (FM8) — so the menu can never diverge from them
+(§2.2) and adds no authority (every verb is the user's own §5.3-checked action).
+`Escape` or a press off the menu dismisses it. Host-tested in `lib/browse`
+(`build_context_menu` labels + model-mirrored enablement, `context_menu_rect`
+anchor/clamp/degenerate, `draw_context_menu` paints/no-panic, and the
+`context_menu_command_at` full-window mirror + fail-closed on a disabled row and
+off the menu). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-- **Drawn context menu** (`lib/controls::Menu`): the app-side menu painted
-  from the done `ContextMenuModel`, each `MenuItem` enabled/disabled from
-  `is_enabled` and routed to the verb it invokes — Open/Open With… (FM6),
-  Rename (FM5), Cut/Copy/Paste (FM7), Properties (FM8). Delete lands with its
-  own FM7 engine action + entry, never ahead of it.
+`OpenWith` was **removed** from `ContextCommand`/`CONTEXT_COMMANDS` (and the now
+unused `ContextMenuModel::selection_is_file` deleted with it, §2.14): the drawn
+menu has no verb to invoke for it until the FM6b file→viewer hand-off lands, so
+carrying a clickable-but-dead Open With… row would be speculative surface
+(§2.4). It rejoins the command set in that stage, exactly as Delete and New
+Folder join with the stages that first wire their behaviour. The drawn context
+menu therefore has no `planned` remainder.
 
 ### FM5 — in-place rename `[x]`
 
@@ -542,20 +576,32 @@ The remaining app-side wiring (still `planned`):
 
 - **Open a data file in its associated viewer (`OpenFile`).** Activating a
   regular file today leaves the listing unchanged (an honest no-op, never a
-  fabricated action); wiring it needs a *new* hand-off mechanism the tree does
-  not yet have. The viewer obtains its file only by asking the *session* for a
-  pick (`PickFile` → the session `fd_grant`s to the viewer's window owner →
-  `FilePicked`); there is no path for the file manager to hand a file to a child
-  it spawned. The intended shape (`plans/APPWIN.md` AW5 CU6) is: the manager
-  `fs_open`s the file read-only, spawns the associated viewer, `fd_grant`s the
-  one-shot descriptor to the child's attested PID, and forwards the handle to
-  it — so the viewer needs no filesystem capability of its own (least
-  privilege, §5.2). That grant-to-spawned-child plumbing (and the ordering/race
-  discipline it needs) is its own increment.
+  fabricated action); wiring it hands the file to a spawned viewer. **The
+  correct mechanism already exists and is race-free at spawn: `spawn_attached`
+  with an `FdWire::Handle` wire** (`lib/abi::process`). The manager `fs_open`s
+  the file read-only and spawns the associated viewer with a `SpawnAttach`
+  block that wires that descriptor onto one of the child's standard streams;
+  the kernel resolves it owner-checked against the manager's kernel-attested
+  identity and clones the read-only *open description* into the child, so the
+  viewer reads its document with **no filesystem capability of its own** (least
+  privilege, §5.2) and there is no post-spawn channel, handle-forwarding, or
+  ordering race to get right. This **supersedes** the earlier fd_grant-to-
+  attested-PID sketch (`fd_grant`/`fd_redeem` stay the picker's *post-hoc*
+  delegation to an already-running window owner; a spawn-time inheritance is
+  the cleaner tool for a child the manager itself launches — evolve in place,
+  §2.13). The viewer gains a "read my document from the inherited descriptor"
+  startup path (distinct from its interactive `PickFile` path); that viewer
+  change plus the manager's `fs_open`+`spawn_attached` wiring is its own
+  increment.
 - **"Open With…"** draws the bundles the done `open_with` model returns as a
-  `lib/controls` `Menu`; the remaining work is only the app-side `BundleSource`
-  backed by the real app store and the menu that lists `applications_for`'s
-  result. It lands with the `OpenFile` hand-off above (both spawn a viewer).
+  `lib/controls` `Menu` and launches the chosen one via the same
+  `spawn_attached`+`FdWire::Handle` hand-off; the remaining work is the
+  app-side `BundleSource` backed by the real app store (runtime bundle
+  enumeration + `AppInfo` MIME associations) and the chooser menu over
+  `applications_for`'s result. It lands with the `OpenFile` hand-off above
+  (both inherit the file into the spawned viewer), and **re-adds** the
+  `OpenWith` entry to `chrome::CONTEXT_COMMANDS` (staged out of the drawn
+  context menu until this verb exists, §2.4).
 - **Double-click activation.** Activation is keyboard-driven (`Enter`) today;
   a pointer double-click needs press-time tracking and lands with the pointer
   refinements, not as speculative state now (§2.4).

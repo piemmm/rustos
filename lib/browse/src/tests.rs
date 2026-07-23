@@ -3281,7 +3281,6 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     for command in [
         ContextCommand::Open,
-        ContextCommand::OpenWith,
         ContextCommand::Rename,
         ContextCommand::Cut,
         ContextCommand::Copy,
@@ -3293,10 +3292,10 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
 }
 
 #[test]
-fn the_context_menu_enables_item_commands_on_a_directory_but_not_open_with() {
+fn the_context_menu_enables_the_item_commands_on_a_directory() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
-    // A directory descends on Open; it has no application to "open with".
+    // A directory descends on Open; every selection-scoped command is offered.
     let browser = Browser::open_root(activation_source()).expect("root");
     assert_eq!(browser.selected_name(), Some("Docs"));
     let menu = ContextMenuModel::for_browser(&browser, false);
@@ -3305,24 +3304,25 @@ fn the_context_menu_enables_item_commands_on_a_directory_but_not_open_with() {
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
     assert!(menu.is_enabled(ContextCommand::Properties));
-    assert!(!menu.is_enabled(ContextCommand::OpenWith));
 }
 
 #[test]
-fn the_context_menu_disables_open_with_on_a_bundle() {
+fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
-    // A bundle launches itself; there is no application to choose for it.
+    // A bundle is a selection like any other: Open launches it, and the
+    // selection-scoped commands apply.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(1).expect("select Editor.app");
     assert!(browser.selected_entry().expect("bundle").is_bundle());
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
-    assert!(!menu.is_enabled(ContextCommand::OpenWith));
+    assert!(menu.is_enabled(ContextCommand::Rename));
+    assert!(menu.is_enabled(ContextCommand::Properties));
 }
 
 #[test]
-fn the_context_menu_enables_open_with_only_on_a_file() {
+fn the_context_menu_enables_the_item_commands_on_a_file() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
     let mut browser = Browser::open_root(activation_source()).expect("root");
@@ -3330,7 +3330,10 @@ fn the_context_menu_enables_open_with_only_on_a_file() {
     assert_eq!(browser.selected_name(), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
-    assert!(menu.is_enabled(ContextCommand::OpenWith));
+    assert!(menu.is_enabled(ContextCommand::Rename));
+    assert!(menu.is_enabled(ContextCommand::Cut));
+    assert!(menu.is_enabled(ContextCommand::Copy));
+    assert!(menu.is_enabled(ContextCommand::Properties));
 }
 
 #[test]
@@ -3349,19 +3352,168 @@ fn context_commands_list_covers_every_variant_once() {
     use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
 
     // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
-    // exactly once, in a stable order. Delete and New Folder are absent — their
-    // engine action does not exist yet, so they are not modelled here.
+    // exactly once, in a stable order. Open With…, Delete, and New Folder are
+    // absent — the drawn menu has no verb to invoke for them yet, so they land
+    // with the stage that first wires their behaviour, never as speculative
+    // surface.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
-            ContextCommand::OpenWith,
             ContextCommand::Rename,
             ContextCommand::Cut,
             ContextCommand::Copy,
             ContextCommand::Paste,
             ContextCommand::Properties,
         ]
+    );
+}
+
+#[test]
+fn build_context_menu_labels_each_row_and_mirrors_the_model_enablement() {
+    use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::render::build_context_menu;
+
+    // A selected entry, no clipboard: the selection commands are actionable and
+    // Paste is disabled. Each drawn row carries its command's label and its
+    // actionability mirrors the model, so a disabled command reads muted
+    // (present) rather than vanishing.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let menu = build_context_menu(model);
+    assert_eq!(menu.len(), CONTEXT_COMMANDS.len());
+    for (item, &command) in menu.items().iter().zip(CONTEXT_COMMANDS) {
+        assert_eq!(item.label(), command.label());
+        assert_eq!(
+            item.state().is_actionable(),
+            model.is_enabled(command),
+            "{command:?} actionability mirrors the model"
+        );
+    }
+
+    // Paste specifically is disabled with no clipboard and enabled with one.
+    let paste_index = CONTEXT_COMMANDS
+        .iter()
+        .position(|&c| c == ContextCommand::Paste)
+        .expect("Paste is modelled");
+    assert!(!menu.items()[paste_index].state().is_actionable());
+    let with_clip = build_context_menu(ContextMenuModel::for_browser(&browser, true));
+    assert!(with_clip.items()[paste_index].state().is_actionable());
+}
+
+#[test]
+fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
+    use crate::chrome::ContextMenuModel;
+    use crate::render::{build_context_menu, context_menu_rect};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    // A window comfortably larger than the menu, so a mid-window anchor fits.
+    let vp = Rect::new(0, 0, 800, 600);
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, true));
+
+    // Placed with its top-left at the click point when the whole menu fits.
+    let rect = context_menu_rect(&menu, Point::new(40, 30), vp, font, &theme);
+    assert_eq!((rect.origin.x, rect.origin.y), (40, 30));
+    assert!(rect.width > 0 && rect.height > 0);
+
+    // A click near the bottom-right corner shifts the menu left/up so the whole
+    // menu stays inside the window rather than spilling off it.
+    let corner = context_menu_rect(&menu, Point::new(798, 598), vp, font, &theme);
+    assert!(
+        corner.origin.x + i32::try_from(corner.width).unwrap() <= i32::try_from(vp.width).unwrap()
+    );
+    assert!(
+        corner.origin.y + i32::try_from(corner.height).unwrap()
+            <= i32::try_from(vp.height).unwrap()
+    );
+    assert!(corner.origin.x >= 0 && corner.origin.y >= 0);
+
+    // A window smaller than the menu still yields a drawable clamped rect
+    // (no panic), never a zero or over-size rectangle.
+    let tiny = Rect::new(0, 0, 10, 8);
+    let small = context_menu_rect(&menu, Point::new(3, 3), tiny, font, &theme);
+    assert!(small.width >= 1 && small.width <= tiny.width);
+    assert!(small.height >= 1 && small.height <= tiny.height);
+}
+
+#[test]
+fn draw_context_menu_paints_into_the_surface_without_panicking() {
+    use crate::chrome::ContextMenuModel;
+    use crate::render::{build_context_menu, draw_context_menu};
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 400);
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, false));
+
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    draw_context_menu(&mut surface, &menu, Point::new(20, 20), &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_context_menu(
+        &mut tiny,
+        &menu,
+        Point::new(0, 0),
+        &theme,
+        font,
+        Rect::new(0, 0, 2, 2),
+    );
+}
+
+#[test]
+fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
+    use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::render::{build_context_menu, context_menu_command_at};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 400);
+    // A selection, no clipboard: the item commands are enabled, Paste disabled.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let menu = build_context_menu(model);
+    let anchor = Point::new(30, 24);
+
+    // Scanning the whole window, every command the hit-test resolves is an
+    // enabled one, and every enabled command is reachable — so the drawn rows
+    // and the hit-test cover exactly the model's actionable commands, and a
+    // disabled row (Paste) never resolves (fail closed).
+    let mut seen: Vec<ContextCommand> = Vec::new();
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if let Some(cmd) =
+                context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(x, y))
+            {
+                assert!(model.is_enabled(cmd), "resolved a disabled command {cmd:?}");
+                if !seen.contains(&cmd) {
+                    seen.push(cmd);
+                }
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    for &cmd in CONTEXT_COMMANDS {
+        assert_eq!(
+            seen.contains(&cmd),
+            model.is_enabled(cmd),
+            "{cmd:?} reachable iff enabled"
+        );
+    }
+
+    // A click well outside the menu resolves nothing (fail closed).
+    assert_eq!(
+        context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
+        None
     );
 }
 

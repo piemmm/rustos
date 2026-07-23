@@ -31,7 +31,9 @@ use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::state::{AuthorityState, ControlRole, ControlState, SelectionState};
 use tairix_controls::text::TextField;
-use tairix_controls::{Card, Checkbox, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
+use tairix_controls::{
+    Card, Checkbox, IconButton, Menu, MenuItem, Panel, ScrollBar, TableCell, TableRow, Toolbar,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
@@ -39,7 +41,9 @@ use tairix_theme::{Palette, Theme};
 
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
-use crate::chrome::{self, ManagerTool, ToolbarCommand, ToolbarModel};
+use crate::chrome::{
+    self, ContextCommand, ContextMenuModel, ManagerTool, ToolbarCommand, ToolbarModel,
+};
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
@@ -1275,4 +1279,104 @@ pub fn delete_dialog_action_at(
         }
     }
     None
+}
+
+/// Build the drawn right-click context [`Menu`] for `model`: one [`MenuItem`]
+/// per [`chrome::CONTEXT_COMMANDS`] entry, in order, each carrying the
+/// command's label and keyboard-shortcut caption and rendered disabled (not
+/// hidden) when the model reports the command is not currently actionable — so
+/// the menu's shape is stable and an inapplicable command reads muted rather
+/// than vanishing. The menu performs nothing itself — the caller dispatches the
+/// chosen command in its own capability-checked tail — so composing it grants
+/// no authority; the read-only picker never opens a write context menu, so it
+/// never builds one.
+#[must_use]
+pub fn build_context_menu(model: ContextMenuModel) -> Menu {
+    let items: Vec<MenuItem> = chrome::CONTEXT_COMMANDS
+        .iter()
+        .map(|&command| {
+            let mut item = MenuItem::new(command.label()).with_shortcut(command.shortcut());
+            if !model.is_enabled(command) {
+                item = item.with_state(ControlState::disabled());
+            }
+            item
+        })
+        .collect();
+    Menu::new(items)
+}
+
+/// The bounds of the context `menu` anchored at window-local `anchor` (the
+/// right-click point), clamped so the whole menu stays inside `viewport`.
+///
+/// The menu's top-left is placed at `anchor`; if it would overflow the right or
+/// bottom edge it is shifted left/up so it fits, and it never leaves the
+/// viewport origin. One definition so [`draw_context_menu`] and
+/// [`context_menu_command_at`] place and hit-test the same rectangle (§2.2). A
+/// degenerate viewport still yields a drawable — if clipped — rectangle rather
+/// than a panic (§2.9).
+#[must_use]
+pub fn context_menu_rect(
+    menu: &Menu,
+    anchor: Point,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+) -> Rect {
+    let width = menu
+        .preferred_width(Scale::ONE, theme, font)
+        .clamp(1, viewport.width.max(1));
+    let height = menu
+        .preferred_height(Scale::ONE, theme)
+        .clamp(1, viewport.height.max(1));
+    let origin_x = viewport.origin.x;
+    let origin_y = viewport.origin.y;
+    let max_x = origin_x.saturating_add(to_i32(viewport.width.saturating_sub(width)));
+    let max_y = origin_y.saturating_add(to_i32(viewport.height.saturating_sub(height)));
+    let x = anchor.x.clamp(origin_x, max_x.max(origin_x));
+    let y = anchor.y.clamp(origin_y, max_y.max(origin_y));
+    Rect::new(x, y, width, height)
+}
+
+/// Draw the context `menu` anchored at `anchor`, on top of the current view.
+///
+/// Every blit clips, so an anchor near an edge simply shows the shifted,
+/// possibly-clipped menu rather than panicking. It reads only the passed-in
+/// menu and draws — no I/O, no authority (§4, §5.4).
+pub fn draw_context_menu(
+    surface: &mut Surface,
+    menu: &Menu,
+    anchor: Point,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+) {
+    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
+    menu.render(surface, bounds, Scale::ONE, theme, font);
+}
+
+/// The enabled [`ContextCommand`] the context `menu` (opened at `anchor`) draws
+/// at window-local pixel `point`, or `None` when the click is not on an
+/// actionable row — off the menu, or on a command rendered disabled (fail
+/// closed: a disabled row never acts, §5.4).
+///
+/// This mirrors [`draw_context_menu`]'s placement through the shared
+/// [`context_menu_rect`] and the menu's own [`Menu::row_at`] geometry, so a
+/// click resolves to exactly the row the user pressed (§2.2). The menu is built
+/// from [`chrome::CONTEXT_COMMANDS`] in order, so the row index maps straight
+/// back to its command.
+#[must_use]
+pub fn context_menu_command_at(
+    menu: &Menu,
+    anchor: Point,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<ContextCommand> {
+    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
+    let index = menu.row_at(bounds, Scale::ONE, theme, point)?;
+    if !menu.items().get(index)?.state().is_actionable() {
+        return None;
+    }
+    chrome::CONTEXT_COMMANDS.get(index).copied()
 }

@@ -66,12 +66,21 @@ can never diverge in navigation semantics, listing policy, or look.
   `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable: Open / Rename /
   Cut / Copy / Properties act on the selection (an empty directory offers
-  none), Open With… applies only to a regular file (a directory descends and a
-  bundle launches itself), and Paste needs only the app's held clipboard —
-  threaded in, since the clipboard lives in the app, not the browser. Every
-  command maps to an engine action that already exists, so it is not
-  speculative; Delete and New Folder, whose action does not exist yet, are
-  absent from `CONTEXT_COMMANDS` and land with the stage that first wires them.
+  none), and Paste needs only the app's held clipboard — threaded in, since
+  the clipboard lives in the app, not the browser. Each command's `label()`
+  and keyboard-`shortcut()` caption drive the drawn `MenuItem`, and
+  `CONTEXT_COMMANDS` is the one top-to-bottom order the menu iterates. Only
+  commands the file manager can carry out today are modelled, so none is
+  speculative surface: Open With… (which needs the file→viewer hand-off),
+  Delete, and New Folder are absent from `CONTEXT_COMMANDS` and each lands with
+  the stage that first wires its behaviour. The drawn menu is the renderer's
+  `build_context_menu` (one `MenuItem` per command, disabled when the model
+  says so), `context_menu_rect` (anchored at the click and clamped to the
+  window), `draw_context_menu` (painted topmost), and the mirror
+  `context_menu_command_at` (returning **only** an enabled command — fail
+  closed off the menu or on a disabled row); the files app opens it on a
+  secondary-button press and routes a chosen command to the same verbs the
+  toolbar and keyboard drive.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name

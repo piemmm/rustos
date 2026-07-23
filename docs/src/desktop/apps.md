@@ -147,9 +147,7 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
 - `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable. **Open**,
   **Rename**, **Cut**, **Copy**, and **Properties** act on the selected
-  entry, so they need a selection (an empty directory offers none). **Open
-  With…** applies only to a regular *file* — a directory descends and a
-  bundle launches itself, neither of which has an application to choose.
+  entry, so they need a selection (an empty directory offers none).
   **Paste** targets the current directory and needs only a held clipboard,
   not a selection; because the clipboard lives in the app rather than the
   browser (`Browser::clipboard` *captures* a fresh one from the selection),
@@ -161,12 +159,31 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
 
 The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
-picker builds the same model). Only the commands whose engine action already
-exists are modelled, so none is speculative surface (`AGENTS.md` §2.4):
-**Delete**, whose action does not exist in the engine yet, is absent from
-`CONTEXT_COMMANDS` and lands with the stage that first wires it. **New
-Folder** is a *write* tool that lives on the manager-only toolbar (below),
-not on this menu shared with the read-only picker.
+picker builds the same model). Only commands the file manager can actually
+carry out today are modelled, so none is speculative surface (`AGENTS.md`
+§2.4): **Open With…** (which needs the file→viewer hand-off, the rest of
+FM6b) and **Delete** (whose engine action does not exist yet) are absent from
+`CONTEXT_COMMANDS` and each lands with the stage that first wires its
+behaviour. **New Folder** is a *write* tool that lives on the manager-only
+toolbar (below), not on this menu shared with the read-only picker.
+
+The **context menu is now drawn and clickable**. A secondary-button
+(right-click) press selects the item under the pointer — or clears the
+selection on empty space, so only the directory-scoped Paste is offered —
+and opens a `lib/controls` `Menu` painted from the `ContextMenuModel`:
+`render::build_context_menu` builds one `MenuItem` per `CONTEXT_COMMANDS`
+entry (its `ContextCommand::label()` and keyboard-`shortcut()` caption,
+rendered disabled when the model reports it inapplicable),
+`render::context_menu_rect` anchors it at the click and clamps it inside the
+window, `render::draw_context_menu` paints it topmost, and
+`render::context_menu_command_at` mirrors that placement to return **only an
+enabled command** (a press on a disabled row or off the menu resolves to
+nothing, failing closed). The `files.app` `Run` binary routes a chosen
+command through `dispatch_context_command` to the **exact same** app verbs
+the toolbar and keyboard already drive — Open (`activate`), Rename, Cut,
+Copy, Paste, Properties — so the menu can never diverge from them (`AGENTS.md`
+§2.2) and adds no authority (every verb is the user's own §5.3-checked
+action). `Escape` or a press off the menu dismisses it.
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
@@ -234,8 +251,10 @@ target is and *what should happen*, never performing the spawn or the
 launching user's identity (so the read-only picker composes the same
 `Browser` and simply never launches).
 
-The `files.app` `Run` binary acts on this decision when the user presses
-`Enter`: a `Descended` reveals the selection and repaints, and a
+The `files.app` `Run` binary acts on this decision both when the user
+presses `Enter` and when they choose **Open** from the right-click menu
+(both route through the one shared `activate`): a `Descended` reveals the
+selection and repaints, and a
 `LaunchBundle { path }` **launches the bundle** — its own `Launcher` spawns the
 bundle's own `Run` (`<path>/Run`) through the ordinary signed app-load gate
 (`CAP_PROC_SPAWN`, added to the manifest in the stage that first uses it),
@@ -249,10 +268,14 @@ as the child's reserved `LOAD_*` exit status, named by the reap (the shared
 new any-child wait-set member, drained in the event source's park branch the
 instant it fires, so a launched app is never left a zombie and the wake never
 degrades into a busy-poll (`AGENTS.md` §2.23). Acting on a regular file's
-`OpenFile` decision — the CU6 `fd_grant` hand-off of the file to its associated
-viewer, and "Open With…" — remains the rest of FM6b (it needs a new
-grant-to-spawned-child mechanism the tree does not yet have); activating a file
-today leaves the listing unchanged rather than fabricating an action.
+`OpenFile` decision — handing the file to its associated viewer, and
+"Open With…" — remains the rest of FM6b: the correct mechanism is the
+race-free spawn-time `spawn_attached` + `FdWire::Handle` inheritance (the
+manager `fs_open`s the file read-only and the kernel clones that read-only
+open description into the spawned viewer, which reads it with no filesystem
+capability of its own). Activating a file today leaves the listing unchanged
+rather than fabricating an action, so the right-click **Open** on a file is
+that same honest no-op until the hand-off lands.
 
 ### "Open With…" — the type→bundle association
 
@@ -281,9 +304,10 @@ The type decision is a **display hint only**, like the icon classifier: it
 decides which applications are *offered*, and the ordinary signed load gate
 still verifies and capability-checks whichever bundle the user picks. The
 engine holds no launch authority and never opens the file — spawning the chosen
-bundle and the CU6 `fd_grant` hand-off stay in the `files.app` `Run` binary's
-own capability-checked tail under the user's identity (FM6b), so the read-only
-picker composes the same engine and never launches.
+bundle and the spawn-time `FdWire::Handle` file hand-off stay in the
+`files.app` `Run` binary's own capability-checked tail under the user's
+identity (FM6b), so the read-only picker composes the same engine and never
+launches.
 
 ### Rendering
 
