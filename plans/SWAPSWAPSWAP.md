@@ -19,10 +19,17 @@ facility. That facility's arch-neutral core is now in place: the
 `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed` primitive
 with its honest `AccessTracking` declaration, and the
 `kernel/mem::coldscan` second-chance (clock) cold-page scanner (fail
-closed on any port without a referenced bit). The concrete per-port
-Access-Flag implementation (aarch64 first) and the live compress-out /
-`fault_in` wiring remain staged there. SWAP5 (the optional lower-tier
-block swap) remains a separately approved future design (section 15)  
+closed on any port without a referenced bit). The live wiring is also
+in place: `fault_in` restores parked pages in `resolve_user_fault`, and
+the compress-out half is driven by foreground **direct reclaim**
+(`ramzip_direct_reclaim` at the top of the fault path — a bounded,
+fail-closed, per-fault sweep of the faulting task's own cold pages;
+`pressure::ramzip_reclaim_batch` sets the band-scaled budget). The only
+remaining step to reclaim on real hardware is the concrete per-port
+Access-Flag / referenced-bit implementation (aarch64 first), each
+landing with its own QEMU vertical (`.junie/swapswap-progress.md` b3).
+SWAP5 (the optional lower-tier block swap) remains a separately approved
+future design (section 15)  
 Target: TAIRiX  
 Primary code area: `kernel/mem`  
 Secondary code areas: `kernel/sched`, `kernel/sec`, `kernel/core`, `lib/crypto`, `lib/log`, and existing `lib/abi` diagnostics only if a current caller requires them  

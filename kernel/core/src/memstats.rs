@@ -137,6 +137,44 @@ impl MemStats {
         gauge
     }
 
+    /// The system pressure gauge if one has been created, or `None`
+    /// before the first [`Self::system_pressure`] call brings it online.
+    ///
+    /// Unlike [`Self::system_pressure`] this never *creates* the gauge —
+    /// it has no backing to derive thresholds from — so a reader on a
+    /// path that has no gauge to hand (the demand-fault direct-reclaim
+    /// step) can consult the shared gauge if one exists and simply do
+    /// nothing before boot wires it (fail closed, never a fabricated
+    /// gauge over a guessed backing).
+    #[must_use]
+    pub fn current_pressure(&self) -> Option<&'static MemoryPressure> {
+        *self.pressure.read()
+    }
+
+    /// The reclaimable-cache residue the `ramzip` compress-out handoff
+    /// waits to drain first: the clean file-data plus transform-cache
+    /// bytes (payload and per-entry metadata) still resident across every
+    /// registered ledger.
+    ///
+    /// This is the `clean_and_transform_bytes` figure
+    /// [`tairix_kernel_mem::ramzip_handoff`] gates on — reconstructable
+    /// clean cache and expensive-transform cache are always cheaper to
+    /// drop than encrypted compressed anonymous storage, so compression
+    /// holds until they are gone. Summed saturating (the figures are
+    /// live gauges); an empty registry truthfully reports zero.
+    #[must_use]
+    pub fn ramzip_reclaimable_residue(&self) -> usize {
+        let clean = self.reclaim_class_stats(ReclaimClass::CleanFileData);
+        let transform = self.reclaim_class_stats(ReclaimClass::TransformCache);
+        clean
+            .payload_bytes
+            .saturating_add(clean.metadata_bytes)
+            .saturating_add(transform.payload_bytes)
+            .saturating_add(transform.metadata_bytes)
+            .try_into()
+            .unwrap_or(usize::MAX)
+    }
+
     /// Register a live cache ledger for the reclaim export.
     ///
     /// Called by the production construction sites (a mounted volume's
@@ -283,6 +321,55 @@ mod tests {
         let after = stats.reclaim_class_stats(class);
         assert_eq!(after.payload_bytes, 1024);
         assert_eq!(after.entries, 1);
+    }
+
+    #[test]
+    fn current_pressure_is_none_until_the_gauge_is_created_then_shares_it() {
+        let stats = MemStats::new();
+        // No gauge yet: the fault-path reader gets nothing and does no work.
+        assert!(stats.current_pressure().is_none());
+        let gauge = stats.system_pressure(leaked_fake());
+        // Once created, the reader sees the very same shared gauge.
+        let observed = stats.current_pressure().expect("gauge exists");
+        assert!(core::ptr::eq(gauge, observed), "one shared gauge");
+    }
+
+    #[test]
+    fn reclaimable_residue_sums_only_clean_and_transform_bytes() {
+        let stats = MemStats::new();
+        // Empty registry: nothing to drain before compression.
+        assert_eq!(stats.ramzip_reclaimable_residue(), 0);
+
+        let ledger = Arc::new(CacheAccounting::new());
+        stats.register_ledger(ledger.clone());
+        // Clean file data and transform cache both count, payload+metadata.
+        ledger
+            .charge(ReclaimClass::CleanFileData, 4096, 64)
+            .expect("charges");
+        ledger
+            .charge(ReclaimClass::TransformCache, 1024, 32)
+            .expect("charges");
+        // Metadata and other classes must NOT count toward the handoff
+        // residue: only clean+transform are cheaper than compression.
+        ledger
+            .charge(ReclaimClass::FsMetadata, 8192, 128)
+            .expect("charges");
+        ledger
+            .charge(ReclaimClass::DisposableUi, 2048, 16)
+            .expect("charges");
+        assert_eq!(
+            stats.ramzip_reclaimable_residue(),
+            4096 + 64 + 1024 + 32,
+            "only clean file data + transform cache, payload and metadata"
+        );
+        // Draining them leaves nothing for the handoff to wait on.
+        ledger
+            .discharge(ReclaimClass::CleanFileData, 4096, 64)
+            .expect("discharges");
+        ledger
+            .discharge(ReclaimClass::TransformCache, 1024, 32)
+            .expect("discharges");
+        assert_eq!(stats.ramzip_reclaimable_residue(), 0);
     }
 
     #[test]

@@ -88,8 +88,8 @@ pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
 pub use pressure::{
-    escalation, ramzip_handoff, shrink_target, EscalationStep, FreeMemorySource, MemoryPressure,
-    PressureBand, PressureThresholds, RamzipHandoff,
+    escalation, ramzip_handoff, ramzip_reclaim_batch, shrink_target, EscalationStep,
+    FreeMemorySource, MemoryPressure, PressureBand, PressureThresholds, RamzipHandoff,
 };
 pub use ramtest::{run as ram_selftest, RamFault, Word as RamTestWord, PROGRESS_STEP_BYTES};
 pub use ramzip::{

@@ -939,6 +939,19 @@ where
         if want == 0 {
             return RamzipReclaimSummary::default();
         }
+        // Cheap early-out before the O(n) candidate collection: on a
+        // backend with no referenced bit the scanner can never show a page
+        // cold, so reclaim nothing (fail closed) without walking the whole
+        // live mapping on every triggering fault. The scanner re-checks
+        // this too, but only after the caller has paid for the candidate
+        // list — this keeps direct reclaim near-free on a port that has
+        // not yet enabled access tracking.
+        if !self.space.access_tracking().is_supported() {
+            return RamzipReclaimSummary {
+                access_tracking_unsupported: true,
+                ..RamzipReclaimSummary::default()
+            };
+        }
         // Candidate set: this space's resident *placed anonymous* pages
         // (its heap window), ascending and unique — the order the
         // second-chance scanner requires. Image, stack, file, device,

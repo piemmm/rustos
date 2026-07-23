@@ -5770,25 +5770,34 @@ VM mechanism, `kernel/mem::ramzip`;
   honest `AccessTracking` declaration (fail closed when a port exposes no
   referenced bit), the `HostPageTable` software model, and the
   `kernel/mem::coldscan` second-chance (clock) scanner (host-tested).
-- **Live wiring — landed (b2), fault-in + infra.** `ramzip` is now a
-  single **process-global** pool (`kernel/mem::ramzip::global`, one
-  `Ramzip` behind a `SpinLock`, installed once at boot from the seeded
-  CSPRNG + discovered RAM). `LiveSpace` owns a `space_id` + `ColdPageScanner`
-  and the object-safe `ramzip_fault_in` / `ramzip_reclaim`; a dead space's
-  entries are purged on `LiveSpace::drop`. `resolve_user_fault` restores a
-  compressed page **before** the anonymous handler (`Fatal` terminates only
-  the faulting task, fail closed); `RAMZIP_STATS` reports the live tier
-  (`memstats::install_global_ramzip_stats`). Host-tested end to end over
+- **Live wiring — landed (b2/b2c), fault-in, infra, AND compress-out
+  trigger.** `ramzip` is now a single **process-global** pool
+  (`kernel/mem::ramzip::global`, one `Ramzip` behind a `SpinLock`, installed
+  once at boot from the seeded CSPRNG + discovered RAM). `LiveSpace` owns a
+  `space_id` + `ColdPageScanner` and the object-safe `ramzip_fault_in` /
+  `ramzip_reclaim`; a dead space's entries are purged on `LiveSpace::drop`.
+  `resolve_user_fault` restores a compressed page **before** the anonymous
+  handler (`Fatal` terminates only the faulting task, fail closed), and — the
+  b2c compress-out half — calls `ramzip_direct_reclaim` at the top of the
+  fault path: TAIRiX's foreground **direct reclaim**, which at moderate/severe
+  pressure compresses a bounded batch (`pressure::ramzip_reclaim_batch`: 32 /
+  128 pages) of the faulting task's own cold anonymous pages out into the
+  tier and re-freezes its snapshot, gated on the pinned/real-time template,
+  the clean+transform residue, and the tier's own caps/reserve — fail closed,
+  one bounded pass per fault, never a spin. `RAMZIP_STATS` reports the live
+  tier (`memstats::install_global_ramzip_stats`). Host-tested end to end over
   `HostPageTable`.
-- **Remaining (b2 sweep + b3):** nothing calls `ramzip_reclaim` in
-  production yet — the pressure-driven reclaim driver that hands cold
-  anonymous pages to the tier at `moderate+` bands
-  (`EscalationStep::HandOffToRamzip`'s consumer) is unbuilt, and real ports
-  still declare `AccessTracking` non-`Supported`. So the tier stays empty
-  and fault-in returns `NoEntry` on real hardware until the reclaim driver
-  and the per-port Access-Flag work (b1a/b3, with their QEMU verticals)
-  land. The fault-in half is inert-but-correct until then; nothing in the
-  tier may be weakened to work around a still-`Pending` port.
+- **Remaining (b3 only):** the trigger, policy, template, residue gate, and
+  snapshot republish are complete and host-tested, but real ports still
+  declare `AccessTracking` non-`Supported`, so the cold scanner shows nothing
+  cold and direct reclaim compresses nothing on hardware. Each port's
+  referenced-bit enablement (aarch64 software Access-Flag fault b1a, riscv64
+  A-fault, x86_64 unconditional PTE bit-5 walk, wasm32 honest `Unsupported`)
+  is a boot/exception-path change that lands with its own bare-metal QEMU
+  vertical — deliberately not landed blind, as unvalidated boot-MMU code
+  would fail review. Once a port flips to `Supported`, compress-out works
+  end-to-end with no further change to the trigger; nothing in the tier may
+  be weakened to work around a still-`Pending` port.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
 - Benchmarks beyond the host suites (per-page latency on real boards,

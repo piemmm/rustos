@@ -487,6 +487,54 @@ pub const fn ramzip_handoff(band: PressureBand, clean_and_transform_bytes: usize
     }
 }
 
+/// The compress-out reclaim batch, in pages, for one direct-reclaim
+/// sweep at `band` (`plans/SWAPSWAPSWAP.md` section 6, section 11 —
+/// bounded, benchmarked, never ABI).
+///
+/// This bounds the work one triggering event (a demand fault under
+/// pressure) may spend scanning and compressing the faulting task's own
+/// cold anonymous pages: a small, fixed batch keeps direct reclaim off
+/// the critical path (the sweep is amortised across many faults, never a
+/// single unbounded pass) while still relieving pressure in step with how
+/// deep it is.
+///
+/// The batch is zero except where compression is actually the answer,
+/// mirroring [`ramzip_handoff`]:
+///
+/// - **normal / mild** — compression never runs here (cheaper cache
+///   reclaim and speculative-growth stops handle these bands), so the
+///   batch is zero and the caller does no reclaim work at all.
+/// - **moderate** — a modest batch: cold anonymous pages begin
+///   compressing once the cheaper caches have drained.
+/// - **severe** — a larger batch: reserves are close, so a triggering
+///   fault reclaims harder, still bounded.
+/// - **critical** — zero: speculative work stops and [`escalation`]
+///   hands the next step to the VM policy (freeze / kill / clean OOM),
+///   not to more compression.
+///
+/// Pure and deterministic for equal inputs.
+#[must_use]
+pub const fn ramzip_reclaim_batch(band: PressureBand) -> usize {
+    match band {
+        PressureBand::Normal | PressureBand::Mild | PressureBand::Critical => 0,
+        PressureBand::Moderate => MODERATE_RECLAIM_BATCH_PAGES,
+        PressureBand::Severe => SEVERE_RECLAIM_BATCH_PAGES,
+    }
+}
+
+/// Direct-reclaim batch at moderate pressure: 32 pages (128 KiB with a
+/// 4 KiB page). Small enough that the scan+compress cost is a negligible
+/// addition to a fault that was already going to allocate, large enough
+/// that a task steadily faulting under moderate pressure makes real
+/// headroom over successive faults. Not ABI; a tuning constant validated
+/// against the section 19 benchmarks.
+const MODERATE_RECLAIM_BATCH_PAGES: usize = 32;
+
+/// Direct-reclaim batch at severe pressure: 128 pages (512 KiB). Reserves
+/// are close, so a triggering fault reclaims four times as hard as at
+/// moderate — still a bounded pass, never an unbounded sweep. Not ABI.
+const SEVERE_RECLAIM_BATCH_PAGES: usize = 128;
+
 /// The deterministic next step when the VM must free memory.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EscalationStep {
@@ -844,6 +892,25 @@ mod tests {
             ramzip_handoff(PressureBand::Critical, 0),
             RamzipHandoff::HoldCompression
         );
+    }
+
+    #[test]
+    fn the_reclaim_batch_is_bounded_and_matches_the_handoff_bands() {
+        // Compression never runs at normal/mild/critical, so the batch is
+        // zero there — the caller does no reclaim work at all.
+        assert_eq!(ramzip_reclaim_batch(PressureBand::Normal), 0);
+        assert_eq!(ramzip_reclaim_batch(PressureBand::Mild), 0);
+        assert_eq!(ramzip_reclaim_batch(PressureBand::Critical), 0);
+        // Compression runs at moderate and severe; severe reclaims harder.
+        let moderate = ramzip_reclaim_batch(PressureBand::Moderate);
+        let severe = ramzip_reclaim_batch(PressureBand::Severe);
+        assert!(moderate > 0);
+        assert!(severe > moderate);
+        // A batch is only ever non-zero where the handoff opens compression.
+        for band in PressureBand::ALL {
+            let opens = matches!(band, PressureBand::Moderate | PressureBand::Severe);
+            assert_eq!(ramzip_reclaim_batch(band) > 0, opens, "{band:?}");
+        }
     }
 
     #[test]
