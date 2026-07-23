@@ -25,14 +25,18 @@ the compress-out half is driven by foreground **direct reclaim**
 (`ramzip_direct_reclaim` at the top of the fault path — a bounded,
 fail-closed, per-fault sweep of the faulting task's own cold pages;
 `pressure::ramzip_reclaim_batch` sets the band-scaled budget). The
-per-port referenced-bit enablement is **live on x86_64** (the port
-declares `AccessTracking::Supported` and reads/clears the hardware
-Accessed bit — PTE bit 5 — with an `INVLPG`, proven by the
-`accessed_bit_qemu_x86_64` vertical), so ramzip reclaims cold anonymous
-pages on x86_64 end to end. The aarch64 and riscv64 software
-Access-Flag / A-setting fault paths remain, each to land with its own
-QEMU vertical (`.junie/swapswap-progress.md` b3); wasm32 keeps the
-fail-closed `Unsupported` default (no per-page referenced bit).
+per-port referenced-bit enablement is **live on every MMU-bearing
+Tier-1 port**: x86_64 reads/clears the hardware Accessed bit (PTE bit 5)
+with an `INVLPG`; aarch64 and riscv64 manage the Access Flag / Accessed
+bit in software — `test_and_clear_accessed` clears it and the
+synchronous-exception / trap path sets it back on the access-flag / A/D
+page fault and retries. Each is proven by its own QEMU vertical
+(`accessed_bit_qemu_{x86_64,aarch64,riscv64}`; the aarch64 run uses
+cortex-a72 without HAFDBS and the riscv64 run pins `svade=true,svadu=false`
+so the software fault paths are genuinely exercised), so ramzip reclaims
+cold anonymous pages end to end on all three. wasm32 keeps the fail-closed
+`Unsupported` default (no per-page referenced bit).
+See `.junie/swapswap-progress.md` b3.
 SWAP5 (the optional lower-tier block swap) remains a separately approved
 future design (section 15)  
 Target: TAIRiX  

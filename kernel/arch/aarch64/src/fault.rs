@@ -112,6 +112,32 @@ pub const fn is_abort(esr: u64) -> bool {
     )
 }
 
+/// Mask of the fault-status-code field (`DFSC` for a data abort, `IFSC`
+/// for an instruction abort) in `ESR_ELx.ISS` — bits `[5:0]`. ARM ARM
+/// D17.2.37 (Data Abort) / D17.2.38 (Instruction Abort).
+pub const ESR_ISS_FSC_MASK: u64 = 0b11_1111;
+
+/// The fault-status-code value for an **Access Flag fault**, minus the
+/// low two bits that carry the translation *level* (`0b001000`..`0b001011`
+/// for levels 0–3). ARM ARM Table D17-3 / D17-4: an access to a valid
+/// leaf whose Access Flag (AF, bit 10) is clear raises this fault on a PE
+/// without ARMv8.1 HAFDBS hardware AF management (cortex-a57/a72, the
+/// default QEMU CPU). It is the software referenced-bit mechanism the
+/// cold-page scanner drives.
+pub const FSC_ACCESS_FLAG_BASE: u64 = 0b00_1000;
+
+/// `true` iff a data or instruction abort's `esr` reports an **Access
+/// Flag fault** at any translation level (`FSC == 0b0010xx`).
+///
+/// The synchronous-exception path resolves this by setting AF back on the
+/// faulting leaf ([`crate::paging::set_accessed_flag_in_active`]) and
+/// retrying, rather than treating it as a fatal translation fault. Only
+/// meaningful when [`is_abort`] already holds.
+#[must_use]
+pub const fn is_access_flag_fault(esr: u64) -> bool {
+    (esr & ESR_ISS_FSC_MASK) & !0b11 == FSC_ACCESS_FLAG_BASE
+}
+
 /// Signature of the fault handler the vector invokes for an unexpected
 /// synchronous exception.
 ///
@@ -280,6 +306,40 @@ mod tests {
         assert!(!is_write_data_abort(read_abort));
         // WnR is ISS bit 6 (ARM ARM D17.2.37).
         assert_eq!(ESR_ISS_WNR, 1 << 6);
+    }
+
+    #[test]
+    fn access_flag_faults_are_recognised_at_every_level() {
+        // FSC `0b0010LL` (0x08..=0x0B) is an Access Flag fault at levels
+        // 0–3; a 4 KiB leaf faults at level 3 (0x0B). All four are the
+        // software referenced-bit mechanism.
+        for level in 0..=3u64 {
+            let esr = (EC_DATA_ABORT_LOWER << ESR_EC_SHIFT) | (FSC_ACCESS_FLAG_BASE + level);
+            assert!(is_access_flag_fault(esr), "level {level} data abort");
+            let iesr =
+                (EC_INSTRUCTION_ABORT_LOWER << ESR_EC_SHIFT) | (FSC_ACCESS_FLAG_BASE + level);
+            assert!(is_access_flag_fault(iesr), "level {level} instr abort");
+        }
+    }
+
+    #[test]
+    fn non_access_flag_faults_are_not_misread() {
+        // A translation fault (FSC `0b0001LL`, 0x04..=0x07) and a
+        // permission fault (FSC `0b0011LL`, 0x0C..=0x0F) must not be taken
+        // for the referenced-bit mechanism — resolving them by setting AF
+        // would mask a genuine fault (fail closed).
+        for fsc in [
+            0x04u64, 0x05, 0x06, 0x07, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00,
+        ] {
+            let esr = (EC_DATA_ABORT_LOWER << ESR_EC_SHIFT) | fsc;
+            assert!(!is_access_flag_fault(esr), "FSC {fsc:#x} must not match");
+        }
+        // The FSC field is exactly bits [5:0]; ISS noise above it (e.g.
+        // WnR at bit 6) must not perturb the classification.
+        let esr = (EC_DATA_ABORT_LOWER << ESR_EC_SHIFT) | ESR_ISS_WNR | (FSC_ACCESS_FLAG_BASE + 3);
+        assert!(is_access_flag_fault(esr));
+        assert_eq!(ESR_ISS_FSC_MASK, 0x3F);
+        assert_eq!(FSC_ACCESS_FLAG_BASE, 0x08);
     }
 
     #[test]

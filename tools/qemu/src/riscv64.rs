@@ -70,6 +70,18 @@ pub const QEMU_BINARY: &str = "qemu-system-riscv64";
 /// bridge the Stage 4.D drivers exercise.
 pub const MACHINE: &str = "virt";
 
+/// CPU model the runner targets: the generic RV64 core with
+/// **software-managed** page-table Accessed/Dirty bits
+/// (`svade=true,svadu=false`). RISC-V leaves A/D update
+/// implementation-defined; forcing the Svade (fault-on-update) behaviour
+/// makes the `virt` board exercise the kernel's software A/D-setting fault
+/// path (`kernel/arch/riscv64::paging::set_accessed_flag_in_active`) that
+/// silicon without hardware A/D update requires — the path the cold-page
+/// referenced bit (`plans/SWAPSWAPSWAP.md`) depends on. TAIRiX maps every
+/// leaf with A/D already set, so ordinary operation never faults under
+/// either behaviour; this is the conservative, portable choice.
+pub const CPU: &str = "rv64,svade=true,svadu=false";
+
 /// MMIO base address of the `virt` board's `SiFive` Test device. The
 /// kernel writes a finisher word here to report its result; the value
 /// is fixed by the QEMU `virt` memory map and mirrored by the kernel
@@ -133,9 +145,24 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // `-display none` + explicit `-serial stdio` gives headless boot
     // without the implicit stdio muxing `-nographic` would impose — the
     // same rationale documented on the x86_64 builder.
-    let mut argv: Vec<OsString> = Vec::with_capacity(16 + spec.extra_args.len() * 2);
+    let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len() * 2);
     argv.push("-M".into());
     argv.push(MACHINE.into());
+    // Pin the CPU to `rv64` with **software-managed** page-table A/D bits
+    // (`svade=true,svadu=false`). RISC-V leaves A/D update
+    // implementation-defined: QEMU's default `virt` CPU updates them in
+    // the walk (Svadu), but conservative silicon raises a page fault when
+    // the Accessed/Dirty bit must be set, leaving software to set it
+    // (Svade). TAIRiX maps every leaf with A/D already set, so ordinary
+    // operation never faults under either behaviour; forcing Svade makes
+    // the board exercise the *software* A/D-setting fault path the kernel
+    // must carry for such silicon (`kernel/arch/riscv64::paging::
+    // set_accessed_flag_in_active`, `plans/SWAPSWAPSWAP.md`), which the
+    // cold-page referenced bit depends on — otherwise the path would be
+    // dead under the default Svadu CPU. This is the conservative, portable
+    // choice and is what the `accessed-bit-qemu-riscv64` vertical relies on.
+    argv.push("-cpu".into());
+    argv.push(CPU.into());
     argv.push("-no-reboot".into());
     argv.push("-display".into());
     argv.push("none".into());
@@ -303,6 +330,23 @@ mod tests {
             .position(|a| a == "-M")
             .expect("argv contains -M");
         assert_eq!(argv[pos + 1], MACHINE);
+    }
+
+    #[test]
+    fn argv_forces_software_ad_cpu() {
+        // The riscv64 runner pins the CPU to software-managed A/D
+        // (Svade) so the kernel's software A/D-setting fault path is
+        // genuinely exercised (`plans/SWAPSWAPSWAP.md`), rather than
+        // shadowed by QEMU's default hardware A/D update.
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-cpu")
+            .expect("argv contains -cpu");
+        assert_eq!(argv[pos + 1], CPU);
+        assert!(CPU.contains("svade=true"), "A/D updates must trap");
+        assert!(CPU.contains("svadu=false"), "hardware A/D must be off");
     }
 
     #[test]

@@ -223,6 +223,8 @@ members = [
     "tests/integration/harness",
     "tests/integration/memory_isolation",
     "tests/integration/accessed_bit_qemu_x86_64",
+    "tests/integration/accessed_bit_qemu_aarch64",
+    "tests/integration/accessed_bit_qemu_riscv64",
     "tests/integration/scheduler_stress",
     "tests/integration/scheduler_stress_qemu",
     "tests/integration/kernel_arch_boot",

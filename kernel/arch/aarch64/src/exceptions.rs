@@ -526,6 +526,24 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             return;
         }
 
+        // Software-managed Access Flag (the cold-page referenced bit for
+        // `plans/SWAPSWAPSWAP.md`): cortex-a57/a72 lack HAFDBS, so an
+        // access to a valid leaf whose AF the scanner cleared
+        // (`crate::paging::AddressSpace::test_and_clear_accessed`) raises
+        // an Access-Flag fault rather than updating AF in the walk. Set AF
+        // back on the faulting leaf and return so the trampoline `eret`
+        // retries the access (`ELR_EL1` still points at the faulting
+        // instruction — the PE does not advance it for an abort). Both
+        // data and instruction aborts, from either EL, are handled. When
+        // the leaf is not a cleared-AF leaf (`set_accessed_flag_in_active`
+        // returns `false`), the fault was something else and falls through
+        // to the resolver / fatal path unchanged (fail closed).
+        if crate::fault::is_abort(esr) && crate::fault::is_access_flag_fault(esr) {
+            if crate::paging::set_accessed_flag_in_active(read_far()) {
+                return;
+            }
+        }
+
         // Every data abort from EL0 is offered to the installed resolver
         // before the fatal path, with the `ESR.WnR` verdict. A *read* may
         // be a demand-paged file-mapping fault: a `true` return means the

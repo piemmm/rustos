@@ -85,6 +85,18 @@ pub const fn is_store_page_fault(scause: u64) -> bool {
     scause == SCAUSE_STORE_PAGE_FAULT
 }
 
+/// `true` iff `scause` denotes an **instruction** page fault. Offered to
+/// the software A/D update path (an executable leaf whose Accessed bit was
+/// cleared re-faults on the next fetch under Svade), never to the
+/// demand-paged file resolver (a file mapping is never executable).
+#[must_use]
+pub const fn is_instruction_page_fault(scause: u64) -> bool {
+    if (scause & crate::trap::SCAUSE_INTERRUPT_BIT) != 0 {
+        return false;
+    }
+    scause == SCAUSE_INSTRUCTION_PAGE_FAULT
+}
+
 /// Signature of the fault handler the trap path invokes for an
 /// unexpected synchronous exception.
 ///

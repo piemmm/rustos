@@ -5792,22 +5792,32 @@ VM mechanism, `kernel/mem::ramzip`;
   one bounded pass per fault, never a spin. `RAMZIP_STATS` reports the live
   tier (`memstats::install_global_ramzip_stats`). Host-tested end to end over
   `HostPageTable`.
-- **Per-port enablement (b3): x86_64 done, aarch64/riscv64 remaining.** The
+- **Per-port enablement (b3): done on every MMU-bearing Tier-1 port.** The
   trigger, policy, template, residue gate, and snapshot republish are
-  complete and host-tested. **x86_64 is live**: the port declares
-  `AccessTracking::Supported` and `test_and_clear_accessed` reads/clears the
-  hardware Accessed bit (PTE bit 5, `flags::ACCESSED`) with an `INVLPG` — no
-  software fault path — so the cold scanner finds cold pages and direct
-  reclaim compresses them end to end, proven by the
-  `accessed_bit_qemu_x86_64` vertical. **wasm32** keeps the fail-closed
-  `Unsupported` default permanently (the sandbox exposes no referenced bit).
-  **aarch64** (software Access-Flag fault — cortex-a72/Pi lack HAFDBS) and
-  **riscv64** (software A-setting fault — hardware A/D update is
-  implementation-defined) remain: each is a boot/exception-path change that
-  lands with its own bare-metal QEMU vertical — deliberately not landed
-  blind, as unvalidated boot-MMU/exception code would fail review — and both
-  stay honestly `Pending`/`Unsupported` until then. Nothing in the tier may
-  be weakened to work around a still-`Pending` port.
+  port-agnostic and host-tested, and each MMU port now declares
+  `AccessTracking::Supported` and reclaims cold anonymous pages end to end,
+  proven by its own QEMU vertical
+  (`accessed_bit_qemu_{x86_64,aarch64,riscv64}`).
+  - **x86_64**: `test_and_clear_accessed` reads/clears the hardware Accessed
+    bit (PTE bit 5, `flags::ACCESSED`) with an `INVLPG` — no software fault
+    path.
+  - **aarch64**: the Access Flag (AF, descriptor bit 10) is software-managed
+    (cortex-a72/Pi lack HAFDBS); `test_and_clear_accessed` clears AF (+ TLBI)
+    and the synchronous-exception path (`fault::is_access_flag_fault` →
+    `paging::set_accessed_flag_in_active`) sets it back on the Access-Flag
+    fault and retries. The vertical runs on cortex-a72, so the software path
+    is genuinely exercised.
+  - **riscv64**: the Accessed bit (A, PTE bit 6) is software-managed under
+    Svade; `test_and_clear_accessed` clears A (+ `sfence.vma`) and the trap
+    path (`paging::set_accessed_flag_in_active(stval, AccessKind)`) sets A
+    (and D for a store) back **only** on a valid leaf that permits the
+    access — a permission fault sharing the same `scause` is never masked —
+    and retries. The riscv64 QEMU runner pins `svade=true,svadu=false`, so
+    the software path is genuinely exercised (not shadowed by hardware A/D
+    update); TAIRiX maps every leaf A/D-set, so ordinary operation never
+    faults and the existing riscv64 verticals still pass.
+  - **wasm32** keeps the fail-closed `Unsupported` default permanently (the
+    sandbox exposes no referenced bit).
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
 - Benchmarks beyond the host suites (per-page latency on real boards,

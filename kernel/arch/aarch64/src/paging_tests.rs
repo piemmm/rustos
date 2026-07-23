@@ -1036,3 +1036,113 @@ fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
     assert_ne!(data_leaf & attrs::UXN, 0, "user data must be EL0 XN");
     assert_ne!(data_leaf & attrs::PXN, 0, "user data must be EL1 XN");
 }
+
+#[test]
+fn declares_access_tracking_supported() {
+    use tairix_arch_api::mmu::{self, AccessTracking};
+    static POOL: PageTablePool = PageTablePool::new();
+    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // aarch64 manages the Access Flag in software (cortex-a57/a72 lack
+    // HAFDBS), so the referenced bit is honestly Supported.
+    assert_eq!(
+        mmu::AddressSpace::access_tracking(&space),
+        AccessTracking::Supported
+    );
+}
+
+#[test]
+fn test_and_clear_accessed_drives_the_clock_round_trip() {
+    use tairix_arch_api::mmu::{self, MapError, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // Map an EL0 data page well above the identity window so the walk
+    // builds fresh L2/L3 tables (never shatters a block). `map_page` sets
+    // AF eagerly, so a fresh leaf reads accessed.
+    let va = 64u64 << 30;
+    let pa = 0x4123_4000;
+    mmu::AddressSpace::map_page(&mut space, va, pa, PageFlags::READ | PageFlags::WRITE)
+        .expect("map the probe page");
+
+    // Fail-closed edges first: a misaligned address and an unmapped one
+    // report a typed error, never a fabricated verdict.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va + 0x123),
+        Err(MapError::Misaligned)
+    );
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va + PAGE_SIZE as u64),
+        Err(MapError::NotMapped)
+    );
+
+    // Probe 1: the eager map left AF set, so the first probe reads
+    // accessed and clears AF.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    // The clear took effect on the descriptor.
+    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("mapped");
+    assert_eq!(leaf & attrs::AF, 0, "AF must be cleared after a probe");
+
+    // Probe 2: no access since the clear (the host has no CPU to re-set
+    // AF), so the page reads cold. This is the "genuinely untouched"
+    // verdict the cold-page scanner acts on.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(false)
+    );
+
+    // Simulate a touch the way the exception path does on real hardware:
+    // an Access-Flag fault sets AF back on the leaf.
+    // SAFETY: `root_phys` is the live, host-identity-addressed L1 table of
+    // this exclusively-owned space; no other reference walks it here.
+    assert!(unsafe { set_accessed_flag_in_root(space.root_phys(), va) });
+
+    // Probe 3: the page now reads accessed again — the full clock/
+    // second-chance transition, end to end.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+}
+
+#[test]
+fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    let va = 64u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        va,
+        0x4123_4000,
+        PageFlags::READ | PageFlags::WRITE,
+    )
+    .expect("map the probe page");
+    let root = space.root_phys();
+
+    // An unmapped address: nothing to set, returns false (fail closed).
+    // SAFETY: `root` is the live, host-identity-addressed L1 table of this
+    // exclusively-owned space.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va + PAGE_SIZE as u64) });
+
+    // The leaf still carries AF (eager map), so setting is a no-op that
+    // reports false — the fault was not the referenced-bit mechanism.
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va) });
+
+    // Clear AF, then setting it reports true exactly once; a second call
+    // finds AF already set and reports false.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    // SAFETY: as above.
+    assert!(unsafe { set_accessed_flag_in_root(root, va) });
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va) });
+    let leaf = host_leaf_descriptor(root, va).expect("mapped");
+    assert_ne!(leaf & attrs::AF, 0, "AF must be set after the fault fix-up");
+}

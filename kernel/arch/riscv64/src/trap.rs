@@ -502,6 +502,43 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
             }
             return;
         }
+        // Software A/D update (the cold-page referenced bit,
+        // `plans/SWAPSWAPSWAP.md`): under Svade an access to a valid leaf
+        // whose Accessed (or, for a store, Dirty) bit is clear raises a
+        // page fault rather than updating the bit in the walk. Set the
+        // bit(s) back on the faulting leaf and return so the epilogue's
+        // `sret` retries the access (the saved `sepc` still points at the
+        // faulting instruction — the hart does not advance it for a page
+        // fault). All three page-fault classes and both privilege modes
+        // are handled here — the cleared-A leaf may be the running task's
+        // own page (U-mode) or one the kernel touches on its behalf
+        // (S-mode). A leaf that does not permit the access (a genuine
+        // permission fault shares the same `scause`) or is absent leaves
+        // `set_accessed_flag_in_active` returning `false`, so the fault
+        // falls through to the resolver / fatal path unchanged (fail
+        // closed). On a Svadu part the hardware sets A/D in the walk and
+        // this fault never fires, so the branch is inert there.
+        let ad_kind = if crate::fault::is_store_page_fault(scause) {
+            Some(crate::paging::AccessKind::Store)
+        } else if crate::fault::is_load_page_fault(scause) {
+            Some(crate::paging::AccessKind::Load)
+        } else if crate::fault::is_instruction_page_fault(scause) {
+            Some(crate::paging::AccessKind::Instruction)
+        } else {
+            None
+        };
+        if let Some(kind) = ad_kind {
+            let stval: u64;
+            // SAFETY: reading `stval` (the faulting address) has no side
+            // effects.
+            unsafe {
+                core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+            }
+            if crate::paging::set_accessed_flag_in_active(stval, kind) {
+                return;
+            }
+        }
+
         // A load or store/AMO page fault taken from U-mode is offered to
         // the installed resolver before the fatal path, with the store
         // verdict. For a *load* it may be a demand-paged file-mapping

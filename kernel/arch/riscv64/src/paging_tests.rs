@@ -582,3 +582,123 @@ fn map_page_translates_neutral_flags_and_walks() {
     assert_eq!(leaf & flags::EXEC, 0);
     assert_eq!(leaf & flags::USER, 0);
 }
+
+#[test]
+fn declares_access_tracking_supported() {
+    use tairix_arch_api::mmu::{self, AccessTracking};
+    let pool = fresh_pool();
+    let space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+    // riscv64 manages the Accessed bit through clear + the Svade fault
+    // path (or hardware update on Svadu), so the referenced bit is
+    // honestly Supported.
+    assert_eq!(
+        mmu::AddressSpace::access_tracking(&space),
+        AccessTracking::Supported
+    );
+}
+
+#[test]
+fn test_and_clear_accessed_drives_the_clock_round_trip() {
+    use tairix_arch_api::mmu::{self, MapError, PageFlags};
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+
+    // A page in gigapage slot 100 (fresh L1/L0 tables). `map_page` sets A
+    // (and D) eagerly, so a fresh leaf reads accessed.
+    let va = 100u64 << 30;
+    let pa = 0x8200_0000;
+    mmu::AddressSpace::map_page(&mut space, va, pa, PageFlags::READ | PageFlags::WRITE)
+        .expect("map the probe page");
+
+    // Fail-closed edges: a misaligned address and an unmapped one report a
+    // typed error, never a fabricated verdict.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va + 0x123),
+        Err(MapError::Misaligned)
+    );
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va + PAGE_SIZE as u64),
+        Err(MapError::NotMapped)
+    );
+
+    // Probe 1: the eager map left A set → reads accessed, clears A.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    assert_eq!(
+        leaf_pte(&space, va).expect("mapped").0 & flags::ACCESSED,
+        0,
+        "A must be cleared after a probe"
+    );
+
+    // Probe 2: no access since the clear (the host has no MMU to re-set
+    // A) → reads cold, the "genuinely untouched" verdict.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(false)
+    );
+
+    // Simulate a load access the way the Svade trap path does: set A back
+    // on the leaf.
+    // SAFETY: `root_phys` is the live, host-identity-addressed root table
+    // of this exclusively-owned space.
+    assert!(unsafe { set_accessed_flag_in_root(space.root_phys(), va, AccessKind::Load) });
+
+    // Probe 3: the page reads accessed again — the full clock/second-chance
+    // transition, end to end.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+}
+
+#[test]
+fn set_accessed_flag_in_root_respects_permission_and_clears() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+
+    // A read-only (no WRITE, no EXEC) user page.
+    let va = 100u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        va,
+        0x8200_0000,
+        PageFlags::READ | PageFlags::USER,
+    )
+    .expect("map ro page");
+    let root = space.root_phys();
+
+    // An unmapped address: nothing to set (fail closed).
+    // SAFETY: `root` is the live, host-identity-addressed root table.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va + PAGE_SIZE as u64, AccessKind::Load) });
+
+    // A store to a read-only leaf is a genuine permission fault, not an
+    // A/D update: the WRITE permission is absent, so nothing is set.
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Store) });
+    // An instruction fetch from a non-executable leaf likewise.
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Instruction) });
+
+    // The eager map already set A, so a load "fault" finds nothing to do.
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+
+    // Clear A, then a permitted load access sets it once; a second finds
+    // it already set.
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    // SAFETY: as above.
+    assert!(unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+    // SAFETY: as above.
+    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+    assert_ne!(
+        leaf_pte(&space, va).expect("mapped").0 & flags::ACCESSED,
+        0,
+        "A must be set after the fault fix-up"
+    );
+}

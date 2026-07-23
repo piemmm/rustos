@@ -32,7 +32,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
-use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
+use tairix_arch_api::mmu::{
+    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags,
+};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
@@ -679,6 +681,66 @@ impl MmuAddressSpace for AddressSpace {
         self.root_phys
     }
 
+    fn access_tracking(&self) -> AccessTracking {
+        // The per-page referenced bit the cold-page scanner
+        // (`kernel/mem::coldscan`) needs is the Accessed bit (A, PTE bit
+        // 6). RISC-V leaves A/D update *implementation-defined*: a chip may
+        // update them in hardware during the walk (the Svadu behaviour QEMU
+        // `virt` exposes by default) or raise a page fault when A/D must be
+        // set, leaving software to set them (the Svade behaviour).
+        // `test_and_clear_accessed` clears A (and invalidates the leaf's
+        // TLB entry); on a Svadu part the next access re-sets A in the walk,
+        // on a Svade part it raises a load/store/instruction page fault the
+        // trap path resolves through [`set_accessed_flag_in_active`] by
+        // setting A back and retrying. Either way a probe reading A still
+        // clear proves the page went untouched, so the facility is honestly
+        // Supported. The software Svade path is proven on emulated `svade`
+        // hardware by the `accessed-bit-qemu-riscv64` vertical.
+        AccessTracking::Supported
+    }
+
+    fn test_and_clear_accessed(&mut self, vaddr: u64) -> Result<bool, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // Navigate to the 4 KiB leaf without allocating, exactly as
+        // `unmap` does. A missing level or a large-page leaf on the way
+        // means there is no 4 KiB leaf whose referenced bit this reports —
+        // fail closed with `NotMapped` (the tier tracks only 4 KiB
+        // anonymous leaves, never a gigapage/megapage).
+        let e2 = self.root[vpn_index(vaddr, 2)];
+        if (e2 & flags::VALID) == 0 || pte_is_leaf(e2) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: a present non-leaf entry's PPN is an identity-mapped
+        // table address (see `translate`); `&mut self` makes the exclusive
+        // borrow sound.
+        let l1 = unsafe { &mut *(phys_from_pte(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let e1 = l1[vpn_index(vaddr, 1)];
+        if (e1 & flags::VALID) == 0 || pte_is_leaf(e1) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: as above — a present non-leaf L1 entry's PPN is a valid
+        // identity-mapped table address.
+        let l0 = unsafe { &mut *(phys_from_pte(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let i0 = vpn_index(vaddr, 0);
+        let e0 = l0[i0];
+        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
+            return Err(MapError::NotMapped);
+        }
+        let was_accessed = (e0 & flags::ACCESSED) != 0;
+        if was_accessed {
+            // Clear the Accessed bit so the next access re-sets it (in the
+            // walk on Svadu, or via the Svade page-fault path); a later
+            // probe reading it still clear proves the page went untouched.
+            // Invalidate the stale TLB entry so the cleared bit is observed
+            // on the next translation rather than served from a cached PTE.
+            l0[i0] = e0 & !flags::ACCESSED;
+            invalidate_page_local(vaddr);
+        }
+        Ok(was_accessed)
+    }
+
     fn block_split_support(&self) -> BlockSplit {
         // Sv39 re-expresses a 1 GiB gigapage / 2 MiB megapage leaf as a
         // table of finer leaves (`plans/PI.md` G1/G2 — the riscv64
@@ -865,6 +927,143 @@ fn active_root_phys() -> u64 {
     {
         0
     }
+}
+
+/// The leaf-permission bit a faulting access requires, so
+/// [`set_accessed_flag_in_active`] sets the Accessed bit only on a leaf
+/// that genuinely permits the access — never masking a real permission
+/// fault (which raises the same page-fault cause under Svade).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AccessKind {
+    /// A load page fault (`scause` 13): the leaf must be readable.
+    Load,
+    /// A store/AMO page fault (`scause` 15): the leaf must be writable,
+    /// and the Dirty bit is set alongside Accessed.
+    Store,
+    /// An instruction page fault (`scause` 12): the leaf must be
+    /// executable.
+    Instruction,
+}
+
+impl AccessKind {
+    /// The leaf permission bit the access requires.
+    const fn required_perm(self) -> u64 {
+        match self {
+            Self::Load => flags::READ,
+            Self::Store => flags::WRITE,
+            Self::Instruction => flags::EXEC,
+        }
+    }
+
+    /// Whether resolving the fault also sets the Dirty bit (a store).
+    const fn sets_dirty(self) -> bool {
+        matches!(self, Self::Store)
+    }
+}
+
+/// Set the Accessed (and, for a store, Dirty) bit on the leaf of the
+/// *active* Sv39 regime (`satp`) covering `vaddr`, resolving the RISC-V
+/// A/D page fault a Svade part raises when the bit must be updated.
+///
+/// This is the trap-path counterpart of
+/// [`AddressSpace::test_and_clear_accessed`]: after the cold-page scanner
+/// clears a leaf's A bit, the next access to that page on a Svade part
+/// (QEMU `svade`, or silicon without hardware A/D update) raises a
+/// load/store/instruction page fault. The trap handler (`crate::trap`)
+/// calls this with `stval` and the [`AccessKind`]; it sets A (and D for a
+/// store) back on the faulting leaf and invalidates its stale TLB entry,
+/// so the retried instruction succeeds and a later probe sees the page was
+/// touched.
+///
+/// It sets the bit(s) **only** on a valid leaf that already permits the
+/// faulting access (so a genuine permission fault — which shares the same
+/// `scause` — is *not* masked) and whose relevant bit is actually clear,
+/// and returns `true` only in that case. Any other `vaddr` leaves the
+/// tables untouched and returns `false` — the caller then takes the
+/// ordinary fault path (fail closed). It allocates nothing and is sound in
+/// trap context.
+#[must_use]
+pub fn set_accessed_flag_in_active(vaddr: u64, kind: AccessKind) -> bool {
+    let root_phys = active_root_phys();
+    if root_phys == 0 {
+        return false;
+    }
+    // SAFETY: the active root's tables identity-map the kernel window
+    // (every TAIRiX space does), so `root_phys` is a live, dereferenceable
+    // root table whose walk `set_accessed_flag_in_root` performs; the trap
+    // handler holds the hart exclusively while it resolves the fault, so
+    // the `&mut` borrows of the descriptors are unique.
+    unsafe { set_accessed_flag_in_root(root_phys, vaddr, kind) }
+}
+
+/// Walk the Sv39 hierarchy rooted at `root_phys` and set the Accessed
+/// (and, for a store, Dirty) bit on the valid, access-permitting leaf
+/// covering `vaddr` when the relevant bit is clear, as
+/// [`set_accessed_flag_in_active`] does for the live root. Returns `true`
+/// only when it updated such a leaf.
+///
+/// # Safety
+///
+/// `root_phys` must be a live Sv39 root table whose descendant tables
+/// identity-map their own physical addresses (so each `phys_from_pte` is
+/// dereferenceable), and the caller must hold exclusive access to the
+/// hierarchy for the duration of the call (no aliasing `&mut`).
+#[must_use]
+unsafe fn set_accessed_flag_in_root(root_phys: u64, vaddr: u64, kind: AccessKind) -> bool {
+    // SAFETY: `root_phys` is a live, dereferenceable Sv39 root table per
+    // the function contract; the caller guarantees exclusive access, so
+    // the `&mut` borrows are unique.
+    let root = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    let e2 = root[vpn_index(vaddr, 2)];
+    if (e2 & flags::VALID) == 0 {
+        return false;
+    }
+    if pte_is_leaf(e2) {
+        return set_ad_if_permitted(&mut root[vpn_index(vaddr, 2)], vaddr, kind);
+    }
+    // SAFETY: a valid non-leaf entry's PPN is an identity-mapped table.
+    let l1 = unsafe { &mut *(phys_from_pte(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+    let e1 = l1[vpn_index(vaddr, 1)];
+    if (e1 & flags::VALID) == 0 {
+        return false;
+    }
+    if pte_is_leaf(e1) {
+        return set_ad_if_permitted(&mut l1[vpn_index(vaddr, 1)], vaddr, kind);
+    }
+    // SAFETY: as above — a valid non-leaf L1 entry's PPN is a valid
+    // identity-mapped L0 table.
+    let l0 = unsafe { &mut *(phys_from_pte(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+    let i0 = vpn_index(vaddr, 0);
+    if (l0[i0] & flags::VALID) == 0 || !pte_is_leaf(l0[i0]) {
+        return false;
+    }
+    set_ad_if_permitted(&mut l0[i0], vaddr, kind)
+}
+
+/// Set the Accessed (and, for a store, Dirty) bit on `leaf` when the leaf
+/// permits `kind`'s access and the relevant bit is clear, invalidate the
+/// stale TLB entry for `vaddr`, and report whether anything changed.
+///
+/// Returns `false` (touching nothing) when the leaf does not permit the
+/// access — a genuine permission fault shares the same page-fault cause,
+/// so the caller must fall through to the ordinary fault path — or when
+/// the bits are already set (the fault was not the software A/D mechanism).
+fn set_ad_if_permitted(leaf: &mut u64, vaddr: u64, kind: AccessKind) -> bool {
+    if (*leaf & kind.required_perm()) == 0 {
+        return false;
+    }
+    let mut updated = *leaf;
+    if kind.sets_dirty() {
+        updated |= flags::ACCESSED | flags::DIRTY;
+    } else {
+        updated |= flags::ACCESSED;
+    }
+    if updated == *leaf {
+        return false;
+    }
+    *leaf = updated;
+    invalidate_page_local(vaddr);
+    true
 }
 
 /// Reactivate `root_phys` as the active Sv39 translation root (write

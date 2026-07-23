@@ -1,0 +1,50 @@
+[package]
+name = "tairix-test-accessed-bit-qemu-aarch64"
+description = "QEMU integration test: the aarch64 software-managed Access Flag (the cold-page referenced bit) is read and cleared through the Arch HAL, and an access to a cleared leaf raises an Access-Flag fault the synchronous-exception path resolves by setting AF and retrying — driving the cold-page clock scan on emulated cortex-a72 (no HAFDBS) hardware."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This crate produces a freestanding kernel ELF that QEMU loads via
+# `-kernel` on the aarch64 `virt` board (`tools/qemu`). It links the
+# aarch64 port (`tairix-arch-aarch64`) for boot + paging + EL1 vectors +
+# isa-debug-exit primitives, brings up the synchronous-exception vectors,
+# maps a single 4 KiB kernel page, and asserts that
+# `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed` reports the
+# software-managed Access Flag honestly — set after a real access, clear
+# after a clock-scan clear, and re-set on the next access via the
+# Access-Flag-fault handler — so the compressed-memory tier's cold-page
+# scanner (`plans/SWAPSWAPSWAP.md`, `kernel/mem::coldscan`) can tell a cold
+# page from a hot one on real hardware. The QEMU CPU is `cortex-a72`, which
+# lacks ARMv8.1 HAFDBS, so the software Access-Flag-fault path is genuinely
+# exercised (not shadowed by a hardware AF update).
+#
+# Because the binary is freestanding it is built **only** for
+# `aarch64-unknown-none`. On the host target the crate has no test source
+# and contributes nothing to `cargo test`; the orchestrator that runs the
+# QEMU binary is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-accessed-bit-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The Arch HAL MMU surface (`AGENTS.md` §17.2): the test drives the
+# referenced bit through `tairix_arch_api::mmu::AddressSpace`
+# (`map_page` / `activate` / `access_tracking` / `test_and_clear_accessed`)
+# so the property is proven *through the HAL*, not the port's inherent
+# methods (`plans/WIRING.md` W5b).
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+# `#[global_allocator]` backing (the aarch64 port names `alloc`).
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -1638,33 +1638,51 @@ and its architecture-neutral core lands here (staged in
   the very thrash the tier avoids). This is the same approximation Linux
   page reclaim uses, with no per-page timestamp and no hot-path
   allocation beyond the returned list.
-- **Per-port state.** **x86_64 is live**: the hardware always sets the
-  Accessed bit (PTE bit 5) and never clears it (Intel SDM Vol 3A §4.8), so
-  `test_and_clear_accessed` walks to the 4 KiB leaf, reads and clears bit 5,
-  and `INVLPG`s the page — no software fault path — and `access_tracking`
-  declares `Supported`. `flags::ACCESSED` is the single definition of bit
-  5. aarch64 declares the facility `Pending`: reporting the Access Flag
-  (AF, bit 10) honestly means *managing* it, and the cortex-a57/a72 the
-  boards and the default QEMU CPU expose lack ARMv8.1 HAFDBS, so it needs a
-  software Access-Flag-fault handler (keep `TCR_EL1.HA` clear, set AF on the
-  access-flag abort and resume) — a boot/exception-path change with its own
-  QEMU vertical. riscv64 needs the analogous software A-setting page-fault
-  handler (hardware A/D *update* is implementation-defined), so it stays on
-  the fail-closed default until that lands. wasm32 keeps the fail-closed
-  default permanently: the browser sandbox exposes no per-page referenced
-  bit. The `HostPageTable` double models the bit in software, so the
-  scanner is fully host-tested on every target.
+- **Per-port state.** Three of the four Tier-1 ports are live and declare
+  `Supported`; wasm32 stays fail-closed by construction.
+  - **x86_64**: the hardware always sets the Accessed bit (PTE bit 5) and
+    never clears it (Intel SDM Vol 3A §4.8), so `test_and_clear_accessed`
+    walks to the 4 KiB leaf, reads and clears bit 5, and `INVLPG`s the
+    page — no software fault path. `flags::ACCESSED` is the single
+    definition of bit 5.
+  - **aarch64**: the Access Flag (AF, descriptor bit 10) is
+    software-managed — cortex-a57/a72 (the boards and the default QEMU
+    CPU) lack ARMv8.1 HAFDBS, so an access to a valid leaf whose AF is
+    clear raises an Access-Flag fault. `test_and_clear_accessed` clears AF
+    (+ TLBI); the synchronous-exception path
+    (`is_access_flag_fault` → `paging::set_accessed_flag_in_active`) sets
+    AF back on the faulting leaf and retries. Both data and instruction
+    aborts, from either EL, are handled; a non-AF fault falls through
+    unchanged (fail closed).
+  - **riscv64**: the Accessed bit (A, PTE bit 6) is likewise
+    software-managed — RISC-V leaves A/D *update* implementation-defined
+    (a Svade part faults, a Svadu part updates in the walk).
+    `test_and_clear_accessed` clears A (+ `sfence.vma`); the trap path
+    (load/store/instruction page fault → `paging::set_accessed_flag_in_active`
+    with the `AccessKind`) sets A (and D for a store) back **only** on a
+    valid leaf that permits the access — a genuine permission fault (same
+    `scause`) is never masked — and retries. On a Svadu part the fault
+    never fires and the branch is inert.
+  - **wasm32** keeps the fail-closed default permanently: the browser
+    sandbox exposes no per-page referenced bit.
+  The `HostPageTable` double models the bit in software, so the scanner is
+  fully host-tested on every target.
 - **Tested.** `kernel/arch/api` mmu conformance (honest declaration,
   fail-open rejection), `kernel/mem::coldscan` host tests (untouched
   pages are cold up to budget, a referenced page gets a second chance and
   the cleared bit makes a still-idle page cold next pass, the clock hand
-  rotates, and a backend without a referenced bit fails closed), and the
-  x86_64 QEMU vertical `tests/integration/accessed_bit_qemu_x86_64` — a
-  fresh mapping reads clear, reads set after a genuine access (and is
-  cleared), reads clear again with no access between, and reads set once
-  more after re-access (the full clock transition), plus the
-  misaligned / unmapped fail-closed rejects and the `Supported`
-  declaration, proven on real (emulated) hardware.
+  rotates, and a backend without a referenced bit fails closed), the
+  per-port paging host tests (the clock round-trip and the AF/A
+  fault-fix-up + permission gating on aarch64 and riscv64), and a QEMU
+  vertical per live port —
+  `tests/integration/accessed_bit_qemu_{x86_64,aarch64,riscv64}`. Each
+  drives the full clock transition on real (emulated) hardware — a fresh
+  mapping's bit, a clear making the page read cold, a genuine access
+  re-setting it (through the software fault path on aarch64/riscv64,
+  proven because the aarch64 run uses cortex-a72 without HAFDBS and the
+  riscv64 run pins `svade=true,svadu=false`), and a re-access after the
+  next clear — plus the misaligned / unmapped fail-closed rejects and the
+  `Supported` declaration.
 
 ## 7p. Live tier wiring (global pool, fault-in, boot install)
 

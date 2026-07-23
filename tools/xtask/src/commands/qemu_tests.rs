@@ -568,6 +568,59 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`,
+    // `.junie/swapswap-progress.md`): the software-managed Access Flag
+    // (the cold-page referenced bit) read and cleared through the Arch
+    // HAL, and an access to a cleared-AF leaf resolved by the
+    // synchronous-exception Access-Flag-fault path (setting AF + retry),
+    // driving the cold-page clock scan (`kernel/mem::coldscan`). The QEMU
+    // CPU is `cortex-a72` (no HAFDBS), so the software AF-fault path is
+    // genuinely exercised. Single CPU suffices (the test builds and probes
+    // one address space on the BSP); the 60-second budget matches
+    // `memory_isolation`'s — a strictly bring-up test with no workload.
+    QemuTest {
+        package: "tairix-test-accessed-bit-qemu-aarch64",
+        binary: "tairix-test-accessed-bit-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // ramzip b3 riscv64 (`plans/SWAPSWAPSWAP.md`,
+    // `.junie/swapswap-progress.md`): the software-managed Accessed bit
+    // (the cold-page referenced bit) read and cleared through the Arch
+    // HAL, and an access to a cleared-A leaf resolved by the trap path's
+    // A/D-setting page-fault handler (setting A + retry), driving the
+    // cold-page clock scan (`kernel/mem::coldscan`). The riscv64 runner
+    // pins the CPU to `svade=true,svadu=false`, so the software A/D fault
+    // path is genuinely exercised. Single CPU suffices (the test builds
+    // and probes one address space on the boot hart); the 60-second budget
+    // matches `memory_isolation`'s — a strictly bring-up test with no
+    // workload.
+    QemuTest {
+        package: "tairix-test-accessed-bit-qemu-riscv64",
+        binary: "tairix-test-accessed-bit-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `tairix-test-scheduler-stress`
     // workspace test continues to satisfy the unit / cross-

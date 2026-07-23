@@ -2125,6 +2125,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-accessed-bit-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-accessed-bit-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-accessed-bit-qemu-x86_64"
 version = "0.0.0"
 dependencies = [

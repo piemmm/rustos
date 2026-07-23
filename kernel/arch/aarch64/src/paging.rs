@@ -1659,21 +1659,61 @@ impl MmuAddressSpace for AddressSpace {
     fn access_tracking(&self) -> AccessTracking {
         // The per-page referenced bit the cold-page scanner
         // (`kernel/mem::coldscan`) needs is the Access Flag (AF, bit 10).
-        // Reporting it honestly on aarch64 requires *managing* AF rather
-        // than the current eager-set policy: either hardware AF updates
-        // (ARMv8.1 HAFDBS, absent on the cortex-a57/a72 the boards and the
-        // default QEMU CPU expose) enabled through TCR_EL1.HA, or a
-        // software Access-Flag-fault handler that sets AF on the data
-        // abort a cleared flag raises. Neither has landed, and enabling
-        // one is a boot/exception-path change with its own QEMU vertical,
-        // so aarch64 declares the facility Pending rather than pretend a
-        // referenced bit it does not yet maintain. Fail closed: the
-        // default `test_and_clear_accessed` returns `Unsupported`, so the
-        // scanner reclaims nothing here until the concrete AF path lands
-        // (`plans/SWAPSWAPSWAP.md` b1a).
-        AccessTracking::Pending(
-            "AF management (HAFDBS or software AF-fault) lands in plans/SWAPSWAPSWAP.md b1a",
-        )
+        // aarch64 manages AF in software: cortex-a57/a72 (the boards and
+        // the default QEMU CPU) lack the ARMv8.1 HAFDBS hardware-update
+        // feature, so the architecture raises an Access-Flag fault when a
+        // valid leaf whose AF is clear is accessed. `test_and_clear_accessed`
+        // clears AF (and invalidates the leaf's TLB entry); the next access
+        // then takes that fault, which the synchronous-exception path
+        // (`crate::exceptions`) resolves by setting AF back through
+        // [`set_accessed_flag_in_active`] and retrying — so a probe reading
+        // AF still clear proves the page went untouched. The whole clock
+        // round-trip is proven on emulated cortex-a57 hardware by the
+        // `accessed-bit-qemu-aarch64` vertical.
+        AccessTracking::Supported
+    }
+
+    fn test_and_clear_accessed(&mut self, vaddr: u64) -> Result<bool, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // Navigate to the 4 KiB page leaf without allocating, exactly as
+        // `unmap` does. A missing level or a block leaf encountered on the
+        // way means there is no 4 KiB leaf whose referenced bit this
+        // reports — fail closed with `NotMapped` (the tier tracks only
+        // 4 KiB anonymous leaves, never a coarse block).
+        let e1 = self.root[table_index(vaddr, 1)];
+        if (e1 & attrs::VALID) == 0 || is_block(e1) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: a present table descriptor's output address is an
+        // identity-mapped table (see `translate`); `&mut self` makes the
+        // exclusive borrow of the leaf sound.
+        let l2 = unsafe { &mut *(phys_from_descriptor(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let e2 = l2[table_index(vaddr, 2)];
+        if (e2 & attrs::VALID) == 0 || is_block(e2) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: as above — a present L2 table descriptor's output
+        // address is a valid identity-mapped table.
+        let l3 = unsafe { &mut *(phys_from_descriptor(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let i3 = table_index(vaddr, 3);
+        let e3 = l3[i3];
+        if (e3 & attrs::VALID) == 0 {
+            return Err(MapError::NotMapped);
+        }
+        let was_accessed = (e3 & attrs::AF) != 0;
+        if was_accessed {
+            // Clear the Access Flag so the next access raises an
+            // Access-Flag fault the exception path re-sets; a later probe
+            // reading it still clear proves the page went untouched in
+            // between (the clock scan). Invalidate the stale TLB entry so
+            // the cleared flag is observed on the next translation rather
+            // than served from a cached descriptor that still carries AF.
+            l3[i3] = e3 & !attrs::AF;
+            invalidate_page_inner_shareable(vaddr);
+        }
+        Ok(was_accessed)
     }
 
     fn block_split_support(&self) -> BlockSplit {
@@ -1876,6 +1916,101 @@ fn active_root_phys() -> u64 {
     {
         0
     }
+}
+
+/// Set the Access Flag on the leaf of the *active* stage-1 translation
+/// regime (`TTBR0_EL1`) covering `vaddr`, resolving an Access-Flag fault
+/// the software-managed referenced bit raised.
+///
+/// This is the exception-path counterpart of
+/// [`AddressSpace::test_and_clear_accessed`]: after the cold-page scanner
+/// clears a leaf's AF (bit 10), the next access to that page takes an
+/// Access-Flag fault (cortex-a57/a72 lack HAFDBS hardware AF update). The
+/// synchronous-exception handler (`crate::exceptions`) calls this with
+/// `FAR_EL1` to set AF back on the faulting leaf and invalidate its stale
+/// TLB entry, so the retried instruction succeeds and a later probe sees
+/// the page was touched.
+///
+/// It walks the live tables directly (they identity-map the kernel
+/// window, so a table's physical address is dereferenceable), sets AF only
+/// on a **valid** leaf whose AF is currently **clear**, and returns
+/// `true` only in that case. A `vaddr` with no valid leaf, or a leaf whose
+/// AF is already set (so the fault was *not* the software referenced-bit
+/// mechanism), leaves the tables untouched and returns `false` — the
+/// caller then takes the ordinary fault path (fail closed: this never
+/// fabricates a mapping or masks a genuine fault). It allocates nothing
+/// and is sound in exception context.
+#[must_use]
+pub fn set_accessed_flag_in_active(vaddr: u64) -> bool {
+    let root_phys = active_root_phys();
+    if root_phys == 0 {
+        return false;
+    }
+    // SAFETY: the active root's tables identity-map the kernel window
+    // (every TAIRiX space does), so `root_phys` is a live, dereferenceable
+    // L1 table whose walk `set_accessed_flag_in_root` performs; the
+    // exception handler holds the CPU exclusively while it resolves the
+    // fault, so the `&mut` borrows of the descriptors are unique.
+    unsafe { set_accessed_flag_in_root(root_phys, vaddr) }
+}
+
+/// Walk the stage-1 hierarchy rooted at `root_phys` and set the Access
+/// Flag on the valid leaf covering `vaddr` when its AF is clear, as
+/// [`set_accessed_flag_in_active`] does for the live root. Returns `true`
+/// only when it set AF on a valid AF-clear leaf.
+///
+/// # Safety
+///
+/// `root_phys` must be a live L1 table whose descendant tables identity-map
+/// their own physical addresses (so each `phys_from_descriptor` is
+/// dereferenceable), and the caller must hold exclusive access to the
+/// hierarchy for the duration of the call (no aliasing `&mut`).
+#[must_use]
+unsafe fn set_accessed_flag_in_root(root_phys: u64, vaddr: u64) -> bool {
+    // SAFETY: `root_phys` is a live, dereferenceable L1 table per the
+    // function contract; the caller guarantees exclusive access, so the
+    // `&mut` borrow of the descriptor is unique.
+    let l1 = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    let e1 = l1[table_index(vaddr, 1)];
+    if (e1 & attrs::VALID) == 0 {
+        return false;
+    }
+    if is_block(e1) {
+        return set_af_if_clear(&mut l1[table_index(vaddr, 1)], vaddr);
+    }
+    // SAFETY: a valid table descriptor's output address is an
+    // identity-mapped next-level table (see `AddressSpace::translate`).
+    let l2 = unsafe { &mut *(phys_from_descriptor(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+    let e2 = l2[table_index(vaddr, 2)];
+    if (e2 & attrs::VALID) == 0 {
+        return false;
+    }
+    if is_block(e2) {
+        return set_af_if_clear(&mut l2[table_index(vaddr, 2)], vaddr);
+    }
+    // SAFETY: as above — a valid L2 table descriptor points at an
+    // identity-mapped L3 table.
+    let l3 = unsafe { &mut *(phys_from_descriptor(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+    let i3 = table_index(vaddr, 3);
+    if (l3[i3] & attrs::VALID) == 0 {
+        return false;
+    }
+    set_af_if_clear(&mut l3[i3], vaddr)
+}
+
+/// Set the Access Flag on `leaf` when it is currently clear, invalidate
+/// the stale TLB entry for `vaddr`, and report whether AF was set.
+///
+/// Returns `false` (touching nothing) when AF is already set — the fault
+/// was not the software referenced-bit mechanism, so the caller must fall
+/// through to the ordinary fault path.
+fn set_af_if_clear(leaf: &mut u64, vaddr: u64) -> bool {
+    if (*leaf & attrs::AF) != 0 {
+        return false;
+    }
+    *leaf |= attrs::AF;
+    invalidate_page_inner_shareable(vaddr);
+    true
 }
 
 /// Reactivate `root_phys` as the active stage-1 EL1&0 translation root
