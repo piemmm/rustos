@@ -21,6 +21,7 @@ use tairix_abi::Errno;
 
 use crate::activate::Activation;
 use crate::clipboard::{Clipboard, ClipboardOp};
+use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
@@ -342,6 +343,31 @@ impl<S: DirectorySource> Browser<S> {
     #[must_use]
     pub fn clipboard(&self, op: ClipboardOp) -> Option<Clipboard> {
         Clipboard::new(op, self.selected_component_paths())
+    }
+
+    /// Capture the current selection into a [`DeletePlan`] naming what a Delete
+    /// would remove, or `None` when nothing is selected.
+    ///
+    /// Each target carries its absolute path (so it names exactly the node the
+    /// browser shows) and whether it is directory-backed on disk (so the app
+    /// removes it with [`UnlinkFlags::DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY)
+    /// and recurses, rather than unlinking a leaf file). Building the plan
+    /// grants no authority — the `fs_unlink` the app later performs is the
+    /// user's own capability-checked filesystem operation, so the read-only
+    /// picker composes the same [`Browser`] and never builds one.
+    #[must_use]
+    pub fn plan_delete(&self) -> Option<DeletePlan> {
+        let targets = self
+            .selection
+            .iter()
+            .filter_map(|index| self.entries.get(index))
+            .map(|entry| {
+                let mut path = self.components.clone();
+                path.push(String::from(entry.name()));
+                (path, entry.is_directory_backed())
+            })
+            .collect();
+        DeletePlan::new(targets)
     }
 
     /// Re-read the current directory from the source, preserving the selection

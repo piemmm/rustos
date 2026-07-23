@@ -77,6 +77,20 @@ impl EntryKind {
     pub const fn is_bundle(self) -> bool {
         matches!(self, Self::Bundle)
     }
+
+    /// `true` if the entry is directory-backed on disk — a plain
+    /// [`Directory`](Self::Directory) *or* a [`Bundle`](Self::Bundle).
+    ///
+    /// Unlike [`is_directory`](Self::is_directory), this reports the node's
+    /// *structural* shape rather than whether the browser descends into it, so
+    /// a management verb removes or recurses into a bundle as the directory it
+    /// really is: it selects the
+    /// [`DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY) unlink flag and
+    /// recursion for either kind, while a [`File`](Self::File) is a leaf.
+    #[must_use]
+    pub const fn is_directory_backed(self) -> bool {
+        matches!(self, Self::Directory | Self::Bundle)
+    }
 }
 
 /// Whether `name` is an application bundle name — a non-empty base name
@@ -166,5 +180,12 @@ impl Entry {
     #[must_use]
     pub const fn is_bundle(&self) -> bool {
         self.kind.is_bundle()
+    }
+
+    /// `true` if the entry is directory-backed on disk — a directory or a
+    /// bundle (see [`EntryKind::is_directory_backed`]).
+    #[must_use]
+    pub const fn is_directory_backed(&self) -> bool {
+        self.kind.is_directory_backed()
     }
 }

@@ -434,6 +434,31 @@ succeeded, so a failed copy loses no data. The engine does no I/O; the app
 performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
 launching user's own identity, so the read-only picker never runs it.
 
+### The delete model
+
+Deleting the selection (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in
+`lib/browse::delete` plus `Browser::plan_delete`, host-proven ahead of the app's
+Delete verb exactly as the clipboard and paste-execution models are.
+`Browser::plan_delete()` captures the current multi-selection into a
+`delete::DeletePlan` (`None` when nothing is selected), one `delete::DeleteTarget`
+per marked entry in listing order. Each target carries the entry's absolute
+component path — so it names exactly the node the browser shows and can never
+resolve to a different one (`AGENTS.md` §2.2) — and whether it is
+directory-backed on disk: a directory *or* a sealed `<Name>.app` bundle, since
+either is removed with `UnlinkFlags::DIRECTORY` and recursed into as the
+directory it really is, while a regular file is a leaf. `DeletePlan::new` is
+fail closed: an empty selection, or any target naming the filesystem root (an
+empty component list), yields no plan rather than one that could remove nothing
+or the root itself (`AGENTS.md` §5.4). `DeletePlan::len` and
+`DeletePlan::has_directories` are the honest figures a delete confirmation
+reports — the count, and whether folders (and their contents) are among the
+removals — so the app's `lib/controls` `Dialog` warns truthfully rather than
+treating every deletion as a single file (`AGENTS.md` §2.24). The model names
+*what* would be removed; the app performs each `fs_unlink` under the launching
+user's own identity — an ordinary permission-checked VFS call, no new
+capability — so composing the model grants nothing and the read-only picker
+never builds a delete plan.
+
 ### The new-folder model
 
 Creating a folder (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in

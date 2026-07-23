@@ -43,6 +43,9 @@
 //!   toggle / range / select-all) the management verbs act on.
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
 //!   [`plan_paste`] paste-target validation (`plans/NEW-FILEMANAGER.md` FM7).
+//! * [`delete`](mod@delete) — the [`DeletePlan`] delete model: what the Delete
+//!   verb would remove, captured from the selection (`plans/NEW-FILEMANAGER.md`
+//!   `FM7b`).
 //! * [`execute`](mod@execute) — the pure paste-execution model: the
 //!   [`paste_strategy`] move-vs-copy volume decision and the bounded,
 //!   resumable [`CopyCursor`] streaming-copy model the management verbs run.
@@ -91,6 +94,7 @@ pub mod breadcrumb;
 pub mod browser;
 pub mod chrome;
 pub mod clipboard;
+pub mod delete;
 pub mod entry;
 pub mod error;
 pub mod execute;
@@ -115,6 +119,7 @@ pub use chrome::{
     ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
+pub use delete::{DeletePlan, DeleteTarget};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use execute::{

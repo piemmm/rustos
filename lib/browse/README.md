@@ -147,6 +147,20 @@ can never diverge in navigation semantics, listing policy, or look.
   never a silent wrap. The engine does no I/O and the source is deleted only
   after a cross-volume copy fully succeeds — the app performs every syscall
   under the user's own identity, so the read-only picker never runs it.
+- **Delete** (`delete`, `Browser::plan_delete`, `plans/NEW-FILEMANAGER.md`
+  FM7b): the model of *what* a Delete removes, host-proven ahead of the app
+  verb. `Browser::plan_delete()` captures the selection into a `DeletePlan`
+  (`None` when nothing is selected) whose `DeleteTarget`s each carry the
+  entry's absolute component path and whether it is directory-backed on disk
+  — a directory *or* a bundle, so a sealed `<Name>.app` is removed with
+  `UnlinkFlags::DIRECTORY` and recursed into as the directory it really is,
+  while a regular file is a leaf. `DeletePlan::new` is **fail closed**: an
+  empty selection, or any target naming the root (an empty component list),
+  yields no plan rather than one that could remove nothing or the root.
+  `len`/`has_directories` are the honest figures a delete confirmation reports. The
+  model names the removals; the app performs each `fs_unlink` under the user's
+  own identity (no new capability), so composing it grants nothing and the
+  read-only picker never builds one.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`

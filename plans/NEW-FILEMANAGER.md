@@ -31,7 +31,7 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
+FM7b's pure delete model, FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's drawn read-only properties panel +
 its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
@@ -592,6 +592,28 @@ put, create in an empty directory needs no selection, failed post-create
 re-list surfaced, `validate_new_dir_name` purity, every `MkdirError` message
 non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
+**The pure delete model is done** (§2.19 — host-proven ahead of the app verb,
+exactly as the paste-execution and new-folder models landed): the
+`lib/browse::delete` module (`DeletePlan` + `DeleteTarget`) plus
+`Browser::plan_delete`. `plan_delete` captures the current multi-selection into
+a `DeletePlan` (`None` when nothing is selected), one `DeleteTarget` per marked
+entry in listing order, each carrying the entry's absolute component path (the
+one shared spelling, so a target names exactly the node the browser shows) and
+whether it is directory-backed on disk — a directory *or* a sealed `<Name>.app`
+bundle, via the new `EntryKind::is_directory_backed`, so either is removed with
+`UnlinkFlags::DIRECTORY` and recursed into while a regular file is a leaf.
+`DeletePlan::new` is fail closed: an empty selection, or any target naming the
+root (an empty component list), yields no plan rather than one that could
+remove nothing or the root itself (§5.4). `len`/`has_directories` are the
+honest figures a delete confirmation reports (§2.24). The model names *what*
+would be removed; the app performs each `fs_unlink` under the user's own
+identity (**no new capability**), so composing it grants nothing and the
+read-only picker never builds one. Host-tested in `lib/browse` (capture +
+per-target path/kind, none-on-empty-selection, a bundle marked
+directory-backed, a files-only plan reporting no directories, and the
+fail-closed `DeletePlan::new` empty/root refusals). Docs:
+`docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
 - **Move** = `fs_rename` when source and target share a volume (the
@@ -604,9 +626,10 @@ The remaining app-side verbs (still `planned`):
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
   (§2.24, §5.4).
-- **Delete** asks once (a `lib/controls::Dialog`, honest warmth), then
-  `fs_unlink`/recursive remove under the user's identity; a refusal is an
-  in-UI answer.
+- **Delete** (the pure `plan_delete` model above is done): the app asks once
+  (a `lib/controls::Dialog`, honest warmth, using the plan's count and
+  `has_directories`), then `fs_unlink`/recursive remove under the user's
+  identity for each `DeleteTarget`; a refusal is an in-UI answer.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).

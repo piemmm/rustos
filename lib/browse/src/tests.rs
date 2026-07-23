@@ -16,6 +16,7 @@ use tairix_theme::Theme;
 
 use crate::browser::Browser;
 use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
+use crate::delete::DeletePlan;
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::execute::{
@@ -2249,6 +2250,110 @@ fn plan_paste_refuses_a_folder_into_itself_or_a_descendant() {
 #[test]
 fn paste_error_message_is_non_empty() {
     assert!(!PasteError::WouldRecurse.to_string().is_empty());
+}
+
+// ---- FM7b: the delete model (`delete`) ----
+
+/// The delete target whose leaf name is `name`, for order-independent
+/// assertions (a `plan_delete` orders by listing, not by selection order).
+fn delete_target<'a>(
+    plan: &'a crate::delete::DeletePlan,
+    name: &str,
+) -> &'a crate::delete::DeleteTarget {
+    plan.targets()
+        .iter()
+        .find(|t| t.name() == name)
+        .expect("a target with that name")
+}
+
+#[test]
+fn plan_delete_captures_the_selected_targets_and_their_kinds() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // /System sorted: [Fonts (dir), Security (dir), Kernel (file)]. Select the
+    // directory Fonts and the file Kernel.
+    browser.select(0).expect("focus Fonts");
+    browser.toggle_selection(2).expect("also Kernel");
+
+    let plan = browser.plan_delete().expect("a plan");
+    assert_eq!(plan.len(), 2);
+    assert!(!plan.is_empty());
+    assert!(plan.has_directories());
+
+    let fonts = delete_target(&plan, "Fonts");
+    assert_eq!(fonts.path(), comps(&["System", "Fonts"]).as_slice());
+    assert!(fonts.is_directory());
+
+    let kernel = delete_target(&plan, "Kernel");
+    assert_eq!(kernel.path(), comps(&["System", "Kernel"]).as_slice());
+    assert!(!kernel.is_directory());
+}
+
+#[test]
+fn plan_delete_is_none_when_nothing_is_selected() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.clear_selection();
+    assert!(browser.selection().is_empty());
+    assert!(browser.plan_delete().is_none());
+}
+
+#[test]
+fn plan_delete_of_only_files_has_no_directories() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // Select only the regular file Kernel (index 2).
+    browser.select(2).expect("focus Kernel");
+    let plan = browser.plan_delete().expect("a plan");
+    assert_eq!(plan.len(), 1);
+    assert!(!plan.has_directories());
+    assert!(!plan.targets()[0].is_directory());
+}
+
+#[test]
+fn plan_delete_marks_a_bundle_as_directory_backed() {
+    use tairix_abi::time::Time64;
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Apps".to_string(),
+        vec![
+            Entry::new(
+                "Example.app",
+                crate::entry::EntryKind::Bundle,
+                0,
+                Time64::UNIX_EPOCH,
+            ),
+            Entry::file("notes.txt"),
+        ],
+    );
+    let mut browser = Browser::open_root(fs).expect("root");
+    // Sorted root order is [Apps, Storage, System, Users]; Apps is index 0.
+    browser.open_index(0).expect("enter Apps");
+    browser.select_all();
+
+    let plan = browser.plan_delete().expect("a plan");
+    assert_eq!(plan.len(), 2);
+    // A bundle is directory-backed on disk even though the browser does not
+    // descend into it, so it is removed recursively as the directory it is.
+    assert!(delete_target(&plan, "Example.app").is_directory());
+    assert!(!delete_target(&plan, "notes.txt").is_directory());
+    assert!(plan.has_directories());
+}
+
+#[test]
+fn delete_plan_new_refuses_empty_or_root_targets() {
+    // Nothing to delete.
+    assert!(DeletePlan::new(Vec::new()).is_none());
+    // A root (empty component) target could remove the root itself.
+    assert!(DeletePlan::new(vec![(Vec::new(), true)]).is_none());
+    // Any root target in the set poisons the whole plan (fail closed).
+    assert!(DeletePlan::new(vec![(comps(&["a"]), false), (Vec::new(), true)]).is_none());
+
+    let plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("a valid plan");
+    assert_eq!(plan.len(), 1);
+    let target = &plan.targets()[0];
+    assert_eq!(target.name(), "Kernel");
+    assert_eq!(target.path(), comps(&["System", "Kernel"]).as_slice());
+    assert!(!target.is_directory());
 }
 
 // ---- FM7b: the paste-execution model (`execute`) ----
