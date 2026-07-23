@@ -71,6 +71,13 @@
 //!   trait (the scheduler-policy precedent) with RFC 9438 CUBIC (default)
 //!   and RFC 6582 `NewReno` siblings, held to a shared conformance suite —
 //!   pure integer fixed-point arithmetic, no floating point.
+//!   [`tcp::listen`] is the demultiplexing server-side listener that sits
+//!   above the connection: it keeps a bounded backlog of half-open
+//!   handshakes, moves completed connections onto a bounded accept queue,
+//!   and — when the backlog is full, the SYN-flood condition — falls back to
+//!   stateless RFC 4987 **SYN cookies** over an injected keyed-MAC seam, so a
+//!   flood of spoofed SYNs consumes no per-connection memory (at the
+//!   documented cost of the connection's options).
 //!
 //! # Security
 //!

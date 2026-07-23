@@ -326,8 +326,8 @@ buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
 checksum through `tcp::write`), so it is address-family agnostic. The
 send path is bounded by both the peer's advertised window and the
-congestion window (`tcp::cc`, below). Listeners with an accept queue and
-stateless SYN cookies are the next increment (N6b-2). The connection engine is
+congestion window (`tcp::cc`, below). The demultiplexing server-side
+listener sits one level above it (`tcp::listen`, below). The connection engine is
 driven end to end through the `Stack` demux/originate paths above by the
 `netstack` `SocketService` stream sockets (N5c): the service owns one `Tcb`
 per connection and turns `Connect`/`Send`/`Close` and inbound
@@ -383,9 +383,45 @@ then a single rescue retransmission per episode). A retransmission timeout
 clears the scoreboard and falls back to go-back-N (RFC 6675 §5.1); future
 selective acknowledgements rebuild it.
 
+### `tcp::listen` — the demultiplexing listener and SYN-flood defence
+
+`Tcb` models one connection; `Listener` models the *server* side of
+connection establishment for one local port and sits above it. It
+demultiplexes inbound segments by peer identity (the peer address/port the
+TCB itself does not carry), holds a bounded backlog of half-open
+(SYN-RECEIVED) handshakes with a timeout, and moves each completed
+handshake onto a bounded accept queue that `accept` drains. Both queues are
+fixed capacity: a completed handshake that finds the accept queue full is
+refused with a RST rather than growing it, and a half-open connection whose
+client never returns its ACK is expired by `advance` (which also retransmits
+owed SYN-ACKs; `next_deadline` folds the one-shot timer). It is pure and
+event-driven like the rest of the crate.
+
+When the half-open backlog is full — exactly the SYN-flood condition — the
+listener stops allocating state and answers further SYNs with **stateless
+SYN cookies** (RFC 4987). The server ISN it returns is a keyed MAC over the
+connection 4-tuple and a slowly-rotating counter, with a 3-bit MSS index and
+the counter tick packed into the top bits, so the whole handshake can be
+reconstructed from the client's returning ACK holding *no* per-connection
+memory between the SYN and the ACK — a flood of spoofed SYNs therefore costs
+nothing. The documented trade-off is option loss: a cookie carries only the
+MSS, so a connection accepted via a cookie negotiates no window scaling,
+SACK, or timestamps (cookies are the overflow path, not the default — while
+the backlog has room a full-state half-open with options is kept instead).
+The keyed MAC is an injected `CookieSecret` seam: the engine hand-rolls no
+cryptography (the charter's rule), so the live `netstack` service backs it
+with `lib/crypto` over a per-boot secret while the tests inject a
+deterministic MAC. A returning ACK whose cookie was not minted by this
+secret — or minted under an expired counter — is refused with a RST and
+reconstructs nothing (fail closed). The `fuzz_net_tcp` listener driver
+floods a bounded listener with hostile SYN/ACK/RST traffic and asserts no
+panic, bounded half-open and accept queues, and that every emitted segment
+parses.
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-listeners with a bounded accept queue and stateless SYN cookies (N6b-2),
-then the hardware offloads (N7). Each is
-added with its callers, tests, and fuzz harnesses per increment.
+the socket-surface wiring that exposes `tcp::listen` through `netstack`
+(`listen`/`accept` ABI, `CAP_NET_BIND_PRIVILEGED`; N6b-2-β), then the
+hardware offloads (N7). Each is added with its callers, tests, and fuzz
+harnesses per increment.

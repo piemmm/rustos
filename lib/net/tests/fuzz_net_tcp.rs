@@ -452,3 +452,195 @@ fn state_machine_driver_never_panics() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The N6b-2 listener + SYN-cookie driver.
+//
+// A bounded listener is flooded with hostile, arbitrary (but parseable)
+// SYN/ACK/RST/data segments from a churn of random peers, interleaved with a
+// few genuine handshakes. Invariants, for any schedule and any injected bytes:
+//
+//   1. No listener operation ever panics.
+//   2. Half-open state never exceeds `max_half_open`, and the accept queue
+//      never exceeds `max_accept` — a SYN flood consumes bounded memory.
+//   3. Every segment the listener emits parses back under its pseudo-header.
+//   4. A cookie the listener itself minted, replayed honestly, is accepted;
+//      an off-path forgery is not (checked in the deterministic unit tests).
+// ---------------------------------------------------------------------------
+
+const LISTEN_PORT: u16 = 80;
+const LISTEN_LOCAL: tairix_net::IpAddr = tairix_net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+/// A deterministic keyed MAC standing in for the `lib/crypto`-backed secret.
+struct FuzzSecret(u64);
+
+impl tairix_net::tcp::listen::CookieSecret for FuzzSecret {
+    fn mac(&self, tuple: &[u8], counter: u32) -> u32 {
+        let mut h = self.0 ^ (u64::from(counter).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for &b in tuple {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3);
+        }
+        (((h >> 32) ^ h) & 0xFFFF_FFFF) as u32
+    }
+}
+
+fn listen_pseudo(peer: tairix_net::tcp::listen::Peer) -> Pseudo {
+    match peer.addr {
+        tairix_net::IpAddr::V4(a) => Pseudo::V4 {
+            source: a,
+            destination: Ipv4Addr::new(10, 0, 0, 1),
+        },
+        tairix_net::IpAddr::V6(_) => unreachable!("driver uses v4 peers"),
+    }
+}
+
+fn random_peer(rng: &mut Lcg) -> tairix_net::tcp::listen::Peer {
+    let bytes = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+    tairix_net::tcp::listen::Peer {
+        addr: tairix_net::IpAddr::V4(Ipv4Addr::from(bytes.to_be_bytes())),
+        port: ((rng.next_u64() & 0xFFFF) as u16) | 1,
+    }
+}
+
+/// Feed one hostile arbitrary segment to the listener, asserting bounds and
+/// that every reply parses.
+fn listener_inject(
+    listener: &mut tairix_net::tcp::listen::Listener,
+    rng: &mut Lcg,
+    peer: tairix_net::tcp::listen::Peer,
+    secret: &FuzzSecret,
+    now: Duration64,
+    max_half_open: usize,
+    max_accept: usize,
+) {
+    let ps = listen_pseudo(peer);
+    let meta = TcpSegmentMeta {
+        source_port: peer.port,
+        destination_port: LISTEN_PORT,
+        seq: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
+        ack: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
+        flags: TcpFlags::from_bits((rng.next_u64() & 0xFF) as u8),
+        window: (rng.next_u64() & 0xFFFF) as u16,
+        urgent: 0,
+        options: random_options(rng),
+    };
+    let len = (rng.next_u64() % 8) as usize;
+    let payload: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+    let mut buf = vec![0u8; MAX_HEADER_LEN + len];
+    let Ok(n) = tcp::write(ps, &meta, &payload, &mut buf) else {
+        return;
+    };
+    let Some(seg) = TcpSegment::parse(ps, &buf[..n]) else {
+        return;
+    };
+    listener.on_segment(LISTEN_LOCAL, peer, &seg, now, secret, |p, out| {
+        let mut rb = vec![0u8; MAX_HEADER_LEN + out.payload.len()];
+        let rn = tcp::write(listen_pseudo(p), &out.meta, out.payload, &mut rb)
+            .expect("listener reply serialises");
+        assert!(
+            TcpSegment::parse(listen_pseudo(p), &rb[..rn]).is_some(),
+            "listener emitted an unparseable segment"
+        );
+        true
+    });
+    assert!(
+        listener.half_open_len() <= max_half_open,
+        "half-open bound broken"
+    );
+    assert!(listener.pending() <= max_accept, "accept bound broken");
+}
+
+fn listener_drive_once(rng: &mut Lcg) {
+    let secret = FuzzSecret(rng.next_u64() | 1);
+    let max_half_open = ((rng.next_u64() % 8) as usize) + 1;
+    let max_accept = ((rng.next_u64() % 8) as usize) + 1;
+    let mut listener = tairix_net::tcp::listen::Listener::new(
+        LISTEN_PORT,
+        tairix_net::tcp::listen::ListenConfig {
+            max_half_open,
+            max_accept,
+            half_open_timeout: ms(5000),
+            template: driver_config(),
+        },
+    );
+
+    let mut t = 0u64;
+    let mut honest = tairix_net::tcp::listen::Peer {
+        addr: tairix_net::IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)),
+        port: 55555,
+    };
+    for _ in 0..300 {
+        t += 1 + (rng.next_u64() % 9);
+        let now = ms(t);
+        // A churn of hostile peers, mostly SYNs to drive the flood.
+        for _ in 0..(rng.next_u64() % 6) {
+            let peer = random_peer(rng);
+            listener_inject(
+                &mut listener,
+                rng,
+                peer,
+                &secret,
+                now,
+                max_half_open,
+                max_accept,
+            );
+        }
+        // Occasionally complete an honest cookie handshake and accept it.
+        if rng.next_u64() % 5 == 0 {
+            honest.port = honest.port.wrapping_add(1) | 1;
+            let ps = listen_pseudo(honest);
+            let mut client = Tcb::connect(driver_config(), honest.port, LISTEN_PORT, 0x1234, now);
+            for _ in 0..4 {
+                let mut frames = Vec::new();
+                client.poll_transmit(now, |out| {
+                    let mut b = vec![0u8; MAX_HEADER_LEN + out.payload.len()];
+                    let n = tcp::write(ps, &out.meta, out.payload, &mut b).expect("write");
+                    b.truncate(n);
+                    frames.push(b);
+                    true
+                });
+                if frames.is_empty() {
+                    break;
+                }
+                for f in frames {
+                    if let Some(seg) = TcpSegment::parse(ps, &f) {
+                        listener.on_segment(LISTEN_LOCAL, honest, &seg, now, &secret, |p, out| {
+                            let mut rb = vec![0u8; MAX_HEADER_LEN + out.payload.len()];
+                            let rn = tcp::write(listen_pseudo(p), &out.meta, out.payload, &mut rb)
+                                .expect("reply serialises");
+                            if let Some(s) = TcpSegment::parse(ps, &rb[..rn]) {
+                                client.on_segment(&s, now);
+                            }
+                            true
+                        });
+                    }
+                }
+                if listener.pending() > 0 {
+                    break;
+                }
+            }
+        }
+        listener.advance(now, |_, _| true);
+        // Drain some accepted connections so the queue churns.
+        while listener.accept().is_some() {}
+        assert!(listener.half_open_len() <= max_half_open);
+        assert!(listener.pending() <= max_accept);
+    }
+}
+
+#[test]
+fn listener_driver_never_panics() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "listener_driver_never_panics",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..64 {
+            listener_drive_once(&mut rng);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}

@@ -9,8 +9,9 @@ caller-owned byte slices and explicit monotonic time values, so the exact
 code the live `netstack` service runs is the code the unit tests, property
 tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
-`fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp`, `fuzz_net_igmp`,
-`fuzz_net_mld`) exercise.
+`fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp` (segment codec, the
+connection state machine, and the listener + SYN-cookie driver),
+`fuzz_net_igmp`, `fuzz_net_mld`) exercise.
 
 ## Contents
 
@@ -123,13 +124,27 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
   fixed-point, so the crate needs no floating point or libm. Loss (three
   duplicate ACKs) applies the multiplicative decrease once per window
   (RFC 6582 recover) and a timeout collapses to one segment; growth is slow
-  start below `ssthresh` and the policy's increase above it. Listeners with
-  an accept queue, SYN cookies, and RFC 6675 SACK-based selective
-  retransmission are the next increment (`plans/NETWORK.md` N6b).
+  start below `ssthresh` and the policy's increase above it.
+- `tcp::listen` — the demultiplexing server-side listener (`Listener`) that
+  sits above `tcp::conn`. It demultiplexes inbound segments by peer, holds a
+  bounded backlog of half-open (SYN-RECEIVED) handshakes with a timeout, and
+  moves completed connections onto a bounded accept queue (`accept`). When the
+  backlog is full — the SYN-flood condition — it answers further SYNs with
+  **stateless RFC 4987 SYN cookies** instead of allocating state: the server
+  ISN is a keyed MAC over the connection 4-tuple and a rotating counter, so
+  the handshake is reconstructed from the client's returning ACK holding no
+  per-connection memory (at the documented cost of the connection's window
+  scale / SACK / timestamps options). The keyed MAC is an injected
+  `CookieSecret` seam (the engine hand-rolls no crypto; `netstack` backs it
+  with `lib/crypto`). Both queues are fixed capacity and fail closed: an
+  exhausted accept queue refuses (RST) rather than growing, and a hostile
+  ACK bearing an unminted cookie is refused with a RST. Pure and
+  event-driven like the rest of the crate (`advance`/`next_deadline` drive
+  half-open retransmit + expiry).
 
-Later increments evolve this crate in place: listeners with an accept
-queue, SYN cookies, and RFC 6675 SACK-based loss recovery (`plans/NETWORK.md`
-N6b).
+Later increments evolve this crate in place: the socket-surface wiring
+(`listen`/`accept` ABI, `CAP_NET_BIND_PRIVILEGED`) that exposes
+`tcp::listen` through `netstack` (`plans/NETWORK.md` N6b-2-β).
 
 ## Security
 

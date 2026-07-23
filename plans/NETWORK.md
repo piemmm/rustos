@@ -1026,13 +1026,45 @@ the whole is too large for one change and each leaves the tree working.
   injection at the sender. Docs: `lib/net` lib.rs, `README.md`,
   `docs/src/lib/net.md`.
 
-#### N6b-2 — listeners, SYN-flood defence `[ ]`
-- `listen`/`accept` with bounded accept + SYN queues; overflow ⇒
-  stateless SYN cookies (RFC 4987) with the documented option-loss
-  trade-off; `CAP_NET_BIND_PRIVILEGED` introduced + enforced.
-- Adversarial tests: SYN flood soak (bounded memory asserted), RST/data
-  injection corpus (RFC 5961 behaviour), connection-exhaustion
-  fail-closed, cookie round-trip property tests.
+#### N6b-2 — listeners, SYN-flood defence `[~]`
+
+##### N6b-2-α — the pure `lib/net` listener + SYN-cookie engine `[x]`
+- `lib/net::tcp::listen` is the demultiplexing server-side `Listener`
+  above `tcp::conn`: it demuxes inbound segments by `Peer`, holds a
+  bounded backlog of half-open (SYN-RECEIVED) handshakes with a timeout,
+  and moves completed connections onto a bounded accept queue (`accept`).
+  Both queues are fixed capacity and fail closed — an accept-queue-full
+  handshake is refused with a RST, a stale half-open is expired by
+  `advance` (which also retransmits owed SYN-ACKs; `next_deadline` folds
+  the one-shot timer).
+- Overflow of the half-open backlog ⇒ **stateless RFC 4987 SYN cookies**:
+  the server ISN is a keyed MAC over the connection 4-tuple and a rotating
+  counter (5-bit tick + 3-bit MSS index + 24-bit MAC), so the handshake is
+  reconstructed from the client's returning ACK holding no per-connection
+  memory. The documented trade-off is option loss (a cookie carries only
+  the MSS; a cookie-accepted connection negotiates no window scale/SACK/
+  timestamps). The keyed MAC is an injected `CookieSecret` seam — the
+  engine hand-rolls no crypto (§2.12); `netstack` backs it with
+  `lib/crypto`. Reconstruction replays the existing state machine (build
+  `Tcb::listen` with options disabled, synthesize the SYN, commit the
+  SYN-ACK, feed the ACK), so no new `Tcb` surface was added.
+- Covered by `tcp::listen::tests` (handshake→accept, SYN-flood→bounded
+  cookies, cookie round-trip, tampered + stale cookie → RST, accept-queue
+  exhaustion fail-closed, half-open expiry, peer-RST reap, data-only drop,
+  IPv6 handshake) plus the `fuzz_net_tcp` listener driver (hostile
+  SYN/ACK/RST flood asserting no panic + bounded queues + every emitted
+  segment parses). Docs: `lib/net` lib.rs, `README.md`, `docs/src/lib/net.md`.
+
+##### N6b-2-β — the socket surface + capability + live vertical `[ ]`
+- Expose `tcp::listen` through `netstack`: `SocketType::Stream`
+  `listen`/`accept` on the socket ABI (`lib/abi/src/net.rs`), the
+  demultiplexing listener table in `SocketService`, the accepted-connection
+  delivery event, and the `lib/rt::net` wrappers.
+- `CAP_NET_BIND_PRIVILEGED` introduced **with** its enforcement point
+  (binding a listening port below the privileged bound), audited and
+  fail-closed (§5.2). A live two-process QEMU vertical (a listener served,
+  a peer connects and is accepted) plus the connection-exhaustion/SYN-flood
+  behaviour observed end to end.
 
 ### N7 — hardware offloads + performance hardening `[ ]`
 - The offload vocabulary negotiated end to end: `virtio_net` maps
