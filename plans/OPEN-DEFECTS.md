@@ -43,24 +43,23 @@ The open items, in priority order:
   tairix_abi::driver::virtio_pci::virtio_pci_window_resource`); it does
   not reproduce on the pinned toolchain from a full `cargo clean`. Kept on
   record with its reproduction procedure in case it recurs.
-- **D10 — `autoload-input-qemu-aarch64` desktop focus-change lost-wakeup
-  deadlock — OPEN.** The `cargo xtask ci` QEMU vertical hangs: the guest
-  goes fully idle (all tasks parked, clock frozen at guest-t≈36s) partway
-  through the AW4 terminal stage, after the desktop routes exactly one
-  app-ward window-event delivery (5 of 16) for the terminal-window focus
-  click and before it emits the focus/press deliveries. Proven a hard
-  lost-wakeup, not a slow budget (raising the budget 240s→900s froze at
-  the identical point). Working notes + repro live in
-  `.junie/defect-hunt.md`. Same *class* as D5 (a lost-wakeup) but in the
-  desktop-session/`lib/window` focus-routing / IPC-wake path, not a test
-  harness idle loop. (D7–D9 below are already-closed x86_64 defects; this
-  new one is D10.)
+- **D10 — `autoload-input-qemu-aarch64` intermittent terminal-focus
+  freeze — DONE.** The QEMU vertical intermittently timed out at the AW4
+  terminal stage. Root cause was a fragile *test-harness* readiness gate
+  (the terminal-window click keyed on a global window-endpoint
+  `CallReplied` count that also counts window *presents*), not a kernel
+  lost-wakeup: a timing-dependent files-window repaint inflated the count
+  and fired the terminal-focus click before the terminal window existed.
+  Fixed by gating on window *creation* (the once-per-window shared-frame
+  `sc=shm_map`), which no repaint can inflate; a host regression test
+  locks the creation-based gate in. (D7–D9 below are already-closed
+  x86_64 defects.)
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
-is a rustdoc/docs-build failure, and D10 is a desktop-session focus-change
-lost-wakeup deadlock. Do not collapse them into one change; land each on
+is a rustdoc/docs-build failure, and D10 was a fragile QEMU-harness
+readiness gate (fixed). Do not collapse them into one change; land each on
 its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
@@ -496,58 +495,53 @@ whole-project-green gate:
   added to the `AGENTS.md` §15.18 jump-sheet:
   `Open core-kernel defect tracking → plans/OPEN-DEFECTS.md`.
 
-## D10 — `autoload-input-qemu-aarch64` desktop focus-change lost-wakeup deadlock
+## D10 — `autoload-input-qemu-aarch64` intermittent terminal-focus freeze — DONE
 
-**State:** OPEN. Pre-existing, deterministic, and unrelated to the
-`spawn-session` over-long-username flaky fix that surfaced it (proven: it
-reproduces identically on the pristine baseline with those changes
-stashed). It was masked while the QEMU matrix stopped at the earlier
-`spawn-session-qemu-aarch64` failure.
+**State:** fixed. The `autoload-input-qemu-aarch64` vertical is stable over
+repeated runs; the intermittent freeze (guest goes fully idle at the AW4
+terminal stage, run times out) no longer occurs.
 
-**Symptom.** The vertical (`tests/integration/autoload_input_qemu_aarch64`)
-times out. The guest reaches guest-t≈36s and then goes **fully idle** —
-every task parked, the CPU in `wfi`, the guest monotonic clock frozen —
-and never progresses. Raising the harness budget 240s→900s changed
-nothing (still frozen at the identical guest-t≈36s / same event), so it is
-a **hard lost-wakeup/deadlock, not a slow budget** (never fix it with a
-timeout bump — §2.17).
+**Root cause — a fragile *test-harness* readiness gate, not a kernel
+lost-wakeup.** The freeze was intermittent (timing-dependent), not the
+deterministic deadlock first suspected. The harness gated the
+terminal-window focus click on a **global count of window-endpoint
+`CallReplied` records** (`TERMINAL_WINDOW_REPLIES = 4`). That count
+includes window *presents*, not just window *creates*: it assumed the
+files window presents exactly once (create + one startup present, 2
+replies), so the 4th reply would be the terminal's create/present. But a
+files-window click that lands so it repaints (a timing-sensitive outcome
+under certain boot pacing) adds extra present replies; when the files
+stage emitted ≥4 replies, the 4th `CallReplied` occurred *during the files
+stage*, so the terminal-focus click fired onto the empty desktop before
+the terminal window existed (→ files unfocus = the lone stray delivery),
+the terminal was never focused, the typed-command delivery gate never
+advanced, and the guest idled. The desktop session and `lib/window`
+delivery path were correct throughout; the app-ward `ipc_send` is
+non-blocking and the kernel wakes were not lost.
 
-**How far it gets (4 of 5 PASS witnesses met).** Boot → both virtio-input
-drivers autoload and arm (`irq_bind` ×2) → passphrase unlocks the root
-(`UsersDbLoaded`) → display service binds `DISPLAY_ENDPOINT` → text login
-(`root`/`root`) → `desktop` launches → Files window served → appearance
-toggled → all **three** screendumps (desktop / window / light) captured →
-Terminal bundle spawns, its window is served, its shell (`elsh`) spawns.
-The fifth witness (`shell_round_trip`) is the one never reached.
+**Fix — gate on window *creation*, which no repaint can inflate.** A
+window's shared frame region is mapped exactly once, when the window is
+created (`WindowServer::create` → the session `ShmMapper`); a present
+re-uses that mapping. So the harness now gates the terminal-window click on
+the count of shared-frame **map** operations (`sc=shm_map`), of which
+exactly three precede the terminal-window click — boot framebuffer
+scan-out, files window create, terminal window create — independent of how
+many times any window repaints. Contract constant
+`TERMINAL_WINDOW_FRAME_MAPS = 3` (renamed from `TERMINAL_WINDOW_REPLIES`)
+with the marker `AUTOLOAD_WINDOW_MAP_MARKER = "sc=shm_map"` in
+`tools/xtask` `qemu_tests`. The files-window click keeps its own
+create-keyed gate (the first window-endpoint reply), which is stable.
 
-**Where it wedges.** The PASS gate needs app-ward window-event
-`MessageDelivered` (kernel/ipc id 3010) to reach
-`TERMINAL_ROUND_TRIP_DELIVERIES = 16`; the log stops at **5**. Delivery 5
-is the files-window *unfocus* from the terminal-window focus click. The
-desktop emits that one delivery and then the whole guest goes idle —
-it never emits delivery 6 (focus → the terminal app's event port) or 7
-(the press). So the desktop session wedges *mid* processing a single
-focus-change input event, between unfocusing the old window and focusing
-/ delivering to the newly-spawned terminal's window.
+**Regression guard.** Host test
+`qemu_tests::tests::terminal_window_click_gates_on_window_creation_not_repaint_count`
+asserts the terminal-window click's steps key on the creation (`shm_map`)
+marker and its `TERMINAL_WINDOW_FRAME_MAPS` occurrence count, and never on
+the present-inclusive `CallReplied` count — so the fragile gate cannot
+return. The QEMU vertical itself is the end-to-end guard.
 
-**Leading hypothesis (to verify, not yet proven).** A lost-wakeup /
-blocking wait in the desktop-session focus-routing across the
-`lib/window` `WindowServer::deliver_event` → per-app event endpoint
-(`event_endpoint_for`) path, or the kernel IPC/`waitq` wake that should
-re-ready the desktop (or the just-spawned terminal draining its event
-port). Same *class* as the closed D5 lost-wakeup, but in the
-desktop/window path rather than a test idle loop. The detailed hunt lives
-in `.junie/defect-hunt.md`.
-
-**Do NOT** "fix" it by bumping the timeout, disabling/`#[ignore]`-ing the
-vertical, or weakening the PASS gate (§2.5/§2.17/§7). The fix is the
-structural wake/ordering correction; land it on its own whole-project-green
-gate.
-
-**Done when:** `autoload-input-qemu-aarch64` (and its riscv64/x86_64
-siblings, which share the path) reach all five witnesses deterministically
-over repeated runs, root cause documented, a regression guard in place,
-and a full `cargo xtask ci` is whole-project-green.
+**Note.** riscv64/x86_64 autoload siblings are input-only (no display,
+desktop, or terminal stage), so this gate exists only in the aarch64
+vertical's shared pointer-script contract; no sibling change was needed.
 
 ## Non-goals / do not do
 

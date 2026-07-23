@@ -53,14 +53,33 @@ pub const WINDOW_DUMP_DELIVERIES: u32 = 2;
 /// the runner holds pointer steps behind pending dumps).
 pub const APPEARANCE_DUMP_DELIVERIES: u32 = 4;
 
-/// Window-endpoint `CallReplied` occurrences before the terminal window
-/// can be clicked: the files app's create (1) and sole present (2, its
-/// listing never changes in this script), then the terminal's create (3)
-/// and first blank present (4). The terminal window demonstrably exists
-/// in the compositor at its cascade slot after occurrence 4; later
-/// presents (the shell's prompt and output) only add occurrences, so a
-/// gate at 4 never races them.
-pub const TERMINAL_WINDOW_REPLIES: u32 = 4;
+/// Shared-frame **map** operations (`sc=shm_map`) that have occurred by
+/// the time the terminal window exists and can be clicked — the robust,
+/// present-count-independent gate for the terminal-window click.
+///
+/// A window's shared frame region is mapped **exactly once, when the
+/// window is created** (`WindowServer::create` → the session's
+/// `ShmMapper`); a *present* re-uses that mapping and maps nothing. So the
+/// count of `shm_map` operations tracks window **creation**, never the
+/// (timing-variable) number of repaints — which is why gating on it is
+/// immune to the flaky-repaint race that a `CallReplied`-count gate
+/// suffered (a files-window click that happened to repaint would inflate
+/// the reply count and fire the terminal click before the terminal
+/// existed).
+///
+/// Exactly three frame maps precede the terminal-window click, in order:
+/// 1. the framebuffer display service maps the desktop's granted scan-out
+///    frame region (boot);
+/// 2. the session maps the **files** window's frame region (its create);
+/// 3. the session maps the **terminal** window's frame region (its
+///    create) — the occurrence this gate keys on.
+///
+/// After occurrence 3 the terminal window demonstrably exists in the
+/// compositor at its cascade slot, so the click focuses it. Neither the
+/// files window's repaints nor the terminal's own later presents (the
+/// shell prompt/output) add `shm_map` operations, so the gate can never
+/// race them.
+pub const TERMINAL_WINDOW_FRAME_MAPS: u32 = 3;
 
 /// Deliveries after the terminal-window click completed (the files
 /// window's unfocus, the terminal's focus, and the activating press):

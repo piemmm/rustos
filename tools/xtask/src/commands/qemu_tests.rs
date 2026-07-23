@@ -298,12 +298,26 @@ const AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES: u32 =
 /// re-themed frame was presented.
 const AUTOLOAD_TOGGLE_CLICK_OCCURRENCES: u32 = 3;
 
-/// How many window-endpoint `CallReplied` occurrences gate the
-/// terminal-window click (`plans/APPWIN.md` AW4): the terminal bundle's
-/// create and first present — the shared contract, so the click can
-/// never race the window's existence.
-const AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_REPLIES;
+/// Serial marker of one shared-frame *map* operation: the kernel
+/// syscall-trace record for `shm_map`. A window's frame region is mapped
+/// exactly once — when the window is **created** — and a *present* re-uses
+/// that mapping, so counting these tracks window creation and never the
+/// (timing-variable) number of repaints. Gating the terminal-window click
+/// on it is therefore immune to the flaky-repaint race a `CallReplied`
+/// (present-inclusive) count suffered. Rendered by the same `sc=<name>`
+/// syscall trace the input-arming gate ([`AUTOLOAD_INPUT_KEY_MARKER`])
+/// already keys on, so both gates share one serial convention.
+const AUTOLOAD_WINDOW_MAP_MARKER: &str = "sc=shm_map";
+
+/// How many [`AUTOLOAD_WINDOW_MAP_MARKER`] occurrences gate the
+/// terminal-window click (`plans/APPWIN.md` AW4): the boot framebuffer
+/// scan-out map, the files window's create map, then the terminal
+/// window's create map — after which the terminal window exists at its
+/// cascade slot and the click focuses it, no matter how many times any
+/// window repainted. The shared contract, so the click can never race
+/// the window's existence.
+const AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES: u32 =
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS;
 
 /// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the typed
 /// shell command: the terminal-window click's own deliveries (the files
@@ -5479,21 +5493,29 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
             release,
         ),
-        // The terminal's window create and first present have been
-        // replied on the reserved window endpoint: click its body at the
-        // second cascade slot — the files window's unfocus, the
-        // terminal's focus, and the press are the deliveries the typed
-        // shell command keys on (the guest PASS gate's round-trip
-        // witness follows from the spawn the command causes).
+        // The terminal's window frame has been mapped — its window is
+        // created and sits at the second cascade slot — so click its
+        // body. This gate counts window-frame **maps** (one per window
+        // creation), never window presents, so a files-window repaint can
+        // no longer inflate the count and fire this click before the
+        // terminal window exists (the flaky-repaint deadlock this fix
+        // closes). The files window's unfocus, the terminal's focus, and
+        // the press are the deliveries the typed shell command keys on
+        // (the guest PASS gate's round-trip witness follows from the spawn
+        // the command causes).
         step(
-            &created,
-            AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES,
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
             move_by(terminal_row, terminal_window),
         ),
-        step(&created, AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES, press),
         step(
-            &created,
-            AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES,
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
             release,
         ),
     ])
@@ -5845,6 +5867,71 @@ mod tests {
             "a trailing newline is the unconsumed byte that reintroduces the flaky race"
         );
         assert!(super::OVERLONG_USERNAME.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn terminal_window_click_gates_on_window_creation_not_repaint_count() {
+        // Regression guard for the D10 flaky-repaint deadlock: the
+        // terminal-window focus click (the script's final move + press +
+        // release) must key on window *creation* — one shared-frame
+        // `shm_map` per window — never on the window-endpoint `CallReplied`
+        // count. A `CallReplied` gate counts window *presents* too, so a
+        // files-window click that happened to repaint would inflate the
+        // count and fire this click onto the empty desktop before the
+        // terminal window existed, wedging the session (guest goes idle,
+        // run times out). Counting creations is immune to repaints.
+        let script = super::autoload_desktop_pointer_script().expect("build the pointer script");
+        assert!(
+            script.len() >= 3,
+            "the script ends with the terminal-window click's move/press/release"
+        );
+        let terminal_click = &script[script.len() - 3..];
+
+        // The present-inclusive marker the fragile gate used, reconstructed
+        // exactly as the script builds it, so this test fails if the gate
+        // is ever reverted to a `CallReplied`/present count.
+        let mut endpoint_hex = [0u8; 16];
+        let call_replied = format!(
+            "{} endpoint={}",
+            tairix_kernel_ipc::AuditEvent::CallReplied.message(),
+            tairix_util::fmt::format_hex_u64(
+                tairix_abi::window_ipc::WINDOW_ENDPOINT,
+                &mut endpoint_hex,
+            ),
+        );
+
+        for step in terminal_click {
+            assert_eq!(
+                step.ready_marker,
+                super::AUTOLOAD_WINDOW_MAP_MARKER,
+                "the terminal-window click must gate on the window-creation \
+                 (shm_map) marker, not {:?}",
+                step.ready_marker
+            );
+            assert_eq!(
+                step.ready_occurrences,
+                super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES
+            );
+            assert_ne!(
+                step.ready_marker, call_replied,
+                "the terminal-window click must not gate on the \
+                 present-inclusive CallReplied count"
+            );
+        }
+
+        // The creation-based contract: the marker is the shared `sc=<name>`
+        // syscall trace, and exactly three frame maps precede the terminal
+        // window — the boot framebuffer scan-out, the files window, and the
+        // terminal window itself.
+        assert_eq!(super::AUTOLOAD_WINDOW_MAP_MARKER, "sc=shm_map");
+        assert_eq!(
+            super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
+            tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS
+        );
+        assert_eq!(
+            tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
+            3
+        );
     }
 
     #[test]
