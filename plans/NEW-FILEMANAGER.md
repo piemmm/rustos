@@ -31,7 +31,8 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-FM7b's pure delete model, FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
+FM7b's pure delete model, FM7b's pure recursive-delete execution model
+(`DeleteWalk`), FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's drawn read-only properties panel +
 its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
@@ -617,6 +618,30 @@ directory-backed, a files-only plan reporting no directories, and the
 fail-closed `DeletePlan::new` empty/root refusals). Docs:
 `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
+**The pure recursive-delete *execution* model is done** (§2.19 — host-proven
+ahead of the app verb, the delete-side analogue of the paste-side
+`execute::CopyCursor`): the `lib/browse::delete::DeleteWalk` driven cursor.
+`DeleteWalk::from_plan` begins a removal of a `DeletePlan`; `next_action` yields
+the next `DeleteAction` — `List(path)` (the app reads that directory and reports
+its children with `expand`, so contents are removed before their container) or
+`Remove { path, is_directory }` (the app `fs_unlink`s the leaf or now-empty
+directory and reports it with `complete_removal`), depth-first. It does no I/O,
+keeps its own explicit stack (so a deep tree cannot overflow the call stack),
+is bounded by `MAX_DELETE_DEPTH` (a fail-closed defence — a deeper tree is
+`DeleteError::TooDeep`, never descended without limit, §26.6/§24.4), and holds
+its exact position between steps so the app can cancel or be preempted without
+losing or repeating work (§2.23 — no unbounded buffer, no spin); driving it
+against the wrong step is `DeleteError::OutOfStep`, leaving the walk unchanged.
+`removed` is the honest rising count a progress indicator shows (the total is
+unknown until the reads reveal it, so no fabricated percentage, §2.24). It is
+the browser engine's own component-path traversal, deliberately distinct from
+`rm`'s coreutils removal engine — two consumers with two data models, not one
+algorithm copied twice (§2.2). Host-tested in `lib/browse` (single file, empty
+directory listed-then-removed, contents-before-container depth-first order,
+multiple targets in listing order, the `TooDeep` bound, out-of-step fail-closed
+refusals leaving the walk put, and the interruption/resume holding its exact
+position). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
 - **Move** = `fs_rename` when source and target share a volume (the
@@ -629,10 +654,12 @@ The remaining app-side verbs (still `planned`):
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
   (§2.24, §5.4).
-- **Delete** (the pure `plan_delete` model above is done): the app asks once
-  (a `lib/controls::Dialog`, honest warmth, using the plan's count and
-  `has_directories`), then `fs_unlink`/recursive remove under the user's
-  identity for each `DeleteTarget`; a refusal is an in-UI answer.
+- **Delete** (the pure `plan_delete` *and* `DeleteWalk` recursive-removal
+  models above are done): the app asks once (a `lib/controls::Dialog`, honest
+  warmth, using the plan's count and `has_directories`), then drives a
+  `DeleteWalk` over the `DeletePlan` — reading each directory (`fs_readdir`) and
+  `fs_unlink`ing each node depth-first — under the user's identity; a refusal is
+  an in-UI answer and the walk holds its position for Cancel.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).

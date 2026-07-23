@@ -161,6 +161,24 @@ can never diverge in navigation semantics, listing policy, or look.
   model names the removals; the app performs each `fs_unlink` under the user's
   own identity (no new capability), so composing it grants nothing and the
   read-only picker never builds one.
+- **Delete execution** (`delete::DeleteWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
+  the model of *how* a `DeletePlan` is carried out — the depth-first traversal
+  that removes a directory's contents before the directory itself, the
+  delete-side analogue of `execute::CopyCursor`. `DeleteWalk::from_plan` starts
+  the walk; `next_action` yields the next `DeleteAction` — `List(path)` (the app
+  reads that directory and reports its children with `expand`, so they are
+  removed first) or `Remove { path, is_directory }` (the app unlinks the leaf or
+  now-empty directory and reports it with `complete_removal`). It does no I/O,
+  keeps its own explicit stack (so a deep tree cannot overflow the call stack),
+  stays within `MAX_DELETE_DEPTH` (a fail-closed bound — a deeper tree is
+  `DeleteError::TooDeep`, never descended without limit), and holds its exact
+  position between steps so the app can cancel or be preempted without losing or
+  repeating work. Driving it against the wrong step is `DeleteError::OutOfStep`,
+  leaving the walk unchanged. `removed` is the honest rising count a progress
+  indicator shows; the total is unknown until the reads reveal it, so no
+  fabricated percentage. This is the browser engine's own component-path
+  traversal, distinct from `rm`'s coreutils removal engine — two consumers with
+  two data models, not one algorithm copied twice.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`

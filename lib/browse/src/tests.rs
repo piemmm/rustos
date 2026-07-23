@@ -5,6 +5,7 @@
 //! VFS.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -16,7 +17,7 @@ use tairix_theme::Theme;
 
 use crate::browser::Browser;
 use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
-use crate::delete::DeletePlan;
+use crate::delete::{DeleteAction, DeleteError, DeletePlan, DeleteWalk, MAX_DELETE_DEPTH};
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::execute::{
@@ -2503,6 +2504,244 @@ fn delete_plan_new_refuses_empty_or_root_targets() {
     assert_eq!(target.name(), "Kernel");
     assert_eq!(target.path(), comps(&["System", "Kernel"]).as_slice());
     assert!(!target.is_directory());
+}
+
+// ---- FM7b: the recursive-delete execution model (`DeleteWalk`) ----
+
+/// Drive a [`DeleteWalk`] to completion against an in-memory tree keyed by
+/// absolute-path spelling → children `(name, is_directory)`, returning the
+/// absolute-path spelling of every node in the order it was removed.
+///
+/// A directory absent from `tree` lists as empty. Every `expand`/
+/// `complete_removal` must succeed — a walk driven strictly in step never
+/// errors — so any protocol slip is a test failure, not a swallowed result.
+fn drive_delete(plan: &DeletePlan, tree: &BTreeMap<String, Vec<(String, bool)>>) -> Vec<String> {
+    let mut walk = DeleteWalk::from_plan(plan);
+    let mut order = Vec::new();
+    // A generous ceiling so a modelling bug (a walk that never completes) fails
+    // the test rather than looping forever.
+    for _ in 0..10_000 {
+        match walk.next_action() {
+            None => return order,
+            Some(DeleteAction::List(path)) => {
+                let children = tree.get(&key(path)).cloned().unwrap_or_default();
+                walk.expand(&children).expect("expand in step");
+            }
+            Some(DeleteAction::Remove { path, .. }) => {
+                order.push(key(path));
+                walk.complete_removal().expect("remove in step");
+            }
+        }
+    }
+    panic!("delete walk did not complete within the step ceiling");
+}
+
+#[test]
+fn delete_walk_removes_a_single_file() {
+    let plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&plan);
+
+    assert!(!walk.is_complete());
+    assert_eq!(walk.removed(), 0);
+    match walk.next_action() {
+        Some(DeleteAction::Remove { path, is_directory }) => {
+            assert_eq!(path, comps(&["System", "Kernel"]).as_slice());
+            assert!(!is_directory);
+        }
+        other => panic!("expected a Remove, got {other:?}"),
+    }
+    walk.complete_removal().expect("remove the file");
+    assert!(walk.is_complete());
+    assert_eq!(walk.removed(), 1);
+    assert!(walk.next_action().is_none());
+}
+
+#[test]
+fn delete_walk_lists_an_empty_directory_then_removes_it() {
+    let plan = DeletePlan::new(vec![(comps(&["Storage", "empty"]), true)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&plan);
+
+    // A directory is always listed first, even when it turns out empty.
+    match walk.next_action() {
+        Some(DeleteAction::List(path)) => {
+            assert_eq!(path, comps(&["Storage", "empty"]).as_slice());
+        }
+        other => panic!("expected a List, got {other:?}"),
+    }
+    walk.expand(&[]).expect("expand empty");
+    // Now the emptied directory is removed as a leaf.
+    match walk.next_action() {
+        Some(DeleteAction::Remove { path, is_directory }) => {
+            assert_eq!(path, comps(&["Storage", "empty"]).as_slice());
+            assert!(is_directory);
+        }
+        other => panic!("expected a Remove, got {other:?}"),
+    }
+    walk.complete_removal().expect("remove the directory");
+    assert!(walk.is_complete());
+    assert_eq!(walk.removed(), 1);
+}
+
+#[test]
+fn delete_walk_removes_contents_before_the_directory_depth_first() {
+    // /Storage/tree/{a.txt, sub/{b.txt}}, listed in that order.
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Storage", "tree"])),
+        vec![("a.txt".to_string(), false), ("sub".to_string(), true)],
+    );
+    tree.insert(
+        key(&comps(&["Storage", "tree", "sub"])),
+        vec![("b.txt".to_string(), false)],
+    );
+
+    let plan = DeletePlan::new(vec![(comps(&["Storage", "tree"]), true)]).expect("plan");
+    let order = drive_delete(&plan, &tree);
+
+    // Contents before their container, listing order among siblings, and the
+    // subtree fully removed before we come back up to the parent.
+    assert_eq!(
+        order,
+        vec![
+            key(&comps(&["Storage", "tree", "a.txt"])),
+            key(&comps(&["Storage", "tree", "sub", "b.txt"])),
+            key(&comps(&["Storage", "tree", "sub"])),
+            key(&comps(&["Storage", "tree"])),
+        ]
+    );
+}
+
+#[test]
+fn delete_walk_processes_multiple_targets_in_listing_order() {
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Users", "dir"])),
+        vec![("inner".to_string(), false)],
+    );
+
+    // A file, then a directory, then another file — the plan's listing order.
+    let plan = DeletePlan::new(vec![
+        (comps(&["Users", "first.txt"]), false),
+        (comps(&["Users", "dir"]), true),
+        (comps(&["Users", "last.txt"]), false),
+    ])
+    .expect("plan");
+    let order = drive_delete(&plan, &tree);
+
+    assert_eq!(
+        order,
+        vec![
+            key(&comps(&["Users", "first.txt"])),
+            key(&comps(&["Users", "dir", "inner"])),
+            key(&comps(&["Users", "dir"])),
+            key(&comps(&["Users", "last.txt"])),
+        ]
+    );
+}
+
+#[test]
+fn delete_walk_expand_refuses_a_tree_deeper_than_the_bound() {
+    // A directory target that already sits at the maximum depth: expanding it
+    // would name a child one component deeper than the bound.
+    let deep: Vec<String> = (0..MAX_DELETE_DEPTH).map(|i| format!("d{i}")).collect();
+    assert_eq!(deep.len(), MAX_DELETE_DEPTH);
+    let plan = DeletePlan::new(vec![(deep, true)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&plan);
+
+    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
+    assert_eq!(
+        walk.expand(&[("child".to_string(), false)]),
+        Err(DeleteError::TooDeep)
+    );
+    // Refused, and the walk is left exactly where it was (fail closed): still a
+    // List of the same directory, nothing removed.
+    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
+    assert_eq!(walk.removed(), 0);
+}
+
+#[test]
+fn delete_walk_fails_closed_when_driven_out_of_step() {
+    // `expand` on a leaf file is out of step.
+    let file_plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&file_plan);
+    assert!(matches!(
+        walk.next_action(),
+        Some(DeleteAction::Remove { .. })
+    ));
+    assert_eq!(walk.expand(&[]), Err(DeleteError::OutOfStep));
+    // Unchanged.
+    assert!(matches!(
+        walk.next_action(),
+        Some(DeleteAction::Remove { .. })
+    ));
+
+    // `complete_removal` on a directory whose contents were not listed is out
+    // of step.
+    let dir_plan = DeletePlan::new(vec![(comps(&["Storage", "d"]), true)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&dir_plan);
+    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
+    assert_eq!(walk.complete_removal(), Err(DeleteError::OutOfStep));
+    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
+
+    // Either driver call on a finished walk is out of step.
+    walk.expand(&[]).expect("empty the directory");
+    walk.complete_removal().expect("remove it");
+    assert!(walk.is_complete());
+    assert_eq!(walk.expand(&[]), Err(DeleteError::OutOfStep));
+    assert_eq!(walk.complete_removal(), Err(DeleteError::OutOfStep));
+}
+
+#[test]
+fn delete_walk_holds_its_position_across_an_interruption() {
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Users", "dir"])),
+        vec![("x".to_string(), false), ("y".to_string(), false)],
+    );
+    let plan = DeletePlan::new(vec![(comps(&["Users", "dir"]), true)]).expect("plan");
+    let mut walk = DeleteWalk::from_plan(&plan);
+
+    // List, then remove exactly one child, then "stop" (as a Cancel or a
+    // preemption would) holding the walk.
+    let list = walk.next_action().expect("a step");
+    assert!(matches!(list, DeleteAction::List(_)));
+    walk.expand(&[("x".to_string(), false), ("y".to_string(), false)])
+        .expect("expand");
+    if let Some(DeleteAction::Remove { .. }) = walk.next_action() {
+        walk.complete_removal().expect("remove x");
+    }
+    assert_eq!(walk.removed(), 1);
+    assert!(!walk.is_complete());
+
+    // Resuming from exactly here removes the remaining child then the directory
+    // — no repeat of the child already removed, no skip.
+    let mut order = Vec::new();
+    while let Some(action) = walk.next_action() {
+        match action {
+            DeleteAction::List(path) => {
+                let children = tree.get(&key(path)).cloned().unwrap_or_default();
+                walk.expand(&children).expect("expand");
+            }
+            DeleteAction::Remove { path, .. } => {
+                order.push(key(path));
+                walk.complete_removal().expect("remove");
+            }
+        }
+    }
+    assert_eq!(
+        order,
+        vec![
+            key(&comps(&["Users", "dir", "y"])),
+            key(&comps(&["Users", "dir"])),
+        ]
+    );
+    assert_eq!(walk.removed(), 3);
+}
+
+#[test]
+fn delete_error_messages_are_non_empty() {
+    assert!(!DeleteError::TooDeep.to_string().is_empty());
+    assert!(!DeleteError::OutOfStep.to_string().is_empty());
 }
 
 // ---- FM7b: the paste-execution model (`execute`) ----

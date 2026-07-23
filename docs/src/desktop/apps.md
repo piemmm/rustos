@@ -459,6 +459,35 @@ user's own identity — an ordinary permission-checked VFS call, no new
 capability — so composing the model grants nothing and the read-only picker
 never builds a delete plan.
 
+Where the `DeletePlan` names *what* would be removed, `delete::DeleteWalk`
+models *how* — the depth-first recursive removal that clears a directory's
+contents before the directory itself. It is the delete-side analogue of the
+paste-side `execute::CopyCursor`: a pure, host-provable driven cursor that
+touches no filesystem. `DeleteWalk::from_plan` begins the walk and
+`DeleteWalk::next_action` yields the next `delete::DeleteAction` — `List(path)`
+(the app reads that directory with `fs_readdir` and reports its children with
+`DeleteWalk::expand`, so they are removed first) or
+`Remove { path, is_directory }` (the app unlinks the leaf file, or the
+already-emptied directory with `UnlinkFlags::DIRECTORY`, and reports it with
+`DeleteWalk::complete_removal`). The walk keeps its own explicit stack rather
+than recursing on the call stack, so a deeply nested tree cannot overflow it,
+and it is bounded by `delete::MAX_DELETE_DEPTH` (a fail-closed defence, not a
+scaled capacity — a tree deeper than the bound is `DeleteError::TooDeep`, never
+descended without limit, `AGENTS.md` §26.6, §24.4). It holds its exact position
+between steps, so the app may cancel or be preempted between any two steps and
+resume without repeating or skipping work — no unbounded buffer and no spin
+(`AGENTS.md` §2.23). Driving it against the wrong step (an `expand` on a leaf,
+or a `complete_removal` on a directory not yet listed) is
+`DeleteError::OutOfStep` and leaves the walk unchanged. `DeleteWalk::removed` is
+the honest rising count a progress indicator shows; the total is unknown until
+the reads reveal it, so nothing fabricates a percentage. This is the browser
+engine's own component-path traversal, deliberately distinct from `rm`'s
+coreutils removal engine (which recurses natively over its own raw-path removal
+seam with prompt/force/verbose semantics) — two consumers with two data models,
+not one algorithm copied twice (`AGENTS.md` §2.2). The engine does no I/O; the
+app performs every read and unlink under the launching user's own identity, so
+the read-only picker never runs a walk.
+
 ### The new-folder model
 
 Creating a folder (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in
