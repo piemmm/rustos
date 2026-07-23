@@ -24,6 +24,7 @@ use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
+use crate::mode_edit::{validate_mode, ModeError};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
@@ -201,6 +202,24 @@ impl<S: DirectorySource> Browser<S> {
     #[must_use]
     pub fn selected_name(&self) -> Option<&str> {
         self.selected_entry().map(Entry::name)
+    }
+
+    /// Spell the validated absolute path of the selected entry — the node a
+    /// read-only `fs_stat` (the Properties view) or an open acts on — or
+    /// `None` when the directory is empty.
+    ///
+    /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]), so
+    /// the stat/open can
+    /// never name a different node than the browser shows; a name that cannot
+    /// be spelled as a valid, bounded absolute path is a fail-closed
+    /// [`BrowseError::Source`]. The engine only *names* the target — reading
+    /// its metadata stays in the caller's own capability-checked tail under
+    /// the user's identity, so composing this grants nothing and the
+    /// read-only picker builds the same path.
+    #[must_use]
+    pub fn selected_target_path(&self) -> Option<Result<String, BrowseError>> {
+        let name = String::from(self.selected_name()?);
+        Some(self.child_target_path(&name))
     }
 
     /// Move the selection to `index`.
@@ -394,6 +413,49 @@ impl<S: DirectorySource> Browser<S> {
             Errno::LengthOutOfRange => RenameError::TooLong,
             _ => RenameError::Invalid,
         })
+    }
+
+    /// Change the selected node's permission mode to `mode`, applying the
+    /// change through the injected `set_mode` seam.
+    ///
+    /// `set_mode` receives the node's absolute path and the new mode and
+    /// performs the capability-checked `fs_set_mode` under the caller's own
+    /// identity — the engine adds no authority of its own (the trusted picker
+    /// composes the same [`Browser`] and never calls this). The seam returns
+    /// the kernel boundary's [`Errno`] on refusal.
+    ///
+    /// Transactional and fail closed: the mode is validated
+    /// ([`validate_mode`]) *before* any syscall — a word carrying a bit above
+    /// [`FS_MODE_MASK`](tairix_abi::fs::FS_MODE_MASK) is refused rather than
+    /// masked into a different mode — and the target path is spelled through
+    /// the one shared [`crate::vfs::absolute_path`], so the change can never
+    /// name a different node than the browser shows. The listing carries no
+    /// mode, so a success re-reads nothing here; the caller re-stats the node
+    /// to refresh its Properties view. A VFS refusal leaves the node's mode
+    /// exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// A [`ModeError`]: [`ModeError::NoSelection`] on an empty directory,
+    /// [`ModeError::Invalid`] for an out-of-range mode (both decided before the
+    /// syscall), [`ModeError::Path`] when the node cannot be named, or
+    /// [`ModeError::Refused`] when the VFS refuses the change.
+    pub fn set_mode_selected<F>(&mut self, mode: u32, set_mode: F) -> Result<(), ModeError>
+    where
+        F: FnOnce(&str, u32) -> Result<(), Errno>,
+    {
+        let path = match self.selected_target_path() {
+            None => return Err(ModeError::NoSelection),
+            Some(Err(err)) => {
+                return Err(ModeError::Path(
+                    err.source_errno().unwrap_or(Errno::NotFound),
+                ))
+            }
+            Some(Ok(path)) => path,
+        };
+        validate_mode(mode)?;
+        set_mode(&path, mode).map_err(ModeError::Refused)?;
+        Ok(())
     }
 
     /// Descend into the selected entry, which must be a directory.

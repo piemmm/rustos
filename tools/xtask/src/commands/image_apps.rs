@@ -134,33 +134,31 @@ pub fn app_store_files(ctx: &Context, arch: PieArch) -> Result<&'static [AppStor
         .map_err(Clone::clone)
 }
 
-/// Crate directory of the test-only `memsoak` memory-stability fixture
-/// (`plans/APPS.md` "Immediate work" I2/I3), relative to the workspace
-/// root. It lives outside the userland discovery walk deliberately: the
-/// fixture is planted only on the memory-stability vertical's disk, never
-/// on a production image.
-const MEMSOAK_CRATE_DIR: &str = "tests/integration/memsoak_program";
-
-/// The composed store files the memory-stability vertical's disk plants:
-/// the shared [`app_store_files`] set **plus** the test-only `memsoak`
-/// fixture bundle, composed through the same discovery/compose/sign path
-/// as every store bundle and memoised like the shared set.
+/// The composed store files a single-fixture vertical's disk plants: the
+/// shared [`app_store_files`] set **plus** one test-only fixture bundle whose
+/// crate lives at `crate_dir` (outside the userland discovery walk, so it is
+/// planted only on that vertical's disk, never on a production image),
+/// composed through the same discovery/compose/sign path as every store
+/// bundle. `label` names the fixture in error messages; `cache` memoises the
+/// per-arch result like the shared set. The one definition every
+/// single-fixture vertical's store helper below is built on, never copied.
 ///
 /// # Errors
 ///
 /// As [`build_app_bundles`], plus a failed fixture-manifest discovery.
-pub fn memsoak_store_files(
+fn fixture_store_files(
     ctx: &Context,
     arch: PieArch,
+    crate_dir: &str,
+    label: &str,
+    cache: &'static [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT],
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    cache[arch.index()]
         .get_or_init(|| {
             let base = app_store_files(ctx, arch)?;
-            let crate_dir = ctx.workspace_root.join(MEMSOAK_CRATE_DIR);
+            let crate_dir = ctx.workspace_root.join(crate_dir);
             let app = discover_crate_manifest(&crate_dir)
-                .map_err(|e| format!("image: memsoak manifest discovery: {e}"))?
+                .map_err(|e| format!("image: {label} manifest discovery: {e}"))?
                 .ok_or_else(|| {
                     format!(
                         "image: {} has no {APP_MANIFEST_SOURCE}",
@@ -177,46 +175,70 @@ pub fn memsoak_store_files(
         .map_err(Clone::clone)
 }
 
-/// Crate directory of the test-only `tcpecho` stream-socket fixture
-/// (`plans/NETWORK.md` N5c), relative to the workspace root. Like the
-/// `memsoak` fixture it lives outside the userland discovery walk: it is
-/// planted only on the stream vertical's disk, never on a production image.
-const TCPECHO_CRATE_DIR: &str = "tests/integration/tcpecho_program";
-
-/// The composed store files the stream vertical's disk plants in `/System`:
-/// the shared [`app_store_files`] set **plus** the test-only `tcpecho`
-/// fixture bundle, composed through the same discovery/compose/sign path as
-/// every store bundle and memoised like the shared set.
+/// The composed store files the memory-stability vertical's disk plants: the
+/// shared [`app_store_files`] set plus the test-only `memsoak` fixture bundle
+/// (`plans/APPS.md` "Immediate work" I2/I3), memoised per arch.
 ///
 /// # Errors
 ///
-/// As [`build_app_bundles`], plus a failed fixture-manifest discovery.
+/// As [`fixture_store_files`].
+pub fn memsoak_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    fixture_store_files(
+        ctx,
+        arch,
+        "tests/integration/memsoak_program",
+        "memsoak",
+        &FILES,
+    )
+}
+
+/// The composed store files the stream vertical's disk plants: the shared
+/// [`app_store_files`] set plus the test-only `tcpecho` stream-socket client
+/// fixture bundle (`plans/NETWORK.md` N5c), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
 pub fn tcpecho_store_files(
     ctx: &Context,
     arch: PieArch,
 ) -> Result<&'static [AppStoreFile], String> {
     static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
         [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
-        .get_or_init(|| {
-            let base = app_store_files(ctx, arch)?;
-            let crate_dir = ctx.workspace_root.join(TCPECHO_CRATE_DIR);
-            let app = discover_crate_manifest(&crate_dir)
-                .map_err(|e| format!("image: tcpecho manifest discovery: {e}"))?
-                .ok_or_else(|| {
-                    format!(
-                        "image: {} has no {APP_MANIFEST_SOURCE}",
-                        crate_dir.display()
-                    )
-                })?;
-            let bundle = build_bundle(ctx, arch, &app)?;
-            let mut files = base.to_vec();
-            files.extend(store_files(&[bundle]));
-            Ok(files)
-        })
-        .as_ref()
-        .map(Vec::as_slice)
-        .map_err(Clone::clone)
+    fixture_store_files(
+        ctx,
+        arch,
+        "tests/integration/tcpecho_program",
+        "tcpecho",
+        &FILES,
+    )
+}
+
+/// The composed store files the listener vertical's disk plants: the shared
+/// [`app_store_files`] set plus the test-only `tcpserve` TCP-listener server
+/// fixture bundle (`plans/NETWORK.md` N6b-2-β-2), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn tcpserve_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    fixture_store_files(
+        ctx,
+        arch,
+        "tests/integration/tcpserve_program",
+        "tcpserve",
+        &FILES,
+    )
 }
 
 /// Run `body` over the borrowed `(components, bytes)` view of `files` —

@@ -33,7 +33,8 @@
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
-//!   command enable/pressed state and the [`breadcrumbs`] path bar
+//!   command enable/pressed state, the [`ContextMenuModel`] right-click command
+//!   enable state, and the [`breadcrumbs`] path bar
 //!   (`plans/NEW-FILEMANAGER.md` `FM4b`).
 //! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
 //!   right-anchored crumb layout the painter and the pointer hit-test share.
@@ -60,6 +61,9 @@
 //! * [`properties`](mod@properties) — the [`Properties`] view model: the
 //!   display-ready summary of a node's `fs_stat` metadata the file manager's
 //!   Properties panel shows (`plans/NEW-FILEMANAGER.md` FM8).
+//! * [`mode_edit`](mod@mode_edit) — the [`ModeError`]/[`validate_mode`]
+//!   permission-change model committed through the `fs_set_mode` seam
+//!   (`plans/NEW-FILEMANAGER.md` `FM8b`).
 //! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
 //!   rename model the file manager's first write operation is built on.
 //! * [`render`](mod@render) — painting the current directory into a
@@ -89,6 +93,7 @@ pub mod execute;
 pub mod format;
 pub mod icon;
 pub mod layout;
+pub mod mode_edit;
 pub mod open_with;
 pub mod properties;
 pub mod rename;
@@ -101,7 +106,8 @@ pub mod vfs;
 pub use activate::Activation;
 pub use browser::Browser;
 pub use chrome::{
-    apply_command, breadcrumbs, Crumb, ToolbarCommand, ToolbarModel, TOOLBAR_COMMANDS,
+    apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ToolbarCommand,
+    ToolbarModel, CONTEXT_COMMANDS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
@@ -112,6 +118,7 @@ pub use execute::{
 pub use format::{format_date, format_datetime, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
+pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
 pub use properties::Properties;
 pub use rename::{validate_new_name, RenameError};

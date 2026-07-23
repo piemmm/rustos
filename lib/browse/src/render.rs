@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::state::{ControlRole, ControlState, SelectionState};
-use tairix_controls::{Card, IconButton, ScrollBar, TableCell, TableRow, Toolbar};
+use tairix_controls::{Card, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
@@ -40,6 +40,7 @@ use crate::chrome::{self, ToolbarCommand, ToolbarModel};
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
+use crate::properties::Properties;
 use crate::source::DirectorySource;
 
 /// Padding in pixels between the path bar's edge and its label text.
@@ -610,6 +611,122 @@ fn view_layout_for<S: DirectorySource>(
     match browser.view_mode() {
         ViewMode::List => ViewLayout::List(list_view(browser, font, theme, content)),
         ViewMode::Grid => ViewLayout::Grid(grid_view(browser, font, theme, content)),
+    }
+}
+
+/// The number of label/value rows [`properties_rows`] produces — the field
+/// count the Properties overlay is sized to show.
+pub const PROPERTY_ROW_COUNT: usize = 8;
+
+/// The labelled metadata fields the Properties overlay shows for `props`, in
+/// display order: kind, size (apparent + on-disk), permissions (symbolic +
+/// octal), owner, and the four timestamps.
+///
+/// One definition so the drawn panel and its tests agree on exactly which
+/// fields appear and how each reads (§2.2). Every value comes straight from
+/// the [`Properties`] model — itself taken straight from `fs_stat` — so a
+/// timestamp the backing does not keep renders blank rather than a fabricated
+/// wall time, and no field is invented.
+#[must_use]
+pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
+    let mut size = props.size_display();
+    size.push_str(" (");
+    size.push_str(&props.allocated_display());
+    size.push_str(" on disk)");
+
+    let mut permissions = props.permissions();
+    permissions.push_str(" (");
+    permissions.push_str(&props.mode_octal());
+    permissions.push(')');
+
+    let owner = alloc::format!("uid {} / gid {}", props.uid(), props.gid());
+
+    vec![
+        ("Kind", String::from(props.kind_label())),
+        ("Size", size),
+        ("Permissions", permissions),
+        ("Owner", owner),
+        ("Created", props.created_display()),
+        ("Modified", props.modified_display()),
+        ("Accessed", props.accessed_display()),
+        ("Changed", props.changed_display()),
+    ]
+}
+
+/// The centered bounds of the Properties overlay [`Panel`] within `viewport`,
+/// sized to comfortably show the [`properties_rows`] fields (a header plus one
+/// line per field with a top and bottom margin) and clamped to the window so a
+/// small window still yields a drawable — if clipped — panel rather than a
+/// panic.
+#[must_use]
+pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    let line = row_height(font);
+    let title = Scale::ONE
+        .scale_length(theme.metrics().title_bar_height)
+        .max(1);
+    let rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
+    let content = line.saturating_mul(rows.saturating_add(2));
+    let height = title.saturating_add(content).min(viewport.height.max(1));
+    let width = viewport
+        .width
+        .saturating_mul(4)
+        .checked_div(5)
+        .unwrap_or(viewport.width)
+        .clamp(1, viewport.width.max(1));
+    let x = viewport
+        .origin
+        .x
+        .saturating_add(to_i32(viewport.width.saturating_sub(width) / 2));
+    let y = viewport
+        .origin
+        .y
+        .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
+    Rect::new(x, y, width, height)
+}
+
+/// Draw the Properties overlay for `props` centered in `viewport`: a [`Panel`]
+/// titled with the node's name, its labelled metadata fields drawn as
+/// muted-label / solid-value rows in the panel's content area.
+///
+/// The overlay is drawn on top of the current view. Every blit clips, so a
+/// window too small for the whole panel simply shows what fits rather than
+/// panicking. It reads only the already-authorised [`Properties`] and draws —
+/// it performs no I/O and holds no authority (§4, §5.4).
+pub fn draw_properties(
+    surface: &mut Surface,
+    props: &Properties,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+) {
+    let bounds = properties_panel_rect(viewport, font, theme);
+    let panel = Panel::new(props.name());
+    panel.render(surface, bounds, Scale::ONE, theme, font);
+    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
+        return;
+    };
+    let palette = theme.palette();
+    let rows = properties_rows(props);
+    // Start the value column past the widest label plus a gap, so the values
+    // line up in one column whatever the labels' widths.
+    let label_col = rows
+        .iter()
+        .map(|(label, _)| font.text_width(label))
+        .max()
+        .unwrap_or(0);
+    let gap = font.text_width("  ").max(LABEL_PADDING);
+    let line = row_height(font);
+    let left = content.left().saturating_add(to_i32(LABEL_PADDING));
+    let value_x = left.saturating_add(to_i32(label_col.saturating_add(gap)));
+    let bottom = content.top().saturating_add(to_i32(content.height));
+    let mut y = content.top().saturating_add(to_i32(ROW_PADDING));
+    for (label, value) in &rows {
+        if y >= bottom {
+            break;
+        }
+        font.draw_text(surface, left, y, label, palette.on_surface_muted.into());
+        font.draw_text(surface, value_x, y, value, palette.on_surface.into());
+        y = y.saturating_add(to_i32(line));
     }
 }
 

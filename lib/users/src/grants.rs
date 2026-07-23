@@ -112,6 +112,12 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 /// * `CAP_NET_ADMIN` — administer the network stack: interface, address,
 ///   and route mutation through the `netstack` admin surface
 ///   (`plans/NETWORK.md` §3).
+/// * `CAP_NET_BIND_PRIVILEGED` — bind a listening socket to a well-known
+///   (privileged) port below the privileged-port bound (`netstack`'s
+///   `Bind` gate, the Unix `CAP_NET_BIND_SERVICE` model): running a
+///   privileged network service is an administrative act, so an
+///   administrator's ceiling may grant it to a program whose manifest
+///   requests it. Ordinary transport use stays baseline `CAP_NET`.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_MOUNT,
@@ -124,6 +130,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::TIME_HIRES,
     CapabilityId::MEM_PIN,
     CapabilityId::NET_ADMIN,
+    CapabilityId::NET_BIND_PRIVILEGED,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -252,7 +259,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 19);
+        assert_eq!(set.len(), 20);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -268,6 +275,7 @@ mod tests {
             CapabilityId::TIME_HIRES,
             CapabilityId::MEM_PIN,
             CapabilityId::NET_ADMIN,
+            CapabilityId::NET_BIND_PRIVILEGED,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }

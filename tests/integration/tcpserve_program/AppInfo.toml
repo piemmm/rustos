@@ -1,0 +1,18 @@
+# Signed-AppInfo manifest source for the `tcpserve` TCP-listener fixture
+# (plans/NETWORK.md N6b-2-β-2). Composed and planted ONLY on the aarch64
+# listener QEMU vertical's disk image by tools/xtask — the crate lives outside
+# the userland discovery walk, so no production image ever ships it. The
+# capability list is the bundle's request, intersected with the launching
+# user's grants (the seeded root administrator ceiling): CAP_NET to open a
+# stream socket and listen/accept; CAP_NET_BIND_PRIVILEGED to bind the
+# well-known (privileged) GUEST_TCP_PORT — the netstack Bind gate enforces it
+# against this process's kernel-attested origin, and the administrator ceiling
+# now grants it; and CAP_CONSOLE_WRITE for the TCPSERVE PASS/FAIL report on fd
+# 1/2. Binding the server's own async delivery ports needs no capability (an
+# unrestricted port is an ordinary process resource), so none is requested for
+# them.
+id = "os.tairix.test.tcpserve"
+name = "tcpserve"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_NET", "CAP_NET_BIND_PRIVILEGED", "CAP_CONSOLE_WRITE"]

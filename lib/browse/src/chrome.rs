@@ -5,19 +5,26 @@
 //! `FM4b`'s drawn chrome — the `lib/controls` toolbar, the breadcrumb path bar,
 //! and the context menu — is deliberately staged to land *with* the actions
 //! its surfaces invoke, so no widget is built ahead of the behaviour it calls.
-//! This module is the pure part that can land now: the model behind the two
-//! surfaces whose actions *already* exist in the engine (navigation history,
-//! climb, refresh, the view toggle, and the sort), host-proven without a
+//! This module is the pure part that can land now: the model behind the
+//! surfaces whose actions *already* exist in the engine, host-proven without a
 //! kernel exactly as the [`Activation`](crate::activate) and
-//! [`open_with`](crate::open_with) models were. The context menu is *not*
-//! modelled here — its entries (Rename, Open, Cut/Copy/Paste/Delete, New
-//! Folder) land with their own stages, never as speculative surface.
+//! [`open_with`](crate::open_with) models were.
 //!
 //! * [`ToolbarModel`] reports, from a [`Browser`], whether each
 //!   [`ToolbarCommand`] is currently actionable and which view and sort are
 //!   active — the enable/disable and pressed state the drawn toolbar paints.
 //!   A tool whose action cannot apply renders *disabled*, never hidden, so the
 //!   toolbar's shape is stable.
+//! * [`ContextMenuModel`] reports, from a [`Browser`] and the app's held
+//!   clipboard state, whether each [`ContextCommand`] the right-click menu
+//!   offers is currently actionable. Only the commands whose engine action
+//!   already exists are modelled — Open/Open With… ([`Activation`](crate::activate),
+//!   [`open_with`](crate::open_with)), Rename ([`rename_selected`](crate::Browser::rename_selected)),
+//!   Cut/Copy ([`clipboard`](crate::Browser::clipboard)), Paste
+//!   ([`plan_paste`](crate::clipboard::plan_paste)), and Properties
+//!   ([`Properties`](crate::properties::Properties)). Delete and New Folder are
+//!   *not* modelled here: their engine action does not exist yet, so they land
+//!   with the stage that first wires them, never as speculative surface.
 //! * [`breadcrumbs`] turns the current directory's root-first components into
 //!   the ordered [`Crumb`]s of the path bar, each carrying the ancestor depth
 //!   the drawn crumb binds to
@@ -34,6 +41,7 @@ use alloc::vec::Vec;
 use tairix_icon::IconKind;
 
 use crate::browser::Browser;
+use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::sort::SortMode;
@@ -192,6 +200,113 @@ impl ToolbarModel {
     #[must_use]
     pub const fn sort_mode(&self) -> SortMode {
         self.sort_mode
+    }
+}
+
+/// A file-manager context-menu command whose behaviour already exists in the
+/// engine.
+///
+/// Each variant maps to an operation the drawn `lib/controls` `Menu` binds a
+/// `MenuItem` (with a keyboard equivalent, where one exists) to. New verbs —
+/// Delete, New Folder (`fs_mkdir`) — are added to this vocabulary only in the
+/// stage that first wires their action, never ahead of it, exactly as the
+/// [`ToolbarCommand`] set grows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ContextCommand {
+    /// Activate the selected entry — descend, launch a bundle, or open a file
+    /// ([`activate_selected`](Browser::activate_selected)).
+    Open,
+    /// Choose an application to open the selected *file* with
+    /// ([`applications_for`](crate::open_with::applications_for)).
+    OpenWith,
+    /// Rename the selected entry in place
+    /// ([`rename_selected`](Browser::rename_selected)).
+    Rename,
+    /// Capture the selection onto a move clipboard
+    /// ([`clipboard`](Browser::clipboard) with [`ClipboardOp::Cut`](crate::clipboard::ClipboardOp::Cut)).
+    Cut,
+    /// Capture the selection onto a copy clipboard
+    /// ([`clipboard`](Browser::clipboard) with [`ClipboardOp::Copy`](crate::clipboard::ClipboardOp::Copy)).
+    Copy,
+    /// Paste the held clipboard into the current directory
+    /// ([`plan_paste`](crate::clipboard::plan_paste)).
+    Paste,
+    /// Show the selected entry's properties
+    /// ([`Properties`](crate::properties::Properties)).
+    Properties,
+}
+
+/// The complete set of context-menu commands, in their top-to-bottom menu
+/// order.
+///
+/// The drawn menu iterates this so a new command is one entry here rather than
+/// a hand-maintained list duplicated per surface (mirrors
+/// [`TOOLBAR_COMMANDS`]).
+pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
+    ContextCommand::Open,
+    ContextCommand::OpenWith,
+    ContextCommand::Rename,
+    ContextCommand::Cut,
+    ContextCommand::Copy,
+    ContextCommand::Paste,
+    ContextCommand::Properties,
+];
+
+/// The enable state of the file-manager context menu, taken from a [`Browser`]
+/// and the app's held clipboard.
+///
+/// A snapshot: the drawn menu rebuilds it when it is opened and paints each
+/// [`ContextCommand`] enabled or disabled from [`is_enabled`](Self::is_enabled),
+/// so an inapplicable command renders *disabled*, never hidden, and the menu's
+/// shape stays stable. The model performs no action itself — it only reports
+/// what is offered — so composing it grants nothing (the read-only picker
+/// builds the same model and simply never invokes a write command).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ContextMenuModel {
+    has_selection: bool,
+    selection_is_file: bool,
+    has_clipboard: bool,
+}
+
+impl ContextMenuModel {
+    /// Build the context-menu state from `browser` and whether the app
+    /// currently holds a cut/copy clipboard (`has_clipboard`).
+    ///
+    /// The clipboard lives in the app, not the browser
+    /// ([`clipboard`](Browser::clipboard) *captures* a fresh one from the
+    /// selection rather than storing one), so whether a paste is possible is
+    /// the caller's own state, threaded in here.
+    #[must_use]
+    pub fn for_browser<S: DirectorySource>(browser: &Browser<S>, has_clipboard: bool) -> Self {
+        let selected_kind = browser.selected_entry().map(Entry::kind);
+        Self {
+            has_selection: selected_kind.is_some(),
+            selection_is_file: selected_kind == Some(EntryKind::File),
+            has_clipboard,
+        }
+    }
+
+    /// Whether `command` is currently actionable and should render enabled.
+    ///
+    /// [`Open`](ContextCommand::Open), [`Rename`](ContextCommand::Rename),
+    /// [`Cut`](ContextCommand::Cut), [`Copy`](ContextCommand::Copy), and
+    /// [`Properties`](ContextCommand::Properties) act on the selected entry, so
+    /// they need a selection (an empty directory offers none).
+    /// [`OpenWith`](ContextCommand::OpenWith) applies only to a regular file —
+    /// a directory descends and a bundle launches itself, neither of which has
+    /// an application to choose. [`Paste`](ContextCommand::Paste) targets the
+    /// current directory and needs only a held clipboard, not a selection.
+    #[must_use]
+    pub fn is_enabled(&self, command: ContextCommand) -> bool {
+        match command {
+            ContextCommand::Open
+            | ContextCommand::Rename
+            | ContextCommand::Cut
+            | ContextCommand::Copy
+            | ContextCommand::Properties => self.has_selection,
+            ContextCommand::OpenWith => self.selection_is_file,
+            ContextCommand::Paste => self.has_clipboard,
+        }
     }
 }
 

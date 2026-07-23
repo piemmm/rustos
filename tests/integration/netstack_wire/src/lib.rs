@@ -75,6 +75,33 @@ pub const PEER_ECHO_PAYLOAD: &[u8] = b"tairix-netstack-peer";
 /// the two builds cannot drift.
 pub const PEER_TCP_PORT: u16 = 7;
 
+/// TCP port the **guest** `tcpserve` echo server binds and listens on, and
+/// the port the host client peer connects to, in the role-swapped listener
+/// vertical (`plans/NETWORK.md` N6b-2-β-2). A **well-known (privileged)**
+/// port (≤ `SOCKET_PRIVILEGED_PORT_MAX` = 1023): binding it exercises the
+/// `netstack` privileged-bind gate (`CAP_NET_BIND_PRIVILEGED`) end to end,
+/// so the vertical proves the full privileged listener path, not just an
+/// ephemeral one. Fixed so the guest server and the host client cannot
+/// drift. It is deliberately distinct from [`PEER_TCP_PORT`] so the two
+/// TCP verticals never share a port meaning (and a mis-wired end fails
+/// closed on the wrong port rather than accidentally matching).
+pub const GUEST_TCP_PORT: u16 = 777;
+
+// The listener vertical binds a well-known (privileged) port to exercise the
+// netstack privileged-bind gate, and it must stay distinct from the client
+// vertical's port so a cross-wired end fails closed on the wrong port rather
+// than matching. Compile-time so a bad edit cannot even build.
+const _: () = {
+    assert!(
+        GUEST_TCP_PORT <= 1023,
+        "GUEST_TCP_PORT must be a privileged port"
+    );
+    assert!(
+        GUEST_TCP_PORT != PEER_TCP_PORT,
+        "the two TCP verticals must not share a port meaning"
+    );
+};
+
 /// Number of bytes the `tcpecho` client streams to the peer (and expects
 /// echoed back). Large enough to span many maximum-segment-sized segments
 /// — so windowing, cumulative/selective acknowledgement, and retransmission
@@ -99,6 +126,44 @@ pub const fn stream_byte(index: usize) -> u8 {
     // The low byte (`& 0xFF`) taken without a truncating cast: `to_le_bytes`
     // is const on the pinned toolchain and its first element is the low byte.
     index.wrapping_mul(181).wrapping_add(89).to_le_bytes()[0]
+}
+
+/// Fill `buf` with the deterministic stream bytes starting at stream offset
+/// `offset`: `buf[i]` is [`stream_byte(offset + i)`](stream_byte).
+///
+/// The sending end (the `tcpecho` client, or the host client of the listener
+/// vertical) produces each outbound chunk with this; the echoing end mirrors
+/// whatever it receives, so the echoed run is byte-identical and
+/// [`verify_chunk`] re-derives it to check the echo without buffering the
+/// whole transfer. Shared here — the one definition both TCP fixtures and
+/// both host peers use — so a sender and a verifier can never disagree about
+/// a single byte.
+pub fn fill_chunk(offset: usize, buf: &mut [u8]) {
+    for (i, byte) in buf.iter_mut().enumerate() {
+        *byte = stream_byte(offset + i);
+    }
+}
+
+/// Verify a received chunk against the deterministic stream: `chunk[i]` must
+/// equal [`stream_byte(offset + i)`](stream_byte).
+///
+/// Returns `Ok(())` when every byte matches, or `Err(index)` naming the first
+/// mismatched offset *within the chunk* — a corrupted, reordered, or
+/// duplicated byte is caught at its first wrong position rather than accepted
+/// (fail closed). The one definition every consumer (both fixtures, both host
+/// peers) checks with.
+///
+/// # Errors
+///
+/// The chunk-relative index of the first byte that does not match the
+/// expected deterministic stream value.
+pub fn verify_chunk(offset: usize, chunk: &[u8]) -> Result<(), usize> {
+    for (i, &byte) in chunk.iter().enumerate() {
+        if byte != stream_byte(offset + i) {
+            return Err(i);
+        }
+    }
+    Ok(())
 }
 
 /// The link-local address formed from an interface identifier
@@ -165,5 +230,37 @@ mod tests {
             seen[stream_byte(index) as usize] = true;
         }
         assert!(seen.iter().all(|&hit| hit), "all 256 byte values appear");
+    }
+
+    #[test]
+    fn fill_then_verify_round_trips_across_a_chunk_boundary() {
+        // Fill two adjacent chunks and confirm verify accepts each at its own
+        // offset — a sender fills at the send offset and a verifier checks at
+        // the receive offset, so the two must agree byte-for-byte.
+        let mut a = [0u8; 100];
+        let mut b = [0u8; 100];
+        fill_chunk(0, &mut a);
+        fill_chunk(100, &mut b);
+        assert_eq!(verify_chunk(0, &a), Ok(()));
+        assert_eq!(verify_chunk(100, &b), Ok(()));
+        // A byte from the wrong offset is rejected at that position.
+        assert_eq!(verify_chunk(0, &b), Err(0));
+    }
+
+    #[test]
+    fn verify_catches_a_single_corrupted_byte() {
+        let mut chunk = [0u8; 64];
+        fill_chunk(500, &mut chunk);
+        chunk[37] ^= 0x01;
+        assert_eq!(verify_chunk(500, &chunk), Err(37));
+    }
+
+    #[test]
+    fn verify_catches_a_reordered_chunk() {
+        // Swapping two bytes (a reorder) is caught at the first moved byte.
+        let mut chunk = [0u8; 16];
+        fill_chunk(9, &mut chunk);
+        chunk.swap(2, 11);
+        assert_eq!(verify_chunk(9, &chunk), Err(2));
     }
 }

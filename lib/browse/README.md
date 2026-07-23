@@ -62,9 +62,16 @@ can never diverge in navigation semantics, listing policy, or look.
   is the one shared, **read-only** dispatch (Back / Forward / Up / Refresh /
   view toggle / sort cycle over `ViewMode::toggled` and `SortMode::next`) both
   the toolbar click and its keyboard accelerator run through, so they cannot
-  diverge and the read-only picker can drive the same toolbar. Only the
-  surfaces whose actions already exist are modelled — the context menu lands
-  with the verbs it invokes, never as speculative surface.
+  diverge and the read-only picker can drive the same toolbar.
+  `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
+  `ContextCommand` the right-click menu offers is actionable: Open / Rename /
+  Cut / Copy / Properties act on the selection (an empty directory offers
+  none), Open With… applies only to a regular file (a directory descends and a
+  bundle launches itself), and Paste needs only the app's held clipboard —
+  threaded in, since the clipboard lives in the app, not the browser. Every
+  command maps to an engine action that already exists, so it is not
+  speculative; Delete and New Folder, whose action does not exist yet, are
+  absent from `CONTEXT_COMMANDS` and land with the stage that first wires them.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
@@ -157,8 +164,8 @@ can never diverge in navigation semantics, listing policy, or look.
   date-and-time spelling, blank at the epoch for the same reason) — the
   file-listing convention shared by both views.
 - **Properties** (`properties`, `plans/NEW-FILEMANAGER.md` FM8): the pure
-  view model behind the Properties panel, host-proven ahead of the drawn
-  panel. `Properties::from_stat` turns an entry's name, its browser
+  view model behind the Properties panel. `Properties::from_stat` turns an
+  entry's name, its browser
   `EntryKind`, and the node's `fs_stat` `FileStat` into the display fields the
   panel shows — a human kind label (`Folder` / `File` / `Application`), the
   apparent and on-disk sizes (via `format_size`), the raw and octal mode, the
@@ -168,7 +175,27 @@ can never diverge in navigation semantics, listing policy, or look.
   keeps none — no fabricated wall time). It reads nothing and holds no
   authority: the app performs the one capability-checked `fs_stat` under the
   user's own identity and hands the result here, so the read-only picker
-  builds the same view.
+  builds the same view. The drawn overlay (FM8b) is the renderer's
+  `draw_properties`: a shared `lib/controls` `Panel` centered over the view
+  painting `properties_rows` (the one definition of which fields appear —
+  Kind, Size, Permissions, Owner, and the four stamps), which the files app
+  opens with `Alt+Enter` and dismisses with `Escape`. `Browser::selected_target_path`
+  is the shared spelling of the selected node's absolute path the `fs_stat`
+  acts on.
+- **Permission edit** (`mode_edit`, `Browser::set_mode_selected`,
+  `plans/NEW-FILEMANAGER.md` FM8b): the model of committing a new permission
+  mode to the selected node, host-proven ahead of the drawn permission
+  control. `validate_mode` fails closed on any bit above
+  `tairix_abi::fs::FS_MODE_MASK` (the settable `rwx`/setuid/setgid/sticky
+  word) — refused, never masked into a different mode, so the mode applied is
+  exactly the one asked for. `Browser::set_mode_selected` spells the selected
+  node's absolute path through the one shared `absolute_path`, validates the
+  mode before any syscall, and applies it through an injected `fs_set_mode`
+  seam; a VFS refusal leaves the node's mode unchanged and is surfaced as
+  `ModeError::Refused`. The listing carries no mode, so a success re-reads
+  nothing (the app re-stats to refresh the Properties view). The change is the
+  caller's own permission-checked `fs_set_mode` (no new capability), so the
+  read-only picker composes the same `Browser` and never calls it.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the
@@ -198,8 +225,12 @@ can never diverge in navigation semantics, listing policy, or look.
   gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
   an overlay (the in-place rename editor) sits exactly over it.
-  `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the files app,
-  the picker, and the QEMU vertical's host-side assertions share.
+  `selection_rect`'s sibling `draw_properties` draws the FM8b Properties
+  overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
+  the selected node's `Properties`, clipped so a too-small window shows what
+  fits rather than panicking. `WIN_WIDTH`/`WIN_HEIGHT` are the one
+  browser-view geometry the files app, the picker, and the QEMU vertical's
+  host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — each component checked by the shared
   `tairix_path::validate_file_name` rule, the same rule the rename editor

@@ -144,13 +144,28 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   The terminal crumb — the directory being shown — is flagged
   `is_current()` and the bar renders it inactive, because a jump to it is
   the documented no-op.
+- `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
+  `ContextCommand` the right-click menu offers is actionable. **Open**,
+  **Rename**, **Cut**, **Copy**, and **Properties** act on the selected
+  entry, so they need a selection (an empty directory offers none). **Open
+  With…** applies only to a regular *file* — a directory descends and a
+  bundle launches itself, neither of which has an application to choose.
+  **Paste** targets the current directory and needs only a held clipboard,
+  not a selection; because the clipboard lives in the app rather than the
+  browser (`Browser::clipboard` *captures* a fresh one from the selection),
+  whether a paste is possible is the app's own state, threaded in as
+  `has_clipboard`. `is_enabled(command)` gives each drawn `MenuItem` its
+  enabled state (an inapplicable command renders *disabled*, never hidden),
+  and `CONTEXT_COMMANDS` is the one top-to-bottom order the drawn menu
+  iterates.
 
 The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
-picker builds the same model). Only the surfaces whose actions already
-exist are modelled — the context menu is built with the verbs it invokes
-(rename, open, the clipboard verbs, new folder), never ahead of them
-(`AGENTS.md` §2.4).
+picker builds the same model). Only the commands whose engine action already
+exists are modelled, so none is speculative surface (`AGENTS.md` §2.4):
+**Delete** and **New Folder**, whose action does not exist in the engine
+yet, are absent from `CONTEXT_COMMANDS` and land with the stage that first
+wires them.
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
@@ -399,7 +414,7 @@ launching user's own identity, so the read-only picker never runs it.
 The Properties panel (`plans/NEW-FILEMANAGER.md` FM8) shows one selected node's
 metadata. That view is modelled purely in `lib/browse::properties`, host-tested
 without a kernel exactly as the rename, activation, and clipboard models are;
-the drawn panel that paints it is a later increment.
+the drawn panel that paints it is described below.
 
 `Properties::from_stat(name, kind, stat)` turns an entry's name, its browser
 `EntryKind`, and the `fs_stat` `FileStat` the app read for it into the
@@ -420,6 +435,58 @@ permission string's leading type indicator reads from the structural
 directory's `d`. The model reads nothing and holds no authority: the app
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
+
+### The drawn properties panel
+
+The drawn overlay (`plans/NEW-FILEMANAGER.md` FM8b) paints that model as a
+shared `lib/controls` `Panel` centered over the current view, so it is one
+coherent themed surface rather than a browser-private box (`AGENTS.md` §2.2).
+`render::properties_rows` is the one definition of *which* fields appear and how
+each reads — Kind, Size (apparent plus on-disk), Permissions (symbolic plus
+octal), Owner, and the four timestamps — host-tested so the drawn panel and its
+tests can never disagree about the field set; `render::draw_properties` draws
+the panel titled with the node's name and lays those rows out as muted-label /
+solid-value columns, clipping so a window too small for the whole panel shows
+what fits rather than panicking (`AGENTS.md` §2.9). The panel reads only the
+already-authorised `Properties` and holds no authority.
+
+The `files.app` `Run` binary opens the overlay with **`Alt+Enter`** on the
+selected item: it names the item's path through the shared
+`Browser::selected_target_path` spelling and reads its metadata with one
+capability-checked `fs_stat` under the user's own identity (`fs_open` with the
+directory flag for a folder or sealed bundle, read-only for a file — `stat`
+needs only a live handle), then shows the panel. While the overlay is open it
+owns the window — **`Escape`** dismisses it and every other keystroke is
+swallowed rather than navigating the view behind it. Showing properties is an
+incidental, refusable action: if the item can no longer be named or its
+metadata cannot be read (it vanished, or is unreadable), the refusal is stated
+on `stderr` and the overlay stays closed — an answer, not a crash, and never a
+fabricated summary (`AGENTS.md` §2.24, §5.4).
+
+### Editing permissions
+
+The permission-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
+`lib/browse::mode_edit` plus `Browser::set_mode_selected`, host-proven ahead of
+the drawn permission control exactly as the properties view model landed ahead
+of the drawn panel. `validate_mode` fails closed on any bit above
+`tairix_abi::fs::FS_MODE_MASK` — the settable `rwx`/setuid/setgid/sticky word —
+refusing it rather than masking it into a lesser mode, so the mode committed is
+always exactly the one asked for and never silently a different one (`AGENTS.md`
+§2.24, §5.4). `Browser::set_mode_selected` names the selected node through the
+shared `Browser::selected_target_path` spelling, validates the mode *before*
+any syscall, and applies it through an injected `fs_set_mode` seam under the
+user's own identity — an ordinary permission-checked VFS call, no new
+capability (`AGENTS.md` §4, §5.3). A VFS refusal (the user does not own the
+node, a read-only mount, a lost race) leaves the node's mode exactly as it was
+and is surfaced as `ModeError::Refused` for an honest in-UI answer (`AGENTS.md`
+§2.24). The directory listing carries no mode, so a successful change re-reads
+nothing; the app re-stats the node to refresh the panel. The model reads
+nothing and holds no authority, so the trusted picker composes the same
+`Browser` and never calls the write path.
+
+The drawn permission control the panel offers, and showing/offering an
+ownership change only where the user holds the authority, are the remaining
+FM8b app-side increment.
 
 ## Terminal emulator (`tairix-terminal`)
 

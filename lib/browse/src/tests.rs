@@ -1464,6 +1464,107 @@ mod rename_model {
     }
 }
 
+// --- FM8b: the permission-edit model (validate + commit a new mode) --------
+//
+// The `mode_edit` model runs end to end over the `MockFs` fixture, so every
+// validation, transactional, and fail-closed branch of `set_mode_selected`
+// runs in `cargo test` without a kernel.
+
+mod mode_edit_model {
+    use core::cell::RefCell;
+
+    use alloc::string::ToString;
+
+    use tairix_abi::fs::FS_MODE_MASK;
+    use tairix_abi::Errno;
+
+    use super::MockFs;
+    use crate::browser::Browser;
+    use crate::mode_edit::{validate_mode, ModeError};
+
+    #[test]
+    fn commit_applies_the_mode_to_the_selected_node() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Sorted root order is [Apps, Storage, System, Users]; select Apps.
+        browser.select(0).expect("select Apps");
+
+        let seen = RefCell::new(None);
+        let result = browser.set_mode_selected(0o750, |path, mode| {
+            *seen.borrow_mut() = Some((path.to_string(), mode));
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 0o750)));
+        // The listing is unchanged: a mode change touches no `Entry` field.
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn a_mode_carrying_a_bit_above_the_mask_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        // A file-type bit (above the 0o7777 permission word) is not settable.
+        let result = browser.set_mode_selected(FS_MODE_MASK + 1, |_, _| {
+            panic!("the VFS must not be touched for an invalid mode");
+        });
+        assert_eq!(result, Err(ModeError::Invalid));
+    }
+
+    #[test]
+    fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let result = browser.set_mode_selected(0o644, |_, _| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(ModeError::Refused(Errno::PermissionDenied)));
+        // The listing stands, exactly as before the refused change.
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_reports_no_selection() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Enter the empty /System/Fonts.
+        browser.open_index(2).expect("enter System");
+        browser
+            .open_index(0)
+            .expect("enter the empty Fonts directory");
+        assert_eq!(browser.selected_name(), None);
+        let result = browser.set_mode_selected(0o644, |_, _| panic!("nothing to change"));
+        assert_eq!(result, Err(ModeError::NoSelection));
+    }
+
+    #[test]
+    fn validate_mode_accepts_the_whole_mask_and_refuses_above_it() {
+        // Every bit of the settable permission word is accepted, including the
+        // setuid/setgid/sticky bits.
+        assert_eq!(validate_mode(0), Ok(()));
+        assert_eq!(validate_mode(FS_MODE_MASK), Ok(()));
+        assert_eq!(validate_mode(0o755), Ok(()));
+        // One bit above the mask fails closed, never masked into a lesser word.
+        assert_eq!(validate_mode(FS_MODE_MASK + 1), Err(ModeError::Invalid));
+        assert_eq!(validate_mode(0xFFFF_F000), Err(ModeError::Invalid));
+    }
+
+    #[test]
+    fn every_mode_error_has_a_nonempty_message() {
+        for err in [
+            ModeError::NoSelection,
+            ModeError::Invalid,
+            ModeError::Path(Errno::NotFound),
+            ModeError::Refused(Errno::PermissionDenied),
+        ] {
+            assert!(!err.message().is_empty());
+        }
+    }
+}
+
 // --- FM6a: activating an entry (descend / launch a bundle / open a file) --
 
 use crate::activate::Activation;
@@ -2218,6 +2319,105 @@ fn toolbar_commands_list_covers_every_variant_once() {
 }
 
 #[test]
+fn the_context_menu_needs_a_selection_for_the_item_commands() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // An empty directory offers no selection, so every command that acts on a
+    // selected entry renders disabled; Paste still depends only on the held
+    // clipboard.
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter the empty Fonts");
+    assert_eq!(browser.selected_name(), None);
+
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    for command in [
+        ContextCommand::Open,
+        ContextCommand::OpenWith,
+        ContextCommand::Rename,
+        ContextCommand::Cut,
+        ContextCommand::Copy,
+        ContextCommand::Properties,
+    ] {
+        assert!(!menu.is_enabled(command), "{command:?} without a selection");
+    }
+    assert!(!menu.is_enabled(ContextCommand::Paste));
+}
+
+#[test]
+fn the_context_menu_enables_item_commands_on_a_directory_but_not_open_with() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // A directory descends on Open; it has no application to "open with".
+    let browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.selected_name(), Some("Docs"));
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(menu.is_enabled(ContextCommand::Rename));
+    assert!(menu.is_enabled(ContextCommand::Cut));
+    assert!(menu.is_enabled(ContextCommand::Copy));
+    assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_disables_open_with_on_a_bundle() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // A bundle launches itself; there is no application to choose for it.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(1).expect("select Editor.app");
+    assert!(browser.selected_entry().expect("bundle").is_bundle());
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_enables_open_with_only_on_a_file() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    assert_eq!(browser.selected_name(), Some("notes.txt"));
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_enables_paste_only_when_a_clipboard_is_held() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // Paste targets the current directory and needs a held clipboard, not a
+    // selection: the app threads its own clipboard state in.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    assert!(!ContextMenuModel::for_browser(&browser, false).is_enabled(ContextCommand::Paste));
+    assert!(ContextMenuModel::for_browser(&browser, true).is_enabled(ContextCommand::Paste));
+}
+
+#[test]
+fn context_commands_list_covers_every_variant_once() {
+    use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
+
+    // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
+    // exactly once, in a stable order. Delete and New Folder are absent — their
+    // engine action does not exist yet, so they are not modelled here.
+    assert_eq!(
+        CONTEXT_COMMANDS,
+        &[
+            ContextCommand::Open,
+            ContextCommand::OpenWith,
+            ContextCommand::Rename,
+            ContextCommand::Cut,
+            ContextCommand::Copy,
+            ContextCommand::Paste,
+            ContextCommand::Properties,
+        ]
+    );
+}
+
+#[test]
 fn the_breadcrumbs_at_the_root_are_a_single_current_root_crumb() {
     use crate::chrome::breadcrumbs;
 
@@ -2448,4 +2648,195 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
         ),
         None
     );
+}
+
+// --- FM8b: the drawn Properties overlay + selected_target_path ------------
+
+use crate::properties::Properties;
+use crate::render::{draw_properties, properties_panel_rect, properties_rows, PROPERTY_ROW_COUNT};
+use tairix_abi::fs::{FileId, FileStat};
+use tairix_abi::NodeTimes;
+
+/// A `FileStat` fixture with the given kind and mode; a 1.5 KiB file taking
+/// 4 KiB on disk, owned by uid 1000 / gid 100, with a kept access time left at
+/// the epoch (so the blank-stamp path is exercised).
+fn props_stat(kind: FileKind, mode: u32) -> FileStat {
+    FileStat {
+        kind,
+        size: 1536,
+        allocated: 4096,
+        mode,
+        uid: 1000,
+        gid: 100,
+        id: FileId::NONE,
+        times: NodeTimes {
+            created: Time64::from_secs(1_609_459_200),
+            modified: Time64::from_secs(1_609_459_200 + 3661),
+            accessed: Time64::UNIX_EPOCH,
+            changed: Time64::from_secs(1_700_000_000),
+        },
+    }
+}
+
+#[test]
+fn properties_rows_lists_every_field_in_order_from_the_model() {
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+    let rows = properties_rows(&props);
+    // Exactly the sized-for field count, and in the documented order.
+    assert_eq!(rows.len(), PROPERTY_ROW_COUNT);
+    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    assert_eq!(
+        labels,
+        [
+            "Kind",
+            "Size",
+            "Permissions",
+            "Owner",
+            "Created",
+            "Modified",
+            "Accessed",
+            "Changed",
+        ]
+    );
+    let value = |name: &str| -> String {
+        rows.iter()
+            .find(|(label, _)| *label == name)
+            .map(|(_, v)| v.clone())
+            .expect("field present")
+    };
+    assert_eq!(value("Kind"), "File");
+    assert_eq!(value("Size"), "1.5 KiB (4.0 KiB on disk)");
+    assert_eq!(value("Permissions"), "-rw-r--r-- (0644)");
+    assert_eq!(value("Owner"), "uid 1000 / gid 100");
+    assert_eq!(value("Modified"), "2021-01-01 01:01:01");
+    // A stamp the backing does not keep renders blank, never a fabricated
+    // wall time.
+    assert_eq!(value("Accessed"), "");
+}
+
+#[test]
+fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
+    // A `<Name>.app` bundle is labelled "Application" but is a directory on
+    // disk, so the permission string still leads with `d`.
+    let props = Properties::from_stat(
+        "Editor.app",
+        crate::entry::EntryKind::Bundle,
+        &props_stat(FileKind::Directory, 0o755),
+    );
+    let rows = properties_rows(&props);
+    let kind = rows.iter().find(|(l, _)| *l == "Kind").unwrap().1.clone();
+    let perms = rows
+        .iter()
+        .find(|(l, _)| *l == "Permissions")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(kind, "Application");
+    assert_eq!(perms, "drwxr-xr-x (0755)");
+}
+
+#[test]
+fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+
+    // A generous window: the panel fits and is centered within it.
+    let vp = Rect::new(0, 0, 480, 320);
+    let rect = properties_panel_rect(vp, font, &theme);
+    assert!(rect.width > 0 && rect.height > 0);
+    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
+    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
+    assert!(
+        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
+    );
+    // Centered: equal margins on each axis (within one pixel of integer split).
+    let margin_x = rect.origin.x;
+    let right_margin =
+        i32::try_from(vp.width).unwrap() - (rect.origin.x + i32::try_from(rect.width).unwrap());
+    assert!((margin_x - right_margin).abs() <= 1);
+
+    // A window smaller than the panel would like still yields a drawable rect
+    // clamped to the window, never a zero or over-size rectangle (no panic).
+    let tiny = Rect::new(0, 0, 20, 16);
+    let small = properties_panel_rect(tiny, font, &theme);
+    assert!(small.width >= 1 && small.width <= tiny.width);
+    assert!(small.height >= 1 && small.height <= tiny.height);
+}
+
+#[test]
+fn draw_properties_paints_into_the_surface_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let props = Properties::from_stat(
+        "Documents",
+        crate::entry::EntryKind::Directory,
+        &props_stat(FileKind::Directory, 0o755),
+    );
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    // A blank base to compare against: after drawing the overlay the surface
+    // is no longer uniform, proving the panel actually painted.
+    let before = surface.pixels().to_vec();
+    draw_properties(&mut surface, &props, &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_properties(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2));
+}
+
+#[test]
+fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Default sort: the four view-binding directories in name order.
+    browser
+        .select(
+            browser
+                .entries()
+                .iter()
+                .position(|e| e.name() == "System")
+                .expect("System listed"),
+        )
+        .expect("select System");
+    assert_eq!(
+        browser.selected_target_path(),
+        Some(Ok("/System".to_string()))
+    );
+
+    // Nested: the path reflects the current directory, not just the leaf.
+    let system = browser
+        .entries()
+        .iter()
+        .position(|e| e.name() == "System")
+        .expect("System listed");
+    browser.open_index(system).expect("descend into System");
+    let first = browser.selected_name().expect("a selection").to_string();
+    assert_eq!(
+        browser.selected_target_path(),
+        Some(Ok(alloc::format!("/System/{first}")))
+    );
+
+    // The empty /System/Fonts has no selection, hence no target path.
+    let mut b2 = Browser::open_root(MockFs::fixture()).expect("root");
+    b2.open_index(
+        b2.entries()
+            .iter()
+            .position(|e| e.name() == "System")
+            .unwrap(),
+    )
+    .expect("enter System");
+    b2.open_index(
+        b2.entries()
+            .iter()
+            .position(|e| e.name() == "Fonts")
+            .unwrap(),
+    )
+    .expect("enter Fonts");
+    assert_eq!(b2.selected_target_path(), None);
 }

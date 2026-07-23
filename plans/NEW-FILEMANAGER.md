@@ -31,11 +31,13 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-and FM8a's properties view model
-are done**; the rest of the FM4b drawn chrome (the context menu, and the New
+FM8a's properties view model, FM8b's drawn read-only properties panel +
+its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model, and
+FM4b's pure context-menu chrome model
+are done**; the rest of the FM4b drawn chrome (the drawn context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
 spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
-properties panel + permission editing, and FM9 are
+permission control + ownership, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -319,13 +321,29 @@ when it cannot apply; `TOOLBAR_COMMANDS` is the one command order the chrome
 iterates. `breadcrumbs` turns the root-first `Browser::components` into the
 ordered `Crumb`s of the path bar, each carrying the ancestor `depth` the drawn
 crumb binds to `navigate_to_depth` (`0` = root); the terminal crumb is the
-current directory (`is_current`), whose jump is the documented no-op. Only the
-surfaces whose actions already exist are modelled — the context menu is *not*,
-so it lands with the verbs it invokes rather than as speculative surface (§2.4).
+current directory (`is_current`), whose jump is the documented no-op.
 Host-tested in `lib/browse` (toolbar enable/disable at root / after descend /
 after go-back, the active-view/sort report, the `TOOLBAR_COMMANDS` order, the
 breadcrumb crumb list + depth + `is_current`, and a crumb depth climbing to its
 ancestor). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+**The pure context-menu chrome model is done** (§2.19 — host-proven ahead of
+the drawn menu, exactly as `ToolbarModel` landed ahead of the drawn toolbar):
+`chrome::ContextMenuModel::for_browser(browser, has_clipboard)` +
+`ContextCommand` + `CONTEXT_COMMANDS`. It reports which right-click command is
+actionable: Open/Rename/Cut/Copy/Properties over the selection (an empty
+directory offers none), Open With… over a regular file only (a directory
+descends and a bundle launches itself, so neither has an app to choose), and
+Paste over the app's held clipboard (threaded in, since the clipboard lives in
+the app — `Browser::clipboard` *captures* one from the selection rather than
+storing it). This is no longer speculative surface: every modelled command maps
+to an engine action that already exists (§2.4). Delete and New Folder, whose
+engine action does not exist yet, are deliberately absent from `CONTEXT_COMMANDS`
+and land with the stage that first wires them. Host-tested in `lib/browse`
+(no-selection disables the item commands, a directory enables all but Open
+With…, a bundle disables Open With…, a file enables it, Paste tracks the
+clipboard flag, and the `CONTEXT_COMMANDS` order/coverage). Docs:
+`docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 **The drawn, clickable toolbar is done.** `render` paints `TOOLBAR_COMMANDS`
 as a `lib/controls::Toolbar` of themed `IconButton`s in the top strip (each
@@ -354,9 +372,11 @@ awaits the later toolbar keyboard-focus pass (the `lib/controls::Toolbar`
 
 The remaining drawn chrome (still `planned`):
 
-- **Context menu** (`lib/controls::Menu`): one menu definition whose entries
-  land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
-  Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
+- **Drawn context menu** (`lib/controls::Menu`): the app-side menu painted
+  from the done `ContextMenuModel`, each `MenuItem` enabled/disabled from
+  `is_enabled` and routed to the verb it invokes — Open/Open With… (FM6),
+  Rename (FM5), Cut/Copy/Paste (FM7), Properties (FM8). Delete lands with its
+  own FM7 engine action + entry, never ahead of it.
 - **New Folder** toolbar tool arrives with FM7 (`fs_mkdir`).
 
 ### FM5 — in-place rename `[x]`
@@ -585,18 +605,60 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
   higher-bit masking). Docs: `docs/src/desktop/apps.md`, `lib/browse`
   README + rustdoc, `tairix_abi::fs::mode_string` rustdoc.
 
-### FM8b — the drawn properties panel + permission editing `[ ]`
+### FM8b — the drawn properties panel + permission editing `[~]`
 
-- **A Properties panel** (`lib/controls` `Panel`) painting the done FM8a
-  `Properties` model for the selected item — name, kind, size + on-disk
-  `allocated`, the four `Time64` stamps, owner uid/gid, and mode bits — all
-  straight from `fs_stat` (§21, 64-bit-native throughout), no fabricated
-  fields.
-- **Editing mode/ownership** where the user is authorised: mode via a
-  clear permission control, committed through `fs_set_mode`; a refused
-  change is an honest in-UI answer (§2.24). Ownership change is shown but
-  only offered when the user holds the authority (no ambient escalation,
-  §4). Host tests: mode edit commit/refuse.
+Split (§2.19) into the drawn read-only panel (done) and permission editing
+(still `planned`, since it needs the `fs_set_mode` write path the read-only
+view does not).
+
+**The drawn Properties panel is done.** `render::draw_properties` paints the
+done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
+the view — name (title), kind, size + on-disk `allocated`, permissions
+(symbolic + octal), owner uid/gid, and the four `Time64` stamps — all straight
+from `fs_stat` (§21, 64-bit-native throughout), no fabricated fields.
+`render::properties_rows` is the one host-tested definition of which fields
+appear and how each reads, so the drawn panel and its tests never disagree
+(§2.2); the panel clips so a too-small window shows what fits rather than
+panicking (§2.9). The `files.app` `Run` binary opens the overlay with
+`Alt+Enter` on the selected item — spelling its path through the new public
+`Browser::selected_target_path` and reading its metadata with one
+capability-checked `fs_stat` under the user's own identity (**no new
+capability**) — and dismisses it with `Escape`; while open the overlay owns the
+window (keys do not navigate behind it). Showing properties is an incidental,
+refusable action: a stat the VFS refuses is stated on `stderr` and leaves the
+overlay closed — an answer, not a crash, never a fabricated summary (§2.24,
+§5.4). Host-tested in `lib/browse` (`properties_rows` field set/order + bundle
+labelling, `properties_panel_rect` centering/clamp, `draw_properties` paints /
+degenerate no-panic, and `selected_target_path` spelling + empty-directory
+`None`). Docs: `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
+
+**The pure permission-edit model is done** (§2.19 — host-proven ahead of the
+drawn control, exactly as FM8a's properties model landed ahead of the drawn
+panel): the `lib/browse::mode_edit` module + `Browser::set_mode_selected`.
+`validate_mode` fails closed on any bit above `tairix_abi::fs::FS_MODE_MASK`
+(the settable `rwx`/setuid/setgid/sticky word) — refused, never masked into a
+different mode, so the mode committed is always exactly the one asked for.
+`set_mode_selected` names the selected node through the shared
+`Browser::selected_target_path` spelling, validates the mode *before* any
+syscall, and applies it through an injected `fs_set_mode` seam under the user's
+own identity (**no new capability**); a VFS refusal leaves the node's mode
+unchanged and surfaces as `ModeError::Refused` (§2.24, §5.4). The listing
+carries no mode, so a success re-reads nothing — the app re-stats to refresh
+the panel. The model holds no authority, so the read-only picker composes the
+same `Browser` and never calls it. Host-tested in `lib/browse` (commit applies
+the mode to the selected node's path, an out-of-mask mode refused before any
+syscall, a VFS refusal surfaced leaving the listing put, empty-directory
+`NoSelection`, `validate_mode` purity across the whole mask + above it, every
+`ModeError` message non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse`
+README + rustdoc.
+
+The remaining FM8b work (still `planned`):
+
+- **The drawn permission control** the panel offers, committing through the
+  landed `set_mode_selected` seam; a refused change is an honest in-UI answer
+  (§2.24). **Ownership change** is shown but only offered when the user holds
+  the authority (no ambient escalation, §4). Host tests: the app-side control
+  and its commit/refuse wiring.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 

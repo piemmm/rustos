@@ -145,7 +145,14 @@ Binding a **privileged** (well-known) local port — at or below
 `CAP_NET`: an unprivileged process cannot squat a low port and impersonate a
 system service. An ephemeral (`0`) bind is never privileged. The check is at
 `Bind` time, matching the Unix `CAP_NET_BIND_SERVICE` model, and a refusal is
-audited and fails closed.
+audited and fails closed. Running a privileged network service is an
+administrative act, so `CAP_NET_BIND_PRIVILEGED` is part of the administrator
+account ceiling (`tairix_users::ADMINISTRATIVE_SET`); a program still receives
+it only if its own signed manifest requests it, intersected with that ceiling.
+The whole privileged listener path — bind, listen, accept, echo under injected
+loss — is proven live by the `netstack_listener_qemu_aarch64` two-process QEMU
+vertical (`plans/NETWORK.md` N6b-2-β-2): a guest `tcpserve` server against a
+host client peer.
 
 The stack reports the connection lifecycle to the client's delivery port as
 `SocketStreamEvent` frames (magic `"NSKS"`), the connection-oriented analogue
