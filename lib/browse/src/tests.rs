@@ -3448,3 +3448,90 @@ fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
         None
     );
 }
+
+// --- FM8b: the drawn ownership control ------------------------------------
+
+use crate::render::{draw_owner_control, owner_field_at, OwnerField};
+use tairix_controls::text::TextField;
+
+#[test]
+fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+
+    // Scanning the whole window, every field the hit-test resolves is one of
+    // the two owner values, and both are reachable — so the drawn underlines
+    // and the hit-test cover exactly the same two distinct cells (§2.2).
+    let mut seen: BTreeSet<OwnerField> = BTreeSet::new();
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if let Some(field) = owner_field_at(&props, vp, font, &theme, Point::new(x, y)) {
+                seen.insert(field);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        seen,
+        [OwnerField::Uid, OwnerField::Gid].into_iter().collect()
+    );
+
+    // A click well outside the panel resolves nothing (fail closed).
+    assert_eq!(
+        owner_field_at(&props, vp, font, &theme, Point::new(-5, -5)),
+        None
+    );
+    // On a window too small for the owner row, no field resolves (fail closed).
+    let tiny = Rect::new(0, 0, 20, 16);
+    assert_eq!(
+        owner_field_at(&props, tiny, font, &theme, Point::new(5, 5)),
+        None
+    );
+}
+
+#[test]
+fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+
+    // With no active editor the underlines mark both values as editable.
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    draw_owner_control(&mut surface, &props, &theme, font, vp, None);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // With the uid field being edited the active field renders over its value.
+    let editor = TextField::new().with_text("1000");
+    let mut edited = Surface::new(vp.width, vp.height).expect("surface");
+    let before_edit = edited.pixels().to_vec();
+    draw_owner_control(
+        &mut edited,
+        &props,
+        &theme,
+        font,
+        vp,
+        Some((OwnerField::Uid, &editor)),
+    );
+    assert_ne!(edited.pixels().to_vec(), before_edit);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_owner_control(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2), None);
+}

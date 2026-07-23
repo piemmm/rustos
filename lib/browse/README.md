@@ -254,7 +254,14 @@ can never diverge in navigation semantics, listing policy, or look.
   ownership unchanged and surfaces as `OwnerError::Refused`. The listing
   carries no ownership, so a success re-reads nothing (the app re-stats to
   refresh the Properties view). The model holds no authority, so the read-only
-  picker composes the same `Browser` and never calls it.
+  picker composes the same `Browser` and never calls it. The drawn control is
+  inline on the Properties owner row: `render::OwnerField` /
+  `render::owner_field_at` are the mirror hit-test resolving a click to the uid
+  or gid value it edits, and `render::draw_owner_control` underlines each value
+  as editable and draws the active `lib/controls` `TextField` over the one being
+  edited. Only the file manager calls it — and only where the launching user
+  holds `CAP_FS_CHOWN` (read from the kernel-attested `self_origin`), so a
+  session that cannot use it is never shown it.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the
@@ -296,7 +303,9 @@ can never diverge in navigation semantics, listing policy, or look.
   the selected node's `Properties`, clipped so a too-small window shows what
   fits rather than panicking. `draw_properties_editable` is the file manager's
   variant: the same panel with the permissions row's nine `rwx` characters
-  overlaid by clickable permission toggles (`permission_cell_at` its hit-test).
+  overlaid by clickable permission toggles (`permission_cell_at` its hit-test);
+  `draw_owner_control` (`owner_field_at` its hit-test) likewise makes the owner
+  row's uid/gid values editable, drawn only for a `CAP_FS_CHOWN` holder.
   `WIN_WIDTH`/`WIN_HEIGHT` are the one
   browser-view geometry the files app, the picker, and the QEMU vertical's
   host-side assertions share.

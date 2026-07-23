@@ -22,12 +22,13 @@
 //! Every length saturates and every blit clips, so a degenerate viewport paints
 //! nothing rather than panicking.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::state::{ControlRole, ControlState, SelectionState};
+use tairix_controls::text::TextField;
 use tairix_controls::{Card, Checkbox, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -969,6 +970,167 @@ pub fn permission_cell_at(
         }
     }
     None
+}
+
+/// The index of the "Owner" row within [`PROPERTY_LABELS`] — the row the file
+/// manager overlays with the inline uid/gid ownership control.
+const OWNER_ROW_INDEX: usize = 3;
+
+/// Which of the two owning ids the inline ownership control edits.
+///
+/// The owning user (`uid`) and group (`gid`) are the two independently
+/// editable values on the Properties overlay's owner row; a click resolves to
+/// exactly one of them ([`owner_field_at`]) and the caller commits that one
+/// field through
+/// [`Browser::set_owner_selected`](crate::Browser::set_owner_selected).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum OwnerField {
+    /// The owning user id (`chown`).
+    Uid,
+    /// The owning group id (`chgrp`).
+    Gid,
+}
+
+/// The geometry of the Properties overlay's owner row: the clickable bounds of
+/// the uid and gid values (`[uid, gid]`), each sized to the digits it shows,
+/// and the row pitch the active editor is sized from.
+struct OwnerRowGeom {
+    /// The uid value's cell and the gid value's cell, left-to-right.
+    cells: [Rect; 2],
+    /// The vertical pitch between rows — the height the inline editor uses so
+    /// it is tall enough to read while it overlays the value.
+    line: u32,
+}
+
+/// The owner row's geometry, or `None` when the owner row does not fit the
+/// panel's content (a window too small) — so the painter and the hit-test both
+/// fail closed there rather than placing a control off the row (§2.2, §5.4).
+///
+/// The cells are measured from the same `uid N / gid N` spelling
+/// [`properties_rows`] draws, so a click lands exactly on the number it edits.
+fn owner_row_geom(
+    props: &Properties,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+) -> Option<OwnerRowGeom> {
+    let bounds = properties_panel_rect(viewport, font, theme);
+    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
+    let layout = FieldLayout::resolve(content, font);
+    let glyph = font.glyph_height().max(1);
+    let row_index = u32::try_from(OWNER_ROW_INDEX).unwrap_or(u32::MAX);
+    let row_top = content
+        .top()
+        .saturating_add(to_i32(ROW_PADDING))
+        .saturating_add(to_i32(layout.line.saturating_mul(row_index)));
+    let content_bottom = content.top().saturating_add(to_i32(content.height));
+    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
+        return None;
+    }
+    let uid_str = props.uid().to_string();
+    let gid_str = props.gid().to_string();
+    let uid_x = layout
+        .value_x
+        .saturating_add(to_i32(font.text_width("uid ")));
+    let uid_w = font.text_width(&uid_str).max(1);
+    let gid_x = uid_x
+        .saturating_add(to_i32(uid_w))
+        .saturating_add(to_i32(font.text_width(" / gid ")));
+    let gid_w = font.text_width(&gid_str).max(1);
+    Some(OwnerRowGeom {
+        cells: [
+            Rect::new(uid_x, row_top, uid_w, glyph),
+            Rect::new(gid_x, row_top, gid_w, glyph),
+        ],
+        line: layout.line,
+    })
+}
+
+/// The owning-id field whose value the editable Properties overlay draws at
+/// window-local pixel `point`, or `None` when the click is not on a value.
+///
+/// This mirrors [`draw_owner_control`]'s placement through the shared
+/// `owner_row_geom`, so a click begins editing exactly the id the user pressed
+/// (§2.2). Only the file manager — and only where the user holds
+/// `CAP_FS_CHOWN` — calls it; a click anywhere but a value returns `None`,
+/// changing nothing (fail closed, §5.4).
+#[must_use]
+pub fn owner_field_at(
+    props: &Properties,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<OwnerField> {
+    let geom = owner_row_geom(props, viewport, font, theme)?;
+    let fields = [OwnerField::Uid, OwnerField::Gid];
+    for (rect, field) in geom.cells.iter().zip(fields) {
+        let right = rect.left().saturating_add(to_i32(rect.width));
+        let bottom = rect.top().saturating_add(to_i32(rect.height));
+        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
+            return Some(field);
+        }
+    }
+    None
+}
+
+/// The width, in pixels, the active owner editor is drawn at — comfortably
+/// wider than a single number so a `u32` id (up to ten digits) is readable
+/// while typed.
+fn owner_editor_width(font: BitmapFont) -> u32 {
+    font.text_width("0000000000").max(1)
+}
+
+/// Draw the inline ownership control over the Properties overlay's owner row:
+/// an accent underline beneath the uid and gid values marking each as
+/// clickable to edit, and — when `editor` names a field being edited — the
+/// active [`TextField`] over that value.
+///
+/// Only the file manager, and only where the launching user holds
+/// `CAP_FS_CHOWN`, calls this: reassigning an owner is a privileged operation
+/// (unlike renaming or a mode change), so the control is offered only where it
+/// can be used, and a session without the capability is never shown a control
+/// it cannot use (§2.24). The trusted read-only picker never calls it (the
+/// write surface is separated by call site, the manager-only write-tool
+/// precedent). Every blit clips, so a window too small simply shows what fits
+/// rather than panicking. It reads only the already-authorised [`Properties`]
+/// and draws — the commit happens in the caller's own capability-checked
+/// [`Browser::set_owner_selected`](crate::Browser::set_owner_selected) tail
+/// over `fs_set_owner`, so this holds no authority (§4, §5.4).
+pub fn draw_owner_control(
+    surface: &mut Surface,
+    props: &Properties,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+    editor: Option<(OwnerField, &TextField)>,
+) {
+    let Some(geom) = owner_row_geom(props, viewport, font, theme) else {
+        return;
+    };
+    let palette = theme.palette();
+    let thickness = Scale::ONE.scale_length(1).max(1);
+    let fields = [OwnerField::Uid, OwnerField::Gid];
+    for (rect, field) in geom.cells.iter().zip(fields) {
+        if let Some((editing, text_field)) = editor {
+            if editing == field {
+                let left = u32::try_from(rect.left()).unwrap_or(0);
+                let avail = viewport.width.saturating_sub(left).max(1);
+                let width = owner_editor_width(font).min(avail);
+                let bounds = Rect::new(rect.left(), rect.top(), width, geom.line);
+                text_field.render(surface, bounds, Scale::ONE, theme, font);
+                continue;
+            }
+        }
+        let underline_y = rect.top().saturating_add(to_i32(rect.height));
+        surface.fill_rect(
+            u32::try_from(rect.left()).unwrap_or(0),
+            u32::try_from(underline_y).unwrap_or(0),
+            rect.width,
+            thickness,
+            palette.accent.into(),
+        );
+    }
 }
 
 /// Saturating `u32` → `i32`.

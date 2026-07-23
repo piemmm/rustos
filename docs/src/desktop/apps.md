@@ -626,9 +626,35 @@ listing carries no ownership, so a success re-reads nothing; the app re-stats
 the node to refresh the panel. The model holds no authority, so the trusted
 picker composes the same `Browser` and never calls the write path.
 
-Drawing the ownership control on the Properties overlay — offered only where
-the user holds `CAP_FS_CHOWN`, so an ordinary session is not shown a control it
-cannot use — is the remaining FM8b app-side increment.
+### The drawn ownership control
+
+The file manager draws an editable ownership control on the Properties
+overlay's owner row, **but only where the launching user holds
+`CAP_FS_CHOWN`** — read once from the kernel-attested `self_origin` at
+start-up, so a session that cannot reassign ownership is never shown a control
+it cannot use (`AGENTS.md` §2.24). `render::draw_owner_control` overlays the
+uid and gid values of the read-only `render::draw_properties` owner row: an
+accent underline marks each value as clickable, and while one is being edited
+the shared `lib/controls` `TextField` is drawn over it. `render::OwnerField`
+and `render::owner_field_at` are the mirror hit-test resolving a click to
+exactly the uid or gid value it edits — measured from the same `uid N / gid N`
+spelling the panel draws, so the drawn control and the hit-test can never
+disagree (§2.2) — and a click off a value resolves nothing (fail closed, §5.4).
+Like the permission control, the write surface is separated by call site (only
+the file manager calls `draw_owner_control`; the trusted read-only picker never
+does), *and* additionally gated on the runtime capability, since owner
+reassignment is privileged.
+
+The `files.app` `Run` binary opens the inline id editor on a click, pre-filled
+with the current id and bounded to a `u32`'s ten digits, live-validates the
+typed value, and on `Enter` commits through `Browser::set_owner_selected` over
+`fs_set_owner` under the user's own identity (the kernel enforces `CAP_FS_CHOWN`
+and the group-membership rule); `Escape` cancels. A non-numeric or
+out-of-range id, or a VFS refusal — including the `PermissionDenied` a caller
+without `CAP_FS_CHOWN` receives — states its reason in the field and keeps the
+editor open, an honest answer rather than a silent or fabricated result
+(`AGENTS.md` §2.24, §5.4). On success the panel is re-stat'd so it reflects the
+new owner.
 
 ## Terminal emulator (`tairix-terminal`)
 

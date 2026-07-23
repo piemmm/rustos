@@ -52,14 +52,17 @@ mod program {
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
-    use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_abi::{
+        CapabilityId, Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
+    };
     use tairix_browse::render::{
-        draw_properties_editable, manager_tool_at, permission_cell_at, render,
+        draw_owner_control, draw_properties_editable, manager_tool_at, owner_field_at,
+        permission_cell_at, render, OwnerField,
     };
     use tairix_browse::{
         suggest_new_dir_name, validate_new_name, Browser, DirectorySource, EntryKind, ManagerTool,
-        Properties, RenameError, ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_WIDTH,
+        OwnerChange, Properties, RenameError, ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
@@ -103,6 +106,15 @@ mod program {
 
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
+
+    /// The maximum digit count the owner/group id editor accepts — a `u32` id
+    /// is at most ten decimal digits, so a longer entry cannot be a valid id.
+    const OWNER_ID_MAX_DIGITS: usize = 10;
+
+    /// The in-field hint shown when a typed owner/group id is not a
+    /// well-formed, assignable `u32` (non-numeric, empty, out of range, or the
+    /// reserved "unchanged" sentinel).
+    const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -184,16 +196,49 @@ mod program {
         }
     }
 
+    /// The open owner-id editor on the Properties overlay: which owning id is
+    /// being edited and the inline [`TextField`] carrying the typed value.
+    ///
+    /// `None` unless the user (who must hold `CAP_FS_CHOWN`) clicked the uid or
+    /// gid value to reassign it; the event loop threads it so the editor state
+    /// and the painted control stay in step, exactly as `rename`/`properties`
+    /// are threaded.
+    struct OwnerEditor {
+        /// Which owning id the editor commits.
+        field: OwnerField,
+        /// The inline numeric editor, pre-filled with the current id.
+        editor: TextField,
+    }
+
+    /// The transient overlay state layered over the browser view, threaded
+    /// through the event loop so the painted overlays and the state they
+    /// reflect stay in step. At most one of `rename`/`properties` is open at a
+    /// time; `owner` is nested inside `properties`.
+    struct Overlays {
+        /// The in-place rename editor, when open (`F2`).
+        rename: Option<TextField>,
+        /// The Properties overlay, when open (`Alt+Enter`).
+        properties: Option<Properties>,
+        /// The inline owner/group id editor on the Properties overlay.
+        owner: Option<OwnerEditor>,
+        /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
+        /// offering the ownership control (read once at start-up).
+        can_chown: bool,
+    }
+
     /// Render the browser into `frame` (the shared window surface) and
     /// present the whole window.
     ///
     /// The full-window damage is deliberate: a listing change repaints
     /// the path bar, the rows, and the selection highlight together, and
     /// the surface is one window — not a screen — so the copy is small.
+    ///
+    /// The ownership control is drawn on the Properties overlay only where the
+    /// launching user holds `CAP_FS_CHOWN` (`overlays.can_chown`), so a session
+    /// that cannot use it is never shown it (§2.24).
     fn present_frame<S, T>(
         browser: &Browser<S>,
-        rename: Option<&TextField>,
-        properties: Option<&Properties>,
+        overlays: &Overlays,
         theme: &Theme,
         client: &mut WindowClient<T>,
         window: u64,
@@ -204,6 +249,10 @@ mod program {
         S: DirectorySource,
         T: WindowTransport,
     {
+        let rename = overlays.rename.as_ref();
+        let properties = overlays.properties.as_ref();
+        let owner = overlays.owner.as_ref();
+        let can_chown = overlays.can_chown;
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         // Render the listing at the theme's logical UI font size (the browser
         // window is not DPI-scaled today, so the logical size is the physical
@@ -226,6 +275,13 @@ mod program {
         // metadata). Rename and Properties are never open together.
         if let Some(props) = properties {
             draw_properties_editable(&mut surface, props, theme, font, viewport);
+            // Reassigning an owner is privileged, so the ownership control is
+            // drawn only where the launching user holds `CAP_FS_CHOWN` — never
+            // shown to a session that cannot use it (§2.24).
+            if can_chown {
+                let active = owner.map(|ed| (ed.field, &ed.editor));
+                draw_owner_control(&mut surface, props, theme, font, viewport, active);
+            }
         }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -247,8 +303,7 @@ mod program {
     /// reveal, and the wheel scroll all agree on the geometry.
     fn apply_event<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
-        properties: &mut Option<Properties>,
+        overlays: &mut Overlays,
         theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
@@ -262,41 +317,28 @@ mod program {
             return (false, true);
         }
 
-        // Properties mode: the overlay owns the window. `Escape` dismisses it;
-        // a primary-button press on one of the permission toggles commits a
-        // mode change; every other event is swallowed so a keystroke never
-        // navigates the view behind it.
-        if properties.is_some() {
-            return match event {
-                WindowEvent::Key {
-                    key:
-                        KeyInput::Pressed {
-                            key: KeyValue::Named(NamedKeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => {
-                    *properties = None;
-                    (true, false)
-                }
-                WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
-                    Some(point) => {
-                        apply_permission_toggle(browser, properties, font, theme, viewport, point)
-                    }
-                    None => (false, false),
-                },
-                _ => (false, false),
-            };
+        // A modal overlay (the Properties overlay, or the owner-id editor
+        // nested in it) owns the window while it is open; handle it and return.
+        if let Some(result) = apply_modal_event(browser, overlays, font, theme, viewport, event) {
+            return result;
         }
 
         // Rename mode: the inline editor owns the keyboard. Its keys never
         // navigate the listing, and non-key events leave the edit untouched.
-        if rename.is_some() {
+        if overlays.rename.is_some() {
             return match event {
                 WindowEvent::Key {
                     key: KeyInput::Pressed { key, modifiers },
                     ..
-                } => apply_rename_key(browser, rename, font, theme, viewport, *key, *modifiers),
+                } => apply_rename_key(
+                    browser,
+                    &mut overlays.rename,
+                    font,
+                    theme,
+                    viewport,
+                    *key,
+                    *modifiers,
+                ),
                 _ => (false, false),
             };
         }
@@ -310,9 +352,17 @@ mod program {
                 // state); every other navigation-mode key is handled by the
                 // shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
-                    begin_properties(browser, properties)
+                    begin_properties(browser, &mut overlays.properties)
                 } else {
-                    apply_nav_key(browser, rename, font, theme, viewport, *key, *modifiers)
+                    apply_nav_key(
+                        browser,
+                        &mut overlays.rename,
+                        font,
+                        theme,
+                        viewport,
+                        *key,
+                        *modifiers,
+                    )
                 }
             }
             // A wheel gesture the desktop forwarded (this window owns its own
@@ -343,7 +393,14 @@ mod program {
                     if let Some(tool) =
                         manager_tool_at(browser, theme, viewport, point, MANAGER_TOOLS)
                     {
-                        return apply_manager_tool(browser, rename, font, theme, viewport, tool);
+                        return apply_manager_tool(
+                            browser,
+                            &mut overlays.rename,
+                            font,
+                            theme,
+                            viewport,
+                            tool,
+                        );
                     }
                 }
                 apply_pointer(browser, font, theme, viewport, *x, *y, *action)
@@ -369,6 +426,64 @@ mod program {
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
         }
+    }
+
+    /// Handle one event while a modal overlay owns the window, returning
+    /// `Some(result)` when it consumed the event and `None` when no modal
+    /// overlay is open (so the caller falls through to rename / navigation).
+    ///
+    /// The owner-id editor is nested inside the Properties overlay, so it is
+    /// checked first: while it is open its keys commit or cancel the ownership
+    /// change. Otherwise the Properties overlay owns the window — `Escape`
+    /// dismisses it and a primary-button press routes to a permission toggle
+    /// or (for a `CAP_FS_CHOWN` holder) the owner control. Every other event
+    /// is swallowed so a keystroke never navigates the view behind the overlay.
+    fn apply_modal_event<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> Option<(bool, bool)> {
+        if overlays.owner.is_some() {
+            return Some(match event {
+                WindowEvent::Key {
+                    key: KeyInput::Pressed { key, modifiers },
+                    ..
+                } => apply_owner_edit_key(
+                    browser,
+                    &mut overlays.properties,
+                    &mut overlays.owner,
+                    *key,
+                    *modifiers,
+                ),
+                _ => (false, false),
+            });
+        }
+        if overlays.properties.is_some() {
+            return Some(match event {
+                WindowEvent::Key {
+                    key:
+                        KeyInput::Pressed {
+                            key: KeyValue::Named(NamedKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                } => {
+                    overlays.properties = None;
+                    (true, false)
+                }
+                WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
+                    Some(point) => {
+                        apply_properties_pointer(browser, overlays, font, theme, viewport, point)
+                    }
+                    None => (false, false),
+                },
+                _ => (false, false),
+            });
+        }
+        None
     }
 
     /// Handle one key press in navigation mode (not renaming, not showing the
@@ -702,6 +817,164 @@ mod program {
         }
     }
 
+    /// Route a primary-button press inside the open Properties overlay: a
+    /// press on one of the nine permission toggles commits a mode change
+    /// (`apply_permission_toggle`); otherwise, where the user holds
+    /// `CAP_FS_CHOWN`, a press on the owner or group value opens the inline id
+    /// editor for that field. A press elsewhere changes nothing (fail closed,
+    /// §5.4).
+    ///
+    /// The permission and owner cells sit on different rows, so a press
+    /// resolves to at most one of them; the permission row is checked first so
+    /// its (capability-free) toggles are never shadowed by the owner control.
+    fn apply_properties_pointer<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        point: Point,
+    ) -> (bool, bool) {
+        if permission_cell_at(viewport, font, theme, point).is_some() {
+            return apply_permission_toggle(
+                browser,
+                &mut overlays.properties,
+                font,
+                theme,
+                viewport,
+                point,
+            );
+        }
+        if overlays.can_chown {
+            if let Some(props) = overlays.properties.as_ref() {
+                if let Some(field) = owner_field_at(props, viewport, font, theme, point) {
+                    return begin_owner_edit(props, &mut overlays.owner, field);
+                }
+            }
+        }
+        (false, false)
+    }
+
+    /// Open the inline id editor over the clicked owner or group value,
+    /// pre-filled with the current id and bounded to a `u32`'s ten digits.
+    ///
+    /// The caller has already confirmed the user holds `CAP_FS_CHOWN` and that
+    /// the press landed on `field`'s value; the kernel still authorises the
+    /// eventual commit under the user's own identity (the editor holds no
+    /// authority).
+    fn begin_owner_edit(
+        props: &Properties,
+        owner: &mut Option<OwnerEditor>,
+        field: OwnerField,
+    ) -> (bool, bool) {
+        let current = match field {
+            OwnerField::Uid => props.uid(),
+            OwnerField::Gid => props.gid(),
+        };
+        let mut editor = TextField::new()
+            .with_text(current.to_string())
+            .with_max_len(OWNER_ID_MAX_DIGITS);
+        editor.set_focused(true);
+        *owner = Some(OwnerEditor { field, editor });
+        (true, false)
+    }
+
+    /// Feed one key to the open owner-id editor. A submit commits the reassigned
+    /// id through `fs_set_owner` (closing the editor and refreshing the panel on
+    /// success, or stating the refusal reason in the field and staying open); a
+    /// cancel abandons the edit; an edit repaints and live-validates the typed
+    /// id so a non-numeric or out-of-range value is flagged as the user types.
+    fn apply_owner_edit_key<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        properties: &mut Option<Properties>,
+        owner: &mut Option<OwnerEditor>,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+    ) -> (bool, bool) {
+        let (editor_key, mods) = to_editor_key(key, modifiers);
+        let action = match owner.as_mut() {
+            Some(ed) => ed.editor.on_key(editor_key, mods),
+            None => return (false, false),
+        };
+        match action {
+            Some(TextAction::Submitted) => commit_owner_edit(browser, properties, owner),
+            Some(TextAction::Cancelled) => {
+                *owner = None;
+                (true, false)
+            }
+            Some(TextAction::Edited) => {
+                if let Some(ed) = owner.as_mut() {
+                    let text = ed.editor.text().to_string();
+                    ed.editor.set_message(owner_id_message(&text));
+                }
+                (true, false)
+            }
+            None => (false, false),
+        }
+    }
+
+    /// Commit the open owner-id editor: parse the typed value as a `u32` id and
+    /// apply it to the selected node through the browser's own
+    /// capability-checked [`Browser::set_owner_selected`] over `fs_set_owner`,
+    /// under the user's own identity. On success the editor closes and the
+    /// panel is re-stat'd to reflect the new owner; a non-numeric/out-of-range
+    /// value or a VFS refusal (including the missing-`CAP_FS_CHOWN` denial)
+    /// states its reason in the field and keeps the editor open — an honest
+    /// answer, never a silent or fabricated result (§2.24, §5.4).
+    fn commit_owner_edit<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        properties: &mut Option<Properties>,
+        owner: &mut Option<OwnerEditor>,
+    ) -> (bool, bool) {
+        let Some(ed) = owner.as_ref() else {
+            return (false, false);
+        };
+        let field = ed.field;
+        let text = ed.editor.text().to_string();
+        let Ok(id) = text.parse::<u32>() else {
+            if let Some(ed) = owner.as_mut() {
+                ed.editor.set_message(Some(String::from(OWNER_ID_HINT)));
+            }
+            return (true, false);
+        };
+        let change = match field {
+            OwnerField::Uid => OwnerChange::user(id),
+            OwnerField::Gid => OwnerChange::group(id),
+        };
+        match browser.set_owner_selected(change, |path, uid, gid| {
+            let ret = tairix_rt::fs_set_owner(path.as_bytes(), uid, gid);
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(errno_from(ret))
+            }
+        }) {
+            Ok(()) => {
+                *owner = None;
+                if let Some(updated) = stat_selected_properties(browser) {
+                    *properties = Some(updated);
+                }
+                (true, false)
+            }
+            Err(err) => {
+                if let Some(ed) = owner.as_mut() {
+                    ed.editor.set_message(Some(String::from(err.message())));
+                }
+                (true, false)
+            }
+        }
+    }
+
+    /// The live-validation message for a typed owner/group id, or `None` when
+    /// the text is a well-formed, assignable `u32` id. It never blocks typing;
+    /// it only flags a value the commit would reject.
+    fn owner_id_message(text: &str) -> Option<String> {
+        match text.parse::<u32>() {
+            Ok(id) if id != tairix_abi::fs::FS_OWNER_UNCHANGED => None,
+            _ => Some(String::from(OWNER_ID_HINT)),
+        }
+    }
+
     /// Feed one key to the open rename editor. A submit commits the new name
     /// through `fs_rename` (closing the editor and following the selection on
     /// success, or stating the refusal reason in the field and staying open);
@@ -928,18 +1201,23 @@ mod program {
         };
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
-        // The in-place rename editor, when open (`F2`). `None` in navigation
-        // mode; the event loop threads it so the editor state and the painted
-        // overlay stay in step.
-        let mut rename: Option<TextField> = None;
-        // The Properties overlay, when open (`Alt+Enter`). `None` otherwise;
-        // the event loop threads it so the read-only panel and the painted
-        // overlay stay in step.
-        let mut properties: Option<Properties> = None;
+        // The transient overlay state (rename / Properties / owner editor),
+        // threaded through the event loop so the painted overlays and the
+        // state they reflect stay in step. `can_chown` is whether the
+        // launching user holds `CAP_FS_CHOWN` — read once from the
+        // kernel-attested self-origin (a refused query fails closed to "not
+        // held") — so the ownership control is offered only where it can be
+        // used (§2.24).
+        let mut overlays = Overlays {
+            rename: None,
+            properties: None,
+            owner: None,
+            can_chown: tairix_rt::self_origin()
+                .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
+        };
         if present_frame(
             &browser,
-            rename.as_ref(),
-            properties.as_ref(),
+            &overlays,
             theme,
             &mut client,
             window,
@@ -966,14 +1244,7 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let (changed, close) = apply_event(
-                &mut browser,
-                &mut rename,
-                &mut properties,
-                theme,
-                &mode,
-                &event,
-            );
+            let (changed, close) = apply_event(&mut browser, &mut overlays, theme, &mode, &event);
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);
@@ -982,8 +1253,7 @@ mod program {
             if changed
                 && present_frame(
                     &browser,
-                    rename.as_ref(),
-                    properties.as_ref(),
+                    &overlays,
                     theme,
                     &mut client,
                     window,

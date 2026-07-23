@@ -37,11 +37,12 @@ FM8a's properties view model, FM8b's drawn read-only properties panel +
 its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
 FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
 FM8b's ownership-change model + its privileged `fs_set_owner`/`CAP_FS_CHOWN`
-kernel primitive,
+kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
+wiring,
 and FM4b's pure context-menu chrome model
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
 FM6b app-side spawn/delegation, the FM7b app-side move/copy/delete verbs,
-FM8b's drawn ownership control, and FM9 are
+and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -679,11 +680,11 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
   higher-bit masking). Docs: `docs/src/desktop/apps.md`, `lib/browse`
   README + rustdoc, `tairix_abi::fs::mode_string` rustdoc.
 
-### FM8b — the drawn properties panel + permission editing `[~]`
+### FM8b — the drawn properties panel + permission editing `[x]`
 
-Split (§2.19) into the drawn read-only panel (done), the drawn permission
-(mode) control (done), the ownership-change model + its privileged kernel
-primitive (done), and the drawn ownership control (still `planned`).
+Done. Split (§2.19) into the drawn read-only panel, the drawn permission (mode)
+control, the ownership-change model + its privileged kernel primitive, and the
+drawn ownership control — all landed.
 
 **The drawn Properties panel is done.** `render::draw_properties` paints the
 done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
@@ -785,13 +786,33 @@ gate), `lib/rt`/`lib/abi-sys` (marshalling), and `lib/browse` (the engine
 model). Docs: `docs/src/architecture/syscalls.md`, `docs/src/security/
 capabilities.md`, `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
 
-The remaining FM8b work (still `planned`):
-
-- **The drawn ownership control** on the Properties overlay: offered only where
-  the user holds `CAP_FS_CHOWN` (so an ordinary session is not shown a control
-  it cannot use, §2.24), committing through the done `Browser::set_owner_selected`
-  over `fs_set_owner`. Host tests: the app-side control and its commit/refuse
-  wiring.
+**The drawn ownership control is done.** The Properties overlay's owner row is
+editable in the file manager, but only where the launching user holds
+`CAP_FS_CHOWN` — read once from the kernel-attested `self_origin` at start-up,
+so a session that cannot reassign ownership is never shown a control it cannot
+use (§2.24). `render::draw_owner_control` overlays the uid and gid values of
+`render::draw_properties`' owner row: an accent underline marks each as
+clickable, and while one is being edited the shared `lib/controls` `TextField`
+is drawn over it. `render::OwnerField` + `render::owner_field_at` are the mirror
+hit-test resolving a click to exactly the uid or gid value it edits (measured
+from the same `uid N / gid N` spelling the panel draws, §2.2; nothing off a
+value, fail closed). Like the permission control, the write surface is
+separated by call site — only the file manager calls `draw_owner_control` (the
+trusted read-only picker never does) — *and* additionally gated on the runtime
+capability, since owner reassignment is privileged. The `files.app` `Run`
+binary opens the inline id editor on a click, pre-filled and bounded to a
+`u32`'s ten digits, live-validates the typed id, and on `Enter` commits through
+`Browser::set_owner_selected` over `fs_set_owner` under the user's own identity
+(the kernel enforces `CAP_FS_CHOWN` and the group-membership rule); `Escape`
+cancels. A non-numeric/out-of-range id or a VFS refusal (including the
+missing-`CAP_FS_CHOWN` denial) states its reason in the field and keeps the
+editor open — an honest answer, never a silent or fabricated result (§2.24,
+§5.4). On success the panel is re-stat'd to reflect the new owner. Host-tested
+in `lib/browse` (`owner_field_at` full-panel scan proving it mirrors exactly
+the two distinct value cells and fails closed off-grid / on a too-small window,
+and `draw_owner_control` painting the affordances and the active editor without
+panicking on a degenerate viewport). Docs: `docs/src/desktop/apps.md`,
+`lib/browse` README + rustdoc.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 
