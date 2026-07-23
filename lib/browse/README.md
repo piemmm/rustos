@@ -147,6 +147,19 @@ can never diverge in navigation semantics, listing policy, or look.
   never a silent wrap. The engine does no I/O and the source is deleted only
   after a cross-volume copy fully succeeds — the app performs every syscall
   under the user's own identity, so the read-only picker never runs it.
+- **New folder** (`mkdir`, `Browser::create_directory`,
+  `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
+  current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`
+  spells the typed name through the one shared `tairix_path::validate_file_name`
+  rule (the same rule the rename editor uses) and refuses a name already taken
+  by a sibling (`MkdirError::Clash`) — both decided before any syscall.
+  `Browser::create_directory` then spells the child path through the shared
+  `spell_child`, applies the create through an injected `fs_mkdir` seam, and on
+  success re-lists and follows the selection onto the new folder (ready for the
+  app's inline rename); a VFS refusal leaves the listing exactly as it was and
+  is surfaced as `MkdirError::Refused`. The create is the caller's own
+  permission-checked `fs_mkdir` (no new capability), so the read-only picker
+  composes the same `Browser` and never calls it.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

@@ -61,6 +61,9 @@
 //! * [`properties`](mod@properties) — the [`Properties`] view model: the
 //!   display-ready summary of a node's `fs_stat` metadata the file manager's
 //!   Properties panel shows (`plans/NEW-FILEMANAGER.md` FM8).
+//! * [`mkdir`](mod@mkdir) — the new-folder [`MkdirError`]/[`validate_new_dir_name`]
+//!   model committed through the `fs_mkdir` seam
+//!   (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`mode_edit`](mod@mode_edit) — the [`ModeError`]/[`validate_mode`]
 //!   permission-change model committed through the `fs_set_mode` seam
 //!   (`plans/NEW-FILEMANAGER.md` `FM8b`).
@@ -93,6 +96,7 @@ pub mod execute;
 pub mod format;
 pub mod icon;
 pub mod layout;
+pub mod mkdir;
 pub mod mode_edit;
 pub mod open_with;
 pub mod properties;
@@ -118,6 +122,7 @@ pub use execute::{
 pub use format::{format_date, format_datetime, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
+pub use mkdir::{validate_new_dir_name, MkdirError};
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
 pub use properties::Properties;

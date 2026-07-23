@@ -24,6 +24,7 @@ use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
+use crate::mkdir::{validate_new_dir_name, MkdirError};
 use crate::mode_edit::{validate_mode, ModeError};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
@@ -402,17 +403,68 @@ impl<S: DirectorySource> Browser<S> {
         Ok(())
     }
 
+    /// Spell the validated absolute path of a child named `name` in the
+    /// current directory — the one child-path spelling every write verb
+    /// (rename, create, launch/open) shares, so a verb can never name a
+    /// different node than the browser shows (§2.2). Surfaces the kernel's own
+    /// [`Errno`] on a spelling failure for each caller to map onto its own
+    /// error type.
+    fn spell_child(&self, name: &str) -> Result<String, Errno> {
+        let mut components = self.components.clone();
+        components.push(String::from(name));
+        crate::vfs::absolute_path(&components)
+    }
+
     /// Spell the absolute path of a child named `name` in the current
     /// directory, mapping a spelling failure onto the matching
     /// [`RenameError`]. A `name` that already passed [`validate_new_name`] can
     /// only fail here if the *whole* path exceeds the kernel's limit.
     fn child_path(&self, name: &str) -> Result<String, RenameError> {
-        let mut components = self.components.clone();
-        components.push(String::from(name));
-        crate::vfs::absolute_path(&components).map_err(|errno| match errno {
+        self.spell_child(name).map_err(|errno| match errno {
             Errno::LengthOutOfRange => RenameError::TooLong,
             _ => RenameError::Invalid,
         })
+    }
+
+    /// Create a new folder named `name` in the current directory, applying the
+    /// create through the injected `mkdir` seam and re-reading the directory on
+    /// success.
+    ///
+    /// `mkdir` receives the new folder's absolute path and performs the
+    /// capability-checked `fs_mkdir` under the caller's own identity — the
+    /// engine adds no authority of its own (the trusted picker composes the
+    /// same [`Browser`] and never calls this). The seam returns the kernel
+    /// boundary's [`Errno`] on refusal.
+    ///
+    /// Transactional and fail closed: the name is validated
+    /// ([`validate_new_dir_name`]) *before* any syscall, and a VFS refusal
+    /// leaves the listing exactly as it was. On success the directory is
+    /// re-listed and the selection follows onto the new folder, ready for the
+    /// inline rename the app opens on it.
+    ///
+    /// # Errors
+    ///
+    /// A [`MkdirError`]: a spelling/clash failure decided before the syscall,
+    /// [`MkdirError::Refused`] when the VFS refuses the create, or
+    /// [`MkdirError::Source`] when the post-create re-list fails.
+    pub fn create_directory<M>(&mut self, name: &str, mkdir: M) -> Result<(), MkdirError>
+    where
+        M: FnOnce(&str) -> Result<(), Errno>,
+    {
+        validate_new_dir_name(name, &self.entries)?;
+
+        let path = self.spell_child(name).map_err(|errno| match errno {
+            Errno::LengthOutOfRange => MkdirError::TooLong,
+            _ => MkdirError::Invalid,
+        })?;
+        mkdir(&path).map_err(MkdirError::Refused)?;
+
+        self.refresh()
+            .map_err(|err| MkdirError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
+        if let Some(index) = self.entries.iter().position(|e| e.name() == name) {
+            self.selected = index;
+        }
+        Ok(())
     }
 
     /// Change the selected node's permission mode to `mode`, applying the
@@ -546,9 +598,7 @@ impl<S: DirectorySource> Browser<S> {
     /// fail-closed [`BrowseError::Source`] — the same outcome descending into
     /// such a name already produces.
     fn child_target_path(&self, name: &str) -> Result<String, BrowseError> {
-        let mut components = self.components.clone();
-        components.push(String::from(name));
-        crate::vfs::absolute_path(&components).map_err(BrowseError::Source)
+        self.spell_child(name).map_err(BrowseError::Source)
     }
 
     /// Climb to the parent directory, listing it.

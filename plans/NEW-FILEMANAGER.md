@@ -32,8 +32,9 @@ drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
 FM8a's properties view model, FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model, and
-FM4b's pure context-menu chrome model
+its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
+FM4b's pure context-menu chrome model, and FM7b's pure new-folder (`fs_mkdir`)
+model
 are done**; the rest of the FM4b drawn chrome (the drawn context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
 spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
@@ -545,6 +546,26 @@ composing it grants nothing and the read-only picker never runs it. Host-tested
 (strategy per op × volume, `VolumeId` round-trip, empty/small/large chunking to
 completion, short-transfer advance, resume, resume/advance overrun, error
 message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+**The pure new-folder model is done** (§2.19 — host-proven ahead of the drawn
+New Folder tool, exactly as the paste-execution model landed ahead of the app
+verbs): the `lib/browse::mkdir` module (`MkdirError` + `validate_new_dir_name`)
+plus `Browser::create_directory`. `validate_new_dir_name` spells the typed name
+through the one shared `lib/path::validate_file_name` rule and refuses a name a
+sibling already carries (`Clash`), both before any syscall. `create_directory`
+spells the new folder's absolute path through the one shared
+`Browser::spell_child` helper the launch/open targets also use (de-duplicated
+from the two former private copies, §2.2), applies it through an injected
+`fs_mkdir` seam under the user's own identity (**no new capability**), then
+re-lists and follows the selection onto the new folder ready for the inline
+rename — transactional and fail closed, a VFS refusal leaving the listing put
+and surfacing as `MkdirError::Refused` (§2.24, §5.4). The read-only picker
+composes the same `Browser` and never calls it. Host-tested in `lib/browse`
+(commit creates + selects the new folder, each invalid-name class refused
+before any syscall, clash refused, VFS refusal surfaced leaving the listing
+put, create in an empty directory needs no selection, failed post-create
+re-list surfaced, `validate_new_dir_name` purity, every `MkdirError` message
+non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 The remaining app-side verbs (still `planned`):
 

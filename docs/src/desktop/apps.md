@@ -409,6 +409,29 @@ succeeded, so a failed copy loses no data. The engine does no I/O; the app
 performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
 launching user's own identity, so the read-only picker never runs it.
 
+### The new-folder model
+
+Creating a folder (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in
+`lib/browse::mkdir` plus `Browser::create_directory`, host-proven ahead of the
+drawn New Folder tool exactly as the rename model landed ahead of its editor.
+`validate_new_dir_name` spells the typed name through the one shared
+`tairix_path::validate_file_name` rule — the same rule the rename editor and
+every path component obey (`AGENTS.md` §2.2) — and refuses a name a sibling
+already carries (`MkdirError::Clash`); both are decided *before* any syscall,
+so a rejected name touches neither the VFS nor the view.
+`Browser::create_directory` spells the new folder's absolute path through the
+same shared `spell_child` the launch/open targets use, so the create can never
+name a different node than the browser shows, then applies it through an
+injected `fs_mkdir` seam under the launching user's own identity — an ordinary
+permission-checked VFS call, no new capability (`AGENTS.md` §4, §5.3). It is
+transactional and fail closed: a VFS refusal (a read-only mount, the user
+cannot write the parent, a lost race) leaves the listing exactly as it was and
+is surfaced as `MkdirError::Refused` for an honest in-UI answer (`AGENTS.md`
+§2.24, §5.4). On success the directory is re-listed and the selection follows
+onto the new folder, ready for the app to open its inline rename editor over
+it. The model reads nothing and holds no authority, so the trusted picker
+composes the same `Browser` and never calls the write path.
+
 ### The properties model
 
 The Properties panel (`plans/NEW-FILEMANAGER.md` FM8) shows one selected node's

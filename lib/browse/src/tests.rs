@@ -1464,6 +1464,164 @@ mod rename_model {
     }
 }
 
+// --- FM7b: the new-folder model (validate + commit a directory create) -----
+//
+// The `mkdir` model runs end to end over the `MockFs` fixture, so every
+// validation, transactional, and fail-closed branch of `create_directory` runs
+// in `cargo test` without a kernel.
+
+mod mkdir_model {
+    use core::cell::RefCell;
+
+    use alloc::string::ToString;
+
+    use tairix_abi::Errno;
+
+    use super::{names, MockFs};
+    use crate::browser::Browser;
+    use crate::entry::Entry;
+    use crate::mkdir::{validate_new_dir_name, MkdirError};
+
+    /// A `MockFs` whose root re-reads as `after` once a commit refreshes it.
+    fn fs_with_refreshed_root(after: alloc::vec::Vec<Entry>) -> MockFs {
+        let mut fs = MockFs::fixture();
+        fs.root_after_refresh = Some(after);
+        fs
+    }
+
+    #[test]
+    fn commit_creates_the_folder_and_follows_the_selection_onto_it() {
+        // Root sorts to [Apps, Storage, System, Users]; create Downloads.
+        let fs = fs_with_refreshed_root(alloc::vec![
+            Entry::directory("Apps"),
+            Entry::directory("Downloads"),
+            Entry::directory("Storage"),
+            Entry::directory("System"),
+            Entry::directory("Users"),
+        ]);
+        let mut browser = Browser::open_root(fs).expect("root");
+
+        let seen = RefCell::new(None);
+        let result = browser.create_directory("Downloads", |path| {
+            *seen.borrow_mut() = Some(path.to_string());
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some("/Downloads".to_string()));
+        // The listing refreshed and the selection landed on the new folder,
+        // ready for the app's inline rename.
+        assert_eq!(
+            names(&browser),
+            ["Apps", "Downloads", "Storage", "System", "Users"]
+        );
+        assert_eq!(browser.selected_name(), Some("Downloads"));
+    }
+
+    #[test]
+    fn an_invalid_name_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        for (name, expected) in [
+            ("", MkdirError::Empty),
+            (".", MkdirError::Reserved),
+            ("..", MkdirError::Reserved),
+            ("a/b", MkdirError::Separator),
+            ("bad:name", MkdirError::Invalid),
+        ] {
+            let result = browser.create_directory(name, |_| {
+                panic!("the VFS must not be touched for an invalid name");
+            });
+            assert_eq!(result, Err(expected));
+        }
+        // The listing is untouched.
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        let result = browser.create_directory("System", |_| {
+            panic!("a clashing create must not reach the VFS");
+        });
+        assert_eq!(result, Err(MkdirError::Clash));
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        let result = browser.create_directory("Downloads", |_| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(MkdirError::Refused(Errno::PermissionDenied)));
+        // No refresh happened: the original listing stands.
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn a_create_in_an_empty_directory_needs_no_selection() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Enter the empty /System/Fonts — nothing is selected there.
+        browser.open_index(2).expect("enter System");
+        browser
+            .open_index(0)
+            .expect("enter the empty Fonts directory");
+        assert_eq!(browser.selected_name(), None);
+
+        let seen = RefCell::new(None);
+        let result = browser.create_directory("New Folder", |path| {
+            *seen.borrow_mut() = Some(path.to_string());
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some("/System/Fonts/New Folder".to_string()));
+    }
+
+    #[test]
+    fn a_failed_post_create_relist_is_surfaced() {
+        let mut fs = MockFs::fixture();
+        // The root lists once (open_root) and then refuses, modelling a
+        // directory that becomes unreadable between the create and the refresh.
+        fs.deny_after_first.insert("/".to_string());
+        let mut browser = Browser::open_root(fs).expect("root");
+        let result = browser.create_directory("Downloads", |_| Ok(()));
+        assert_eq!(result, Err(MkdirError::Source(Errno::PermissionDenied)));
+    }
+
+    #[test]
+    fn validate_new_dir_name_is_pure_and_covers_the_model_rules() {
+        let siblings = alloc::vec![Entry::directory("Apps"), Entry::file("notes.txt")];
+        assert_eq!(validate_new_dir_name("Documents", &siblings), Ok(()));
+        assert_eq!(
+            validate_new_dir_name("Apps", &siblings),
+            Err(MkdirError::Clash)
+        );
+        assert_eq!(
+            validate_new_dir_name("notes.txt", &siblings),
+            Err(MkdirError::Clash)
+        );
+        assert_eq!(validate_new_dir_name("", &siblings), Err(MkdirError::Empty));
+        assert_eq!(
+            validate_new_dir_name("..", &siblings),
+            Err(MkdirError::Reserved)
+        );
+    }
+
+    #[test]
+    fn every_mkdir_error_has_a_nonempty_message() {
+        for err in [
+            MkdirError::Empty,
+            MkdirError::Reserved,
+            MkdirError::Separator,
+            MkdirError::Invalid,
+            MkdirError::TooLong,
+            MkdirError::Clash,
+            MkdirError::Refused(Errno::PermissionDenied),
+            MkdirError::Source(Errno::NotFound),
+        ] {
+            assert!(!err.message().is_empty());
+        }
+    }
+}
+
 // --- FM8b: the permission-edit model (validate + commit a new mode) --------
 //
 // The `mode_edit` model runs end to end over the `MockFs` fixture, so every
