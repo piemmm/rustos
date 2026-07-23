@@ -30,9 +30,16 @@ app **parks** on through its wait-set (every accepted event
 authenticated against the kernel-attested session identity the create
 reply named), and the `WindowClient` calls over `ipc_call`. Keyboard
 navigation drives the browser (`Down`/`Up` select, `Enter` opens a
-directory, `Backspace` goes up); a `CloseRequested` from the desktop
+directory, `Backspace` goes up); `F2` renames the selected item,
+`Ctrl+Shift+N` makes a new folder, `Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut, copy,
+and paste the selection (a same-volume move is one `fs_rename`, a
+cross-volume move copies-then-deletes, a copy streams in bounded chunks),
+`Delete` removes it after a modal confirmation, and `Alt+Enter` shows its
+properties — every write the launching user's own permission-checked VFS
+call, no new capability, stopping fail-loud on `stderr` at the first
+refusal (`AGENTS.md` §2.24, §5.4); a `CloseRequested` from the desktop
 ends the program cleanly; every bring-up refusal exits fail-loud with a
-reserved code and a stated reason on `stderr` (`AGENTS.md` §2.24).
+reserved code and a stated reason on `stderr`.
 
 ## Capabilities
 

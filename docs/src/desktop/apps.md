@@ -537,6 +537,40 @@ shown honestly (`AGENTS.md` §5.4). Only the file manager builds and drives this
 mid-run Cancel for a long removal are a separately-staged follow-up; the verb
 itself is complete.)
 
+### The cut / copy / paste verbs
+
+The clipboard verbs (`plans/NEW-FILEMANAGER.md` FM7b) are wired in the
+`files.app` `Run` binary on top of the FM7a/FM7b engine models above. The app
+holds one `clipboard::Clipboard` in its overlay state, captured by
+**`Ctrl+X`** (a move clipboard) or **`Ctrl+C`** (a copy clipboard) from the
+current selection (`Browser::clipboard(op)`); with nothing selected the verb is
+simply unavailable (fail closed). Because the clipboard holds absolute paths it
+survives navigating to the paste target. **`Ctrl+V`** pastes it into the
+current directory: `plan_paste` validates the plan (a paste of a folder into
+itself is refused outright and nothing is touched), the app stats the
+destination directory for its `execute::VolumeId`, and each item is carried out
+under the launching user's own identity — **no new capability**, every
+operation an ordinary §5.3-checked VFS call the user could perform themselves.
+`execute::paste_strategy` chooses the mechanism per item from the two nodes'
+volume ids: a same-volume move is one `fs_rename`, a cross-volume move is
+copy-then-delete (the source removed through the shared delete path only once
+its copy has fully succeeded), and a copy streams — a single file through an
+`execute::CopyCursor` and a directory (or sealed `.app` bundle) through an
+`execute::CopyWalk`, both driven over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
+with one reused, fixed-size (`FS_IO_MAX`) buffer so a copy of any size holds no
+unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). It is bounded and
+fail closed: the first refused operation stops the paste, states the reason on
+`stderr` naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
+already landed in place rather than a fabricated success (`AGENTS.md` §5.4); the
+view is then re-listed so a partial paste is shown honestly. A completed `Cut`
+clears the clipboard (its sources have moved); a `Copy` keeps it for another
+paste. A destination is created **exclusively**, so a pre-existing item of the
+same name is refused rather than clobbered, and a `Copy` back into an item's own
+directory is refused rather than silently duplicating a file onto itself
+(`AGENTS.md` §2.24) — overwrite/merge confirmation and a drawn progress/cancel
+surface for a long copy are a separately-staged follow-up. Only the file
+manager builds and drives this; the read-only picker never pastes.
+
 ### The new-folder model
 
 Creating a folder (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in
