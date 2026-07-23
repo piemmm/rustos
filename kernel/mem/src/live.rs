@@ -210,6 +210,25 @@ pub trait LiveUserSpace: Send {
         page_count: u64,
     ) -> Result<u64, LiveSpaceError>;
 
+    /// Reserve physical headroom for `page_count` demand-paged anonymous
+    /// pages whose *address space is already reserved* — the stack-growth
+    /// case, where the growth room was carved at spawn and only the
+    /// no-overcommit commitment is taken here, one growth step at a time,
+    /// immediately before the pages are faulted in by [`Self::map_anonymous`].
+    ///
+    /// This is the commitment half of [`Self::reserve_anonymous`] without the
+    /// address-space placement (the stack span owns the address space). The
+    /// committed pages join this space's outstanding tally and are consumed
+    /// as they fault in or released on teardown, exactly like a `mem_map`
+    /// reservation, so stack growth is bounded by the same no-overcommit
+    /// budget and fails closed rather than killing the task on first touch.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] ([`AnonError::OutOfMemory`]) when the
+    /// commitment cannot be admitted without overcommitting.
+    fn commit_anonymous(&mut self, page_count: u64) -> Result<(), LiveSpaceError>;
+
     /// Reserve `page_count` pages of *address space* for a demand-paged,
     /// read-only file mapping at a **kernel-chosen** base, returning that
     /// base. No page table entry is written and no frame is drawn: the
@@ -571,6 +590,14 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     file: Option<AnonWindowMap>,
     space_id: u64,
     scanner: ColdPageScanner,
+    /// Frames this space has committed for demand-paged anonymous memory
+    /// (`mem_map` reservations and per-page stack growth) but which have
+    /// not yet faulted in. Charged against the global no-overcommit budget
+    /// ([`FrameAllocator::commit`]) at reservation, decremented as a page
+    /// becomes resident or its reservation is released, and released in full
+    /// on teardown ([`Drop`]) so a task that dies with untouched
+    /// reservations returns exactly its outstanding commitment to the pool.
+    committed_unbacked: u64,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -654,6 +681,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             file,
             space_id: next_space_id(),
             scanner: ColdPageScanner::new(),
+            committed_unbacked: 0,
         })
     }
 
@@ -682,23 +710,29 @@ where
         // do not borrow `self` while `map_anonymous` borrows `self.space`
         // and `self.physmap`.
         let frames = self.frames;
+        // This is the demand-fault path: every page here was reserved ahead
+        // of time (a `mem_map` reservation, or a stack-growth commit) against
+        // the no-overcommit budget, so it draws through the *committed* path
+        // — guaranteed a frame, and not re-gated by the kernel reserve the
+        // reservation already cleared. An unwound page returns to its
+        // reservation (`free_committed`) so the commitment survives a
+        // page-table-build failure without drifting the counter.
         map_anonymous(
             &mut self.space,
             &self.physmap,
             base_va,
             page_count,
-            // A user anonymous commit draws through the reserve-gated path:
-            // a greedy process fails closed before it can drop the free pool
-            // to or below the kernel reserve and starve the kernel's own
-            // ability to make progress (grow its heap, build page tables).
-            || frames.alloc_user().ok(),
+            || frames.alloc_user_committed().ok(),
             |frame| {
-                // The frame was just unwound from this space; the matching
-                // free of a frame the allocator handed out cannot fail, and
-                // there is no better recovery than dropping it (best-effort, never a panic).
-                let _ = frames.free(frame);
+                let _ = frames.free_committed(frame);
             },
         )?;
+        // The reserved pages are now resident: convert them from
+        // committed-unbacked headroom to real residency (the per-page
+        // `alloc_user_committed` already lowered the global counter; keep the
+        // per-space tally in step so teardown releases exactly the pages that
+        // never faulted in).
+        self.committed_unbacked = self.committed_unbacked.saturating_sub(page_count);
         Ok(base_va)
     }
 
@@ -749,15 +783,30 @@ where
             self.anon.validate(base_va, page_count)?;
         }
         let frames = self.frames;
+        // Count the frames actually reclaimed: a demand-paged region is
+        // sparsely resident, so the resident count tells us how many of its
+        // pages ever faulted in. The remainder are still committed-unbacked
+        // reservations whose physical headroom must be returned to the pool.
+        let mut resident = 0u64;
         unmap_anonymous(
             &mut self.space,
             &self.physmap,
             base_va,
             page_count,
             |frame| {
+                resident = resident.saturating_add(1);
                 let _ = frames.free(frame);
             },
         )?;
+        // Release the reservation for every page that never became resident
+        // (an eager, fully-resident region leaves nothing to release). The
+        // resident pages already left the committed tally when they faulted
+        // in; their frames were just freed above.
+        let unbacked = page_count.saturating_sub(resident);
+        if unbacked > 0 {
+            self.frames.uncommit(unbacked);
+            self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
+        }
         if placed {
             // Validated above, so the release matches; ignore its result.
             let _ = self.anon.release(base_va, page_count);
@@ -766,11 +815,28 @@ where
     }
 
     fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
-        // Pure placement out of this task's heap window: no page-table entry
-        // and no frame until a fault lands. The pages fault in one at a time
-        // through `map_anonymous`, so a large reservation costs nothing but
-        // address space up front.
-        Ok(self.anon.allocate(page_count)?)
+        // No-overcommit admission first: reserve physical headroom for every
+        // page before handing back any address space, so a `mem_map` that
+        // could not later be backed fails *here* as a deterministic
+        // `OutOfMemory` rather than as a fault-time kill on first touch. Only
+        // then place the region out of this task's heap window; no page-table
+        // entry and no frame move until a fault lands, and the pages fault in
+        // one at a time through `map_anonymous`.
+        self.frames
+            .commit(page_count)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        match self.anon.allocate(page_count) {
+            Ok(base_va) => {
+                self.committed_unbacked = self.committed_unbacked.saturating_add(page_count);
+                Ok(base_va)
+            }
+            Err(err) => {
+                // The address-space placement failed: return the commitment
+                // we just made so a failed reservation consumes no headroom.
+                self.frames.uncommit(page_count);
+                Err(err.into())
+            }
+        }
     }
 
     fn reserve_anonymous_at(
@@ -780,14 +846,35 @@ where
     ) -> Result<u64, LiveSpaceError> {
         // A caller-placed (`FIXED`) reservation records no window entry: it
         // is torn down by extent, and the fault path fails closed if a page
-        // it backs collides with resident memory. Validate the shape only.
+        // it backs collides with resident memory. Validate the shape first,
+        // *before* charging the commitment, so a malformed request reserves
+        // nothing.
         if page_count == 0 {
             return Err(LiveSpaceError::Anon(AnonError::ZeroLength));
         }
         if base_va % crate::frame::PAGE_SIZE as u64 != 0 {
             return Err(LiveSpaceError::Anon(AnonError::Unaligned));
         }
+        // No-overcommit admission (see `reserve_anonymous`): reserve physical
+        // headroom for the whole extent up front, so a first touch is
+        // guaranteed a frame.
+        self.frames
+            .commit(page_count)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        self.committed_unbacked = self.committed_unbacked.saturating_add(page_count);
         Ok(base_va)
+    }
+
+    fn commit_anonymous(&mut self, page_count: u64) -> Result<(), LiveSpaceError> {
+        // Commitment only — the address space (the stack span's growth room)
+        // is already reserved. Charge the no-overcommit budget and join the
+        // pages to this space's outstanding tally; `map_anonymous` consumes
+        // them as each faults in, and teardown releases any that never did.
+        self.frames
+            .commit(page_count)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        self.committed_unbacked = self.committed_unbacked.saturating_add(page_count);
+        Ok(())
     }
 
     fn reserve_file_region(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
@@ -1162,6 +1249,17 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         // still holds this root); `self` is being dropped, so no other
         // reference into the tables is live.
         unsafe { self.space.reclaim_table_frames() };
+
+        // 4. Return this space's outstanding no-overcommit reservations —
+        //    the pages a `mem_map`/stack commit reserved physical headroom
+        //    for but which never faulted in — to the global budget. Their
+        //    resident siblings already left the tally as they faulted in and
+        //    had their frames freed in step 2, so a task that dies holding
+        //    untouched reservations leaks no committed headroom.
+        if self.committed_unbacked > 0 {
+            self.frames.uncommit(self.committed_unbacked);
+            self.committed_unbacked = 0;
+        }
     }
 }
 
@@ -1447,6 +1545,60 @@ mod tests {
         assert_eq!(
             live.reserve_anonymous_at(base + 1, 1),
             Err(LiveSpaceError::Anon(AnonError::Unaligned))
+        );
+    }
+
+    #[test]
+    fn reserve_charges_the_commit_budget_and_fault_in_converts_it() {
+        // A `mem_map` reservation reserves physical headroom up front (the
+        // no-overcommit guarantee), a fault-in converts one reserved page to
+        // residency, and unmap returns the still-unbacked reservations — so
+        // the committed tally is exactly balanced across the region's life.
+        let frames = leaked_frames();
+        let (mut live, _sim) = live_over(frames);
+        assert_eq!(frames.committed_frames(), 0);
+
+        let base = live.reserve_anonymous(4).expect("heap window has room");
+        assert_eq!(
+            frames.committed_frames(),
+            4,
+            "reserve charges the whole extent up front"
+        );
+        assert_eq!(live.space().mapped_pages(), 0, "but commits no frame yet");
+
+        // Fault one page in: it converts from reserved-unbacked to resident.
+        live.map_anonymous(base + PAGE_SIZE as u64, 1)
+            .expect("fault in one page");
+        assert_eq!(
+            frames.committed_frames(),
+            3,
+            "one reservation became resident"
+        );
+        assert_eq!(live.space().mapped_pages(), 1);
+
+        // Unmap: the three never-touched reservations are released and the
+        // one resident page is freed, returning the tally to zero.
+        live.unmap_anonymous(base, 4).expect("sparse release");
+        assert_eq!(frames.committed_frames(), 0, "every commitment released");
+        assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    #[test]
+    fn dropping_a_space_releases_its_untouched_reservations() {
+        // A task that dies holding untouched `mem_map` reservations must
+        // return that reserved headroom to the global budget, or a
+        // long-running system would leak commitment on every short-lived
+        // process that reserved but never touched memory.
+        let frames = leaked_frames();
+        {
+            let (mut live, _sim) = live_over(frames);
+            live.reserve_anonymous(5).expect("heap window has room");
+            assert_eq!(frames.committed_frames(), 5);
+        }
+        assert_eq!(
+            frames.committed_frames(),
+            0,
+            "teardown released the untouched reservations"
         );
     }
 

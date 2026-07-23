@@ -161,6 +161,18 @@ where
         .map_err(live_errno)
     }
 
+    fn commit(&self, pages: u64) -> Result<(), Errno> {
+        let cpu = self.arch.current_cpu();
+        // Reserve physical headroom for `pages` demand-paged pages whose
+        // address space already exists (stack growth): commitment only, no
+        // placement. Fails closed as a `Result` when the no-overcommit
+        // budget cannot admit the growth, so the stack-fault path refuses
+        // rather than killing the task on first touch.
+        with_current_live_space(cpu, |space| space.commit_anonymous(pages))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         let page_count = page_count_for(len).map_err(anon_errno)?;
         let cpu = self.arch.current_cpu();
@@ -507,6 +519,7 @@ mod tests {
         anon_maps: Vec<(u64, u64)>,
         anon_placed: Vec<u64>,
         anon_reserves: Vec<u64>,
+        anon_commits: Vec<u64>,
         anon_reserves_at: Vec<(u64, u64)>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
@@ -558,6 +571,14 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(PLACED_BASE),
+            }
+        }
+
+        fn commit_anonymous(&mut self, page_count: u64) -> Result<(), LiveSpaceError> {
+            self.anon_commits.push(page_count);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(()),
             }
         }
 

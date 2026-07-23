@@ -59,6 +59,22 @@ pub trait MemMap: Sync {
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn reserve(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno>;
 
+    /// Reserve physical headroom for `pages` demand-paged anonymous pages
+    /// whose *address space is already reserved* — the stack-growth case,
+    /// where the growth room was carved at spawn and only the no-overcommit
+    /// commitment is taken here, immediately before the pages are backed by
+    /// [`MemMap::map`]. This is the commitment half of [`MemMap::reserve`]
+    /// with no address-space placement, so the no-overcommit refusal for a
+    /// stack that cannot grow surfaces here as a `Result` rather than as a
+    /// fault-time kill.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfMemory`] when the commitment cannot be admitted
+    /// without overcommitting. The default producer ([`NullMemMap`]) returns
+    /// [`Errno::NotImplemented`].
+    fn commit(&self, pages: u64) -> Result<(), Errno>;
+
     /// Map `len` bytes (rounded up to whole pages) of fresh anonymous `RW`
     /// memory into the caller's own address space, returning the base
     /// address of the new region.
@@ -107,6 +123,10 @@ pub struct NullMemMap;
 
 impl MemMap for NullMemMap {
     fn reserve(&self, _len: usize, _flags: MapFlags, _addr_hint: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn commit(&self, _pages: u64) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

@@ -301,6 +301,13 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // below owns the whole footprint and returns it (frames zeroed,
         // tables freed) when the task exits. A returning `Err` maps to a
         // stable errno; the cause is already audited by `spawn_image`.
+        //
+        // The image and stack are *user* pages, so they draw through the
+        // reserve-gated user path: a spawn cannot dip into the kernel
+        // reserve, nor steal a frame a prior `mem_map`/stack reservation is
+        // guaranteeing, so it fails closed under genuine memory pressure
+        // rather than overcommitting. (The child's page-table frames are
+        // kernel structures drawn separately from the reserve above.)
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(
@@ -309,7 +316,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                 &mut space,
                 &physmap,
                 &request,
-                move || frames.alloc().ok(),
+                move || frames.alloc_user().ok(),
             )
         }
         .map_err(spawn_caller_errno)?;

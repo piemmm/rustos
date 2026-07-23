@@ -395,6 +395,15 @@ pub enum FaultLocality {
         /// Distance of the fault past the nearest owned region's end.
         offset: u64,
     },
+    /// The fault landed **inside** a region the task legitimately owns (a
+    /// reserved anonymous mapping, a file mapping, or the committed/growth
+    /// stack span) but could not be resolved — the deterministic
+    /// out-of-memory case, where a demand-paged page could not be backed.
+    /// This is emphatically *not* a wild access: the address is memory the
+    /// task reserved, so it carries no offset to leak and is reported as a
+    /// distinct, honest "in a region you own" locality rather than the
+    /// scaremongering "wild".
+    InRegion,
     /// Genuinely far from every mapping and from the null page — no
     /// meaningful offset to report.
     Wild,
@@ -408,6 +417,7 @@ impl FaultLocality {
             Self::NullPage { .. } => "null_page",
             Self::BelowStackGuard { .. } => "below_stack_guard",
             Self::PastRegion { .. } => "region",
+            Self::InRegion => "in_region",
             Self::Wild => "wild",
         }
     }
@@ -420,7 +430,7 @@ impl FaultLocality {
         match self {
             Self::NullPage { offset } | Self::PastRegion { offset } => Some(offset),
             Self::BelowStackGuard { distance } => Some(distance),
-            Self::Wild => None,
+            Self::InRegion | Self::Wild => None,
         }
     }
 }
@@ -1370,6 +1380,21 @@ impl AddressSpaceRegistry {
             if offset <= NEAR_REGION_WINDOW {
                 return FaultLocality::PastRegion { offset };
             }
+        }
+        // Inside a region the task legitimately owns — a reserved anonymous
+        // mapping, a file mapping, or its stack span — that could not be
+        // resolved. This is the deterministic out-of-memory case (a
+        // demand-paged page that could not be backed), not a wild pointer:
+        // report the honest "in a region you own" locality, never "wild".
+        let in_stack_span = self
+            .stack_spans
+            .get(&task)
+            .is_some_and(|span| va >= span.reserve_base() && va < span.top());
+        if in_stack_span
+            || self.anon_region_covering(task, va)
+            || self.file_region_covering(task, va).is_some()
+        {
+            return FaultLocality::InRegion;
         }
         FaultLocality::Wild
     }
@@ -2780,12 +2805,28 @@ mod tests {
             reg.classify_fault_locality(TaskId(2), 0x10_4000 + NEAR_REGION_WINDOW + 1),
             FaultLocality::Wild
         );
-        // A fault inside the live region is not a run *past* it (the
-        // fault_class describes the miss); locality falls through to wild.
+        // A fault inside the live region is not a run *past* it — it is a
+        // miss inside memory the task owns (the deterministic OOM case), so
+        // the locality is the honest `InRegion`, never the scaremongering
+        // `wild` (which is reserved for addresses outside every mapping).
         assert_eq!(
             reg.classify_fault_locality(TaskId(2), 0x10_2000),
-            FaultLocality::Wild
+            FaultLocality::InRegion
         );
+    }
+
+    #[test]
+    fn classify_fault_locality_names_an_in_region_oom_not_wild() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A reserved anonymous region [0x20_0000, 0x20_4000): a fault inside
+        // it that the resolver could not back (frame exhaustion) is a
+        // deterministic OOM, reported as `in_region` with no leaked offset —
+        // not `wild`, which would falsely read as a stray pointer.
+        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
+        let locality = reg.classify_fault_locality(TaskId(2), 0x20_2000);
+        assert_eq!(locality, FaultLocality::InRegion);
+        assert_eq!(locality.bucket(), "in_region");
+        assert_eq!(locality.offset(), None, "in-region OOM leaks no offset");
     }
 
     #[test]

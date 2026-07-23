@@ -750,11 +750,29 @@ faults; this is what replaced the earlier eager commit, whose single
 `mem_map` syscall zeroed and mapped the whole region in one
 non-preemptible pass and, under a memory-stress workload (`stress --vm`),
 monopolised the CPU for the entire loop and starved every interrupt (the
-serial console stuttered and the machine appeared to lock up). The frame
-draw is reserve-gated (`FrameAllocator::alloc_user`), so a process that
-would starve the kernel's own frame reserve fails closed at the fault (the
-task is killed with the audited `anon` class, deterministic OOM, never a
-panic). `mem_unmap` validates the caller-named `(base, page_count)` against
+serial console stuttered and the machine appeared to lock up).
+
+**Reservation is commit-accounted — TAIRiX does not overcommit anonymous
+memory.** `mem_map` reserves *physical headroom* for every page of the
+region up front, against a global no-overcommit budget
+(`FrameAllocator::commit`, admitted only while `free_frames >=
+reserve_frames + committed_frames + request`). The budget is the usable RAM
+below the kernel reserve, so a reservation the machine cannot actually back
+is refused **here**, deterministically, as `Errno::OutOfMemory` — a `Result`
+the `lib/rt` heap turns into a null `alloc` and `Vec::try_reserve` turns into
+`Err`, so a program that checks its allocations (like `stress --vm`) degrades
+gracefully instead of being killed. A committed page's first touch is then
+**guaranteed** a frame (`FrameAllocator::alloc_user_committed`, which converts
+one reserved page to residency); an *eager* user draw
+(`FrameAllocator::alloc_user`) may never dip below `reserve_frames +
+committed_frames`, so it can never steal a committed page's reserved frame.
+This replaces the earlier overcommit-and-fault-time-kill behaviour, whose
+`stress --vm 4 --vm-bytes 76M` on a ~175 MiB machine surfaced out-of-memory
+only as a fault-time task kill mislabelled a "wild" fault. Stack growth takes
+the same commitment one page at a time (`resolve_stack_fault` commits before
+it backs each growth page), and a reservation's still-unbacked pages are
+returned to the budget on `mem_unmap` and on task teardown, so a task that
+dies holding untouched reservations leaks no headroom. `mem_unmap` validates the caller-named `(base, page_count)` against
 the recorded reservation (fail closed with `NotFound` otherwise), then
 **sparsely** tears down the region — reclaiming and zeroing only the pages
 that actually faulted in and skipping the untouched reservation pages — and
@@ -829,12 +847,16 @@ design note, `AGENTS.md` §15.2):
   bytes — and the frames `mem_unmap` reclaims are zeroed on free, the same
   guarantee [§4](#4-sensitive-region-api) and [§5](#5-dma-buffers) give
   the rest of the crate.
-- **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A frame- or
-  page-table-allocation failure surfaces as `Errno::OutOfMemory`, never a
-  panic — the user-facing projection of the
+- **Deterministic, no-overcommit OOM (`AGENTS.md` §4 / §2.9 / §26.3).** A
+  reservation the machine cannot back surfaces as `Errno::OutOfMemory` at
+  `mem_map`/commit time, never as a fault-time kill and never a panic — the
+  user-facing projection of the
   [§6 result-returning OOM contract](#6-result-returning-oom-contract).
-  There is no per-process quota; a process is bounded only by the physical
-  frames available.
+  Anonymous (and stack-growth) memory is commit-accounted against the usable
+  RAM below the kernel reserve, so a successful reservation is a *promise* the
+  pages can be touched; there is no per-process quota, but the system as a
+  whole does not overcommit, so a first touch of committed memory is
+  guaranteed a frame rather than gambling on availability.
 
 The immutable-`FrozenAddressSpace` snapshot the post-spawn registry stores
 (§3b) is read-only; the production `mem_map` / `mmio_map` producers instead
@@ -1552,9 +1574,17 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
   action. The kill is audited with the stable `TaskFaultKilled` event
   (kernel/core id 4034): task id plus a coarse `fault_class`
-  (`stack_limit` / `stack` / `file_region` / `wild`), never the raw
+  (`stack_limit` / `stack` / `file_region` / `anon` / `wild`) and a
+  non-leaking `fault_offset` locality bucket (`null_page` /
+  `below_stack_guard` / `region` / `in_region` / `wild`), never the raw
   address — so a crashing program
-  is visible on the system log, not only via its `wait` status. A fault
+  is visible on the system log, not only via its `wait` status. A miss
+  *inside* memory the task legitimately reserved (the deterministic
+  out-of-memory case — with commit accounting this should not arise for
+  anonymous memory, since `mem_map` fails first, but the kernel still
+  reports it honestly) is `fault_class=anon`/`file_region`/`stack` with
+  `fault_offset=in_region`, **never** the misleading `wild`, which is
+  reserved for an address outside every mapping. A fault
   with no attributable task falls back to the fatal halt. A page already
   resident (a concurrent resolution) is a benign race and simply resumes.
 - **Release is sparse.** `file_unmap` (no. 76) releases only the exact whole

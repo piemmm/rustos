@@ -3207,6 +3207,12 @@ pub enum CrashFaultBucket {
     /// Genuinely far from every mapping; `fault_offset` is meaningless (`0`).
     #[default]
     Wild = 3,
+    /// Inside a region the task legitimately owns (a reserved anonymous
+    /// mapping, a file mapping, or its stack span) but which could not be
+    /// resolved — the deterministic out-of-memory case. `fault_offset` is
+    /// meaningless (`0`): the address is memory the task reserved, not a
+    /// stray pointer, so no distance is leaked.
+    InRegion = 4,
 }
 
 impl CrashFaultBucket {
@@ -3227,6 +3233,7 @@ impl CrashFaultBucket {
             1 => Ok(Self::BelowStackGuard),
             2 => Ok(Self::PastRegion),
             3 => Ok(Self::Wild),
+            4 => Ok(Self::InRegion),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -4910,10 +4917,11 @@ mod tests {
             CrashFaultBucket::BelowStackGuard,
             CrashFaultBucket::PastRegion,
             CrashFaultBucket::Wild,
+            CrashFaultBucket::InRegion,
         ] {
             assert_eq!(CrashFaultBucket::from_u8(b.as_u8()), Ok(b));
         }
-        assert_eq!(CrashFaultBucket::from_u8(4), Err(Errno::OutOfRange));
+        assert_eq!(CrashFaultBucket::from_u8(5), Err(Errno::OutOfRange));
     }
 
     #[test]

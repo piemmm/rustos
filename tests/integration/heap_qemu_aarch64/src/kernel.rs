@@ -245,6 +245,13 @@ impl MemMap for AnonProducer {
         self.map(len, flags, addr_hint)
     }
 
+    fn commit(&self, _pages: u64) -> Result<(), Errno> {
+        // This proving-ground producer maps eagerly and tracks no
+        // no-overcommit budget, so a headroom reservation is a no-op that
+        // permits the (rare) stack-growth path to proceed to `map`.
+        Ok(())
+    }
+
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         let page_count = page_count_for(len).map_err(anon_to_errno)?;
         // The `tairix-rt` heap always maps with FIXED placement at the next

@@ -2111,6 +2111,20 @@ where
                 return false;
             }
         }
+        // Reserve physical headroom for every growth page this fault will
+        // back, *before* touching any page table: stack growth is subject to
+        // the same no-overcommit budget as `mem_map`, so a stack that cannot
+        // grow because RAM is committed elsewhere fails closed here rather
+        // than being backed and then unable to fault a later page. The
+        // committed pages are consumed one at a time by the `map` calls
+        // below (each `map_anonymous` converts one reservation to
+        // residency), and any still-uncommitted on an early stop are
+        // released when the task is reclaimed. Cannot underflow:
+        // `page_va < committed_base` inside the growth room.
+        let growth_pages = (span.committed_base() - page_va) / PAGE_SIZE as u64;
+        if self.mem_map.commit(growth_pages).is_err() {
+            return false;
+        }
         // Walk downward from the page below the committed base to the
         // faulting page, committing each page as it is backed so the
         // low-water mark is truthful even if the walk stops early.
@@ -2970,6 +2984,9 @@ fn crash_cause_codes(
             (CrashFaultBucket::BelowStackGuard, distance)
         }
         FaultLocality::PastRegion { offset } => (CrashFaultBucket::PastRegion, offset),
+        // A miss inside owned memory (the deterministic OOM case): honest
+        // `in_region`, carrying no offset — never the misleading `wild`.
+        FaultLocality::InRegion => (CrashFaultBucket::InRegion, 0),
         FaultLocality::Wild => (CrashFaultBucket::Wild, 0),
     };
     (class, bucket, offset)
@@ -17822,6 +17839,9 @@ mod tests {
             // can confirm the handler returned the producer's value verbatim.
             Ok(0x5000_0000 | addr_hint)
         }
+        fn commit(&self, _pages: u64) -> Result<(), Errno> {
+            Ok(())
+        }
         fn map(
             &self,
             len: usize,
@@ -18477,12 +18497,18 @@ mod tests {
         assert!(kills[1]
             .fields
             .contains(&(String::from("fault_class"), String::from("wild"))));
-        // Both faults are far from any owned region end, so the locality is
-        // `wild` and no `region_offset` is emitted.
+        // The read miss landed *inside* the task's live file region — a
+        // deterministic in-region out-of-memory/EOF miss, reported as the
+        // honest `in_region` locality, never the misleading `wild`. The wild
+        // write is outside every mapping and is genuinely `wild`. Neither
+        // carries a `region_offset` (both localities are offsetless).
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("fault_offset"), String::from("in_region"))));
+        assert!(kills[1]
+            .fields
+            .contains(&(String::from("fault_offset"), String::from("wild"))));
         for kill in &kills {
-            assert!(kill
-                .fields
-                .contains(&(String::from("fault_offset"), String::from("wild"))));
             assert!(kill.fields.iter().all(|(k, _)| k != "region_offset"));
         }
         // Diagnostics policy: the record never carries the raw address.
@@ -18779,6 +18805,12 @@ mod tests {
             // (`map`); reservation is not exercised here, so it simply
             // delegates.
             self.map(len, flags, addr_hint)
+        }
+        fn commit(&self, _pages: u64) -> Result<(), Errno> {
+            // The no-overcommit headroom reservation always succeeds in this
+            // double; the tests drive the exhaustion path through `map`'s
+            // `fail_from`, which is where the fixtures model frame pressure.
+            Ok(())
         }
         fn map(
             &self,
@@ -19164,6 +19196,9 @@ mod tests {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn reserve_anonymous(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn commit_anonymous(&mut self, _pages: u64) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn reserve_anonymous_at(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {

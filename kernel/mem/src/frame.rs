@@ -246,6 +246,20 @@ struct FrameAllocatorState {
     /// Kernel-internal allocations draw the whole pool. Fixed after
     /// construction.
     reserve_frames: usize,
+    /// Frames of anonymous/stack user memory that are *committed* (a
+    /// successful `mem_map`/stack reservation promised the caller they can
+    /// be touched) but not yet resident (never faulted in). Every such page
+    /// is guaranteed a frame: a commit is admitted only while
+    /// `free_frames >= reserve_frames + committed_frames + request`, and an
+    /// eager user allocation may not draw the free pool below
+    /// `reserve_frames + committed_frames`. The count therefore reserves
+    /// physical headroom *up front* so a first touch of committed memory
+    /// can never fail — the deterministic, no-overcommit refusal happens at
+    /// reservation time (`Errno::OutOfMemory`) instead of as a fault-time
+    /// kill. Decremented as a committed page faults in
+    /// ([`FrameAllocator::alloc_user_committed`]) or its reservation is
+    /// released ([`FrameAllocator::uncommit`]).
+    committed_frames: usize,
 }
 
 impl FrameAllocatorState {
@@ -641,6 +655,7 @@ impl FrameAllocator {
             free_frames: 0,
             usable_frames: 0,
             reserve_frames: 0,
+            committed_frames: 0,
         };
 
         // 5. Build per-frame state from the collected runs: clear the
@@ -724,12 +739,126 @@ impl FrameAllocator {
         let n = 1usize << order;
         let mut g = self.inner.lock();
         // Reserve guard: refuse if the draw would leave the free pool at or
-        // below the reserve. Checked before the carve so a user commit
-        // never even transiently dips into kernel headroom.
-        if g.free_frames < n || g.free_frames - n <= g.reserve_frames {
+        // below the reserve *plus the frames already promised to committed
+        // (reserved-but-not-yet-resident) user pages*. Checked before the
+        // carve so this eager draw never even transiently dips into kernel
+        // headroom or into the physical frames a prior `mem_map`/stack
+        // reservation is guaranteeing — an eager user allocation can never
+        // steal a committed page's frame, so a committed first touch can
+        // never fail closed.
+        let floor = g.reserve_frames.saturating_add(g.committed_frames);
+        if g.free_frames < n || g.free_frames - n <= floor {
             return Err(AllocError::OutOfMemory);
         }
         g.alloc_order(order).map(Frame)
+    }
+
+    /// Reserve physical headroom for `pages` frames of anonymous/stack user
+    /// memory that the caller promises the owning task it may later touch,
+    /// **without** allocating any frame yet.
+    ///
+    /// This is the no-overcommit admission control for demand-paged user
+    /// memory: the reservation is admitted only while the free pool can
+    /// still hold every already-committed page, the kernel reserve, *and*
+    /// this request at once (`free_frames >= reserve_frames +
+    /// committed_frames + pages`). A first touch of a committed page is
+    /// therefore guaranteed a frame ([`Self::alloc_user_committed`]) — the
+    /// out-of-memory refusal happens here, deterministically, as a
+    /// `Result`, never as a fault-time task kill under overcommit.
+    ///
+    /// The caller must later balance every admitted page with exactly one
+    /// of a committed fault-in ([`Self::alloc_user_committed`], as the page
+    /// becomes resident) or an [`Self::uncommit`] (as the reservation is
+    /// released while still unbacked), so the count returns to zero when the
+    /// region is gone.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] when the reservation cannot be admitted
+    /// without breaching the kernel reserve or a prior commitment.
+    pub fn commit(&self, pages: u64) -> Result<(), AllocError> {
+        let Ok(pages) = usize::try_from(pages) else {
+            // More pages than the address width can count is, a fortiori,
+            // more than any machine's RAM: refuse closed.
+            return Err(AllocError::OutOfMemory);
+        };
+        if pages == 0 {
+            return Ok(());
+        }
+        let mut g = self.inner.lock();
+        // Admit only while the free pool still covers the kernel reserve,
+        // every already-committed page, and this request together. Computed
+        // saturating so a momentarily tiny pool can never wrap into a
+        // spurious admission.
+        let floor = g.reserve_frames.saturating_add(g.committed_frames);
+        let headroom = g.free_frames.saturating_sub(floor);
+        if pages > headroom {
+            return Err(AllocError::OutOfMemory);
+        }
+        g.committed_frames += pages;
+        Ok(())
+    }
+
+    /// Release `pages` frames of a commitment made by [`Self::commit`] whose
+    /// pages never became resident (an unbacked reservation being torn
+    /// down). Saturating, so a double release or a miscount can never wrap
+    /// the counter below zero and spuriously admit a later commit.
+    pub fn uncommit(&self, pages: u64) {
+        let pages = usize::try_from(pages).unwrap_or(usize::MAX);
+        let mut g = self.inner.lock();
+        g.committed_frames = g.committed_frames.saturating_sub(pages);
+    }
+
+    /// Allocate a single frame to make a previously [`committed`](Self::commit)
+    /// user page resident (the demand-fault path of anonymous/stack memory).
+    ///
+    /// Unlike [`Self::alloc_user`] this draws the whole pool — the frame was
+    /// already reserved by the matching [`Self::commit`], so the kernel
+    /// reserve is not a barrier here — and it converts one committed page
+    /// from reserved to resident (decrementing the committed count,
+    /// [`Self::committed_frames`]). The
+    /// commitment guarantees a frame is available, so this fails only on a
+    /// genuine invariant breach.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] if no frame is available — which, given a
+    /// matching prior commit, indicates the commitment invariant was
+    /// violated rather than ordinary pressure; the caller still fails closed.
+    pub fn alloc_user_committed(&self) -> Result<Frame, AllocError> {
+        let mut g = self.inner.lock();
+        let frame = g.alloc_order(0).map(Frame)?;
+        g.committed_frames = g.committed_frames.saturating_sub(1);
+        Ok(frame)
+    }
+
+    /// Return a frame taken by [`Self::alloc_user_committed`] **back to its
+    /// committed-but-unbacked reservation** (the fault-in unwind path):
+    /// free the frame and re-charge one committed page, so a first touch
+    /// that allocated a frame but then failed to install its page-table
+    /// entry leaves the commitment intact and the counter undrifted. The
+    /// reservation is released later, exactly once, by [`Self::uncommit`]
+    /// when the region is torn down.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::InvariantViolation`] for a double-free or a free of an
+    /// unowned/misaligned frame (as [`Self::free`]); the commitment is
+    /// re-charged only on a successful free.
+    pub fn free_committed(&self, frame: Frame) -> Result<(), AllocError> {
+        let mut g = self.inner.lock();
+        g.free_order(frame.0, 0)?;
+        g.committed_frames += 1;
+        Ok(())
+    }
+
+    /// Frames currently committed to demand-paged user memory but not yet
+    /// resident — the reserved-but-untouched headroom
+    /// [`Self::commit`]/[`Self::alloc_user_committed`]/[`Self::uncommit`]
+    /// track. A diagnostic and the basis of the no-overcommit gate.
+    #[must_use]
+    pub fn committed_frames(&self) -> FrameCount {
+        self.inner.lock().committed_frames
     }
 
     /// Free a frame previously returned by [`Self::alloc`].
@@ -1265,6 +1394,97 @@ mod tests {
             a.free(f).unwrap();
         }
         assert_eq!(a.free_frames(), usable);
+    }
+
+    #[test]
+    fn commit_reserves_headroom_and_refuses_the_overcommit() {
+        // A commit is admitted only while the free pool can still hold the
+        // kernel reserve, every prior commitment, and this request at once.
+        let usable = 4 * RESERVE_DIVISOR;
+        let m = small_map(usable);
+        let a = FrameAllocator::new(&m).unwrap();
+        let reserve = a.reserve_frames();
+        assert!(reserve > 0, "test needs a non-zero reserve");
+
+        // The whole non-reserve pool may be committed, one page at a time,
+        // but not one page more: the last admissible commit leaves exactly
+        // `reserve` frames of guaranteed kernel headroom uncommitted.
+        let committable = usable - reserve;
+        for _ in 0..committable {
+            a.commit(1).expect("within the no-overcommit budget");
+        }
+        assert_eq!(a.committed_frames(), committable);
+        assert_eq!(
+            a.commit(1).err(),
+            Some(AllocError::OutOfMemory),
+            "one page past the budget is refused as a Result, not overcommitted"
+        );
+        // A single bulk request for the whole budget behaves identically.
+        a.uncommit(committable as u64);
+        assert_eq!(a.committed_frames(), 0);
+        a.commit(committable as u64)
+            .expect("bulk commit of the budget");
+        assert_eq!(
+            a.commit(1).err(),
+            Some(AllocError::OutOfMemory),
+            "the budget is the budget however it is split"
+        );
+    }
+
+    #[test]
+    fn committed_pages_are_guaranteed_a_frame_and_eager_draws_respect_them() {
+        // Every committed page can always be made resident, and an eager
+        // user draw can never steal a committed page's reserved frame.
+        let usable = 4 * RESERVE_DIVISOR;
+        let m = small_map(usable);
+        let a = FrameAllocator::new(&m).unwrap();
+        let reserve = a.reserve_frames();
+        let committable = usable - reserve;
+
+        // Commit the entire non-reserve budget up front.
+        a.commit(committable as u64).expect("commit the budget");
+        // An eager user allocation must now be refused outright: every
+        // non-reserve frame is promised to a committed page.
+        assert_eq!(
+            a.alloc_user().err(),
+            Some(AllocError::OutOfMemory),
+            "an eager draw cannot dip into committed headroom"
+        );
+        // Yet every committed page can still be faulted in — the frames were
+        // reserved for exactly this — until the commitment is exhausted.
+        let mut held = Vec::new();
+        for _ in 0..committable {
+            held.push(
+                a.alloc_user_committed()
+                    .expect("committed page is guaranteed a frame"),
+            );
+        }
+        assert_eq!(
+            a.committed_frames(),
+            0,
+            "every commitment converted to residency"
+        );
+        assert_eq!(a.free_frames(), reserve, "only the kernel reserve remains");
+
+        for f in held {
+            a.free(f).unwrap();
+        }
+        assert_eq!(a.free_frames(), usable);
+    }
+
+    #[test]
+    fn uncommit_is_saturating_and_releases_headroom() {
+        let usable = 4 * RESERVE_DIVISOR;
+        let m = small_map(usable);
+        let a = FrameAllocator::new(&m).unwrap();
+        a.commit(3).expect("commit three");
+        assert_eq!(a.committed_frames(), 3);
+        // An over-release cannot wrap the counter below zero.
+        a.uncommit(10);
+        assert_eq!(a.committed_frames(), 0);
+        // A zero-page commit is a trivial success and changes nothing.
+        a.commit(0).expect("zero commit");
+        assert_eq!(a.committed_frames(), 0);
     }
 
     #[test]
