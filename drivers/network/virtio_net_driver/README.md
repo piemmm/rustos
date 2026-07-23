@@ -40,7 +40,11 @@ owns the shared frame-ring region. Any NIC driver serves any stack build
    busy-polling (`AGENTS.md` §2.23): a doorbell drives the pure
    `NetChannelServer` (`Facts`/`Attach`/`Service`/`Detach`); an interrupt is
    acknowledged (so the line never storms) and, when a region is attached,
-   wakes the stack with a single receive-frames notify.
+   wakes the stack with a single device-work notify. The `Service` doorbell
+   never waits on the device — it moves what is ready and returns (a
+   cross-process reply must never block on hardware) — so a transmit frame is
+   left in flight and its completion reaped on a later `Service` that this
+   shared interrupt drives.
 
 ## Supported hardware
 

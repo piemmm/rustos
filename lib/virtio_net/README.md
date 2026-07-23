@@ -4,8 +4,9 @@ Stability tier: **experimental**.
 
 Arch-neutral, transport-agnostic virtio-net link-layer device logic: the
 bring-up (virtio 1.1 §3.1 init sequence, `VIRTIO_NET_F_MAC`) and the
-frame-ring `tairix_abi::driver::net::Net` service (drain the TX ring into
-the device, harvest delivered frames into the RX ring), written once over
+frame-ring `tairix_abi::driver::net::Net` service (reap completed
+transmissions, drain the TX ring into the device, harvest delivered
+frames into the RX ring), written once over
 the bus-agnostic `lib/virtio` transport so the same source compiles
 against the PCI (x86_64) and MMIO (aarch64, riscv64) backends.
 
@@ -17,6 +18,14 @@ directly: a process crate may depend on `lib/*` but never on another
 (`register`) that wraps this engine is the `tairix-drv-network-virtio-net`
 crate, which re-exports `VirtioNet` from here.
 
+- **The service doorbell never waits on the device.** It moves what is
+  ready and returns, so it is safe to serve across the live process
+  boundary (the driver process answering the stack's `Service` request),
+  where parking would block the reply and the serve loop. A transmit
+  frame is handed to the device and left in flight; its completion is
+  reaped non-blockingly on a later call (the shared device interrupt the
+  completion raises drives it). With one staging pair a further queued
+  frame is held in the ring — back-pressure, never a wait or a drop.
 - `no_std`, allocation-free steady state (staging carved once at `open`).
 - Fail-closed: a runt/oversize/corrupt TX slot is dropped without wedging
   the queue; a device fault is a typed `DriverError`, never a panic
@@ -28,6 +37,7 @@ crate, which re-exports `VirtioNet` from here.
 
 `cargo test -p tairix-virtio-net` drives the engine against the
 `lib/virtio` `MockTransport`/`MockHost`: `open` reads the MAC, TX/RX
-frame-ring round-trips, runt/oversize/corrupt-slot handling, a
-shared-interrupt spurious-wake mid-transmit, `BufferClass::Sensitive`
-scrubbing, and the no-per-packet-DMA steady-state invariant.
+frame-ring round-trips, runt/oversize/corrupt-slot handling, the
+non-blocking transmit doorbell (it never waits on the device) and its
+single-staging back-pressure, `BufferClass::Sensitive` scrubbing, and the
+no-per-packet-DMA steady-state invariant.

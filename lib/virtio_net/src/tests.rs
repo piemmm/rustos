@@ -123,31 +123,32 @@ fn auto_host() -> &'static AutoDrainHost {
     Box::leak(Box::new(AutoDrainHost::new()))
 }
 
-/// `VirtioHost` whose first wakes are spurious: the device drains a
-/// queue only once `skips` wakes have passed — the shared-interrupt
-/// case where receive traffic wakes an in-flight transmit wait before
-/// the transmit chain was consumed.
-struct SpuriousWakeHost {
-    inner: AutoDrainHost,
-    skips: core::cell::Cell<u32>,
+/// A `VirtioHost` whose `notify_wait` panics. The non-blocking `service`
+/// doorbell must never wait on the device — it may run inside a
+/// cross-process `Service` call, where parking would block the reply and
+/// the serve loop — so any `notify_wait` from the service path is a defect
+/// this host turns into a loud test failure.
+struct NoWaitHost {
+    inner: MockHost,
 }
 
-impl DmaHost for SpuriousWakeHost {
+impl DmaHost for NoWaitHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
 }
 
-impl VirtioHost for SpuriousWakeHost {
-    fn notify_wait(&self, queue_index: u16) {
-        let remaining = self.skips.get();
-        if remaining > 0 {
-            // A wake with nothing consumed on this queue.
-            self.skips.set(remaining - 1);
-            return;
-        }
-        self.inner.notify_wait(queue_index);
+impl VirtioHost for NoWaitHost {
+    fn notify_wait(&self, _queue_index: u16) {
+        panic!("service() must never wait on the device");
     }
+}
+
+fn open_net_no_wait(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
+    let host = Box::leak(Box::new(NoWaitHost {
+        inner: MockHost::new(),
+    }));
+    Box::new(VirtioNet::open(t, host).expect("open"))
 }
 
 fn open_net_with_host(
@@ -200,6 +201,18 @@ fn deliver_rx(net: &mut VirtioNet<'static, MockTransport>) {
     let _ = net.transport_mut().drain_queue(wire::RX_QUEUE);
 }
 
+/// Simulate the device consuming a posted transmit chain and raising its
+/// interrupt: drain the TX virtqueue so the completion lands in the used
+/// ring for the next `service` to reap (and the TX shim records the frame).
+/// The non-blocking `service` doorbell hands a frame to the device and
+/// returns without waiting, exactly as it must across the live process
+/// boundary; a later `service` (which the completion's interrupt drives)
+/// reaps the staging. A test therefore drives the device the same way the
+/// hardware would, between the transmitting `service` and the reaping one.
+fn deliver_tx(net: &mut VirtioNet<'static, MockTransport>) {
+    let _ = net.transport_mut().drain_queue(wire::TX_QUEUE);
+}
+
 #[test]
 fn open_reports_device_facts() {
     let (t, _, _) = build_device();
@@ -223,33 +236,67 @@ fn service_transmits_queued_frames_to_the_peer() {
     rings.tx.push(&frame).expect("queue");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    // The doorbell handed the frame to the device without waiting; driving
+    // the device now delivers it to the peer.
+    deliver_tx(&mut net);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0], frame);
 }
 
-/// Regression test: a wake that announces *other* traffic (the shared
-/// device interrupt) must never fault an in-flight transmission — the
-/// driver parks again and completes the send on a later wake.
+/// Regression: the transmit doorbell must never wait on the device. The
+/// device is never driven here (no `drain_queue`), and `notify_wait` would
+/// panic, yet `service` still hands the frame over and returns — the
+/// pre-fix code parked on `notify_wait`, which across the live process
+/// boundary blocks the reply and the whole serve loop.
 #[test]
-fn spurious_wake_mid_transmit_is_parked_through_not_faulted() {
+fn transmit_doorbell_never_waits_on_the_device() {
     let (t, tx_log, _) = build_device();
-    let host = Box::leak(Box::new(SpuriousWakeHost {
-        inner: AutoDrainHost::new(),
-        skips: core::cell::Cell::new(2),
-    }));
-    let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
-    host.inner
-        .install_transport(net.transport_mut() as *mut MockTransport);
+    let mut net = open_net_no_wait(t);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let frame = arp_frame();
     rings.tx.push(&frame).expect("queue");
-    let report = net.service(&mut rings).expect("spurious wakes tolerated");
+    let report = net.service(&mut rings).expect("service never waits");
     assert_eq!(report.transmitted, 1);
+    // Nothing waited: the frame is in flight, not yet consumed by the
+    // (undriven) device.
+    assert!(tx_log.borrow().is_empty());
+    // Driving the device now completes it, and the next doorbell reaps.
+    deliver_tx(&mut net);
+    assert_eq!(tx_log.borrow().len(), 1);
+    let report = net.service(&mut rings).expect("reap");
+    assert_eq!(report, ServiceReport::default());
+}
+
+/// Regression: with a single staging pair, a second queued frame is held
+/// (back-pressure) until the first transmission is reaped — never dropped,
+/// never waited on.
+#[test]
+fn transmit_applies_back_pressure_until_the_prior_frame_is_reaped() {
+    let (t, tx_log, _) = build_device();
+    let mut net = open_net_no_wait(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let first = arp_frame();
+    let mut second = arp_frame();
+    second[0] = 0xAA; // distinguish it from the first
+    rings.tx.push(&first).expect("queue first");
+    rings.tx.push(&second).expect("queue second");
+    // First doorbell: one frame handed over, the second held in the ring.
+    assert_eq!(net.service(&mut rings).expect("service").transmitted, 1);
+    // Second doorbell without draining: the staging is still in flight, so
+    // nothing new is sent (back-pressure) and the frame is not dropped.
+    assert_eq!(net.service(&mut rings).expect("service").transmitted, 0);
+    // Drive the device: the first completes; the next doorbell reaps it and
+    // sends the held second frame.
+    deliver_tx(&mut net);
+    assert_eq!(net.service(&mut rings).expect("service").transmitted, 1);
+    deliver_tx(&mut net);
     let log = tx_log.borrow();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0], frame);
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0], first);
+    assert_eq!(log[1], second);
 }
 
 #[test]
@@ -295,6 +342,7 @@ fn runt_and_oversize_tx_frames_are_dropped_without_wedging() {
     rings.tx.push(&good).expect("queue good");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0], good);
@@ -313,6 +361,7 @@ fn sensitive_class_round_trip_scrubs_staging() {
     rings.tx.push(&tx_frame).expect("queue");
     let report = net.service(&mut rings).expect("service tx");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     assert_eq!(tx_log.borrow()[0], tx_frame);
     let rx_frame = arp_frame();
     rx_queue.borrow_mut().push_back(rx_frame.clone());
@@ -346,9 +395,11 @@ fn steady_state_traffic_allocates_no_new_dma() {
         rings.tx.push(&frame).expect("queue");
         let report = net.service(&mut rings).expect("service");
         assert_eq!(report.transmitted, 1);
-        // The device completes the receive chain and raises its IRQ; the
-        // next doorbell harvests it (the non-blocking `service` never
-        // waits for the delivery itself).
+        // The device consumes the transmit chain and completes the receive
+        // chain, each raising the (shared) IRQ; the next doorbell reaps the
+        // transmit staging and harvests the frame (the non-blocking
+        // `service` never waits for either event itself).
+        deliver_tx(&mut net);
         deliver_rx(&mut net);
         let report = net.service(&mut rings).expect("service rx");
         assert_eq!(report.received, 1);
@@ -384,6 +435,7 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     assert_eq!(tx_log.borrow().len(), 1);
 }
 
@@ -594,6 +646,7 @@ fn tx_checksum_frame_sets_needs_csum_header() {
         .expect("queue");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     // The frame bytes are handed over verbatim; the header carries the
     // device's completion request.
     assert_eq!(tx_log.borrow()[0], frame);
@@ -628,6 +681,7 @@ fn plain_tx_frame_emits_a_zero_header() {
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     rings.tx.push(&arp_frame()).expect("queue");
     net.service(&mut rings).expect("service");
+    deliver_tx(&mut net);
     assert_eq!(hdr_log.borrow()[0], [0u8; wire::HEADER_LEN]);
 }
 
@@ -684,6 +738,7 @@ fn tx_segment_frame_sets_the_gso_header() {
         .expect("queue");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     assert_eq!(tx_log.borrow()[0], frame);
     let hdr = hdr_log.borrow()[0];
     assert_eq!(
@@ -747,5 +802,6 @@ fn tx_checksum_header_suppressed_when_host_csum_not_negotiated() {
     // logs the frame, so the zero-header path is exercised without fault).
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
+    deliver_tx(&mut net);
     assert_eq!(tx_log.borrow()[0], frame);
 }
