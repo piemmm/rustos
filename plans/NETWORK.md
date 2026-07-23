@@ -1228,12 +1228,54 @@ the whole is too large for one change and each leaves the tree working.
   datagram that folds to zero. `virtio_net` therefore never advertises
   `TX_CSUM_UDP`; the rationale is documented in `device_facts`.
 
-#### N7c — mergeable RX buffers, multiqueue, measured budgets `[ ]`
-- `MRG_RXBUF` and multiqueue receive plumbed where the device offers
-  them. Measured budgets recorded in the docs (loopback + QEMU virtio
+#### N7c-1 — mergeable receive buffers (`MRG_RXBUF`) `[x]`
+- `lib/virtio_net` negotiates `VIRTIO_NET_F_MRG_RXBUF` (feature bit 15)
+  when the device offers it. The `virtio_net_hdr` becomes the 12-byte
+  `virtio_net_hdr_mrg_rxbuf` on **both** rings (a transitional device
+  sizes the header uniformly once mergeable is on); the header length is
+  one runtime value used by every transmit and receive chain.
+- The driver posts a **pool** of single-descriptor receive buffers
+  (`RX_POOL` = the RX virtqueue size), not a single outstanding buffer,
+  so a burst the device delivers back to back is captured before the
+  stack next services the ring instead of being dropped past one buffer.
+  This is the concrete N7c receive-side win and applies whether or not
+  mergeable is negotiated.
+- A frame the device merged across several buffers is reassembled in
+  order, reading the buffer count from the first buffer's `num_buffers`:
+  a ≤MTU frame arrives in one buffer (`num_buffers` == 1) and is
+  delivered straight from it (one copy, into the RX ring); a merged frame
+  is assembled through a reassembly buffer bounded to one link frame.
+  Reassembly is total and fail-closed — a zero / out-of-range
+  `num_buffers`, a completion naming no posted buffer, a runt shorter
+  than the header, or an over-link-frame merge drops the frame (never a
+  fabricated one, never an out-of-bounds access) and harvesting
+  continues. Back-pressure holds a reassembled frame in `rx_pending` when
+  the RX ring is full and retries it before the next completion, so
+  nothing the device handed over is dropped and RX-ring order is kept.
+  The negotiated features are one `features: u64` field behind
+  `guest_csum`/`host_csum`/`host_tso`/`mergeable` accessors (no bag of
+  bools).
+- Host-tested: negotiation on/off, single-buffer over the 12-byte header,
+  in-order three-buffer reassembly, the three fail-closed drops, and the
+  pool capturing an `RX_POOL`-frame burst in one service; the existing 29
+  driver tests still pass over the rewritten single-descriptor receive
+  path. Docs: `lib/virtio_net` rustdoc + README, `docs/src/drivers/
+  network.md`, README support-matrix networking paragraph.
+- Guest-driven, so the live QEMU verticals exercise it once QEMU's
+  virtio-net offers `MRG_RXBUF` (its default); the host reassembly tests
+  are the authoritative multi-buffer proof (the N7a/N7b precedent).
+
+#### N7c-2 — multiqueue receive (`VIRTIO_NET_F_MQ` / RSS) `[ ]`
+- Multiqueue receive plumbed where the device offers it: per-queue frame
+  rings, the virtio control-queue (`VIRTIO_NET_CTRL_MQ`) to set the queue
+  pair count, and receive steering. `DeviceFacts.rx_queues` already
+  carries the count. Landed only when a real second consumer needs it.
+
+#### N7c-3 — measured budgets + per-arch offload matrix `[ ]`
+- Measured budgets recorded in the docs (loopback + QEMU virtio
   throughput/latency, hot-path allocations = 0); regressions are §2.16
-  defects. `README.md` support-matrix rows updated (per-arch offload
-  state).
+  defects. `README.md` support-matrix rows record the per-arch offload
+  state.
 
 ### N8 — `ping`/`ss`-class command apps + observability `[ ]`
 - System command apps (`ping` — v4+v6, coreutils/iputils-familiar

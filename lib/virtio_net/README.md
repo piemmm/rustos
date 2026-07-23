@@ -26,6 +26,17 @@ crate, which re-exports `VirtioNet` from here.
   reaped non-blockingly on a later call (the shared device interrupt the
   completion raises drives it). With one staging pair a further queued
   frame is held in the ring — back-pressure, never a wait or a drop.
+- **Negotiated offloads** (each only when the device offers it, so the
+  software path is always the fallback): receive-checksum validation
+  (`VIRTIO_NET_F_GUEST_CSUM`), transmit TCP-checksum
+  (`VIRTIO_NET_F_CSUM`), TCP segmentation (`HOST_TSO4`+`TSO6`), and
+  **mergeable receive buffers** (`VIRTIO_NET_F_MRG_RXBUF`). With
+  mergeable buffers the header is the 12-byte `virtio_net_hdr_mrg_rxbuf`
+  on both rings, the driver posts a *pool* of receive buffers (so a burst
+  is captured before the stack next services the ring, not dropped past a
+  single outstanding buffer), and it reassembles a frame the device split
+  across several buffers — bounded to one link frame, fail-closed on an
+  over-long or corrupt `num_buffers`.
 - `no_std`, allocation-free steady state (staging carved once at `open`).
 - Fail-closed: a runt/oversize/corrupt TX slot is dropped without wedging
   the queue; a device fault is a typed `DriverError`, never a panic
@@ -39,5 +50,9 @@ crate, which re-exports `VirtioNet` from here.
 `lib/virtio` `MockTransport`/`MockHost`: `open` reads the MAC, TX/RX
 frame-ring round-trips, runt/oversize/corrupt-slot handling, the
 non-blocking transmit doorbell (it never waits on the device) and its
-single-staging back-pressure, `BufferClass::Sensitive` scrubbing, and the
-no-per-packet-DMA steady-state invariant.
+single-staging back-pressure, `BufferClass::Sensitive` scrubbing, the
+no-per-packet-DMA steady-state invariant, and mergeable receive buffers
+(negotiation on/off, single-buffer over the 12-byte header, in-order
+multi-buffer reassembly, the three fail-closed drops — zero /
+out-of-range `num_buffers`, over-link-frame merge — and the pool
+capturing a burst in one service).

@@ -25,6 +25,40 @@ const DEVICE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 type Frame = Vec<u8>;
 type TxLog = Rc<RefCell<Vec<Frame>>>;
 type RxQueue = Rc<RefCell<VecDeque<Frame>>>;
+
+/// Serve one posted single-descriptor receive buffer: zero its `hdr_len`
+/// inline `virtio_net_hdr`, let `stamp_header` set any device flags, then
+/// copy one queued frame's bytes after the header. Returns the total
+/// bytes "written" (header + frame), or 0 when no frame is queued (the
+/// buffer completes empty, exactly as a real device leaves an unfilled
+/// posted buffer). This is the single-buffer (`num_buffers` == 1) receive
+/// the driver's common path takes; the multi-buffer merge path has its
+/// own stateful shim.
+fn single_buffer_rx(
+    chain: &mut ChainView<'_>,
+    rx_queue: &RxQueue,
+    hdr_len: usize,
+    stamp_header: impl Fn(&mut [u8]),
+) -> Result<u32, VirtioError> {
+    let Some(buf) = chain.device_write.first_mut() else {
+        return Err(VirtioError::DeviceFault);
+    };
+    if buf.len() < hdr_len {
+        return Err(VirtioError::DeviceFault);
+    }
+    for b in &mut buf[..hdr_len] {
+        *b = 0;
+    }
+    stamp_header(&mut buf[..hdr_len]);
+    let Some(frame) = rx_queue.borrow_mut().pop_front() else {
+        return Ok(0);
+    };
+    let dst = &mut buf[hdr_len..];
+    let copy_len = core::cmp::min(dst.len(), frame.len());
+    dst[..copy_len].copy_from_slice(&frame[..copy_len]);
+    Ok(u32::try_from(hdr_len + copy_len).unwrap_or(u32::MAX))
+}
+
 fn build_device() -> (MockTransport, TxLog, RxQueue) {
     let mut t = MockTransport::new(2, 8, 0, 6);
     t.set_config(0, &DEVICE_MAC);
@@ -36,22 +70,10 @@ fn build_device() -> (MockTransport, TxLog, RxQueue) {
     t.install_shim(
         wire::RX_QUEUE,
         Box::new(move |chain: &mut ChainView<'_>| {
-            if chain.device_write.len() < 2 {
-                return Err(VirtioError::DeviceFault);
-            }
-            // Zero the header (Stage 4 negotiates no offloads).
-            for b in chain.device_write[0].iter_mut() {
-                *b = 0;
-            }
-            let header_len = chain.device_write[0].len();
-            let Some(frame) = rx_for_shim.borrow_mut().pop_front() else {
-                return Ok(0);
-            };
-            let dst = &mut chain.device_write[1];
-            let copy_len = core::cmp::min(dst.len(), frame.len());
-            dst[..copy_len].copy_from_slice(&frame[..copy_len]);
-            let total = header_len + copy_len;
-            Ok(u32::try_from(total).unwrap_or(u32::MAX))
+            // Mergeable receive buffers are not negotiated here, so each
+            // receive buffer is one device-write descriptor holding the
+            // 10-byte inline `virtio_net_hdr` followed by the frame.
+            single_buffer_rx(chain, &rx_for_shim, wire::HEADER_LEN, |_| {})
         }),
     );
     // TX shim (queue 1): copy the device-read frame payload into
@@ -520,28 +542,15 @@ fn build_device_rx_flags(flags: u8, csum_start: u16, csum_offset: u16) -> (MockT
     t.install_shim(
         wire::RX_QUEUE,
         Box::new(move |chain: &mut ChainView<'_>| {
-            if chain.device_write.len() < 2 {
-                return Err(VirtioError::DeviceFault);
-            }
-            let hdr = &mut chain.device_write[0];
-            for b in hdr.iter_mut() {
-                *b = 0;
-            }
-            if hdr.len() >= wire::HEADER_LEN {
+            // GUEST_CSUM (not MRG_RXBUF) is negotiated, so the header is
+            // the 10-byte legacy `virtio_net_hdr`; stamp the device flags.
+            single_buffer_rx(chain, &rx_for_shim, wire::HEADER_LEN, |hdr| {
                 hdr[wire::HDR_FLAGS_OFFSET] = flags;
                 hdr[wire::HDR_CSUM_START_OFFSET..wire::HDR_CSUM_START_OFFSET + 2]
                     .copy_from_slice(&csum_start.to_le_bytes());
                 hdr[wire::HDR_CSUM_OFFSET_OFFSET..wire::HDR_CSUM_OFFSET_OFFSET + 2]
                     .copy_from_slice(&csum_offset.to_le_bytes());
-            }
-            let header_len = hdr.len();
-            let Some(frame) = rx_for_shim.borrow_mut().pop_front() else {
-                return Ok(0);
-            };
-            let dst = &mut chain.device_write[1];
-            let copy_len = core::cmp::min(dst.len(), frame.len());
-            dst[..copy_len].copy_from_slice(&frame[..copy_len]);
-            Ok(u32::try_from(header_len + copy_len).unwrap_or(u32::MAX))
+            })
         }),
     );
     (t, rx_queue)
@@ -618,22 +627,11 @@ fn rx_flags_ignored_when_guest_csum_not_negotiated() {
     t.install_shim(
         wire::RX_QUEUE,
         Box::new(move |chain: &mut ChainView<'_>| {
-            if chain.device_write.len() < 2 {
-                return Err(VirtioError::DeviceFault);
-            }
-            let hdr = &mut chain.device_write[0];
-            for b in hdr.iter_mut() {
-                *b = 0;
-            }
-            hdr[wire::HDR_FLAGS_OFFSET] = wire::VIRTIO_NET_HDR_F_DATA_VALID;
-            let header_len = hdr.len();
-            let Some(frame) = rx_for_shim.borrow_mut().pop_front() else {
-                return Ok(0);
-            };
-            let dst = &mut chain.device_write[1];
-            let copy_len = core::cmp::min(dst.len(), frame.len());
-            dst[..copy_len].copy_from_slice(&frame[..copy_len]);
-            Ok(u32::try_from(header_len + copy_len).unwrap_or(u32::MAX))
+            // Stamp DATA_VALID on the wire; the driver must ignore it
+            // because GUEST_CSUM was not negotiated. Legacy 10-byte header.
+            single_buffer_rx(chain, &rx_for_shim, wire::HEADER_LEN, |hdr| {
+                hdr[wire::HDR_FLAGS_OFFSET] = wire::VIRTIO_NET_HDR_F_DATA_VALID;
+            })
         }),
     );
     let mut net = open_net(t);
@@ -873,4 +871,192 @@ fn tx_checksum_header_suppressed_when_host_csum_not_negotiated() {
     assert_eq!(report.transmitted, 1);
     deliver_tx(&mut net);
     assert_eq!(tx_log.borrow()[0], frame);
+}
+
+// ---------------------------------------------------------------------
+// Mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`).
+// ---------------------------------------------------------------------
+
+/// Build a virtio-net `MockTransport` offering `VIRTIO_NET_F_MRG_RXBUF`
+/// whose RX shim delivers exactly one frame split across `parts`
+/// buffers, stamping `declared` into the first buffer's
+/// `virtio_net_hdr_mrg_rxbuf::num_buffers`. `declared` may differ from
+/// `parts.len()` so a test can exercise a corrupt or out-of-range count.
+///
+/// The mock invokes the shim once per posted receive buffer in avail
+/// (and hence used) order, so buffer 0 carries the 12-byte inline header
+/// plus `parts[0]` and every later buffer carries pure frame bytes — the
+/// on-wire layout a mergeable device produces. Buffers past `parts`
+/// complete empty, exactly as a real device leaves unfilled posted
+/// buffers.
+fn build_device_mergeable(declared: u16, parts: Vec<Vec<u8>>) -> MockTransport {
+    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_MRG_RXBUF, 6);
+    t.set_config(0, &DEVICE_MAC);
+    let call = Rc::new(RefCell::new(0usize));
+    let call_for_shim = Rc::clone(&call);
+    t.install_shim(
+        wire::RX_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let i = {
+                let mut c = call_for_shim.borrow_mut();
+                let i = *c;
+                *c += 1;
+                i
+            };
+            let Some(buf) = chain.device_write.first_mut() else {
+                return Err(VirtioError::DeviceFault);
+            };
+            let Some(part) = parts.get(i) else {
+                // A posted buffer beyond this frame completes empty.
+                return Ok(0);
+            };
+            if i == 0 {
+                if buf.len() < wire::MRG_HEADER_LEN {
+                    return Err(VirtioError::DeviceFault);
+                }
+                for b in &mut buf[..wire::MRG_HEADER_LEN] {
+                    *b = 0;
+                }
+                buf[wire::HDR_NUM_BUFFERS_OFFSET..wire::HDR_NUM_BUFFERS_OFFSET + 2]
+                    .copy_from_slice(&declared.to_le_bytes());
+                let dst = &mut buf[wire::MRG_HEADER_LEN..];
+                let n = core::cmp::min(dst.len(), part.len());
+                dst[..n].copy_from_slice(&part[..n]);
+                Ok(u32::try_from(wire::MRG_HEADER_LEN + n).unwrap_or(u32::MAX))
+            } else {
+                // A trailing buffer carries pure frame bytes (no header).
+                let n = core::cmp::min(buf.len(), part.len());
+                buf[..n].copy_from_slice(&part[..n]);
+                Ok(u32::try_from(n).unwrap_or(u32::MAX))
+            }
+        }),
+    );
+    t
+}
+
+/// Service once and return the single delivered frame, or `None` when
+/// nothing was delivered (a fail-closed drop).
+fn deliver_merged(net: &mut VirtioNet<'static, MockTransport>) -> Option<Vec<u8>> {
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    deliver_rx(net);
+    let report = net.service(&mut rings).expect("service");
+    if report.received == 0 {
+        return None;
+    }
+    assert_eq!(report.received, 1);
+    let mut buf = vec![0u8; 2048];
+    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+    Some(buf[..n].to_vec())
+}
+
+#[test]
+fn mergeable_negotiation_is_accepted_when_offered() {
+    let t = build_device_mergeable(1, vec![arp_frame()]);
+    let net = open_net(t);
+    assert_ne!(
+        net.transport().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
+        0,
+        "the driver must negotiate mergeable buffers when the device offers them"
+    );
+}
+
+#[test]
+fn mergeable_not_negotiated_when_not_offered() {
+    // The default device offers no features: the driver must not claim
+    // mergeable buffers.
+    let (t, _tx, _rx) = build_device();
+    let net = open_net(t);
+    assert_eq!(
+        net.transport().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
+        0
+    );
+}
+
+#[test]
+fn mergeable_single_buffer_frame_round_trips() {
+    // num_buffers == 1 over the 12-byte mergeable header: the common
+    // path, delivered straight from its one buffer.
+    let frame = arp_frame();
+    let t = build_device_mergeable(1, vec![frame.clone()]);
+    let mut net = open_net(t);
+    assert_eq!(deliver_merged(&mut net), Some(frame));
+}
+
+#[test]
+fn mergeable_multi_buffer_frame_is_reassembled_in_order() {
+    // A frame split across three buffers is reassembled into one frame,
+    // in buffer order, exactly reproducing the concatenated bytes.
+    let a = vec![0xA1u8; 40];
+    let b = vec![0xB2u8; 50];
+    let c = vec![0xC3u8; 30];
+    let mut whole = Vec::new();
+    whole.extend_from_slice(&a);
+    whole.extend_from_slice(&b);
+    whole.extend_from_slice(&c);
+    let t = build_device_mergeable(3, vec![a, b, c]);
+    let mut net = open_net(t);
+    assert_eq!(deliver_merged(&mut net), Some(whole));
+}
+
+#[test]
+fn mergeable_zero_num_buffers_is_dropped_fail_closed() {
+    // A corrupt num_buffers of 0 delivers no frame (never a fabricated
+    // one) and the driver keeps flowing.
+    let t = build_device_mergeable(0, vec![arp_frame()]);
+    let mut net = open_net(t);
+    assert_eq!(deliver_merged(&mut net), None);
+}
+
+#[test]
+fn mergeable_out_of_range_num_buffers_is_dropped_fail_closed() {
+    // A num_buffers beyond the pool cannot be reassembled: drop it,
+    // never index a buffer the driver does not own.
+    let t = build_device_mergeable(u16::MAX, vec![arp_frame()]);
+    let mut net = open_net(t);
+    assert_eq!(deliver_merged(&mut net), None);
+}
+
+#[test]
+fn mergeable_over_link_frame_merge_is_dropped_fail_closed() {
+    // Two buffers whose data together exceed one link frame overflow the
+    // reassembly bound and are dropped fail-closed (an over-MTU merge is
+    // refused, never an attacker-sized copy).
+    let first = vec![0x11u8; wire::MAX_FRAME_LEN];
+    let second = vec![0x22u8; 200];
+    let t = build_device_mergeable(2, vec![first, second]);
+    let mut net = open_net(t);
+    assert_eq!(deliver_merged(&mut net), None);
+}
+
+#[test]
+fn receive_pool_captures_a_burst_in_one_service() {
+    // The driver posts a pool of receive buffers, so a burst of frames
+    // the device delivers back to back is captured before the stack next
+    // services the ring — the single-outstanding-buffer predecessor could
+    // hold only one. A wider ring lets the whole burst land in one call.
+    let slots = u32::try_from(RX_POOL).expect("pool fits u32");
+    let geometry = RingGeometry::new(slots, 2048, 2048).expect("geometry");
+    let (t, _tx, rx_queue) = build_device();
+    let mut net = open_net(t);
+    let frames: Vec<Frame> = (0..RX_POOL)
+        .map(|i| tagged_frame(u8::try_from(i).unwrap()))
+        .collect();
+    for f in &frames {
+        rx_queue.borrow_mut().push_back(f.clone());
+    }
+    let mut region = vec![0u8; geometry.region_len()];
+    let mut rings =
+        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    deliver_rx(&mut net);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(
+        report.received, slots,
+        "the whole burst must be captured by the receive pool in one service"
+    );
+    let mut buf = vec![0u8; 2048];
+    for expected in &frames {
+        let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+        assert_eq!(&buf[..n], expected.as_slice());
+    }
 }

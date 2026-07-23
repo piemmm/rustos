@@ -114,7 +114,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`) |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`) |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -170,6 +170,28 @@ transmit staging is sized to the transmit-ring slot capacity (the GSO cap)
 when TSO is negotiated. As elsewhere, the driver does no
 checksum/segmentation arithmetic; `lib/net`'s software segmentation is the
 byte-for-byte conformance oracle (`plans/NETWORK.md` N7b-2).
+
+### Mergeable receive buffers (`MRG_RXBUF`)
+
+When the device offers `VIRTIO_NET_F_MRG_RXBUF` the driver negotiates it.
+Two things change. First, the driver posts a **pool** of receive buffers
+rather than a single outstanding one, so a burst of frames the device
+delivers back to back is captured before the stack next services the ring
+— the single-buffer predecessor could hold only one, and the device
+dropped the rest. Second, the `virtio_net_hdr` grows to the 12-byte
+`virtio_net_hdr_mrg_rxbuf` on **both** rings (a transitional device sizes
+the header uniformly once mergeable is on), and the device may deliver one
+frame across several receive buffers, recording the count in the first
+buffer's `num_buffers`. The driver reassembles those buffers in order into
+one frame: a ≤MTU frame arrives in a single buffer (`num_buffers` == 1)
+and is delivered straight from it, while a merged frame is assembled
+through a reassembly buffer bounded to one link frame. Reassembly is
+fail-closed — a zero or out-of-range `num_buffers`, a completion naming no
+posted buffer, a runt shorter than the header, or a merge that would
+exceed one link frame drops the frame (never a fabricated one, never an
+out-of-bounds access) and the driver keeps flowing. Buffers are re-posted
+to the device once their frame is delivered, and scrubbed first when the
+ring class is sensitive (`plans/NETWORK.md` N7c).
 
 The netstack QEMU verticals
 (`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)
