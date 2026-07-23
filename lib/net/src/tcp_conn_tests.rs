@@ -227,6 +227,71 @@ fn retransmits_a_lost_segment() {
 }
 
 #[test]
+fn cumulative_ack_advances_una_past_a_recovery_rewound_snd_nxt() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+
+    // The server (sender) queues several segments' worth of data and
+    // transmits as far as its window allows; the client receives every
+    // segment, so a cumulative ACK up to the server's `snd_max` is valid.
+    let payload = [0x5au8; 8000];
+    assert!(server.send(&payload).unwrap() > 0);
+    let frames = drain(&mut server, now);
+    assert!(
+        frames.len() >= 2,
+        "the test needs several segments in flight"
+    );
+    for frame in &frames {
+        feed(&mut client, frame, now);
+    }
+    let snd_max = server.snd_max;
+    assert!(
+        server.snd_una.lt(snd_max),
+        "data is outstanding after the burst"
+    );
+
+    // The retransmission timer fires before any ACK returns (model the
+    // ACKs delayed or lost). Go-back-N rewinds `snd_nxt` to `snd_una`, and
+    // the next poll retransmits one segment, so `snd_nxt` now sits strictly
+    // below `snd_max`.
+    let deadline = server
+        .next_deadline()
+        .expect("outstanding data arms the RTO");
+    let after = plus(deadline, ms(1));
+    server.advance(after);
+    let _ = drain(&mut server, after);
+    assert!(
+        server.snd_nxt.lt(snd_max),
+        "the RTO rewound snd_nxt below snd_max"
+    );
+
+    // A cumulative ACK for everything the server sent now arrives. It
+    // acknowledges data in `(snd_nxt, snd_max]` — valid, since the peer
+    // holds it — and must advance `snd_una` and quiesce retransmission.
+    // Before the fix the "acks something not yet sent" guard was bounded by
+    // the rewound `snd_nxt`, so this ACK was challenged and dropped, leaving
+    // `snd_una` frozen and the server retransmitting acknowledged data until
+    // the connection timed out.
+    let ack = client_data(client.snd_nxt.value(), snd_max.value(), b"");
+    feed(&mut server, &ack, after);
+
+    assert_eq!(
+        server.snd_una, snd_max,
+        "the cumulative ACK advances snd_una to snd_max"
+    );
+    assert!(
+        !server.snd_nxt.lt(server.snd_una),
+        "snd_nxt never trails snd_una"
+    );
+    assert_eq!(
+        server.next_deadline(),
+        None,
+        "with nothing outstanding the retransmission timer is disarmed"
+    );
+    assert_eq!(server.reset_reason(), None, "the connection is not aborted");
+}
+
+#[test]
 fn peer_reset_aborts_the_connection() {
     let now = ms(0);
     let (mut client, mut server) = handshake(now);

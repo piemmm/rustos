@@ -232,6 +232,20 @@ impl SysinfoQueryId {
     /// layout oracle.
     pub const CRASH_RECORD: Self = Self(20);
 
+    /// List every managed network interface's live stack counters: one
+    /// [`NetInterfaceCountersRecord`](crate::net_ipc::NetInterfaceCountersRecord)
+    /// per interface (received/transmitted frames and bytes, receive
+    /// drops, transmit resolution drops, and the stack-wide ICMP-error
+    /// and reassembly-eviction defence counters), paged by a
+    /// [`NetInterfaceListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the counters are
+    /// system-wide, cross-principal network metrics — the same class of
+    /// state as [`Self::NET_INTERFACE_STATE`] and the surface a
+    /// defence-in-progress (a SYN flood, a reassembly-eviction storm)
+    /// becomes visible on (`plans/NETWORK.md` §5: `stats:net`).
+    pub const NET_INTERFACE_COUNTERS: Self = Self(21);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -530,6 +544,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::CRASH_RECORD,
         name: "crash_record",
         required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_INTERFACE_COUNTERS,
+        name: "net_interface_stats",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
 ];
@@ -3620,6 +3640,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::NET_INTERFACE_STATE.as_u16(), 18);
         assert_eq!(SysinfoQueryId::IRQ_LIST.as_u16(), 19);
         assert_eq!(SysinfoQueryId::CRASH_RECORD.as_u16(), 20);
+        assert_eq!(SysinfoQueryId::NET_INTERFACE_COUNTERS.as_u16(), 21);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 

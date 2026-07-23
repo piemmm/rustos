@@ -12,7 +12,9 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+use tairix_abi::net_ipc::{
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+};
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
     MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
@@ -240,6 +242,21 @@ pub trait SysinfoSource {
     /// `netstack` service's broker read; the owned list is returned
     /// whole and [`crate::serve`] applies the `offset`/`limit` paging.
     fn net_interface_state(&self, caller: &Caller) -> Result<Vec<NetInterfaceStateRecord>, Errno>;
+
+    /// Return every managed network interface's live stack counters, in
+    /// the stack's stable table order (`plans/NETWORK.md` §5).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: the
+    /// counters are system-wide network metrics — the same boundary as
+    /// [`net_interface_state`](Self::net_interface_state), and the
+    /// surface a defence-in-progress becomes visible on. On a running
+    /// system the source forwards to the `netstack` service's broker
+    /// read; the owned list is returned whole and [`crate::serve`]
+    /// applies the `offset`/`limit` paging.
+    fn net_interface_counters(
+        &self,
+        caller: &Caller,
+    ) -> Result<Vec<NetInterfaceCountersRecord>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

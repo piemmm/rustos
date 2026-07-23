@@ -42,11 +42,14 @@ FM8b's ownership-change model + its privileged `fs_set_owner`/`CAP_FS_CHOWN`
 kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
 wiring,
 FM4b's pure context-menu chrome model,
+FM7b's app-side move/copy verbs (`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut/copy/paste
+driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` /
+copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`)
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
-FM6b app-side spawn/delegation, the FM7b app-side move/copy verbs (and the
-delete progress-indicator + mid-run cancel follow-up),
+FM6b app-side spawn/delegation, the FM7b progress-indicator + mid-run cancel
+follow-up (delete and copy alike),
 and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
@@ -701,18 +704,36 @@ out-of-step fail-closed refusals leaving the walk put, the interruption/resume
 holding its exact position, `from_items` empty/root fail-closed, and the error
 messages). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
+**The app-side move/copy verbs are done.** The `files.app` `Run` binary holds
+one `Clipboard` in its overlay state, captured by `Ctrl+X` (a move clipboard)
+or `Ctrl+C` (a copy clipboard) from the current selection
+(`Browser::clipboard(op)`; nothing selected is a fail-closed no-op), and pasted
+into the current directory by `Ctrl+V`. Paste validates the plan with
+`plan_paste` (a paste of a folder into itself is refused outright, nothing
+touched), stats the destination directory for its `VolumeId`, and carries out
+each item under the user's own identity — **no new capability**:
+`execute::paste_strategy` picks `fs_rename` for a same-volume move,
+copy-then-delete for a cross-volume move (the source removed through the shared
+delete path only after its copy fully succeeds), and a stream for a copy — a
+file through an `execute::CopyCursor` and a directory (or sealed `.app` bundle)
+through an `execute::CopyWalk`, over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
+with one reused, fixed-size (`FS_IO_MAX`) buffer, so a copy of any size holds no
+unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
+the first refused operation stops the paste, states the reason on `stderr`
+naming the item (fail loud, §2.24), and leaves what already landed in place
+(§5.4); the view is re-listed so a partial paste is shown honestly. A completed
+`Cut` clears the clipboard; a `Copy` keeps it. A destination is created
+*exclusively*, so a pre-existing name is refused rather than clobbered, and a
+`Copy` back into an item's own directory is refused rather than duplicated onto
+itself — overwrite/merge confirmation is a deliberate v1 scope boundary, not a
+silent overwrite. Only the write-capable file manager builds and drives this;
+the read-only picker never pastes. The engine models are host-tested in
+`lib/browse` (FM7a + the `execute` model above); the app wiring rides the FM9
+autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
+`run.rs` rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
-- **Move** = `fs_rename` when source and target share a volume (the
-  `PasteStrategy::Rename` case); otherwise
-  **copy-then-delete** (the `PasteStrategy::CopyThenDelete` case). **Copy**
-  streams `fs_read`→`fs_write` driving the landed `execute::CopyCursor` in
-  bounded, interruptible chunks, and a *directory* copy drives the landed
-  `execute::CopyWalk` (§2.23 — no unbounded buffer, no spin),
-  preserving metadata where the target format allows and failing closed with
-  `TimestampOutOfRange`-style honesty on a narrowing target (§21). An error
-  mid-copy stops, reports, and leaves a partial-copy marker rather than a
-  silent half-result (§2.24, §5.4).
 - **Progress + cancel** for long operations (delete and copy alike): a bounded
   progress indicator (`lib/controls` `Progress`) driven by `DeleteWalk::removed`
   / the copy cursor, and a Cancel that stops at the next step/chunk boundary
@@ -723,8 +744,8 @@ The remaining app-side verbs (still `planned`):
   its exact position between steps, so no engine change is needed.
 - Host tests: the engine-side selection ranges, clipboard state machine,
   move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
-  **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
-  move/copy work adds partial-failure recovery over the VFS seams.
+  **done** in `lib/browse` (FM7a + the `execute` model above); the progress/
+  cancel drive interleaving rides the FM9 autoload vertical.
 
 (**New Folder is done** — its drawn manager-only tool + `Ctrl+Shift+N` +
 create-then-inline-rename wiring landed with FM4b's chrome; see that stage.)

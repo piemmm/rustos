@@ -25,13 +25,17 @@
 //! opens a directory, `Backspace` goes up); `F2` renames the selected
 //! item through an inline `lib/controls` text field, committing over
 //! `fs_rename` under the user's own identity (a refusal is stated in the
-//! field, never a silent failure or a fabricated success); `Delete` opens
-//! a modal confirmation `Dialog` and, on confirm, removes the selection
-//! (recursively for a folder) over the user's own `fs_unlink`s, stopping
-//! and stating the reason on `stderr` on the first refusal; a
-//! `CloseRequested` from the desktop closes the window and ends the
-//! program cleanly. Every bring-up refusal exits fail-loud with a
-//! reserved code and a stated reason on `stderr`.
+//! field, never a silent failure or a fabricated success); `Ctrl+X`/`Ctrl+C`
+//! capture the selection onto a cut/copy clipboard and `Ctrl+V` pastes it
+//! into the current directory — a same-volume move is one `fs_rename`, a
+//! cross-volume move is copy-then-delete, and a copy streams the bytes in
+//! bounded chunks, all under the user's own identity and stopping fail-loud
+//! on `stderr` at the first refusal; `Delete` opens a modal confirmation
+//! `Dialog` and, on confirm, removes the selection (recursively for a folder)
+//! over the user's own `fs_unlink`s, stopping and stating the reason on
+//! `stderr` on the first refusal; a `CloseRequested` from the desktop closes
+//! the window and ends the program cleanly. Every bring-up refusal exits
+//! fail-loud with a reserved code and a stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -50,7 +54,7 @@ mod program {
     use alloc::string::{String, ToString};
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::fs::{OpenFlags, FS_MODE_MASK, FS_NAME_MAX};
+    use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
@@ -65,9 +69,11 @@ mod program {
         OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        suggest_new_dir_name, validate_new_name, Browser, DeleteAction, DeletePlan, DeleteWalk,
-        DirectorySource, EntryKind, ManagerTool, OwnerChange, Properties, RenameError,
-        ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Browser, Clipboard,
+        ClipboardOp, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeletePlan, DeleteWalk,
+        DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem, PasteStrategy, Properties,
+        RenameError, ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -244,6 +250,12 @@ mod program {
         owner: Option<OwnerEditor>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
+        /// The held cut/copy clipboard, captured by `Ctrl+X`/`Ctrl+C` and
+        /// consumed by `Ctrl+V`. It lives in the app (not the browser), so it
+        /// survives navigating to the paste target; a `Cut` is cleared once
+        /// pasted (its sources have moved), a `Copy` is kept so it can be
+        /// pasted again elsewhere.
+        clipboard: Option<Clipboard>,
         /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
         /// offering the ownership control (read once at start-up).
         can_chown: bool,
@@ -376,14 +388,16 @@ mod program {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
             } => {
-                // Alt+Enter opens the Properties overlay and Delete opens the
-                // delete confirmation (both need the overlay state); every
-                // other navigation-mode key is handled by the shared
-                // `apply_nav_key`.
+                // Alt+Enter opens the Properties overlay, Delete opens the
+                // delete confirmation, and Ctrl+X/C/V drive the clipboard
+                // verbs (all need the overlay/clipboard state); every other
+                // navigation-mode key is handled by the shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
+                } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
+                    apply_clipboard_verb(browser, &mut overlays.clipboard, verb)
                 } else {
                     apply_nav_key(
                         browser,
@@ -696,12 +710,12 @@ mod program {
                     return;
                 };
                 if walk.expand(&children).is_err() {
-                    report_delete_stop("delete stopped: a folder is nested too deep");
+                    report_error("delete stopped: a folder is nested too deep");
                     return;
                 }
             } else {
                 let Ok(spelled) = tairix_browse::vfs::absolute_path(&path) else {
-                    report_delete_stop("delete stopped: a path could not be spelled");
+                    report_error("delete stopped: a path could not be spelled");
                     return;
                 };
                 let flags = if is_directory {
@@ -714,7 +728,7 @@ mod program {
                     return;
                 }
                 if walk.complete_removal().is_err() {
-                    report_delete_stop("delete stopped: internal walk error");
+                    report_error("delete stopped: internal walk error");
                     return;
                 }
             }
@@ -747,11 +761,338 @@ mod program {
         let _ = tairix_rt::stderr(b"\n");
     }
 
-    /// State on `stderr` that the delete stopped for the given reason — a
-    /// fail-loud diagnosis for a refusal that is not a single item's unlink
-    /// (a too-deep tree, an unspellable path, an internal step error).
-    fn report_delete_stop(reason: &str) {
+    /// State a `files:`-prefixed diagnosis on `stderr` — the one fail-loud
+    /// reporting path a whole-operation refusal (a too-deep tree, an
+    /// unspellable path, a rejected paste plan, an internal step error) states
+    /// its reason through, shared by the delete and paste drives (§2.2).
+    fn report_error(reason: &str) {
         let _ = tairix_rt::stderr(b"files: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
+    }
+
+    /// One clipboard verb the keyboard invokes in navigation mode.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum ClipboardVerb {
+        /// `Ctrl+X`: capture the selection onto a move clipboard.
+        Cut,
+        /// `Ctrl+C`: capture the selection onto a copy clipboard.
+        Copy,
+        /// `Ctrl+V`: paste the held clipboard into the current directory.
+        Paste,
+    }
+
+    /// Classify a navigation-mode key press as a clipboard verb, or `None`.
+    ///
+    /// `Ctrl+X`/`Ctrl+C`/`Ctrl+V` are the verbs; `Shift` must not be held (so
+    /// `Ctrl+Shift+N`'s New Folder is never shadowed). The keyboard delivers
+    /// the letter itself even with `Ctrl` held (the `Ctrl+Shift+N` precedent),
+    /// and either case is accepted.
+    fn clipboard_verb(key: KeyValue, modifiers: AbiModifiers) -> Option<ClipboardVerb> {
+        let KeyValue::Char(ch) = key else {
+            return None;
+        };
+        if !modifiers.ctrl || modifiers.shift || modifiers.alt {
+            return None;
+        }
+        if ch.eq_ignore_ascii_case(&'x') {
+            Some(ClipboardVerb::Cut)
+        } else if ch.eq_ignore_ascii_case(&'c') {
+            Some(ClipboardVerb::Copy)
+        } else if ch.eq_ignore_ascii_case(&'v') {
+            Some(ClipboardVerb::Paste)
+        } else {
+            None
+        }
+    }
+
+    /// Apply a clipboard `verb`.
+    ///
+    /// `Cut`/`Copy` capture the current selection onto `clipboard` (a no-op
+    /// with nothing selected — the verb is simply unavailable, fail closed);
+    /// neither changes the visible view, so both repaint nothing. `Paste`
+    /// carries the held clipboard into the current directory (`run_paste`),
+    /// which re-lists and repaints.
+    fn apply_clipboard_verb<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        clipboard: &mut Option<Clipboard>,
+        verb: ClipboardVerb,
+    ) -> (bool, bool) {
+        match verb {
+            ClipboardVerb::Cut => {
+                if let Some(clip) = browser.clipboard(ClipboardOp::Cut) {
+                    *clipboard = Some(clip);
+                }
+                (false, false)
+            }
+            ClipboardVerb::Copy => {
+                if let Some(clip) = browser.clipboard(ClipboardOp::Copy) {
+                    *clipboard = Some(clip);
+                }
+                (false, false)
+            }
+            ClipboardVerb::Paste => run_paste(browser, clipboard),
+        }
+    }
+
+    /// Carry out a paste of the held `clipboard` into the current directory,
+    /// under the user's own identity (no new capability, no ambient authority
+    /// — every operation is the ordinary §5.3-checked write the user could
+    /// perform themselves).
+    ///
+    /// The plan is validated first ([`plan_paste`]): pasting a folder into
+    /// itself is refused outright (`WouldRecurse`) and nothing is touched. Each
+    /// item's move-vs-copy is then decided by [`paste_strategy`] from the two
+    /// nodes' volume ids — a same-volume move is one `fs_rename`, a cross-volume
+    /// move is copy-then-delete, a copy always streams. It is bounded and fail
+    /// closed: the first refused operation stops the paste, states the reason on
+    /// `stderr` (fail loud, §2.24), and leaves whatever already landed in place
+    /// rather than a fabricated success (§5.4). A completed `Cut` clears the
+    /// clipboard (its sources have moved); a `Copy` keeps it for another paste.
+    fn run_paste<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        clipboard: &mut Option<Clipboard>,
+    ) -> (bool, bool) {
+        let Some(clip) = clipboard.as_ref() else {
+            return (false, false);
+        };
+        let target = browser.components().to_vec();
+        let plan = match plan_paste(clip, &target) {
+            Ok(plan) => plan,
+            Err(err) => {
+                report_error(err.to_string().as_str());
+                return (false, false);
+            }
+        };
+        // The destination directory's volume decides same- vs cross-volume for
+        // every item (a move within a volume is one rename).
+        let Some(dest_stat) = stat_node(&target) else {
+            report_error("paste stopped: the destination folder could not be read");
+            return (false, false);
+        };
+        let dest_vol = VolumeId::new(dest_stat.id.volume);
+        let op = plan.op();
+        // One reused, fixed-size copy buffer (never a per-file allocation, and
+        // never a buffer sized to a file's length): a copy of any size streams
+        // through it a chunk at a time, so memory stays bounded (§2.23, §26.6).
+        let mut buf = alloc::vec![0u8; FS_IO_MAX];
+        for item in plan.items() {
+            if let Err(reason) = run_paste_item(op, item, dest_vol, &mut buf) {
+                report_paste_item_error(item.source(), reason);
+                break;
+            }
+        }
+        // A cut is consumed by the paste; a copy can be pasted again elsewhere.
+        if op == ClipboardOp::Cut {
+            *clipboard = None;
+        }
+        // Re-list so the view shows what actually landed — a partial paste left
+        // by a refusal is shown honestly (§2.24); a failed re-list leaves the
+        // browser where it was (fail closed).
+        let _ = browser.refresh();
+        (true, false)
+    }
+
+    /// Carry out one planned paste item, returning a terse reason on the first
+    /// refusal (the paste stops; nothing after this item runs).
+    ///
+    /// An item whose destination equals its source ([`PasteItem::overwrites_source`])
+    /// is a paste back into the item's own directory: a `Cut` is a no-op (the
+    /// item is already where it would land) and a `Copy` is refused rather than
+    /// silently duplicating a file onto itself (§2.24). Otherwise the source is
+    /// stat'd for its kind and volume, [`paste_strategy`] chooses the mechanism,
+    /// and a pre-existing destination of a *different* name is refused by the
+    /// exclusive create in [`copy_file`] rather than clobbered — a deliberate
+    /// v1 scope boundary (overwrite/merge confirmation is future work), not a
+    /// silent overwrite.
+    fn run_paste_item(
+        op: ClipboardOp,
+        item: &PasteItem,
+        dest_vol: VolumeId,
+        buf: &mut [u8],
+    ) -> Result<(), &'static str> {
+        if item.overwrites_source() {
+            return match op {
+                ClipboardOp::Cut => Ok(()),
+                ClipboardOp::Copy => Err("an item cannot be copied onto itself"),
+            };
+        }
+        let source = item.source();
+        let dest = item.dest();
+        let Some(stat) = stat_node(source) else {
+            return Err("a source item could not be read");
+        };
+        let source_vol = VolumeId::new(stat.id.volume);
+        let is_directory = matches!(stat.kind, FileKind::Directory);
+        match paste_strategy(op, source_vol, dest_vol) {
+            PasteStrategy::Rename => rename_item(source, dest),
+            PasteStrategy::Copy => copy_tree(source, dest, is_directory, buf),
+            PasteStrategy::CopyThenDelete => {
+                copy_tree(source, dest, is_directory, buf)?;
+                delete_source(source, is_directory)
+            }
+        }
+    }
+
+    /// Move a same-volume item with a single `fs_rename` from its source to its
+    /// destination path, under the user's own identity.
+    fn rename_item(source: &[String], dest: &[String]) -> Result<(), &'static str> {
+        let from = spell_path(source)?;
+        let to = spell_path(dest)?;
+        if tairix_rt::fs_rename(from.as_bytes(), to.as_bytes()) != 0 {
+            return Err("a source item could not be moved");
+        }
+        Ok(())
+    }
+
+    /// Copy a source tree to its destination: a single [`copy_file`] for a
+    /// regular file, or a depth-first [`CopyWalk`] for a directory (or sealed
+    /// `.app` bundle), under the user's own identity.
+    fn copy_tree(
+        source: &[String],
+        dest: &[String],
+        is_directory: bool,
+        buf: &mut [u8],
+    ) -> Result<(), &'static str> {
+        if is_directory {
+            copy_dir(source, dest, buf)
+        } else {
+            copy_file(source, dest, buf)
+        }
+    }
+
+    /// Copy one regular file from `source` to `dest` by driving a [`CopyCursor`]
+    /// in fixed `FS_IO_MAX`-sized chunks through the reused `buf`, so the copy
+    /// stays bounded and interruptible (§2.23).
+    ///
+    /// The destination is created exclusively: a pre-existing file of that name
+    /// is refused rather than clobbered (§2.24). A source that ends before its
+    /// stat'd length, or grows past it, fails closed rather than looping or
+    /// wrapping.
+    fn copy_file(source: &[String], dest: &[String], buf: &mut [u8]) -> Result<(), &'static str> {
+        let source_spelled = spell_path(source)?;
+        let dest_spelled = spell_path(dest)?;
+        let reader = tairix_rt::File::open(source_spelled.as_bytes(), OpenFlags::READ)
+            .map_err(|_| "a source file could not be opened")?;
+        let stat = reader
+            .stat()
+            .map_err(|_| "a source file could not be read")?;
+        let create = OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::EXCLUSIVE);
+        let writer = tairix_rt::File::open(dest_spelled.as_bytes(), create)
+            .map_err(|_| "a destination of that name already exists")?;
+        let mut cursor = CopyCursor::new(stat.size);
+        while let Some(chunk) = cursor.next_chunk() {
+            let want = usize::try_from(chunk.len()).map_err(|_| "a copy chunk was too large")?;
+            let read = reader
+                .read_at(chunk.offset(), &mut buf[..want])
+                .map_err(|_| "a source file could not be read")?;
+            if read == 0 {
+                return Err("a source file ended early");
+            }
+            let wrote = writer
+                .write_at(chunk.offset(), &buf[..read])
+                .map_err(|_| "a destination file could not be written")?;
+            if wrote != read {
+                return Err("a destination file could not be fully written");
+            }
+            let carried = u64::try_from(read).map_err(|_| "a copy transfer was too large")?;
+            cursor
+                .advance(carried)
+                .map_err(|_| "a source file changed during the copy")?;
+        }
+        Ok(())
+    }
+
+    /// Copy a directory tree by driving a [`CopyWalk`] to completion: create
+    /// each destination directory before its contents (`fs_mkdir`), read each
+    /// source directory (`fs_readdir`, the same shared decode the browser and
+    /// the delete walk use), and stream each leaf file — depth-first, bounded,
+    /// under the user's own identity.
+    fn copy_dir(source: &[String], dest: &[String], buf: &mut [u8]) -> Result<(), &'static str> {
+        let Some(mut walk) =
+            CopyWalk::from_items(alloc::vec![(source.to_vec(), dest.to_vec(), true)])
+        else {
+            return Err("nothing to copy");
+        };
+        loop {
+            // Copy the current step out so the walk is free to be mutated.
+            enum Step {
+                MakeDir(alloc::vec::Vec<String>),
+                List(alloc::vec::Vec<String>),
+                CopyFile(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
+            }
+            let step = match walk.next_action() {
+                None => return Ok(()),
+                Some(CopyAction::MakeDir { dest }) => Step::MakeDir(dest.to_vec()),
+                Some(CopyAction::List { source }) => Step::List(source.to_vec()),
+                Some(CopyAction::CopyFile { source, dest }) => {
+                    Step::CopyFile(source.to_vec(), dest.to_vec())
+                }
+            };
+            match step {
+                Step::MakeDir(dest) => {
+                    let spelled = spell_path(&dest)?;
+                    if tairix_rt::fs_mkdir(spelled.as_bytes()) != 0 {
+                        return Err("a destination folder could not be created");
+                    }
+                    walk.created().map_err(|_| "internal copy step error")?;
+                }
+                Step::List(source) => {
+                    let children =
+                        read_children(&source).map_err(|_| "a folder could not be read")?;
+                    walk.expand(&children)
+                        .map_err(|_| "a folder is nested too deep")?;
+                }
+                Step::CopyFile(source, dest) => {
+                    copy_file(&source, &dest, buf)?;
+                    walk.copied_file().map_err(|_| "internal copy step error")?;
+                }
+            }
+        }
+    }
+
+    /// Remove a cross-volume move's source once its copy has fully succeeded,
+    /// by driving the shared delete path (`run_delete`) over a one-item
+    /// [`DeletePlan`] under the user's own identity. Any refusal is stated on
+    /// `stderr` by `run_delete` itself, so a copied-but-not-removed source is
+    /// reported, never silently left (§2.24).
+    fn delete_source(source: &[String], is_directory: bool) -> Result<(), &'static str> {
+        let Some(plan) = DeletePlan::new(alloc::vec![(source.to_vec(), is_directory)]) else {
+            return Err("a moved source could not be removed");
+        };
+        run_delete(&plan);
+        Ok(())
+    }
+
+    /// Read a node's structural metadata (kind + size + volume id) through a
+    /// resolve-only handle — opened with neither read nor write — so a path of
+    /// unknown kind (file or directory) can be stat'd without guessing a flag,
+    /// under the user's own identity. `None` when the path cannot be spelled or
+    /// the node cannot be stat'd (the caller reports, fail closed).
+    fn stat_node(path: &[String]) -> Option<tairix_abi::fs::FileStat> {
+        let spelled = tairix_browse::vfs::absolute_path(path).ok()?;
+        tairix_rt::File::open(spelled.as_bytes(), OpenFlags::empty())
+            .and_then(|file| file.stat())
+            .ok()
+    }
+
+    /// Spell a root-first component path to its validated absolute string, the
+    /// one shared spelling the browser navigates with, or a terse reason.
+    fn spell_path(path: &[String]) -> Result<String, &'static str> {
+        tairix_browse::vfs::absolute_path(path).map_err(|_| "a path could not be spelled")
+    }
+
+    /// State on `stderr` that the paste stopped while handling `source` — an
+    /// honest, fail-loud diagnosis naming the item and the reason, never a
+    /// silent failure or a fabricated success (§2.24). Carries no path prefix
+    /// beyond the leaf name the user already sees.
+    fn report_paste_item_error(source: &[String], reason: &str) {
+        let name = source.last().map_or("", String::as_str);
+        let _ = tairix_rt::stderr(b"files: could not paste ");
+        let _ = tairix_rt::stderr(name.as_bytes());
+        let _ = tairix_rt::stderr(b": ");
         let _ = tairix_rt::stderr(reason.as_bytes());
         let _ = tairix_rt::stderr(b"\n");
     }
@@ -1341,6 +1682,25 @@ mod program {
         Ok((event_endpoint, set))
     }
 
+    /// The transient overlay/clipboard state the event loop threads, all
+    /// closed at start-up.
+    ///
+    /// `can_chown` is whether the launching user holds `CAP_FS_CHOWN` — read
+    /// once from the kernel-attested self-origin (a refused query fails closed
+    /// to "not held") — so the ownership control is offered only where it can
+    /// be used (§2.24).
+    fn initial_overlays() -> Overlays {
+        Overlays {
+            rename: None,
+            properties: None,
+            owner: None,
+            delete: None,
+            clipboard: None,
+            can_chown: tairix_rt::self_origin()
+                .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
+        }
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
@@ -1409,21 +1769,7 @@ mod program {
         };
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
-        // The transient overlay state (rename / Properties / owner editor),
-        // threaded through the event loop so the painted overlays and the
-        // state they reflect stay in step. `can_chown` is whether the
-        // launching user holds `CAP_FS_CHOWN` — read once from the
-        // kernel-attested self-origin (a refused query fails closed to "not
-        // held") — so the ownership control is offered only where it can be
-        // used (§2.24).
-        let mut overlays = Overlays {
-            rename: None,
-            properties: None,
-            owner: None,
-            delete: None,
-            can_chown: tairix_rt::self_origin()
-                .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
-        };
+        let mut overlays = initial_overlays();
         if present_frame(
             &browser,
             &overlays,

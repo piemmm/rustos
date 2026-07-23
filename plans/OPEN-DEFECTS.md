@@ -602,6 +602,29 @@ is arch-neutral (`§2.2`); no per-arch change was needed. Receive staging
 stays single-buffered (re-posted each frame) — a separate concern the stack
 rides out via TCP retransmit, out of scope for this transmit-egress fix.
 
+**Definitive crawl cause — a rejected cumulative ACK during loss recovery
+(`lib/net` `tcp_conn.rs`), the real reason the vertical timed out.** The
+transmit-pipelining fix above was necessary but did not stop the crawl: with
+the peer injecting guest→peer loss, the guest echo server enters
+retransmission, and both go-back-N on RTO (`advance`, `snd_nxt = snd_una`)
+and fast retransmit rewind the next-to-send cursor `snd_nxt` back below the
+true transmit high-water `snd_max`. `process_ack` then bounded its
+"ACK acknowledges something not yet sent" challenge (RFC 5961 §5) on the
+*rewound* `snd_nxt` instead of `snd_max`, so a valid cumulative ACK covering
+`(snd_nxt, snd_max]` — data the peer demonstrably held — was challenged and
+dropped without advancing `snd_una`. `snd_una` froze, the sender
+retransmitted already-acknowledged bytes every (doubling) RTO, and the
+connection eventually hit the user timeout and RST. Fixed by gating that
+challenge on `snd_max` (the highest sequence ever transmitted, which
+`Plan::Retransmit` never advances) and, when a cumulative ACK advances
+`snd_una` past the rewound cursor, carrying `snd_nxt` forward to preserve
+`snd_una <= snd_nxt`. Regression guard (host, `lib/net`):
+`cumulative_ack_advances_una_past_a_recovery_rewound_snd_nxt` establishes a
+connection, bursts several segments, fires the RTO to rewind `snd_nxt`, then
+delivers a cumulative ACK up to `snd_max` and asserts `snd_una` advances and
+the RTO disarms (it froze before the fix). Arch-neutral — every port shares
+`lib/net`.
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

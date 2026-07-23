@@ -1,7 +1,7 @@
 //! The request dispatcher: the one place a `netstack-v1` request is
 //! decoded, capability-checked, audited, and answered.
 
-use tairix_abi::net_ipc::{encode_counters_reply, encode_page_reply, NetstackRequest, IF_NAME_LEN};
+use tairix_abi::net_ipc::{encode_page_reply, NetstackRequest, IF_NAME_LEN};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, Errno, Origin};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -93,9 +93,9 @@ pub fn serve(
     };
 
     let required = match decoded {
-        NetstackRequest::InterfaceFacts { .. } | NetstackRequest::InterfaceState { .. } => {
-            CapabilityId::SYSINFO_INTROSPECT
-        }
+        NetstackRequest::InterfaceFacts { .. }
+        | NetstackRequest::InterfaceState { .. }
+        | NetstackRequest::InterfaceCounters { .. } => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -135,9 +135,13 @@ pub fn serve(
             audit_mutation(audit, "route add", iface, applied)?;
             write_status(response)
         }
-        NetstackRequest::Counters { iface } => {
-            let counters = stack.counters(iface)?;
-            encode_counters_reply(Ok(counters), response)
+        NetstackRequest::InterfaceCounters { offset, limit } => {
+            let records: alloc::vec::Vec<_> = stack
+                .counters_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetInterfaceCountersRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
         }
         NetstackRequest::InterfaceFacts { offset, limit } => {
             let records: alloc::vec::Vec<_> = stack
@@ -224,7 +228,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceList => "interface list",
         NetstackRequest::AddrAdd { .. } => "addr add",
         NetstackRequest::RouteAdd { .. } => "route add",
-        NetstackRequest::Counters { .. } => "counters",
+        NetstackRequest::InterfaceCounters { .. } => "interface counters",
         NetstackRequest::InterfaceFacts { .. } => "interface facts",
         NetstackRequest::InterfaceState { .. } => "interface state",
         NetstackRequest::BindDriver { .. } => "bind driver",

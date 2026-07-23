@@ -1342,7 +1342,15 @@ impl Tcb {
         let prev_una = self.snd_una;
         let flight_before = self.snd_max.distance_from(prev_una);
         // ACK for something not yet sent: challenge and drop (RFC 5961 §5).
-        if ack.gt(self.snd_nxt) {
+        // The bound is the highest sequence ever transmitted (`snd_max`), not
+        // the next-to-send cursor `snd_nxt`: loss recovery rewinds `snd_nxt`
+        // back to `snd_una` (go-back-N on RTO, fast retransmit) so it can sit
+        // far below data the peer already holds and is acknowledging. Gating
+        // on `snd_nxt` would reject a valid cumulative ACK covering
+        // `(snd_nxt, snd_max]`, leaving `snd_una` frozen and the sender
+        // retransmitting already-acknowledged data until the connection
+        // times out.
+        if ack.gt(self.snd_max) {
             self.challenge_ack(now_ns);
             return false;
         }
@@ -1380,6 +1388,15 @@ impl Tcb {
             // New data acknowledged.
             self.take_rtt_sample(ack, now_ns);
             self.snd_una = ack;
+            // Preserve `snd_una <= snd_nxt`: a cumulative ACK can acknowledge
+            // data past the next-to-send cursor when recovery has rewound
+            // `snd_nxt` below `snd_max` (go-back-N on RTO / fast retransmit).
+            // The acknowledged bytes are no longer to be retransmitted, so the
+            // cursor moves forward to the acknowledgement; any still-unacked
+            // tail (`snd_una..snd_max`) resumes from here.
+            if self.snd_nxt.lt(self.snd_una) {
+                self.snd_nxt = self.snd_una;
+            }
             self.drop_acked_data();
             if use_sack {
                 self.scoreboard.retain_above(self.snd_una);
