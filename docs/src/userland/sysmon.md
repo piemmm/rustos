@@ -43,19 +43,41 @@ never kill the observer built to run under stress.
 
 ## Layout and keys
 
-Six summary lines — title (uptime, load averages, pin state), memory
-overview in MiB with the pinned aggregate, the pressure band with a
-five-step depth gauge and free/reserve/entry figures, the band-history
-strip (`.` normal, `-` mild, `=` moderate, `#` severe, `!` critical,
-one glyph per refresh, bounded at 120 samples), the aggregate CPU line
-(interval busy share plus the summed switch/preemption counters), and
-the task census — sit above a scrollable detail panel the `p` key
-cycles through five views: the reclaim ledger table, the `ramzip`
-counter block, the per-CPU load table, the interrupt-lines table (one
-row per bound line — its id, the owning driver task, the interrupt
-count since boot, and whether the line is quarantined), and the process
-top consumers (by `%CPU` over the interval and by resident bytes; the
-full interactive list remains `top`'s job).
+A fixed seven-row summary block sits above a scrollable detail panel and
+a key-hint footer:
+
+- a full-width **title bar** (uptime, load averages, pin state);
+- three colour-coded **bar gauges** — memory used (`Mem`, with the
+  used/total MiB figures, the exact percentage, and the kernel-heap
+  size), the memory-pressure band (`Pres`, a five-segment bar with the
+  band name and the free/reserve/entry figures), and aggregate CPU busy
+  (`CPU`, with the busy share, CPU count, and summed
+  switch/preemption counters). Each bar fills proportionally and is
+  coloured by severity — green below 60%, yellow below 85%, red above
+  (the pressure segments colour by band depth) — so the machine's state
+  reads at a glance the way GNU `top`'s plain numbers do not;
+- a colour-coded pressure-band **history strip** (`Hist`: `.` normal,
+  `-` mild, `=` moderate, `#` severe, `!` critical, one glyph per
+  refresh coloured by its band, bounded at 120 samples);
+- the **task census** (`Tasks`);
+- a **panel tab bar** naming every detail panel — `caches`, `ramzip`,
+  `cpu`, `irqs`, `procs` — with the focused one highlighted and a
+  `[first-last/total]` scroll indicator when the panel overflows.
+
+The `p` key cycles the detail panel through five views: the reclaim
+ledger table, the `ramzip` counter block, the per-CPU load table, the
+interrupt-lines table (one row per bound line — its id, the owning
+driver task, the interrupt count since boot, and whether the line is
+quarantined, a quarantined line drawn in the warn colour), and the
+process top consumers (by `%CPU` over the interval and by resident
+bytes; the full interactive list remains `top`'s job). Each table's
+column header, stated refusals, and degraded rows are drawn in their
+own rendition, so structure reads without hunting.
+
+Colour is always reinforcement, never the sole channel: on a monochrome
+terminal the gauges still fill and the bars still read (the header falls
+back to reverse video), so the layout never depends on colour to be
+legible.
 
 Keys follow the `top` conventions: `q` quit, `r` refresh now, `p`
 cycle the panel, `+`/`-` lengthen/shorten the refresh interval by one

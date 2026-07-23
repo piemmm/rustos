@@ -35,12 +35,19 @@ operands: it is controlled with keys pressed inside the session.
 - Up/Down, PageUp/PageDown, Home/End — scroll the detail panel.
 - `h`, `?` — toggle the in-session key overlay.
 
-Six summary lines precede the detail panel: the title (uptime, load
-averages, and the pin state); the memory figures in MiB with the
-pinned aggregate; the pressure band with its depth gauge, free and
-reserve figures, and entry counters; the band-history strip (one glyph
-per refresh: `.` normal, `-` mild, `=` moderate, `#` severe, `!`
-critical); the aggregate CPU line; and the task census.
+A fixed summary block precedes the detail panel: a title bar (uptime,
+load averages, and the pin state); three colour-coded bar gauges —
+memory used (with the used/total MiB, the percentage, and the
+kernel-heap size), the memory-pressure band (a five-segment bar with
+the band name and the free/reserve/entry figures), and aggregate CPU
+busy (with the CPU count and switch/preemption counters); a
+colour-coded band-history strip (one glyph per refresh: `.` normal,
+`-` mild, `=` moderate, `#` severe, `!` critical); the task census;
+and a panel tab bar showing every panel with the focused one
+highlighted. Each gauge fills proportionally and is coloured by
+severity (green, then yellow, then red). Colour is only reinforcement:
+on a terminal without colour the gauges still fill and every line still
+reads.
 
 Every figure travels through the System Information API — there is no
 `/proc` to scrape. The kernel-wide statistics queries need

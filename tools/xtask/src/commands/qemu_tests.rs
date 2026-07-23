@@ -3984,11 +3984,11 @@ const TESTS: &[QemuTest] = &[
     // authenticates `root`/`root` at the console login, and starts
     // `sysmon` from its store bundle (the load gate verifies the whole
     // on-disk bundle; the granted `CAP_MEM_PIN` lets it pin itself). The
-    // `Pressure:` token on the transcript witnesses the gated
-    // `MEMORY_PRESSURE` figures rendered on the first frame; `r` then
-    // drives an immediate refresh over the raw console, and the
-    // `reclaimable` token (the detail-panel header naming the
-    // `RECLAIM_STATS` ledger table) witnesses the panel render. `q` quits,
+    // `Pres` gauge label on the transcript witnesses the
+    // `MEMORY_PRESSURE` pressure gauge rendered on the first frame; `r`
+    // then drives an immediate refresh over the raw console, and the
+    // `shrinks` token (a `RECLAIM_STATS` ledger column header) witnesses
+    // the reclaim detail panel rendered. `q` quits,
     // leaving the alternate screen; the shell prompt reappearing is the
     // intact-screen witness, after which the runner types `exit`. Each
     // line is typed only after its marker appeared; every marker is
@@ -4019,11 +4019,11 @@ const TESTS: &[QemuTest] = &[
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@tairix ~% ", Duration::ZERO, "sysmon\n"),
-            // The first frame's pressure line rendered its gated figures.
-            ("Pressure:", Duration::ZERO, "r"),
+            // The first frame's pressure gauge rendered (its `Pres` label).
+            ("Pres", Duration::ZERO, "r"),
             // The refresh key was accepted (raw-mode input works); the
-            // reclaim ledger panel header rendered.
-            ("reclaimable", Duration::ZERO, "q"),
+            // reclaim ledger panel's column header rendered.
+            ("shrinks", Duration::ZERO, "q"),
             // The monitor quit and the shell repainted its prompt on the
             // restored screen.
             ("root@tairix ~% ", Duration::ZERO, "exit\n"),
@@ -4036,8 +4036,8 @@ const TESTS: &[QemuTest] = &[
     // exact reported sequence: after the first authenticated shell prompt it
     // waits one second, types exactly
     // `stress --cpu 10 --timeout 120s --background`, requires the returned
-    // prompt to accept `sysmon`, observes its `Pressure:` frame, refreshes to
-    // the `reclaimable` panel, and quits back to the shell while ten CPU-bound
+    // prompt to accept `sysmon`, observes its `Pres` gauge frame, refreshes to
+    // the reclaim (`shrinks`) panel, and quits back to the shell while ten CPU-bound
     // workers saturate four CPUs. After the post-`sysmon` prompt it advances
     // its serial cursor past the launcher's early stress-worker syscalls and,
     // on the next `comm=stress` line (the detached controller waking to tear
@@ -4075,9 +4075,9 @@ const TESTS: &[QemuTest] = &[
             // The detached launcher returned and the shell accepts a command.
             ("root@tairix ~% ", Duration::ZERO, "sysmon\n"),
             // The monitor rendered while the CPU workers were active.
-            ("Pressure:", Duration::ZERO, "r"),
+            ("Pres", Duration::ZERO, "r"),
             // Raw input and a fresh sysinfo round trip remain live under load.
-            ("reclaimable", Duration::ZERO, "q"),
+            ("shrinks", Duration::ZERO, "q"),
             // Advance past the prompt restored by `sysmon`; the launcher's
             // earlier stress-worker syscalls are now outside the search window.
             ("root@tairix ~% ", Duration::ZERO, ""),

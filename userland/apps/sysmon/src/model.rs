@@ -116,6 +116,29 @@ impl Focus {
             Focus::Processes => "processes",
         }
     }
+
+    /// A one-word tab label for the panel navigation bar — short enough that
+    /// the whole bar fits an 80-column line, so every panel is visible at
+    /// once with the focused one highlighted (the `p` key cycles them).
+    #[must_use]
+    pub const fn tab_label(self) -> &'static str {
+        match self {
+            Focus::Reclaim => "caches",
+            Focus::Ramzip => "ramzip",
+            Focus::Cpu => "cpu",
+            Focus::Irqs => "irqs",
+            Focus::Processes => "procs",
+        }
+    }
+
+    /// Every panel in `p`-cycle order, for drawing the navigation bar.
+    pub const ALL: [Focus; 5] = [
+        Focus::Reclaim,
+        Focus::Ramzip,
+        Focus::Cpu,
+        Focus::Irqs,
+        Focus::Processes,
+    ];
 }
 
 /// Whether the monitor's own memory is pinned out of the swap tiers, and —

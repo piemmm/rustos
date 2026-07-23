@@ -631,12 +631,18 @@ fn render_draws_the_summary_and_the_reclaim_panel() {
     // single tokens.
     assert!(contains(&out, b"sysmon - up"));
     assert!(contains(&out, b"[pinned]"));
+    // The memory gauge's trailing figures carry the MiB unit and the
+    // kernel-heap size.
     assert!(contains(&out, b"MiB"));
-    assert!(contains(&out, b"kernel,"));
-    assert!(contains(&out, b"Pressure:"));
+    assert!(contains(&out, b"kernel"));
+    // The pressure gauge is labelled `Pres` and names its current band.
+    assert!(contains(&out, b"Pres"));
     assert!(contains(&out, b"moderate"));
-    assert!(contains(&out, b"reclaimable caches"));
+    // The panel tab bar shows the focused `caches` panel, whose table lists
+    // the reclaim classes by name.
+    assert!(contains(&out, b"caches"));
     assert!(contains(&out, b"disposable-ui"));
+    // The task-census row.
     assert!(contains(&out, b"Tasks"));
     assert!(contains(&out, b"total,"));
 }
@@ -671,22 +677,24 @@ fn each_panel_renders_its_detail_lines() {
     let (_service, mut model) = refreshed();
     let _ = model.handle_event(&Event::Char('p'));
     let out = rendered(&mut model);
-    assert!(contains(&out, b"compressed tier (ramzip)"));
+    // The tab bar highlights the `ramzip` panel; its counters follow below.
+    assert!(contains(&out, b"ramzip"));
     assert!(contains(&out, b"stored"));
     assert!(contains(&out, b"16K"));
     let _ = model.handle_event(&Event::Char('p'));
     let out = rendered(&mut model);
-    assert!(contains(&out, b"per-cpu load"));
+    // The `cpu` tab's table carries the switch/preemption columns.
+    assert!(contains(&out, b"cpu"));
     assert!(contains(&out, b"switches"));
     let _ = model.handle_event(&Event::Char('p'));
     let out = rendered(&mut model);
-    assert!(contains(&out, b"interrupt lines"));
     // The quarantined line 111 renders its owner, count, and state.
     assert!(contains(&out, b"111"));
     assert!(contains(&out, b"quarantined"));
     let _ = model.handle_event(&Event::Char('p'));
     let out = rendered(&mut model);
-    assert!(contains(&out, b"processes"));
+    // The `procs` panel: the census top consumers by %cpu.
+    assert!(contains(&out, b"procs"));
     assert!(contains(&out, b"%cpu"));
     assert!(contains(&out, b"shell"));
 }
@@ -784,4 +792,98 @@ fn run_survives_a_service_that_refuses_everything() {
     let out = screen.into_tty().output;
     // Every gated panel states its refusal; nothing dies.
     assert!(contains(&out, b"CAP_SYSINFO_KERNEL)"));
+}
+
+// ---- Rendering: the redesigned gauges, tabs, and styled rows ---------------
+
+use crate::app::{detail_rows, RowStyle};
+
+/// Cycle the focused panel to `target` from the default (`Reclaim`).
+fn focus_on(model: &mut Model, target: Focus) {
+    for _ in 0..Focus::ALL.len() {
+        if model.focus() == target {
+            return;
+        }
+        let _ = model.handle_event(&Event::Char('p'));
+    }
+    assert_eq!(model.focus(), target);
+}
+
+#[test]
+fn the_memory_gauge_draws_a_filled_bar_with_a_percentage() {
+    let (_service, mut model) = refreshed();
+    let out = rendered(&mut model);
+    // The gauge is bracketed, has at least one filled cell (512M of 1024M
+    // used), and states the exact percentage and unit beside it.
+    assert!(contains(&out, b"["));
+    assert!(contains(&out, b"|"));
+    assert!(contains(&out, b"]"));
+    assert!(contains(&out, b"50%"));
+    assert!(contains(&out, b"MiB"));
+}
+
+#[test]
+fn the_cpu_gauge_names_the_busy_share_and_cpu_count() {
+    let (_service, mut model) = refreshed();
+    let out = rendered(&mut model);
+    assert!(contains(&out, b"busy"));
+    assert!(contains(&out, b"cpus"));
+}
+
+#[test]
+fn the_tab_bar_lists_every_panel() {
+    let (_service, mut model) = refreshed();
+    let out = rendered(&mut model);
+    for label in ["caches", "ramzip", "cpu", "irqs", "procs"] {
+        assert!(
+            contains(&out, label.as_bytes()),
+            "tab bar must show {label}"
+        );
+    }
+}
+
+#[test]
+fn the_irq_panel_styles_the_header_and_quarantined_line() {
+    let (_service, mut model) = refreshed();
+    focus_on(&mut model, Focus::Irqs);
+    let rows = detail_rows(&model);
+    // The first row is the column header; the quarantined line 111 is drawn
+    // in the warn rendition; the healthy line 27 is an ordinary body row.
+    assert_eq!(rows[0].style, RowStyle::Header);
+    let quarantined = rows
+        .iter()
+        .find(|r| r.text.contains("111"))
+        .expect("quarantined row");
+    assert_eq!(quarantined.style, RowStyle::Warn);
+    let active = rows
+        .iter()
+        .find(|r| r.text.contains(" 27 "))
+        .expect("active row");
+    assert_eq!(active.style, RowStyle::Body);
+}
+
+#[test]
+fn a_refused_panel_query_yields_a_single_denied_row() {
+    let service = FakeService::healthy();
+    service.deny(SysinfoQueryId::RECLAIM_STATS);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    // The default focus is the reclaim panel; a refused query renders as one
+    // stated-refusal row, never a fabricated table.
+    let rows = detail_rows(&model);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].style, RowStyle::Denied);
+    assert!(rows[0].text.contains("CAP_SYSINFO_KERNEL"));
+}
+
+#[test]
+fn the_process_panel_notice_is_styled_when_the_global_census_is_refused() {
+    let service = FakeService::healthy();
+    service.deny(SysinfoQueryId::GLOBAL_PROCESS_LIST);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    focus_on(&mut model, Focus::Processes);
+    let rows = detail_rows(&model);
+    assert_eq!(rows[0].style, RowStyle::Notice);
+    assert!(rows[0].text.contains("CAP_SYSINFO_GLOBAL"));
 }
