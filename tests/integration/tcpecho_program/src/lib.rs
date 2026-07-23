@@ -38,39 +38,11 @@ pub const PASS_MARKER: &str = "TCPECHO PASS";
 /// transfer length both ends derive from one constant.
 pub const TRANSFER_BYTES: usize = wire::STREAM_TRANSFER_BYTES;
 
-/// Fill `buf` with the deterministic stream bytes starting at stream offset
-/// `offset`: `buf[i]` is the byte at absolute stream position `offset + i`.
-///
-/// The client calls this to produce each outbound chunk; the host peer echoes
-/// whatever it receives, so the echoed run is byte-identical to this sequence
-/// and [`verify_chunk`] re-derives it to check the echo without buffering the
-/// whole transfer.
-pub fn fill_chunk(offset: usize, buf: &mut [u8]) {
-    for (i, byte) in buf.iter_mut().enumerate() {
-        *byte = wire::stream_byte(offset + i);
-    }
-}
-
-/// Verify a received echo chunk against the deterministic stream: `chunk[i]`
-/// must equal the byte at absolute stream position `offset + i`.
-///
-/// Returns `Ok(())` when every byte matches, or `Err(index)` naming the first
-/// mismatched offset *within the chunk* — a corrupted, reordered, or
-/// duplicated echo is caught at its first wrong byte rather than accepted
-/// (fail closed).
-///
-/// # Errors
-///
-/// The chunk-relative index of the first byte that does not match the
-/// expected deterministic stream value.
-pub fn verify_chunk(offset: usize, chunk: &[u8]) -> Result<(), usize> {
-    for (i, &byte) in chunk.iter().enumerate() {
-        if byte != wire::stream_byte(offset + i) {
-            return Err(i);
-        }
-    }
-    Ok(())
-}
+// The deterministic chunk fill/verify are the one shared definition in the
+// wire crate (both TCP fixtures and both host peers use them, so a sender and
+// a verifier can never disagree about a byte). Re-exported so this fixture's
+// program and tests name them here unchanged.
+pub use wire::{fill_chunk, verify_chunk};
 
 #[cfg(test)]
 mod tests {
@@ -87,38 +59,6 @@ mod tests {
             manifest.contains("name = \"tcpecho\""),
             "AppInfo.toml must name the bundle `{COMMAND}`"
         );
-    }
-
-    #[test]
-    fn fill_then_verify_round_trips_across_a_chunk_boundary() {
-        // Fill two adjacent chunks and confirm verify accepts each at its own
-        // offset — the client fills at the send offset and verifies at the
-        // receive offset, so the two must agree byte-for-byte.
-        let mut a = [0u8; 100];
-        let mut b = [0u8; 100];
-        fill_chunk(0, &mut a);
-        fill_chunk(100, &mut b);
-        assert_eq!(verify_chunk(0, &a), Ok(()));
-        assert_eq!(verify_chunk(100, &b), Ok(()));
-        // A byte from the wrong offset is rejected at that position.
-        assert_eq!(verify_chunk(0, &b), Err(0));
-    }
-
-    #[test]
-    fn verify_catches_a_single_corrupted_byte() {
-        let mut chunk = [0u8; 64];
-        fill_chunk(500, &mut chunk);
-        chunk[37] ^= 0x01;
-        assert_eq!(verify_chunk(500, &chunk), Err(37));
-    }
-
-    #[test]
-    fn verify_catches_a_reordered_chunk() {
-        // Swapping two bytes (a reorder) is caught at the first moved byte.
-        let mut chunk = [0u8; 16];
-        fill_chunk(9, &mut chunk);
-        chunk.swap(2, 11);
-        assert_eq!(verify_chunk(9, &chunk), Err(2));
     }
 
     #[test]

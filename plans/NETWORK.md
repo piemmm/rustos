@@ -1084,15 +1084,34 @@ the whole is too large for one change and each leaves the tree working.
   round-trip/fail-closed tests for the new ops and event. Docs:
   `docs/src/abi/net-sockets.md`.
 
-##### N6b-2-β-2 — the live two-process QEMU listener vertical `[ ]`
-- A guest **server** `.app` (bind a port, `listen`, `accept`, echo) plus a
-  host-side **client** peer (`netpeer` connect + stream + verify echo, with
-  bounded loss), a runner bin, `qemu_tests.rs` enrolment, wire consts, and
-  image planting — the role-swapped mirror of the N5c stream vertical, which
-  runs a guest client against a host echo server. Observe the
-  connection-exhaustion/SYN-flood behaviour end to end. The engine and the
-  service surface are already proven by the `lib/net` listener tests
-  (β-α) and the β-1 socket-service tests; this adds the live boot witness.
+##### N6b-2-β-2 — the live two-process QEMU listener vertical `[x]`
+- `netstack_listener_qemu_aarch64` is the role-swapped mirror of the N5c
+  stream vertical: a guest **server** command app (`tcpserve_program`) binds
+  the well-known (**privileged**) `wire::GUEST_TCP_PORT`, `listen`s, `accept`s
+  the host client's connection over the shared v6 link-local wire, echoes every
+  received byte back, and verifies the received run against the shared
+  deterministic stream; the host **client** peer (`netpeer::run_tcp_connect_peer`,
+  `Tcb::connect`) streams `STREAM_TRANSFER_BYTES`, verifies the echo
+  byte-for-byte, and injects bounded inbound loss so RFC 9293 retransmission is
+  exercised both ways. PASS keys on the server's audited `exit`
+  (`comm=tcpserve`, a verified exchange — a failed one parks forever) then the
+  shell's scripted `exit` after the `TCPSERVE PASS` marker, **and** the client
+  peer reporting the whole transfer echoed+verified, so neither side passes
+  alone.
+- The **privileged** listener path is exercised end to end: the guest server's
+  manifest requests `CAP_NET_BIND_PRIVILEGED`, `CAP_NET_BIND_PRIVILEGED` is now
+  in the administrator ceiling (`tairix_users::ADMINISTRATIVE_SET`) so the
+  seeded root account grants it, and the netstack `Bind` gate enforces it
+  against the kernel-attested origin.
+- Shared byte gen/verify (`fill_chunk`/`verify_chunk`) was hoisted into
+  `netstack_wire` as the one definition both fixtures and both host peers use
+  (§2.2); the three fixture-store helpers in `image_apps` were collapsed onto
+  one `fixture_store_files` (§2.2). Wire const `GUEST_TCP_PORT` (privileged,
+  distinct from `PEER_TCP_PORT`) added.
+- Deferred to N7+: the standalone connection-exhaustion/SYN-flood *vertical* —
+  that path is proven by the `tcp::listen` cookie/flood unit tests and the
+  `fuzz_net_tcp` listener driver; this vertical proves the ordinary
+  accept-and-serve path live.
 
 ### N7 — hardware offloads + performance hardening `[ ]`
 - The offload vocabulary negotiated end to end: `virtio_net` maps

@@ -1,0 +1,41 @@
+[package]
+name = "tairix-test-netstack-listener-qemu-aarch64"
+description = "plans/NETWORK.md N6b-2-β-2 TCP-listener QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with the encrypted-root disk carrying the standard signed store bundles plus the signed virtio-net driver bundle and the test-only tcpserve fixture bundle, with a virtio-net device attached and the harness-side active TCP client peer on its dgram netdev. It unlocks the root, authenticates root/root at the console login, and runs `tcpserve` from the scripted shell: the server binds the well-known (privileged) port (exercising CAP_NET_BIND_PRIVILEGED), listens, accepts the host client's connection over the shared IPv6 link-local wire, echoes every received byte back, and verifies the received run under injected packet loss (RFC 9293 retransmission across the two-process boundary). PASS once the fixture's audited exit (a verified transfer — a failed one parks forever) has been observed and the shell's scripted exit, typed only after the TCPSERVE PASS marker appeared, follows it; the harness additionally requires the client peer to report the whole transfer echoed and verified, so neither side can pass alone. The role-swapped mirror of the tcpecho stream vertical."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-netstack-listener-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline with the planted
+# encrypted-root disk carrying the virtio-net driver + tcpserve fixture and
+# prove the server-side stream-socket path end to end over the live
+# two-process network" integration test. It reuses the entire production boot
+# pipeline through `tairix-kernel`'s library half — discovery, the unlock
+# kthread, PID 1 supervision, netstack, devmgr's driver autoload, login's
+# spawn-as-user, the shell, and the disk-backed bundle spawn path — and only
+# swaps the audit sink (no duplication). Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The fixture's pure library, for the one `COMMAND` definition the PASS keying
+# matches `comm` against. `default-features = false`: the fixture's `program`
+# feature (its own `Run` binary's userland runtime) must never link into this
+# kernel bin — the runtime's `_start`/panic handler belong to the fixture's
+# standalone cross-compile only.
+tairix-test-tcpserve = { path = "../tcpserve_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
