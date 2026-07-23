@@ -28,8 +28,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_index_at, render, reveal_selection};
-use tairix_browse::{vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
+use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
+use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_font::BitmapFont;
 use tairix_theme::Theme;
 use tairix_wm::{Compositor, Point, Rect, WindowId};
@@ -182,11 +182,15 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// Apply one primary-button press at the picker-window-local position
     /// `local`.
     ///
-    /// A click on an entry row resolves through the shared hit-test
+    /// A click on a toolbar command runs it (the read-only navigation the
+    /// picker shares with the file manager — Back/Forward/Up/Refresh, the view
+    /// toggle, and sort — through the one shared
+    /// `tairix_browse::apply_command`); a click on an entry row resolves
+    /// through the shared hit-test
     /// (`tairix_browse::render::entry_index_at` — exactly the rows the
     /// renderer drew): a directory row descends, a regular-file row
-    /// chooses that file. A click on the path bar, past the listing, or
-    /// on an unresolvable coordinate changes nothing.
+    /// chooses that file. A click on the path bar, a disabled tool, past the
+    /// listing, or on an unresolvable coordinate changes nothing.
     pub fn handle_click(
         &mut self,
         local: Point,
@@ -200,6 +204,20 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let theme = shell.session().active_theme();
         let font = picker_font(theme);
         let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
+        // A toolbar command takes priority over the item area it sits above;
+        // an enabled command runs, a disabled one resolves to nothing.
+        if let Some(command) = self
+            .active
+            .as_ref()
+            .and_then(|active| toolbar_command_at(&active.browser, theme, viewport, local))
+        {
+            return self.navigate(shell, compositor, move |browser| {
+                match apply_command(browser, command) {
+                    Ok(true) => NavOutcome::Redraw,
+                    Ok(false) | Err(_) => NavOutcome::None,
+                }
+            });
+        }
         let index = self
             .active
             .as_ref()

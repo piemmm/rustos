@@ -24,7 +24,9 @@ over a resolution-independent design grid, so the same glyph is
   `rasterise(side) -> Surface` / `draw_onto(&mut Surface)`.
 - `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
   battery, and bell; the file manager's folder, folder-open, generic file,
-  app-bundle, text, image, archive, and executable; and a generic fallback),
+  app-bundle, text, image, archive, and executable; the file manager's toolbar
+  commands nav-back, nav-forward, nav-up, refresh, view-toggle, and sort; and a
+  generic fallback),
   `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
   `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`), and
   `builtin_icon`.

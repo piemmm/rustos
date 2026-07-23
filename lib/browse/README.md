@@ -57,9 +57,14 @@ can never diverge in navigation semantics, listing policy, or look.
   `breadcrumbs` turns the root-first components into the ordered `Crumb`s of
   the path bar, each carrying the ancestor `depth` the drawn crumb binds to
   `navigate_to_depth` (`0` is the root); the terminal crumb is the current
-  directory (`is_current`), whose jump is a no-op. Only the surfaces whose
-  actions already exist are modelled — the context menu lands with the verbs
-  it invokes, never as speculative surface.
+  directory (`is_current`), whose jump is a no-op. `ToolbarCommand::icon`
+  gives each command its `lib/icon` glyph, and `apply_command(browser, cmd)`
+  is the one shared, **read-only** dispatch (Back / Forward / Up / Refresh /
+  view toggle / sort cycle over `ViewMode::toggled` and `SortMode::next`) both
+  the toolbar click and its keyboard accelerator run through, so they cannot
+  diverge and the read-only picker can drive the same toolbar. Only the
+  surfaces whose actions already exist are modelled — the context menu lands
+  with the verbs it invokes, never as speculative surface.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
@@ -169,7 +174,13 @@ can never diverge in navigation semantics, listing policy, or look.
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
   keeps the selection visible, and `entry_index_at` is the shared item point
-  hit-test (`crumb_at` its path-bar counterpart). `selection_rect` is
+  hit-test (`crumb_at` its path-bar counterpart). Above the path bar it draws
+  the command toolbar (`chrome::TOOLBAR_COMMANDS` as a `lib/controls`
+  `Toolbar` of themed `IconButton`s, disabled tools muted from the
+  `ToolbarModel`); `toolbar_command_at` is that strip's hit-test, returning
+  only an *enabled* command (fail closed). `chrome_height` (the toolbar strip
+  plus the path bar) is the one header offset the item views, the scrollbar
+  gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
   an overlay (the in-place rename editor) sits exactly over it.
   `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the files app,

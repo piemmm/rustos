@@ -95,7 +95,9 @@ pub mod vfs;
 
 pub use activate::Activation;
 pub use browser::Browser;
-pub use chrome::{breadcrumbs, Crumb, ToolbarCommand, ToolbarModel, TOOLBAR_COMMANDS};
+pub use chrome::{
+    apply_command, breadcrumbs, Crumb, ToolbarCommand, ToolbarModel, TOOLBAR_COMMANDS,
+};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;

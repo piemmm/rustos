@@ -28,11 +28,13 @@ which the drift guard enforces.
 ## Status
 
 `in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
-drawn breadcrumb path bar + pointer routing, FM5, FM6a, FM6b's pure association
+drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
+`Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, and FM7b's pure paste-execution model
-are done**; the rest of the FM4b drawn chrome (the toolbar, the context menu,
-`Alt+←/→`), the FM6b app-side spawn/delegation, the FM7b app-side
-move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is
+are done**; the rest of the FM4b drawn chrome (the context menu, and the New
+Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
+spawn/delegation, the FM7b app-side move/copy/delete verbs, and FM8–FM9 are
+`planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -47,10 +49,12 @@ history + breadcrumb navigation) is done; **FM4b** paints that model as drawn
 chrome. Its **breadcrumb path bar is now drawn and clickable**, with the app's
 pointer routing wired onto it (a primary-button press climbs a crumb via
 `navigate_to_depth` or selects an item via `select`) — landed now because its
-action (breadcrumb navigation) already exists (§2.4). The remaining FM4b chrome
-(the toolbar and the context menu) still lands *with* the actions its entries
-gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so no menu/tool is
-built as speculative surface ahead of the behaviours it invokes (§2.4).
+action (breadcrumb navigation) already exists (§2.4). Its **drawn clickable
+toolbar** is now done too — its commands (Back/Forward/Up/Refresh/ToggleView/
+Sort) and their actions already exist, so it needs no speculative surface. The
+remaining FM4b chrome (the context menu) still lands *with* the actions its
+entries gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so no menu
+entry is built as speculative surface ahead of the behaviours it invokes (§2.4).
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven) is done, and
@@ -321,15 +325,37 @@ after go-back, the active-view/sort report, the `TOOLBAR_COMMANDS` order, the
 breadcrumb crumb list + depth + `is_current`, and a crumb depth climbing to its
 ancestor). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
+**The drawn, clickable toolbar is done.** `render` paints `TOOLBAR_COMMANDS`
+as a `lib/controls::Toolbar` of themed `IconButton`s in the top strip (each
+glyph from the new `ToolbarCommand::icon()` — six new `lib/icon::IconKind`
+glyphs NavBack/NavForward/NavUp/Refresh/ViewToggle/Sort), each enabled or
+disabled from `ToolbarModel` (muted, never hidden). `render::toolbar_command_at`
+is the strip's mirror hit-test returning **only an enabled command** (fail
+closed); the app routes a primary-button press through it, then the breadcrumb,
+then item selection. Both the click and the keyboard accelerators run through
+the one shared read-only `chrome::apply_command(browser, cmd)` (Back/Forward/
+Up/Refresh + `ViewMode::toggled` / `SortMode::next`), so they cannot diverge
+and the picker can drive the same toolbar. Accelerators: **`Alt+←/→`**
+(Back/Forward), **`Alt+↑`** (Up), **`F5`** (Refresh). One `render::chrome_height`
+(toolbar strip + path bar) is the single header offset the item views, the
+scrollbar gutter, and every hit-test share (§2.2). Host-tested in `lib/browse`
+(`ViewMode::toggled`, the `SortMode::next` six-mode cycle, `ToolbarCommand::icon`
+distinctness, `apply_command` navigation/view/sort + fail-closed refresh, and
+`toolbar_command_at` enabled-resolution + disabled-fail-closed) and `lib/icon`
+(the new glyphs draw + round-trip). Docs: `docs/src/desktop/apps.md`,
+`lib/browse`/`lib/icon` README + rustdoc.
+
+The view-toggle and sort commands are toolbar (pointer) commands; they have no
+conventional single-key accelerator, and a uniform keyboard path for every tool
+awaits the later toolbar keyboard-focus pass (the `lib/controls::Toolbar`
+`on_key` focus model), not invented chords now.
+
 The remaining drawn chrome (still `planned`):
 
-- **Toolbar** (`lib/controls::Toolbar`): the `TOOLBAR_COMMANDS` painted as
-  `IconButton`s over `ToolbarModel`, each with a keyboard equivalent and the
-  disabled state the model reports. New Folder arrives with FM7 (`fs_mkdir`).
 - **Context menu** (`lib/controls::Menu`): one menu definition whose entries
   land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
   Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
-- **`Alt+←/→`** bound to Back/Forward (lands with the toolbar's Back/Forward).
+- **New Folder** toolbar tool arrives with FM7 (`fs_mkdir`).
 
 ### FM5 — in-place rename `[x]`
 

@@ -27,8 +27,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use tairix_controls::state::{ControlState, SelectionState};
-use tairix_controls::{Card, ScrollBar, TableCell, TableRow};
+use tairix_controls::state::{ControlRole, ControlState, SelectionState};
+use tairix_controls::{Card, IconButton, ScrollBar, TableCell, TableRow, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
@@ -36,7 +36,7 @@ use tairix_theme::{Palette, Theme};
 
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
-use crate::chrome;
+use crate::chrome::{self, ToolbarCommand, ToolbarModel};
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
@@ -75,7 +75,15 @@ pub fn render<S: DirectorySource>(
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    draw_path_bar(&mut surface, font, palette, browser, row_height);
+    draw_toolbar(&mut surface, theme, font, browser, viewport);
+    draw_path_bar(
+        &mut surface,
+        font,
+        palette,
+        browser,
+        toolbar_height(theme),
+        row_height,
+    );
 
     let content = content_viewport(viewport, theme);
     match browser.view_mode() {
@@ -101,11 +109,12 @@ fn draw_path_bar<S: DirectorySource>(
     font: BitmapFont,
     palette: &Palette,
     browser: &Browser<S>,
+    top: u32,
     row_height: u32,
 ) {
     surface.fill_rect(
         0,
-        0,
+        top,
         surface.width(),
         row_height,
         palette.surface_raised.into(),
@@ -114,7 +123,7 @@ fn draw_path_bar<S: DirectorySource>(
     let widths = crumb_widths(&crumbs, font);
     let sep_width = font.text_width(SEPARATOR);
     let placed = breadcrumb::layout(&widths, surface.width(), LABEL_PADDING, sep_width);
-    let y = row_height.saturating_sub(font.glyph_height()) / 2;
+    let y = top.saturating_add(row_height.saturating_sub(font.glyph_height()) / 2);
     let y = to_i32(y);
     for (position, crumb) in placed.iter().zip(crumbs.iter()) {
         // The separator sits in the gap before every crumb but the first,
@@ -155,17 +164,20 @@ fn crumb_widths(crumbs: &[chrome::Crumb], font: BitmapFont) -> Vec<u32> {
 ///
 /// This mirrors the drawn path bar's own placement through the shared
 /// [`breadcrumb::layout`], so a pointer-driven jump lands on exactly the crumb
-/// the user clicked (§2.2). Unlike [`entry_index_at`] it needs no theme: the
-/// path bar spans the whole window width, not the scrollbar-inset content area.
+/// the user clicked (§2.2). `theme` gives the path bar's vertical band (it sits
+/// below the toolbar strip); the crumbs span the whole window width, not the
+/// scrollbar-inset content area.
 #[must_use]
 pub fn crumb_at<S: DirectorySource>(
     browser: &Browser<S>,
     font: BitmapFont,
+    theme: &Theme,
     viewport: Rect,
     point: Point,
 ) -> Option<usize> {
     let y = u32::try_from(point.y).ok()?;
-    if y >= row_height(font) {
+    let top = toolbar_height(theme);
+    if y < top || y >= top.saturating_add(row_height(font)) {
         return None;
     }
     let crumbs = chrome::breadcrumbs(browser);
@@ -194,7 +206,7 @@ fn draw_list<S: DirectorySource>(
     browser: &Browser<S>,
     content: Rect,
 ) {
-    let view = list_view(browser, font, content);
+    let view = list_view(browser, font, theme, content);
     let visible = view.visible_rows();
     if visible == 0 {
         return;
@@ -226,7 +238,7 @@ fn draw_grid<S: DirectorySource>(
     browser: &Browser<S>,
     content: Rect,
 ) {
-    let view = grid_view(browser, font, content);
+    let view = grid_view(browser, font, theme, content);
     let columns = view.columns();
     let visible_rows = view.visible_rows();
     if columns == 0 || visible_rows == 0 {
@@ -263,7 +275,7 @@ fn draw_scrollbar<S: DirectorySource>(
     viewport: Rect,
 ) {
     let gutter = gutter_width(theme, viewport.width);
-    let header = row_height(font);
+    let header = chrome_height(font, theme);
     if gutter == 0 || viewport.height <= header {
         return;
     }
@@ -368,20 +380,113 @@ fn grid_metrics(font: BitmapFont) -> (u32, u32, u32) {
     (cell_width, cell_height, gap)
 }
 
+/// The height in pixels of the command toolbar strip at the top of the window:
+/// the theme's control height plus a gap above and below, scaled to physical
+/// pixels. One definition so the drawn toolbar, the path bar's vertical offset,
+/// the item area, and the hit-tests all agree on where each chrome band sits.
+#[must_use]
+pub fn toolbar_height(theme: &Theme) -> u32 {
+    let metrics = theme.metrics();
+    let gap = Scale::ONE.scale_length(metrics.control_gap);
+    Scale::ONE
+        .scale_length(metrics.control_height)
+        .saturating_add(gap.saturating_mul(2))
+        .max(1)
+}
+
+/// The total height reserved for the window chrome above the item area: the
+/// command toolbar strip plus the breadcrumb path bar. This is the header the
+/// item views lay out below and the top of the scrollbar gutter, so paint and
+/// hit-test share one offset (§2.2).
+#[must_use]
+pub fn chrome_height(font: BitmapFont, theme: &Theme) -> u32 {
+    toolbar_height(theme).saturating_add(row_height(font))
+}
+
+/// The group each toolbar command belongs to, so related commands read as a
+/// unit with a quiet divider between groups: navigation, refresh, and the
+/// view/sort presentation controls.
+const fn toolbar_group(command: ToolbarCommand) -> u16 {
+    match command {
+        ToolbarCommand::Back | ToolbarCommand::Forward | ToolbarCommand::Up => 0,
+        ToolbarCommand::Refresh => 1,
+        ToolbarCommand::ToggleView | ToolbarCommand::Sort => 2,
+    }
+}
+
+/// Build the drawn command toolbar for `model`: one [`IconButton`] per
+/// [`chrome::TOOLBAR_COMMANDS`] entry, in order, each carrying the command's
+/// glyph and rendered disabled (not hidden) when the model reports the command
+/// is not currently actionable, so the toolbar's shape is stable.
+fn build_toolbar(model: ToolbarModel) -> Toolbar {
+    let mut toolbar = Toolbar::new();
+    for &command in chrome::TOOLBAR_COMMANDS {
+        let mut button = IconButton::new(command.icon(), ControlRole::Navigation);
+        if !model.is_enabled(command) {
+            button.set_state(ControlState::disabled());
+        }
+        toolbar = toolbar.with_icon(button, toolbar_group(command));
+    }
+    toolbar
+}
+
+/// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] as
+/// themed [`IconButton`]s over the [`ToolbarModel`], spanning the full window
+/// width above the path bar. A disabled command reads muted rather than
+/// vanishing (the model decides which).
+fn draw_toolbar<S: DirectorySource>(
+    surface: &mut Surface,
+    theme: &Theme,
+    font: BitmapFont,
+    browser: &Browser<S>,
+    viewport: Rect,
+) {
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser));
+    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    toolbar.render(surface, bounds, Scale::ONE, theme, font);
+}
+
+/// The actionable toolbar command at window-local pixel `point`, or `None`
+/// when the click is not on one — outside the toolbar strip, on a group
+/// gutter, or on a command the [`ToolbarModel`] has disabled (fail closed: a
+/// disabled tool does not act, §5.4). It mirrors the drawn toolbar's own
+/// layout so a click resolves to exactly the tool [`render`] painted (§2.2).
+#[must_use]
+pub fn toolbar_command_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    theme: &Theme,
+    viewport: Rect,
+    point: Point,
+) -> Option<ToolbarCommand> {
+    let model = ToolbarModel::for_browser(browser);
+    let toolbar = build_toolbar(model);
+    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
+    let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
+    model.is_enabled(command).then_some(command)
+}
+
 /// The [`ListView`] for `browser` at the given content viewport.
 fn list_view<S: DirectorySource>(
     browser: &Browser<S>,
     font: BitmapFont,
+    theme: &Theme,
     content: Rect,
 ) -> ListView {
     let row_height = row_height(font);
-    ListView::new(content, row_height, row_height, browser.entries().len())
+    ListView::new(
+        content,
+        row_height,
+        chrome_height(font, theme),
+        browser.entries().len(),
+    )
 }
 
 /// The [`GridView`] for `browser` at the given content viewport.
 fn grid_view<S: DirectorySource>(
     browser: &Browser<S>,
     font: BitmapFont,
+    theme: &Theme,
     content: Rect,
 ) -> GridView {
     let (cell_width, cell_height, gap) = grid_metrics(font);
@@ -390,7 +495,7 @@ fn grid_view<S: DirectorySource>(
         cell_width,
         cell_height,
         gap,
-        row_height(font),
+        chrome_height(font, theme),
         browser.entries().len(),
     )
 }
@@ -503,8 +608,8 @@ fn view_layout_for<S: DirectorySource>(
 ) -> ViewLayout {
     let content = content_viewport(viewport, theme);
     match browser.view_mode() {
-        ViewMode::List => ViewLayout::List(list_view(browser, font, content)),
-        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, font, content)),
+        ViewMode::List => ViewLayout::List(list_view(browser, font, theme, content)),
+        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, font, theme, content)),
     }
 }
 
