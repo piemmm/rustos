@@ -5842,8 +5842,16 @@ VM mechanism, `kernel/mem::ramzip`;
   (2 MiB) and a desktop-scaled (4 MiB) RAM profile from one harness
   (`docs/src/architecture/memory.md` §7s). The caps and band watermarks stay
   implementation constants, never ABI.
-- SWAP5 (optional encrypted lower-tier block swap policy) remains a
-  separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
+- SWAP5 (optional encrypted lower-tier block swap) is now fully designed as
+  **partition swap** in `plans/FIX-SWAPFILE.md` (planned, SF0–SF6): a dedicated
+  raw block partition — never a file in an ARXFS volume — page-slotted with
+  short compressed writes, its own ephemeral `SealKey`/`NonceSequence`,
+  compress-once re-seal on the `ramzip → partition` demotion, no durability
+  redundancy but mandatory AEAD integrity detection (corruption fails closed to
+  a killed task + audit), `swapon`/`swapoff` over multiple durable-identity
+  block devices with a draining `swapoff`, removable default-off, and
+  per-user/per-task swap quotas via the §24.3 rlimit facility. It supersedes the
+  one-paragraph SWAP5 sketch in `plans/SWAPSWAPSWAP.md` §15.
 - Per-page latency measured on real boards under real workloads remains
   future work alongside SWAP5, where such workloads exist to measure; the
   host suite above supplies the pre-hardware evidence.

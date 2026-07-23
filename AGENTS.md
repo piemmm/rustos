@@ -1686,7 +1686,7 @@ You are not exempt from any rule above. In addition:
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
-    | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
+    | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md`; `plans/FIX-SWAPFILE.md` (partition swap / SWAP5) |
     | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
