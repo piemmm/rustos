@@ -552,7 +552,10 @@ memory-safety behaviour.
 
 ## 15. Interaction with optional disk swap
 
-Disk swap is explicitly lower priority than `ramzip`.
+Disk swap is explicitly lower priority than `ramzip`. It is now fully designed
+as **partition swap** in `plans/FIX-SWAPFILE.md` (SWAP5); that document owns the
+block-swap tier end to end and supersedes the sketch in this section. The
+invariants below still bind and are carried into `FIX-SWAPFILE.md`.
 
 If a later stage implements block swap:
 
@@ -732,10 +735,19 @@ Docs:
 
 ### SWAP5 - Optional lower-tier swap, if approved later
 
+Now fully designed as **partition swap** in `plans/FIX-SWAPFILE.md` (SF0–SF6):
+a dedicated raw block partition (never a file in an ARXFS volume), page-slotted
+short compressed writes, its own ephemeral `SealKey`/`NonceSequence`,
+compress-once re-seal on the `ramzip → partition` demotion, no durability
+redundancy but mandatory AEAD integrity detection, `swapon`/`swapoff` over
+multiple durable-identity block devices with a draining `swapoff`, removable
+default-off, and per-user/per-task swap quotas via the §24.3 rlimit facility.
+The deliverables below are the seed for that document.
+
 Deliverables:
 
-- Separate design document for encrypted block/ARXFS swap, consistent with
-  `ALIAS.md` and `DRIVES.md` storage naming.
+- Separate design document (`plans/FIX-SWAPFILE.md`) for encrypted block swap,
+  consistent with `ALIAS.md` and `DRIVES.md` storage naming.
 - Capability, storage, and failure policy. The swap backing is named by
   durable identity (pinned `disk:`/`part:`/`vol:` alias with fingerprint, or
   `id::` root), resolution returns a capability rather than a pathname, and
