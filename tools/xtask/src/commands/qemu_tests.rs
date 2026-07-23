@@ -546,6 +546,28 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // ramzip b3 (`plans/SWAPSWAPSWAP.md`, `.junie/swapswap-progress.md`):
+    // the x86_64 hardware referenced (Accessed) bit read and cleared
+    // through the Arch HAL, driving the cold-page clock scan
+    // (`kernel/mem::coldscan`). Single CPU suffices (the test builds and
+    // probes one address space on the BSP); the 60-second budget matches
+    // `memory_isolation`'s — a strictly bring-up test with no workload.
+    QemuTest {
+        package: "tairix-test-accessed-bit-qemu-x86_64",
+        binary: "tairix-test-accessed-bit-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `tairix-test-scheduler-stress`
     // workspace test continues to satisfy the unit / cross-

@@ -1,0 +1,44 @@
+[package]
+name = "tairix-test-accessed-bit-qemu-x86_64"
+description = "QEMU integration test: the x86_64 hardware referenced (Accessed) bit is read and cleared through the Arch HAL, driving the cold-page clock scan."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This crate produces a freestanding kernel ELF that QEMU loads via
+# multiboot1 (`tools/qemu`). It links the x86_64 port
+# (`tairix-arch-x86_64`) for boot + paging + isa-debug-exit primitives,
+# maps a single 4 KiB page, and asserts that
+# `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed` reports the
+# hardware Accessed bit honestly — set after a real access, clear after a
+# clock-scan clear, and re-set on the next access — so the compressed-
+# memory tier's cold-page scanner (`plans/SWAPSWAPSWAP.md`,
+# `kernel/mem::coldscan`) can tell a cold page from a hot one on real
+# hardware.
+#
+# Because the binary is freestanding it is built **only** for
+# `x86_64-unknown-none`. On the host target the crate has no test source
+# and contributes nothing to `cargo test`; the orchestrator that runs the
+# QEMU binary is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-accessed-bit-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+# The Arch HAL MMU surface (`AGENTS.md` §17.2): the test drives the
+# referenced bit through `tairix_arch_api::mmu::AddressSpace`
+# (`map_page` / `activate` / `access_tracking` / `test_and_clear_accessed`)
+# so the property is proven *through the HAL*, not the port's inherent
+# methods (`plans/WIRING.md` W5b).
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

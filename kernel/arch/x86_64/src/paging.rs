@@ -73,6 +73,13 @@ pub mod flags {
     pub const WRITE_THROUGH: u64 = 1 << 3;
     /// Page-level cache-disable/PAT index bit.
     pub const CACHE_DISABLE: u64 = 1 << 4;
+    /// Accessed: the CPU sets this on the leaf (and every intermediate
+    /// entry it walks) the first time the page is read, written, or
+    /// fetched, and never clears it itself (Intel SDM Vol 3A §4.8). This
+    /// is the hardware referenced bit the page-replacement clock scan
+    /// reads and clears to tell a genuinely cold page from a hot one
+    /// before the compressed-memory tier reclaims it.
+    pub const ACCESSED: u64 = 1 << 5;
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
     /// No-Execute (bit 63): an instruction fetch from the page faults.
@@ -960,6 +967,77 @@ impl MmuAddressSpace for AddressSpace {
 
     fn root_phys(&self) -> u64 {
         self.pml4_phys
+    }
+
+    fn access_tracking(&self) -> tairix_arch_api::mmu::AccessTracking {
+        // x86_64 has an unconditional hardware referenced bit: the CPU
+        // sets the leaf PTE's Accessed bit (bit 5) on the first access and
+        // never clears it itself (Intel SDM Vol 3A §4.8), so a clock scan
+        // can read and clear it with no software fault path — unlike the
+        // aarch64 / riscv64 ports, whose access flag needs a software
+        // access-flag-fault handler on parts that do not update it in the
+        // page walk. Supported on every x86_64 CPU TAIRiX targets.
+        tairix_arch_api::mmu::AccessTracking::Supported
+    }
+
+    fn test_and_clear_accessed(&mut self, vaddr: u64) -> Result<bool, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+            // Navigate to the 4 KiB PT leaf without allocating, exactly as
+            // `unmap` does. A missing level or a huge-page leaf means there
+            // is no 4 KiB leaf whose referenced bit this reports — fail
+            // closed with `NotMapped` (the tier tracks only 4 KiB
+            // anonymous leaves, never a huge block).
+            let e4 = self.pml4[i4];
+            if e4 & flags::PRESENT == 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present entry → identity-mapped PDPT (see `translate`).
+            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e3 = pdpt[i3];
+            if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present non-huge PDPT entry → identity-mapped PD.
+            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e2 = pd[i2];
+            if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present non-huge PD entry → identity-mapped PT, and
+            // `&mut self` makes the exclusive borrow of the leaf sound.
+            let pt = unsafe { &mut *((e2 & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
+            let e1 = pt[i1];
+            if e1 & flags::PRESENT == 0 {
+                return Err(MapError::NotMapped);
+            }
+            let was_accessed = e1 & flags::ACCESSED != 0;
+            if was_accessed {
+                // Clear the Accessed bit so the CPU re-sets it on the next
+                // touch; a later probe reading it still clear proves the
+                // page went untouched in between (the clock scan).
+                pt[i1] = e1 & !flags::ACCESSED;
+                // The stale TLB entry may still permit an access without a
+                // page-walk (and so without re-setting Accessed), so the
+                // cleared bit only becomes observable once the TLB entry is
+                // invalidated: flush this page on the current CPU.
+                self.flush_page(vaddr);
+            }
+            Ok(was_accessed)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = vaddr;
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
     }
 
     fn block_split_support(&self) -> BlockSplit {

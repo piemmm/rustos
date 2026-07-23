@@ -1638,20 +1638,33 @@ and its architecture-neutral core lands here (staged in
   the very thrash the tier avoids). This is the same approximation Linux
   page reclaim uses, with no per-page timestamp and no hot-path
   allocation beyond the returned list.
-- **Per-port state.** aarch64 currently declares the facility
-  `Pending`: reporting the Access Flag (AF, bit 10) honestly means
-  *managing* it (hardware AF via ARMv8.1 HAFDBS + `TCR_EL1.HA`, absent on
-  the cortex-a57/a72 the boards and the default QEMU CPU expose, or a
-  software Access-Flag-fault handler), a boot/exception-path change with
-  its own QEMU vertical staged as b1a. x86_64 (PTE bit 5), riscv64 (PTE
-  `A` bit), and wasm32 remain on the fail-closed default until their b3
-  slices. The `HostPageTable` double models the bit in software, so the
-  scanner is fully host-tested today.
+- **Per-port state.** **x86_64 is live**: the hardware always sets the
+  Accessed bit (PTE bit 5) and never clears it (Intel SDM Vol 3A §4.8), so
+  `test_and_clear_accessed` walks to the 4 KiB leaf, reads and clears bit 5,
+  and `INVLPG`s the page — no software fault path — and `access_tracking`
+  declares `Supported`. `flags::ACCESSED` is the single definition of bit
+  5. aarch64 declares the facility `Pending`: reporting the Access Flag
+  (AF, bit 10) honestly means *managing* it, and the cortex-a57/a72 the
+  boards and the default QEMU CPU expose lack ARMv8.1 HAFDBS, so it needs a
+  software Access-Flag-fault handler (keep `TCR_EL1.HA` clear, set AF on the
+  access-flag abort and resume) — a boot/exception-path change with its own
+  QEMU vertical. riscv64 needs the analogous software A-setting page-fault
+  handler (hardware A/D *update* is implementation-defined), so it stays on
+  the fail-closed default until that lands. wasm32 keeps the fail-closed
+  default permanently: the browser sandbox exposes no per-page referenced
+  bit. The `HostPageTable` double models the bit in software, so the
+  scanner is fully host-tested on every target.
 - **Tested.** `kernel/arch/api` mmu conformance (honest declaration,
   fail-open rejection), `kernel/mem::coldscan` host tests (untouched
   pages are cold up to budget, a referenced page gets a second chance and
   the cleared bit makes a still-idle page cold next pass, the clock hand
-  rotates, and a backend without a referenced bit fails closed).
+  rotates, and a backend without a referenced bit fails closed), and the
+  x86_64 QEMU vertical `tests/integration/accessed_bit_qemu_x86_64` — a
+  fresh mapping reads clear, reads set after a genuine access (and is
+  cleared), reads clear again with no access between, and reads set once
+  more after re-access (the full clock transition), plus the
+  misaligned / unmapped fail-closed rejects and the `Supported`
+  declaration, proven on real (emulated) hardware.
 
 ## 7p. Live tier wiring (global pool, fault-in, boot install)
 

@@ -5787,16 +5787,21 @@ VM mechanism, `kernel/mem::ramzip`;
   one bounded pass per fault, never a spin. `RAMZIP_STATS` reports the live
   tier (`memstats::install_global_ramzip_stats`). Host-tested end to end over
   `HostPageTable`.
-- **Remaining (b3 only):** the trigger, policy, template, residue gate, and
-  snapshot republish are complete and host-tested, but real ports still
-  declare `AccessTracking` non-`Supported`, so the cold scanner shows nothing
-  cold and direct reclaim compresses nothing on hardware. Each port's
-  referenced-bit enablement (aarch64 software Access-Flag fault b1a, riscv64
-  A-fault, x86_64 unconditional PTE bit-5 walk, wasm32 honest `Unsupported`)
-  is a boot/exception-path change that lands with its own bare-metal QEMU
-  vertical — deliberately not landed blind, as unvalidated boot-MMU code
-  would fail review. Once a port flips to `Supported`, compress-out works
-  end-to-end with no further change to the trigger; nothing in the tier may
+- **Per-port enablement (b3): x86_64 done, aarch64/riscv64 remaining.** The
+  trigger, policy, template, residue gate, and snapshot republish are
+  complete and host-tested. **x86_64 is live**: the port declares
+  `AccessTracking::Supported` and `test_and_clear_accessed` reads/clears the
+  hardware Accessed bit (PTE bit 5, `flags::ACCESSED`) with an `INVLPG` — no
+  software fault path — so the cold scanner finds cold pages and direct
+  reclaim compresses them end to end, proven by the
+  `accessed_bit_qemu_x86_64` vertical. **wasm32** keeps the fail-closed
+  `Unsupported` default permanently (the sandbox exposes no referenced bit).
+  **aarch64** (software Access-Flag fault — cortex-a72/Pi lack HAFDBS) and
+  **riscv64** (software A-setting fault — hardware A/D update is
+  implementation-defined) remain: each is a boot/exception-path change that
+  lands with its own bare-metal QEMU vertical — deliberately not landed
+  blind, as unvalidated boot-MMU/exception code would fail review — and both
+  stay honestly `Pending`/`Unsupported` until then. Nothing in the tier may
   be weakened to work around a still-`Pending` port.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.

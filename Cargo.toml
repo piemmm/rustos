@@ -222,6 +222,7 @@ members = [
     # (AGENTS.md §17.2), keeping target selection out of test source.
     "tests/integration/harness",
     "tests/integration/memory_isolation",
+    "tests/integration/accessed_bit_qemu_x86_64",
     "tests/integration/scheduler_stress",
     "tests/integration/scheduler_stress_qemu",
     "tests/integration/kernel_arch_boot",
