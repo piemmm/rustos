@@ -976,6 +976,23 @@ where
         })
     }
 
+    fn set_owner(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        owner: u32,
+        group: u32,
+    ) -> Result<(), Errno> {
+        // The whole authority rule (privileged reassignment vs. the
+        // unprivileged owner-only group change, the set-*id* strip) lives in
+        // the secured VFS under the caller's kernel-attested credential; this
+        // seam only resolves the covering mount and delegates.
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.set_owner_via_secured(cred, path, fs, owner, group)
+        })
+    }
+
     fn attr_get(
         &self,
         uid: u32,

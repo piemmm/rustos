@@ -7358,6 +7358,27 @@ where
         Ok(0)
     }
 
+    fn fs_set_owner(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        owner: u32,
+        group: u32,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
+        // non-null `UserPtr`. The whole ownership authority rule (the
+        // `CAP_FS_CHOWN` gate for reassigning the uid or setting a foreign
+        // gid, the unprivileged owner-only group change, the set-*id* strip)
+        // is the secured VFS's, applied under the caller's attested identity
+        // and capability set — never a caller-supplied one.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .set_owner(uid, caller.caps.effective(), &path, owner, group)?;
+        Ok(0)
+    }
+
     fn fs_attr_get(
         &self,
         caller: &CallerContext<'_>,

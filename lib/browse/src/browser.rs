@@ -27,6 +27,7 @@ use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::mkdir::{validate_new_dir_name, MkdirError};
 use crate::mode_edit::{validate_mode, ModeError};
+use crate::owner_edit::{validate_owner, OwnerChange, OwnerError};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
@@ -533,6 +534,63 @@ impl<S: DirectorySource> Browser<S> {
         };
         validate_mode(mode)?;
         set_mode(&path, mode).map_err(ModeError::Refused)?;
+        Ok(())
+    }
+
+    /// Change the selected node's owning user and/or group, applying the
+    /// change through the injected `set_owner` seam (the `chown(2)` /
+    /// `chgrp(2)` shape).
+    ///
+    /// `set_owner` receives the node's absolute path and the new `(uid, gid)`,
+    /// each carrying [`FS_OWNER_UNCHANGED`](tairix_abi::fs::FS_OWNER_UNCHANGED)
+    /// for a field the `change` leaves alone, and performs the `fs_set_owner`
+    /// syscall under the caller's own identity. Unlike the other write verbs,
+    /// this one is **privileged**: the kernel's secured VFS requires
+    /// `CAP_FS_CHOWN` to reassign the owner or to set a group the caller is
+    /// not a member of, and strips the set-*id* bits on any change. The engine
+    /// adds no authority of its own and makes none of that policy decision —
+    /// the trusted read-only picker composes the same [`Browser`] and never
+    /// calls this — so a caller lacking the privilege sees the kernel's own
+    /// [`Errno::PermissionDenied`] as [`OwnerError::Refused`].
+    ///
+    /// Transactional and fail closed: the change is validated
+    /// ([`validate_owner`]) *before* any syscall — a field set to the reserved
+    /// sentinel as an explicit target is refused rather than misread — and the
+    /// target path is spelled through the one shared
+    /// [`crate::vfs::absolute_path`], so the change can never name a different
+    /// node than the browser shows. The listing carries no ownership, so a
+    /// success re-reads nothing here; the caller re-stats the node to refresh
+    /// its Properties view. A VFS refusal leaves the node's ownership exactly
+    /// as it was.
+    ///
+    /// # Errors
+    ///
+    /// An [`OwnerError`]: [`OwnerError::NoSelection`] on an empty directory,
+    /// [`OwnerError::Invalid`] for a sentinel-as-target (both decided before
+    /// the syscall), [`OwnerError::Path`] when the node cannot be named, or
+    /// [`OwnerError::Refused`] when the VFS refuses the change (including the
+    /// missing-`CAP_FS_CHOWN` denial).
+    pub fn set_owner_selected<F>(
+        &mut self,
+        change: OwnerChange,
+        set_owner: F,
+    ) -> Result<(), OwnerError>
+    where
+        F: FnOnce(&str, u32, u32) -> Result<(), Errno>,
+    {
+        let path = match self.selected_target_path() {
+            None => return Err(OwnerError::NoSelection),
+            Some(Err(err)) => {
+                return Err(OwnerError::Path(
+                    err.source_errno().unwrap_or(Errno::NotFound),
+                ))
+            }
+            Some(Ok(path)) => path,
+        };
+        validate_owner(change)?;
+        let uid = change.uid.unwrap_or(tairix_abi::fs::FS_OWNER_UNCHANGED);
+        let gid = change.gid.unwrap_or(tairix_abi::fs::FS_OWNER_UNCHANGED);
+        set_owner(&path, uid, gid).map_err(OwnerError::Refused)?;
         Ok(())
     }
 

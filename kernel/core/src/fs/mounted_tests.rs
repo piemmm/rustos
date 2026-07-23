@@ -17,7 +17,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
 use tairix_abi::driver::DriverHandle;
-use tairix_abi::{Errno, FileKind, OpenFlags, UnlinkFlags};
+use tairix_abi::{CapabilityId, Errno, FileKind, OpenFlags, UnlinkFlags, FS_OWNER_UNCHANGED};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
@@ -762,6 +762,175 @@ fn rename_before_a_mount_is_installed_fails_closed() {
     let caps = caps();
     assert_eq!(
         svc.rename(TEST_UID, &caps, &path("a"), &path("b")),
+        Err(Errno::NotImplemented)
+    );
+}
+
+/// A capability set holding `CAP_FS_CHOWN` — the privileged authority to
+/// reassign a node's owner (and to set any group).
+fn chown_caps() -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::FS_CHOWN);
+    caps
+}
+
+/// A fully-installed writable service whose identity table also makes the
+/// test principal a member of the supplementary group `gid`, so the
+/// unprivileged owner-may-set-a-group-they-belong-to branch is exercised.
+fn ready_with_supplementary(gid: u32) -> MountedFilesystemService<RwMockFs> {
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
+        .expect("register driver");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let mut builder = IdentityTableBuilder::new();
+    builder.push_group(GroupRecord {
+        gid: GroupId(TEST_GID),
+    });
+    builder.push_group(GroupRecord { gid: GroupId(gid) });
+    builder.push_user(UserRecord {
+        uid: UserId(TEST_UID),
+        primary_gid: GroupId(TEST_GID),
+        supplementary_gids: Vec::from([GroupId(gid)]),
+        capability_grants: CapabilitySet::empty(),
+    });
+    identity
+        .install(
+            builder
+                .verify(&NullSink)
+                .expect("well-formed identity table"),
+        )
+        .expect("install identity");
+    MountedFilesystemService::new(cell, identity)
+}
+
+/// Create a regular file owned by the test principal and return its path.
+fn create_file(svc: &MountedFilesystemService<RwMockFs>, name: &str) -> alloc::string::String {
+    let p = path(name);
+    svc.open(
+        TEST_UID,
+        &caps(),
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    p
+}
+
+#[test]
+fn set_owner_reassigns_the_uid_only_for_a_privileged_caller() {
+    let svc = ready();
+    let p = create_file(&svc, "f");
+
+    // Unprivileged: reassigning the owner is refused and nothing changes.
+    assert_eq!(
+        svc.set_owner(TEST_UID, &caps(), &p, 2000, FS_OWNER_UNCHANGED),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").uid, TEST_UID);
+
+    // Privileged (`CAP_FS_CHOWN`): the owner is reassigned.
+    svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
+        .expect("chown");
+    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").uid, 2000);
+}
+
+#[test]
+fn set_owner_strips_the_setuid_bit_on_a_change() {
+    let svc = ready();
+    let p = create_file(&svc, "bin");
+    // A setuid, group-executable file.
+    svc.set_mode(TEST_UID, &caps(), &p, 0o4755).expect("chmod");
+
+    svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
+        .expect("chown");
+
+    let st = svc.stat(TEST_UID, &caps(), &p).expect("stat");
+    assert_eq!(st.uid, 2000);
+    // The setuid bit is gone; a reassigned file cannot stay setuid.
+    assert_eq!(st.mode & 0o7777, 0o0755);
+}
+
+#[test]
+fn set_owner_group_change_to_a_non_member_group_is_denied_unprivileged() {
+    let svc = ready();
+    let p = create_file(&svc, "g");
+    // The owner belongs only to gid 1000; setting an unrelated group without
+    // `CAP_FS_CHOWN` is refused, and the group is unchanged.
+    assert_eq!(
+        svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 55),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, TEST_GID);
+}
+
+#[test]
+fn set_owner_group_change_to_a_member_group_is_allowed_unprivileged() {
+    let svc = ready_with_supplementary(7);
+    let p = create_file(&svc, "g");
+    // The owner is a member of gid 7, so an unprivileged `chgrp` to it
+    // succeeds — no capability needed.
+    svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 7)
+        .expect("chgrp to a member group");
+    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, 7);
+}
+
+#[test]
+fn set_owner_privileged_group_change_needs_no_membership() {
+    let svc = ready();
+    let p = create_file(&svc, "g");
+    // A `CAP_FS_CHOWN` holder may set any group, member or not.
+    svc.set_owner(TEST_UID, &chown_caps(), &p, FS_OWNER_UNCHANGED, 55)
+        .expect("privileged chgrp");
+    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, 55);
+}
+
+#[test]
+fn set_owner_leaving_both_unchanged_is_a_noop_even_unprivileged() {
+    let svc = ready();
+    let p = create_file(&svc, "n");
+    // Both fields sentinel: a no-op that succeeds without `CAP_FS_CHOWN`.
+    svc.set_owner(
+        TEST_UID,
+        &caps(),
+        &p,
+        FS_OWNER_UNCHANGED,
+        FS_OWNER_UNCHANGED,
+    )
+    .expect("no-op chown");
+    let st = svc.stat(TEST_UID, &caps(), &p).expect("stat");
+    assert_eq!(st.uid, TEST_UID);
+    assert_eq!(st.gid, TEST_GID);
+}
+
+#[test]
+fn set_owner_on_a_read_only_mount_fails_closed() {
+    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
+    let svc = service(true, true, true);
+    assert_eq!(
+        svc.set_owner(
+            TEST_UID,
+            &chown_caps(),
+            &path("a"),
+            2000,
+            FS_OWNER_UNCHANGED
+        ),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn set_owner_before_a_mount_is_installed_fails_closed() {
+    let svc = service(false, true, false);
+    assert_eq!(
+        svc.set_owner(
+            TEST_UID,
+            &chown_caps(),
+            &path("a"),
+            2000,
+            FS_OWNER_UNCHANGED
+        ),
         Err(Errno::NotImplemented)
     );
 }

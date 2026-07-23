@@ -139,6 +139,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
 |  94 | `signal_intake` | `u32 op`                               | `u64` (value) | —             | yes   |
 |  95 | `sched_set_realtime` | `u32 realtime`                    | `errno`       | `CAP_SCHED_REALTIME` | yes |
+|  96 | `fs_set_owner` | `user_ptr` (path), `len`, `u32 uid`, `u32 gid` | `errno`       | `CAP_FS_ACCESS` (+ `CAP_FS_CHOWN` per-inode) | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -180,6 +181,25 @@ its mode (write access does not imply chmod, and holding a capability grants
 no override), the covering mount must be writable, and a node carrying a
 `required_cap` gate demands that capability for this change as for any other
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
+
+`fs_set_owner` (no. 96) is the `chown(2)` / `chgrp(2)` shape: it reassigns the
+owning user and/or group of the node at a path. Either `uid` or `gid` may be
+`FS_OWNER_UNCHANGED` (`0xFFFF_FFFF`, the `(uid_t)-1` convention) to leave that
+field alone; a call changing neither is a well-formed no-op. Unlike
+`fs_set_mode`, it is a **privileged** operation, and the rule is the secured
+VFS's, applied under the caller's kernel-attested credential: reassigning the
+**uid**, or setting a **gid** the caller is not a member of, requires
+`CAP_FS_CHOWN` (the Unix `CAP_CHOWN` analogue, held by the administrator
+ceiling); without it, only the node's **owner** may change the group, and only
+to a group they already belong to (the unprivileged `chgrp`). Any successful
+change **clears the set-user-ID bit** (and the set-group-ID bit of a
+group-executable node — a set-group-ID directory keeps it), so a reassigned
+file can never carry a stale set-*id* escalation, and the covering mount must
+be writable. The dispatch gate is the coarse `CAP_FS_ACCESS` like the other
+path calls; the privileged per-inode check is deeper, in the VFS. It fails
+closed — a refused change leaves the node's ownership exactly as it was — and
+is audited. The `chown` command app and the file manager's Properties panel
+are its callers.
 
 The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
 `getxattr`/`setxattr`/`listxattr`/`removexattr` shapes over the per-inode
@@ -311,7 +331,8 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
 

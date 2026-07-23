@@ -94,6 +94,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///
 /// * `CAP_USER_ADMIN` — create/modify/delete/lock accounts and edit
 ///   grants.
+/// * `CAP_FS_CHOWN` — reassign the owning user of any filesystem node
+///   (the `chown(2)` privilege): administering who owns files is an
+///   administrative act, not an ordinary session's, so it is granted here
+///   rather than in the baseline. An ordinary owner can still set their
+///   own file's group to a group they belong to without it.
 /// * `CAP_FS_MOUNT` — mount and unmount volumes.
 /// * `CAP_RLIMIT_RAISE` — raise hard resource limits above an inherited
 ///   ceiling.
@@ -120,6 +125,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   requests it. Ordinary transport use stays baseline `CAP_NET`.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
+    CapabilityId::FS_CHOWN,
     CapabilityId::FS_MOUNT,
     CapabilityId::RLIMIT_RAISE,
     CapabilityId::AUDIT_READ,
@@ -259,12 +265,13 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 20);
+        assert_eq!(set.len(), 21);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
         for cap in [
             CapabilityId::USER_ADMIN,
+            CapabilityId::FS_CHOWN,
             CapabilityId::FS_MOUNT,
             CapabilityId::RLIMIT_RAISE,
             CapabilityId::AUDIT_READ,

@@ -1991,6 +1991,31 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Set the owning user and/or group of the file or directory at the
+    /// absolute path `path` (`path_len` bytes) to `uid` / `gid` (the
+    /// `chown(2)` / `chgrp(2)` shape). Either field may be
+    /// [`tairix_abi::fs::FS_OWNER_UNCHANGED`] to leave it unchanged.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
+    /// The per-inode rule — reassigning the uid, or setting a gid the caller
+    /// is not a member of, requires [`CapabilityId::FS_CHOWN`]; otherwise
+    /// only the owner may change the group, and only to a group they belong
+    /// to; any change strips the set-*id* bits — is the secured VFS's,
+    /// applied in the handler's filesystem service.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_set_owner(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _uid: u32,
+        _gid: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read one extended attribute of the file or directory at the
     /// absolute path `path` (`path_len` bytes) into the caller's
     /// `value_out` buffer, returning the value's byte count (the
@@ -2775,6 +2800,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     return Err(Errno::OutOfRange);
                 }
                 self.handlers.fs_set_mode(caller, args.0[0], path_len, mode)
+            }
+            SyscallNumber::FS_SET_OWNER => {
+                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
+                // args[1] is the path length; args[2]/args[3] are the new
+                // uid/gid (either may be `FS_OWNER_UNCHANGED`). The whole
+                // authority rule is the secured VFS's; no value needs
+                // rejecting here (an id is any `u32`, the sentinel included).
+                let path_len = decode_len(args.0[1])?;
+                let uid = decode_u32(args.0[2]);
+                let gid = decode_u32(args.0[3]);
+                self.handlers
+                    .fs_set_owner(caller, args.0[0], path_len, uid, gid)
             }
             SyscallNumber::FS_ATTR_GET => {
                 // args[0]/args[2]/args[4] are non-null `UserPtr`s
@@ -4011,6 +4048,18 @@ mod tests {
             Ok(0)
         }
 
+        fn fs_set_owner(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _uid: u32,
+            _gid: u32,
+        ) -> SyscallResult {
+            self.record("fs_set_owner");
+            Ok(0)
+        }
+
         fn fs_attr_get(
             &self,
             _c: &CallerContext<'_>,
@@ -5002,6 +5051,43 @@ mod tests {
             .dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_set_mode"));
+    }
+
+    #[test]
+    fn fs_set_owner_requires_fs_access_and_reaches_the_handler() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000; // path — a non-null user pointer
+        args.0[1] = 16; // path length
+        args.0[2] = 1000; // new uid
+        args.0[3] = u64::from(tairix_abi::FS_OWNER_UNCHANGED); // gid unchanged
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_SET_OWNER.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_set_owner"));
+
+        // Without `CAP_FS_ACCESS` the dispatcher refuses before the handler
+        // (the privileged `CAP_FS_CHOWN` per-inode rule is the VFS's, deeper).
+        let bare = build_caps(&[], &sink);
+        let ctx_bare = CallerContext {
+            task_id: TaskId(7),
+            caps: &bare,
+        };
+        let h_bare = MockHandlers::default();
+        let d_bare = Dispatcher::new(&h_bare, &sink);
+        assert_eq!(
+            d_bare.dispatch(&ctx_bare, SyscallNumber::FS_SET_OWNER.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h_bare.last(), None);
     }
 
     #[test]

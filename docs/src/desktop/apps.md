@@ -592,8 +592,43 @@ visible in the panel's octal and symbolic spelling and are edited through the
 `chmod` command — a deliberate scope boundary for a bloat-free panel, not an
 omission.
 
-Showing and offering an ownership change only where the user holds the
-authority is the remaining FM8b app-side increment.
+### Editing ownership
+
+The ownership-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
+`lib/browse::owner_edit` plus `Browser::set_owner_selected`, host-proven ahead
+of the drawn ownership control exactly as the permission-edit model landed
+ahead of its control. It is deliberately unlike the other write verbs (rename,
+mode, mkdir), which are the user's own §5.3-checked writes needing no new
+capability: reassigning a file's **owner** is a privileged operation, so it is
+gated by a dedicated capability, `CAP_FS_CHOWN` — the Unix `CAP_CHOWN`
+analogue, carried by the administrator ceiling and by nothing an ordinary
+session holds (`AGENTS.md` §5.2). The whole authority rule lives kernel-side in
+the secured VFS behind the new `fs_set_owner` syscall: reassigning the uid, or
+setting a group the caller is not a member of, requires `CAP_FS_CHOWN`;
+otherwise only the node's owner may change the group, and only to a group they
+already belong to (the unprivileged `chgrp`). Any successful change clears the
+set-user-ID bit (and the set-group-ID bit of a group-executable node — a
+set-group-ID directory keeps it), so a reassigned file can never carry a stale
+set-*id* escalation, the standard `chown(2)` safety behaviour.
+
+The engine models none of that policy. `OwnerChange` names *what* to change —
+each of `uid`/`gid` is either `None` (leave unchanged) or `Some(id)` (set) —
+and `validate_owner` fails closed on a field set to the reserved
+`FS_OWNER_UNCHANGED` sentinel as an explicit target, refusing it before any
+syscall rather than misreading it as "unchanged". `Browser::set_owner_selected`
+names the selected node through the shared `Browser::selected_target_path`
+spelling, validates before any syscall, maps `None` onto the sentinel, and
+applies through an injected `fs_set_owner` seam under the user's own identity;
+a VFS refusal — including the `PermissionDenied` a caller without `CAP_FS_CHOWN`
+receives — leaves the ownership exactly as it was and is surfaced as
+`OwnerError::Refused` for an honest in-UI answer (`AGENTS.md` §2.24, §5.4). The
+listing carries no ownership, so a success re-reads nothing; the app re-stats
+the node to refresh the panel. The model holds no authority, so the trusted
+picker composes the same `Browser` and never calls the write path.
+
+Drawing the ownership control on the Properties overlay — offered only where
+the user holds `CAP_FS_CHOWN`, so an ordinary session is not shown a control it
+cannot use — is the remaining FM8b app-side increment.
 
 ## Terminal emulator (`tairix-terminal`)
 

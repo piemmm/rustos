@@ -118,7 +118,8 @@ per-descriptor, and per-lease (the kernel owner-gates every seat
 acquire, input drain, and present against the live lease, and every
 shared-memory region against its owner). An
 administrator is an account whose grant additionally includes the
-administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_MOUNT`,
+administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_CHOWN` — the
+`chown(2)` privilege to reassign a file's owner, `CAP_FS_MOUNT`,
 `CAP_RLIMIT_RAISE`, `CAP_AUDIT_READ`, the global `CAP_SYSINFO_*` queries,
 `CAP_TIME_SET`, `CAP_TIME_HIRES`) — no uid is special, there is no admin
 flag, and group membership conveys file reach through ACLs, never class

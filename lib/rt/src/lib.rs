@@ -304,6 +304,9 @@ const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 
+/// `fs_set_owner` syscall number (as above).
+const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
+
 /// `fs_attr_*` syscall numbers (as above).
 const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
 const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
@@ -3561,6 +3564,36 @@ pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
     ret as i64
 }
 
+/// Set the owning user and/or group of the file or directory at the
+/// absolute `path` to `uid` / `gid` (`SyscallNumber::FS_SET_OWNER`, the
+/// `chown(2)` / `chgrp(2)` shape).
+///
+/// Pass [`tairix_abi::FS_OWNER_UNCHANGED`] for either field to leave it
+/// unchanged (so an owner-only or group-only change touches only the field
+/// it names); a call leaving both is a no-op. The kernel authorises the
+/// change through the secured VFS under the caller's attested identity:
+/// reassigning the **uid**, or setting a **gid** the caller is not a member
+/// of, requires `CAP_FS_CHOWN`; otherwise only the node's owner may change
+/// the group, and only to a group they belong to. Any successful change
+/// clears the setuid bit (and the setgid bit of a group-executable node),
+/// and the covering mount must be writable. Returns `0` on success or
+/// `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_set_owner(path: &[u8], uid: u32, gid: u32) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `path` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_SET_OWNER,
+            [ptr, path.len() as u64, u64::from(uid), u64::from(gid), 0, 0],
+        )
+    };
+    ret as i64
+}
+
 /// Read the extended attribute `key` of the file or directory at the
 /// absolute `path` into `value_out` (`SyscallNumber::FS_ATTR_GET`, the
 /// `getxattr(2)` shape).
@@ -5641,6 +5674,20 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0o640);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_set_owner_marshals_path_uid_and_gid() {
+        let path = b"/Users/me/notes.txt";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_set_owner(path, 1000, tairix_abi::FS_OWNER_UNCHANGED), 0);
+        });
+        assert_eq!(number, NUM_FS_SET_OWNER);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], 1000);
+        assert_eq!(args[3], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

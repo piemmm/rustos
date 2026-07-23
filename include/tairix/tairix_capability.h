@@ -58,5 +58,6 @@
 #define TAIRIX_CAP_NET ((uint16_t)36u)
 #define TAIRIX_CAP_SCHED_REALTIME ((uint16_t)37u)
 #define TAIRIX_CAP_NET_BIND_PRIVILEGED ((uint16_t)38u)
+#define TAIRIX_CAP_FS_CHOWN ((uint16_t)39u)
 
 #endif /* TAIRIX_CAPABILITY_H */

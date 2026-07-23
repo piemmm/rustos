@@ -119,6 +119,7 @@ extern "C" {
 #define TAIRIX_SYS_MEM_UNPIN 93u
 #define TAIRIX_SYS_SIGNAL_INTAKE 94u
 #define TAIRIX_SYS_SCHED_SET_REALTIME 95u
+#define TAIRIX_SYS_FS_SET_OWNER 96u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -343,6 +344,7 @@ int32_t tairix_sys_mem_pin(void);
 int32_t tairix_sys_mem_unpin(void);
 uint64_t tairix_sys_signal_intake(uint32_t a0);
 int32_t tairix_sys_sched_set_realtime(uint32_t a0);
+int32_t tairix_sys_fs_set_owner(void * a0, uintptr_t a1, uint32_t a2, uint32_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

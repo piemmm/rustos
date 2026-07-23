@@ -506,6 +506,39 @@ impl Vfs {
         DelegatedFs::new_secured(fs, template).set_mode(cred, &remainder, mode)
     }
 
+    /// Set the owning user and/or group of the node at `path` under a
+    /// driver-backed mount, delegating to `fs` (the `chown(2)` /
+    /// `chgrp(2)` shape).
+    ///
+    /// The per-inode authority rule is
+    /// [`DelegatedFs::set_owner`](super::delegate::DelegatedFs::set_owner)'s:
+    /// reassigning the uid, or setting a gid the caller is not a member of,
+    /// requires [`tairix_abi::CapabilityId::FS_CHOWN`]; otherwise only the
+    /// owner may change the group, and only to a group they belong to. Any
+    /// change clears the set-*id* bits. Secured-only, like `set_mode`: a
+    /// uniform-template mount stores no per-node ownership record for the
+    /// change to land in.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::PermissionDenied`] if the caller lacks the authority
+    ///   for the requested change or fails a search/capability check on the
+    ///   way to the node.
+    /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
+    pub fn set_owner_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).set_owner(cred, &remainder, uid, gid)
+    }
+
     /// Read one extended attribute of the node at `path` under a
     /// driver-backed mount, delegating to `fs` (the `getxattr(2)` shape).
     ///

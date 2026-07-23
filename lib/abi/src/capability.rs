@@ -499,6 +499,31 @@ impl CapabilityId {
     /// their signed manifests.
     pub const NET_BIND_PRIVILEGED: Self = Self(38);
 
+    /// Reassign the owning **user** of a filesystem node, and set its
+    /// owning **group** beyond what an ordinary owner may (the `chown(2)`
+    /// privilege; the Unix `CAP_CHOWN` analogue).
+    ///
+    /// Changing a file's owner is a security-sensitive act — it can hand a
+    /// file to another principal or seize one — so it is a guarded class of
+    /// authority, not ambient. This capability guards the whole class of
+    /// ownership reassignment (every node, not one path), and no existing
+    /// capability expresses it at that granularity: `CAP_FS_ACCESS` is the
+    /// coarse "may use the filesystem at all" gate every session holds, and
+    /// `CAP_USER_ADMIN` administers the *account database*, not the owner
+    /// field of arbitrary inodes. The `fs_set_owner` syscall enforces it
+    /// kernel-side against the caller's kernel-attested credential before any
+    /// state is touched, and audits the decision.
+    ///
+    /// The capability is required only to change the **uid**, or to set a
+    /// **gid** the caller does not otherwise qualify for. Without it, an
+    /// ordinary owner may still set a file's group to one of *their own*
+    /// groups — the standard unprivileged `chown :group` — because that
+    /// grants no authority the caller does not already have. Any successful
+    /// ownership change clears the setuid and setgid bits, so a reassigned
+    /// file can never become a new setuid-to-someone-else escalation
+    /// (fail closed; capability checks before state touches).
+    pub const FS_CHOWN: Self = Self(39);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -547,6 +572,7 @@ impl CapabilityId {
         (Self::NET, "CAP_NET"),
         (Self::SCHED_REALTIME, "CAP_SCHED_REALTIME"),
         (Self::NET_BIND_PRIVILEGED, "CAP_NET_BIND_PRIVILEGED"),
+        (Self::FS_CHOWN, "CAP_FS_CHOWN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -679,6 +705,7 @@ mod tests {
         assert_eq!(CapabilityId::NET.as_u16(), 36);
         assert_eq!(CapabilityId::SCHED_REALTIME.as_u16(), 37);
         assert_eq!(CapabilityId::NET_BIND_PRIVILEGED.as_u16(), 38);
+        assert_eq!(CapabilityId::FS_CHOWN.as_u16(), 39);
     }
 
     #[test]
@@ -712,9 +739,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=38 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=39 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=38 {
+        for raw in 1..=39 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

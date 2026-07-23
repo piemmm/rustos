@@ -236,6 +236,25 @@ can never diverge in navigation semantics, listing policy, or look.
   never resolves a toggle (separated by call site, not a runtime flag). The
   setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
   via `chmod` — a deliberate scope boundary, and a toggle preserves them.
+- **Ownership edit** (`owner_edit`, `Browser::set_owner_selected`,
+  `plans/NEW-FILEMANAGER.md` FM8b): the model of committing a new owning user
+  and/or group to the selected node (the `chown(2)` / `chgrp(2)` shape),
+  host-proven ahead of the drawn ownership control. Unlike rename, mode, and
+  mkdir — the user's own §5.3-checked writes — reassigning the owner is a
+  **privileged** operation: the kernel's secured VFS requires the dedicated
+  `CAP_FS_CHOWN` to change the uid or set a group the caller is not a member
+  of, and clears the set-*id* bits on any change. The engine models none of
+  that policy — it names *what* to change via `OwnerChange` (each field `None`
+  = unchanged, `Some(id)` = set), and `validate_owner` fails closed on a field
+  set to the reserved `FS_OWNER_UNCHANGED` sentinel as an explicit target.
+  `Browser::set_owner_selected` spells the selected node's absolute path
+  through the one shared `absolute_path`, validates before any syscall, maps
+  `None` onto the sentinel, and applies through an injected `fs_set_owner`
+  seam; a VFS refusal (including the missing-`CAP_FS_CHOWN` denial) leaves the
+  ownership unchanged and surfaces as `OwnerError::Refused`. The listing
+  carries no ownership, so a success re-reads nothing (the app re-stats to
+  refresh the Properties view). The model holds no authority, so the read-only
+  picker composes the same `Browser` and never calls it.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the

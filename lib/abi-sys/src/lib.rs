@@ -137,6 +137,7 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
+const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
 const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
 const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
 const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
@@ -1978,6 +1979,39 @@ pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32)
     }
 }
 
+/// `fs_set_owner`: set the owning user and/or group of the file or
+/// directory at the absolute path `(path, path_len)` to `uid` / `gid`
+/// (`SyscallNumber::FS_SET_OWNER`, the `chown(2)` / `chgrp(2)` shape).
+/// Returns a `TAIRIX_E_*` code.
+///
+/// Pass `TAIRIX_FS_OWNER_UNCHANGED` for either field to leave it unchanged.
+/// Requires `TAIRIX_CAP_FS_ACCESS`; reassigning the **uid**, or setting a
+/// **gid** the caller is not a member of, additionally requires
+/// `TAIRIX_CAP_FS_CHOWN` — otherwise only the node's owner may change the
+/// group, and only to a group they belong to. Any successful change clears
+/// the setuid bit (and the setgid bit of a group-executable node) and the
+/// covering mount must be writable. The kernel validates `(path, path_len)`
+/// against the caller's address space before reading it.
+#[must_use]
+#[export_name = "tairix_sys_fs_set_owner"]
+pub extern "C" fn sys_fs_set_owner(path: *mut c_void, path_len: usize, uid: u32, gid: u32) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    // The whole authority rule is enforced kernel-side by the secured VFS.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_SET_OWNER,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(uid),
+                u64::from(gid),
+                0,
+                0,
+            ],
+        ))
+    }
+}
+
 /// `fs_attr_get`: read the extended attribute `(key, key_len)` of the file
 /// or directory at the absolute path `(path, path_len)` into
 /// `(value_out, value_out_len)` (`SyscallNumber::FS_ATTR_GET`, the
@@ -2404,6 +2438,7 @@ mod tests {
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
+        (NUM_FS_SET_OWNER, "fs_set_owner", 4),
         (NUM_FS_ATTR_GET, "fs_attr_get", 6),
         (NUM_FS_ATTR_SET, "fs_attr_set", 6),
         (NUM_FS_ATTR_LIST, "fs_attr_list", 5),
@@ -3403,6 +3438,24 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0o640);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_set_owner_marshals_path_len_uid_and_gid() {
+        let mut path = *b"/Storage/file";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_set_owner(ptr, path.len(), tairix_abi::FS_OWNER_UNCHANGED, 42),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_SET_OWNER);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
+        assert_eq!(args[3], 42);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

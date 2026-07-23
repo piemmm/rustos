@@ -48,6 +48,40 @@ pub const FS_IO_MAX: usize = 1 << 20;
 /// the filesystem's own and are never settable through the call.
 pub const FS_MODE_MASK: u32 = 0o7777;
 
+/// The set-user-ID permission bit (`0o4000`).
+///
+/// A successful ownership change through
+/// [`fs_set_owner`](crate::SyscallNumber::FS_SET_OWNER) always clears this bit,
+/// so a file whose owner is reassigned can never carry a stale
+/// setuid-to-someone-else escalation (the standard `chown(2)` safety
+/// behaviour). One definition, shared by the secured VFS that enforces it.
+pub const FS_SETUID_BIT: u32 = 0o4000;
+
+/// The set-group-ID permission bit (`0o2000`).
+///
+/// A successful ownership change clears this bit **only** when the node is
+/// group-executable ([`FS_GROUP_EXEC_BIT`] set) — a set-group-ID *directory*
+/// legitimately keeps the bit to drive group inheritance, exactly as
+/// `chown(2)` does — so a reassigned group-executable file cannot become a
+/// setgid escalation while collaborative directories survive a group change.
+pub const FS_SETGID_BIT: u32 = 0o2000;
+
+/// The group-execute permission bit (`0o0010`).
+///
+/// Distinguishes a group-executable file (whose [`FS_SETGID_BIT`] is cleared
+/// on an ownership change) from a set-group-ID directory (whose bit is
+/// preserved).
+pub const FS_GROUP_EXEC_BIT: u32 = 0o0010;
+
+/// The [`fs_set_owner`](crate::SyscallNumber::FS_SET_OWNER) `uid`/`gid`
+/// sentinel meaning "leave this field unchanged" (the `(uid_t)-1` /
+/// `(gid_t)-1` convention of `chown(2)`).
+///
+/// A call may pass this for either field to change only the other; passing it
+/// for both is a well-formed no-op. `0xFFFF_FFFF` is not an assignable id, so
+/// the sentinel can never collide with a real owner id.
+pub const FS_OWNER_UNCHANGED: u32 = u32::MAX;
+
 /// Longest extended-attribute key, in bytes, a `fs_attr_*` syscall accepts.
 ///
 /// A fixed *security* validation bound on untrusted input, never a growable

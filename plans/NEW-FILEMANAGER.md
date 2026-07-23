@@ -36,10 +36,12 @@ FM7b's pure delete model, FM7b's pure new-folder (`fs_mkdir`) model, FM7b's draw
 FM8a's properties view model, FM8b's drawn read-only properties panel +
 its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
 FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
+FM8b's ownership-change model + its privileged `fs_set_owner`/`CAP_FS_CHOWN`
+kernel primitive,
 and FM4b's pure context-menu chrome model
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
 FM6b app-side spawn/delegation, the FM7b app-side move/copy/delete verbs,
-FM8b's ownership change, and FM9 are
+FM8b's drawn ownership control, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -680,7 +682,8 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
 ### FM8b — the drawn properties panel + permission editing `[~]`
 
 Split (§2.19) into the drawn read-only panel (done), the drawn permission
-(mode) control (done), and an ownership change (still `planned`).
+(mode) control (done), the ownership-change model + its privileged kernel
+primitive (done), and the drawn ownership control (still `planned`).
 
 **The drawn Properties panel is done.** `render::draw_properties` paints the
 done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
@@ -750,11 +753,45 @@ full-panel scan proving `permission_cell_at` mirrors exactly the nine distinct
 bits and fails closed off-grid). Docs: `docs/src/desktop/apps.md`, `lib/browse`
 README + rustdoc.
 
+**The ownership-change model and its privileged kernel primitive are done.**
+Reassigning a file's *owner* is genuinely unlike the other write verbs (rename,
+mode, mkdir), which are the user's own §5.3-checked writes needing no new
+capability: it is a privilege operation, so it is gated by a new dedicated
+capability `CAP_FS_CHOWN` (id 39, the Unix `CAP_CHOWN` analogue), carried by
+the `ADMINISTRATIVE_SET` ceiling and by nothing an ordinary session holds
+(§5.2 — a new capability guarding a real class of authority, added with its
+live holder and enforcement point). The kernel primitive is the new
+`fs_set_owner` syscall (no. 96): the whole authority rule lives in the secured
+VFS (`DelegatedFs::set_owner` over the frozen driver `set_security`, so no
+driver-trait change) — reassigning the uid, or setting a gid the caller is not
+a member of, requires `CAP_FS_CHOWN`; otherwise only the node's owner may
+change the group, and only to a group they belong to (the unprivileged
+`chgrp`); any change strips the set-*id* bits (the `chown(2)` safety
+behaviour). Dispatch keeps the coarse `CAP_FS_ACCESS` gate; the privileged
+check is per-inode, in the VFS, under the caller's kernel-attested credential,
+and audited, fail closed (§5.4). Wired end to end: `lib/rt::fs_set_owner`, the
+C stub `tairix_sys_fs_set_owner`, and the generated `include/` header. The pure
+engine model is `lib/browse::owner_edit` (`OwnerChange`/`OwnerError`/
+`validate_owner`) + `Browser::set_owner_selected`: it names *what* to change
+(each field `None` = unchanged, `Some(id)` = set), refuses the reserved
+`FS_OWNER_UNCHANGED` sentinel as an explicit target before any syscall, spells
+the node through the shared `absolute_path`, and surfaces a VFS refusal
+(including the missing-`CAP_FS_CHOWN` denial) as `OwnerError::Refused` leaving
+the ownership untouched. The model holds no authority, so the read-only picker
+composes the same `Browser` and never calls it. Tested in `kernel/core`
+(privileged/unprivileged uid, member/non-member group, setid-strip, no-op,
+read-only, not-implemented), `kernel/syscall` (dispatch + `CAP_FS_ACCESS`
+gate), `lib/rt`/`lib/abi-sys` (marshalling), and `lib/browse` (the engine
+model). Docs: `docs/src/architecture/syscalls.md`, `docs/src/security/
+capabilities.md`, `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
+
 The remaining FM8b work (still `planned`):
 
-- **Ownership change** is shown but only offered when the user holds the
-  authority (no ambient escalation, §4). Host tests: the app-side control and
-  its commit/refuse wiring.
+- **The drawn ownership control** on the Properties overlay: offered only where
+  the user holds `CAP_FS_CHOWN` (so an ordinary session is not shown a control
+  it cannot use, §2.24), committing through the done `Browser::set_owner_selected`
+  over `fs_set_owner`. Host tests: the app-side control and its commit/refuse
+  wiring.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 

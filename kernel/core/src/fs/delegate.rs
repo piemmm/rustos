@@ -31,7 +31,10 @@ use tairix_abi::driver::filesystem::{
     NodeKind, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
+use tairix_abi::fs::{FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT};
+use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
+use tairix_kernel_sec::{GroupId, UserId};
 
 use super::path::MAX_COMPONENT_LEN;
 use super::perm::{Access, Credentials, Metadata};
@@ -240,6 +243,88 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
         }
         let mut sec = self.fs.security(node).map_err(map_driver_error)?;
         sec.mode = mode;
+        self.fs.set_security(node, sec).map_err(map_driver_error)
+    }
+
+    /// Set the owning user and/or group of the node at `components` (the
+    /// `chown(2)` / `chgrp(2)` shape), leaving its mode's permission triads,
+    /// ACL, and capability gate otherwise untouched.
+    ///
+    /// `uid` / `gid` of [`FS_OWNER_UNCHANGED`] leave that field as it is; a
+    /// call changing neither is a no-op that touches no state. The authority
+    /// rule is stricter than a mode change:
+    ///
+    /// * Reassigning the **uid**, or setting a **gid** the caller is not a
+    ///   member of, requires [`CapabilityId::FS_CHOWN`] (the Unix `CAP_CHOWN`
+    ///   privilege). Without it either is refused.
+    /// * Without the capability, only the node's **owner** may change the
+    ///   group, and only to a group the caller already belongs to (its
+    ///   primary or a supplementary group) — the unprivileged `chgrp`.
+    /// * A `required_cap` gate on the node is honoured first, exactly as for
+    ///   a mode change (the gate guards *all* access to the node).
+    ///
+    /// On any actual change the set-user-ID bit is cleared, and the
+    /// set-group-ID bit is cleared for a group-executable node (a set-group-ID
+    /// directory keeps it), so a reassigned file can never carry a stale
+    /// set-*id* escalation. Implemented only for the per-inode policy: a
+    /// uniform-template mount has no stored per-node record to change.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    /// [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn set_owner(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), VfsError> {
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        if let Some(cap) = meta.required_cap {
+            if !cred.caps.holds(cap) {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+
+        let mut sec = self.fs.security(node).map_err(map_driver_error)?;
+        let owner = if uid == FS_OWNER_UNCHANGED {
+            sec.uid
+        } else {
+            uid
+        };
+        let group = if gid == FS_OWNER_UNCHANGED {
+            sec.gid
+        } else {
+            gid
+        };
+        let owner_changed = owner != sec.uid;
+        let group_changed = group != sec.gid;
+        if !owner_changed && !group_changed {
+            return Ok(());
+        }
+
+        let privileged = cred.caps.holds(CapabilityId::FS_CHOWN);
+        if !privileged {
+            // Reassigning the owner is always privileged.
+            if owner_changed {
+                return Err(VfsError::PermissionDenied);
+            }
+            // Group change is the owner's, and only to a group they belong to.
+            if group_changed && !(UserId(sec.uid) == cred.uid && cred.is_in_group(GroupId(group))) {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+
+        sec.uid = owner;
+        sec.gid = group;
+        // Strip set-*id* bits so a reassigned node cannot become an
+        // escalation: always the setuid bit; the setgid bit only for a
+        // group-executable node (a setgid directory keeps it).
+        sec.mode &= !FS_SETUID_BIT;
+        if sec.mode & FS_GROUP_EXEC_BIT != 0 {
+            sec.mode &= !FS_SETGID_BIT;
+        }
         self.fs.set_security(node, sec).map_err(map_driver_error)
     }
 }

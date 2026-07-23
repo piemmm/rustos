@@ -1801,6 +1801,30 @@ impl SyscallNumber {
     /// is low (once per driver start), so the record cannot drown the log.
     pub const SCHED_SET_REALTIME: Self = Self(95);
 
+    /// Set the owning user and/or group of the file or directory at an
+    /// absolute path (the `chown(2)` / `chgrp(2)` shape).
+    ///
+    /// Arguments: `path: *const u8` (a non-null user pointer),
+    /// `path_len: usize` (at most [`crate::FS_PATH_MAX`]), `uid: u32` and
+    /// `gid: u32` — the new owning user and group. Either field may be
+    /// [`crate::FS_OWNER_UNCHANGED`] to leave that field as it is, so an
+    /// owner-only or group-only change touches only the field it names; a
+    /// call leaving *both* unchanged is a well-formed no-op.
+    ///
+    /// Gated on `CAP_FS_ACCESS` at dispatch like the other path-taking
+    /// filesystem calls; the per-inode rule is the secured VFS's and is
+    /// stricter than a mode change. Reassigning the **uid**, or setting a
+    /// **gid** the caller is not a member of, is the privileged
+    /// [`crate::CapabilityId::FS_CHOWN`] operation (the Unix `CAP_CHOWN`
+    /// model) and is refused without it. Absent that capability, only the
+    /// node's **owner** may change the group, and only to a group the caller
+    /// already belongs to (its egid or a supplementary group) — the standard
+    /// unprivileged `chgrp`. The covering mount must be writable. Any
+    /// successful ownership change **clears the setuid and setgid bits**, so
+    /// a reassigned file can never become a setuid-to-someone-else
+    /// escalation. Fail closed: a refused change leaves the node untouched.
+    pub const FS_SET_OWNER: Self = Self(96);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -2055,6 +2079,7 @@ mod tests {
         assert_eq!(SyscallNumber::PORT_BIND.as_u16(), 88);
         assert_eq!(SyscallNumber::BOOT_FACTS_GET.as_u16(), 89);
         assert_eq!(SyscallNumber::SCHED_SET_REALTIME.as_u16(), 95);
+        assert_eq!(SyscallNumber::FS_SET_OWNER.as_u16(), 96);
     }
 
     #[test]

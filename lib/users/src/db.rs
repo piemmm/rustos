@@ -43,7 +43,17 @@ pub const FORMAT_HEADER: &str = "tairix-users-v1";
 pub const MAX_DB_LEN: usize = 64 * 1024;
 
 /// Longest single line, in bytes.
-pub const MAX_LINE_LEN: usize = 512;
+///
+/// A fail-closed validation bound on the trusted on-disk database, sized to
+/// admit the largest *legitimate* record: one granting the entire named
+/// capability set. The `CAP_*` grants are serialised by name, and the whole
+/// `abi-v1` named set is ~590 bytes; adding the account's identity, home and
+/// shell paths, and PBKDF2 password record needs a few hundred more, so the
+/// bound is set well above that so a record granting the full administrative
+/// ceiling never overflows a line. It is not a capacity that scales with
+/// hardware — it stays fixed — but it must hold the data the format can
+/// legitimately carry.
+pub const MAX_LINE_LEN: usize = 1024;
 
 /// Most records one database may hold.
 pub const MAX_USERS: usize = 512;

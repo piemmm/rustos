@@ -2358,6 +2358,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SCHED_REALTIME),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_SET_OWNER,
+        name: "fs_set_owner",
+        arg_count: 4,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            // The new owning user id, or `FS_OWNER_UNCHANGED` to leave it.
+            AbiType::U32,
+            // The new owning group id, or `FS_OWNER_UNCHANGED` to leave it.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The coarse "may use the filesystem at all" gate, like the other
+        // path-taking calls; the privileged per-inode rule (reassigning the
+        // uid, or setting a gid the caller is not a member of, requires
+        // `CAP_FS_CHOWN`) is the secured VFS's. Rewrites persistent inode
+        // ownership metadata; audited like `fs_set_mode`.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

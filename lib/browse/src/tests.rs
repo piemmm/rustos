@@ -1727,6 +1727,155 @@ mod mode_edit_model {
     }
 }
 
+// --- FM8b: the ownership-edit model (validate + commit a new owner) --------
+//
+// The `owner_edit` model runs end to end over the `MockFs` fixture, so every
+// validation, transactional, and fail-closed branch of `set_owner_selected`
+// runs in `cargo test` without a kernel. The authority rule itself
+// (`CAP_FS_CHOWN`, group membership, set-*id* strip) is the kernel's and is
+// proven in `kernel/core`; here the engine only names the change and surfaces
+// the seam's outcome.
+
+mod owner_edit_model {
+    use core::cell::RefCell;
+
+    use alloc::string::ToString;
+
+    use tairix_abi::fs::FS_OWNER_UNCHANGED;
+    use tairix_abi::Errno;
+
+    use super::MockFs;
+    use crate::browser::Browser;
+    use crate::owner_edit::{validate_owner, OwnerChange, OwnerError};
+
+    #[test]
+    fn commit_applies_the_owner_to_the_selected_node() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+
+        let seen = RefCell::new(None);
+        let result = browser.set_owner_selected(
+            OwnerChange {
+                uid: Some(1000),
+                gid: Some(50),
+            },
+            |path, uid, gid| {
+                *seen.borrow_mut() = Some((path.to_string(), uid, gid));
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 1000, 50)));
+        // The listing is unchanged: an ownership change touches no `Entry`.
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_field_marshals_the_sentinel() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+
+        let seen = RefCell::new(None);
+        // Group-only change: the uid field must reach the seam as the
+        // reserved "unchanged" sentinel, never a fabricated id.
+        let result = browser.set_owner_selected(OwnerChange::group(7), |_, uid, gid| {
+            *seen.borrow_mut() = Some((uid, gid));
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some((FS_OWNER_UNCHANGED, 7)));
+    }
+
+    #[test]
+    fn a_sentinel_target_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        // The reserved sentinel is not a real id: naming it as a target is
+        // refused rather than misread as "leave unchanged".
+        let result =
+            browser.set_owner_selected(OwnerChange::user(FS_OWNER_UNCHANGED), |_, _, _| {
+                panic!("the VFS must not be touched for an invalid id");
+            });
+        assert_eq!(result, Err(OwnerError::Invalid));
+    }
+
+    #[test]
+    fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        // The missing-`CAP_FS_CHOWN` denial (or any VFS refusal) surfaces as
+        // `Refused`, leaving the listing exactly as it was.
+        let result = browser
+            .set_owner_selected(OwnerChange::user(0), |_, _, _| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(OwnerError::Refused(Errno::PermissionDenied)));
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_reports_no_selection() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.open_index(2).expect("enter System");
+        browser
+            .open_index(0)
+            .expect("enter the empty Fonts directory");
+        assert_eq!(browser.selected_name(), None);
+        let result =
+            browser.set_owner_selected(OwnerChange::user(1), |_, _, _| panic!("nothing to change"));
+        assert_eq!(result, Err(OwnerError::NoSelection));
+    }
+
+    #[test]
+    fn validate_owner_accepts_real_ids_and_refuses_the_sentinel() {
+        assert_eq!(validate_owner(OwnerChange::default()), Ok(()));
+        assert_eq!(validate_owner(OwnerChange::user(0)), Ok(()));
+        assert_eq!(validate_owner(OwnerChange::group(1000)), Ok(()));
+        assert_eq!(
+            validate_owner(OwnerChange {
+                uid: Some(1),
+                gid: Some(2)
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_owner(OwnerChange::user(FS_OWNER_UNCHANGED)),
+            Err(OwnerError::Invalid)
+        );
+        assert_eq!(
+            validate_owner(OwnerChange::group(FS_OWNER_UNCHANGED)),
+            Err(OwnerError::Invalid)
+        );
+    }
+
+    #[test]
+    fn owner_change_constructors_and_is_empty() {
+        assert_eq!(OwnerChange::user(5).uid, Some(5));
+        assert_eq!(OwnerChange::user(5).gid, None);
+        assert_eq!(OwnerChange::group(9).gid, Some(9));
+        assert_eq!(OwnerChange::group(9).uid, None);
+        assert!(OwnerChange::default().is_empty());
+        assert!(!OwnerChange::user(0).is_empty());
+    }
+
+    #[test]
+    fn every_owner_error_has_a_nonempty_message() {
+        for err in [
+            OwnerError::NoSelection,
+            OwnerError::Invalid,
+            OwnerError::Path(Errno::NotFound),
+            OwnerError::Refused(Errno::PermissionDenied),
+        ] {
+            assert!(!err.message().is_empty());
+        }
+    }
+}
+
 // --- FM6a: activating an entry (descend / launch a bundle / open a file) --
 
 use crate::activate::Activation;

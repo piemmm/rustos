@@ -627,6 +627,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_set_owner(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _uid: u32,
+        _gid: u32,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn fs_attr_get(
         &self,
         _c: &CallerContext<'_>,

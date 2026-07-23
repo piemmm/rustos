@@ -233,6 +233,39 @@ pub trait FilesystemService: Send + Sync {
         mode: u32,
     ) -> Result<(), Errno>;
 
+    /// Set the owning user and/or group of the node at the absolute `path`
+    /// (the `chown(2)` / `chgrp(2)` shape), leaving its mode's permission
+    /// triads, ACL, and capability gate otherwise untouched. Either of
+    /// `uid` / `gid` may be [`tairix_abi::fs::FS_OWNER_UNCHANGED`] to leave
+    /// that field.
+    ///
+    /// The secured VFS owns the authorisation: reassigning the uid, or
+    /// setting a gid the caller is not a member of, requires
+    /// [`tairix_abi::CapabilityId::FS_CHOWN`]; otherwise only the node's
+    /// owner may change the group, and only to a group they belong to. Any
+    /// change clears the set-*id* bits.
+    ///
+    /// Defaults to [`Errno::NotImplemented`] so a service (the boot-time
+    /// null service, a mount whose format stores no per-node ownership)
+    /// that cannot honour the change fails closed; the real per-inode
+    /// filesystem overrides it.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (a missing path, an
+    /// unauthorised caller, a read-only mount), or [`Errno::NotImplemented`]
+    /// when no filesystem is mounted or the format keeps no ownership.
+    fn set_owner(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _new_uid: u32,
+        _new_gid: u32,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the extended attribute `key` of the node at the absolute
     /// `path` into `value_out`, returning the value's byte count (the
     /// `getxattr(2)` shape).

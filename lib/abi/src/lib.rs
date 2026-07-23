@@ -89,7 +89,8 @@ pub use field::{
 };
 pub use fs::{
     DirEntry, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX, FS_PATH_MAX,
+    FS_ATTR_VALUE_MAX, FS_GROUP_EXEC_BIT, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX, FS_OWNER_UNCHANGED,
+    FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT,
 };
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,
