@@ -103,7 +103,7 @@ pub mod users;
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
 pub use cputime::{for_each_cpu_time, CPU_TIME_PAGE};
-pub use human::{format_load, format_mib, format_size, format_tenths, format_uptime};
+pub use human::{format_count, format_load, format_mib, format_size, format_tenths, format_uptime};
 pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
 pub use kstats::{
     for_each_cpu_load, for_each_irq, for_each_reclaim_class, memory_pressure, ramzip_stats,

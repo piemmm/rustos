@@ -434,6 +434,8 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 pressure_shrinks: stats.pressure_shrinks,
                 teardowns: stats.teardowns,
                 failures: stats.failures,
+                hits: stats.hits,
+                misses: stats.misses,
             };
             out.extend_from_slice(&record.to_le_bytes());
         }

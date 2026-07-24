@@ -692,10 +692,10 @@ impl<F: FilesystemRead> CachedFs<F> {
             if let Some(entry) = self.data.get_mut(&(raw, base)) {
                 entry.tick = tick;
             }
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::CleanFileData);
             return Ok((n, len));
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::CleanFileData);
         let Some(mut chunk) = Self::try_zeroed(CHUNK) else {
             // No memory for a chunk buffer: serve the caller's slice
             // straight from the driver without caching. A short read
@@ -747,10 +747,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             if let Some(entry) = self.stat.get_mut(&raw) {
                 entry.tick = tick;
             }
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::FsMetadata);
             return Ok(info);
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::FsMetadata);
         let info = self.inner.node_info(node)?;
         if let Some(tick) = self.admit(KeyRef::Stat(raw), size_of::<NodeInfo>(), ENTRY_OVERHEAD) {
             self.stat.insert(raw, StatEntry { info, tick });
@@ -772,10 +772,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             {
                 entry.tick = tick;
             }
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::FsMetadata);
             return Ok(NodeId::from_raw(node));
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::FsMetadata);
         let node = self.inner.lookup(dir, name)?;
         // A name over the VFS component bound is unbounded input from
         // the cache's point of view and is served uncached.
@@ -840,7 +840,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             // The contract's refusal for an undersized buffer is served
             // from the cached name length exactly as the driver would.
             if name_out.len() < cached.name.len() {
-                self.accounting.record_hit();
+                self.accounting.record_hit(ReclaimClass::FsMetadata);
                 return Err(DriverError::BufferTooSmall);
             }
             let mut entry = cached.entry;
@@ -851,10 +851,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             if let Some(cached) = self.dirent.get_mut(&(dir_raw, cursor)) {
                 cached.tick = tick;
             }
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::FsMetadata);
             return Ok(Some(entry));
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::FsMetadata);
         let Some(entry) = self.inner.read_dir(dir, cursor, name_out)? else {
             return Ok(None);
         };
@@ -1026,10 +1026,10 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
             if let Some(entry) = self.sec.get_mut(&raw) {
                 entry.tick = tick;
             }
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::FsMetadata);
             return Ok(sec);
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::FsMetadata);
         let sec = self.inner.security(node)?;
         if let Some(tick) = self.admit(KeyRef::Sec(raw), size_of::<NodeSecurity>(), ENTRY_OVERHEAD)
         {

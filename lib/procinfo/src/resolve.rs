@@ -1621,6 +1621,8 @@ mod tests {
                 pressure_shrinks: 0,
                 teardowns: 0,
                 failures: 0,
+                hits: (i as u64) * 100,
+                misses: i as u64,
             })
             .collect()
     }

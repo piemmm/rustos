@@ -211,6 +211,8 @@ impl MemStats {
                 .saturating_add(stats.pressure_shrinks);
             total.teardowns = total.teardowns.saturating_add(stats.teardowns);
             total.failures = total.failures.saturating_add(stats.failures);
+            total.hits = total.hits.saturating_add(stats.hits);
+            total.misses = total.misses.saturating_add(stats.misses);
         }
         total
     }

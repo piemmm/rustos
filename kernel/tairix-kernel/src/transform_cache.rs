@@ -306,7 +306,7 @@ impl ClusterCache for TransformClusterCache {
         }
         self.enforce_pressure();
         if !self.entries.contains_key(&phys) {
-            self.accounting.record_miss();
+            self.accounting.record_miss(ReclaimClass::TransformCache);
             return None;
         }
         let tick = self.next_tick();
@@ -315,7 +315,7 @@ impl ClusterCache for TransformClusterCache {
             self.lru.insert(tick, phys);
             entry.tick = tick;
         }
-        self.accounting.record_hit();
+        self.accounting.record_hit(ReclaimClass::TransformCache);
         self.entries.get(&phys).map(|entry| entry.plain.as_slice())
     }
 

@@ -1277,14 +1277,18 @@ until one is installed and populated.
 
 - **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
   per-owner counter surface — each cache is charged to exactly one
-  `ReclaimOwner`, so its ledger *is* that owner's contribution. Beside
-  the split payload/metadata byte ledgers and the hit/miss/insertion/
-  invalidation/eviction/refusal counters it counts: `pressure_shrinks`
-  (forced-shrink passes that actually reclaimed), `teardowns`
-  (whole-cache drains — a rollback purge, a poison drain), and
-  `failures` (detected ledger/index defects). The pressure gauge counts
-  entries into each band (`band_entries`, §7h). Counters saturate:
-  they are diagnostics, never control flow.
+  `ReclaimOwner`, so its ledger *is* that owner's contribution. The
+  `hits` and `misses` counters are kept **per reclaim class** (each
+  lookup is attributed to the class it served), so the `RECLAIM_STATS`
+  export carries a genuine per-class hit ratio — the direct measure of a
+  cache's effectiveness, which `sysmon`'s `caches` panel renders as its
+  `hit%` column. Beside those and the split payload/metadata byte
+  ledgers and the insertion/invalidation/eviction/refusal counters it
+  counts: `pressure_shrinks` (forced-shrink passes that actually
+  reclaimed), `teardowns` (whole-cache drains — a rollback purge, a
+  poison drain), and `failures` (detected ledger/index defects). The
+  pressure gauge counts entries into each band (`band_entries`, §7h).
+  Counters saturate: they are diagnostics, never control flow.
 - **Stable audit events.** Security-relevant failures emit one
   structured record through the boot audit sink using `kernel/mem`'s
   reserved `EventId` range (`2_000..3_000`, `reclaim_audit`):

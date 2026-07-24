@@ -479,13 +479,13 @@ impl<B: Block> BlockCache<B> {
             return forward(&mut self.device, lba, buf);
         };
         if self.try_serve(lba, blocks, buf) {
-            self.accounting.record_hit();
+            self.accounting.record_hit(ReclaimClass::CleanFileData);
             return Ok(());
         }
         if self.poisoned {
             return forward(&mut self.device, lba, buf);
         }
-        self.accounting.record_miss();
+        self.accounting.record_miss(ReclaimClass::CleanFileData);
         forward(&mut self.device, lba, buf)?;
         self.populate(lba, blocks, buf);
         Ok(())

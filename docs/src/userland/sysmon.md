@@ -4,7 +4,8 @@
 system app-store command app that watches every aspect of the kernel's
 memory and load through the System Information API, full screen and
 live: physical memory, the kernel heap, the memory-pressure band with a
-scrolling history strip, the reclaimable-cache ledger, the `ramzip`
+scrolling history strip, the reclaimable-cache ledger with per-class
+hit ratios, the `ramzip`
 compressed tier, the pinned-memory aggregate, mounted-volume storage
 usage, per-CPU load, the kernel IRQ table, and a process census. Its
 primary function is observing a machine under deliberate stress; at idle
@@ -116,10 +117,31 @@ six views. Each table's column header is drawn as an inverted
 drawn in their own colour, so structure reads without hunting.
 
 - **`caches`** — the **reclaimable-cache ledger**, one row per reclaim
-  class (e.g. disposable UI surfaces, clean file-backed pages): the
-  memory the kernel *could* hand back under pressure without data loss,
-  broken down by class so an operator can see where reclaimable slack
-  lives.
+  class: the memory the kernel *could* hand back under pressure without
+  data loss (every entry is rebuildable from its canonical source, so it
+  is dropped rather than paged out), broken down by class and — the panel
+  exists for this — carrying each class's **hit ratio**, the direct
+  measure of whether a cache is earning the memory it holds. The columns
+  are `class`, `entries` (live entries held), `cached` (payload plus
+  per-entry metadata bytes), `hits` and `misses` (lookups served from
+  cache vs. fallen through to the source, since boot), `hit%` (`hits /
+  (hits + misses)`, or `-` for a class nothing has looked up this boot —
+  never a fabricated `0%`), and the health counters `ref` (admissions
+  refused), `shr` (pressure-forced shrink passes), and `fail` (internal
+  failures that poisoned a cache). Counts abbreviate above 99 999 as
+  `k`/`M`/`G`/`T` (decimal thousands) so a column never widens. Hits and
+  misses are counted **per class** in the kernel's `CacheAccounting`
+  ledger (each cache attributes every lookup to the class it served), so
+  the ratios are honest per-class figures, not a whole-cache average. The
+  nine classes, in reclaim order (first dropped first, so a class low in
+  the list survives longest): `disposable-ui` (rasterised UI assets),
+  `predictive-prefetch` (speculative prefetch), `background-validation`
+  (idle-time validation work), `semantic-app-cache` (verified app-launch
+  state), `runtime-cache` (runtime-derived state), `clean-file-data`
+  (clean file contents re-readable from the volume), `transform-cache`
+  (verified/decrypted/decompressed data), `fs-metadata` (stat, lookup,
+  directory, and security records), and `reliability-assist` (recovery
+  assist state).
 - **`ramzip`** — the **compressed memory tier**, laid out in aligned
   sections. `ramzip` transparently compresses cold anonymous pages into a
   smaller in-RAM store instead of paging them out, so more fits in

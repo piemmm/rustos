@@ -17,8 +17,8 @@
 //!    screen, and paints its first frame. The `Pres` gauge label on the
 //!    transcript witnesses the gated `MEMORY_PRESSURE` figures rendered;
 //!    the runner then types `r` (an immediate refresh — the §6 keys work
-//!    over the raw console) and waits for `shrinks` (a column header of the
-//!    default `RECLAIM_STATS` ledger panel).
+//!    over the raw console) and waits for `hit%` (the cache-hit-ratio
+//!    column header of the default `RECLAIM_STATS` ledger panel).
 //! 2. `q` — the monitor quits, leaves the alternate screen (restoring the
 //!    covered shell content), and the shell prompt reappearing at all is
 //!    the intact-screen witness: a monitor that died, hung, or wedged the

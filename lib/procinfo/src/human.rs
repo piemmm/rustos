@@ -41,6 +41,36 @@ pub fn format_size(bytes: u64) -> String {
     format!("{}.{}G", tenths / 10, tenths % 10)
 }
 
+/// Render a plain event count for a narrow column: the exact number
+/// below 100 000 (`12345`), then tenths of the next SI-style unit —
+/// `k` thousands, `M` millions, `G` billions, `T` trillions — so a
+/// counter that grows without bound (cache hits, interrupt counts)
+/// never widens its column past six characters. Zero renders as `0`.
+///
+/// Unlike [`format_size`] this is a *count* of things, not bytes, so it
+/// scales in decimal thousands (`k`/`M`/…), not binary KiB/MiB.
+#[must_use]
+pub fn format_count(count: u64) -> String {
+    const K: u64 = 1_000;
+    const M: u64 = 1_000 * K;
+    const G: u64 = 1_000 * M;
+    const T: u64 = 1_000 * G;
+    if count < 100_000 {
+        return format!("{count}");
+    }
+    let (unit, suffix) = if count < M {
+        (K, 'k')
+    } else if count < G {
+        (M, 'M')
+    } else if count < T {
+        (G, 'G')
+    } else {
+        (T, 'T')
+    };
+    let tenths = count * 10 / unit;
+    format!("{}.{}{}", tenths / 10, tenths % 10, suffix)
+}
+
 /// Render a byte count as tenths of MiB (`986.2`), the unit of the GNU
 /// `top` memory summary line.
 #[must_use]
@@ -80,7 +110,20 @@ pub fn format_load(fixed: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_load, format_mib, format_size, format_tenths, format_uptime};
+    use super::{format_count, format_load, format_mib, format_size, format_tenths, format_uptime};
+
+    #[test]
+    fn counts_render_exact_then_compact_units() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(99_999), "99999");
+        // At and above 100 000 the compact SI-style units keep the
+        // column narrow; counts scale in decimal thousands, not KiB.
+        assert_eq!(format_count(100_000), "100.0k");
+        assert_eq!(format_count(1_500_000), "1.5M");
+        assert_eq!(format_count(2_000_000_000), "2.0G");
+        assert_eq!(format_count(3_400_000_000_000), "3.4T");
+    }
 
     #[test]
     fn tenths_render_with_one_decimal_and_saturate() {

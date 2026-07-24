@@ -82,6 +82,11 @@ impl FakeService {
                         class: u8::try_from(class).unwrap_or(0),
                         payload_bytes: 1024 * (class as u64 + 1),
                         entries: class as u64,
+                        // 100:10 per class — a 90% hit ratio the panel test
+                        // asserts, and a non-idle denominator so `hit%` is a
+                        // percentage rather than the idle `-`.
+                        hits: 100 * (class as u64 + 1),
+                        misses: 10 * (class as u64 + 1),
                         ..ReclaimClassRecord::default()
                     })
                     .collect(),
@@ -723,6 +728,12 @@ fn render_draws_the_summary_and_the_reclaim_panel() {
     // the reclaim classes by name.
     assert!(contains(&out, b"caches"));
     assert!(contains(&out, b"disposable-ui"));
+    // The caches table leads with the effectiveness columns: hits, misses,
+    // and the hit ratio (100 : 10 per class renders as 90%).
+    assert!(contains(&out, b"hits"));
+    assert!(contains(&out, b"misses"));
+    assert!(contains(&out, b"hit%"));
+    assert!(contains(&out, b"90%"));
     // The task-census row.
     assert!(contains(&out, b"Tasks"));
     assert!(contains(&out, b"total,"));

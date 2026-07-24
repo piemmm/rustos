@@ -224,6 +224,8 @@ fn kernel_stats_reply(query: SysinfoQueryId) -> Option<Vec<u8>> {
                         pressure_shrinks: 0,
                         teardowns: 0,
                         failures: 0,
+                        hits: (i as u64) * 10,
+                        misses: 1,
                     }
                     .to_le_bytes(),
                 );

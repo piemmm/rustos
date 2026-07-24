@@ -332,7 +332,7 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
     }
     emit(
         out,
-        "class                  payload    metadata  entries  refusals  shrinks  teardowns  failures",
+        "class                  payload    metadata  entries      hits    misses  hit%  refusals  shrinks  failures",
     )?;
     for chunk in reply.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
         let record = ReclaimClassRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
@@ -340,19 +340,35 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
         emit(
             out,
             &format!(
-                "{:<21}  {:>7}  {:>10}  {:>7}  {:>8}  {:>7}  {:>9}  {:>8}",
+                "{:<21}  {:>7}  {:>10}  {:>7}  {:>8}  {:>8}  {:>4}  {:>8}  {:>7}  {:>8}",
                 name,
                 record.payload_bytes,
                 record.metadata_bytes,
                 record.entries,
+                record.hits,
+                record.misses,
+                hit_pct(record.hits, record.misses),
                 record.refusals,
                 record.pressure_shrinks,
-                record.teardowns,
                 record.failures,
             ),
         )?;
     }
     Ok(())
+}
+
+/// The cache hit ratio `hits / (hits + misses)` as a whole-percent string
+/// (`"92%"`), or `"-"` when no lookup has happened yet — an idle cache is
+/// reported honestly, never as a fabricated ratio over a zero denominator.
+fn hit_pct(hits: u64, misses: u64) -> String {
+    let lookups = hits.saturating_add(misses);
+    if lookups == 0 {
+        return String::from("-");
+    }
+    // hits <= lookups, so the quotient is 0..=100 and always fits a u64;
+    // the checked conversion is the lint-clean way to say so.
+    let pct = u64::try_from(u128::from(hits) * 100 / u128::from(lookups)).unwrap_or(100);
+    format!("{pct}%")
 }
 
 /// Fetch and render the `ramzip` compressed-tier counters. Counters only
@@ -607,6 +623,8 @@ mod tests {
                     pressure_shrinks: 2,
                     teardowns: 0,
                     failures: 0,
+                    hits: 900,
+                    misses: 100,
                 }],
                 ramzip: RamzipStats {
                     entries: 4,
@@ -1096,6 +1114,9 @@ mod tests {
         assert!(lines[0].starts_with("class"));
         assert!(lines[1].starts_with("clean-file-data"), "{}", lines[1]);
         assert!(lines[1].contains("4096"));
+        // The hit ratio (900 / (900 + 100)) is rendered as a percentage.
+        assert!(lines[0].contains("hit%"), "header: {}", lines[0]);
+        assert!(lines[1].contains("90%"), "row: {}", lines[1]);
     }
 
     #[test]

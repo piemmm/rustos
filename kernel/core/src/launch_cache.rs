@@ -304,7 +304,7 @@ impl LaunchCache {
         }
         self.enforce_pressure();
         if !self.entries.contains_key(bundle) {
-            self.accounting.record_miss();
+            self.accounting.record_miss(ReclaimClass::SemanticAppCache);
             return None;
         }
         let tick = self.next_tick();
@@ -313,7 +313,7 @@ impl LaunchCache {
             self.lru.insert(tick, String::from(bundle));
             entry.tick = tick;
         }
-        self.accounting.record_hit();
+        self.accounting.record_hit(ReclaimClass::SemanticAppCache);
         self.entries.get(bundle).map(|entry| Arc::clone(&entry.app))
     }
 

@@ -2677,12 +2677,19 @@ pub struct ReclaimClassRecord {
     /// Internal failures (poisoned ledgers) attributed to the class
     /// since boot.
     pub failures: u64,
+    /// Lookups of the class served from cache since boot (the cache
+    /// avoided the canonical source): the numerator of the class's
+    /// hit ratio, the direct measure of the cache's effectiveness.
+    pub hits: u64,
+    /// Lookups of the class that fell through to the canonical source
+    /// since boot: the miss half of the hit ratio.
+    pub misses: u64,
 }
 
 impl ReclaimClassRecord {
     /// Encoded size on the wire: the class byte plus 7 reserved bytes,
-    /// then seven `u64` figures.
-    pub const WIRE_LEN: usize = 8 + 7 * 8;
+    /// then nine `u64` figures.
+    pub const WIRE_LEN: usize = 8 + 9 * 8;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -2698,6 +2705,8 @@ impl ReclaimClassRecord {
             self.pressure_shrinks,
             self.teardowns,
             self.failures,
+            self.hits,
+            self.misses,
         ]
         .iter()
         .enumerate()
@@ -2737,6 +2746,8 @@ impl ReclaimClassRecord {
             pressure_shrinks: read_u64(bytes, 40),
             teardowns: read_u64(bytes, 48),
             failures: read_u64(bytes, 56),
+            hits: read_u64(bytes, 64),
+            misses: read_u64(bytes, 72),
         })
     }
 }
@@ -4732,6 +4743,8 @@ mod tests {
             pressure_shrinks: 5,
             teardowns: 1,
             failures: 0,
+            hits: 900,
+            misses: 100,
         };
         let decoded = ReclaimClassRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
         assert_eq!(decoded, record);

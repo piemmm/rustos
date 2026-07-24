@@ -484,8 +484,8 @@ pub struct CacheAccounting {
     /// Live entries per class: one increment per successful charge, one
     /// decrement per successful discharge, zeroed with the byte ledger.
     entries: [AtomicU64; ReclaimClass::ALL.len()],
-    hits: AtomicU64,
-    misses: AtomicU64,
+    hits: [AtomicU64; ReclaimClass::ALL.len()],
+    misses: [AtomicU64; ReclaimClass::ALL.len()],
     insertions: AtomicU64,
     invalidations: AtomicU64,
     evictions: AtomicU64,
@@ -514,6 +514,12 @@ pub struct ReclaimClassStats {
     pub teardowns: u64,
     /// Detected internal failures attributed to the class.
     pub failures: u64,
+    /// Lookups of the class served from cache (the cache avoided the
+    /// canonical source): the numerator of the class's hit ratio.
+    pub hits: u64,
+    /// Lookups of the class that fell through to the canonical source:
+    /// the miss half of the hit ratio.
+    pub misses: u64,
 }
 
 /// Saturating sum of a per-class counter array (a whole-cache view of a
@@ -539,8 +545,8 @@ impl CacheAccounting {
             payload_bytes: [const { AtomicUsize::new(0) }; ReclaimClass::ALL.len()],
             metadata_bytes: [const { AtomicUsize::new(0) }; ReclaimClass::ALL.len()],
             entries: [const { AtomicU64::new(0) }; ReclaimClass::ALL.len()],
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
+            hits: [const { AtomicU64::new(0) }; ReclaimClass::ALL.len()],
+            misses: [const { AtomicU64::new(0) }; ReclaimClass::ALL.len()],
             insertions: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -666,14 +672,15 @@ impl CacheAccounting {
         }
     }
 
-    /// Record a lookup served from the cache.
-    pub fn record_hit(&self) {
-        bump(&self.hits);
+    /// Record a lookup of `class` served from the cache.
+    pub fn record_hit(&self, class: ReclaimClass) {
+        bump(&self.hits[class.index()]);
     }
 
-    /// Record a lookup that fell through to the canonical source.
-    pub fn record_miss(&self) {
-        bump(&self.misses);
+    /// Record a lookup of `class` that fell through to the canonical
+    /// source.
+    pub fn record_miss(&self, class: ReclaimClass) {
+        bump(&self.misses[class.index()]);
     }
 
     /// Record an entry dropped because its source changed.
@@ -713,16 +720,29 @@ impl CacheAccounting {
         bump(&self.failures[class.index()]);
     }
 
-    /// Lookups served from the cache.
+    /// Lookups served from the cache, summed across every class.
     #[must_use]
     pub fn hits(&self) -> u64 {
-        self.hits.load(Ordering::Relaxed)
+        class_sum(&self.hits)
     }
 
-    /// Lookups that fell through to the canonical source.
+    /// Lookups that fell through to the canonical source, summed across
+    /// every class.
     #[must_use]
     pub fn misses(&self) -> u64 {
-        self.misses.load(Ordering::Relaxed)
+        class_sum(&self.misses)
+    }
+
+    /// Lookups of `class` served from the cache.
+    #[must_use]
+    pub fn class_hits(&self, class: ReclaimClass) -> u64 {
+        self.hits[class.index()].load(Ordering::Relaxed)
+    }
+
+    /// Lookups of `class` that fell through to the canonical source.
+    #[must_use]
+    pub fn class_misses(&self, class: ReclaimClass) -> u64 {
+        self.misses[class.index()].load(Ordering::Relaxed)
     }
 
     /// Entries admitted.
@@ -816,6 +836,8 @@ impl CacheAccounting {
             pressure_shrinks: self.class_pressure_shrinks(class),
             teardowns: self.class_teardowns(class),
             failures: self.class_failures(class),
+            hits: self.class_hits(class),
+            misses: self.class_misses(class),
         }
     }
 }
@@ -1053,8 +1075,8 @@ mod tests {
     #[test]
     fn event_counters_track_each_path() {
         let acct = CacheAccounting::new();
-        acct.record_hit();
-        acct.record_miss();
+        acct.record_hit(ReclaimClass::CleanFileData);
+        acct.record_miss(ReclaimClass::CleanFileData);
         acct.record_invalidation();
         acct.record_eviction();
         acct.record_refusal(ReclaimClass::CleanFileData);
@@ -1081,6 +1103,9 @@ mod tests {
         acct.record_pressure_shrink(ReclaimClass::TransformCache);
         acct.record_teardown(ReclaimClass::SemanticAppCache);
         acct.record_failure(ReclaimClass::RuntimeCache);
+        acct.record_hit(ReclaimClass::CleanFileData);
+        acct.record_hit(ReclaimClass::FsMetadata);
+        acct.record_miss(ReclaimClass::FsMetadata);
         assert_eq!(acct.class_refusals(ReclaimClass::CleanFileData), 2);
         assert_eq!(acct.class_refusals(ReclaimClass::FsMetadata), 1);
         assert_eq!(acct.class_refusals(ReclaimClass::TransformCache), 0);
@@ -1088,6 +1113,14 @@ mod tests {
         assert_eq!(acct.class_pressure_shrinks(ReclaimClass::TransformCache), 1);
         assert_eq!(acct.class_teardowns(ReclaimClass::SemanticAppCache), 1);
         assert_eq!(acct.class_failures(ReclaimClass::RuntimeCache), 1);
+        // Hits and misses attribute to their own class, and the summed
+        // accessors fold every class together.
+        assert_eq!(acct.class_hits(ReclaimClass::CleanFileData), 1);
+        assert_eq!(acct.class_hits(ReclaimClass::FsMetadata), 1);
+        assert_eq!(acct.class_misses(ReclaimClass::FsMetadata), 1);
+        assert_eq!(acct.class_misses(ReclaimClass::CleanFileData), 0);
+        assert_eq!(acct.hits(), 2);
+        assert_eq!(acct.misses(), 1);
     }
 
     #[test]

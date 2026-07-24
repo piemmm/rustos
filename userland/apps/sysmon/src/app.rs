@@ -51,8 +51,8 @@ use core::fmt::Write as _;
 
 use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
 use tairix_procinfo::{
-    field_lossy, format_load, format_mib, format_size, format_tenths, format_uptime, state_char,
-    Transport,
+    field_lossy, format_count, format_load, format_mib, format_size, format_tenths, format_uptime,
+    state_char, Transport,
 };
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -236,30 +236,44 @@ fn denied_row<T>(gauge: &Gauge<T>) -> PanelRow {
     }))
 }
 
-/// The reclaim-ledger table: one row per class.
+/// The reclaim-ledger table: one row per reclaim class, leading with the
+/// cache-effectiveness figures the panel exists to show at a glance —
+/// hits, misses, and the hit ratio — beside the class's live footprint and
+/// its health counters.
+///
+/// The `hit%` column is `hits / (hits + misses)` as a whole percent, or
+/// `-` for a class no code has looked up this boot (an idle denominator is
+/// never a fabricated ratio). `cached` is the class's whole resident
+/// footprint (entry payload plus per-entry bookkeeping). Counts render
+/// through [`format_count`] so an unbounded counter never widens its
+/// column; the abbreviated headers (`ref` refusals, `shr` pressure
+/// shrinks, `fail` internal failures) are spelled out in the manual.
 fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     let Some(records) = snapshot.reclaim.ready() else {
         return alloc::vec![denied_row(&snapshot.reclaim)];
     };
     let mut rows = Vec::with_capacity(records.len() + 1);
     rows.push(PanelRow::header(format!(
-        "{:<22} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "class", "payload", "meta", "entries", "shrinks", "refused", "fails"
+        "{:<21} {:>7} {:>7} {:>8} {:>8} {:>4} {:>5} {:>5} {:>5}",
+        "class", "entries", "cached", "hits", "misses", "hit%", "ref", "shr", "fail"
     )));
     for record in records {
         let name = tairix_abi::sysinfo::RECLAIM_CLASS_NAMES
             .get(usize::from(record.class))
             .copied()
             .unwrap_or("?");
+        let cached = record.payload_bytes.saturating_add(record.metadata_bytes);
         rows.push(PanelRow::body(format!(
-            "{:<22} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "{:<21} {:>7} {:>7} {:>8} {:>8} {:>4} {:>5} {:>5} {:>5}",
             name,
-            format_size(record.payload_bytes),
-            format_size(record.metadata_bytes),
-            record.entries,
-            record.pressure_shrinks,
-            record.refusals,
-            record.failures
+            format_count(record.entries),
+            format_size(cached),
+            format_count(record.hits),
+            format_count(record.misses),
+            ratio_pct(record.hits, record.hits.saturating_add(record.misses)),
+            format_count(record.refusals),
+            format_count(record.pressure_shrinks),
+            format_count(record.failures),
         )));
     }
     rows
