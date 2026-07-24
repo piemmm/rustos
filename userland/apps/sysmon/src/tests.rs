@@ -392,6 +392,42 @@ fn refreshed() -> (FakeService, Model) {
     (service, model)
 }
 
+/// Reconstruct the painted screen as one trimmed `String` per row by
+/// composing the base window and reading its cells directly — no tty, no
+/// escape-sequence decoding.
+fn grid_lines(model: &mut Model, rows: u16, cols: u16) -> Vec<alloc::string::String> {
+    use crate::app::{compose, Theme};
+    let mut screen = screen_with(FakeTty::with_input(b""), rows, cols);
+    let theme = Theme::resolve(&mut screen);
+    let win = compose(model, &theme, Size::new(rows, cols));
+    let buffer = win.buffer();
+    let mut lines = Vec::with_capacity(usize::from(rows));
+    for row in 0..rows {
+        let mut text = alloc::string::String::new();
+        if let Some(cells) = buffer.row(row) {
+            for cell in cells {
+                text.push(cell.ch);
+            }
+        }
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        lines.push(text);
+    }
+    lines
+}
+
+/// The row of the reconstructed grid whose text contains `needle`, or a
+/// panic naming the whole grid so a failure is legible.
+fn grid_row<'a>(lines: &'a [alloc::string::String], needle: &str) -> &'a str {
+    for line in lines {
+        if line.contains(needle) {
+            return line;
+        }
+    }
+    panic!("no row contains {needle:?} in:\n{}", lines.join("\n"))
+}
+
 // ---- Command line ------------------------------------------------------
 
 #[test]
@@ -717,9 +753,10 @@ fn render_draws_the_summary_and_the_reclaim_panel() {
     // single tokens.
     assert!(contains(&out, b"sysmon - up"));
     assert!(contains(&out, b"[pinned]"));
-    // The memory gauge's trailing figures carry the MiB unit and the
-    // kernel-heap size.
-    assert!(contains(&out, b"MiB"));
+    // The memory gauge's trailing figures carry the compact used/total
+    // figures and the kernel-heap size.
+    assert!(contains(&out, b"512.0M"));
+    assert!(contains(&out, b"used"));
     assert!(contains(&out, b"kernel"));
     // The pressure gauge is labelled `Pres` and names its current band.
     assert!(contains(&out, b"Pres"));
@@ -918,21 +955,22 @@ fn focus_on(model: &mut Model, target: Focus) {
 
 #[test]
 fn the_memory_gauge_draws_a_stacked_bar_with_a_percentage() {
+    // On a roomy screen the adaptive bar grows wide enough to show every
+    // category, so the stacked composition is asserted directly on the
+    // reconstructed memory row: a `[`…`]` bar decomposing the 512M of 1024M
+    // used into `#` user-resident (128M), `K` kernel heap (64M), and `=`
+    // other-in-use cells, then the compact used/total figures and the exact
+    // used percentage.
     let (_service, mut model) = refreshed();
-    let out = rendered(&mut model);
-    // The stacked gauge is bracketed and decomposes the 512M of 1024M used
-    // into its categories: `#` user-resident (128M), `K` kernel heap (64M),
-    // and `=` other-in-use cells, over blank free track. The trailing text
-    // states the exact used percentage and the MiB unit.
-    // The trailing figures are plain text, whose background-matching spaces
-    // the cell-diff renderer skips, so each token is asserted on its own.
-    assert!(contains(&out, b"["));
-    assert!(contains(&out, b"#"));
-    assert!(contains(&out, b"K"));
-    assert!(contains(&out, b"]"));
-    assert!(contains(&out, b"50%"));
-    assert!(contains(&out, b"used"));
-    assert!(contains(&out, b"MiB"));
+    let lines = grid_lines(&mut model, 25, 120);
+    let mem = grid_row(&lines, "Mem");
+    assert!(mem.contains('['), "bar open: {mem:?}");
+    assert!(mem.contains(']'), "bar close: {mem:?}");
+    assert!(mem.contains('#'), "user-resident cells: {mem:?}");
+    assert!(mem.contains('K'), "kernel-heap cells: {mem:?}");
+    assert!(mem.contains('='), "other-in-use cells: {mem:?}");
+    assert!(mem.contains("50% used"), "used percentage: {mem:?}");
+    assert!(mem.contains("512.0M/1024.0M"), "compact figures: {mem:?}");
 }
 
 #[test]
@@ -1115,4 +1153,113 @@ fn the_process_panel_notice_is_styled_when_the_global_census_is_refused() {
     let rows = detail_rows(&model);
     assert_eq!(rows[0].style, RowStyle::Notice);
     assert!(rows[0].text.contains("CAP_SYSINFO_GLOBAL"));
+}
+
+// ---- 80-column fit ---------------------------------------------------------
+
+/// The conventional serial fallback and the smallest grid the tool must
+/// serve without clipping a figure: 80 columns by 25 rows.
+
+#[test]
+fn every_composed_row_fits_the_eighty_column_grid() {
+    // The renderer clips each line to the width, so an over-wide line can
+    // never physically overflow — this instead guards against a future
+    // double-width miscount, and pairs with the content assertions below
+    // that prove no *figure* is lost to that clipping.
+    let (_service, mut model) = refreshed();
+    for line in grid_lines(&mut model, 25, 80) {
+        assert!(
+            tairix_curses::str_width(&line) <= 80,
+            "row wider than 80 columns: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn the_memory_line_keeps_every_figure_at_eighty_columns() {
+    // ramzip and pinned are the figures the old fixed-width bar pushed off
+    // the 80-column line; the adaptive bar yields its cells so they stay on.
+    let mut service = FakeService::healthy();
+    service.ramzip = Some(RamzipStats {
+        stored_bytes: 16 * 1024 * 1024,
+        pinned_bytes: 32 * 1024 * 1024,
+        ..RamzipStats::default()
+    });
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let lines = grid_lines(&mut model, 25, 80);
+    let mem = grid_row(&lines, "Mem");
+    // Every mandatory memory figure is present in full, not truncated.
+    assert!(mem.contains("% used"), "used share: {mem:?}");
+    assert!(mem.contains("kernel 64.0M"), "kernel heap: {mem:?}");
+    assert!(mem.contains("ramzip 16.0M"), "ramzip stored: {mem:?}");
+    assert!(mem.contains("pinned 32.0M"), "pinned: {mem:?}");
+}
+
+#[test]
+fn large_figures_are_not_truncated_at_eighty_columns() {
+    // A big, busy machine: multi-terabyte RAM, hundred-gigabyte ramzip and
+    // pinned aggregates, million-plus scheduler counters, half-a-billion
+    // band-entry transitions. The compact units keep every figure on the
+    // line and the adaptive bar simply gives up its cells.
+    let mut service = FakeService::healthy();
+    service.memory = Some(KernelMemoryStats {
+        total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
+        free_bytes: 1024 * 1024 * 1024 * 1024,
+        kernel_heap_bytes: 20 * 1024 * 1024 * 1024,
+        user_resident_bytes: 512 * 1024 * 1024 * 1024,
+        page_size: 4096,
+        reserved: 0,
+    });
+    service.ramzip = Some(RamzipStats {
+        stored_bytes: 100 * 1024 * 1024 * 1024,
+        pinned_bytes: 200 * 1024 * 1024 * 1024,
+        ..RamzipStats::default()
+    });
+    *service.pressure.borrow_mut() = Some(MemoryPressureStats {
+        band: 4,
+        total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
+        free_bytes: 1024 * 1024 * 1024 * 1024,
+        reserve_bytes: 64 * 1024 * 1024 * 1024,
+        band_entries: [500_000_000, 0, 0, 0, 0],
+        ..MemoryPressureStats::default()
+    });
+    service.cpu_loads = Some(vec![
+        CpuLoadRecord {
+            cpu: 0,
+            reserved: 0,
+            queue_depth: 9,
+            switches: 1_500_000,
+            preemptions: 12_000_000,
+        },
+        CpuLoadRecord {
+            cpu: 1,
+            reserved: 0,
+            queue_depth: 9,
+            switches: 0,
+            preemptions: 0,
+        },
+    ]);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let lines = grid_lines(&mut model, 25, 80);
+
+    for line in &lines {
+        assert!(
+            tairix_curses::str_width(line) <= 80,
+            "row wider than 80 columns: {line:?}"
+        );
+    }
+
+    let mem = grid_row(&lines, "Mem");
+    assert!(mem.contains("kernel 20.0G"), "kernel heap: {mem:?}");
+    assert!(mem.contains("ramzip 100.0G"), "ramzip: {mem:?}");
+    assert!(mem.contains("pinned 200.0G"), "pinned: {mem:?}");
+
+    let pres = grid_row(&lines, "Pres");
+    assert!(pres.contains("500.0M entries"), "band entries: {pres:?}");
+
+    let cpu = grid_row(&lines, "CPU");
+    assert!(cpu.contains("1.5M sw"), "switches: {cpu:?}");
+    assert!(cpu.contains("12.0M preempt"), "preemptions: {cpu:?}");
 }

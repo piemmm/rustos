@@ -54,9 +54,11 @@ renfort.
   minutes) et l'état d'épinglage (`[pinned]`, ou `[unpinned: <reason>]`
   quand l'épinglage a été refusé).
 - **`Mem`** — la barre de mémoire (voir la légende des barres), suivie des
-  Mio utilisés / totaux, du pourcentage utilisé, de la taille du tas du
-  noyau et — quand ils sont non nuls — des chiffres du magasin compressé
-  `ramzip` et de la mémoire épinglée `pinned`.
+  chiffres utilisé / total (unités compactes `K`/`M`/`G`), du pourcentage
+  utilisé, de la taille du tas du noyau et — quand ils sont non nuls — des
+  chiffres du magasin compressé `ramzip` et de la mémoire épinglée
+  `pinned`. La barre rétrécit pour garder chaque chiffre sur une ligne de
+  80 colonnes, si bien qu'aucun chiffre n'est jamais tronqué.
 - **`Pres`** — la barre de pression mémoire : une jauge à cinq bandes,
   chaque bande atteinte remplie de sa propre couleur de gravité, suivie du
   nom de la bande courante, des chiffres libre / réserve et du total des

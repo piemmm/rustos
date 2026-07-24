@@ -53,9 +53,11 @@ refuerza.
   (1/5/15 minutos) y el estado de fijación (`[pinned]`, o
   `[unpinned: <reason>]` cuando la fijación fue rechazada).
 - **`Mem`** — la barra de memoria (véase la leyenda de barras), seguida
-  de MiB usados / totales, el porcentaje usado, el tamaño del montículo
-  del núcleo y — cuando no son cero — las cifras del almacén comprimido
-  `ramzip` y de la memoria fijada `pinned`.
+  de las cifras usada / total (unidades compactas `K`/`M`/`G`), el
+  porcentaje usado, el tamaño del montículo del núcleo y — cuando no son
+  cero — las cifras del almacén comprimido `ramzip` y de la memoria fijada
+  `pinned`. La barra se encoge para mantener cada cifra en una línea de 80
+  columnas, así que nunca se recorta.
 - **`Pres`** — la barra de presión de memoria: un indicador de cinco
   bandas, cada banda alcanzada rellena con su propio color de severidad,
   seguida del nombre de la banda actual, las cifras de libre / reserva y

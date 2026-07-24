@@ -49,10 +49,12 @@ yw lliw.
 - **Llinell deitl** — enw'r offeryn, amser i fyny'r system (`up D days,
   H:MM`), y tair cyfartaledd llwyth (1/5/15 munud), a'r cyflwr pinio
   (`[pinned]`, neu `[unpinned: <reason>]` pan wrthodwyd y piniad).
-- **`Mem`** — y bar cof (gweler allwedd y bariau), yna'r MiB a ddefnyddiwyd
-  / cyfanswm, y ganran a ddefnyddiwyd, maint pentwr y cnewyllyn, a — phan na
-  fo'n sero — ffigurau'r storfa gywasgedig `ramzip` a'r cof pinnwyd
-  `pinned`.
+- **`Mem`** — y bar cof (gweler allwedd y bariau), yna'r ffigurau a
+  ddefnyddiwyd / cyfanswm (unedau cryno `K`/`M`/`G`), y ganran a
+  ddefnyddiwyd, maint pentwr y cnewyllyn, a — phan na fo'n sero —
+  ffigurau'r storfa gywasgedig `ramzip` a'r cof pinnwyd `pinned`. Mae'r bar
+  yn crebachu i gadw pob ffigur ar linell 80 colofn, felly ni thorrir
+  ffigur byth.
 - **`Pres`** — y bar pwysedd cof: mesurydd o bum band, pob band a
   gyrhaeddwyd wedi'i lenwi yn ei liw difrifoldeb ei hun, yna enw'r band
   cyfredol, y ffigurau rhydd / wrth gefn, a chyfanswm y mynediadau i fand.

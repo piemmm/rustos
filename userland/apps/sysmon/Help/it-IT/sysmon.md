@@ -53,9 +53,11 @@ rinforzo.
   stato di blocco (`[pinned]`, oppure `[unpinned: <reason>]` quando il
   blocco è stato rifiutato).
 - **`Mem`** — la barra della memoria (vedi la legenda delle barre),
-  seguita dai MiB usati / totali, dalla percentuale usata, dalla dimensione
-  dell'heap del kernel e — quando non nulli — dai valori dell'archivio
-  compresso `ramzip` e della memoria bloccata `pinned`.
+  seguita dai valori usato / totale (unità compatte `K`/`M`/`G`), dalla
+  percentuale usata, dalla dimensione dell'heap del kernel e — quando non
+  nulli — dai valori dell'archivio compresso `ramzip` e della memoria
+  bloccata `pinned`. La barra si restringe per tenere ogni valore su una
+  riga di 80 colonne, così non viene mai troncato.
 - **`Pres`** — la barra di pressione della memoria: un indicatore a cinque
   bande, ogni banda raggiunta riempita nel proprio colore di gravità,
   seguito dal nome della banda corrente, dai valori libero / riserva e dal

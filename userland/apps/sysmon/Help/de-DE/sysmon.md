@@ -53,9 +53,11 @@ Verstärkung.
   (`[pinned]`, oder `[unpinned: <reason>]`, wenn das Anheften abgelehnt
   wurde).
 - **`Mem`** — der Speicherbalken (siehe die Balken-Legende), gefolgt von
-  belegten / gesamten MiB, dem belegten Prozentsatz, der Größe des
-  Kernel-Heaps und — falls von null verschieden — den Werten des
-  komprimierten `ramzip`-Speichers und des angehefteten `pinned`-Speichers.
+  den Werten belegt / gesamt (kompakte Einheiten `K`/`M`/`G`), dem
+  belegten Prozentsatz, der Größe des Kernel-Heaps und — falls von null
+  verschieden — den Werten des komprimierten `ramzip`-Speichers und des
+  angehefteten `pinned`-Speichers. Der Balken schrumpft, damit jeder Wert
+  auf einer 80-Spalten-Zeile bleibt und nie abgeschnitten wird.
 - **`Pres`** — der Speicherdruck-Balken: eine Anzeige mit fünf Bändern,
   jedes erreichte Band in seiner eigenen Schweregradfarbe gefüllt, gefolgt
   vom Namen des aktuellen Bandes, den Werten frei / Reserve und der

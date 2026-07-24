@@ -51,9 +51,11 @@ rotulada à esquerda para se ler sem cor; a cor é apenas reforço.
   estado de fixação (`[pinned]`, ou `[unpinned: <reason>]` quando a fixação
   foi recusada).
 - **`Mem`** — a barra de memória (ver a legenda das barras), seguida dos
-  MiB usados / totais, da percentagem usada, do tamanho da pilha do núcleo
-  e — quando não nulos — dos valores do armazém comprimido `ramzip` e da
-  memória fixada `pinned`.
+  valores usado / total (unidades compactas `K`/`M`/`G`), da percentagem
+  usada, do tamanho da pilha do núcleo e — quando não nulos — dos valores
+  do armazém comprimido `ramzip` e da memória fixada `pinned`. A barra
+  encolhe para manter cada valor numa linha de 80 colunas, pelo que nunca
+  é cortado.
 - **`Pres`** — a barra de pressão de memória: um indicador de cinco bandas,
   cada banda alcançada preenchida na sua própria cor de gravidade, seguida
   do nome da banda atual, dos valores livre / reserva e do total de

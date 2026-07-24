@@ -51,8 +51,8 @@ use core::fmt::Write as _;
 
 use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
 use tairix_procinfo::{
-    field_lossy, format_count, format_load, format_mib, format_size, format_tenths, format_uptime,
-    state_char, Transport,
+    field_lossy, format_count, format_load, format_size, format_tenths, format_uptime, state_char,
+    Transport,
 };
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -620,7 +620,7 @@ fn process_rows(model: &Model) -> Vec<PanelRow> {
 /// capability, each with a monochrome fallback (reverse video, bold, dim, or
 /// plain) so the layout is legible on a terminal that cannot show colour.
 /// Rendering is then pure over the theme and the model.
-struct Theme {
+pub(crate) struct Theme {
     /// Title and footer bars: white on blue, else reverse video.
     bar: Attributes,
     /// The focused panel tab: black on cyan, else reverse video.
@@ -678,7 +678,7 @@ enum Ink {
 
 impl Theme {
     /// Resolve the palette from `screen`.
-    fn resolve<T: Tty>(screen: &mut Screen<T>) -> Theme {
+    pub(crate) fn resolve<T: Tty>(screen: &mut Screen<T>) -> Theme {
         Theme {
             bar: fg_on_bg(screen, BasicColor::White, BasicColor::Blue, reversed()),
             tab_active: fg_on_bg(screen, BasicColor::Black, BasicColor::Cyan, reversed()),
@@ -818,12 +818,13 @@ const MEM_OTHER_GLYPH: char = '=';
 /// idle track, severity-coloured by the busy share.
 const CPU_BUSY_GLYPH: char = '#';
 
-/// The gauge bar width for a screen of `cols` columns: a third of the width,
-/// bounded so it neither vanishes on a narrow terminal nor dominates a wide
-/// one.
-fn bar_width(cols: usize) -> usize {
-    (cols / 3).clamp(8, 40)
-}
+/// The narrowest a summary gauge bar shrinks to before [`gauge_line`] drops
+/// it entirely in favour of the figures, and the widest it grows on a roomy
+/// screen. Sizing the bar from the space the figures leave — rather than a
+/// fixed fraction of the width — is what keeps every figure on the line at
+/// 80 columns.
+const MIN_BAR_WIDTH: usize = 6;
+const MAX_BAR_WIDTH: usize = 24;
 
 /// Draw `text` at `(row, col)` with `attrs`, truncated to the columns left
 /// on the line (never splitting a double-width glyph), and return the column
@@ -877,21 +878,21 @@ struct Segment {
     attrs: Attributes,
 }
 
-/// Draw a stacked bar gauge: a `[` bracket, then each [`Segment`] laid down
-/// left-to-right in its own glyph and rendition, the remainder as muted empty
-/// track, and a `]` bracket. Each slice is rounded down to whole cells and
-/// clamped to the remaining width, so the segments never overrun the bar (a
-/// slice starved to zero cells simply does not draw). Returns the column just
-/// past the closing bracket.
+/// Draw a stacked bar gauge `width` cells wide: a `[` bracket, then each
+/// [`Segment`] laid down left-to-right in its own glyph and rendition, the
+/// remainder as muted empty track, and a `]` bracket. Each slice is rounded
+/// down to whole cells and clamped to the remaining width, so the segments
+/// never overrun the bar (a slice starved to zero cells simply does not
+/// draw). Returns the column just past the closing bracket.
 fn segmented_gauge(
     win: &mut Window,
     theme: &Theme,
     row: u16,
     col: u16,
     cols: usize,
+    width: usize,
     segments: &[Segment],
 ) -> u16 {
-    let width = bar_width(cols);
     let mut c = span(win, row, col, cols, "[", theme.muted);
     let mut drawn = 0usize;
     for segment in segments {
@@ -909,6 +910,40 @@ fn segmented_gauge(
         c = c.saturating_add(1);
     }
     span(win, row, c, cols, "]", theme.muted)
+}
+
+/// Draw a summary gauge line — a `label`, an adaptively sized stacked
+/// [`segmented_gauge`], then the `trailing` figures — so the figures are
+/// never truncated on a narrow (80-column) screen.
+///
+/// The bar is sized from the columns left after the label and the figures:
+/// it grows to at most [`MAX_BAR_WIDTH`], shrinks toward [`MIN_BAR_WIDTH`]
+/// as the figures need the room, and is omitted altogether (label straight
+/// into figures) when even the minimum bar plus its brackets will not fit.
+/// The figures always win the space, which is what makes the mandatory
+/// used/pinned/counter figures fit at 80 columns instead of being cut off.
+/// `trailing` carries its own leading separator.
+fn gauge_line(
+    win: &mut Window,
+    theme: &Theme,
+    row: u16,
+    label: &str,
+    segments: &[Segment],
+    trailing: &str,
+    cols: usize,
+) {
+    let col = span(win, row, 0, cols, label, theme.label);
+    let avail = cols.saturating_sub(usize::from(col));
+    // Columns the bar (its two brackets included) may take without pushing a
+    // figure off the line.
+    let bar_room = avail.saturating_sub(str_width(trailing));
+    let after = if bar_room >= MIN_BAR_WIDTH + 2 {
+        let width = (bar_room - 2).min(MAX_BAR_WIDTH);
+        segmented_gauge(win, theme, row, col, cols, width, segments)
+    } else {
+        col
+    };
+    span(win, row, after, cols, trailing, Attributes::PLAIN);
 }
 
 // ---- Summary rows ----------------------------------------------------------
@@ -946,8 +981,8 @@ fn draw_title(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
 /// separate, double-counting bar slices — honest accounting over a
 /// misleading picture.
 fn draw_memory(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usize) {
-    let col = span(win, ROW_MEM, 0, cols, "Mem  ", theme.label);
     let Some(memory) = snapshot.memory.ready() else {
+        let col = span(win, ROW_MEM, 0, cols, "Mem  ", theme.label);
         let reason = if snapshot.memory.is_denied() {
             KERNEL_DENIED
         } else {
@@ -980,11 +1015,13 @@ fn draw_memory(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usize
             attrs: theme.mem_other,
         },
     ];
-    let after = segmented_gauge(win, theme, ROW_MEM, col, cols, &segments);
+    // Compact per-figure units (`format_size`: `64.0M`, `2.0G`) keep the
+    // used/total/heap figures — and the overlapping ramzip/pinned figures —
+    // on the line at 80 columns; the adaptive bar yields its cells to them.
     let mut trailing = format!(
-        "  {} / {} MiB  {}% used  kernel {}",
-        format_mib(used),
-        format_mib(total),
+        " {}/{} {}% used  kernel {}",
+        format_size(used),
+        format_size(total),
         frac_tenths(used, total) / 10,
         format_size(heap),
     );
@@ -998,7 +1035,7 @@ fn draw_memory(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usize
             );
         }
     }
-    span(win, ROW_MEM, after, cols, &trailing, Attributes::PLAIN);
+    gauge_line(win, theme, ROW_MEM, "Mem  ", &segments, &trailing, cols);
 }
 
 /// One pressure-band segment is this many gauge cells wide, so the five-band
@@ -1039,12 +1076,15 @@ fn draw_pressure(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usi
         .unwrap_or("?");
     let entries: u64 = pressure.band_entries.iter().sum();
     // The band name reads in its own severity colour; the rest is plain.
+    // `format_size`/`format_count` keep the free/reserve/entry figures on the
+    // line at 80 columns even as the entry counter grows without bound.
     let c2 = span(win, ROW_PRESSURE, c, cols, "  ", Attributes::PLAIN);
     let c3 = span(win, ROW_PRESSURE, c2, cols, name, theme.band(band));
     let trailing = format!(
-        "  free {}  reserve {}  {entries} band entries",
+        "  free {}  reserve {}  {} entries",
         format_size(pressure.free_bytes),
         format_size(pressure.reserve_bytes),
+        format_count(entries),
     );
     span(win, ROW_PRESSURE, c3, cols, &trailing, Attributes::PLAIN);
 }
@@ -1078,9 +1118,9 @@ fn draw_history(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
 /// rather than a fabricated breakdown; the per-CPU detail panel carries each
 /// core's own share.
 fn draw_cpu(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
-    let col = span(win, ROW_CPU, 0, cols, "CPU  ", theme.label);
     let busy = model.cpu_busy();
     if busy.is_empty() {
+        let col = span(win, ROW_CPU, 0, cols, "CPU  ", theme.label);
         span(win, ROW_CPU, col, cols, UNAVAILABLE, theme.muted);
         return;
     }
@@ -1088,31 +1128,38 @@ fn draw_cpu(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
     let avg = u32::try_from(total / busy.len() as u64)
         .unwrap_or(1000)
         .min(1000);
-    let after = segmented_gauge(
-        win,
-        theme,
-        ROW_CPU,
-        col,
-        cols,
-        &[Segment {
-            frac_tenths: avg,
-            glyph: CPU_BUSY_GLYPH,
-            attrs: theme.severity(avg),
-        }],
-    );
-    let mut trailing = format!("  {}% busy  {} cpus", format_tenths(avg), busy.len());
+    let mut trailing = format!(" {}% busy  {} cpus", format_tenths(avg), busy.len());
     match &model.snapshot().cpu_loads {
         Gauge::Ready(loads) => {
             let switches: u64 = loads.iter().map(|l| l.switches).sum();
             let preemptions: u64 = loads.iter().map(|l| l.preemptions).sum();
-            let _ = write!(trailing, "  {switches} sw  {preemptions} preempt");
+            // Compact counts (`format_count`: `1.5M`) keep the switch and
+            // preemption figures on the line at 80 columns.
+            let _ = write!(
+                trailing,
+                "  {} sw  {} preempt",
+                format_count(switches),
+                format_count(preemptions)
+            );
         }
         Gauge::Denied => {
             let _ = write!(trailing, "  counters {KERNEL_DENIED}");
         }
         Gauge::Unavailable => {}
     }
-    span(win, ROW_CPU, after, cols, &trailing, Attributes::PLAIN);
+    gauge_line(
+        win,
+        theme,
+        ROW_CPU,
+        "CPU  ",
+        &[Segment {
+            frac_tenths: avg,
+            glyph: CPU_BUSY_GLYPH,
+            attrs: theme.severity(avg),
+        }],
+        &trailing,
+        cols,
+    );
 }
 
 /// The task-census row.
@@ -1203,6 +1250,47 @@ fn draw_footer(win: &mut Window, theme: &Theme, size: Size, cols: usize) {
 
 // ---- Render and run --------------------------------------------------------
 
+/// Compose the whole base screen into one [`Window`], sized to `size`.
+///
+/// Every summary line and the detail panel are laid out here against the
+/// screen width, so the composition is testable cell-by-cell without a tty:
+/// [`render`] draws this window and, when help is toggled, the overlay on
+/// top. The model's viewport and scroll are reconciled to the drawable
+/// capacity as a side effect, so the tab bar's indicator and the detail
+/// panel agree.
+pub(crate) fn compose(model: &mut Model, theme: &Theme, size: Size) -> Window {
+    let cols = usize::from(size.cols);
+    let capacity = detail_capacity(size);
+    model.set_viewport(capacity);
+    let rows = detail_rows(model);
+    model.clamp_scroll(rows.len());
+    let scroll = model.scroll();
+
+    let mut win = Window::new(Pos::ORIGIN, size);
+    draw_title(&mut win, theme, model, cols);
+    if size.rows > ROW_MEM {
+        draw_memory(&mut win, theme, model.snapshot(), cols);
+    }
+    if size.rows > ROW_PRESSURE {
+        draw_pressure(&mut win, theme, model.snapshot(), cols);
+    }
+    if size.rows > ROW_HISTORY {
+        draw_history(&mut win, theme, model, cols);
+    }
+    if size.rows > ROW_CPU {
+        draw_cpu(&mut win, theme, model, cols);
+    }
+    if size.rows > ROW_TASKS {
+        draw_tasks(&mut win, theme, model.snapshot(), cols);
+    }
+    if size.rows > ROW_TABS {
+        draw_tabs(&mut win, theme, model, cols, rows.len(), capacity);
+    }
+    draw_detail(&mut win, theme, &rows, scroll, capacity, cols);
+    draw_footer(&mut win, theme, size, cols);
+    win
+}
+
 /// Draw `model` onto `screen` and flush it (the curses two-step:
 /// `wnoutrefresh` each window, then `doupdate`).
 ///
@@ -1216,38 +1304,8 @@ fn draw_footer(win: &mut Window, theme: &Theme, size: Size, cols: usize) {
 /// [`SysmonError::Terminal`] if the underlying tty write fails.
 pub fn render<T: Tty>(model: &mut Model, screen: &mut Screen<T>) -> Result<(), SysmonError> {
     let size = screen.size();
-    let cols = usize::from(size.cols);
     let theme = Theme::resolve(screen);
-
-    let capacity = detail_capacity(size);
-    model.set_viewport(capacity);
-    let rows = detail_rows(model);
-    model.clamp_scroll(rows.len());
-    let scroll = model.scroll();
-
-    let mut win = Window::new(Pos::ORIGIN, size);
-    draw_title(&mut win, &theme, model, cols);
-    if size.rows > ROW_MEM {
-        draw_memory(&mut win, &theme, model.snapshot(), cols);
-    }
-    if size.rows > ROW_PRESSURE {
-        draw_pressure(&mut win, &theme, model.snapshot(), cols);
-    }
-    if size.rows > ROW_HISTORY {
-        draw_history(&mut win, &theme, model, cols);
-    }
-    if size.rows > ROW_CPU {
-        draw_cpu(&mut win, &theme, model, cols);
-    }
-    if size.rows > ROW_TASKS {
-        draw_tasks(&mut win, &theme, model.snapshot(), cols);
-    }
-    if size.rows > ROW_TABS {
-        draw_tabs(&mut win, &theme, model, cols, rows.len(), capacity);
-    }
-    draw_detail(&mut win, &theme, &rows, scroll, capacity, cols);
-    draw_footer(&mut win, &theme, size, cols);
-
+    let win = compose(model, &theme, size);
     screen.wnoutrefresh(&win);
 
     if model.help_visible() {

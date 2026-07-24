@@ -91,13 +91,16 @@ play, and the `?` overlay reproduces this key in-app:
     separately attributed above (caches, buffers, kernel frames);
   - blank track — **free** memory.
 
-  The trailing text states `used / total MiB`, the used percentage, the
-  kernel-heap size, and — when non-zero — the `ramzip` compressed-store
-  bytes and the `pinned` anonymous-memory total. Those last two overlap
-  the bar's buckets (pinned pages are user-resident; the compressed store
-  is kernel memory), so they are reported as figures rather than as
-  separate, double-counting bar slices — honest accounting over a
-  misleading picture.
+  The trailing text states the `used / total` figures (in compact
+  `K`/`M`/`G` units), the used percentage, the kernel-heap size, and —
+  when non-zero — the `ramzip` compressed-store bytes and the `pinned`
+  anonymous-memory total. Those last two overlap the bar's buckets
+  (pinned pages are user-resident; the compressed store is kernel
+  memory), so they are reported as figures rather than as separate,
+  double-counting bar slices — honest accounting over a misleading
+  picture. The bar is sized from the space the figures leave — it shrinks,
+  and is dropped entirely if need be — so no figure is ever clipped on an
+  80-column screen.
 
 - The **pressure** bar (`Pres`) and the **CPU** bar (`CPU`) are
   *severity*-coloured: green below 60%, yellow below 85%, red at or above

@@ -46,9 +46,11 @@ the left so it reads without colour; colour is only reinforcement.
 - **Title bar** — the tool name, the system uptime (`up D days, H:MM`),
   the three load averages (1/5/15-minute), and the pin state
   (`[pinned]`, or `[unpinned: <reason>]` when the pin was refused).
-- **`Mem`** — the memory bar (see the bar key), followed by used / total
-  MiB, the used percentage, the kernel-heap size, and — when non-zero —
-  the `ramzip` compressed-store and `pinned` figures.
+- **`Mem`** — the memory bar (see the bar key), followed by the used /
+  total figures (compact `K`/`M`/`G` units), the used percentage, the
+  kernel-heap size, and — when non-zero — the `ramzip` compressed-store
+  and `pinned` figures. The bar shrinks to keep every figure on an
+  80-column line, so the figures are never clipped.
 - **`Pres`** — the memory-pressure bar: a five-band gauge, each entered
   band filled in its own severity colour, followed by the current band
   name and the free / reserve figures and the total band-entry count.

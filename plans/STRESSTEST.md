@@ -624,7 +624,8 @@ implementation fixed):
   still leaves a running session of stated refusals. `SysmonError` is
   `Usage`/`Terminal` only.
 - The §6 layout/keys hold: six summary lines (title with uptime/load/pin
-  state; MiB memory overview with the pinned aggregate; pressure band
+  state; memory overview — used/total/heap and the overlapping
+  ramzip/pinned aggregates in compact `format_size` units; pressure band
   name + depth gauge + free/reserve/entry counters; the band-history
   strip — one glyph per refresh, bounded at 120 samples; aggregate CPU
   busy share over the interval with summed switch/preemption counters;
@@ -634,6 +635,14 @@ implementation fixed):
   `%CPU` and by resident bytes — the full list stays `top`'s). `+`/`-`
   step the interval one second within 0.1–60 s and re-arm the very next
   bounded wait; `r` refreshes now; `?`/`h` overlay; `q` quits.
+- 80×25 fit is an invariant, not incidental: the Mem and CPU summary
+  lines draw through one adaptive `gauge_line` that sizes the bar from the
+  columns the compact `format_size`/`format_count` figures leave — the bar
+  shrinks toward a floor and is dropped entirely rather than clip a figure
+  — and the Pressure entry counter and CPU switch/preemption counters use
+  `format_count`, so every mandatory figure stays on the line at 80
+  columns. A grid-reconstruction test (`compose` → cell readback) asserts
+  it on the healthy snapshot and on a terabyte/million-counter worst case.
 - Pin-on-start with graceful refusal: `mem_pin` before the first
   refresh; `0` → `[pinned]`, `-PermissionDenied` → "CAP_MEM_PIN not
   held", `-OutOfRange` → "pinned-memory limit exceeded" — a standing
