@@ -215,6 +215,47 @@ fn a_not_ready_floppy_drains_via_in_band_sense_without_request_sense() {
 }
 
 #[test]
+fn inquiry_ignores_a_nonzero_ufi_completion_block() {
+    // Regression (the observed metal `errno 0xc` defect): a real UFI
+    // floppy answers INQUIRY with valid identity in the data phase but
+    // leaves a stale start-of-day ASC/ASCQ in its command-completion
+    // interrupt. INQUIRY (and REQUEST SENSE) report their whole result in
+    // the data phase, so that completion block must not fail the command
+    // (USB Mass Storage CBI 1.1 §3.4.3.1.1); before the fix this aborted
+    // LUN bring-up with `Errno::NotImplemented`.
+    let mut dev = ScriptedDevice::new();
+    let mut identity = vec![0u8; 36];
+    identity[0] = 0x00; // direct-access block device
+    identity[1] = 0x80; // removable medium
+    dev.in_steps.push_back(InStep::Data(identity));
+    dev.interrupts.push_back(vec![0x28, 0x00]); // stale UNIT ATTENTION ASC
+    let mut scsi = floppy(dev);
+    let inquiry = scsi.inquiry(0).expect("INQUIRY passes despite the block");
+    assert_eq!(inquiry.device_type, 0x00);
+    assert!(inquiry.removable);
+    // The verdict came from the data phase, not a follow-up command.
+    assert_eq!(device(&scsi).control_outs.len(), 1);
+}
+
+#[test]
+fn request_sense_ignores_a_nonzero_ufi_completion_block() {
+    // REQUEST SENSE, like INQUIRY, carries its whole result in the data
+    // phase; its completion block must not fail it.
+    let mut dev = ScriptedDevice::new();
+    let mut sense = vec![0u8; 18];
+    sense[0] = 0x70; // current fixed-format sense
+    sense[2] = 0x06; // UNIT ATTENTION key
+    sense[12] = 0x28; // ASC: media change
+    dev.in_steps.push_back(InStep::Data(sense));
+    dev.interrupts.push_back(vec![0x28, 0x00]); // stale ASC in the block
+    let mut scsi = floppy(dev);
+    let sense = scsi.request_sense(0).expect("REQUEST SENSE passes");
+    assert_eq!(sense.key, 0x06);
+    assert_eq!(sense.asc, 0x28);
+    assert_eq!(device(&scsi).control_outs.len(), 1);
+}
+
+#[test]
 fn a_floppy_geometry_reads_through_the_ufi_set() {
     // READ CAPACITY on a 1.44 MB floppy: 2880 blocks of 512 bytes.
     let mut dev = ScriptedDevice::new();

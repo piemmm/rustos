@@ -54,6 +54,11 @@ pub enum CbiStatus {
 const STATUS_VALUE_PASSED: u8 = 0;
 const STATUS_VALUE_FAILED: u8 = 1;
 
+/// `INQUIRY` opcode (SPC-4 §6.6).
+const OPCODE_INQUIRY: u8 = 0x12;
+/// `REQUEST SENSE` opcode (SPC-4 §6.39).
+const OPCODE_REQUEST_SENSE: u8 = 0x03;
+
 /// One CBI mass-storage device: the ADSC/bulk/interrupt framing over a
 /// transport.
 pub struct Cbi<T: MsdTransport> {
@@ -130,12 +135,20 @@ impl<T: MsdTransport> Cbi<T> {
     /// as in-band sense so the command layer never issues a separate
     /// `REQUEST SENSE`.
     ///
+    /// `opcode` is the completed command's operation code (`cdb[0]`): a
+    /// UFI device reports its identity and its sense entirely in the data
+    /// phase, so the completion block is not meaningful for `INQUIRY` and
+    /// `REQUEST SENSE` and its bytes (a stale start-of-day ASC/ASCQ on a
+    /// real floppy) must not fail those two commands — their success is
+    /// the transport completing the data phase (USB Mass Storage CBI 1.1
+    /// §3.4.3.1.1; the established UFI handling).
+    ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a block of the wrong size,
     /// [`Errno::BadMagic`] for a typed block of the wrong shape, and the
     /// reset-first surfaced error for a phase error / persistent failure.
-    fn completion(&mut self) -> Result<bool, Errno> {
+    fn completion(&mut self, opcode: u8) -> Result<bool, Errno> {
         let mut block = [0u8; CBI_STATUS_LEN];
         let received = self.transport.interrupt_in(&mut block)?;
         if received != CBI_STATUS_LEN {
@@ -143,7 +156,12 @@ impl<T: MsdTransport> Cbi<T> {
         }
         match self.status {
             CbiStatus::UfiSense => {
-                if block[0] == 0 && block[1] == 0 {
+                // INQUIRY and REQUEST SENSE carry their whole result in the
+                // data phase; a UFI floppy's completion block for them is
+                // undefined (real drives leave a start-of-day ASC/ASCQ
+                // there), so it must never fail the command. Every other
+                // command passes when its ASC (byte 0) is zero.
+                if opcode == OPCODE_INQUIRY || opcode == OPCODE_REQUEST_SENSE || block[0] == 0 {
                     Ok(true)
                 } else {
                     // The completion block is the sense: capture it so the
@@ -223,7 +241,7 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
             _ => {}
         }
 
-        let passed = self.completion()?;
+        let passed = self.completion(block[0])?;
         Ok(CommandOutcome {
             passed,
             transferred,
