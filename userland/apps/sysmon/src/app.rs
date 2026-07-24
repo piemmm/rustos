@@ -11,17 +11,28 @@
 //! key-hint footer:
 //!
 //! * a full-width **title bar** (uptime, load averages, pin state);
-//! * three colour-coded **bar gauges** — memory used, the pressure band, and
-//!   aggregate CPU busy — each filled proportionally and coloured by
-//!   severity (green → yellow → red), so the machine's state reads at a
-//!   glance the way GNU `top`'s plain numbers do not;
+//! * three **bar gauges** — memory, the pressure band, and aggregate CPU:
+//!   * the **memory** bar is a *stacked* gauge whose cells name what the
+//!     RAM holds — `#` user-resident (green), `K` kernel heap (cyan), `=`
+//!     other in-use (magenta), and blank track for free — a disjoint
+//!     decomposition of physical RAM, so the composition reads at a glance
+//!     the way GNU `top`'s single used/free number does not;
+//!   * the **pressure** band bar and the aggregate **CPU** busy bar are
+//!     severity-coloured (green → yellow → red), the CPU bar filled with
+//!     `#` busy cells over blank idle track (the kernel accounts busy vs
+//!     idle only — there is no user/system/iowait split to draw);
+//!   * the `?` help overlay carries a **key** naming every glyph and colour;
 //! * a colour-coded pressure-band **history strip**, one glyph per refresh;
 //! * a **task census** line;
 //! * a **panel tab bar** showing every detail panel with the focused one
 //!   highlighted and a scroll indicator when the panel overflows;
 //! * the focused **detail table** (reclaim ledger, `ramzip` counters,
-//!   per-CPU load, interrupt lines, or the process summary), with a styled
-//!   header row and refusal/quarantine rows drawn in their own colour.
+//!   mounted-volume storage, per-CPU load, interrupt lines, or the process
+//!   summary), with a styled header row and refusal/quarantine rows drawn in
+//!   their own colour.
+//!
+//! The detail panel is chosen with the Left/Right arrow keys (or `p`), which
+//! step the tab ring in either direction.
 //!
 //! Every figure a refused query withheld renders as the refusal it is, in
 //! its panel, while the session continues (fail closed, degrade gracefully).
@@ -209,6 +220,7 @@ pub(crate) fn detail_rows(model: &Model) -> Vec<PanelRow> {
     match model.focus() {
         Focus::Reclaim => reclaim_rows(model.snapshot()),
         Focus::Ramzip => ramzip_rows(model.snapshot()),
+        Focus::Storage => storage_rows(model.snapshot()),
         Focus::Cpu => cpu_rows(model),
         Focus::Irqs => irq_rows(model.snapshot()),
         Focus::Processes => process_rows(model),
@@ -253,56 +265,204 @@ fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     rows
 }
 
-/// The `ramzip` counter panel: bytes, caps, and the outcome counters.
+/// The width of the leading section-name column in the `ramzip` table, so
+/// every figure lines up beneath its group.
+const RAMZIP_SECTION: usize = 11;
+
+/// The `ramzip` compressed-tier panel: a clean, section-aligned table of the
+/// tier's live footprint, its derived caps, and the compression and restore
+/// outcome counters — each of the two cache paths carrying its hit ratio (the
+/// compression accept rate and the restore success rate), so the cache's
+/// effectiveness reads at a glance rather than being inferred from raw
+/// counters.
 fn ramzip_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     let Some(stats) = snapshot.ramzip.ready() else {
         return alloc::vec![denied_row(&snapshot.ramzip)];
     };
     let saved = stats.logical_bytes.saturating_sub(stats.stored_bytes);
+    let restored = stats
+        .fault_ins
+        .saturating_add(stats.warm_restored)
+        .saturating_add(stats.cluster_restored);
+    let restore_failures = stats.auth_failures.saturating_add(stats.decode_failures);
+    let section = |name: &str, body: String| -> PanelRow {
+        PanelRow::body(format!("{name:<RAMZIP_SECTION$}{body}"))
+    };
     alloc::vec![
-        PanelRow::body(format!(
-            "stored {}  logical {}  saved {}  metadata {}  entries {}",
-            format_size(stats.stored_bytes),
-            format_size(stats.logical_bytes),
-            format_size(saved),
-            format_size(stats.metadata_bytes),
-            stats.entries
-        )),
-        PanelRow::body(format!(
-            "caps   min {}  soft {}  hard {}  pinned {}",
-            format_size(stats.min_cap_bytes),
-            format_size(stats.soft_cap_bytes),
-            format_size(stats.hard_cap_bytes),
-            format_size(stats.pinned_bytes)
-        )),
-        PanelRow::body(format!(
-            "compress  attempts {}  accepted {}  incompressible {}  policy {}  cap {}",
-            stats.attempts,
-            stats.accepted,
-            stats.rejected_incompressible,
-            stats.rejected_policy,
-            stats.rejected_cap
-        )),
-        PanelRow::body(format!(
-            "rejected  ineligible {}  reserve {}  task-share {}  thrash {}",
-            stats.rejected_ineligible,
-            stats.rejected_reserve,
-            stats.rejected_task_share,
-            stats.rejected_thrash
-        )),
-        PanelRow::body(format!(
-            "restore   fault-ins {}  warm {}  clustered {}  auth-fail {}  decode-fail {}",
-            stats.fault_ins,
-            stats.warm_restored,
-            stats.cluster_restored,
-            stats.auth_failures,
-            stats.decode_failures
-        )),
-        PanelRow::body(format!(
-            "warm-up   attempts {}  stopped {}  thrash-detected {}",
-            stats.warm_attempts, stats.warm_stopped, stats.thrash_detected
-        )),
+        section(
+            "tier",
+            format!(
+                "entries {}   logical {}   stored {}   metadata {}",
+                stats.entries,
+                format_size(stats.logical_bytes),
+                format_size(stats.stored_bytes),
+                format_size(stats.metadata_bytes),
+            ),
+        ),
+        section(
+            "",
+            format!(
+                "saved {} ({} of logical)",
+                format_size(saved),
+                ratio_pct(saved, stats.logical_bytes),
+            ),
+        ),
+        section(
+            "capacity",
+            format!(
+                "min {}   soft {}   hard {}   pinned {}",
+                format_size(stats.min_cap_bytes),
+                format_size(stats.soft_cap_bytes),
+                format_size(stats.hard_cap_bytes),
+                format_size(stats.pinned_bytes),
+            ),
+        ),
+        section(
+            "compress",
+            format!(
+                "attempts {}   accepted {}   accept-rate {}",
+                stats.attempts,
+                stats.accepted,
+                ratio_pct(stats.accepted, stats.attempts),
+            ),
+        ),
+        section(
+            "",
+            format!(
+                "rejected: incompressible {}  policy {}  cap {}  ineligible {}",
+                stats.rejected_incompressible,
+                stats.rejected_policy,
+                stats.rejected_cap,
+                stats.rejected_ineligible,
+            ),
+        ),
+        section(
+            "",
+            format!(
+                "          reserve {}  task-share {}  thrash {}",
+                stats.rejected_reserve, stats.rejected_task_share, stats.rejected_thrash,
+            ),
+        ),
+        section(
+            "restore",
+            format!(
+                "faults {}   warm {}   clustered {}   restored {}",
+                stats.fault_ins, stats.warm_restored, stats.cluster_restored, restored,
+            ),
+        ),
+        section(
+            "",
+            format!(
+                "failures: auth {}  decode {}   success-rate {}",
+                stats.auth_failures,
+                stats.decode_failures,
+                ratio_pct(restored, restored.saturating_add(restore_failures)),
+            ),
+        ),
+        section(
+            "warm-up",
+            format!(
+                "attempts {}   stopped {}   thrash-detected {}",
+                stats.warm_attempts, stats.warm_stopped, stats.thrash_detected,
+            ),
+        ),
     ]
+}
+
+/// The mounted-volume storage panel: one row per mounted filesystem with its
+/// space accounting — total size, used, available, use percentage, and an
+/// ASCII usage bar — the `df`-class view of the disks the system has mounted.
+///
+/// A volume whose driver reports no capacity (an all-zero
+/// [`VolumeStats`](tairix_abi::driver::filesystem::VolumeStats)) shows its
+/// identity with `-` for every figure — the honest "capacity unknown"
+/// answer, never a fabricated total. A volume that is not healthy
+/// (surprise-removed, recovery-conflicted) is drawn in the warn rendition
+/// with the condition named, so a dead disk never looks mounted-and-well.
+fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
+    use tairix_abi::sysinfo::MountAvailability;
+    let Some(records) = snapshot.mounts.ready() else {
+        return alloc::vec![denied_row(&snapshot.mounts)];
+    };
+    let mut rows = Vec::with_capacity(records.len() + 1);
+    rows.push(PanelRow::header(format!(
+        "{:<20} {:<7} {:>8} {:>8} {:>8} {:>4}  usage",
+        "mounted on", "type", "size", "used", "avail", "use"
+    )));
+    if records.is_empty() {
+        rows.push(PanelRow::notice(String::from("no volumes mounted")));
+        return rows;
+    }
+    for record in records {
+        let usage = record.usage();
+        let block = u64::from(usage.block_size);
+        let total = usage.total_blocks.saturating_mul(block);
+        let target = field_lossy(record.target_bytes());
+        let fstype = field_lossy(record.fstype_bytes());
+        let condition = match record.availability() {
+            MountAvailability::Available => "",
+            MountAvailability::UnavailableDirty => "  [unavailable-dirty]",
+            MountAvailability::UnavailableLost => "  [unavailable-lost]",
+            MountAvailability::RecoveryConflict => "  [recovery-conflict]",
+        };
+        let text = if total == 0 {
+            // No capacity known: state the identity, never a fabricated size.
+            format!(
+                "{:<20} {:<7} {:>8} {:>8} {:>8} {:>4}  capacity unknown{condition}",
+                truncate_to_width(&target, 20),
+                truncate_to_width(&fstype, 7),
+                "-",
+                "-",
+                "-",
+                "-",
+            )
+        } else {
+            let used = total.saturating_sub(usage.free_blocks.saturating_mul(block));
+            let avail = usage.avail_blocks.saturating_mul(block);
+            let frac = frac_tenths(used, total);
+            format!(
+                "{:<20} {:<7} {:>8} {:>8} {:>8} {:>3}%  {}{condition}",
+                truncate_to_width(&target, 20),
+                truncate_to_width(&fstype, 7),
+                format_size(total),
+                format_size(used),
+                format_size(avail),
+                frac / 10,
+                text_bar(frac, 12),
+            )
+        };
+        rows.push(if record.availability() == MountAvailability::Available {
+            PanelRow::body(text)
+        } else {
+            PanelRow::warn(text)
+        });
+    }
+    rows
+}
+
+/// Format `part`/`whole` as a whole-percent string (`"75%"`), or `"-"` when
+/// there is nothing to divide — never a fabricated ratio for an idle counter.
+fn ratio_pct(part: u64, whole: u64) -> String {
+    if whole == 0 {
+        return String::from("-");
+    }
+    format!("{}%", frac_tenths(part, whole) / 10)
+}
+
+/// A fixed-width ASCII usage bar, `[|||||     ]`, filled to `frac_tenths`
+/// (`0..=1000`) over `width` cells — legible on any console font, in a plain
+/// detail row where a coloured cell gauge is not available.
+fn text_bar(frac_tenths: u32, width: usize) -> String {
+    let filled = usize::try_from(u64::from(frac_tenths) * width as u64 / 1000)
+        .unwrap_or(width)
+        .min(width);
+    let mut bar = String::with_capacity(width + 2);
+    bar.push('[');
+    for i in 0..width {
+        bar.push(if i < filled { BAR_FILLED } else { BAR_EMPTY });
+    }
+    bar.push(']');
+    bar
 }
 
 /// The per-CPU table: busy share over the interval, queue depth, and the
@@ -455,10 +615,18 @@ struct Theme {
     tab_inactive: Attributes,
     /// Field labels ("Mem", "Pres", …): bright cyan, else bold.
     label: Attributes,
-    /// Table column headers: bold.
+    /// Table column headers: inverted (reverse video) and bold, so the
+    /// heading reads as a distinct bar above the body on colour and
+    /// monochrome terminals alike.
     header: Attributes,
     /// Gauge brackets and empty track: dim.
     muted: Attributes,
+    /// Memory bar: user-resident cells (`#`): green.
+    mem_user: Attributes,
+    /// Memory bar: kernel-heap cells (`K`): cyan.
+    mem_kernel: Attributes,
+    /// Memory bar: other-in-use cells (`=`): magenta.
+    mem_other: Attributes,
     /// Low / healthy severity: green.
     ok: Attributes,
     /// Medium severity: yellow.
@@ -469,6 +637,31 @@ struct Theme {
     info: Attributes,
 }
 
+/// A palette selector for a help-legend sample glyph, so the `?` overlay's
+/// key draws each glyph in the exact rendition its bar uses. Kept in step
+/// with [`Theme`] so the legend can never show a colour the bars do not.
+#[derive(Copy, Clone)]
+enum Ink {
+    /// Plain body text.
+    Plain,
+    /// A field label / legend heading.
+    Label,
+    /// The memory bar's user-resident sample.
+    MemUser,
+    /// The memory bar's kernel-heap sample.
+    MemKernel,
+    /// The memory bar's other-in-use sample.
+    MemOther,
+    /// The healthy / low-severity sample.
+    Ok,
+    /// The medium-severity sample.
+    Warn,
+    /// The critical-severity sample.
+    Crit,
+    /// The muted empty-track sample.
+    Muted,
+}
+
 impl Theme {
     /// Resolve the palette from `screen`.
     fn resolve<T: Tty>(screen: &mut Screen<T>) -> Theme {
@@ -477,8 +670,11 @@ impl Theme {
             tab_active: fg_on_bg(screen, BasicColor::Black, BasicColor::Cyan, reversed()),
             tab_inactive: fg_only(screen, BasicColor::BrightBlack, dim()),
             label: fg_only(screen, BasicColor::BrightCyan, bold()),
-            header: fg_only(screen, BasicColor::BrightWhite, bold()),
+            header: reversed_bold(),
             muted: fg_only(screen, BasicColor::BrightBlack, dim()),
+            mem_user: fg_only(screen, BasicColor::Green, Attributes::PLAIN),
+            mem_kernel: fg_only(screen, BasicColor::Cyan, Attributes::PLAIN),
+            mem_other: fg_only(screen, BasicColor::Magenta, Attributes::PLAIN),
             ok: fg_only(screen, BasicColor::Green, Attributes::PLAIN),
             warn: fg_only(screen, BasicColor::Yellow, bold()),
             crit: fg_only(screen, BasicColor::Red, bold()),
@@ -518,6 +714,21 @@ impl Theme {
             RowStyle::Denied => self.crit,
         }
     }
+
+    /// The rendition for a help-legend [`Ink`] selector.
+    fn ink(&self, ink: Ink) -> Attributes {
+        match ink {
+            Ink::Plain => Attributes::PLAIN,
+            Ink::Label => self.label,
+            Ink::MemUser => self.mem_user,
+            Ink::MemKernel => self.mem_kernel,
+            Ink::MemOther => self.mem_other,
+            Ink::Ok => self.ok,
+            Ink::Warn => self.warn,
+            Ink::Crit => self.crit,
+            Ink::Muted => self.muted,
+        }
+    }
 }
 
 /// Resolve `fg` on the terminal default background, or `fallback` on a
@@ -547,6 +758,14 @@ fn reversed() -> Attributes {
     attrs
 }
 
+/// Reverse-video and bold attributes (the inverted table-header rendition).
+fn reversed_bold() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.reverse = true;
+    attrs.bold = true;
+    attrs
+}
+
 /// Bold attributes.
 fn bold() -> Attributes {
     let mut attrs = Attributes::PLAIN;
@@ -571,6 +790,19 @@ const BAND_GLYPHS: [char; tairix_abi::sysinfo::PRESSURE_BAND_COUNT] = ['.', '-',
 /// console font; colour carries the richness.
 const BAR_FILLED: char = '|';
 const BAR_EMPTY: char = ' ';
+
+/// The stacked-memory-bar category glyphs, each naming what a filled cell of
+/// the memory gauge represents. ASCII, so the composition reads on a
+/// monochrome console where the category colours are absent; the `?` help
+/// overlay documents them. The empty track ([`BAR_EMPTY`]) is free memory.
+const MEM_USER_GLYPH: char = '#';
+const MEM_KERNEL_GLYPH: char = 'K';
+const MEM_OTHER_GLYPH: char = '=';
+
+/// The CPU gauge's busy-cell glyph. The kernel accounts busy vs idle only
+/// (no user/system/iowait split), so the bar is `#` busy cells over blank
+/// idle track, severity-coloured by the busy share.
+const CPU_BUSY_GLYPH: char = '#';
 
 /// The gauge bar width for a screen of `cols` columns: a third of the width,
 /// bounded so it neither vanishes on a narrow terminal nor dominates a wide
@@ -617,30 +849,49 @@ fn bar_row(win: &mut Window, row: u16, cols: usize, attrs: Attributes) {
     }
 }
 
-/// Draw a proportional bar gauge: a `[` bracket, `width` cells filled to
-/// `frac_tenths / 1000` in `fill` and the remainder in the muted track, and a
-/// `]` bracket. Returns the column just past the closing bracket.
-fn gauge(
+/// One category slice of a [`segmented_gauge`]: the share of the bar it
+/// fills (in tenths of a percent of the whole, `0..=1000`), the glyph its
+/// cells carry, and the rendition they are drawn in. Slices are stacked
+/// left-to-right; the leftover track is free/idle.
+#[derive(Copy, Clone)]
+struct Segment {
+    /// Share of the whole bar this slice fills, in tenths of a percent.
+    frac_tenths: u32,
+    /// The glyph each filled cell of the slice carries.
+    glyph: char,
+    /// The rendition the slice's cells are drawn in.
+    attrs: Attributes,
+}
+
+/// Draw a stacked bar gauge: a `[` bracket, then each [`Segment`] laid down
+/// left-to-right in its own glyph and rendition, the remainder as muted empty
+/// track, and a `]` bracket. Each slice is rounded down to whole cells and
+/// clamped to the remaining width, so the segments never overrun the bar (a
+/// slice starved to zero cells simply does not draw). Returns the column just
+/// past the closing bracket.
+fn segmented_gauge(
     win: &mut Window,
     theme: &Theme,
     row: u16,
     col: u16,
     cols: usize,
-    frac_tenths: u32,
-    fill: Attributes,
+    segments: &[Segment],
 ) -> u16 {
     let width = bar_width(cols);
     let mut c = span(win, row, col, cols, "[", theme.muted);
-    let filled = usize::try_from(u64::from(frac_tenths) * width as u64 / 1000)
-        .unwrap_or(width)
-        .min(width);
-    for i in 0..width {
-        let (ch, attrs) = if i < filled {
-            (BAR_FILLED, fill)
-        } else {
-            (BAR_EMPTY, theme.muted)
-        };
-        cell(win, row, c, cols, ch, attrs);
+    let mut drawn = 0usize;
+    for segment in segments {
+        let want =
+            usize::try_from(u64::from(segment.frac_tenths) * width as u64 / 1000).unwrap_or(width);
+        let cells = want.min(width - drawn);
+        for _ in 0..cells {
+            cell(win, row, c, cols, segment.glyph, segment.attrs);
+            c = c.saturating_add(1);
+        }
+        drawn += cells;
+    }
+    for _ in drawn..width {
+        cell(win, row, c, cols, BAR_EMPTY, theme.muted);
         c = c.saturating_add(1);
     }
     span(win, row, c, cols, "]", theme.muted)
@@ -664,7 +915,22 @@ fn draw_title(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
     span(win, ROW_TITLE, 1, cols, &title_line(model), theme.bar);
 }
 
-/// The memory gauge: used / total with a severity-coloured bar.
+/// The memory gauge: a stacked bar decomposing physical RAM into what holds
+/// it, plus the used/total figures.
+///
+/// The bar's slices are a *disjoint* decomposition of `used = total - free`,
+/// so they never double-count and the filled width is exactly the used
+/// fraction: `#` user-resident memory, then `K` the kernel's own heaps, then
+/// `=` the remainder of used (caches, buffers, and everything not separately
+/// attributed), over blank free track. Each component is capped to the
+/// running remainder of `used` so a component's figure that momentarily
+/// exceeds the aggregate can never push the fill past the true used width.
+///
+/// The compressed `ramzip` tier and pinned anonymous memory overlap these
+/// buckets (pinned pages are user-resident; the compressed store is kernel
+/// memory), so they are reported as trailing figures rather than as
+/// separate, double-counting bar slices — honest accounting over a
+/// misleading picture.
 fn draw_memory(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usize) {
     let col = span(win, ROW_MEM, 0, cols, "Mem  ", theme.label);
     let Some(memory) = snapshot.memory.ready() else {
@@ -676,16 +942,48 @@ fn draw_memory(win: &mut Window, theme: &Theme, snapshot: &Snapshot, cols: usize
         span(win, ROW_MEM, col, cols, reason, theme.muted);
         return;
     };
-    let used = memory.total_bytes.saturating_sub(memory.free_bytes);
-    let frac = frac_tenths(used, memory.total_bytes);
-    let after = gauge(win, theme, ROW_MEM, col, cols, frac, theme.severity(frac));
-    let trailing = format!(
-        "  {} / {} MiB  {}%  kernel {}",
+    let total = memory.total_bytes;
+    let used = total.saturating_sub(memory.free_bytes);
+    // Disjoint slices of `used`, each capped to what remains, so the sum is
+    // exactly `used` and no bucket is counted twice.
+    let resident = memory.user_resident_bytes.min(used);
+    let heap = memory.kernel_heap_bytes.min(used - resident);
+    let rest = used - resident - heap;
+    let segments = [
+        Segment {
+            frac_tenths: frac_tenths(resident, total),
+            glyph: MEM_USER_GLYPH,
+            attrs: theme.mem_user,
+        },
+        Segment {
+            frac_tenths: frac_tenths(heap, total),
+            glyph: MEM_KERNEL_GLYPH,
+            attrs: theme.mem_kernel,
+        },
+        Segment {
+            frac_tenths: frac_tenths(rest, total),
+            glyph: MEM_OTHER_GLYPH,
+            attrs: theme.mem_other,
+        },
+    ];
+    let after = segmented_gauge(win, theme, ROW_MEM, col, cols, &segments);
+    let mut trailing = format!(
+        "  {} / {} MiB  {}% used  kernel {}",
         format_mib(used),
-        format_mib(memory.total_bytes),
-        frac / 10,
-        format_size(memory.kernel_heap_bytes)
+        format_mib(total),
+        frac_tenths(used, total) / 10,
+        format_size(heap),
     );
+    if let Some(ramzip) = snapshot.ramzip.ready() {
+        if ramzip.stored_bytes > 0 || ramzip.pinned_bytes > 0 {
+            let _ = write!(
+                trailing,
+                "  ramzip {}  pinned {}",
+                format_size(ramzip.stored_bytes),
+                format_size(ramzip.pinned_bytes),
+            );
+        }
+    }
     span(win, ROW_MEM, after, cols, &trailing, Attributes::PLAIN);
 }
 
@@ -757,8 +1055,14 @@ fn draw_history(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
     }
 }
 
-/// The aggregate CPU gauge: all-CPU busy share with a severity-coloured bar,
-/// plus the CPU count and the summed switch/preemption counters.
+/// The aggregate CPU gauge: all-CPU busy share drawn as `#` busy cells over
+/// blank idle track, severity-coloured by the busy share, plus the CPU count
+/// and the summed switch/preemption counters.
+///
+/// The kernel accounts busy vs idle only (there is no user/system/iowait
+/// split in the ABI), so the bar honestly carries a single busy category
+/// rather than a fabricated breakdown; the per-CPU detail panel carries each
+/// core's own share.
 fn draw_cpu(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
     let col = span(win, ROW_CPU, 0, cols, "CPU  ", theme.label);
     let busy = model.cpu_busy();
@@ -770,7 +1074,18 @@ fn draw_cpu(win: &mut Window, theme: &Theme, model: &Model, cols: usize) {
     let avg = u32::try_from(total / busy.len() as u64)
         .unwrap_or(1000)
         .min(1000);
-    let after = gauge(win, theme, ROW_CPU, col, cols, avg, theme.severity(avg));
+    let after = segmented_gauge(
+        win,
+        theme,
+        ROW_CPU,
+        col,
+        cols,
+        &[Segment {
+            frac_tenths: avg,
+            glyph: CPU_BUSY_GLYPH,
+            attrs: theme.severity(avg),
+        }],
+    );
     let mut trailing = format!("  {}% busy  {} cpus", format_tenths(avg), busy.len());
     match &model.snapshot().cpu_loads {
         Gauge::Ready(loads) => {
@@ -823,14 +1138,14 @@ fn draw_tabs(
     if lines > capacity {
         let first = model.scroll() + 1;
         let last = (model.scroll() + capacity).min(lines);
-        let indicator = format!("[{first}-{last}/{lines}] p:panel");
+        let indicator = format!("[{first}-{last}/{lines}] <-/-> panel");
         let width = u16::try_from(str_width(&indicator)).unwrap_or(0);
         let start = u16::try_from(cols)
             .unwrap_or(width)
             .saturating_sub(width + 1);
         span(win, ROW_TABS, start.max(col), cols, &indicator, theme.muted);
     } else {
-        span(win, ROW_TABS, col, cols, " p:panel", theme.muted);
+        span(win, ROW_TABS, col, cols, " <-/-> panel", theme.muted);
     }
 }
 
@@ -850,12 +1165,18 @@ fn draw_detail(
             // leaves no stale text behind; nothing to draw.
             continue;
         };
+        // A column header reads as an inverted full-width bar, so the table's
+        // heading stands out from the body rows below it the way a spreadsheet
+        // header row does; other rows draw their text only.
+        if entry.style == RowStyle::Header {
+            bar_row(win, row, cols, theme.row(RowStyle::Header));
+        }
         span(win, row, 0, cols, &entry.text, theme.row(entry.style));
     }
 }
 
 /// The footer key hints.
-const FOOTER_HINT: &str = " q quit  p panel  r refresh  +/- interval  up/down scroll  ? help ";
+const FOOTER_HINT: &str = " q quit  <-/-> panel  up/down scroll  r refresh  +/- interval  ? help ";
 
 /// The full-width footer bar.
 fn draw_footer(win: &mut Window, theme: &Theme, size: Size, cols: usize) {
@@ -982,29 +1303,121 @@ fn drive<T: Transport, Y: Tty>(
 
 // ---- Help overlay ----------------------------------------------------------
 
-/// The help-overlay title and body, drawn inside a bordered box.
-const HELP_TITLE: &str = " sysmon keys ";
-const HELP_LINES: &[&str] = &[
-    " p            next detail panel",
-    " up / down    scroll the panel",
-    " PgUp / PgDn  scroll a page",
-    " Home / End   first / last",
-    " + / -        lengthen / shorten the interval",
-    " r            refresh now",
-    " q            quit",
-    " ?            toggle this help",
+/// One run of help text drawn in a single rendition: the unit the legend is
+/// built from, so a sample glyph can carry the exact colour its bar uses.
+#[derive(Copy, Clone)]
+struct Chunk {
+    /// The literal text of the run.
+    text: &'static str,
+    /// The rendition to draw it in.
+    ink: Ink,
+}
+
+/// One line of the help overlay: a sequence of [`Chunk`]s drawn left to
+/// right. An empty line is a blank separator.
+type HelpLine = &'static [Chunk];
+
+/// A plain-text help chunk.
+const fn plain(text: &'static str) -> Chunk {
+    Chunk {
+        text,
+        ink: Ink::Plain,
+    }
+}
+
+/// The help-overlay title, drawn over the top border.
+const HELP_TITLE: &str = " sysmon help ";
+
+/// The help overlay: the key bindings, then a **key** naming every gauge
+/// glyph and colour, so a reader can decode the memory and CPU bars without
+/// leaving the app.
+const HELP_CONTENT: &[HelpLine] = &[
+    &[plain(" left / right  previous / next panel")],
+    &[plain(" p             next panel")],
+    &[plain(" up / down     scroll the panel")],
+    &[plain(" PgUp / PgDn   scroll a page")],
+    &[plain(" Home / End    first / last")],
+    &[plain(" + / -         lengthen / shorten the interval")],
+    &[plain(" r             refresh now")],
+    &[plain(" q             quit")],
+    &[plain(" ?             toggle this help")],
+    &[],
+    &[Chunk {
+        text: " bar key",
+        ink: Ink::Label,
+    }],
+    &[
+        plain(" Mem   "),
+        Chunk {
+            text: "#",
+            ink: Ink::MemUser,
+        },
+        plain(" user  "),
+        Chunk {
+            text: "K",
+            ink: Ink::MemKernel,
+        },
+        plain(" kernel  "),
+        Chunk {
+            text: "=",
+            ink: Ink::MemOther,
+        },
+        plain(" other  "),
+        Chunk {
+            text: "blank",
+            ink: Ink::Muted,
+        },
+        plain(" free"),
+    ],
+    &[
+        plain(" CPU   "),
+        Chunk {
+            text: "#",
+            ink: Ink::Ok,
+        },
+        plain(" busy (coloured by load)  "),
+        Chunk {
+            text: "blank",
+            ink: Ink::Muted,
+        },
+        plain(" idle"),
+    ],
+    &[
+        plain(" load  "),
+        Chunk {
+            text: "ok",
+            ink: Ink::Ok,
+        },
+        plain(" <60%  "),
+        Chunk {
+            text: "warn",
+            ink: Ink::Warn,
+        },
+        plain(" <85%  "),
+        Chunk {
+            text: "crit",
+            ink: Ink::Crit,
+        },
+        plain(" >=85%"),
+    ],
 ];
+
+/// The rendered width of one help line: the sum of its chunks' widths.
+fn help_line_width(line: HelpLine) -> usize {
+    line.iter().map(|chunk| str_width(chunk.text)).sum()
+}
 
 /// Build the centred help overlay window for a screen of `size`, or `None`
 /// if the screen is too small to hold it. The border and title are drawn in
-/// the theme's bar rendition so the overlay reads as a distinct surface.
+/// the theme's bar rendition so the overlay reads as a distinct surface, and
+/// each legend sample glyph in the exact rendition its bar uses.
 fn help_window(size: Size, theme: &Theme) -> Option<Window> {
     let mut content_cols = str_width(HELP_TITLE);
-    for line in HELP_LINES {
-        content_cols = content_cols.max(str_width(line));
+    for line in HELP_CONTENT {
+        content_cols = content_cols.max(help_line_width(line));
     }
     let box_cols = u16::try_from(content_cols + 2).ok()?;
-    let box_rows = u16::try_from(HELP_LINES.len() + 2).ok()?;
+    let box_rows = u16::try_from(HELP_CONTENT.len() + 2).ok()?;
     if box_rows > size.rows || box_cols > size.cols {
         return None;
     }
@@ -1017,9 +1430,12 @@ fn help_window(size: Size, theme: &Theme) -> Option<Window> {
     // The title overlays the top border, centred.
     let title_col = u16::try_from((cols.saturating_sub(str_width(HELP_TITLE))) / 2).unwrap_or(1);
     span(&mut win, 0, title_col, cols, HELP_TITLE, theme.bar);
-    for (offset, line) in HELP_LINES.iter().enumerate() {
+    for (offset, line) in HELP_CONTENT.iter().enumerate() {
         let row = 1 + u16::try_from(offset).unwrap_or(0);
-        span(&mut win, row, 1, cols, line, Attributes::PLAIN);
+        let mut col = 1u16;
+        for chunk in *line {
+            col = span(&mut win, row, col, cols, chunk.text, theme.ink(chunk.ink));
+        }
     }
     Some(win)
 }

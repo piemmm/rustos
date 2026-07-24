@@ -12,12 +12,12 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessRecord,
-    RamzipStats, ReclaimClassRecord, SysinfoQueryId, Uptime,
+    CpuLoadRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
+    ProcessRecord, RamzipStats, ReclaimClassRecord, SysinfoQueryId, Uptime,
 };
 use tairix_curses::Event;
 use tairix_procinfo::{
-    call, for_each_cpu_load, for_each_cpu_time, for_each_irq, for_each_process,
+    call, for_each_cpu_load, for_each_cpu_time, for_each_irq, for_each_mount, for_each_process,
     for_each_reclaim_class, memory_pressure, ramzip_stats, CallError, ListError, Transport,
 };
 
@@ -84,6 +84,8 @@ pub enum Focus {
     Reclaim,
     /// The `ramzip` compressed-tier counters (`RAMZIP_STATS`).
     Ramzip,
+    /// The mounted-volume storage table (`MOUNT_LIST`).
+    Storage,
     /// The per-CPU load table (`CPU_LOAD` + the `CPU_TIME_STATS` split).
     Cpu,
     /// The kernel IRQ table: one row per bound interrupt line (`IRQ_LIST`).
@@ -93,15 +95,31 @@ pub enum Focus {
 }
 
 impl Focus {
-    /// The next panel in the `p` cycling order.
+    /// The next panel in the forward (`p` / Right-arrow) cycling order.
     #[must_use]
     pub const fn next(self) -> Focus {
         match self {
             Focus::Reclaim => Focus::Ramzip,
-            Focus::Ramzip => Focus::Cpu,
+            Focus::Ramzip => Focus::Storage,
+            Focus::Storage => Focus::Cpu,
             Focus::Cpu => Focus::Irqs,
             Focus::Irqs => Focus::Processes,
             Focus::Processes => Focus::Reclaim,
+        }
+    }
+
+    /// The previous panel in the reverse (Left-arrow) cycling order — the
+    /// inverse of [`Focus::next`], so Left and Right step the same ring in
+    /// opposite directions.
+    #[must_use]
+    pub const fn prev(self) -> Focus {
+        match self {
+            Focus::Reclaim => Focus::Processes,
+            Focus::Ramzip => Focus::Reclaim,
+            Focus::Storage => Focus::Ramzip,
+            Focus::Cpu => Focus::Storage,
+            Focus::Irqs => Focus::Cpu,
+            Focus::Processes => Focus::Irqs,
         }
     }
 
@@ -111,6 +129,7 @@ impl Focus {
         match self {
             Focus::Reclaim => "reclaimable caches",
             Focus::Ramzip => "compressed tier (ramzip)",
+            Focus::Storage => "mounted volumes",
             Focus::Cpu => "per-cpu load",
             Focus::Irqs => "interrupt lines",
             Focus::Processes => "processes",
@@ -125,16 +144,18 @@ impl Focus {
         match self {
             Focus::Reclaim => "caches",
             Focus::Ramzip => "ramzip",
+            Focus::Storage => "disks",
             Focus::Cpu => "cpu",
             Focus::Irqs => "irqs",
             Focus::Processes => "procs",
         }
     }
 
-    /// Every panel in `p`-cycle order, for drawing the navigation bar.
-    pub const ALL: [Focus; 5] = [
+    /// Every panel in forward-cycle order, for drawing the navigation bar.
+    pub const ALL: [Focus; 6] = [
         Focus::Reclaim,
         Focus::Ramzip,
+        Focus::Storage,
         Focus::Cpu,
         Focus::Irqs,
         Focus::Processes,
@@ -193,6 +214,10 @@ pub struct Snapshot {
     pub reclaim: Gauge<Vec<ReclaimClassRecord>>,
     /// The `ramzip` tier counters (`RAMZIP_STATS`, gated).
     pub ramzip: Gauge<RamzipStats>,
+    /// The mounted-volume table with per-volume space accounting
+    /// (`MOUNT_LIST`, ungated): one [`MountRecord`] per mounted filesystem.
+    /// A failed walk records the honest absence, never a fabricated volume.
+    pub mounts: Gauge<Vec<MountRecord>>,
     /// The per-CPU scheduler load records (`CPU_LOAD`, gated).
     pub cpu_loads: Gauge<Vec<CpuLoadRecord>>,
     /// The kernel IRQ table, one record per bound line (`IRQ_LIST`, gated on
@@ -217,6 +242,7 @@ impl Default for Snapshot {
             pressure: Gauge::Unavailable,
             reclaim: Gauge::Unavailable,
             ramzip: Gauge::Unavailable,
+            mounts: Gauge::Unavailable,
             cpu_loads: Gauge::Unavailable,
             irqs: Gauge::Unavailable,
             processes: Vec::new(),
@@ -384,6 +410,15 @@ impl Model {
         let pressure = gauge_call(memory_pressure(transport));
         let ramzip = gauge_call(ramzip_stats(transport));
 
+        let mut mount_records = Vec::new();
+        let mounts = gauge_walk(
+            for_each_mount(transport, |record| {
+                mount_records.push(*record);
+                Ok(())
+            }),
+            mount_records,
+        );
+
         let mut reclaim_records = Vec::new();
         let reclaim = gauge_walk(
             for_each_reclaim_class(transport, |record| {
@@ -445,6 +480,7 @@ impl Model {
             pressure,
             reclaim,
             ramzip,
+            mounts,
             cpu_loads,
             irqs,
             processes,
@@ -547,8 +583,13 @@ impl Model {
         match event {
             Event::Char('q' | 'Q') => Action::Quit,
             Event::Char('r' | 'R') => Action::Refresh,
-            Event::Char('p' | 'P') => {
+            Event::Char('p' | 'P') | Event::Right => {
                 self.focus = self.focus.next();
+                self.scroll = 0;
+                Action::Redraw
+            }
+            Event::Left => {
+                self.focus = self.focus.prev();
                 self.scroll = 0;
                 Action::Redraw
             }

@@ -14,11 +14,11 @@
 //! 1. `sysmon` — the store bundle spawns through the full signature +
 //!    capability + interface-hash load gate; the monitor pins itself
 //!    (`mem_pin` under the granted `CAP_MEM_PIN`), enters the alternate
-//!    screen, and paints its first frame. The `Pressure:` token on the
+//!    screen, and paints its first frame. The `Pres` gauge label on the
 //!    transcript witnesses the gated `MEMORY_PRESSURE` figures rendered;
 //!    the runner then types `r` (an immediate refresh — the §6 keys work
-//!    over the raw console) and waits for `reclaimable` (the detail-panel
-//!    header naming the `RECLAIM_STATS` ledger table).
+//!    over the raw console) and waits for `shrinks` (a column header of the
+//!    default `RECLAIM_STATS` ledger panel).
 //! 2. `q` — the monitor quits, leaves the alternate screen (restoring the
 //!    covered shell content), and the shell prompt reappearing at all is
 //!    the intact-screen witness: a monitor that died, hung, or wedged the

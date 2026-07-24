@@ -1128,44 +1128,6 @@ pub fn beacon(tag: &str) {
     putchar(b'\n');
 }
 
-/// Emit a boot beacon annotated with a CPU id — `tag`, then ` cpu=<n>`,
-/// then `\r\n` — for tracing the secondary-core bring-up, where each
-/// core needs its own trail and a started secondary reaches Rust before
-/// the log sink is usable on it (the MMU is still off at entry).
-///
-/// Same lock-free, MMU-off-safe, direct-`putchar` discipline as
-/// [`beacon`]: it fires from a freshly-started core that has not yet
-/// adopted the translation regime, so it must not touch the ring lock or
-/// the video console. The decimal id is rendered into a tiny stack buffer
-/// (a `u32` is at most ten digits) with no allocation.
-///
-/// Freestanding-only (the whole module is gated to the bare-metal
-/// target), like [`beacon`].
-pub fn beacon_cpu(tag: &str, cpu: u32) {
-    for &byte in tag.as_bytes() {
-        putchar(byte);
-    }
-    for &byte in b" cpu=" {
-        putchar(byte);
-    }
-    let mut digits = [0u8; 10];
-    let mut value = cpu;
-    let mut idx = digits.len();
-    loop {
-        idx -= 1;
-        digits[idx] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    for &byte in &digits[idx..] {
-        putchar(byte);
-    }
-    putchar(b'\r');
-    putchar(b'\n');
-}
-
 /// [`core::fmt::Write`] adapter for the **log/debug** line path that
 /// routes by build profile. A release build emits each byte through the
 /// user-facing console — the video console when configured (its

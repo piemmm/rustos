@@ -6,11 +6,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, IrqListRequest, IrqRecord,
-    KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessListRequest, ProcessRecord,
-    ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId,
-    SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
+    KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
+    MountRecord, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
+    ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED,
+    RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::{Duration64, Errno, ProcId};
 use tairix_curses::{Event, Screen, Size, Tty};
@@ -37,6 +39,7 @@ struct FakeService {
     cpu_times: RefCell<Option<Vec<CpuTimeRecord>>>,
     cpu_loads: Option<Vec<CpuLoadRecord>>,
     irqs: Option<Vec<IrqRecord>>,
+    mounts: Option<Vec<MountRecord>>,
     processes: RefCell<Vec<ProcessRecord>>,
     deny: RefCell<Vec<SysinfoQueryId>>,
 }
@@ -114,6 +117,7 @@ impl FakeService {
                     count: 200_000,
                 },
             ]),
+            mounts: Some(healthy_mounts()),
             processes: RefCell::new(vec![
                 record_with(1, b"init", 100, 4096),
                 record_with(2, b"shell", 900, 1024 * 1024),
@@ -230,6 +234,15 @@ impl Transport for FakeService {
                     r.to_le_bytes().to_vec()
                 }))
             }
+            SysinfoQueryId::MOUNT_LIST => {
+                let Some(records) = &self.mounts else {
+                    return Err(Errno::NotFound);
+                };
+                let req = MountListRequest::from_bytes(payload)?;
+                Ok(page_bytes(records, req.offset, req.limit, |r| {
+                    r.to_le_bytes().to_vec()
+                }))
+            }
             SysinfoQueryId::GLOBAL_PROCESS_LIST | SysinfoQueryId::SELF_PROCESS_LIST => {
                 let req = ProcessListRequest::from_bytes(payload)?;
                 let records = self.processes.borrow();
@@ -305,6 +318,60 @@ fn record_with(pid: u64, name: &[u8], cpu_time_ns: u64, mem_bytes: u64) -> Proce
         name,
     )
     .expect("record")
+}
+
+/// The healthy-snapshot mount table: a used root volume and a
+/// no-capacity, surprise-removed volume, exercising both the usage and the
+/// degraded rows of the storage panel.
+fn healthy_mounts() -> Vec<MountRecord> {
+    vec![
+        // A healthy root volume: 20 GiB, a fifth used (4 of 20).
+        mount_record(
+            b"rootfs",
+            b"/",
+            b"arxfs",
+            MountFlags::READ_ONLY,
+            VolumeStats {
+                block_size: 4096,
+                total_blocks: 5 * 1024 * 1024,
+                free_blocks: 4 * 1024 * 1024,
+                avail_blocks: 4 * 1024 * 1024,
+                files: 0,
+                files_free: 0,
+            },
+            MountAvailability::Available,
+        ),
+        // A volume whose driver reports no capacity: honest "unknown".
+        mount_record(
+            b"data",
+            b"/Storage/data",
+            b"fat32",
+            MountFlags::default(),
+            VolumeStats::default(),
+            MountAvailability::UnavailableDirty,
+        ),
+    ]
+}
+
+/// A mount-table record for the storage-panel fixtures.
+fn mount_record(
+    source: &[u8],
+    target: &[u8],
+    fstype: &[u8],
+    flags: MountFlags,
+    usage: VolumeStats,
+    availability: MountAvailability,
+) -> MountRecord {
+    MountRecord::new(
+        source,
+        target,
+        fstype,
+        flags,
+        usage,
+        availability,
+        [0u8; 16],
+    )
+    .expect("mount")
 }
 
 /// Whether `haystack` contains the byte run `needle`.
@@ -518,25 +585,39 @@ fn the_panel_key_cycles_every_panel_and_resets_scroll() {
     model.set_viewport(2);
     assert_eq!(model.handle_event(&Event::Down), Action::Redraw);
     assert_eq!(model.scroll(), 1);
+    // `p` visits every panel in `Focus::ALL` order, once each, before
+    // wrapping back to the first.
     let mut seen = vec![model.focus()];
-    for _ in 0..4 {
+    for _ in 1..Focus::ALL.len() {
         assert_eq!(model.handle_event(&Event::Char('p')), Action::Redraw);
         seen.push(model.focus());
     }
-    assert_eq!(
-        seen,
-        vec![
-            Focus::Reclaim,
-            Focus::Ramzip,
-            Focus::Cpu,
-            Focus::Irqs,
-            Focus::Processes
-        ]
-    );
+    assert_eq!(seen, Focus::ALL.to_vec());
     // Scroll was reset by the first cycle.
     assert_eq!(model.scroll(), 0);
     // The cycle wraps.
     assert_eq!(model.handle_event(&Event::Char('p')), Action::Redraw);
+    assert_eq!(model.focus(), Focus::Reclaim);
+}
+
+#[test]
+fn the_arrow_keys_step_the_panel_ring_in_both_directions() {
+    let (_service, mut model) = refreshed();
+    assert_eq!(model.focus(), Focus::Reclaim);
+    model.set_viewport(2);
+    // Right steps forward exactly as `p` does, and resets the scroll.
+    assert_eq!(model.handle_event(&Event::Down), Action::Redraw);
+    assert_eq!(model.scroll(), 1);
+    assert_eq!(model.handle_event(&Event::Right), Action::Redraw);
+    assert_eq!(model.focus(), Focus::Ramzip);
+    assert_eq!(model.scroll(), 0);
+    // Left steps backward and wraps from the first panel to the last.
+    assert_eq!(model.handle_event(&Event::Left), Action::Redraw);
+    assert_eq!(model.focus(), Focus::Reclaim);
+    assert_eq!(model.handle_event(&Event::Left), Action::Redraw);
+    assert_eq!(model.focus(), Focus::Processes);
+    // Left then Right returns to where it started.
+    assert_eq!(model.handle_event(&Event::Right), Action::Redraw);
     assert_eq!(model.focus(), Focus::Reclaim);
 }
 
@@ -675,23 +756,31 @@ fn a_refused_pin_renders_its_stated_reason() {
 #[test]
 fn each_panel_renders_its_detail_lines() {
     let (_service, mut model) = refreshed();
-    let _ = model.handle_event(&Event::Char('p'));
+    focus_on(&mut model, Focus::Ramzip);
     let out = rendered(&mut model);
-    // The tab bar highlights the `ramzip` panel; its counters follow below.
+    // The tab bar highlights the `ramzip` panel; its sectioned counters
+    // follow below, carrying the compression accept rate.
     assert!(contains(&out, b"ramzip"));
     assert!(contains(&out, b"stored"));
     assert!(contains(&out, b"16K"));
-    let _ = model.handle_event(&Event::Char('p'));
+    assert!(contains(&out, b"accept-rate"));
+    focus_on(&mut model, Focus::Storage);
+    let out = rendered(&mut model);
+    // The `disks` panel: the mounted root volume with its usage figures.
+    assert!(contains(&out, b"disks"));
+    assert!(contains(&out, b"mounted on"));
+    assert!(contains(&out, b"arxfs"));
+    focus_on(&mut model, Focus::Cpu);
     let out = rendered(&mut model);
     // The `cpu` tab's table carries the switch/preemption columns.
     assert!(contains(&out, b"cpu"));
     assert!(contains(&out, b"switches"));
-    let _ = model.handle_event(&Event::Char('p'));
+    focus_on(&mut model, Focus::Irqs);
     let out = rendered(&mut model);
     // The quarantined line 111 renders its owner, count, and state.
     assert!(contains(&out, b"111"));
     assert!(contains(&out, b"quarantined"));
-    let _ = model.handle_event(&Event::Char('p'));
+    focus_on(&mut model, Focus::Processes);
     let out = rendered(&mut model);
     // The `procs` panel: the census top consumers by %cpu.
     assert!(contains(&out, b"procs"));
@@ -709,9 +798,7 @@ fn a_denied_global_census_renders_the_fallback_reason() {
     let out = rendered(&mut model);
     assert!(contains(&out, b"(own)"));
     // The processes panel opens with the full stated refusal.
-    for _ in 0..4 {
-        let _ = model.handle_event(&Event::Char('p'));
-    }
+    focus_on(&mut model, Focus::Processes);
     let out = rendered(&mut model);
     assert!(contains(&out, b"CAP_SYSINFO_GLOBAL)"));
 }
@@ -723,6 +810,15 @@ fn render_shows_the_help_overlay_when_toggled() {
     let out = rendered(&mut model);
     assert!(contains(&out, b"lengthen"));
     assert!(contains(&out, b"shorten"));
+    // The overlay carries the bar key: the memory categories, the CPU busy
+    // glyph, and the severity thresholds, so a reader can decode the gauges.
+    assert!(contains(&out, b"bar key"));
+    assert!(contains(&out, b"user"));
+    assert!(contains(&out, b"kernel"));
+    assert!(contains(&out, b"busy"));
+    assert!(contains(&out, b"free"));
+    assert!(contains(&out, b"<60%"));
+    assert!(contains(&out, b">=85%"));
 }
 
 #[test]
@@ -810,16 +906,54 @@ fn focus_on(model: &mut Model, target: Focus) {
 }
 
 #[test]
-fn the_memory_gauge_draws_a_filled_bar_with_a_percentage() {
+fn the_memory_gauge_draws_a_stacked_bar_with_a_percentage() {
     let (_service, mut model) = refreshed();
     let out = rendered(&mut model);
-    // The gauge is bracketed, has at least one filled cell (512M of 1024M
-    // used), and states the exact percentage and unit beside it.
+    // The stacked gauge is bracketed and decomposes the 512M of 1024M used
+    // into its categories: `#` user-resident (128M), `K` kernel heap (64M),
+    // and `=` other-in-use cells, over blank free track. The trailing text
+    // states the exact used percentage and the MiB unit.
+    // The trailing figures are plain text, whose background-matching spaces
+    // the cell-diff renderer skips, so each token is asserted on its own.
     assert!(contains(&out, b"["));
-    assert!(contains(&out, b"|"));
+    assert!(contains(&out, b"#"));
+    assert!(contains(&out, b"K"));
     assert!(contains(&out, b"]"));
     assert!(contains(&out, b"50%"));
+    assert!(contains(&out, b"used"));
     assert!(contains(&out, b"MiB"));
+}
+
+#[test]
+fn the_memory_trailing_annotates_the_overlapping_ramzip_and_pinned_figures() {
+    let mut service = FakeService::healthy();
+    // ramzip stored and pinned bytes overlap the bar's disjoint buckets, so
+    // they are reported as trailing figures rather than double-counted slices.
+    service.ramzip = Some(RamzipStats {
+        stored_bytes: 8 * 1024 * 1024,
+        pinned_bytes: 4 * 1024 * 1024,
+        ..RamzipStats::default()
+    });
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let out = rendered(&mut model);
+    assert!(contains(&out, b"ramzip"));
+    assert!(contains(&out, b"pinned"));
+}
+
+#[test]
+fn a_table_header_renders_in_the_inverted_rendition() {
+    let (_service, mut model) = refreshed();
+    // The storage panel opens with a column header, drawn as a full-width
+    // inverted (reverse-video) bar. Reverse video is the only reverse the
+    // screen emits (the coloured bars/tabs use colour, not reverse), so its
+    // SGR marks the header unambiguously.
+    focus_on(&mut model, Focus::Storage);
+    let out = rendered(&mut model);
+    assert!(
+        contains(&out, b"\x1b[7m"),
+        "a table header must render inverted (reverse video)"
+    );
 }
 
 #[test]
@@ -834,12 +968,96 @@ fn the_cpu_gauge_names_the_busy_share_and_cpu_count() {
 fn the_tab_bar_lists_every_panel() {
     let (_service, mut model) = refreshed();
     let out = rendered(&mut model);
-    for label in ["caches", "ramzip", "cpu", "irqs", "procs"] {
+    for label in ["caches", "ramzip", "disks", "cpu", "irqs", "procs"] {
         assert!(
             contains(&out, label.as_bytes()),
             "tab bar must show {label}"
         );
     }
+}
+
+#[test]
+fn the_ramzip_panel_reports_the_cache_hit_ratios() {
+    let mut service = FakeService::healthy();
+    service.ramzip = Some(RamzipStats {
+        logical_bytes: 16384,
+        stored_bytes: 4096,
+        attempts: 10,
+        accepted: 7,
+        fault_ins: 6,
+        warm_restored: 2,
+        cluster_restored: 0,
+        auth_failures: 1,
+        decode_failures: 1,
+        ..RamzipStats::default()
+    });
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    focus_on(&mut model, Focus::Ramzip);
+    let text: alloc::string::String = detail_rows(&model)
+        .iter()
+        .map(|r| r.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Compression accept rate 7/10 = 70%; restore success (6+2)/(8+2) = 80%;
+    // stored 4K of 16K logical saves 12K = 75%.
+    assert!(text.contains("accept-rate 70%"), "accept-rate: {text}");
+    assert!(text.contains("success-rate 80%"), "success-rate: {text}");
+    assert!(text.contains("75% of logical"), "saved ratio: {text}");
+}
+
+#[test]
+fn an_idle_ramzip_tier_reports_no_ratio_rather_than_a_fabricated_one() {
+    let mut service = FakeService::healthy();
+    service.ramzip = Some(RamzipStats::default());
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    focus_on(&mut model, Focus::Ramzip);
+    let text: alloc::string::String = detail_rows(&model)
+        .iter()
+        .map(|r| r.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Nothing offered and nothing restored: the ratios are `-`, never 0% or
+    // 100% invented from an empty denominator.
+    assert!(text.contains("accept-rate -"), "idle accept-rate: {text}");
+    assert!(text.contains("success-rate -"), "idle success-rate: {text}");
+}
+
+#[test]
+fn the_storage_panel_lists_volumes_with_usage_and_marks_the_dead_one() {
+    let (_service, mut model) = refreshed();
+    focus_on(&mut model, Focus::Storage);
+    let rows = detail_rows(&model);
+    assert_eq!(rows[0].style, RowStyle::Header);
+    // The healthy 20 GiB root is a fifth used: a filled usage bar and 20%.
+    let root = rows
+        .iter()
+        .find(|r| r.text.contains("arxfs"))
+        .expect("root");
+    assert_eq!(root.style, RowStyle::Body);
+    assert!(root.text.contains("20%"), "root use%: {}", root.text);
+    assert!(root.text.contains('|'), "root usage bar: {}", root.text);
+    // The no-capacity dirty volume states its unknown size and is warned.
+    let data = rows
+        .iter()
+        .find(|r| r.text.contains("/Storage/data"))
+        .expect("data");
+    assert_eq!(data.style, RowStyle::Warn);
+    assert!(data.text.contains("capacity unknown"));
+    assert!(data.text.contains("[unavailable-dirty]"));
+}
+
+#[test]
+fn a_failed_mount_walk_renders_a_single_absence_row() {
+    let service = FakeService::healthy();
+    service.deny(SysinfoQueryId::MOUNT_LIST);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    focus_on(&mut model, Focus::Storage);
+    let rows = detail_rows(&model);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].style, RowStyle::Denied);
 }
 
 #[test]

@@ -285,14 +285,6 @@ pub fn boot(
         enable_fp_el1();
     }
 
-    // Ordered UART boot beacons (`serial::beacon`, UART-only — safe with
-    // the MMU off, never the video lock) bisect a metal hang: the
-    // consolidated boot-log line below is emitted only *after* the MMU is
-    // on, so a wedge before/at translation-enable (the classic metal Pi
-    // failure) would otherwise leave no trail. The last tag a serial
-    // capture shows localises the hang.
-    serial::beacon("pi-beacon 1/6: boot entry (el1, fp on, mmu off)");
-
     // P2 + P3, *before* the MMU comes on: point the console at the UART
     // and the GICv2 driver at the GICD/GICC bases the firmware tree
     // describes. Both walks early-return at their matched node
@@ -306,10 +298,8 @@ pub fn boot(
     // the vectors not yet installed (the `virt`-only "GiB 0 Device"
     // assumption this replaces).
     let early = configure_mmio_from_dtb(dtb);
-    serial::beacon("pi-beacon 2/6: mmio discovered (console/gic/video/pcie)");
     let (console_base, _) = console::current();
     let (gicd_base, gicc_base) = gic::current();
-    serial::beacon("pi-beacon 2a/6: console/gic bases read");
     // The mailbox doorbell the video console rang is an MMIO window the
     // identity map must type Device like the UART and GIC (on the Pi 4
     // they all share gigapage 3, but the mask is derived from facts,
@@ -341,7 +331,6 @@ pub fn boot(
         kernel_end_addr(),
     );
     configure_device_gigapages(device_mask);
-    serial::beacon("pi-beacon 2b/6: device gigapage mask configured");
     // RAM gigapage mask from the facts in hand pre-MMU: the kernel
     // image's own extent, the firmware DTB blob, and the firmware
     // scan-out surface. Every other non-Device gigapage stays *invalid*
@@ -360,7 +349,6 @@ pub fn boot(
         (dtb, early.dtb_len),
         (fb_base, fb_len),
     ]));
-    serial::beacon("pi-beacon 2c/6: ram gigapage mask configured");
 
     // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
@@ -373,17 +361,9 @@ pub fn boot(
     //
     // This is the boot's sharpest cliff: enabling translation against a
     // mis-typed identity map wedged the metal Pi 4B the instant the MMU
-    // came on. Beacon 3/6 is the last UART output guaranteed to predate
-    // that transition; a serial capture that stops here pins the hang to
-    // MMU-enable, while beacon 4/6 only prints once translation is live.
-    serial::beacon("pi-beacon 3/6: identity map built, enabling mmu");
+    // came on.
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
-    serial::beacon(if mmu_on {
-        "pi-beacon 4/6: mmu on (translation live)"
-    } else {
-        "pi-beacon 4/6: mmu enable FAILED (running mmu-off)"
-    });
 
     // The framebuffer console renders through a borrowed character-cell grid
     // so it can save the primary screen and restore it when a full-screen
@@ -399,7 +379,6 @@ pub fn boot(
             let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
             let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
             video::attach_console(Box::leak(main), Box::leak(alt));
-            serial::beacon("pi-beacon 4/6a: video console cell grids attached");
         }
     }
 
@@ -493,14 +472,12 @@ pub fn boot(
             },
         );
     }
-    serial::beacon("pi-beacon 4a/6: pcie discovery logged (post-mmu)");
 
     // Discover the rest of the board from the firmware device tree: the
     // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
     // P5) — full-tree walks that need the MMU on. A null, unreadable, or
     // incomplete tree leaves the `virt` defaults in place (fail closed).
     let discovered = configure_from_dtb(dtb);
-    serial::beacon("pi-beacon 5/6: post-mmu memory/timer/psci discovered");
     // Widen the RAM gigapage mask with the discovered `/memory` windows
     // — a walk that is only safe post-MMU — so later-built process
     // spaces map every window, and install the widened gigapages
@@ -845,7 +822,6 @@ pub fn boot(
     // moved into `BootInfo` here, so it is built exactly once.
     if ready {
         if let Ok(layout) = layout_result {
-            serial::beacon("pi-beacon 6/6: handover sound, entering kernel core");
             // Resolve + audit which discovered storage node binds the
             // bootstrap root block driver before entering the core — the storage analogue of the
             // keyboard bind gate. Read-only: it mounts nothing; the
@@ -867,9 +843,7 @@ pub fn boot(
     }
 
     // The handover was rejected (see the boot-log line's fields for which
-    // check failed); park fail-closed, leaving the serial trail intact for
-    // bisection.
-    serial::beacon("pi-beacon 6/6: handover REJECTED, parking (see boot log)");
+    // check failed); park fail-closed.
     halt_current_cpu()
 }
 
@@ -1015,14 +989,6 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
 /// was issued, so a refusal from `run_secondary` is a genuine fault; it
 /// is reported on the UART debug line and the core parks fail-closed.
 extern "C" fn production_secondary_entry(cpu: u32) -> ! {
-    // Serial-only bring-up beacons, mirroring the boot core's `pi-beacon`
-    // trail: a started secondary reaches here with the MMU (and log sink)
-    // still off, and any fault before `init_vectors` installs this core's
-    // handlers hangs it silently — so each phase leaves an immediate,
-    // lock-free UART mark whose last-printed tag for a given cpu localises
-    // exactly where a core that never checks in died. Reaching this first
-    // mark at all proves the release + wake + trampoline worked for `cpu`.
-    serial::beacon_cpu("pi-beacon smp: reached rust entry (mmu off)", cpu);
     // SAFETY: this secondary core's first action, exactly once, before
     // any FP/SIMD instruction executes on it.
     unsafe {
@@ -1034,10 +1000,8 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
     // MMU during `boot`), so the adopted tables are live and coherent.
     if !unsafe { tairix_arch_aarch64::paging::adopt_boot_translation() } {
         // No published boot root: nothing sane to run on — park.
-        serial::beacon_cpu("pi-beacon smp: no boot root, parking", cpu);
         halt_current_cpu()
     }
-    serial::beacon_cpu("pi-beacon smp: mmu adopted", cpu);
     // SAFETY: per-CPU installs on this core, exactly once each, before
     // any interrupt source is armed here: the EL1 vector base and the
     // GICv2 CPU interface are banked per core (the distributor write in
@@ -1046,11 +1010,9 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
         exceptions::init_vectors();
         gic::init();
     }
-    serial::beacon_cpu("pi-beacon smp: vectors + gic up", cpu);
     // Per-CPU tickless preemption + IPI arming (the callbacks and the
     // per-CPU backing were installed by the boot CPU before `CPU_ON`).
     crate::aarch64::gic_irq::init_secondary_preemption(cpu);
-    serial::beacon_cpu("pi-beacon smp: preempt armed, joining kernel", cpu);
 
     // Join the live kernel. Returns only when this core must stop.
     let exit = tairix_kernel_core::run_secondary(cpu);

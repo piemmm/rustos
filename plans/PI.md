@@ -618,8 +618,6 @@ so neither perturbs the single-CPU QEMU boot and both are safe on QEMU's
 `cortex-a72` model. The end-to-end release remains on-metal-only (no
 `-M raspi4b` in the pinned QEMU); acceptance is all four
 `SecondaryCpuOnline` lines with core 3 scheduling across repeated boots.
-The `pi-beacon smp:` phase beacons are kept as the on-metal bring-up
-trail until core 3 is confirmed stable, then removed.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 
