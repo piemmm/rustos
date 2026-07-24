@@ -1481,19 +1481,54 @@ the whole is too large for one change and each leaves the tree working.
   a live QEMU vertical (the enforcement is host-tested; a knob whose effect
   needs on-wire proof gets one when it lands).
 
-#### N9b-3 — the per-interface `network.conf` store, apply, bonding `[ ]`
-- `/System/Settings/Network/network.conf` laid out by `tools/mkimage`/
-  installer over the landed `lib/netconfig` engine.
-- `netstack`: config load/reload/apply (atomic per interface, audited),
-  bond interface kind with `active-backup` + `balance` (§6.3), member
-  health monitor, gratuitous ARP/NA on failover.
+#### N9b-3-1 — per-interface `network.conf` applied (static addressing) `[x]`
+Per-interface static addressing is delivered and enforced end to end
+(bonding excluded; that is N9b-3-2). The interface is bound to hardware by
+its **stable MAC** (approach A: `netstack` holds each interface's MAC, so
+it matches config by `match.mac` and renames the interface to the admin
+alias).
+- **ABI** (`lib/abi/net_ipc`): `NetInterfaceConfigMsg` — a **separate**
+  framed message (own `"NIC1"` magic, 96-byte wire, versioned) carrying
+  `alias`, an optional `match.mac`, typed `NetIpv4Config`/`NetIpv6Config`
+  (`disabled`/`static`{addr,prefix,gw?} and, for v6, `slaac`), and an MTU
+  override, with `to_le_bytes`/`from_bytes`/`validate` (unicast addresses,
+  on-subnet v4 gateway, `≥1280` MTU) — round-trip + fail-closed tested.
+  `NETSTACK_MAX_REQUEST` is now `max(NetstackRequest::WIRE_LEN,
+  NetInterfaceConfigMsg::WIRE_LEN)`.
+- **netstack**: `Netstack::apply_interface_config` (match by MAC→rename
+  else by alias; validate-then-mutate so a refusal is atomic; static v6
+  `Duplicate`→idempotent success); `run.rs` intercepts the framed message
+  like `BindDriver` and gates/audits it via `serve_interface_config`
+  (`CAP_NET_ADMIN`, event `16_016`). Host-tested (mac-match+rename,
+  apply-by-alias, static v4/v6, disabled, mtu, atomic-on-refusal,
+  idempotency, NotFound, alias-clash).
+- **devmgr** (`netcfg`): `interface_configs_from_config` maps
+  `network.conf` → `InterfaceConfigPlan` (bonds/members/loopback omitted; a
+  managed non-bond iface without `match.mac` is rejected loud, event
+  `13_016`); `deliver_interface_configs` pushes each per interface,
+  retrying silently on `NotFound` (interface not bound yet) each hw-tree
+  generation bump and recording each success (events `13_014`/`13_015`).
+  Reuses `CAP_FS_ACCESS`; `netstack` stays filesystem-free.
+- **`tools/mkimage`**: the writable root ships an **empty** `network.conf`
+  ("no managed interfaces beyond loopback") via the `lib/netconfig` default
+  render; the installer/`configure` write the operator's interfaces.
+- **Docs**: `docs/src/userland/{netstack,networking}.md`.
+- **Deferred to N9b-3-2**: bonding, `match.node` binding, runtime reload,
+  bond `info:`/`state:`/`stats:`, and the live QEMU vertical (this
+  increment is host-tested; the guest path is guest-driven and exercised
+  once an image carries a configured static interface).
+
+#### N9b-3-2 — bonding, failover, reload, observability, QEMU vertical `[ ]`
+- `netstack`: bond interface kind with `active-backup` + `balance` (§6.3),
+  member health monitor, gratuitous ARP/NA on failover; `match.node`
+  binding (define the tree node→device semantics with member resolution);
+  runtime config reload.
 - `info:`/`state:`/`stats:` members for bonds and the remaining §5
   counter/rate queries; `SysinfoQueryId` additions; `lib/procinfo`
   resolver mapping.
 - Tests: bond failover QEMU vertical (kill a member mid-TCP-transfer,
-  assert the flow survives within the monitor budget), config-reject-
-  leaves-state tests, audited-refusal tests.
-- Docs: `docs/src/userland/networking.md` configuration chapter.
+  assert the flow survives within the monitor budget), plus a live
+  static-addressing vertical.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

@@ -92,15 +92,21 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
 /// `CAP_DRV_LOAD` for the restricted driver-store `ipc_call` endpoint (the
 /// kernel re-checks it at the load gate), `CAP_NET_ADMIN` to hand a bound
 /// NIC driver's device channel to the network stack (the `BindDriver`
-/// admin call the stack gates on it), and `CAP_LOG_EMIT` for its
-/// structured diagnostics. It writes no standard stream (no console pair)
-/// and holds no resource capability: the kernel mints a loaded driver's
-/// grants from its matched node, never from this caller.
+/// admin call the stack gates on it), `CAP_FS_ACCESS` to read the
+/// world-readable machine-wide network policy post-unlock and deliver it
+/// to the network stack on its behalf (the stack-wide `net.*` settings
+/// and the per-interface `network.conf`, `plans/NETWORK.md` N9b-2 /
+/// N9b-3-1; `netstack` itself holds no filesystem capability), and
+/// `CAP_LOG_EMIT` for its structured diagnostics. It writes no standard
+/// stream (no console pair) and holds no resource capability: the kernel
+/// mints a loaded driver's grants from its matched node, never from this
+/// caller.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const DEVMGR_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::DRV_LOAD,
     CapabilityId::NET_ADMIN,
+    CapabilityId::FS_ACCESS,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -441,6 +447,7 @@ mod tests {
                 CapabilityId::SYSINFO_HW,
                 CapabilityId::DRV_LOAD,
                 CapabilityId::NET_ADMIN,
+                CapabilityId::FS_ACCESS,
                 CapabilityId::LOG_EMIT,
             ])
         );

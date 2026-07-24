@@ -52,11 +52,15 @@ endpoints — the service does no work and consumes no CPU.
 
 ## The `netstack-v1` IPC surface
 
-One fixed-width, fail-closed request frame
-(`tairix_abi::net_ipc::NetstackRequest`); every request is
-capability-checked against the caller's kernel-attested origin
-**before any state is touched**, and every mutation and refusal is a
-structured audit record (event range `16000..17000`).
+Two fixed-width, fail-closed framed messages arrive on the admin
+endpoint: the 64-byte `tairix_abi::net_ipc::NetstackRequest` (below) and
+the wider per-interface `NetInterfaceConfigMsg` (its own `"NIC1"` magic;
+see *Per-interface configuration*). The service transport tells them
+apart by magic and decodes the interface-config message before the
+request enum, the `BindDriver`-interception precedent. Every request is
+capability-checked against the caller's kernel-attested origin **before
+any state is touched**, and every mutation and refusal is a structured
+audit record (event range `16000..17000`).
 
 | Operation | Gate | Reply |
 |---|---|---|
@@ -101,6 +105,37 @@ The policy is enforced, not advisory:
   SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default
   backlog, falling back to cookies only on overflow. (`net.ipv6.privacy`
   has no enforcement consumer yet and is deliberately not delivered.)
+
+## Per-interface configuration (`network.conf`)
+
+Each managed interface's addressing is declared in one document,
+`/System/Settings/Network/network.conf`, whose grammar, closed key
+registry, typed values, bounded fail-closed parser, and canonical render
+are the one `lib/netconfig` engine (`plans/NETWORK.md` §6.1). As with the
+stack-wide policy, `netstack` never reads it: the FS-capable device
+manager reads it post-unlock, maps each **managed, non-bond** interface
+that carries a stable `match.mac` identity into a `NetInterfaceConfigMsg`,
+and delivers it over the `CAP_NET_ADMIN` admin endpoint. A managed
+non-bond interface with no `match.mac` cannot be bound to hardware by
+identity (`match.node` binding is a later increment) and is surfaced loud
+(`devmgr` event `13_016`), never silently ignored; bond interfaces and
+their members are omitted (bonding is a later increment).
+
+`netstack` locates the interface by its **stable MAC** — it is the only
+component holding each interface's MAC, from the driver's facts — and
+renames that interface to the admin-chosen alias, so an interface first
+brought up under a derived `netN` alias becomes `wan`/`lan0` once its
+configuration is applied. The apply is **atomic per interface**: the whole
+message is validated (unicast addresses, an on-subnet IPv4 gateway, a
+`≥ 1280` MTU override) before any state is touched, so a refusal leaves
+the interface untouched, and it is idempotent (re-applying the same
+configuration is a success, not a duplicate). Because interfaces bind
+asynchronously as their drivers come up, delivery of an interface not yet
+present returns `NotFound` and is retried silently on the next
+hardware-tree generation bump; a successful apply is recorded so it is not
+re-pushed (`devmgr` events `13_014`/`13_015`). The image ships an **empty**
+`network.conf` ("no managed interfaces beyond loopback"); the installer,
+or `configure`, writes the operator's interfaces through the same engine.
 
 ## Sockets (the data plane)
 

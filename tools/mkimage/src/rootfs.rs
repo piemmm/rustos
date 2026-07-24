@@ -84,6 +84,18 @@ pub const USERS_DB_NAME: &str = "Users";
 /// Name of the group registry file under `/System/Security`.
 pub const GROUPS_DB_NAME: &str = "Groups";
 
+/// Name of the writable-Settings subdirectory that holds the network
+/// configuration store (`/System/Settings/Network`, `AGENTS.md` §16.1;
+/// `plans/NETWORK.md` §6.1).
+pub const NETWORK_SETTINGS_DIR: &str = "Network";
+
+/// Name of the per-interface network-configuration document under
+/// `/System/Settings/Network` (`network.conf`). The image ships the
+/// canonical **empty** document ("no managed interfaces beyond loopback");
+/// the first-boot installer, or `configure`, later writes the operator's
+/// interfaces through the one `tairix_netconfig` engine.
+pub const NETWORK_CONF_NAME: &str = "network.conf";
+
 /// Name of the per-installation machine-id file under `/System/Security`
 /// (`AGENTS.md` §16.2). Its bytes are the raw [`tairix_abi::MACHINE_ID_LEN`]
 /// machine-id — non-secret per-installation identity (the TAIRiX equivalent
@@ -307,6 +319,7 @@ fn populate_system_subtree(
         .map_err(MkimageError::RootPartition)?;
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
+    write_network_config(fs, system)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
@@ -397,6 +410,40 @@ fn write_security_file(
         .map_err(MkimageError::RootPartition)?;
     let written = fs
         .write_at(security, name.as_bytes(), 0, text.as_bytes())
+        .map_err(MkimageError::RootPartition)?;
+    if written != text.len() {
+        return Err(MkimageError::RootPartition(
+            tairix_abi::DriverError::DeviceFault,
+        ));
+    }
+    Ok(())
+}
+
+/// Lay out the network-configuration store skeleton on the writable root:
+/// create `/System/Settings/Network` and write the canonical **empty**
+/// `network.conf` through the one `tairix_netconfig` engine.
+///
+/// The empty document means "no managed interfaces beyond loopback"
+/// ([`tairix_netconfig::NetworkConfig::default`]); the first-boot installer,
+/// or `configure`, later writes the operator's interfaces through the same
+/// engine, so the image skeleton and its readers cannot drift. A short write
+/// is a build failure, never a truncated store.
+fn write_network_config(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), MkimageError> {
+    let settings = fs
+        .lookup(system, b"Settings")
+        .map_err(MkimageError::RootPartition)?;
+    let network = fs
+        .create(
+            settings,
+            NETWORK_SETTINGS_DIR.as_bytes(),
+            NodeKind::Directory,
+        )
+        .map_err(MkimageError::RootPartition)?;
+    let text = tairix_netconfig::NetworkConfig::default().render();
+    fs.create(network, NETWORK_CONF_NAME.as_bytes(), NodeKind::RegularFile)
+        .map_err(MkimageError::RootPartition)?;
+    let written = fs
+        .write_at(network, NETWORK_CONF_NAME.as_bytes(), 0, text.as_bytes())
         .map_err(MkimageError::RootPartition)?;
     if written != text.len() {
         return Err(MkimageError::RootPartition(
@@ -523,6 +570,29 @@ mod tests {
                 "/System/{immutable} must NOT exist on the writable root volume"
             );
         }
+    }
+
+    #[test]
+    fn the_writable_root_ships_an_empty_network_config() {
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let settings = fs.lookup(system, b"Settings").expect("Settings exists");
+        let network = fs
+            .lookup(settings, NETWORK_SETTINGS_DIR.as_bytes())
+            .expect("Settings/Network exists");
+        let conf = fs
+            .lookup(network, NETWORK_CONF_NAME.as_bytes())
+            .expect("network.conf exists");
+        // The shipped document is the canonical empty store, and it parses
+        // back to "no managed interfaces beyond loopback".
+        let mut buf = [0u8; 64];
+        let read = fs.read_at(conf, 0, &mut buf).expect("network.conf reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
+        let parsed = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        assert!(parsed.interfaces().is_empty(), "the default store is empty");
     }
 
     #[test]

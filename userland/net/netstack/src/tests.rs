@@ -13,17 +13,17 @@ use tairix_abi::net::{
     SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSockProto,
-    NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
-    NETSTACK_MAX_REPLY,
+    decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
+    NetIpv6Config, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings,
+    IF_NAME_LEN, NETSTACK_MAX_REPLY,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
     CapabilityId, CapabilitySummary, DriverError, Duration64, Errno, Origin, ProcId, TrustDomain,
 };
 use tairix_log::{Event, EventId, Level, Sink};
-use tairix_net::addr::{IpAddr, Ipv4Addr};
+use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
@@ -2351,6 +2351,260 @@ fn applying_settings_reconfigures_an_existing_interface() {
         .iface()
         .ipv6_addresses()
         .is_empty());
+}
+
+/// The device MAC of `managed_stack`'s single `wan` interface, as the wire
+/// octets a [`NetInterfaceConfigMsg`] MAC selector carries.
+const MAC_A_OCTETS: [u8; 6] = [0x02, 0xAA, 0, 0, 0, 0x01];
+
+#[test]
+fn interface_config_matches_by_mac_and_renames() {
+    let mut stack = managed_stack();
+    let msg = NetInterfaceConfigMsg {
+        alias: name("lan0"),
+        match_mac: Some(MAC_A_OCTETS),
+        ipv4: NetIpv4Config::Static {
+            addr: [10, 0, 2, 15],
+            prefix: 24,
+            gateway: Some([10, 0, 2, 2]),
+        },
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    stack.apply_interface_config(&msg, t(2)).expect("applied");
+    // The MAC-matched interface was renamed to the admin alias.
+    assert!(stack.interface(name("wan")).is_none());
+    let iface = stack.interface(name("lan0")).expect("renamed to lan0");
+    assert_eq!(
+        iface.stack().iface().ipv4(),
+        Some((Ipv4Addr::new(10, 0, 2, 15), 24))
+    );
+}
+
+#[test]
+fn interface_config_applies_by_alias_and_overrides_mtu() {
+    let mut stack = managed_stack();
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        ipv4: NetIpv4Config::Static {
+            addr: [192, 168, 1, 10],
+            prefix: 24,
+            gateway: None,
+        },
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 9000,
+    };
+    stack.apply_interface_config(&msg, t(2)).expect("applied");
+    let iface = stack.interface(name("wan")).expect("still wan");
+    assert_eq!(
+        iface.stack().iface().ipv4(),
+        Some((Ipv4Addr::new(192, 168, 1, 10), 24))
+    );
+}
+
+#[test]
+fn interface_config_assigns_a_static_ipv6_address() {
+    let mut stack = managed_stack();
+    let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: Some(MAC_A_OCTETS),
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Static {
+            addr: addr.octets(),
+            prefix: 64,
+            gateway: None,
+        },
+        mtu: 0,
+    };
+    stack.apply_interface_config(&msg, t(2)).expect("applied");
+    let has_addr = stack
+        .interface(name("wan"))
+        .expect("iface")
+        .stack()
+        .iface()
+        .ipv6_addresses()
+        .iter()
+        .any(|info| info.addr == addr && info.prefix_len == 64);
+    assert!(has_addr, "the static IPv6 address is assigned");
+}
+
+#[test]
+fn interface_config_disables_both_families() {
+    let mut stack = managed_stack();
+    // Start with a v4 assignment so disabling actually removes something.
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 0, 2],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Slaac,
+                mtu: 0,
+            },
+            t(2),
+        )
+        .expect("seed");
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Disabled,
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+            },
+            t(3),
+        )
+        .expect("disable");
+    let iface = stack.interface(name("wan")).expect("iface");
+    assert_eq!(iface.stack().iface().ipv4(), None);
+    assert!(iface.stack().iface().ipv6_addresses().is_empty());
+}
+
+#[test]
+fn interface_config_not_found_for_an_unknown_mac() {
+    let mut stack = managed_stack();
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: Some([0xde, 0xad, 0xbe, 0xef, 0, 0]),
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    assert_eq!(
+        stack.apply_interface_config(&msg, t(2)),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn interface_config_leaves_state_untouched_on_a_refusal() {
+    let mut stack = managed_stack();
+    // A first, valid application.
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 2, 15],
+                    prefix: 24,
+                    gateway: Some([10, 0, 2, 2]),
+                },
+                ipv6: NetIpv6Config::Slaac,
+                mtu: 0,
+            },
+            t(2),
+        )
+        .expect("first apply");
+    // A second application with an off-subnet gateway fails validation
+    // before any state is touched.
+    let bad = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        ipv4: NetIpv4Config::Static {
+            addr: [10, 0, 2, 20],
+            prefix: 24,
+            gateway: Some([10, 9, 9, 9]),
+        },
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    assert_eq!(
+        stack.apply_interface_config(&bad, t(3)),
+        Err(Errno::OutOfRange)
+    );
+    // The first assignment is intact — the refusal was atomic.
+    assert_eq!(
+        stack
+            .interface(name("wan"))
+            .expect("iface")
+            .stack()
+            .iface()
+            .ipv4(),
+        Some((Ipv4Addr::new(10, 0, 2, 15), 24))
+    );
+}
+
+#[test]
+fn interface_config_is_idempotent() {
+    let mut stack = managed_stack();
+    let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 5);
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        ipv4: NetIpv4Config::Static {
+            addr: [10, 0, 2, 15],
+            prefix: 24,
+            gateway: None,
+        },
+        ipv6: NetIpv6Config::Static {
+            addr: addr.octets(),
+            prefix: 64,
+            gateway: None,
+        },
+        mtu: 0,
+    };
+    stack.apply_interface_config(&msg, t(2)).expect("first");
+    stack
+        .apply_interface_config(&msg, t(3))
+        .expect("re-applying the same config is a success, not a duplicate");
+    let count = stack
+        .interface(name("wan"))
+        .expect("iface")
+        .stack()
+        .iface()
+        .ipv6_addresses()
+        .iter()
+        .filter(|info| info.addr == addr)
+        .count();
+    assert_eq!(count, 1, "the static address is present exactly once");
+}
+
+#[test]
+fn interface_config_rejects_an_alias_already_taken() {
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("wan"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            t(0),
+        )
+        .expect("wan");
+    stack
+        .add_interface(
+            name("eth1"),
+            NetIfKind::Ethernet,
+            facts(MAC_B),
+            IID_B,
+            9,
+            t(0),
+        )
+        .expect("eth1");
+    // Renaming MAC_A's interface to the already-taken `eth1` alias fails.
+    let msg = NetInterfaceConfigMsg {
+        alias: name("eth1"),
+        match_mac: Some(MAC_A_OCTETS),
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    assert_eq!(
+        stack.apply_interface_config(&msg, t(1)),
+        Err(Errno::AlreadyExists)
+    );
+    // Both interfaces keep their names (the refusal changed nothing).
+    assert!(stack.interface(name("wan")).is_some());
+    assert!(stack.interface(name("eth1")).is_some());
 }
 
 #[test]

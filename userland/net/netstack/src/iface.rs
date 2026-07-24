@@ -15,11 +15,13 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind,
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
+    NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::iface::AddrError;
 use tairix_net::internet_checksum;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{
@@ -178,6 +180,103 @@ impl Netstack {
             interface.stack.set_ipv4_enabled(settings.ipv4_enabled);
             interface.stack.set_ipv6_enabled(settings.ipv6_enabled, now);
         }
+    }
+
+    /// Apply one managed interface's declarative configuration
+    /// (`network.conf`, `plans/NETWORK.md` N9b-3-1), delivered by the
+    /// device manager over the [`NetInterfaceConfigMsg`] admin message.
+    ///
+    /// The interface is located by its **stable hardware identity**: when
+    /// `msg` carries a MAC selector the interface whose device MAC matches
+    /// is found and *renamed* to the admin-chosen alias (netstack is the
+    /// only holder of each interface's MAC, from the driver's facts); a
+    /// message with no selector matches an interface already bearing the
+    /// alias. An interface not yet present is [`Errno::NotFound`] — the
+    /// caller retries when the driver binds — and an alias already taken by
+    /// a *different* interface is [`Errno::AlreadyExists`].
+    ///
+    /// The whole message is validated ([`NetInterfaceConfigMsg::validate`])
+    /// **before** any state is touched, so a refusal leaves the interface
+    /// untouched — the application is atomic per interface. Re-applying the
+    /// same configuration is idempotent: a static address already assigned
+    /// is a success, not a duplicate error.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — the message failed validation, or the
+    ///   engine refused a validated field.
+    /// * [`Errno::NotFound`] — no interface matched the selector.
+    /// * [`Errno::AlreadyExists`] — the alias is bound to another
+    ///   interface.
+    pub fn apply_interface_config(
+        &mut self,
+        msg: &NetInterfaceConfigMsg,
+        now: Duration64,
+    ) -> Result<(), Errno> {
+        // Validate the whole message up front so the mutation below is
+        // atomic: after this every engine call can only fail on a resource
+        // limit the fresh config never reaches, so a partial apply is not
+        // possible (fail closed, leave the interface untouched).
+        msg.validate()?;
+        let index = match msg.match_mac {
+            Some(mac) => self
+                .interfaces
+                .iter()
+                .position(|i| i.facts.mac.as_octets() == &mac)
+                .ok_or(Errno::NotFound)?,
+            None => self.find(msg.alias).ok_or(Errno::NotFound)?,
+        };
+        // Rename a MAC-matched interface to its admin-chosen alias, unless
+        // the alias is already taken by a *different* interface (fail
+        // closed rather than collide two aliases).
+        if self.interfaces[index].name != msg.alias {
+            if let Some(other) = self.find(msg.alias) {
+                if other != index {
+                    return Err(Errno::AlreadyExists);
+                }
+            }
+            self.interfaces[index].name = msg.alias;
+        }
+        let stack = &mut self.interfaces[index].stack;
+        if msg.mtu != 0 {
+            stack.set_mtu(msg.mtu);
+        }
+        match msg.ipv4 {
+            NetIpv4Config::Disabled => stack.set_ipv4_enabled(false),
+            NetIpv4Config::Static {
+                addr,
+                prefix,
+                gateway,
+            } => {
+                stack.set_ipv4_enabled(true);
+                stack
+                    .set_ipv4_config(Ipv4Addr::from(addr), prefix, gateway.map(Ipv4Addr::from))
+                    .map_err(|_| Errno::OutOfRange)?;
+            }
+        }
+        match msg.ipv6 {
+            NetIpv6Config::Disabled => stack.set_ipv6_enabled(false, now),
+            NetIpv6Config::Slaac => stack.set_ipv6_enabled(true, now),
+            NetIpv6Config::Static {
+                addr,
+                prefix,
+                gateway,
+            } => {
+                stack.set_ipv6_enabled(true, now);
+                match stack.add_ipv6_static(Ipv6Addr::from(addr), prefix, now) {
+                    // A re-applied identical address is not an error: this
+                    // apply is idempotent (config-vs-bind ordering aside).
+                    Ok(()) | Err(AddrError::Duplicate) => {}
+                    Err(_) => return Err(Errno::OutOfRange),
+                }
+                if let Some(gw) = gateway {
+                    stack
+                        .add_route_v6(Ipv6Addr::UNSPECIFIED, 0, Some(Ipv6Addr::from(gw)))
+                        .map_err(|_| Errno::OutOfRange)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Borrow a managed interface by alias.

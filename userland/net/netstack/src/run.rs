@@ -51,8 +51,8 @@ mod program {
     use tairix_abi::driver::BufferClass;
     use tairix_abi::net::{SocketRequest, NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY};
     use tairix_abi::net_ipc::{
-        NetIfKind, NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT, NETSTACK_MAX_REPLY,
-        NETSTACK_MAX_REQUEST,
+        NetIfKind, NetInterfaceConfigMsg, NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT,
+        NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
     };
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -371,6 +371,16 @@ mod program {
             let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
             return;
         }
+        // The per-interface configuration is a *separate* framed message (its
+        // own magic), wider than the 64-byte request enum, so it is
+        // intercepted here like `BindDriver` and matched by its magic before
+        // the request decode. It is a pure state mutation, but decoding it
+        // needs the wider frame, so the interception lives in the transport.
+        if let Ok(msg) = NetInterfaceConfigMsg::from_bytes(&request[..request_len]) {
+            let result = serve_interface_config(stack, &caller, &msg);
+            let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
+            return;
+        }
         match serve(
             stack,
             sockets,
@@ -425,6 +435,48 @@ mod program {
                     events::DRIVER_BIND_FAILED,
                     Level::Warn,
                     "netstack bind driver failed: provisioning refused (interface left unbound)",
+                    err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Capability-check and apply a per-interface configuration: gate on
+    /// `CAP_NET_ADMIN` against the caller's attested origin (fail closed,
+    /// audited) **before any state is touched**, then apply the whole
+    /// message atomically ([`Netstack::apply_interface_config`]). A refusal
+    /// (validation, an unmatched interface, an alias clash) leaves the
+    /// interface untouched and is reported to the caller.
+    fn serve_interface_config(
+        stack: &mut Netstack,
+        caller: &Caller,
+        msg: &NetInterfaceConfigMsg,
+    ) -> Result<(), Errno> {
+        if !caller.capabilities().holds(CapabilityId::NET_ADMIN) {
+            audit(
+                events::REQUEST_DENIED,
+                Level::Warn,
+                "netstack interface config denied: caller lacks CAP_NET_ADMIN",
+            );
+            return Err(Errno::PermissionDenied);
+        }
+        match stack.apply_interface_config(msg, now()) {
+            Ok(()) => {
+                audit(
+                    events::INTERFACE_CONFIG_APPLIED,
+                    Level::Info,
+                    "netstack: per-interface network configuration applied",
+                );
+                Ok(())
+            }
+            Err(err) => {
+                // Report the exact refusal so a rejected configuration is
+                // diagnosable (fail loud); the interface stays untouched.
+                audit_errno(
+                    events::ADMIN_REFUSED,
+                    Level::Warn,
+                    "netstack interface config refused (interface left untouched)",
                     err,
                 );
                 Err(err)

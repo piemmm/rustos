@@ -48,9 +48,27 @@ pub const IF_NAME_LEN: usize = 16;
 /// bound on the reply size, not an interface-count capacity.
 pub const NETSTACK_LIST_LIMIT_MAX: u16 = 32;
 
-/// Largest request the [`NETSTACK_ENDPOINT`] accepts: exactly one
-/// fixed-width request frame.
-pub const NETSTACK_MAX_REQUEST: usize = NetstackRequest::WIRE_LEN;
+/// Largest request the [`NETSTACK_ENDPOINT`] accepts.
+///
+/// Two distinct fixed-width framed messages arrive on the admin endpoint:
+/// the 64-byte [`NetstackRequest`] and the wider per-interface
+/// [`NetInterfaceConfigMsg`] (its rich address payload does not fit the
+/// 64-byte request enum, so it is its own self-identifying frame, decoded
+/// by the transport before [`NetstackRequest`], the `BindDriver`-interception
+/// precedent). The receive buffer is sized to the larger so neither is ever
+/// truncated.
+pub const NETSTACK_MAX_REQUEST: usize =
+    max_usize(NetstackRequest::WIRE_LEN, NetInterfaceConfigMsg::WIRE_LEN);
+
+/// The larger of two sizes, as a `const fn` (there is no `const`
+/// [`Ord::max`] in a stable `const` context).
+const fn max_usize(a: usize, b: usize) -> usize {
+    if a >= b {
+        a
+    } else {
+        b
+    }
+}
 
 /// An IP address family as carried on this protocol.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -557,6 +575,385 @@ fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
         return Err(Errno::BadMagic);
     }
     Ok(())
+}
+
+/// Magic number identifying a per-interface configuration message
+/// (`"NIC1"` little-endian). Distinct from [`NETSTACK_REQUEST_MAGIC`] so
+/// the transport can tell the two framed messages apart on the one admin
+/// endpoint.
+pub const NET_INTERFACE_CONFIG_MAGIC: u32 = u32::from_le_bytes(*b"NIC1");
+
+/// The `net-iface-config-v1` message version.
+pub const NET_INTERFACE_CONFIG_VERSION_V1: u16 = 1;
+
+/// The IPv4 addressing an interface configuration requests
+/// (`network.conf` `<iface>.ipv4.*`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NetIpv4Config {
+    /// IPv4 is administratively disabled on this interface: it binds no
+    /// IPv4 address and answers no IPv4/ARP.
+    Disabled,
+    /// A static IPv4 assignment.
+    Static {
+        /// The interface address (network byte order).
+        addr: [u8; 4],
+        /// The on-link prefix length, in bits (`1..=32`).
+        prefix: u8,
+        /// The optional default gateway (network byte order); the engine
+        /// requires it to lie inside the connected subnet.
+        gateway: Option<[u8; 4]>,
+    },
+}
+
+/// The IPv6 addressing an interface configuration requests
+/// (`network.conf` `<iface>.ipv6.*`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NetIpv6Config {
+    /// IPv6 is administratively disabled on this interface: it forms no
+    /// link-local and accepts no IPv6.
+    Disabled,
+    /// Stateless address autoconfiguration (RFC 4862): the interface forms
+    /// its link-local and adopts advertised prefixes. A static address may
+    /// still be assigned alongside SLAAC via [`Self::Static`].
+    Slaac,
+    /// A static IPv6 assignment (the interface additionally keeps its
+    /// autoconfigured link-local; SLAAC and a static address coexist).
+    Static {
+        /// The interface address (network byte order).
+        addr: [u8; 16],
+        /// The on-link prefix length, in bits (`1..=128`).
+        prefix: u8,
+        /// The optional default-router next hop (network byte order); an
+        /// IPv6 gateway is commonly link-local and need not lie inside the
+        /// interface prefix, so it is validated only as a unicast address.
+        gateway: Option<[u8; 16]>,
+    },
+}
+
+/// Wire discriminant of [`NetIpv4Config::Disabled`].
+const IPV4_METHOD_DISABLED: u8 = 0;
+/// Wire discriminant of [`NetIpv4Config::Static`].
+const IPV4_METHOD_STATIC: u8 = 1;
+/// Wire discriminant of [`NetIpv6Config::Disabled`].
+const IPV6_METHOD_DISABLED: u8 = 0;
+/// Wire discriminant of [`NetIpv6Config::Slaac`].
+const IPV6_METHOD_SLAAC: u8 = 1;
+/// Wire discriminant of [`NetIpv6Config::Static`].
+const IPV6_METHOD_STATIC: u8 = 2;
+
+/// One managed interface's declarative configuration, pushed to
+/// `netstack` post-unlock by the FS-capable device manager (which reads
+/// `/System/Settings/Network/network.conf` through `lib/netconfig` — the
+/// network-parsing sandbox holds no filesystem capability).
+///
+/// The interface is identified by its **stable hardware identity** — its
+/// MAC — not by discovery order: `netstack` is the only component that
+/// holds each interface's MAC (from the driver's `Facts`), so it matches a
+/// configuration to the bound interface by [`Self::match_mac`] and renames
+/// that interface to the admin-chosen [`Self::alias`]. A message with no
+/// MAC selector matches an interface already bearing `alias` (the
+/// apply-by-alias path).
+///
+/// The payload's address fields do not fit the 64-byte [`NetstackRequest`]
+/// enum, so this is a **separate** self-identifying frame (its own
+/// [`NET_INTERFACE_CONFIG_MAGIC`]), decoded by the service transport before
+/// [`NetstackRequest`] — the `BindDriver`-interception precedent.
+///
+/// Every decode fails closed (unknown magic/version/method, an out-of-range
+/// prefix, a present-flag that is not `0`/`1`, or a dirty reserved tail);
+/// [`Self::validate`] additionally enforces the semantic invariants
+/// (unicast addresses, an on-subnet IPv4 gateway) so the service can apply
+/// the whole message atomically — a refusal leaves the interface untouched.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceConfigMsg {
+    /// The interface's admin-chosen alias, NUL-padded.
+    pub alias: [u8; IF_NAME_LEN],
+    /// The stable MAC identity to match, or `None` to match by `alias`.
+    pub match_mac: Option<[u8; 6]>,
+    /// The requested IPv4 addressing.
+    pub ipv4: NetIpv4Config,
+    /// The requested IPv6 addressing.
+    pub ipv6: NetIpv6Config,
+    /// The link MTU override, or `0` to keep the device-reported MTU.
+    pub mtu: u16,
+}
+
+impl NetInterfaceConfigMsg {
+    /// Encoded size on the wire: magic (4), version (2), `mac_present`
+    /// (1), reserved (1), alias (16), mac (6), ipv4 {method (1), prefix
+    /// (1), addr (4), `gw_present` (1), gw (4)}, ipv6 {method (1), prefix
+    /// (1), addr (16), `gw_present` (1), gw (16)}, mtu (2), and a zero
+    /// reserved tail.
+    pub const WIRE_LEN: usize = 96;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, NET_INTERFACE_CONFIG_MAGIC);
+        put_u16(&mut out, 4, NET_INTERFACE_CONFIG_VERSION_V1);
+        if let Some(mac) = self.match_mac {
+            out[6] = 1;
+            out[24..30].copy_from_slice(&mac);
+        }
+        out[8..24].copy_from_slice(&self.alias);
+        match self.ipv4 {
+            NetIpv4Config::Disabled => out[30] = IPV4_METHOD_DISABLED,
+            NetIpv4Config::Static {
+                addr,
+                prefix,
+                gateway,
+            } => {
+                out[30] = IPV4_METHOD_STATIC;
+                out[31] = prefix;
+                out[32..36].copy_from_slice(&addr);
+                if let Some(gw) = gateway {
+                    out[36] = 1;
+                    out[37..41].copy_from_slice(&gw);
+                }
+            }
+        }
+        match self.ipv6 {
+            NetIpv6Config::Disabled => out[41] = IPV6_METHOD_DISABLED,
+            NetIpv6Config::Slaac => out[41] = IPV6_METHOD_SLAAC,
+            NetIpv6Config::Static {
+                addr,
+                prefix,
+                gateway,
+            } => {
+                out[41] = IPV6_METHOD_STATIC;
+                out[42] = prefix;
+                out[43..59].copy_from_slice(&addr);
+                if let Some(gw) = gateway {
+                    out[59] = 1;
+                    out[60..76].copy_from_slice(&gw);
+                }
+            }
+        }
+        put_u16(&mut out, 76, self.mtu);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed input.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole message.
+    /// * [`Errno::BadMagic`] — wrong magic, a present-flag that is not
+    ///   `0`/`1`, a set field behind a clear present-flag, or a dirty
+    ///   reserved tail.
+    /// * [`Errno::AbiVersionUnsupported`] — not `net-iface-config-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown method, an out-of-range or
+    ///   zero static prefix, or an invalid alias.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != NET_INTERFACE_CONFIG_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != NET_INTERFACE_CONFIG_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if bytes[7] != 0 || bytes[76 + 2..Self::WIRE_LEN].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let match_mac = match bytes[6] {
+            0 => {
+                if bytes[24..30].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                None
+            }
+            1 => {
+                let mut mac = [0u8; 6];
+                mac.copy_from_slice(&bytes[24..30]);
+                Some(mac)
+            }
+            _ => return Err(Errno::OutOfRange),
+        };
+        let mut alias = [0u8; IF_NAME_LEN];
+        alias.copy_from_slice(&bytes[8..24]);
+        validate_if_name(&alias)?;
+        let ipv4 = decode_ipv4_config(bytes)?;
+        let ipv6 = decode_ipv6_config(bytes)?;
+        let mtu = read_u16(bytes, 76);
+        Ok(Self {
+            alias,
+            match_mac,
+            ipv4,
+            ipv6,
+            mtu,
+        })
+    }
+
+    /// Enforce the semantic invariants the structural decode cannot, so the
+    /// service can apply the whole message atomically.
+    ///
+    /// * A static IPv4/IPv6 address is a genuine **unicast** host address
+    ///   (not unspecified, loopback, multicast, or — for v4 — broadcast).
+    /// * A static IPv4 gateway lies inside the connected subnet (the engine
+    ///   refuses an off-subnet v4 next hop that could never resolve
+    ///   on-link). An IPv6 gateway is only required to be unicast: an IPv6
+    ///   default router is routinely a link-local next hop outside the
+    ///   interface prefix.
+    /// * An MTU override is at least the IPv6 minimum link MTU (1280).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] on any violated invariant (fail closed).
+    pub fn validate(&self) -> Result<(), Errno> {
+        if self.mtu != 0 && self.mtu < 1280 {
+            return Err(Errno::OutOfRange);
+        }
+        if let NetIpv4Config::Static {
+            addr,
+            prefix,
+            gateway,
+        } = self.ipv4
+        {
+            let host = core::net::Ipv4Addr::from(addr);
+            if host.is_unspecified()
+                || host.is_loopback()
+                || host.is_multicast()
+                || host.is_broadcast()
+            {
+                return Err(Errno::OutOfRange);
+            }
+            if let Some(gw) = gateway {
+                if !ipv4_same_subnet(addr, gw, prefix) {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+        }
+        if let NetIpv6Config::Static { addr, gateway, .. } = self.ipv6 {
+            let host = core::net::Ipv6Addr::from(addr);
+            if host.is_unspecified() || host.is_loopback() || host.is_multicast() {
+                return Err(Errno::OutOfRange);
+            }
+            if let Some(gw) = gateway {
+                let gw = core::net::Ipv6Addr::from(gw);
+                if gw.is_unspecified() || gw.is_multicast() {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Decode the IPv4 configuration block (bytes 30..41), enforcing the
+/// disabled-method zero invariants and the `gw_present` flag.
+fn decode_ipv4_config(bytes: &[u8]) -> Result<NetIpv4Config, Errno> {
+    let prefix = bytes[31];
+    let mut addr = [0u8; 4];
+    addr.copy_from_slice(&bytes[32..36]);
+    match bytes[30] {
+        IPV4_METHOD_DISABLED => {
+            if prefix != 0 || addr != [0; 4] || bytes[36..41].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            Ok(NetIpv4Config::Disabled)
+        }
+        IPV4_METHOD_STATIC => {
+            if prefix == 0 || prefix > 32 {
+                return Err(Errno::OutOfRange);
+            }
+            let gateway = decode_gateway_v4(bytes)?;
+            Ok(NetIpv4Config::Static {
+                addr,
+                prefix,
+                gateway,
+            })
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Decode the IPv4 gateway (present flag at 36, address at 37..41).
+fn decode_gateway_v4(bytes: &[u8]) -> Result<Option<[u8; 4]>, Errno> {
+    match bytes[36] {
+        0 => {
+            if bytes[37..41].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            Ok(None)
+        }
+        1 => {
+            let mut gw = [0u8; 4];
+            gw.copy_from_slice(&bytes[37..41]);
+            Ok(Some(gw))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Decode the IPv6 configuration block (bytes 41..76), enforcing the
+/// disabled/slaac zero invariants and the `gw_present` flag.
+fn decode_ipv6_config(bytes: &[u8]) -> Result<NetIpv6Config, Errno> {
+    let prefix = bytes[42];
+    let mut addr = [0u8; 16];
+    addr.copy_from_slice(&bytes[43..59]);
+    let addressless = prefix == 0 && addr == [0; 16] && bytes[59..76].iter().all(|&b| b == 0);
+    match bytes[41] {
+        IPV6_METHOD_DISABLED => {
+            if !addressless {
+                return Err(Errno::BadMagic);
+            }
+            Ok(NetIpv6Config::Disabled)
+        }
+        IPV6_METHOD_SLAAC => {
+            if !addressless {
+                return Err(Errno::BadMagic);
+            }
+            Ok(NetIpv6Config::Slaac)
+        }
+        IPV6_METHOD_STATIC => {
+            if prefix == 0 || prefix > 128 {
+                return Err(Errno::OutOfRange);
+            }
+            let gateway = decode_gateway_v6(bytes)?;
+            Ok(NetIpv6Config::Static {
+                addr,
+                prefix,
+                gateway,
+            })
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Decode the IPv6 gateway (present flag at 59, address at 60..76).
+fn decode_gateway_v6(bytes: &[u8]) -> Result<Option<[u8; 16]>, Errno> {
+    match bytes[59] {
+        0 => {
+            if bytes[60..76].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            Ok(None)
+        }
+        1 => {
+            let mut gw = [0u8; 16];
+            gw.copy_from_slice(&bytes[60..76]);
+            Ok(Some(gw))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Whether `gateway` lies in the same IPv4 subnet as `addr` at `prefix`
+/// bits (`prefix` in `1..=32`, guaranteed by the decoder).
+fn ipv4_same_subnet(addr: [u8; 4], gateway: [u8; 4], prefix: u8) -> bool {
+    let host = u32::from_be_bytes(addr);
+    let gw = u32::from_be_bytes(gateway);
+    // `prefix` is 1..=32 here, so `32 - prefix` is 0..=31 and the shift is
+    // in range; a /32 masks to the full address.
+    let mask = if prefix == 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    host & mask == gw & mask
 }
 
 /// The kind of link an interface record describes.
@@ -1428,6 +1825,218 @@ mod tests {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn interface_config_messages_round_trip() {
+        for msg in [
+            // Full dual-stack static config, matched by MAC.
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 2, 15],
+                    prefix: 24,
+                    gateway: Some([10, 0, 2, 2]),
+                },
+                ipv6: NetIpv6Config::Static {
+                    addr: [0x20; 16],
+                    prefix: 64,
+                    gateway: Some([0xfe; 16]),
+                },
+                mtu: 1500,
+            },
+            // Disabled v4, SLAAC v6, no MAC selector, no MTU override.
+            NetInterfaceConfigMsg {
+                alias: name("lan0"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Disabled,
+                ipv6: NetIpv6Config::Slaac,
+                mtu: 0,
+            },
+            // Static v4 with no gateway, disabled v6.
+            NetInterfaceConfigMsg {
+                alias: name("eth9"),
+                match_mac: Some([0; 6]),
+                ipv4: NetIpv4Config::Static {
+                    addr: [192, 168, 1, 5],
+                    prefix: 32,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 9000,
+            },
+        ] {
+            let bytes = msg.to_le_bytes();
+            assert_eq!(NetInterfaceConfigMsg::from_bytes(&bytes), Ok(msg));
+            msg.validate().expect("the sample configs are valid");
+        }
+    }
+
+    #[test]
+    fn interface_config_magic_is_the_ascii_tag() {
+        assert_eq!(NET_INTERFACE_CONFIG_MAGIC, u32::from_le_bytes(*b"NIC1"));
+    }
+
+    #[test]
+    fn interface_config_fails_closed_on_malformed_framing() {
+        let good = NetInterfaceConfigMsg {
+            alias: name("wan"),
+            match_mac: Some([1, 2, 3, 4, 5, 6]),
+            ipv4: NetIpv4Config::Static {
+                addr: [10, 0, 0, 1],
+                prefix: 24,
+                gateway: Some([10, 0, 0, 254]),
+            },
+            ipv6: NetIpv6Config::Slaac,
+            mtu: 1500,
+        }
+        .to_le_bytes();
+        // A short buffer.
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&good[..good.len() - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Wrong magic.
+        let mut bad = good;
+        bad[0] ^= 0xFF;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // Wrong version.
+        let mut bad = good;
+        bad[4] = 2;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::AbiVersionUnsupported)
+        );
+        // A dirty reserved byte (offset 7).
+        let mut bad = good;
+        bad[7] = 1;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A dirty reserved tail byte.
+        let mut bad = good;
+        bad[NetInterfaceConfigMsg::WIRE_LEN - 1] = 1;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A mac-present flag that is neither 0 nor 1.
+        let mut bad = good;
+        bad[6] = 2;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        // A MAC set behind a clear present-flag.
+        let mut bad = good;
+        bad[6] = 0;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // An unknown IPv4 method.
+        let mut bad = good;
+        bad[30] = 9;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        // An out-of-range IPv4 static prefix.
+        let mut bad = good;
+        bad[31] = 33;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        // An unknown IPv6 method.
+        let mut bad = good;
+        bad[41] = 9;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        // A disabled IPv4 method carrying a non-zero prefix.
+        let mut bad = good;
+        bad[30] = 0;
+        bad[31] = 24;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn interface_config_validate_rejects_bad_semantics() {
+        // A multicast static v4 address.
+        assert_eq!(
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [224, 0, 0, 1],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+            }
+            .validate(),
+            Err(Errno::OutOfRange)
+        );
+        // An off-subnet v4 gateway.
+        assert_eq!(
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 0, 1],
+                    prefix: 24,
+                    gateway: Some([10, 0, 1, 1]),
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+            }
+            .validate(),
+            Err(Errno::OutOfRange)
+        );
+        // A too-small MTU override.
+        assert_eq!(
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Disabled,
+                ipv6: NetIpv6Config::Slaac,
+                mtu: 500,
+            }
+            .validate(),
+            Err(Errno::OutOfRange)
+        );
+        // A multicast static v6 address.
+        assert_eq!(
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Disabled,
+                ipv6: NetIpv6Config::Static {
+                    addr: {
+                        let mut a = [0u8; 16];
+                        a[0] = 0xff;
+                        a[15] = 1;
+                        a
+                    },
+                    prefix: 64,
+                    gateway: None,
+                },
+                mtu: 0,
+            }
+            .validate(),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

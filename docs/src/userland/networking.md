@@ -87,6 +87,37 @@ These resolve through `tairix_procinfo`'s `info:`/`stats:` resolver onto
 the `NET_INTERFACE_COUNTERS` and `NET_INTERFACE_RATES` queries; like the
 socket table they require `CAP_SYSINFO_GLOBAL` and are audited.
 
+## Configuring interfaces (`network.conf`)
+
+Per-interface addressing is declarative, not imperative: it lives in one
+document, `/System/Settings/Network/network.conf`, parsed and rendered by
+the single `lib/netconfig` engine. Each managed interface is named by a
+stable admin alias (`wan`, `lan0`) bound to hardware by its MAC
+(`<iface>.match.mac`) — never by discovery order — and carries its
+addressing (`<iface>.ipv4.method static|disabled` with
+`ipv4.address`/`ipv4.gateway`; `<iface>.ipv6.method slaac|static|disabled`
+with `ipv6.address`/`ipv6.gateway`) and an optional `<iface>.mtu`.
+
+```
+wan.match.mac    52:54:00:12:34:56
+wan.ipv4.method  static
+wan.ipv4.address 10.0.2.15/24
+wan.ipv4.gateway 10.0.2.2
+wan.ipv6.method  slaac
+```
+
+The file is read post-unlock by the device manager and applied to
+`netstack` per interface, atomically and idempotently — a malformed or
+inconsistent document is refused whole and the running configuration is
+left untouched (fail closed). The image ships an empty document ("no
+managed interfaces beyond loopback"); the installer, or a future
+`configure`-class writer, fills in the operator's interfaces through the
+same engine. The stack-wide switches (`net.ipv4.enabled`,
+`net.ipv6.enabled`, `net.tcp.syncookies`) live separately in `system.conf`
+and are set with `configure` (§6.2). See
+[Network-stack service](./netstack.md) for how the configuration is
+delivered and enforced.
+
 ## See also
 
 - [Network-stack service](./netstack.md) — the `netstack` process, its

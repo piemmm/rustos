@@ -46,12 +46,15 @@
 mod program {
     use tairix_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use tairix_abi::hwtree::HwDeviceClass;
-    use tairix_abi::net_ipc::{NetstackRequest, NetworkSettings, IF_NAME_LEN, NETSTACK_ENDPOINT};
+    use tairix_abi::net_ipc::{
+        NetInterfaceConfigMsg, NetstackRequest, NetworkSettings, IF_NAME_LEN, NETSTACK_ENDPOINT,
+    };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::{Errno, HwNode, HwTreeHeader, OpenFlags};
-    use tairix_devmgr::netcfg::settings_from_config;
+    use tairix_devmgr::netcfg::{interface_configs_from_config, settings_from_config};
     use tairix_devmgr::{
-        events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
+        events, DriverStoreCall, HwTreeService, InterfaceConfigPlan, NetstackBind,
+        NetworkConfigSource, NetworkInterfaceConfigSource,
     };
     use tairix_log::{log, Event, Field, Level};
     use tairix_rt::LogSink;
@@ -247,6 +250,14 @@ mod program {
                 tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
             decode_status_reply(&reply[..len])
         }
+
+        fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
+            let request = config.to_le_bytes();
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len =
+                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            decode_status_reply(&reply[..len])
+        }
     }
 
     /// The production [`NetworkConfigSource`] backing: reads the stack-wide
@@ -285,6 +296,44 @@ mod program {
         }
     }
 
+    /// The production [`NetworkInterfaceConfigSource`] backing: reads the
+    /// per-interface configuration from
+    /// `/System/Settings/Network/network.conf` and maps it through the one
+    /// shared `lib/netconfig` engine
+    /// ([`interface_configs_from_config`](tairix_devmgr::netcfg::interface_configs_from_config)).
+    ///
+    /// Reading the machine-wide store needs `CAP_FS_ACCESS` (the bundle
+    /// requests it); the kernel re-checks it on `fs_open`, so this seam adds
+    /// no authority. It returns [`None`] on any failure — the store not yet
+    /// mounted (before the root unlock), an unreadable or oversized document,
+    /// or one the engine cannot parse or validate — so delivery leaves the
+    /// interfaces unconfigured and retries on the next generation bump, never
+    /// guessing at a partial configuration (fail closed).
+    struct RtNetworkInterfaceConfig;
+
+    impl NetworkInterfaceConfigSource for RtNetworkInterfaceConfig {
+        fn load(&mut self) -> Option<InterfaceConfigPlan> {
+            let fd = tairix_rt::fs_open(tairix_netconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+            if fd < 0 {
+                return None;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // `fd >= 0` checked above; descriptors are small kernel indices.
+            let fd = fd as u32;
+            let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
+            let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
+            let _ = tairix_rt::fs_close(fd);
+            let len = outcome.ok()?;
+            let text = core::str::from_utf8(&buf[..len]).ok()?;
+            // `parse` validates the whole document (including the bond and
+            // static-addressing invariants), so a semantically inconsistent
+            // store is refused whole here rather than delivered as a partial
+            // guess (fail closed).
+            let config = tairix_netconfig::NetworkConfig::parse(text).ok()?;
+            Some(interface_configs_from_config(&config))
+        }
+    }
+
     /// Program entry point. Runs the reactive match-and-load loop for the
     /// life of the service (`budget = None`): fetch the catalogue once, then
     /// read the discovered tree, load a driver for every matched node, and
@@ -305,6 +354,7 @@ mod program {
             &mut RtStoreCall,
             &mut RtNetstackBind,
             &mut RtNetworkConfig,
+            &mut RtNetworkInterfaceConfig,
             &LogSink,
             &mut reply_buf,
             None,

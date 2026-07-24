@@ -20,7 +20,7 @@ workspace = true
 # into the kernel image (E0152 / allocator clash, `AGENTS.md` §17.4 / §1).
 [features]
 default = ["program"]
-program = ["dep:tairix-rt", "dep:tairix-sysconfig"]
+program = ["dep:tairix-rt", "dep:tairix-sysconfig", "dep:tairix-netconfig"]
 
 # The package is both the `tairix-devmgr` match-policy library (above) and the
 # `Run` entry-point binary of the device-manager service installed at
@@ -51,6 +51,13 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # store, so the kernel — which links the match-policy library with
 # `default-features = false` — never pulls it into the ring-0 image.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0", optional = true }
+# The per-interface network-configuration store engine (`AGENTS.md` §16.1;
+# `plans/NETWORK.md` §6.1): the one definition of the `network.conf` grammar
+# the device manager reads post-unlock and maps into the per-interface
+# `NetInterfaceConfigMsg` it pushes to `netstack` (`plans/NETWORK.md`
+# N9b-3-1). Optional and program-gated exactly like `tairix-sysconfig`, so
+# the kernel never pulls it into the ring-0 image.
+tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0", optional = true }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers

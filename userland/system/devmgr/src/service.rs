@@ -26,7 +26,10 @@ use tairix_log::{log as log_event, Event, Level, Sink};
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
 use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
-use crate::netcfg::{deliver_network_settings, NetConfigState, NetworkConfigSource};
+use crate::netcfg::{
+    deliver_interface_configs, deliver_network_settings, NetConfigState, NetIfConfigState,
+    NetworkConfigSource, NetworkInterfaceConfigSource,
+};
 use crate::observe::for_each_node;
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
@@ -128,8 +131,10 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     store: &mut C,
     netstack: &mut dyn NetstackBind,
     netcfg: &mut dyn NetworkConfigSource,
+    netifcfg: &mut dyn NetworkInterfaceConfigSource,
     netbind: &mut NetBindState,
     netconfig: &mut NetConfigState,
+    netifconfig: &mut NetIfConfigState,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
     state: &mut AutoloadState,
     tree_buf: &mut Vec<u8>,
@@ -181,6 +186,11 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // NIC driver emitted) to the network stack, idempotently (each endpoint
     // once) and fail-soft (a stack not yet up is retried next bump).
     bind_new_channels(&nodes, netbind, netstack, sink);
+    // Deliver each managed interface's `network.conf` configuration to the
+    // network stack. Runs *after* `bind_new_channels` so an interface that
+    // just bound this cycle can be matched (by MAC) and configured in the
+    // same reaction; an interface not yet bound is retried on the next bump.
+    deliver_interface_configs(netifcfg, netifconfig, netstack, sink);
     // Hot-removal reaction: a bound node missing from this snapshot means its
     // device is gone, so tear its driver down. The same generation-bump path
     // that loads a newly-appeared node's driver unloads a vanished one's
@@ -225,6 +235,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     store: &mut C,
     netstack: &mut dyn NetstackBind,
     netcfg: &mut dyn NetworkConfigSource,
+    netifcfg: &mut dyn NetworkInterfaceConfigSource,
     sink: &dyn Sink,
     reply_buf: &mut [u8],
     budget: Option<u32>,
@@ -233,6 +244,10 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     // The memory of whether the stack-wide `net.*` policy has been
     // delivered to the network stack (once, `plans/NETWORK.md` N9b-2).
     let mut netconfig = NetConfigState::new();
+    // The memory of which per-interface `network.conf` configurations have
+    // been delivered (each when its interface binds, `plans/NETWORK.md`
+    // N9b-3-1).
+    let mut netifconfig = NetIfConfigState::new();
     // The memory of which NIC device channels have been handed to the
     // network stack: each `netchan` endpoint is bound exactly once across
     // every generation bump.
@@ -254,8 +269,10 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         store,
         netstack,
         netcfg,
+        netifcfg,
         &mut netbind,
         &mut netconfig,
+        &mut netifconfig,
         &mut catalogue,
         &mut state,
         &mut tree_buf,
@@ -273,8 +290,10 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             store,
             netstack,
             netcfg,
+            netifcfg,
             &mut netbind,
             &mut netconfig,
+            &mut netifconfig,
             &mut catalogue,
             &mut state,
             &mut tree_buf,
@@ -450,6 +469,13 @@ mod tests {
         ) -> Result<(), Errno> {
             Ok(())
         }
+
+        fn apply_interface_config(
+            &mut self,
+            _config: &tairix_abi::net_ipc::NetInterfaceConfigMsg,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
     }
 
     /// A no-op [`NetworkConfigSource`] for the loop tests: it never yields a
@@ -458,6 +484,16 @@ mod tests {
     struct NoConfig;
     impl NetworkConfigSource for NoConfig {
         fn load(&mut self) -> Option<tairix_abi::net_ipc::NetworkSettings> {
+            None
+        }
+    }
+
+    /// A no-op [`NetworkInterfaceConfigSource`] for the loop tests: it never
+    /// yields a plan, so `deliver_interface_configs` is a no-op. The delivery
+    /// policy itself is tested directly in `crate::netcfg`.
+    struct NoIfConfig;
+    impl NetworkInterfaceConfigSource for NoIfConfig {
+        fn load(&mut self) -> Option<crate::netcfg::InterfaceConfigPlan> {
             None
         }
     }
@@ -490,6 +526,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -531,6 +568,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -574,6 +612,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -631,6 +670,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -672,6 +712,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -712,6 +753,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -759,6 +801,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(2),
@@ -809,6 +852,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -850,6 +894,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -879,6 +924,7 @@ mod tests {
                 &mut store,
                 &mut NoNetstack,
                 &mut NoConfig,
+                &mut NoIfConfig,
                 &sink,
                 &mut reply_buf,
                 None
@@ -906,6 +952,7 @@ mod tests {
                 &mut store,
                 &mut NoNetstack,
                 &mut NoConfig,
+                &mut NoIfConfig,
                 &sink,
                 &mut reply_buf,
                 None
@@ -1028,6 +1075,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoConfig,
+            &mut NoIfConfig,
             &sink,
             &mut reply_buf,
             Some(0),

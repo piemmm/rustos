@@ -77,12 +77,27 @@ pub const NETWORK_SETTINGS_DELIVERED: EventId = EventId(13_012);
 /// generation bump — never an error (fail-soft, like the driver store
 /// being unavailable). Recorded at `Warn`.
 pub const NETWORK_SETTINGS_DELIVERY_FAILED: EventId = EventId(13_013);
+/// A per-interface `network.conf` configuration was delivered to the
+/// network stack and accepted (the `NetInterfaceConfigMsg` admin call
+/// succeeded). Recorded at `Info`: an interface's addressing came up.
+pub const NETWORK_IFCONFIG_DELIVERED: EventId = EventId(13_014);
+/// A per-interface configuration was read but the network stack refused it
+/// for a reason other than "interface not bound yet" (which is the silent,
+/// expected retry state). Retried on the next generation bump — never an
+/// error (fail-soft). Recorded at `Warn`.
+pub const NETWORK_IFCONFIG_DELIVERY_FAILED: EventId = EventId(13_015);
+/// A managed non-bond interface in `network.conf` declares no `match.mac`
+/// identity selector, so the device manager cannot bind it to hardware by
+/// stable identity (`match.node` binding is a later increment). The
+/// interface is skipped and the operator's configuration error is surfaced
+/// loud, once. Recorded at `Warn`.
+pub const NETWORK_IFCONFIG_REJECTED: EventId = EventId(13_016);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 13] = [
+    const ALL: [EventId; 16] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -96,6 +111,9 @@ mod tests {
         NETSTACK_BIND_FAILED,
         NETWORK_SETTINGS_DELIVERED,
         NETWORK_SETTINGS_DELIVERY_FAILED,
+        NETWORK_IFCONFIG_DELIVERED,
+        NETWORK_IFCONFIG_DELIVERY_FAILED,
+        NETWORK_IFCONFIG_REJECTED,
     ];
 
     #[test]

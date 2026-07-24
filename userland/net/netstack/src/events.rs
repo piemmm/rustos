@@ -82,13 +82,19 @@ pub const SOCKET_ACCEPTED: EventId = EventId(16_014);
 /// security-relevant configuration change, recorded at `Info`.
 pub const NETWORK_SETTINGS_APPLIED: EventId = EventId(16_015);
 
+/// A per-interface `network.conf` configuration was applied over the
+/// [`NetInterfaceConfigMsg`](tairix_abi::net_ipc::NetInterfaceConfigMsg)
+/// admin message (static addressing, MTU, family enable): a
+/// security-relevant configuration change, recorded at `Info`.
+pub const INTERFACE_CONFIG_APPLIED: EventId = EventId(16_016);
+
 #[cfg(test)]
 mod tests {
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
-        INBOUND_ECHO_SERVED, NETSTACK_RANGE_END, NETSTACK_RANGE_START, NETWORK_SETTINGS_APPLIED,
-        REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_ACCEPTED, SOCKET_DENIED, SOCKET_LISTENING,
-        SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
+        INBOUND_ECHO_SERVED, INTERFACE_CONFIG_APPLIED, NETSTACK_RANGE_END, NETSTACK_RANGE_START,
+        NETWORK_SETTINGS_APPLIED, REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_ACCEPTED,
+        SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
 
     #[test]
@@ -109,6 +115,7 @@ mod tests {
             SOCKET_LISTENING,
             SOCKET_ACCEPTED,
             NETWORK_SETTINGS_APPLIED,
+            INTERFACE_CONFIG_APPLIED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -132,6 +139,7 @@ mod tests {
             SOCKET_LISTENING.0,
             SOCKET_ACCEPTED.0,
             NETWORK_SETTINGS_APPLIED.0,
+            INTERFACE_CONFIG_APPLIED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {
