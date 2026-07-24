@@ -382,7 +382,11 @@ mod tests {
              cache.filesystem auto\n\
              cache.block auto\n\
              cache.transform auto\n\
-             cache.semantic auto\n",
+             cache.semantic auto\n\
+             net.ipv4.enabled true\n\
+             net.ipv6.enabled true\n\
+             net.ipv6.privacy false\n\
+             net.tcp.syncookies auto\n",
         );
     }
 

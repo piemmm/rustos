@@ -51,6 +51,24 @@ Chaque cache est un accélérateur récupérable, jamais la source de
 vérité ; désactiver l'un d'eux ou tous ne fait donc que ralentir le
 travail concerné — cela ne change jamais un résultat.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` ou `false` : les
+  commutateurs de familles d'adresses à l'échelle de la pile. Les deux
+  valent `true` par défaut. Une famille désactivée n'attribue aucune
+  adresse, ne répond à aucun paquet et refuse un socket de cette
+  famille par une erreur typée — jamais un rejet silencieux.
+- `net.ipv6.privacy` — `true` ou `false` : si la pile forme des
+  adresses IPv6 temporaires (de confidentialité) en plus de l'adresse
+  stable. `false` (par défaut) n'utilise que l'adresse SLAAC stable.
+- `net.tcp.syncookies` — `auto` ou `always` : la défense contre les
+  inondations SYN. `auto` (par défaut) conserve une file semi-ouverte
+  bornée et bascule vers des cookies sans état en cas de débordement ;
+  `always` répond à chaque demande de connexion sans état. Il n'y a
+  pas de `off` — une file de connexions non défendue n'est pas un
+  réglage.
+
+La pile réseau lit les réglages `net.*` ; une modification prend effet
+lorsque la pile applique de nouveau sa configuration.
+
 ## OPTIONS
 
 - `-h, -?` — afficher l'aide courte de cette commande.

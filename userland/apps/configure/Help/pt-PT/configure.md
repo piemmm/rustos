@@ -50,6 +50,23 @@ Cada cache é um acelerador recuperável, nunca a fonte da verdade, por
 isso desligar qualquer uma ou todas apenas torna mais lento o trabalho
 afetado — nunca altera um resultado.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` ou `false`: os
+  interruptores das famílias de endereços a nível da pilha. Ambos são
+  `true` por predefinição. Uma família desativada não vincula
+  endereços, não responde a pacotes e recusa um socket dessa família
+  com um erro tipado — nunca um descarte silencioso.
+- `net.ipv6.privacy` — `true` ou `false`: se a pilha forma endereços
+  IPv6 temporários (de privacidade) além do estável. `false` (a
+  predefinição) usa apenas o endereço SLAAC estável.
+- `net.tcp.syncookies` — `auto` ou `always`: a defesa contra
+  inundações SYN. `auto` (a predefinição) mantém uma fila semiaberta
+  limitada e recorre a cookies sem estado em caso de transbordo;
+  `always` responde a cada pedido de ligação sem estado. Não há `off`
+  — uma fila de ligações indefesa não é uma definição.
+
+A pilha de rede lê as definições `net.*`; uma alteração produz efeito
+quando a pilha aplica novamente a sua configuração.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar a ajuda breve deste comando.

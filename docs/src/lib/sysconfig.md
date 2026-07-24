@@ -39,11 +39,27 @@ account can read the settings but not change them.
 | `cache.block`     | `auto` \| `off`       | the kernel whole-disk block cache (`kernel/tairix-kernel::block_cache`) |
 | `cache.transform` | `auto` \| `off`       | the ARXFS decompressed-cluster cache (`kernel/tairix-kernel::transform_cache`) |
 | `cache.semantic`  | `auto` \| `off`       | the application-launch cache (`kernel/core::launch_cache`) |
+| `net.ipv4.enabled`| `true` \| `false`     | the network stack (`netstack`): the stack-wide IPv4 address-family switch |
+| `net.ipv6.enabled`| `true` \| `false`     | the network stack (`netstack`): the stack-wide IPv6 address-family switch |
+| `net.ipv6.privacy`| `true` \| `false`     | the network stack (`netstack`): RFC 8981 temporary (privacy) IPv6 addresses |
+| `net.tcp.syncookies` | `auto` \| `always` | the network stack (`netstack`): the TCP SYN-flood defence policy |
 
 Adding a key is adding a `Key` variant (plus its `SystemConfig` field and
 match arms) **and** its consumer in the same change — the compiler then
 forces every reader to state what the new key means for it. There is no
 free-form key namespace and no second store.
+
+The `net.*` family is the stack-wide network configuration; its consumer is
+the user-space network stack (`netstack`). Because `netstack` is the
+network-parsing sandbox and holds **no** filesystem capability, it cannot
+read the store itself: the settings reach it over a capability-gated
+(`CAP_NET_ADMIN`) admin IPC, pushed by an FS-capable component after the
+root unlock. The engine surface (this crate) and the live apply path land
+as staged increments (`plans/NETWORK.md` N9b), mirroring how the
+per-interface `lib/netconfig` engine landed ahead of its wiring.
+Per-interface network settings (addresses, MTU, bonding) live in the
+separate `/System/Settings/Network/network.conf` store
+(`lib/netconfig`), never here.
 
 ## The caching switches
 
@@ -71,6 +87,20 @@ reads the store off the just-unlocked root and calls
 consults at admission — so `off` takes effect on each cache's next
 operation, dropping (and zeroing any decrypted plaintext) what it held.
 
+## The network switches
+
+The `net.*` keys are the stack-wide network posture, typed as
+`NetToggle` (`true` / `false`) for the two address-family switches and the
+privacy switch, and `SynCookies` (`auto` / `always`) for the SYN-flood
+defence. Their defaults reproduce today's behaviour: both families
+enabled, IPv6 privacy addresses off, and the `auto` SYN-cookie policy
+(bounded half-open queue, stateless cookies on overflow). There is
+deliberately **no** `off` for `net.tcp.syncookies` — an undefended or
+unbounded connection queue is a security regression the charter forbids,
+not a configuration. A disabled address family binds no addresses, answers
+no packets, and refuses a socket in that family with a typed error (fail
+closed), never a silent drop.
+
 ## API shape
 
 - `SystemConfig::parse(&str) -> Result<SystemConfig, ConfigError>` — the
@@ -87,6 +117,9 @@ operation, dropping (and zeroing any decrypted plaintext) what it held.
   interpretation the kernel cache-admission control applies.
 - `CacheClass::{ALL, key}` / `CacheMode` / `CacheSwitch` — the closed
   cache-switch vocabulary the kernel reuses (no duplicate enum).
+- `NetToggle` (`true`/`false`, `is_enabled`) / `SynCookies`
+  (`auto`/`always`) — the closed `net.*` value vocabulary the network
+  stack reuses (no duplicate enum).
 
 The crate is `no_std` + `alloc`, performs no I/O, holds no authority, and
 is host-unit-tested in `src/lib.rs`. Stability tier: experimental

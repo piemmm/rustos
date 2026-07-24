@@ -49,6 +49,23 @@ Cada caché es un acelerador recuperable, nunca la fuente de la verdad,
 así que apagar cualquiera o todas ellas solo hace más lento el trabajo
 afectado — nunca cambia un resultado.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` o `false`: los
+  conmutadores de familias de direcciones de toda la pila. Ambos son
+  `true` de forma predeterminada. Una familia desactivada no vincula
+  direcciones, no responde a paquetes y rechaza un socket de esa
+  familia con un error tipado — nunca un descarte silencioso.
+- `net.ipv6.privacy` — `true` o `false`: si la pila forma direcciones
+  IPv6 temporales (de privacidad) además de la estable. `false` (la
+  predeterminada) usa solo la dirección SLAAC estable.
+- `net.tcp.syncookies` — `auto` o `always`: la defensa contra
+  inundaciones SYN. `auto` (la predeterminada) mantiene una cola
+  semiabierta acotada y recurre a cookies sin estado al desbordarse;
+  `always` responde a cada solicitud de conexión sin estado. No hay
+  `off` — una cola de conexiones indefensa no es una opción.
+
+La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
+la pila vuelve a aplicar su configuración.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar la ayuda breve de esta orden.

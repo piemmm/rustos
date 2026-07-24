@@ -11,10 +11,20 @@ at `/System/Settings/Configuration/system.conf`.
 
 The store's grammar, closed key registry, fail-closed parse, and canonical
 render are the shared `lib/sysconfig` engine — the same engine every
-boot-time consumer (the login service's `os.loginType`) reads through, so
-producer and consumer can never diverge. Settings take effect at the point
-their consumer parses the store: the store lives on the encrypted root
+boot-time consumer (the login service's `os.loginType`, the cache manager's
+`cache.*`, the network stack's `net.*`) reads through, so producer and
+consumer can never diverge. Settings take effect at the point their
+consumer parses or applies the store: the store lives on the encrypted root
 volume, so it is read only after the `ARXFS passphrase:` unlock.
+
+The registry spans three families: `os.*` (the login default), `cache.*`
+(the SMARTRAM caching switches), and `net.*` — the stack-wide network
+knobs: `net.ipv4.enabled` / `net.ipv6.enabled` (the address-family
+switches), `net.ipv6.privacy` (RFC 8981 temporary IPv6 addresses), and
+`net.tcp.syncookies` (`auto` / `always`, the SYN-flood defence — never an
+`off`). Per-interface network configuration is a separate declarative store
+(`/System/Settings/Network/network.conf`, the `lib/netconfig` engine), not
+part of this command.
 
 Reads and writes go through the secured VFS under the caller's own
 kernel-attested identity: `/System/Settings` is owned by the system

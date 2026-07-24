@@ -1434,10 +1434,36 @@ the whole is too large for one change and each leaves the tree working.
   (`fuzz_netconfig`, registered in `cargo xtask fuzz`). README (experimental
   tier) + `docs/src/lib/netconfig.md`.
 
-#### N9b — store deployment, `configure net.*`, apply, bonding, observability `[ ]`
+#### N9b-1 — the `configure net.*` stack-wide keys in `lib/sysconfig` `[x]`
+- `configure` gains the `net.*` stack-wide keys in `lib/sysconfig`'s closed
+  registry (§6.2): `net.ipv4.enabled`, `net.ipv6.enabled`,
+  `net.ipv6.privacy` (typed `NetToggle`, `true`/`false`), and
+  `net.tcp.syncookies` (typed `SynCookies`, `auto`/`always`, deliberately
+  no `off`). A hand-written `SystemConfig::Default` sets the two family
+  switches on, IPv6 privacy off, and cookies `auto`.
+- Pure engine surface only (the N9a `lib/netconfig` precedent): the
+  `configure` command lists/shows/sets/persists them unchanged, all 13
+  Help locales + `docs/src/lib/sysconfig.md` + `configure/README.md`
+  document them, and the sysconfig/configure host suites cover parse,
+  defaults, closed-value rejection, and round-trip. `netstack` delivery +
+  enforcement is N9b-2.
+
+#### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[ ]`
+- `netstack` is the FS-capability-less parser sandbox (§0), so it cannot
+  read `system.conf`: add a `CAP_NET_ADMIN`
+  `NetstackRequest::ApplyNetworkSettings` admin op (audited, fail-closed)
+  pushed post-unlock by an FS-capable component (devmgr/init) over
+  `lib/sysconfig`.
+- Enforce family-enable at socket `open` (refuse a disabled family, typed
+  error + audit) and at interface auto-config (a disabled family binds no
+  address, answers nothing); map `net.tcp.syncookies always` →
+  `ListenConfig.max_half_open = 0`, `auto` → the bounded default.
+  (`net.ipv6.privacy` gains enforcement only when RFC 8981 temporary
+  addresses land, §2.4.)
+
+#### N9b-3 — the per-interface `network.conf` store, apply, bonding `[ ]`
 - `/System/Settings/Network/network.conf` laid out by `tools/mkimage`/
-  installer; `configure` gains the `net.*` stack-wide keys in
-  `lib/sysconfig`'s registry (§6.2).
+  installer over the landed `lib/netconfig` engine.
 - `netstack`: config load/reload/apply (atomic per interface, audited),
   bond interface kind with `active-backup` + `balance` (§6.3), member
   health monitor, gratuitous ARP/NA on failover.
@@ -1447,8 +1473,7 @@ the whole is too large for one change and each leaves the tree working.
 - Tests: bond failover QEMU vertical (kill a member mid-TCP-transfer,
   assert the flow survives within the monitor budget), config-reject-
   leaves-state tests, audited-refusal tests.
-- Docs: `docs/src/userland/networking.md` configuration chapter;
-  `userland/apps/configure` Help/ + README for `net.*`.
+- Docs: `docs/src/userland/networking.md` configuration chapter.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

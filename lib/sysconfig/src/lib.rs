@@ -39,6 +39,19 @@
 //!   memory pressure without breaking the SMARTRAM reserve invariants. The
 //!   effective mode of a class is `off` whenever `cache.all` is `off`, else
 //!   the class's own value (see [`SystemConfig::effective_cache`]).
+//! * `net.ipv4.enabled`, `net.ipv6.enabled` — `true` (default) or `false`:
+//!   the stack-wide address-family switches (`plans/NETWORK.md` section 6.2).
+//!   A disabled family binds no addresses, answers no packets, and refuses
+//!   family-specific socket creation with a typed error — fail closed, not a
+//!   silent drop.
+//! * `net.ipv6.privacy` — `true` or `false` (default): whether the stack
+//!   forms RFC 8981 temporary (privacy) IPv6 addresses in addition to the
+//!   stable SLAAC address.
+//! * `net.tcp.syncookies` — `auto` (default) or `always`: the SYN-flood
+//!   defence policy. `auto` keeps a bounded half-open queue and falls back to
+//!   stateless cookies on overflow; `always` answers every SYN statelessly.
+//!   There is deliberately no `off`: an undefended SYN queue is a security
+//!   regression, never a configuration.
 //!
 //! # Security
 //!
@@ -237,6 +250,89 @@ impl CacheClass {
     }
 }
 
+/// A stack-wide boolean network switch (`net.ipv4.enabled`,
+/// `net.ipv6.enabled`, `net.ipv6.privacy`).
+///
+/// The value vocabulary is `true` / `false` — the network-configuration
+/// spelling (`plans/NETWORK.md` section 6.2), distinct from the caching
+/// switches' `on` / `off`, so each store key reads in its own domain's
+/// idiom.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NetToggle {
+    /// The feature is on (`true`).
+    Enabled,
+    /// The feature is off (`false`).
+    Disabled,
+}
+
+impl NetToggle {
+    /// The canonical value spelling (`true` / `false`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "true",
+            Self::Disabled => "false",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set
+    /// (case-sensitive — one canonical spelling).
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "true" => Some(Self::Enabled),
+            "false" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// Whether the switch is on.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+/// The TCP SYN-flood defence policy (`net.tcp.syncookies`).
+///
+/// There is deliberately no `Off` variant: an undefended or unbounded SYN
+/// queue is a security regression the charter forbids, never a
+/// configuration. The choice is only *how eagerly* the stack falls back to
+/// stateless cookies.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SynCookies {
+    /// Keep a bounded half-open queue and issue stateless cookies only once
+    /// it overflows — the default, and the value an absent store implies.
+    #[default]
+    Auto,
+    /// Answer every SYN with a stateless cookie, holding no half-open state
+    /// at all (the most aggressive posture, for a host under sustained
+    /// flood).
+    Always,
+}
+
+impl SynCookies {
+    /// The canonical value spelling (`auto` / `always`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set
+    /// (case-sensitive — one canonical spelling).
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 /// One key of the closed configuration registry.
 ///
 /// Adding a key means adding a variant here, its row in [`Key::ALL`], its
@@ -258,6 +354,14 @@ pub enum Key {
     CacheTransform,
     /// `cache.semantic` — the launch cache's per-class switch.
     CacheSemantic,
+    /// `net.ipv4.enabled` — the stack-wide IPv4 address-family switch.
+    NetIpv4Enabled,
+    /// `net.ipv6.enabled` — the stack-wide IPv6 address-family switch.
+    NetIpv6Enabled,
+    /// `net.ipv6.privacy` — RFC 8981 temporary (privacy) IPv6 addresses.
+    NetIpv6Privacy,
+    /// `net.tcp.syncookies` — the TCP SYN-flood defence policy.
+    NetTcpSynCookies,
 }
 
 impl Key {
@@ -269,6 +373,10 @@ impl Key {
         Self::CacheBlock,
         Self::CacheTransform,
         Self::CacheSemantic,
+        Self::NetIpv4Enabled,
+        Self::NetIpv6Enabled,
+        Self::NetIpv6Privacy,
+        Self::NetTcpSynCookies,
     ];
 
     /// The canonical key spelling.
@@ -281,6 +389,10 @@ impl Key {
             Self::CacheBlock => "cache.block",
             Self::CacheTransform => "cache.transform",
             Self::CacheSemantic => "cache.semantic",
+            Self::NetIpv4Enabled => "net.ipv4.enabled",
+            Self::NetIpv6Enabled => "net.ipv6.enabled",
+            Self::NetIpv6Privacy => "net.ipv6.privacy",
+            Self::NetTcpSynCookies => "net.tcp.syncookies",
         }
     }
 
@@ -302,6 +414,10 @@ impl Key {
             | Self::CacheBlock
             | Self::CacheTransform
             | Self::CacheSemantic => &["auto", "off"],
+            Self::NetIpv4Enabled | Self::NetIpv6Enabled | Self::NetIpv6Privacy => {
+                &["true", "false"]
+            }
+            Self::NetTcpSynCookies => &["auto", "always"],
         }
     }
 }
@@ -344,7 +460,7 @@ impl fmt::Display for ConfigError {
 /// implies — every key at its documented default — so a consumer that finds
 /// no store file (a fresh installation, a boot before the root unlock) runs
 /// on defaults without a special case.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SystemConfig {
     /// The login service's boot-default session type (`os.loginType`).
     pub login_type: LoginType,
@@ -359,6 +475,41 @@ pub struct SystemConfig {
     pub cache_transform: CacheMode,
     /// The launch cache's per-class switch (`cache.semantic`).
     pub cache_semantic: CacheMode,
+    /// The stack-wide IPv4 address-family switch (`net.ipv4.enabled`).
+    /// Enabled by default.
+    pub net_ipv4_enabled: NetToggle,
+    /// The stack-wide IPv6 address-family switch (`net.ipv6.enabled`).
+    /// Enabled by default.
+    pub net_ipv6_enabled: NetToggle,
+    /// Whether the stack forms RFC 8981 temporary (privacy) IPv6 addresses
+    /// (`net.ipv6.privacy`). Disabled by default — the stable SLAAC address
+    /// only, unless the operator opts in.
+    pub net_ipv6_privacy: NetToggle,
+    /// The TCP SYN-flood defence policy (`net.tcp.syncookies`).
+    pub net_tcp_syncookies: SynCookies,
+}
+
+impl Default for SystemConfig {
+    /// The configuration an **absent** store implies: text login, every
+    /// cache enabled, both address families enabled, IPv6 privacy addresses
+    /// off, and the `auto` SYN-cookie policy. Written by hand because the
+    /// per-field defaults are not uniform (IPv6 privacy defaults *off* while
+    /// the family switches default *on*), so a blanket derive would be
+    /// wrong.
+    fn default() -> Self {
+        Self {
+            login_type: LoginType::default(),
+            cache_all: CacheSwitch::default(),
+            cache_filesystem: CacheMode::default(),
+            cache_block: CacheMode::default(),
+            cache_transform: CacheMode::default(),
+            cache_semantic: CacheMode::default(),
+            net_ipv4_enabled: NetToggle::Enabled,
+            net_ipv6_enabled: NetToggle::Enabled,
+            net_ipv6_privacy: NetToggle::Disabled,
+            net_tcp_syncookies: SynCookies::default(),
+        }
+    }
 }
 
 impl SystemConfig {
@@ -417,6 +568,10 @@ impl SystemConfig {
             Key::CacheBlock => self.cache_block.as_str(),
             Key::CacheTransform => self.cache_transform.as_str(),
             Key::CacheSemantic => self.cache_semantic.as_str(),
+            Key::NetIpv4Enabled => self.net_ipv4_enabled.as_str(),
+            Key::NetIpv6Enabled => self.net_ipv6_enabled.as_str(),
+            Key::NetIpv6Privacy => self.net_ipv6_privacy.as_str(),
+            Key::NetTcpSynCookies => self.net_tcp_syncookies.as_str(),
         }
     }
 
@@ -471,6 +626,22 @@ impl SystemConfig {
                 self.cache_semantic =
                     CacheMode::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
+            Key::NetIpv4Enabled => {
+                self.net_ipv4_enabled =
+                    NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::NetIpv6Enabled => {
+                self.net_ipv6_enabled =
+                    NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::NetIpv6Privacy => {
+                self.net_ipv6_privacy =
+                    NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::NetTcpSynCookies => {
+                self.net_tcp_syncookies =
+                    SynCookies::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
         }
         Ok(())
     }
@@ -516,8 +687,8 @@ mod tests {
     use std::string::String;
 
     use super::{
-        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, SystemConfig, CONFIG_PATH,
-        MAX_CONFIG_LEN,
+        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, SynCookies,
+        SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN,
     };
 
     #[test]
@@ -600,18 +771,73 @@ mod tests {
         for login_type in [LoginType::Text, LoginType::Graphical] {
             for cache_all in [CacheSwitch::On, CacheSwitch::Off] {
                 for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
-                    let config = SystemConfig {
-                        login_type,
-                        cache_all,
-                        cache_filesystem,
-                        cache_block: CacheMode::Off,
-                        cache_transform: CacheMode::Auto,
-                        cache_semantic: CacheMode::Off,
-                    };
-                    assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                    for net_ipv4_enabled in [NetToggle::Enabled, NetToggle::Disabled] {
+                        for syncookies in [SynCookies::Auto, SynCookies::Always] {
+                            let config = SystemConfig {
+                                login_type,
+                                cache_all,
+                                cache_filesystem,
+                                cache_block: CacheMode::Off,
+                                cache_transform: CacheMode::Auto,
+                                cache_semantic: CacheMode::Off,
+                                net_ipv4_enabled,
+                                net_ipv6_enabled: NetToggle::Disabled,
+                                net_ipv6_privacy: NetToggle::Enabled,
+                                net_tcp_syncookies: syncookies,
+                            };
+                            assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                        }
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn net_defaults_match_the_documented_posture() {
+        // An absent store: both families on, privacy off, cookies auto.
+        let config = SystemConfig::default();
+        assert_eq!(config.net_ipv4_enabled, NetToggle::Enabled);
+        assert_eq!(config.net_ipv6_enabled, NetToggle::Enabled);
+        assert!(config.net_ipv4_enabled.is_enabled());
+        assert!(config.net_ipv6_enabled.is_enabled());
+        assert_eq!(config.net_ipv6_privacy, NetToggle::Disabled);
+        assert!(!config.net_ipv6_privacy.is_enabled());
+        assert_eq!(config.net_tcp_syncookies, SynCookies::Auto);
+    }
+
+    #[test]
+    fn net_keys_parse_their_closed_value_sets() {
+        let config = SystemConfig::parse(
+            "net.ipv4.enabled false\n\
+             net.ipv6.enabled true\n\
+             net.ipv6.privacy true\n\
+             net.tcp.syncookies always\n",
+        )
+        .expect("parses");
+        assert_eq!(config.net_ipv4_enabled, NetToggle::Disabled);
+        assert_eq!(config.net_ipv6_enabled, NetToggle::Enabled);
+        assert_eq!(config.net_ipv6_privacy, NetToggle::Enabled);
+        assert_eq!(config.net_tcp_syncookies, SynCookies::Always);
+    }
+
+    #[test]
+    fn net_rejects_the_wrong_value_vocabulary() {
+        // The family switches take true/false, never the caches' on/off.
+        assert_eq!(
+            SystemConfig::parse("net.ipv4.enabled on\n"),
+            Err(ConfigError::InvalidValue),
+        );
+        // Values are case-sensitive: one canonical spelling.
+        assert_eq!(
+            SystemConfig::parse("net.ipv6.enabled True\n"),
+            Err(ConfigError::InvalidValue),
+        );
+        // SYN-cookies has no `off`: an undefended queue is not a setting.
+        assert_eq!(
+            SystemConfig::parse("net.tcp.syncookies off\n"),
+            Err(ConfigError::InvalidValue),
+        );
     }
 
     #[test]

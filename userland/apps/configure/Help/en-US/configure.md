@@ -48,6 +48,22 @@ Every cache is a reclaimable accelerator, never the source of truth, so
 turning any or all of them off only makes the affected work slower — it
 never changes a result.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` or `false`: the
+  stack-wide address-family switches. Both are `true` by default. A
+  disabled family binds no addresses, answers no packets, and refuses
+  a socket in that family with a typed error — never a silent drop.
+- `net.ipv6.privacy` — `true` or `false`: whether the stack forms
+  temporary (privacy) IPv6 addresses alongside the stable one. `false`
+  (the default) uses the stable SLAAC address only.
+- `net.tcp.syncookies` — `auto` or `always`: the SYN-flood defence
+  policy. `auto` (the default) keeps a bounded half-open queue and
+  falls back to stateless cookies on overflow; `always` answers every
+  connection request statelessly. There is no `off` — an undefended
+  connection queue is never a setting.
+
+The `net.*` settings are read by the network stack; a change takes
+effect when the stack next applies its configuration.
+
 ## OPTIONS
 
 - `-h, -?` — show this command's own short help.
@@ -59,6 +75,7 @@ never changes a result.
 - `configure os.loginType graphical` — boot to the graphical login.
 - `configure cache.all off` — disable every memory cache system-wide.
 - `configure cache.filesystem off` — disable only the filesystem cache.
+- `configure net.ipv6.enabled false` — turn IPv6 off stack-wide.
 
 ## EXIT STATUS
 

@@ -49,6 +49,25 @@ Ogni cache è un acceleratore recuperabile, mai la fonte di verità,
 quindi spegnerne una o tutte rende soltanto più lento il lavoro
 interessato — non cambia mai un risultato.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` o `false`: gli
+  interruttori delle famiglie di indirizzi a livello di stack. Entrambi
+  sono `true` per impostazione predefinita. Una famiglia disattivata non
+  assegna indirizzi, non risponde ad alcun pacchetto e rifiuta un socket
+  di quella famiglia con un errore tipizzato — mai uno scarto
+  silenzioso.
+- `net.ipv6.privacy` — `true` o `false`: se lo stack forma indirizzi
+  IPv6 temporanei (di privacy) oltre a quello stabile. `false` (il
+  valore predefinito) usa solo l'indirizzo SLAAC stabile.
+- `net.tcp.syncookies` — `auto` o `always`: la difesa dalle inondazioni
+  SYN. `auto` (il valore predefinito) mantiene una coda semiaperta
+  limitata e ripiega su cookie senza stato in caso di overflow;
+  `always` risponde a ogni richiesta di connessione senza stato. Non
+  esiste `off` — una coda di connessioni indifesa non è
+  un'impostazione.
+
+Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
+quando lo stack applica di nuovo la sua configurazione.
+
 ## OPTIONS
 
 - `-h, -?` — mostrare la guida breve di questo comando.

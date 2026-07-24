@@ -51,6 +51,24 @@ Jeder Cache ist ein rückgewinnbarer Beschleuniger, niemals die Quelle
 der Wahrheit; das Abschalten eines oder aller macht die betroffene
 Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` oder `false`: die
+  stackweiten Schalter der Adressfamilien. Beide sind standardmäßig
+  `true`. Eine deaktivierte Familie bindet keine Adressen, beantwortet
+  keine Pakete und lehnt einen Socket dieser Familie mit einem
+  typisierten Fehler ab — nie ein stilles Verwerfen.
+- `net.ipv6.privacy` — `true` oder `false`: ob der Stack temporäre
+  (Privacy-)IPv6-Adressen zusätzlich zur stabilen Adresse bildet.
+  `false` (die Vorgabe) nutzt nur die stabile SLAAC-Adresse.
+- `net.tcp.syncookies` — `auto` oder `always`: die Abwehr gegen
+  SYN-Fluten. `auto` (die Vorgabe) hält eine begrenzte Halb-offen-
+  Warteschlange und weicht bei Überlauf auf zustandslose Cookies aus;
+  `always` beantwortet jede Verbindungsanfrage zustandslos. Es gibt
+  kein `off` — eine ungeschützte Verbindungswarteschlange ist keine
+  Einstellung.
+
+Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
+sobald der Stack seine Konfiguration das nächste Mal anwendet.
+
 ## OPTIONS
 
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen.

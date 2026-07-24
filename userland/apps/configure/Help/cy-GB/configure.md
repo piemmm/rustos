@@ -50,6 +50,24 @@ Mae pob storfa'n gyflymydd adenilladwy, byth yn ffynhonnell y gwir,
 felly nid yw diffodd unrhyw un neu bob un ohonynt ond yn gwneud y gwaith
 dan sylw yn arafach — nid yw byth yn newid canlyniad.
 
+- `net.ipv4.enabled`, `net.ipv6.enabled` — `true` neu `false`:
+  switshis teuluoedd cyfeiriadau ar draws y pentwr. Mae'r ddau yn
+  `true` yn ddiofyn. Nid yw teulu analluogedig yn rhwymo cyfeiriadau,
+  nid yw'n ateb unrhyw becyn, ac mae'n gwrthod soced o'r teulu hwnnw
+  â gwall wedi'i deipio — byth yn ollwng distaw.
+- `net.ipv6.privacy` — `true` neu `false`: a yw'r pentwr yn ffurfio
+  cyfeiriadau IPv6 dros dro (preifatrwydd) yn ychwanegol at yr un
+  sefydlog. Mae `false` (y diofyn) yn defnyddio'r cyfeiriad SLAAC
+  sefydlog yn unig.
+- `net.tcp.syncookies` — `auto` neu `always`: y polisi amddiffyn rhag
+  llifogydd SYN. Mae `auto` (y diofyn) yn cadw ciw hanner-agored
+  ffiniedig ac yn cwympo'n ôl at gwcis di-wladwriaeth pan fo'n
+  gorlifo; mae `always` yn ateb pob cais cysylltu heb wladwriaeth.
+  Nid oes `off` — nid yw ciw cysylltiadau diamddiffyn yn osodiad.
+
+Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
+rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.
+
 ## OPTIONS
 
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn.
