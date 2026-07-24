@@ -200,22 +200,90 @@ kernel/core                    the single point that builds the per-core-type
 
 ## Phases (ordered, each independently reviewable and complete)
 
+**Phase dependencies.** P0 is independent (build-layer only) and can land
+first or in parallel. P1 (the `cpufeatures`/`cpucycles` HAL slices) is the
+prerequisite for P2 and P3 and depends on nothing but the existing HAL. P2
+(the `lib/cpuops` framework + first `ByPriority` consumers) depends on P1's
+`CpuFeatureSet`. P3 (the `ByBenchmark` axis) depends on P2's selector seam
+*and* P1's `CpuCycles` counter. P4 (fuzz/docs/burn-down) depends on whatever
+consumers P2/P3 landed. Each phase ends only when the whole-project §7 gate
+is green (§2.15); the per-phase **Acceptance** blocks state the phase-local
+bar on top of that.
+
 ### P0 — Build-time floor (the layer under everything)
 
-- Add a single build-layer mapping "image → `target-cpu`/`target-feature`"
-  in `tools/xtask` (consumed by both the kernel build and the
-  `cross_compile_pie_elf` PIE recipe, so kernel and user-space binaries in
-  the same image share one floor — §2.2). It is **not** a blanket edit to
-  the shared `[target.aarch64-unknown-none]` block.
-- Choose each image's floor from *which SoCs/PCs it must boot*: a universal
-  `aarch64` image's floor is baseline **ARMv8.0-A** (the common set of every
-  ARMv8 SBC it boots — A53∩A72∩A76∩Allwinner∩… ≈ baseline), **not**
-  `cortex-a72`; the generic x86_64 ISO's floor stays low (default
-  `x86-64-v1` for maximum reach, raised only if a minimum-hardware
-  requirement is published and documented); QEMU-virt images pick a
-  documented model. Record the choice and its rationale. Everything above
-  the floor is recovered per booted CPU by P1–P3 runtime dispatch, so the
-  low floor costs nothing at runtime.
+**Scope in one line:** give `tools/xtask` a single, total `image → CPU
+floor` mapping and thread its `-C target-cpu`/`-C target-feature` flags into
+*both* the kernel build and the PIE user-space build, without touching the
+shared `.cargo/config.toml` `[target.*]` blocks.
+
+**Why not `.cargo/config.toml`:** the `[target.aarch64-unknown-none]` block
+is shared by the RPi image kernel, the QEMU-virt run kernel, and every PIE
+user-space cross-build. A floor set there would leak across images and
+violate the "floor is per-image" decision. The floor must be injected at the
+point each image's binaries are built.
+
+**Deliverables (files + symbols):**
+
+- New module `tools/xtask/src/floor.rs` (add `mod floor;` to
+  `tools/xtask/src/commands.rs` or `lib.rs` as the sibling modules are
+  declared): the single source of truth.
+  - `pub struct CpuFloor { pub target_cpu: Option<&'static str>, pub
+    target_features: &'static [&'static str], pub rationale: &'static str }`.
+  - `pub fn floor_for_image(image: ImageKind) -> CpuFloor` — total over a
+    new `enum ImageKind { AArch64Generic, X86_64Iso, Riscv64Generic,
+    AArch64Virt, /* … every shipped image */ }`. Values decided below.
+  - `impl CpuFloor { pub fn rustflags(&self) -> Vec<String> }` — emits the
+    `["-C","target-cpu=…","-C","target-feature=+a,+b"]` token list (empty
+    vec when both are `None`/empty, i.e. a genuinely generic floor).
+- **Cargo flag-precedence constraint (get this right).** Setting the
+  `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS` env var **replaces** (does not
+  merge with) the `.cargo/config.toml` `[target.*]` `rustflags` block —
+  cargo takes flags from exactly one source, env outranking config. So the
+  injected floor string must **also carry** the flags the shared block
+  currently supplies (`-C force-frame-pointers=yes` on every bare-metal
+  target; plus the x86_64 soft-backend `--cfg`s). To keep those in one
+  place, hoist the per-target base flags into `floor.rs` as
+  `base_rustflags(triple)` and have `CpuFloor::rustflags()` = base ⧺ floor,
+  so config and the injected set can never diverge (§2.2). (The PIE recipe
+  already reconstructs the whole string, so it has the same requirement.)
+- Wire into the **kernel** build: `build_platform_image`
+  (`tools/xtask/src/commands.rs` ~line 1462) and `build_virt_run_kernel`
+  (~line 1601). Both currently rely on the `ctx.cargo()` inherited
+  `.cargo/config.toml` flags. Set `CARGO_ENCODED_RUSTFLAGS` (0x1f-joined,
+  = `base_rustflags(triple)` ⧺ floor tokens) on the kernel `cargo build`
+  `Command` for that image.
+- Wire into the **PIE** build: `cross_compile_pie_elf`
+  (`tools/xtask/src/commands/pie_build.rs` line 73) already clears
+  `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` and sets `arch.rustflags_env_var()`
+  to the PIE link recipe. Extend its signature with a `floor: &CpuFloor`
+  parameter and prepend the floor tokens to that string (the PIE recipe's
+  existing link flags stand in for the base set for user-space) so kernel and
+  user-space in one image share the exact floor (§2.2). Update the two
+  callers (`image_drivers`, `image_apps`) to pass the same
+  `floor_for_image(image)` the kernel build used — thread the resolved
+  `ImageKind`/`CpuFloor` down from `build_platform_image`.
+
+**Floor values (decided).** Each image's floor is chosen from *which
+SoCs/PCs it must boot*, and every one is recorded in `floor_for_image` with
+its `rationale`:
+
+- `AArch64Generic` (universal ARM media, boots RPi 4 / CM4 / OrangePi /
+  other ARMv8 SBCs): floor = baseline **ARMv8.0-A**, i.e. `target_cpu:
+  None`, `target_features: []` (the common set A53∩A72∩A76∩Allwinner∩… ≈
+  baseline). **Not** `cortex-a72`.
+- `X86_64Iso` (boots arbitrary PCs): floor = **`x86-64` (v1)**,
+  `target_cpu: Some("x86-64")`, for maximum reach. Raised to `x86-64-v2`
+  only if a published minimum-hardware requirement is added and documented.
+- `Riscv64Generic`: floor = the base `rv64gc` the triple already implies;
+  no extra features baked in.
+- `AArch64Virt` / other QEMU-run kernels: a documented model floor may be
+  chosen (e.g. the core QEMU `virt` models) since the image is not shipped
+  hardware; record it.
+
+Everything above the floor is recovered per booted CPU by P1–P3 runtime
+dispatch, so the low floor costs nothing at runtime.
+
 - **Product-model decision (settled — was the P0 open question).** TAIRiX
   ships **one generic floor image per architecture, not per-board**: a
   single `aarch64` media boots RPi 4 / CM4 / OrangePi / other ARMv8 SBCs and
@@ -229,90 +297,338 @@ kernel/core                    the single point that builds the per-core-type
   `plans/BOOTLOADER.md`'s concern, not this plan's. Reconciled against
   `plans/UNIVERSAL.md` (universal `.app`/Wasm distribution) and
   `plans/PI.md`.
-- Validate that any floor feature actually lowers on the freestanding
-  targets (the x86_64 block already pins *soft* crypto backends to dodge
-  codegen crashes; expect to validate the aarch64 path the same way and
-  **fail the build** rather than ship broken codegen — §2.1).
-- Tests: an xtask unit test that the floor mapping is total (every shipped
-  image resolves to a documented floor) and that kernel + PIE builds in one
-  image get identical flags.
+
+**Codegen validation (a real build step, not a claim).** Any floor that
+raises `target-cpu`/`target-feature` above the current default must be
+proven to actually lower on the freestanding target before it is adopted:
+the x86_64 `[target.x86_64-unknown-none]` block already pins *soft* crypto
+backends (`chacha20_force_soft`, `poly1305_force_soft`,
+`curve25519_dalek_backend="serial"`) to dodge the freestanding-SIMD codegen
+crash. When a floor turns a feature on, re-verify those crates still lower;
+if enabling a feature reintroduces a codegen crash, **fail the build**
+(§2.1), do not ship broken codegen and do not silently drop the feature.
+The generic floors decided above deliberately stay at baseline, so P0 as
+specified changes no codegen — but the validation step is part of the phase
+so a future floor-raise cannot skip it.
+
+**Tests (host, in `tools/xtask`):**
+
+- `floor_for_image` is **total**: a table-driven test over every `ImageKind`
+  variant asserts each resolves to a `CpuFloor` with a non-empty `rationale`
+  (mirrors the existing `kernel_build_profile_matches_image_profile` test
+  style at `commands.rs` ~line 1852).
+- **Kernel and PIE share one floor:** a test that, for a given `ImageKind`,
+  the token list injected into the kernel `cargo` env equals the token list
+  prepended to the `cross_compile_pie_elf` rustflags string (§2.2 — they
+  cannot skew).
+- `CpuFloor::rustflags()` emits an empty vec for a generic
+  (`None`/empty) floor and a well-formed `-C target-cpu=…` / `-C
+  target-feature=+…` pair otherwise.
+
+**Acceptance:** every shipped image resolves to a documented floor; the
+generic images build byte-for-byte as today (baseline floor is a no-op flag
+set); `cargo xtask ci` green.
 
 ### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer)
 
-- New closed slice `kernel/arch/api/src/cpufeatures.rs`: the
-  `CpuFeatures` trait (`detect(CpuId) -> CpuFeatureSet`), the arch-neutral
-  `CpuFeatureSet` bitset + `CoreType`/model id, honest per-feature
-  `Supported`/`Unsupported(reason)`/`Pending(note)` where a probe is not
-  yet trustworthy, and a `conformance::run_all` vertical. Record this new
-  HAL surface in `PLAN.md` and §17.2 per the charter (mirrors the
-  `shadowstack` authorisation precedent in `plans/FIX-PROTECTION.md`).
-- Per-port impls under `kernel/arch/{x86_64,aarch64,riscv64,wasm32}/`
-  reading the real ID sources. `wasm32` reports the host query; a feature
-  the silicon genuinely lacks is honestly `Unsupported(reason)`, never a
-  fabricated bit.
-- The cycle-counter primitive the harness needs (generalise the x86_64
-  `Rdtsc` into a HAL `cpu_cycles()` — PMCCNTR_EL0/RDTSC/rdcycle, host
-  `performance.now()` on wasm32), added to the HAL (its own slice or
-  folded into `timer.rs`, decided in P1) with a conformance check that it
-  is monotonic within a measurement window.
-- Tests: per-port conformance (detection returns a coherent set; masking a
-  bit is honoured), host tests with a fake ID source.
+**Scope in one line:** add a new closed HAL slice that turns each target's
+CPU-ID source into one arch-neutral `CpuFeatureSet`, plus a HAL cycle
+counter for the P3 harness — modelled slot-for-slot on the existing
+`memtag`/`sidechannel` slices.
+
+**Deliverables — the HAL trait (`kernel/arch/api/src/cpufeatures.rs`):**
+
+- `pub struct CpuFeatureSet(u64)` — an arch-neutral bitset with named,
+  arch-tagged accessors so no raw bit index leaks to consumers. Members
+  cover the extensions consumers actually gate on:
+  - aarch64: `CRC32`, `AES`/`PMULL`, `SHA1`, `SHA2`, `SHA3`, `LSE` (atomics),
+    `ASIMD`/NEON (baseline-present but represented for completeness), `DIT`.
+  - x86_64: `SSE2`, `SSSE3`, `SSE4_2` (carries CRC32/`crc32` + `POPCNT`),
+    `AVX`, `AVX2`, `AES` (AES-NI), `PCLMULQDQ`, `SHA` (SHA-NI), `RDRAND`,
+    `RDSEED`.
+  - riscv64: the `misa`/ISA-string extensions relevant now (`Zbb`, `Zbc`,
+    `Zbkc`, the vector `V` extension) — represented honestly, most
+    `Unsupported`/absent on today's QEMU virt.
+  - Provide `pub const fn contains(self, feature: CpuFeature) -> bool` and a
+    `CpuFeature` enum naming each bit, so a `Candidate`'s required-feature
+    declaration (P2) is type-checked, never a magic mask.
+- `pub struct CoreType { pub model: Option<&'static str>, pub class:
+  CoreClass, pub raw_id: u64 }` — the per-core-type key P2/P3 hash on;
+  reuses the existing `CoreClass` (`lib.rs`) and the existing per-port model
+  decoders (`cpuname.rs::name_for_midr` on aarch64, `cpuname.rs` on x86_64).
+  `raw_id` is MIDR_EL1 / CPUID signature / `mvendorid:marchid:mimpid`.
+- `pub trait CpuFeatures: Send + Sync { fn detect(&self, cpu: CpuId) ->
+  CpuFeatureSet; fn core_type(&self, cpu: CpuId) -> CoreType; fn profile(&self)
+  -> FeatureProfile; }` — object-safe, `Send + Sync` (reached from every CPU),
+  detection keyed by `CpuId` because heterogeneous SMP means per-CPU answers.
+- `pub struct FeatureProfile` + `pub enum FeatureSupport {
+  Supported, Unsupported(&'static str), Pending(&'static str) }` and
+  `validate()`/`entries()`/`is_release_ready()` — the *identical* honesty
+  pattern as `memtag::TaggingProfile`/`Tagging` (§19.10 template), so a port
+  that cannot yet trust a probe declares it `Unsupported`/`Pending` with a
+  justification rather than fabricating a bit.
+- `pub mod conformance { pub fn run_all<C: CpuFeatures + ?Sized>(port: &C) }`
+  — asserts: profile validates; `detect` is stable across back-to-back calls
+  for one `CpuId`; a bit reported present is consistent with the profile;
+  `core_type` is total and panic-free for an out-of-range `CpuId`. Wire into
+  `kernel/arch/api/src/conformance.rs::run_all` (add a `cpufeatures`
+  parameter alongside `memtag`/`percpu`).
+- Re-export from `kernel/arch/api/src/lib.rs` (`pub use cpufeatures::{…}`)
+  and add `pub mod cpufeatures;`.
+
+**Deliverables — the HAL cycle counter (decision: its own tiny slice,
+`kernel/arch/api/src/cpucycles.rs`, not folded into `timer.rs`):** `timer.rs`
+is the tickless scheduler-tick surface and must not grow a benchmarking verb
+(interface creep, §2.4). New `pub trait CpuCycles: Send + Sync { fn
+cpu_cycles(&self) -> u64; fn cycles_monotonic_hint(&self) -> bool; }` with a
+`conformance::run_all` proving the counter is non-decreasing across a short
+busy window. Generalises the existing x86_64 `Rdtsc`
+(`kernel/arch/x86_64/src/apic_timer.rs`/`tsc.rs`).
+
+**Deliverables — per-port impls** (each is the ONLY place its ID source is
+read — §17.2/§17.5 `cfg-check`):
+
+- `kernel/arch/x86_64/src/cpufeatures.rs`: `CPUID` leaves 1 (ECX/EDX) and 7
+  (EBX/ECX) → the bitset; reuse `cpuname.rs` for `model`; `cpu_cycles` = the
+  existing `Rdtsc`.
+- `kernel/arch/aarch64/src/cpufeatures.rs`: `ID_AA64ISAR0_EL1` (AES/SHA/CRC32/
+  atomics fields), `ID_AA64PFR0_EL1` (ASIMD); `core_type` from
+  `cpuname.rs::name_for_midr` + `hetcore.rs` class; `cpu_cycles` =
+  `PMCCNTR_EL0` (enable via `PMUSERENR`/`PMCR` at boot) or `CNTVCT_EL0`
+  fallback if the PMU cycle counter is unavailable — record which in the
+  profile.
+- `kernel/arch/riscv64/src/cpufeatures.rs`: `misa` + the device-tree
+  `riscv,isa` string (via `tairix_fdt`) for Z-extensions; `cpu_cycles` =
+  `rdcycle`/`time` CSR.
+- `kernel/arch/wasm32/src/cpufeatures.rs`: honest host query — most
+  extensions `Unsupported("wasm host does not expose native ISA extensions")`;
+  `cpu_cycles` via the host `performance.now()` binding already in
+  `wasm32/src/bindings.rs`.
+- Publish each port's handle where the other HAL handles are published
+  (the port's `kernel_arch.rs` aggregation) so `kernel/core` can reach it at
+  bring-up (P2).
+
+**Record the new surface:** add `cpufeatures`/`cpucycles` to the §17.2 HAL
+enumeration in `AGENTS.md` and to `PLAN.md`'s HAL list, and to the
+`kernel/arch/api/src/lib.rs` module rustdoc (mirrors how `memtag`/`smp`
+were recorded).
+
+**Tests:**
+
+- Host tests per port with a **fake ID source**: a decoder unit test that a
+  synthetic `CPUID`/`ID_AA64ISAR0_EL1`/`misa` value yields the expected
+  `CpuFeatureSet` (masking a field off is honoured — the bit disappears).
+- `conformance::run_all` invoked from each port's existing `conformance`
+  host test over its real handle.
+- Cycle-counter conformance: monotonic within a measurement window (host
+  double for the non-native side).
+
+**Acceptance:** detection compiles and its decoders are host-tested on all
+four ports; no `cfg(target_arch)` appears above the HAL (`cargo xtask
+cfg-check` green); the HAL conformance vertical runs the new slice.
 
 ### P2 — The generic `lib/cpuops` framework (registry + `ByPriority` + self-verify + fail-closed baseline)
 
-- New `no_std` crate `lib/cpuops` (updates §3 + `PLAN.md`,
-  stability tier in its `README.md`). Contents:
-  `Family`/`Candidate<T>` (T = the op's fn-pointer signature),
-  required-`CpuFeatureSet`, `Selection::{ByPriority, ByBenchmark}`,
-  `Selector` (filter → self-verify → choose → fail-closed baseline),
-  `OpsTable<T>`, and the pin/log seams (injected, capability-clean — the
-  crate does no I/O and no logging itself; it emits typed decisions the
-  caller logs via `lib/log`, §19.4).
-- Land the full abstraction (§27): both policies present, self-verify
-  mandatory, per-core-type keying, pinning, logging — even though P2's
-  first consumers use only `ByPriority`.
-- First deterministic consumers (biggest safe wins, zero nondeterminism):
-  CRC32 (`+crc`/CRC32 vs portable table) and the **crypto backend
-  availability** decision (capability-gated per invariant 8). Wire the
-  per-core-type ops-table build into `kernel/core` bring-up.
-- Tests: host-test the selector with a fake `CpuFeatureSet` (filters
-  correctly, rejects a deliberately-wrong candidate, falls back closed,
-  honours a pin); conformance that every candidate is bit-identical to the
-  reference across sizes/alignments/edge cases.
+**Scope in one line:** a new `no_std` `lib/cpuops` crate holding the whole
+selection abstraction (registry, self-verify, both policies, per-core-type
+keying, pin, typed log), wired once in `kernel/core` bring-up, with CRC32 and
+the crypto-availability decision as its first two consumers.
+
+**Deliverables — the crate (`lib/cpuops/`; updates §3 layout + `PLAN.md`;
+`README.md` stability tier `experimental`; `no_std`, no `cfg`, no SoC name —
+§2.20):**
+
+- `pub struct Candidate<T: Copy>` — one implementation: `{ name:
+  &'static str, requires: &'static [CpuFeature], selection_hint: (), impl_:
+  T }` where `T` is the op's `extern "C" fn` pointer type. `requires` is
+  matched against the `CpuFeatureSet` (P1).
+- `pub struct Family<'a, T: Copy, In>` — the op abstraction: `{ id:
+  FamilyId, candidates: &'a [Candidate<T>], baseline: Candidate<T>,
+  selection: Selection, reference: fn(&In) -> RefOut, run: fn(T, &In) ->
+  RefOut, vectors: &'a [In] }`. `baseline` is separate and mandatory (always
+  feature-legal, always last resort — invariant 6). `FamilyId` is a stable
+  enum used as the log/pin key.
+- `pub enum Selection { ByPriority, ByBenchmark }` (invariant 1).
+- `pub struct Selector` — the algorithm, pure and host-testable:
+  1. **filter** candidates whose `requires` ⊄ the core's `CpuFeatureSet`
+     (invariant 4);
+  2. **self-verify** each survivor: run it over every vector and compare to
+     `reference`; reject on any mismatch (invariant 5);
+  3. **choose**: `ByPriority` → first verified survivor in declared order;
+     `ByBenchmark` → hand survivors to the P3 `BenchHarness` (a seam in P2, a
+     real harness in P3);
+  4. **fail closed**: if none survive, return `baseline` (invariant 6);
+     never panic, never spin.
+  Returns a `Selection Decision { family: FamilyId, chosen: &'static str,
+  core: CoreType, reason: DecisionReason }` — a *typed* record, not a log
+  call (the crate does no I/O; the caller logs it via `lib/log`, §19.4).
+- `pub struct OpsTable` — the resolved struct-of-fn-pointers consumed on the
+  hot path, built per `CoreType` (invariant 9). `pub struct OpsTables` keying
+  `CoreType → OpsTable`, resolved as each CPU comes up.
+- `pub struct Pin` / `pub fn apply_pin(&mut Selector, FamilyId, &str)` — the
+  boot-parameter override (invariant 10): pin forces a named candidate but it
+  **still self-verifies** (a pinned buggy candidate is rejected, falls to
+  baseline — pinning cannot defeat correctness).
+- `pub trait DecisionSink { fn record(&self, d: &Decision); }` — the injected
+  log seam (capability-clean; `kernel/core` supplies a `lib/log`-backed impl).
+
+- **Foundational-complete from the first commit (§27):** both policies, the
+  mandatory self-verify, per-core-type keying, pin, and the typed decision
+  sink are all present now — even though P2's two consumers use only
+  `ByPriority`. A one-family/one-policy slice is the §27 defect and is
+  rejected.
+
+**Deliverables — first two consumers:**
+
+- **CRC32 family.** Portable table-driven CRC32 is the `baseline`; the
+  extension candidate uses the aarch64 `crc32*` instructions / x86_64
+  `crc32` (`SSE4_2`) gated on the `CRC32`/`SSE4_2` bit. The ISA-divergent
+  candidate bodies live under `kernel/arch/<target>/` (one impl per bit, not
+  copy-pasted — §2.21); the portable baseline and the `Family` wiring live in
+  the owning crate. Identify the current CRC32/`physical_checksum` consumer:
+  ARXFS `drivers/filesystem/arxfs/src/integrity.rs::physical_checksum` (a
+  fast non-crypto checksum, explicitly *not* a crypto primitive) is the first
+  real caller — route it through the ops table.
+- **Crypto backend availability decision (capability-gated only — invariant
+  8).** *No benchmark.* A `ByPriority` family whose candidates are the
+  audited `lib/crypto` hardware backend (requires AES/PMULL/SHA present) and
+  the audited constant-time software backend (baseline). Selection is
+  *availability*, never speed; the chosen backend still comes from
+  `lib/crypto` (§2.12). This proves the framework models the crypto carve-out
+  without ever letting a benchmark near a secret.
+
+**Deliverables — bring-up wiring (`kernel/core`):** the single point (§17.1
+selection-point precedent) that, as each CPU comes up, reads the port's
+`CpuFeatures` handle, builds/looks-up the `OpsTable` for that `CoreType`, and
+records each `Decision` through the `lib/log` sink. Consumers fetch their
+family's fn pointer from the per-CPU/per-core-type `OpsTable`.
+
+**Tests:**
+
+- Selector (host, fake `CpuFeatureSet` + fake vectors): filters on missing
+  feature; rejects a deliberately-wrong candidate (verify catches it); falls
+  back to baseline when all survivors rejected; honours a pin; a pinned
+  *buggy* candidate still falls to baseline.
+- Conformance: every CRC32 candidate is bit-identical to the reference across
+  the fixed vector (empty, 1 byte, unaligned, page-crossing, max).
+- Crypto family: selects the hardware backend only when the availability bit
+  is set; never runs a benchmark (assert the `ByBenchmark` path is never
+  entered for this family).
+
+**Acceptance:** `lib/cpuops` lands complete (§27); CRC32 and crypto-avail
+route through it; `kernel/core` builds per-core-type tables; whole-project
+gate green; coverage ≥ 85% for the new `lib/*` crate (§7).
 
 ### P3 — The `ByBenchmark` axis (bounded, deterministic boot microbenchmark)
 
-- Add the `BenchHarness`: fixed iteration budget over a fixed, warmed input
-  buffer, measured with the HAL cycle counter, median-of-N to reject noise,
-  **never** "loop until a threshold" (that is the §2.1 retry-until-it-works
-  hack). Bounded one-shot during bring-up; no busy-wait (§2.23).
-- Per-core-type measurement (invariant 9): benchmark per distinct core type
-  / cluster and keep a per-core-type ops table; do not impose the boot
-  CPU's result globally.
-- `ByBenchmark` consumers — secret-free, bit-identical families only:
-  `memcpy`/`memset`/page-zero, framebuffer blit/blend/fill (`lib/raster`),
-  RFC-1071 IP checksum (`lib/net`), XOR/parity. Crypto stays strictly on
-  P1/P2's capability axis.
-- Log the chosen impl per family per core type (§19.4, stable event ID);
-  honour the pin boot parameter to force determinism.
-- Tests: host-test the harness with a fake timer (bounded, deterministic,
-  picks the faster of two fakes, honours a pin); QEMU verticals per arch
-  proving the extension-using family is chosen when the feature is present
-  and the baseline is chosen when features are masked off.
+**Scope in one line:** turn the P2 `ByBenchmark` seam into a real bounded
+one-shot microbenchmark keyed per core type, then move the secret-free,
+bit-identical families onto it.
+
+**Deliverables — the harness (`lib/cpuops/src/bench.rs`):**
+
+- `pub struct BenchHarness<'c> { cycles: &'c dyn CpuCycles, iters: u32,
+  rounds: u32 }` — takes the P1 `CpuCycles` handle by injection (the crate
+  stays `no_std`/no-arch — §2.20). Fixed `iters` over a fixed, warmed input
+  buffer; `rounds` measurements reduced by **median** (invariant: reject
+  noise, never "loop until a threshold" — §2.1); bounded one-shot, no
+  busy-wait (§2.23).
+- `pub fn fastest<T: Copy, In>(&self, survivors: &[Candidate<T>], run: fn(T,
+  &In) -> RefOut, warm: &In) -> usize` — returns the index of the lowest
+  median cycle count; ties break to the earliest (lowest priority index) for
+  determinism. Called by the `Selector::choose` `ByBenchmark` arm added in P2.
+- Because measurement is inherently machine-dependent, the *only*
+  nondeterminism the framework introduces is which verified-correct candidate
+  wins; the pin (P2) makes even that deterministic when required (invariant
+  10, §19.3 reproducibility).
+
+**Deliverables — per-core-type measurement (invariant 9):** the bring-up
+wiring (P2, `kernel/core`) benchmarks once per *distinct* `CoreType` /
+cluster (big.LITTLE, Intel hybrid) as those CPUs come up, caching the result
+in `OpsTables`; the boot CPU's result is never imposed on a different core
+type.
+
+**Deliverables — `ByBenchmark` consumers (secret-free, bit-identical only —
+invariant 8):**
+
+- `memcpy` / `memset` / page-zero: candidates (portable, NEON/`ASIMD`,
+  x86_64 AVX2) behind the ops table; the baseline is the current portable
+  loop. First real caller: the `kernel/mem` page-zero path.
+- Framebuffer blit/blend/fill: `lib/raster/src/surface.rs`
+  (`fill_rect`, `fill_round_rect`, `blit`) — route the inner fill/blend loop
+  through an ops-table fn pointer; NEON/AVX candidates gated on the feature
+  bit, portable baseline unchanged.
+- RFC-1071 IP checksum: `lib/net/src/checksum.rs`
+  (`internet_checksum` / `Checksum::push`/`finish`) — a SIMD folding
+  candidate vs the portable ones'-complement baseline.
+- XOR/parity: the baseline word-XOR with a SIMD candidate (a future RAID/FEC
+  consumer — land the family; `ByBenchmark` proven on it).
+- Crypto stays strictly on the P1/P2 capability axis — **never** here.
+
+**Deliverables — logging + pin:** each `Decision` (family × core type) is
+recorded through the `lib/log` sink with a stable event ID (§19.4); the pin
+boot parameter forces a named candidate for determinism (CI, debugging,
+reproducible-build validation).
+
+**Tests:**
+
+- Harness (host, **fake** `CpuCycles`): bounded (fixed iters/rounds),
+  deterministic under the fake, picks the faster of two fake candidates,
+  median rejects an injected outlier, honours a pin, tie-breaks to earliest.
+- Every benchmarked candidate is bit-identical to its reference across the
+  fixed vector (empty/1/unaligned/page-crossing/max) — the correctness gate
+  is independent of the speed choice.
+- QEMU verticals per arch: the extension-using family is chosen when the
+  feature is present and the baseline when the feature is masked off (via a
+  test hook that forces a reduced `CpuFeatureSet`); heterogeneous-core keying
+  exercised where the emulator models it (e.g. QEMU `-cpu` big.LITTLE combos).
+
+**Acceptance:** the four families route through `ByBenchmark`; measurement is
+bounded and never busy-waits; pin makes selection deterministic; whole-project
+gate green.
 
 ### P4 — Fuzzing, docs, and burn-down
 
-- Fuzz every accelerated routine against its portable reference (§19.6);
-  crashing/divergent inputs enter the regression corpus with a unit test
-  (§7). Add `cargo xtask fuzz` harnesses for each family.
-- `docs/src/architecture/` page describing the two axes, the crypto
-  carve-out, per-core-type keying, pinning, and the build-time-floor vs
-  runtime-ceiling layering; rustdoc on every public `lib/cpuops` and HAL
-  item (§2.8/§13). Add the P0 image-floor rationale to the platform docs.
-- Update the `README.md` feature/architecture matrix (§13) with the
-  per-target accelerated-path state.
+**Scope in one line:** fuzz every accelerated routine against its reference,
+document the framework, and update the support matrix — closing the plan.
+
+**Deliverables — fuzzing (§19.6):**
+
+- One `cargo-fuzz`/in-tree harness per family in `lib/cpuops` (and the arch
+  candidate crates): feed arbitrary bytes/sizes/alignments to *every*
+  candidate and assert bit-identity with the portable reference. A divergence
+  or crash is a bug; the input enters the family's regression corpus with a
+  unit test (§7).
+- Add the new harnesses to `cargo xtask fuzz` (the `--quick` per-PR gate and
+  the nightly soak) so they run in `cargo xtask ci`.
+
+**Deliverables — docs (§2.8/§13):**
+
+- New `docs/src/architecture/cpu-feature-dispatch.md` (add to
+  `docs/src/SUMMARY.md`): the two axes, the crypto carve-out, per-core-type
+  keying, pinning, and the build-time-floor-vs-runtime-ceiling layering
+  diagram.
+- The P0 image→floor rationale table added to the platform docs
+  (`docs/src/platform/`).
+- rustdoc on every public `lib/cpuops` and `cpufeatures`/`cpucycles` HAL item
+  (the `deny(missing_docs)` in `kernel/arch/api` enforces the HAL half).
+
+**Deliverables — matrix + burn-down:**
+
+- Update the `README.md` feature/architecture support matrix (§13) with a
+  per-target accelerated-path row (CRC32, crypto-HW, blit/memcpy).
+- Flip this plan's Status to `done` with a concise done-state summary
+  (§13 — plans hold current state, not history); confirm §17.2 / `PLAN.md`
+  HAL enumeration lists `cpufeatures`/`cpucycles`.
+
+**Acceptance:** every accelerated routine is fuzzed against its reference in
+CI; docs build (`cargo xtask docs-check`) with no stale-symbol failures; the
+support matrix reflects reality; whole-project gate green.
 
 ## Testing (§7)
+
+Each phase's own **Tests** / **Acceptance** block above is authoritative;
+this section is the cross-cutting summary of what must be green overall.
 
 - Selector: filter, self-verify rejection, fail-closed baseline, pin
   honoured — host tests with fakes.
