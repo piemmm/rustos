@@ -58,9 +58,8 @@ use crate::iface::{Iface, IfaceAction, IfaceConfig};
 use crate::igmp::{IgmpMessage, PROTOCOL_IGMP};
 use crate::ipv4::{Ipv4Header, IPV4_HEADER_LEN, PROTOCOL_ICMP};
 use crate::ipv6::{
-    hop_by_hop_router_alert, walk, Ipv6Header, WalkOutcome, WalkRejection, HBH_ROUTER_ALERT_LEN,
-    IPV6_HEADER_LEN, IPV6_MIN_MTU, NEXT_HEADER_HOP_BY_HOP, NEXT_HEADER_ICMPV6,
-    PARAM_PROBLEM_NEXT_HEADER,
+    hop_by_hop_router_alert, walk, Ipv6Header, WalkOutcome, WalkRejection, IPV6_HEADER_LEN,
+    IPV6_MIN_MTU, NEXT_HEADER_HOP_BY_HOP, NEXT_HEADER_ICMPV6, PARAM_PROBLEM_NEXT_HEADER,
 };
 use crate::mcast::{Igmp, JoinError, Membership, MembershipReport, Mld, ReportReason};
 use crate::mld::{
@@ -224,6 +223,27 @@ pub enum StackEvent {
     },
 }
 
+impl StackEvent {
+    /// Reclaim this event's owned byte buffer (if it carries one) into
+    /// `pool` for reuse, so a delivered payload does not free and
+    /// reallocate its buffer on the next receive.
+    fn recycle_into(self, pool: &mut BufPool) {
+        match self {
+            StackEvent::EchoReply { payload, .. } | StackEvent::UdpDatagram { payload, .. } => {
+                pool.give(payload);
+            }
+            StackEvent::TcpSegment { segment, .. } => pool.give(segment),
+            StackEvent::EchoRequestServed { .. }
+            | StackEvent::AddressPreferred { .. }
+            | StackEvent::AddressInvalidated { .. }
+            | StackEvent::DadFailed { .. }
+            | StackEvent::NeighborUnreachable { .. }
+            | StackEvent::IcmpErrorReceived { .. }
+            | StackEvent::ReassemblyExpired { .. } => {}
+        }
+    }
+}
+
 /// Per-frame receive metadata the driver reports alongside a delivered
 /// frame: which offloads the device performed on it.
 ///
@@ -336,12 +356,88 @@ impl TxFrame {
 }
 
 /// Frames to transmit and events to report from one engine call.
+///
+/// The caller owns one [`StackOutput`] and **reuses** it across every
+/// engine call: each entry point drains the previous call's frames and
+/// events back into the engine's buffer pool before it fills the output
+/// again, so the steady-state receive and transmit paths perform **zero**
+/// heap allocations (the byte buffers are recycled, not freed and
+/// reallocated). This is the allocation-free hot path the network stack's
+/// performance budget depends on; the invariant is proven by the
+/// `hotpath_allocations` regression test. The contract is simply that the
+/// caller consumes `frames`/`events` before the next engine call, which
+/// the netstack service loop does by construction.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StackOutput {
     /// Ethernet frames to hand to the driver, in order.
     pub frames: Vec<TxFrame>,
     /// Typed facts for the caller.
     pub events: Vec<StackEvent>,
+}
+
+impl StackOutput {
+    /// Reclaim the previous call's frame and event byte buffers into
+    /// `pool` and clear the output, ready to be filled again. Called by
+    /// every engine entry point before it emits, so a reused output never
+    /// leaks or reallocates its buffers.
+    fn recycle_into(&mut self, pool: &mut BufPool) {
+        for frame in self.frames.drain(..) {
+            pool.give(frame.bytes);
+        }
+        for event in self.events.drain(..) {
+            event.recycle_into(pool);
+        }
+    }
+}
+
+/// A bounded free-list of byte buffers the engine reuses so the hot path
+/// allocates nothing in steady state.
+///
+/// A buffer taken for a transmitted frame or a delivered payload is
+/// returned to the pool when the caller's next engine call recycles the
+/// output ([`StackOutput::recycle_into`]); a transient buffer (an upper
+/// message copied into an IP packet, an IP packet copied into a frame) is
+/// returned explicitly the moment its consumer has copied it. The pool is
+/// capped so a hostile traffic pattern cannot make it grow without bound
+/// (§24.1 — a growable capacity, not an unbounded one); beyond the cap a
+/// returned buffer is simply dropped.
+#[derive(Debug, Default)]
+struct BufPool {
+    free: Vec<Vec<u8>>,
+}
+
+impl BufPool {
+    /// Largest number of recycled buffers held at once. One engine call
+    /// emits a small, bounded number of frames plus at most
+    /// [`MAX_PENDING_PACKETS`] parked packets, so this comfortably covers
+    /// the working set while bounding a hostile pattern's residency.
+    const CAP: usize = 512;
+
+    /// A cleared, zero-length buffer — recycled if one is available, else
+    /// freshly allocated (the only place the engine allocates a frame or
+    /// payload buffer, and only when the pool is cold or momentarily
+    /// drained).
+    fn take(&mut self) -> Vec<u8> {
+        self.free.pop().unwrap_or_default()
+    }
+
+    /// A recycled buffer resized to `len` zero bytes.
+    fn take_zeroed(&mut self, len: usize) -> Vec<u8> {
+        let mut buf = self.take();
+        buf.clear();
+        buf.resize(len, 0);
+        buf
+    }
+
+    /// Return `buf` to the pool for reuse (cleared, capacity retained),
+    /// unless it never held anything or the pool is at its cap.
+    fn give(&mut self, mut buf: Vec<u8>) {
+        if buf.capacity() == 0 || self.free.len() >= Self::CAP {
+            return;
+        }
+        buf.clear();
+        self.free.push(buf);
+    }
 }
 
 /// Monotonic counters for observability (`stats:net`, plan §5).
@@ -522,6 +618,8 @@ pub struct Stack {
     /// over-size super-segment for the device to split.
     tx_segment_tcp: bool,
     counters: StackCounters,
+    /// Recycled byte buffers backing the allocation-free hot path.
+    bufs: BufPool,
 }
 
 /// Largest TCP super-segment payload the engine will hand the device for
@@ -565,6 +663,7 @@ impl Stack {
             pmtu: PathMtuCache::new(config.pmtu_capacity, config.pmtu_lifetime),
             reassembler: Reassembler::new(config.reassembly),
             error_limiter: ErrorRateLimiter::new(config.error_burst, config.error_rate),
+            bufs: BufPool::default(),
             pending: Vec::new(),
             ra_routes: 0,
             redirect_routes: 0,
@@ -700,8 +799,8 @@ impl Stack {
 impl Stack {
     /// Process one received Ethernet frame carrying no device offload
     /// metadata (the canonical software path).
-    pub fn on_frame(&mut self, frame_bytes: &[u8], now: Duration64) -> StackOutput {
-        self.on_frame_meta(frame_bytes, RxMeta::none(), now)
+    pub fn on_frame(&mut self, frame_bytes: &[u8], now: Duration64, out: &mut StackOutput) {
+        self.on_frame_meta(frame_bytes, RxMeta::none(), now, out);
     }
 
     /// Process one received Ethernet frame together with the per-frame
@@ -716,17 +815,18 @@ impl Stack {
         frame_bytes: &[u8],
         rx: RxMeta,
         now: Duration64,
-    ) -> StackOutput {
-        let mut out = StackOutput::default();
+        out: &mut StackOutput,
+    ) {
+        out.recycle_into(&mut self.bufs);
         self.counters.rx_frames += 1;
         self.counters.rx_bytes += frame_bytes.len() as u64;
         let Some(frame) = EthernetFrame::parse(frame_bytes) else {
             self.counters.rx_dropped += 1;
-            return out;
+            return;
         };
         if frame.destination != self.mac && !is_group_mac(frame.destination) {
             self.counters.rx_dropped += 1;
-            return out;
+            return;
         }
         // The device's checksum assurance is honoured only when the stack
         // opted into the offload; a per-frame claim is otherwise ignored.
@@ -736,12 +836,11 @@ impl Stack {
             ChecksumCheck::Verify
         };
         match frame.ethertype {
-            ETHERTYPE_ARP => self.on_arp(&mut out, frame.payload, now),
-            ETHERTYPE_IPV4 => self.on_ipv4(&mut out, frame.payload, check, now),
-            ETHERTYPE_IPV6 => self.on_ipv6(&mut out, frame.payload, check, now),
+            ETHERTYPE_ARP => self.on_arp(out, frame.payload, now),
+            ETHERTYPE_IPV4 => self.on_ipv4(out, frame.payload, check, now),
+            ETHERTYPE_IPV6 => self.on_ipv6(out, frame.payload, check, now),
             _ => self.counters.rx_dropped += 1,
         }
-        out
     }
 
     /// ARP (RFC 826): answer requests for our address; solicited
@@ -860,7 +959,7 @@ impl Stack {
                 destination: IpAddr::V4(header.destination),
                 source_port: datagram.source_port,
                 destination_port: datagram.destination_port,
-                payload: datagram.payload.to_vec(),
+                payload: self.pooled_copy(datagram.payload),
             });
             return;
         }
@@ -1118,7 +1217,7 @@ impl Stack {
                 destination: IpAddr::V6(header.destination),
                 source_port: datagram.source_port,
                 destination_port: datagram.destination_port,
-                payload: datagram.payload.to_vec(),
+                payload: self.pooled_copy(datagram.payload),
             });
             return;
         }
@@ -1436,6 +1535,15 @@ impl Stack {
         u32::try_from(self.mtu_v6).unwrap_or(u32::MAX)
     }
 
+    /// A pooled buffer holding a copy of `src`, so a delivered payload is
+    /// carried in a recycled buffer rather than a freshly allocated one.
+    fn pooled_copy(&mut self, src: &[u8]) -> Vec<u8> {
+        let mut buf = self.bufs.take();
+        buf.clear();
+        buf.extend_from_slice(src);
+        buf
+    }
+
     /// Emit one Ethernet frame with no transmit offload (the
     /// control-plane path: ARP, ND, IGMP/MLD, ICMP).
     fn push_frame(
@@ -1457,8 +1565,9 @@ impl Stack {
         packet: &[u8],
         offload: TxOffload,
     ) {
-        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+        let mut frame = self.bufs.take_zeroed(ETHERNET_HEADER_LEN + packet.len());
         if write_header(&mut frame, dst, self.mac, ethertype).is_none() {
+            self.bufs.give(frame);
             return;
         }
         frame[ETHERNET_HEADER_LEN..].copy_from_slice(packet);
@@ -1485,10 +1594,12 @@ impl Stack {
         match self.neighbors.lookup(next_hop, now) {
             LookupResult::Send(mac) => {
                 self.push_frame_offloaded(out, mac, ethertype, &packet, offload);
+                self.bufs.give(packet);
             }
             LookupResult::Pending => {
                 if self.pending.len() >= MAX_PENDING_PACKETS {
                     self.counters.pending_dropped += 1;
+                    self.bufs.give(packet);
                 } else {
                     self.pending.push(PendingPacket {
                         next_hop,
@@ -1501,7 +1612,10 @@ impl Stack {
                 let actions = self.neighbors.advance(now);
                 self.apply_neighbor_actions(out, actions, now);
             }
-            LookupResult::TableFull => self.counters.pending_dropped += 1,
+            LookupResult::TableFull => {
+                self.counters.pending_dropped += 1;
+                self.bufs.give(packet);
+            }
         }
     }
 
@@ -1524,6 +1638,7 @@ impl Stack {
                     &parked.packet,
                     parked.offload,
                 );
+                self.bufs.give(parked.packet);
             } else {
                 index += 1;
             }
@@ -1551,9 +1666,16 @@ impl Stack {
                     }
                 },
                 NeighborAction::Unreachable { ip } => {
-                    let before = self.pending.len();
-                    self.pending.retain(|parked| parked.next_hop != ip);
-                    self.counters.pending_dropped += (before - self.pending.len()) as u64;
+                    let mut index = 0;
+                    while index < self.pending.len() {
+                        if self.pending[index].next_hop == ip {
+                            let parked = self.pending.remove(index);
+                            self.bufs.give(parked.packet);
+                            self.counters.pending_dropped += 1;
+                        } else {
+                            index += 1;
+                        }
+                    }
                     out.events.push(StackEvent::NeighborUnreachable { ip });
                 }
             }
@@ -1799,8 +1921,9 @@ impl Stack {
         // header off the payload).
         let is_segmentation = matches!(offload, TxOffload::TcpSegment { .. });
         if is_segmentation || IPV4_HEADER_LEN + upper_message.len() <= self.link_mtu {
-            let mut packet = vec![0u8; IPV4_HEADER_LEN + upper_message.len()];
+            let mut packet = self.bufs.take_zeroed(IPV4_HEADER_LEN + upper_message.len());
             if header.write(&mut packet, upper_message.len()).is_none() {
+                self.bufs.give(packet);
                 return;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(upper_message);
@@ -1815,8 +1938,9 @@ impl Stack {
         };
         for part in parts {
             let payload = &upper_message[part.payload_start..part.payload_end];
-            let mut packet = vec![0u8; IPV4_HEADER_LEN + payload.len()];
+            let mut packet = self.bufs.take_zeroed(IPV4_HEADER_LEN + payload.len());
             if part.header.write(&mut packet, payload.len()).is_none() {
+                self.bufs.give(packet);
                 continue;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(payload);
@@ -1836,24 +1960,24 @@ impl Stack {
         offload: TxOffload,
         now: Duration64,
     ) {
-        match next_hop {
-            Some(next_hop) => {
-                self.resolve_and_send_offloaded(
-                    out,
-                    IpAddr::V4(next_hop),
-                    ETHERTYPE_IPV4,
-                    packet,
-                    offload,
-                    now,
-                );
-            }
-            None => self.push_frame_offloaded(
+        if let Some(next_hop) = next_hop {
+            self.resolve_and_send_offloaded(
+                out,
+                IpAddr::V4(next_hop),
+                ETHERTYPE_IPV4,
+                packet,
+                offload,
+                now,
+            );
+        } else {
+            self.push_frame_offloaded(
                 out,
                 ipv4_multicast_mac(&dest),
                 ETHERTYPE_IPV4,
                 &packet,
                 offload,
-            ),
+            );
+            self.bufs.give(packet);
         }
     }
 
@@ -1910,16 +2034,18 @@ impl Stack {
         // header — which itself names the upper protocol — is prepended.
         let packet = if router_alert {
             let hbh = hop_by_hop_router_alert(next_header);
-            let mut payload = Vec::with_capacity(HBH_ROUTER_ALERT_LEN + upper_message.len());
+            let mut payload = self.bufs.take();
             payload.extend_from_slice(&hbh);
             payload.extend_from_slice(upper_message);
             let mut header = Ipv6Header::new(source, dest, NEXT_HEADER_HOP_BY_HOP);
             header.hop_limit = hop_limit;
-            ipv6_packet(&header, &payload)
+            let packet = self.pooled_ipv6_packet(&header, &payload);
+            self.bufs.give(payload);
+            packet
         } else {
             let mut header = Ipv6Header::new(source, dest, next_header);
             header.hop_limit = hop_limit;
-            ipv6_packet(&header, upper_message)
+            self.pooled_ipv6_packet(&header, upper_message)
         };
         let Some(packet) = packet else {
             return;
@@ -1932,9 +2058,11 @@ impl Stack {
                 &packet,
                 offload,
             );
+            self.bufs.give(packet);
             return;
         }
         let Some(next_hop) = self.next_hop_v6(dest, now) else {
+            self.bufs.give(packet);
             return;
         };
         self.resolve_and_send_offloaded(
@@ -1945,6 +2073,18 @@ impl Stack {
             offload,
             now,
         );
+    }
+
+    /// Assemble a fixed IPv6 header and payload into a **pooled** buffer
+    /// (the allocation-free transmit path). Returns the buffer to the
+    /// pool and `None` if the header will not serialise.
+    fn pooled_ipv6_packet(&mut self, header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
+        let mut buf = self.bufs.take_zeroed(IPV6_HEADER_LEN + payload.len());
+        if write_ipv6_into(&mut buf, header, payload).is_none() {
+            self.bufs.give(buf);
+            return None;
+        }
+        Some(buf)
     }
 
     /// Gate, rate-limit, and emit an ICMP error about a v4 packet.
@@ -2039,11 +2179,12 @@ impl Stack {
         sequence: u16,
         payload: &[u8],
         now: Duration64,
-    ) -> Result<StackOutput, SendError> {
+        out: &mut StackOutput,
+    ) -> Result<(), SendError> {
+        out.recycle_into(&mut self.bufs);
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
-        let mut out = StackOutput::default();
         match dest {
             IpAddr::V4(dest) => {
                 if dest.is_multicast() || dest.is_broadcast() || dest.is_unspecified() {
@@ -2061,10 +2202,11 @@ impl Stack {
                     sequence,
                     payload,
                 };
-                let mut message = vec![0u8; echo.wire_len()];
+                let mut message = self.bufs.take_zeroed(echo.wire_len());
                 echo.write(IcmpContext::V4, &mut message)
                     .ok_or(SendError::TooLarge)?;
-                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_ICMP, &message, now);
+                self.send_ipv4_packet(out, source, dest, PROTOCOL_ICMP, &message, now);
+                self.bufs.give(message);
             }
             IpAddr::V6(dest) => {
                 if dest.is_multicast() || dest.is_unspecified() {
@@ -2088,11 +2230,11 @@ impl Stack {
                     source,
                     destination: dest,
                 };
-                let mut message = vec![0u8; echo.wire_len()];
+                let mut message = self.bufs.take_zeroed(echo.wire_len());
                 echo.write(context, &mut message)
                     .ok_or(SendError::TooLarge)?;
                 self.send_ipv6_packet(
-                    &mut out,
+                    out,
                     source,
                     dest,
                     NEXT_HEADER_ICMPV6,
@@ -2100,9 +2242,10 @@ impl Stack {
                     self.hop_limit,
                     now,
                 );
+                self.bufs.give(message);
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Originate a UDP datagram from `source_port` to `dest`:`destination_port`.
@@ -2131,11 +2274,12 @@ impl Stack {
         destination_port: u16,
         payload: &[u8],
         now: Duration64,
-    ) -> Result<StackOutput, SendError> {
+        out: &mut StackOutput,
+    ) -> Result<(), SendError> {
+        out.recycle_into(&mut self.bufs);
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
-        let mut out = StackOutput::default();
         match dest {
             IpAddr::V4(dest) => {
                 if dest.is_broadcast() || dest.is_unspecified() {
@@ -2147,7 +2291,7 @@ impl Stack {
                 if !dest.is_multicast() && self.next_hop_v4(dest).is_none() {
                     return Err(SendError::NoRoute);
                 }
-                let mut message = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+                let mut message = self.bufs.take_zeroed(udp::UDP_HEADER_LEN + payload.len());
                 udp::write(
                     udp::Pseudo::V4 {
                         source,
@@ -2161,7 +2305,7 @@ impl Stack {
                 .map_err(|_| SendError::TooLarge)?;
                 let ttl = dest.is_multicast().then_some(MULTICAST_DATA_HOP_LIMIT);
                 self.send_ipv4_packet_ttl(
-                    &mut out,
+                    out,
                     source,
                     dest,
                     PROTOCOL_UDP,
@@ -2170,6 +2314,7 @@ impl Stack {
                     TxOffload::None,
                     now,
                 );
+                self.bufs.give(message);
             }
             IpAddr::V6(dest) => {
                 if dest.is_unspecified() {
@@ -2190,7 +2335,7 @@ impl Stack {
                 if IPV6_HEADER_LEN + total > path_mtu {
                     return Err(SendError::TooLarge);
                 }
-                let mut message = vec![0u8; total];
+                let mut message = self.bufs.take_zeroed(total);
                 udp::write(
                     udp::Pseudo::V6 {
                         source,
@@ -2207,18 +2352,11 @@ impl Stack {
                 } else {
                     self.hop_limit
                 };
-                self.send_ipv6_packet(
-                    &mut out,
-                    source,
-                    dest,
-                    PROTOCOL_UDP,
-                    &message,
-                    hop_limit,
-                    now,
-                );
+                self.send_ipv6_packet(out, source, dest, PROTOCOL_UDP, &message, hop_limit, now);
+                self.bufs.give(message);
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// The effective TCP maximum segment size (data bytes) for a
@@ -2378,12 +2516,13 @@ impl Stack {
         payload: &[u8],
         gso_size: Option<u16>,
         now: Duration64,
-    ) -> Result<StackOutput, SendError> {
+        out: &mut StackOutput,
+    ) -> Result<(), SendError> {
+        out.recycle_into(&mut self.bufs);
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
         let tcp_header_len = tcp::TCP_HEADER_LEN + meta.options.wire_len();
-        let mut out = StackOutput::default();
         match dest {
             IpAddr::V4(dest) => {
                 if dest.is_broadcast() || dest.is_unspecified() || dest.is_multicast() {
@@ -2408,7 +2547,7 @@ impl Stack {
                     let single_frame = IPV4_HEADER_LEN + seg_len <= self.link_mtu;
                     self.tcp_tx_offload(IPV4_HEADER_LEN, single_frame)
                 };
-                let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
+                let mut segment = self.bufs.take_zeroed(MAX_HEADER_LEN + payload.len());
                 let n = tcp::write_with_checksum(
                     Pseudo::V4 {
                         source,
@@ -2421,7 +2560,7 @@ impl Stack {
                 )
                 .map_err(|_| SendError::TooLarge)?;
                 self.send_ipv4_packet_ttl(
-                    &mut out,
+                    out,
                     source,
                     dest,
                     PROTOCOL_TCP,
@@ -2430,6 +2569,7 @@ impl Stack {
                     offload,
                     now,
                 );
+                self.bufs.give(segment);
             }
             IpAddr::V6(dest) => {
                 if dest.is_unspecified() || dest.is_multicast() {
@@ -2446,7 +2586,7 @@ impl Stack {
                     // refused below), so a negotiated offload always applies.
                     self.tcp_tx_offload(IPV6_HEADER_LEN, true)
                 };
-                let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
+                let mut segment = self.bufs.take_zeroed(MAX_HEADER_LEN + payload.len());
                 let n = tcp::write_with_checksum(
                     Pseudo::V6 {
                         source,
@@ -2467,7 +2607,7 @@ impl Stack {
                     return Err(SendError::TooLarge);
                 }
                 self.send_ipv6_packet_opt(
-                    &mut out,
+                    out,
                     source,
                     dest,
                     PROTOCOL_TCP,
@@ -2477,22 +2617,23 @@ impl Stack {
                     offload,
                     now,
                 );
+                self.bufs.give(segment);
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Perform every timed transition due at `now`: interface
     /// bring-up (DAD, router solicitation), address lifetimes,
     /// neighbour-cache aging, default-router and path-MTU expiry, and
     /// reassembly timeouts.
-    pub fn advance(&mut self, now: Duration64) -> StackOutput {
-        let mut out = StackOutput::default();
+    pub fn advance(&mut self, now: Duration64, out: &mut StackOutput) {
+        out.recycle_into(&mut self.bufs);
         for action in self.iface.advance(now) {
             match action {
-                IfaceAction::SendDadSolicit { target } => self.send_dad_solicit(&mut out, target),
+                IfaceAction::SendDadSolicit { target } => self.send_dad_solicit(out, target),
                 IfaceAction::SendRouterSolicitation { source } => {
-                    self.send_router_solicitation(&mut out, source);
+                    self.send_router_solicitation(out, source);
                 }
                 IfaceAction::AddressPreferred { addr } => {
                     // A now-usable address announces membership in its
@@ -2516,7 +2657,7 @@ impl Stack {
             }
         }
         let actions = self.neighbors.advance(now);
-        self.apply_neighbor_actions(&mut out, actions, now);
+        self.apply_neighbor_actions(out, actions, now);
         self.routers.advance(now);
         self.pmtu.advance(now);
         for expired in self.reassembler.advance(now) {
@@ -2526,12 +2667,11 @@ impl Stack {
             });
         }
         for report in self.membership_v4.advance(now) {
-            self.emit_igmp_report(&mut out, report, now);
+            self.emit_igmp_report(out, report, now);
         }
         for report in self.membership_v6.advance(now) {
-            self.emit_mld_report(&mut out, report, now);
+            self.emit_mld_report(out, report, now);
         }
-        out
     }
 
     /// When the earliest timed transition across every component is
@@ -2773,11 +2913,22 @@ fn mask_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
     Ipv6Addr::from((bits & (u128::MAX << (128 - u32::from(prefix_len)))).to_be_bytes())
 }
 
-/// Assemble a fixed IPv6 header and payload into one packet buffer.
+/// Write a fixed IPv6 header and payload into `buf` (sized to exactly
+/// `IPV6_HEADER_LEN + payload.len()`). The one definition of the IPv6
+/// header+payload assembly, shared by the pooled transmit path
+/// ([`Stack::pooled_ipv6_packet`]) and the allocating [`ipv6_packet`].
+fn write_ipv6_into(buf: &mut [u8], header: &Ipv6Header, payload: &[u8]) -> Option<()> {
+    header.write(buf, payload.len())?;
+    buf[IPV6_HEADER_LEN..].copy_from_slice(payload);
+    Some(())
+}
+
+/// Assemble a fixed IPv6 header and payload into one freshly allocated
+/// packet buffer (the control-plane path and the test helper; the
+/// data-plane transmit path uses [`Stack::pooled_ipv6_packet`]).
 fn ipv6_packet(header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
     let mut out = vec![0u8; IPV6_HEADER_LEN + payload.len()];
-    header.write(&mut out, payload.len())?;
-    out[IPV6_HEADER_LEN..].copy_from_slice(payload);
+    write_ipv6_into(&mut out, header, payload)?;
     Some(out)
 }
 
@@ -2793,6 +2944,76 @@ fn v4_source_ambiguous(source: Ipv4Addr) -> bool {
 fn mac_seed(mac: MacAddress) -> u64 {
     let o = mac.as_octets();
     u64::from_be_bytes([0, 0, o[0], o[1], o[2], o[3], o[4], o[5]])
+}
+
+/// Test-only ergonomic wrappers that drive the reusable-`StackOutput`
+/// engine entry points with a throwaway output and return it owned, so
+/// the large unit-test suite reads without per-call scaffolding. Not
+/// compiled into any shipping artefact; the production callers use the
+/// allocation-free `&mut StackOutput` entry points directly.
+#[cfg(test)]
+impl Stack {
+    pub(crate) fn on_frame_collect(&mut self, frame_bytes: &[u8], now: Duration64) -> StackOutput {
+        let mut out = StackOutput::default();
+        self.on_frame(frame_bytes, now, &mut out);
+        out
+    }
+
+    pub(crate) fn on_frame_meta_collect(
+        &mut self,
+        frame_bytes: &[u8],
+        rx: RxMeta,
+        now: Duration64,
+    ) -> StackOutput {
+        let mut out = StackOutput::default();
+        self.on_frame_meta(frame_bytes, rx, now, &mut out);
+        out
+    }
+
+    pub(crate) fn advance_collect(&mut self, now: Duration64) -> StackOutput {
+        let mut out = StackOutput::default();
+        self.advance(now, &mut out);
+        out
+    }
+
+    pub(crate) fn send_datagram_collect(
+        &mut self,
+        dest: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
+        let mut out = StackOutput::default();
+        self.send_datagram(dest, source_port, destination_port, payload, now, &mut out)?;
+        Ok(out)
+    }
+
+    pub(crate) fn send_echo_request_collect(
+        &mut self,
+        dest: IpAddr,
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
+        let mut out = StackOutput::default();
+        self.send_echo_request(dest, identifier, sequence, payload, now, &mut out)?;
+        Ok(out)
+    }
+
+    pub(crate) fn send_tcp_collect(
+        &mut self,
+        dest: IpAddr,
+        meta: &TcpSegmentMeta,
+        payload: &[u8],
+        gso_size: Option<u16>,
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
+        let mut out = StackOutput::default();
+        self.send_tcp(dest, meta, payload, gso_size, now, &mut out)?;
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

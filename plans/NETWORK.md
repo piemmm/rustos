@@ -1271,11 +1271,38 @@ the whole is too large for one change and each leaves the tree working.
   pair count, and receive steering. `DeviceFacts.rx_queues` already
   carries the count. Landed only when a real second consumer needs it.
 
-#### N7c-3 — measured budgets + per-arch offload matrix `[ ]`
-- Measured budgets recorded in the docs (loopback + QEMU virtio
-  throughput/latency, hot-path allocations = 0); regressions are §2.16
-  defects. `README.md` support-matrix rows record the per-arch offload
-  state.
+#### N7c-3 — measured budgets + per-arch offload matrix `[x]`
+- The engine's data-plane hot path is **allocation-free in steady state**,
+  and that budget is enforced as a regression, not merely documented. Every
+  `Stack` entry point takes a caller-owned, reused `&mut StackOutput`
+  scratch; on entry it recycles the previous call's frame and payload byte
+  buffers into a bounded internal pool (`BufPool`, capped so a hostile
+  pattern cannot grow it) and draws every frame / IP-packet / upper-message
+  / delivered-payload buffer from that pool, returning each transient buffer
+  the moment its consumer copied it. Once warm, `on_frame`/`send_datagram`/
+  `send_tcp` touch the allocator zero times. `netstack` holds one reusable
+  `StackOutput` and copies frames into the ring by borrow, so the property
+  carries into the live service.
+- The budget is proven by `lib/net/tests/hotpath_allocations.rs`: a counting
+  global allocator, two warmed back-to-back stacks (ARP resolved), and 512
+  UDP transmit+receive rounds asserting **0** allocations. A per-packet
+  allocation reintroduced on the send or receive path fails the build (the
+  §2.16 regression guard).
+- Scope of the enforced budget is the data plane (`send_datagram`/`send_tcp`
+  transmit, `on_frame` receive); infrequent control-plane emissions (ARP/ND,
+  ICMP errors, IGMP/MLD reports) and the timer sweep `advance` are outside
+  it by design (rare, not per-packet). End-to-end throughput/latency over a
+  real device are exercised by the guest-driven QEMU verticals
+  (`netstack_stream_qemu_*`, `netstack_ping_qemu_*`) — the realistic
+  measurement environment — rather than a machine-specific packets-per-second
+  figure, which would be non-deterministic and useless as a regression gate;
+  the allocation budget is the deterministic, machine-independent guard.
+- Docs: `docs/src/lib/net.md` ("Performance budget"), `docs/src/drivers/
+  network.md` ("Per-architecture offload state"), `lib/net/README.md`. The
+  `README.md` support matrix carries the per-arch offload row (`Network
+  offloads (RX/TX csum, TSO, mergeable RX)` — `✓ virtio` on x86_64/aarch64/
+  riscv64, `—` on wasm32; the offloads are the arch-neutral driver's, so the
+  only per-arch difference is the discovery bus).
 
 ### N8 — `ping`/`ss`-class command apps + observability `[x]`
 

@@ -181,7 +181,8 @@ fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Re
 
     while !stop.load(Ordering::Acquire) {
         // Timer-due engine output (DAD probes, NS retransmits).
-        let out = stack.advance(now(start));
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
         note_replies(&out, guest_v6, &mut reply_v6);
         send_frames(socket, qemu_sock, &out.frames);
 
@@ -205,7 +206,8 @@ fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Re
         // echo requests, the replies to ours).
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let out = stack.on_frame(&buf[..len], now(start));
+                let mut out = StackOutput::default();
+                stack.on_frame(&buf[..len], now(start), &mut out);
                 note_replies(&out, guest_v6, &mut reply_v6);
                 send_frames(socket, qemu_sock, &out.frames);
             }
@@ -262,7 +264,8 @@ fn run_ping_responder(
     while !stop.load(Ordering::Acquire) {
         // Timer-due engine output (the peer's own DAD probes, NS retransmits
         // for any neighbour resolution it initiated while replying).
-        let out = stack.advance(now(start));
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
         note_served(&out, &mut served);
         send_frames(socket, qemu_sock, &out.frames);
 
@@ -270,7 +273,8 @@ fn run_ping_responder(
         // link-local, and its echo requests (answered in the same output).
         match socket.recv(&mut buf) {
             Ok(len) => {
-                let out = stack.on_frame(&buf[..len], now(start));
+                let mut out = StackOutput::default();
+                stack.on_frame(&buf[..len], now(start), &mut out);
                 note_served(&out, &mut served);
                 send_frames(socket, qemu_sock, &out.frames);
             }
@@ -310,13 +314,18 @@ fn campaign_ping(
     sequence: u16,
     now: Duration64,
 ) {
-    if let Ok(out) = stack.send_echo_request(
-        dest,
-        wire::PEER_ECHO_ID,
-        sequence,
-        wire::PEER_ECHO_PAYLOAD,
-        now,
-    ) {
+    let mut out = StackOutput::default();
+    if stack
+        .send_echo_request(
+            dest,
+            wire::PEER_ECHO_ID,
+            sequence,
+            wire::PEER_ECHO_PAYLOAD,
+            now,
+            &mut out,
+        )
+        .is_ok()
+    {
         send_frames(socket, qemu_sock, &out.frames);
     }
 }
@@ -452,8 +461,7 @@ fn run_tcp_echo_peer(
 
     while !stop.load(Ordering::Acquire) {
         // Timer-due engine + connection output (DAD, ND retransmits, RTO).
-        let out = stack.advance(now(start));
-        send_frames(socket, qemu_sock, &out.frames);
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
         tcb.advance(now(start));
         drive_tcp_egress(
             &mut tcb,
@@ -621,8 +629,7 @@ fn run_tcp_connect_peer(
 
     while !stop.load(Ordering::Acquire) {
         // Timer-due engine + connection output (DAD, ND retransmits, RTO).
-        let out = stack.advance(now(start));
-        send_frames(socket, qemu_sock, &out.frames);
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
         tcb.advance(now(start));
 
         // Feed more of the deterministic stream into the send buffer once the
@@ -718,7 +725,8 @@ fn deliver_inbound_frame(
     qemu_sock: &PathBuf,
     now: Duration64,
 ) {
-    let out = stack.on_frame(frame, now);
+    let mut out = StackOutput::default();
+    stack.on_frame(frame, now, &mut out);
     send_frames(socket, qemu_sock, &out.frames);
     for event in &out.events {
         if let StackEvent::TcpSegment {
@@ -742,6 +750,15 @@ fn deliver_inbound_frame(
     }
 }
 
+/// Run the peer stack's due timers and transmit whatever they emit (DAD,
+/// ND retransmits, RTO) — the shared "flush engine output" step every
+/// peer loop begins with, so no loop repeats the reused-output dance.
+fn flush_engine(stack: &mut Stack, socket: &UnixDatagram, qemu_sock: &PathBuf, now: Duration64) {
+    let mut out = StackOutput::default();
+    stack.advance(now, &mut out);
+    send_frames(socket, qemu_sock, &out.frames);
+}
+
 /// Drain the echo connection's outbound segments, folding each through the
 /// peer stack toward the guest's link-local and transmitting the frames.
 fn drive_tcp_egress(
@@ -754,8 +771,9 @@ fn drive_tcp_egress(
 ) {
     let dest = IpAddr::V6(guest_v6);
     tcb.poll_transmit(now, |seg| {
-        match stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, now) {
-            Ok(out) => {
+        let mut out = StackOutput::default();
+        match stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, now, &mut out) {
+            Ok(()) => {
                 send_frames(socket, qemu_sock, &out.frames);
                 true
             }

@@ -18,7 +18,7 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
 use tairix_net::iface::MAX_IPV6_ADDRS;
-use tairix_net::stack::{Stack, StackConfig};
+use tairix_net::stack::{Stack, StackConfig, StackOutput};
 use tairix_net::{IpAddr, Ipv4Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -116,7 +116,8 @@ fn random_frames_never_panic_and_state_stays_bounded() {
                 }
             }
             let now = Duration64::from_secs(secs);
-            let out = stack.on_frame(&buf[..size], now);
+            let mut out = StackOutput::default();
+            stack.on_frame(&buf[..size], now, &mut out);
             for frame in &out.frames {
                 assert!(frame.bytes.len() <= ETHERNET_HEADER_LEN + 1500);
                 assert!(EthernetFrame::parse(&frame.bytes).is_some());
@@ -126,9 +127,9 @@ fn random_frames_never_panic_and_state_stays_bounded() {
             if iteration % 64 == 0 {
                 secs += 1;
                 let now = Duration64::from_secs(secs);
-                let _ = stack.advance(now);
+                stack.advance(now, &mut out);
                 let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 2, (rng.next_u64() & 0xFF) as u8));
-                let _ = stack.send_echo_request(dest, 1, 1, b"fuzz", now);
+                let _ = stack.send_echo_request(dest, 1, 1, b"fuzz", now, &mut out);
             }
             assert!(stack.counters().rx_frames > 0);
             assert!(stack.iface().ipv6_addresses().len() <= MAX_IPV6_ADDRS);

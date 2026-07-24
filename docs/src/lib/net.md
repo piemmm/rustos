@@ -518,9 +518,52 @@ software segments TCP-byte-for-byte. The ring descriptor
 (`FrameOffload::TxSegment`) and the `virtio_net` GSO header carry it to the
 device (`plans/NETWORK.md` N7b-2).
 
+## Performance budget: the allocation-free data-plane hot path
+
+The engine's receive and transmit fast paths allocate **nothing** on the
+heap in steady state — the charter's first-class performance rule for a hot
+path (§2.16), not an afterthought. This is a *budget*, enforced as a
+regression: a per-packet allocation reintroduced on the send or receive
+path fails the build.
+
+The mechanism is a reused output. Every engine entry point
+(`on_frame` / `on_frame_meta`, `send_datagram`, `send_echo_request`,
+`send_tcp`, `advance`) takes a caller-owned `&mut StackOutput` scratch
+rather than returning a freshly allocated one. On entry it recycles the
+previous call's frame and payload byte buffers into an internal bounded
+pool (`StackOutput::recycle_into`), then draws every buffer it needs — the
+Ethernet frame it emits, the IP packet and upper-layer message it builds,
+and the payload it delivers on a `StackEvent` — from that pool, returning
+each transient buffer the moment its consumer has copied it. Once the pool
+and the output vectors are warm, a receive or a transmit reuses that memory
+and touches the allocator zero times. The `netstack` service holds one such
+`StackOutput` and reuses it across every frame, so the property carries into
+the live service, not just the engine in isolation.
+
+`tests/hotpath_allocations.rs` proves it with a counting global allocator:
+it warms two back-to-back stacks (resolving ARP so transmits no longer
+park), then drives 512 UDP transmit + receive rounds through reused outputs
+and asserts the allocation count over that window is exactly zero. The
+budget covers the *data plane* — `send_datagram` / `send_tcp` transmit and
+`on_frame` receive. Infrequent control-plane emissions (ARP/ND, ICMP
+errors, IGMP/MLD reports) and the timer sweep `advance` (which gathers
+transient action vectors from its sub-components) are outside this
+steady-state budget by design: they are rare, not per-packet, and are not
+where throughput lives.
+
+Per-packet cost otherwise is linear in the frame length (one bounded copy
+per protocol layer, no per-call temporaries and no growth once warm) and
+independent of the number of connections, routes, or neighbours the stack
+holds (those are indexed structures, not scanned per packet). End-to-end
+throughput and latency over a real device are exercised by the guest-driven
+QEMU verticals (`netstack_stream_qemu_*`, `netstack_ping_qemu_*`), the
+realistic measurement environment; the allocation-free invariant above is
+the portion of the budget that is deterministic and therefore machine-
+independent, so it — not a machine-specific packets-per-second figure — is
+the enforced regression guard.
+
 ## What lands next
 
-The remaining `plans/NETWORK.md` increments evolve this crate in place:
-mergeable receive buffers, multiqueue receive, and the measured
-performance budgets (N7c). Each is added with its callers, tests, and fuzz
-harnesses per increment.
+The remaining `plans/NETWORK.md` increment evolves this crate in place:
+multiqueue receive (N7c-2, deferred until a device presents more than one
+receive queue). It is added with its callers, tests, and fuzz harnesses.

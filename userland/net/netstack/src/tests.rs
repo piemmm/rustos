@@ -23,7 +23,7 @@ use tairix_abi::{
 };
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_net::addr::{IpAddr, Ipv4Addr};
-use tairix_net::stack::{Stack, StackConfig, StackEvent, TxFrame};
+use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{Delivery, SocketService, MAX_SOCKETS_PER_PRINCIPAL};
@@ -115,7 +115,8 @@ impl Net for PeerNet {
     fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
         let mut report = ServiceReport::default();
         // The peer's own timers first (its DAD probes, solicitations).
-        let out = self.stack.advance(self.now);
+        let mut out = StackOutput::default();
+        self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
             if rings.rx.push(&frame.bytes).is_ok() {
                 report.received += 1;
@@ -126,7 +127,8 @@ impl Net for PeerNet {
             match rings.tx.pop(&mut self.scratch) {
                 Ok(Some(len)) => {
                     report.transmitted += 1;
-                    let out = self.stack.on_frame(&self.scratch[..len], self.now);
+                    self.stack
+                        .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
                         if rings.rx.push(&frame.bytes).is_ok() {
                             report.received += 1;
@@ -238,11 +240,19 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
 
     // Queue an echo request; it parks on ARP resolution, so the
     // queued frame is the ARP request the pump must round-trip.
-    let out = stack
+    let mut out = StackOutput::default();
+    stack
         .interface_mut(name("wan"))
         .expect("iface")
         .stack_mut()
-        .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"tairix-netstack", t(2))
+        .send_echo_request(
+            IpAddr::V4(V4_B),
+            0x77,
+            1,
+            b"tairix-netstack",
+            t(2),
+            &mut out,
+        )
         .expect("send echo");
     push_tx(&mut fs, &out.frames);
 
@@ -298,11 +308,12 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
     // Ping the peer's link-local address.
     fs.net_mut().now = t(3);
     let dest = link_local(IID_B);
-    let out = stack
+    let mut out = StackOutput::default();
+    stack
         .interface_mut(name("wan"))
         .expect("iface")
         .stack_mut()
-        .send_echo_request(IpAddr::V6(dest), 0x42, 7, b"ping6", t(3))
+        .send_echo_request(IpAddr::V6(dest), 0x42, 7, b"ping6", t(3), &mut out)
         .expect("send echo");
     push_tx(&mut fs, &out.frames);
     let mut events = Vec::new();
@@ -1850,7 +1861,11 @@ impl PeerTcpNet {
         } = self;
         let dest = IpAddr::V4(V4_A);
         tcb.poll_transmit(*now, |seg| {
-            if let Ok(out) = stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, *now) {
+            let mut out = StackOutput::default();
+            if stack
+                .send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, *now, &mut out)
+                .is_ok()
+            {
                 for frame in &out.frames {
                     if rings.rx.push(&frame.bytes).is_ok() {
                         report.received += 1;
@@ -1869,7 +1884,8 @@ impl Net for PeerTcpNet {
 
     fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
         let mut report = ServiceReport::default();
-        let out = self.stack.advance(self.now);
+        let mut out = StackOutput::default();
+        self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
             if rings.rx.push(&frame.bytes).is_ok() {
                 report.received += 1;
@@ -1880,7 +1896,8 @@ impl Net for PeerTcpNet {
             match rings.tx.pop(&mut self.scratch) {
                 Ok(Some(len)) => {
                     report.transmitted += 1;
-                    let out = self.stack.on_frame(&self.scratch[..len], self.now);
+                    self.stack
+                        .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
                         if rings.rx.push(&frame.bytes).is_ok() {
                             report.received += 1;

@@ -22,7 +22,9 @@ use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::internet_checksum;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
-use tairix_net::stack::{RxMeta, SendError, Stack, StackConfig, StackEvent, TxFrame, TxOffload};
+use tairix_net::stack::{
+    RxMeta, SendError, Stack, StackConfig, StackEvent, StackOutput, TxFrame, TxOffload,
+};
 use tairix_net::tcp::TcpSegmentMeta;
 
 use crate::channel::FrameService;
@@ -74,6 +76,11 @@ pub struct Netstack {
     /// Reusable RX pump scratch, sized lazily to the widest ring
     /// slot — allocated once, never per pumped frame (hot path).
     scratch: Vec<u8>,
+    /// Reusable engine output, passed to every [`Stack`] call so the
+    /// pump reuses one set of frame/event buffers across frames instead
+    /// of allocating a fresh output per call — the allocation-free hot
+    /// path the engine's [`StackOutput`] contract provides.
+    out: StackOutput,
 }
 
 impl Netstack {
@@ -312,13 +319,16 @@ impl Netstack {
         // Remember the most specific refusal so a genuine "too large"
         // (actionable) is surfaced rather than masked as "unreachable".
         let mut deferred: Option<Errno> = None;
-        for iface in &mut self.interfaces {
+        let Self {
+            interfaces, out, ..
+        } = self;
+        for iface in interfaces.iter_mut() {
             match iface
                 .stack
-                .send_datagram(dest, source_port, destination_port, payload, now)
+                .send_datagram(dest, source_port, destination_port, payload, now, out)
             {
-                Ok(out) => {
-                    batches.push((iface.name, out.frames));
+                Ok(()) => {
+                    batches.push((iface.name, core::mem::take(&mut out.frames)));
                     if !multicast {
                         // One link carries a unicast datagram; stop.
                         break;
@@ -360,12 +370,15 @@ impl Netstack {
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
         let mut deferred: Option<Errno> = None;
-        for iface in &mut self.interfaces {
+        let Self {
+            interfaces, out, ..
+        } = self;
+        for iface in interfaces.iter_mut() {
             match iface
                 .stack
-                .send_echo_request(dest, identifier, sequence, payload, now)
+                .send_echo_request(dest, identifier, sequence, payload, now, out)
             {
-                Ok(out) => return Ok(alloc::vec![(iface.name, out.frames)]),
+                Ok(()) => return Ok(alloc::vec![(iface.name, core::mem::take(&mut out.frames))]),
                 Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
                 Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
                 // No route / no source / link down on this interface: try
@@ -400,11 +413,14 @@ impl Netstack {
         now: Duration64,
     ) -> Result<Vec<TxFrame>, Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
-        match self.interfaces[index]
+        let Self {
+            interfaces, out, ..
+        } = self;
+        match interfaces[index]
             .stack
-            .send_tcp(dest, meta, payload, gso_size, now)
+            .send_tcp(dest, meta, payload, gso_size, now, out)
         {
-            Ok(out) => Ok(out.frames),
+            Ok(()) => Ok(core::mem::take(&mut out.frames)),
             Err(SendError::TooLarge) => Err(Errno::MessageTooLarge),
             Err(_) => Err(Errno::NetworkUnreachable),
         }
@@ -485,10 +501,16 @@ impl Netstack {
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
         let mut batches = FrameBatch::new();
-        for iface in &mut self.interfaces {
+        let Self {
+            interfaces, out, ..
+        } = self;
+        for iface in interfaces.iter_mut() {
             match iface.stack.join_multicast(group, now) {
                 // A fresh join emits a membership report to announce it.
-                Ok(true) => batches.push((iface.name, iface.stack.advance(now).frames)),
+                Ok(true) => {
+                    iface.stack.advance(now, out);
+                    batches.push((iface.name, core::mem::take(&mut out.frames)));
+                }
                 // Already a member (a prior reference): no new report.
                 Ok(false) => {}
                 Err(tairix_net::stack::McastError::NotMulticast) => return Err(Errno::OutOfRange),
@@ -505,9 +527,13 @@ impl Netstack {
     /// reference dropped) tagged by alias.
     pub fn leave_multicast_all(&mut self, group: IpAddr, now: Duration64) -> FrameBatch {
         let mut batches = FrameBatch::new();
-        for iface in &mut self.interfaces {
+        let Self {
+            interfaces, out, ..
+        } = self;
+        for iface in interfaces.iter_mut() {
             if iface.stack.leave_multicast(group, now) {
-                batches.push((iface.name, iface.stack.advance(now).frames));
+                iface.stack.advance(now, out);
+                batches.push((iface.name, core::mem::take(&mut out.frames)));
             }
         }
         batches
@@ -625,14 +651,15 @@ impl Netstack {
         let Self {
             interfaces,
             scratch,
+            out,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
 
         // Timer-due engine output first (retransmits, DAD probes, RS),
         // queued into the TX ring bound over the service's own region.
-        let out = iface.stack.advance(now);
-        events.extend(out.events);
+        iface.stack.advance(now, out);
+        events.append(&mut out.events);
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             queue_frames(&mut rings, &out.frames);
@@ -655,8 +682,8 @@ impl Netstack {
                         // redundant fold. A bogus offset fails closed to the
                         // software path (the engine then drops the frame).
                         let rx = resolve_rx_offload(offload, &mut scratch[..len]);
-                        let out = iface.stack.on_frame_meta(&scratch[..len], rx, now);
-                        events.extend(out.events);
+                        iface.stack.on_frame_meta(&scratch[..len], rx, now, out);
+                        events.append(&mut out.events);
                         replied |= !out.frames.is_empty();
                         queue_frames(&mut rings, &out.frames);
                     }

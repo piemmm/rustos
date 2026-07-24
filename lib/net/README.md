@@ -73,7 +73,13 @@ connection state machine, and the listener + SYN-cookie driver),
   identifier (RFC 7217 derivation is the service layer's job).
 - `stack` — the dual-stack host engine composing everything above:
   one `Stack` per interface takes frames and explicit `now` values and
-  returns frames plus typed events — ARP/ND answering and resolution
+  fills a caller-owned, **reused** `StackOutput` with frames plus typed
+  events. Reusing that output across calls makes the receive and transmit
+  data paths allocation-free in steady state — the engine recycles the
+  previous call's frame and payload buffers through a bounded pool rather
+  than freeing and reallocating them (a §2.16 budget the
+  `hotpath_allocations` test enforces; `docs/src/lib/net.md`). The engine
+  performs ARP/ND answering and resolution
   with a bounded pending queue, echo in/out, budgeted reassembly,
   rate-limited ICMP error generation, RA processing (SLAAC, default
   routers, on-link routes, MTU, timing adoption — all bounded),
@@ -155,11 +161,11 @@ connection state machine, and the listener + SYN-cookie driver),
   event-driven like the rest of the crate (`advance`/`next_deadline` drive
   half-open retransmit + expiry).
 
-Later increments evolve this crate in place: mergeable receive buffers
-and multiqueue receive (`plans/NETWORK.md` N7c). UDP transmit-checksum
-offload is deliberately not done — the virtio partial-checksum contract
-cannot honour UDP's `0x0000`→`0xFFFF` rule, so UDP stays on the software
-path (N7b-2).
+One increment remains and evolves this crate in place: multiqueue receive
+(`plans/NETWORK.md` N7c-2, deferred until a device presents more than one
+receive queue). UDP transmit-checksum offload is deliberately not done —
+the virtio partial-checksum contract cannot honour UDP's
+`0x0000`→`0xFFFF` rule, so UDP stays on the software path (N7b-2).
 
 ## Security
 

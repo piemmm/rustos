@@ -193,6 +193,25 @@ out-of-bounds access) and the driver keeps flowing. Buffers are re-posted
 to the device once their frame is delivered, and scrubbed first when the
 ring class is sensitive (`plans/NETWORK.md` N7c).
 
+### Per-architecture offload state
+
+The offload set above is a property of the arch-neutral `virtio_net`
+driver and the `lib/net` engine, not of any one target: the same four
+negotiated offloads (receive checksum, TCP transmit checksum, TCP
+segmentation, mergeable receive buffers) are available identically on
+`x86_64`, `aarch64`, and `riscv64` — the only per-arch difference is the
+bus the device is discovered over (virtio-PCI vs. virtio-MMIO), which does
+not change the offload contract. `wasm32` has no network device. The
+README support matrix records this as one "Network offloads" row
+(`✓ virtio` on the three device-bearing targets, `—` on `wasm32`). Each
+offload is negotiated only when the device offers it and is never
+load-bearing for correctness — the `lib/net` software path is the
+byte-for-byte oracle for every one. The engine's data-plane receive and
+transmit paths additionally allocate nothing on the heap in steady state
+(a reused output recycles buffers through a bounded pool), a §2.16
+performance budget enforced by the `lib/net` `hotpath_allocations`
+regression test (`plans/NETWORK.md` N7c-3).
+
 The netstack QEMU verticals
 (`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)
 drive a live emulated device end to end across the **two-process**
