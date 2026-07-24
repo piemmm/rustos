@@ -105,3 +105,70 @@ pub const TERMINAL_COMMAND: &str = "true\n";
 /// the typed command: keyboard → session → terminal → pipe → shell →
 /// `spawn`, every hop kernel-attested.
 pub const TERMINAL_ROUND_TRIP_DELIVERIES: u32 = 16;
+
+// --- FM9-a: the file-manager New-Folder + inline-rename stage
+// (`plans/NEW-FILEMANAGER.md` FM9-a), appended after the AW4 terminal
+// round trip. The same window-event delivery counter is the sequencing
+// clock: after the terminal command's five keys (both edges) the counter
+// stands at [`FM9_TYPING_DONE_DELIVERIES`], and each appended input action
+// advances it deterministically (a focus-changing click delivers three
+// events — the old window's unfocus, the new window's focus, and the
+// press — a click on the already-focused window delivers one press, and a
+// typed key delivers both of its edges). The guest applies the injected
+// events strictly in order, so these counts are exact, not racy.
+
+/// The delivery counter once the terminal command has been fully typed:
+/// [`TERMINAL_TYPE_DELIVERIES`] (7) plus both edges of the five
+/// [`TERMINAL_COMMAND`] keys (`t r u e` + Enter = 10) — the base the
+/// file-manager stage's gates are measured from.
+pub const FM9_TYPING_DONE_DELIVERIES: u32 = 17;
+
+/// Gate for the click that refocuses the files window **and** selects the
+/// **`Users`** row in one action — the first file-manager click, fired once
+/// the terminal command is fully typed. It lands on the `Users` row at a
+/// left-biased column that is clear of the overlapping (raised) terminal
+/// window, so the desktop routes it to the still-background files window:
+/// it raises files to the front, and delivers three events (terminal
+/// unfocus, files focus, files press) — the press selecting the row. Every
+/// later file-manager click lands on the now-frontmost files window.
+pub const FM9_USERS_CLICK_DELIVERIES: u32 = FM9_TYPING_DONE_DELIVERIES;
+
+/// Gate for the first **`Enter`** (descend into `/Users`): after the
+/// `Users`-row click's three deliveries. `Enter` delivers both its edges;
+/// the press activates the selected directory.
+pub const FM9_DESCEND_USERS_DELIVERIES: u32 = FM9_USERS_CLICK_DELIVERIES + 3;
+
+/// Gate for the click that selects the **`root`** row in `/Users`: after
+/// the first `Enter`'s two edge deliveries.
+pub const FM9_ROOT_CLICK_DELIVERIES: u32 = FM9_DESCEND_USERS_DELIVERIES + 2;
+
+/// Gate for the second **`Enter`** (descend into `/Users/root`): after the
+/// `root`-row click's one delivery.
+pub const FM9_DESCEND_ROOT_DELIVERIES: u32 = FM9_ROOT_CLICK_DELIVERIES + 1;
+
+/// Gate for the **New Folder** toolbar click: after the second `Enter`'s
+/// two edge deliveries. The click creates `New Folder` in `/Users/root`
+/// (`fs_mkdir`) and opens the inline rename on it.
+pub const FM9_NEW_FOLDER_DELIVERIES: u32 = FM9_DESCEND_ROOT_DELIVERIES + 2;
+
+/// Gate for typing the rename **suffix + Enter**: after the New Folder
+/// click's one delivery. The inline editor is pre-filled with the
+/// placeholder name and focused with the caret at the end, so the typed
+/// characters append to make a distinct name, and `Enter` commits it
+/// (`fs_rename`).
+pub const FM9_RENAME_DELIVERIES: u32 = FM9_NEW_FOLDER_DELIVERIES + 1;
+
+/// The text the runner appends to the placeholder folder name before
+/// committing the rename: printable letters plus the committing `Enter`.
+/// It must be non-empty so the committed name differs from the placeholder
+/// (a rename to the same name is a no-op that performs no `fs_rename` and
+/// emits no audit record), and every character must be seat-keyboard
+/// typable (lowercase letters qualify).
+pub const FM9_RENAME_SUFFIX: &str = "x\n";
+
+/// Gate for the file-manager "named folder" screendump: after the rename
+/// suffix + Enter has been fully typed. [`FM9_RENAME_SUFFIX`] is two keys
+/// (`x` then Enter), each delivering both edges, so the counter advances by
+/// four from [`FM9_RENAME_DELIVERIES`]. By then the inline editor has
+/// committed and closed and the named folder is on screen.
+pub const FM9_FOLDER_DUMP_DELIVERIES: u32 = FM9_RENAME_DELIVERIES + 4;

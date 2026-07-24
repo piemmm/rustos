@@ -209,6 +209,23 @@ impl Toolbar {
         rects.iter().position(|r| r.contains(point))
     }
 
+    /// The surface [`Rect`] tool `index` occupies for the given bounds, or
+    /// `None` when `index` is out of range (fail closed). The forward mirror
+    /// of [`tool_at`](Self::tool_at) over the one shared layout, so a caller
+    /// that must aim *at* a tool (a test that clicks it) reads the same
+    /// geometry paint and hit-test use, never a hand-copied position.
+    #[must_use]
+    pub fn tool_rect(
+        &self,
+        index: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let (rects, _) = self.layout(bounds, scale, theme);
+        rects.get(index).copied()
+    }
+
     /// Paint the toolbar into `surface` at `bounds` for the active theme.
     pub fn render(
         &self,

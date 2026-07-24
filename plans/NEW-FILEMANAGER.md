@@ -71,12 +71,20 @@ the signed `AppInfo` MIME associations that resolve the viewer), and
 for a regular file; the drawn `render::build_open_with_menu` chooser offers the
 full `applications_for` result and launches the picked bundle through the same
 `DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
-**FM6b is now complete. FM9 is in progress: its prerequisite audit gates
-(FM9-pre — the `FsNodeMutated`/`FsMutationDenied` filesystem-mutation audit
-events every write syscall now emits, the robust serial witnesses the vertical
-keys on and a §5.4/§19.4 requirement in their own right) are landed; the
-autoload QEMU click-through vertical (which also needs a writable fixture
-volume) and its docs remain.** The starting point is
+**FM6b is now complete. FM9 is in progress: FM9-pre (the `FsNodeMutated`/
+`FsMutationDenied` filesystem-mutation audit events every write syscall emits,
+the robust serial witnesses the vertical keys on and a §5.4/§19.4 requirement
+in their own right) and FM9-a are landed.** FM9-a appends the New-Folder +
+inline-rename click-through to the aarch64 `autoload_input` QEMU vertical after
+the AW4 terminal round trip: it descends into `/Users/root` by
+layout-reconstructed pointer clicks (`render::selection_rect` for rows, the new
+forward `render::manager_tool_rect` over the new `Toolbar::tool_rect` for the
+New Folder tool, offset by the WM's `WindowFrame::insets` client inset) and
+seat-keyboard `Enter`s, creates+names a folder, and the guest PASS latches two
+new `FsNodeMutated` `op=mkdir`→`op=rename` witnesses (post-terminal-round-trip,
+fail-closed) plus a "named folder" screendump. **What remains is FM9-b (open a
+file via CU6) and FM9-c (delete with confirm), each appended after FM9-a with
+its own kernel-attested PASS witness, plus its docs.** The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -1085,7 +1093,7 @@ and `draw_owner_control` painting the affordances and the active editor without
 panicking on a degenerate viewport). Docs: `docs/src/desktop/apps.md`,
 `lib/browse` README + rustdoc.
 
-### FM9 — the autoload QEMU vertical + docs `[ ]`
+### FM9 — the autoload QEMU vertical + docs (FM9-a done)
 
 FM9 is split (§2.19) so the vertical's robust, non-fragile gates exist before
 the click-through that keys on them is written.
@@ -1108,18 +1116,61 @@ the click-through that keys on them is written.
   logged. Host-tested in `kernel/core` (`fs_audit_tests`: allow+deny id/level/
   fields per op, path-bounding incl. multibyte boundary + always-emitted, octal
   mode). Docs: `docs/src/architecture/kernel.md` audit catalogue.
-- **FM9 — extend the desktop autoload vertical** (the AW3/AW5 interaction
-  contract) with a file-manager stage: start menu → Files → click a
-  folder icon (descend) → New Folder → inline-rename → open a file into
-  the viewer via CU6 delegation → delete with confirm — each step gated
-  on kernel-attested serial records (window replies, `fd_grant`/
-  `fd_redeem` audit ids, the FM9-pre `FsNodeMutated` records matched by
-  `op`), never a faked screendump (§2.1). The autoload fixture's `/System`
-  volume is read-only, so this increment must first give the fixture a
-  **writable** volume for the manager to act on. Every delivery count /
-  reply index / cascade slot the new steps shift is re-derived in the
-  contract's lib target, landed as its own increment (the AW5 "remaining"
-  discipline).
+- **The manager already has a writable place to act — no extra fixture
+  volume is needed (corrected §2.3).** An earlier draft of FM9 said the
+  autoload fixture "must first give the fixture a **writable** volume
+  because `/System` is read-only". That prerequisite is redundant and was
+  dropped: the autoload vertical boots the production path, which on a
+  successful unlock publishes the encrypted `ARXFSRoot` partition
+  **read-write** as `/` and its writable sub-mounts (`/Users`, `/Storage`,
+  `/System/Logs`, `/System/Settings`) — see
+  `tairix_kernel::unlock_orchestrate::WritableStateSink` /
+  `system_mount::register_writable_state`. The shared users-root fixture
+  already carries `/Users/root/`, owned by the logged-in account
+  (`tairix_users::FIRST_USER_UID`/`FIRST_USER_GID`, mode `0700`;
+  `tairix_test_arxfs_image::build_users_root_image_with_key`), and the
+  desktop session (and the files bundle it spawns) run as that account.
+  So the manager can create/rename/delete under `/Users/root` with the
+  authority it already holds. Adding a fourth writable partition would
+  duplicate an already-writable tree (§2.3) and is forbidden; FM9 acts on
+  `/Users/root`.
+
+- **FM9 is split (§2.19) into three mutation increments**, each a complete,
+  fully-gated landing appended **after** the AW4 terminal round trip (so the
+  existing delivery counts 2/4/7/16 do not shift; each new stage adds its own
+  kernel-attested PASS witness rather than re-deriving the terminal gates):
+  - **FM9-a — New Folder + inline-rename `[x]` (done).** The aarch64
+    `autoload_input` vertical, after the AW4 terminal round trip, drives the
+    served files window to create and name a folder in `/Users/root` by
+    coordinate-computed pointer clicks (the seat-keyboard injection
+    `tairix_qemu::qkeycode_for` covers only printable ASCII + `ret`/`tab`/
+    `spc`, no arrows). Every click point is reconstructed from the browser's
+    own layout code — `render::selection_rect` for rows, the new forward
+    `render::manager_tool_rect` (over the new `Toolbar::tool_rect`) for the
+    New Folder tool — over a `Browser::open_root` on a fake `DirectorySource`,
+    so it obeys the same default sort (directories first, name ascending:
+    `Apps`, `Storage`, `System`, `Users`) and resolves each row by name; the
+    points are offset by the WM's client inset (`WindowFrame::insets`) so a
+    click lands on the client, not the server-side title bar/border. The
+    first click hits the `Users` row at a left-biased column clear of the
+    (raised, large) terminal window — raising+focusing files — then a seat
+    `Enter` descends; a `root`-row click + `Enter` descends into
+    `/Users/root`; the New Folder tool click makes `New Folder` (`fs_mkdir`)
+    and opens the inline rename; a typed suffix + `Enter` commits a distinct
+    name (`fs_rename`). Sequencing is the window-event (`MessageDelivered`)
+    delivery counter (a focus-changing click = 3, a same-window press = 1, a
+    typed key = 2 edges), so pointer and seat-keyboard cursors interleave
+    deterministically; the contract counts live in the vertical's `src/lib.rs`
+    (`FM9_*`). Two new guest PASS witnesses latch from the FM9-pre
+    `FsNodeMutated` (id 4100) `op=mkdir` then `op=rename` serial lines,
+    counted only after the terminal round trip so no boot/login mutation can
+    satisfy them (fail closed — `FsMutationDenied` is id 4101 and never
+    latches), plus a "named folder" screendump asserting the files window is
+    composited at its slot.
+  - **FM9-b — open a file into the viewer via CU6 delegation**, gated on the
+    `fd_grant`/`fd_redeem` audit ids (reuses AW5).
+  - **FM9-c — delete with confirm**, gated on the `FsNodeMutated` `op=unlink`
+    /`op=rmdir` records.
 - **Docs** kept current in the same changes (§2.8, §13):
   `docs/src/desktop/apps.md` (the manager's design as each stage lands),
   the `lib/browse`/`lib/icon`/`lib/controls` rustdoc + `README.md`

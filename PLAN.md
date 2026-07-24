@@ -3373,8 +3373,18 @@ transfer, landed in increments:
   `open_with_index_at` draw the full `applications_for` candidate list and
   launch the picked bundle through the same `DOCUMENT_ROLE_ARG`+`STDIN`
   hand-off (the default open picks the first association; the chooser lets the
-  user pick any). **FM6b is complete; the remaining work is FM9** (the autoload
-  QEMU vertical + docs).
+  user pick any). **FM6b is complete, and FM9's first vertical increment
+  FM9-a is landed**: the aarch64 `autoload_input` QEMU vertical now appends,
+  after the AW4 terminal round trip, a New-Folder + inline-rename click-through
+  that descends into `/Users/root` by layout-reconstructed pointer clicks
+  (`render::selection_rect` for rows, the new forward `render::manager_tool_rect`
+  over the new `Toolbar::tool_rect` for the New Folder tool, offset by the WM's
+  `WindowFrame::insets` client inset) and seat-keyboard `Enter`s, creating and
+  naming a folder; the guest PASS gate latches two new `FsNodeMutated`
+  `op=mkdir`→`op=rename` witnesses (counted only after the terminal round trip,
+  fail-closed) plus a "named folder" screendump. **The remaining work is FM9-b**
+  (open a file into the viewer via CU6 delegation) **and FM9-c** (delete with
+  confirm).
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

@@ -3958,6 +3958,37 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
 }
 
 #[test]
+fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
+    use crate::chrome::{ManagerTool, MANAGER_TOOLS};
+    use crate::render::{manager_tool_at, manager_tool_rect};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 200);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+
+    // The New Folder tool has a rect, and that rect's centre hit-tests back
+    // to exactly the New Folder tool — paint, hit-test, and aim geometry are
+    // one definition.
+    let rect = manager_tool_rect(&browser, &theme, vp, MANAGER_TOOLS, ManagerTool::NewFolder)
+        .expect("the New Folder tool is laid out");
+    let centre = Point::new(
+        rect.left() + i32::try_from(rect.width).unwrap() / 2,
+        rect.top() + i32::try_from(rect.height).unwrap() / 2,
+    );
+    assert_eq!(
+        manager_tool_at(&browser, &theme, vp, centre, MANAGER_TOOLS),
+        Some(ManagerTool::NewFolder),
+    );
+
+    // The read-only picker (no write tools) never lays a write tool out.
+    assert_eq!(
+        manager_tool_rect(&browser, &theme, vp, &[], ManagerTool::NewFolder),
+        None,
+    );
+}
+
+#[test]
 fn suggest_new_dir_name_disambiguates_against_the_listing() {
     use crate::mkdir::{suggest_new_dir_name, NEW_FOLDER_BASE};
 

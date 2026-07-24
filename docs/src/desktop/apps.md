@@ -703,6 +703,23 @@ picker does not), reachable by clicking the toolbar tool or pressing
 `mkdir::suggest_new_dir_name`, creates it through `Browser::create_directory`,
 and opens the inline rename on the new folder so the user names it at once.
 
+The whole New-Folder + inline-rename flow is proven end to end on the
+production desktop by the autoload QEMU vertical
+(`plans/NEW-FILEMANAGER.md` FM9-a, appended after the AW4 terminal round
+trip): the runner refocuses the served files window, descends into
+`/Users/root` by coordinate-computed pointer clicks — reconstructing the
+browser's own row layout through `render::selection_rect` over the real
+listings and the New Folder tool through `render::manager_tool_rect`, the same
+layout code the guest paints with, offset by the window manager's client inset
+(`WindowFrame::insets`) so a click lands on the client, not the decoration
+(`AGENTS.md` §2.2) — and seat-keyboard `Enter`s, clicks the New Folder tool,
+and types a distinct name. The guest's PASS gate latches on the kernel's own
+`FsNodeMutated` audit records — `op=mkdir` then `op=rename`, observed after the
+terminal round trip so no boot- or login-time directory creation can satisfy
+them — so the mkdir and the rename are kernel-attested, under the logged-in
+user's own identity, and a refused mutation (`FsMutationDenied`) can never
+count (fail closed).
+
 ### The properties model
 
 The Properties panel (`plans/NEW-FILEMANAGER.md` FM8) shows one selected node's

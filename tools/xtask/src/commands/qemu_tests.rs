@@ -368,6 +368,38 @@ const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
 /// round-trip witness.
 const AUTOLOAD_TERMINAL_COMMAND: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
 
+// --- FM9-a file-manager stage gates (`plans/NEW-FILEMANAGER.md` FM9-a):
+// the window-event delivery counts at which each appended click / typed
+// step fires, aliased from the shared contract so the script and the guest
+// PASS gate can never drift.
+
+/// Gate for the click that refocuses files and selects the `Users` row.
+const FM9_USERS_CLICK: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_USERS_CLICK_DELIVERIES;
+
+/// Gate for the first descend `Enter` (into `/Users`), typed at the seat keyboard.
+const FM9_DESCEND_USERS: u32 =
+    tairix_test_autoload_input_qemu_aarch64::FM9_DESCEND_USERS_DELIVERIES;
+
+/// Gate for the click selecting the `root` row.
+const FM9_ROOT_CLICK: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_ROOT_CLICK_DELIVERIES;
+
+/// Gate for the second descend `Enter` (into `/Users/root`), typed at the seat keyboard.
+const FM9_DESCEND_ROOT: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_DESCEND_ROOT_DELIVERIES;
+
+/// Gate for the New Folder toolbar click.
+const FM9_NEW_FOLDER: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_NEW_FOLDER_DELIVERIES;
+
+/// Gate for typing the rename suffix + Enter at the seat keyboard.
+const FM9_RENAME: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_RENAME_DELIVERIES;
+
+/// The rename suffix + committing Enter the vertical appends to the
+/// placeholder folder name (so the committed name differs and `fs_rename`
+/// runs) — the shared contract.
+const FM9_RENAME_SUFFIX: &str = tairix_test_autoload_input_qemu_aarch64::FM9_RENAME_SUFFIX;
+
+/// Gate for the "named folder" screendump: after the rename suffix is typed.
+const FM9_FOLDER_DUMP: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_FOLDER_DUMP_DELIVERIES;
+
 /// Serial marker after which the autoload vertical types the login +
 /// desktop-command dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
@@ -4249,16 +4281,17 @@ const TESTS: &[QemuTest] = &[
     // Every click coordinate is computed from the production shell's own
     // layout code (`autoload_desktop_pointer_script`), and the pin move
     // also delivers the `kind=pointer` witness, so the pointer decode path
-    // stays separately proven. A 240-second budget covers the boot +
+    // stays separately proven. A 300-second budget covers the boot +
     // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
     // ~1 s login typing + session bring-up + the paced click script +
-    // both app spawns + the typed command on QEMU TCG.
+    // both app spawns + the typed command + the FM9-a file-manager
+    // New-Folder + inline-rename click-through on QEMU TCG.
     QemuTest {
         package: "tairix-test-autoload-input-qemu-aarch64",
         binary: "tairix-test-autoload-input-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(240),
+        timeout: Duration::from_secs(300),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
         ramfb: true,
@@ -4280,6 +4313,15 @@ const TESTS: &[QemuTest] = &[
                 AUTOLOAD_TERMINAL_TYPE_OCCURRENCES,
                 AUTOLOAD_TERMINAL_COMMAND,
             ),
+            // The FM9-a file-manager stage's seat-keyboard steps, interleaved
+            // between the pointer clicks by their delivery-count gates: the
+            // two descend `Enter`s (into `/Users`, then `/Users/root`) after
+            // the `Users`/`root` row clicks, then the rename suffix + Enter
+            // after the New Folder click commits the placeholder folder. Each
+            // `\n` is `Enter`; the guest applies the injected keys in order.
+            (AUTOLOAD_WINDOW_EVENT_MARKER, FM9_DESCEND_USERS, "\n"),
+            (AUTOLOAD_WINDOW_EVENT_MARKER, FM9_DESCEND_ROOT, "\n"),
+            (AUTOLOAD_WINDOW_EVENT_MARKER, FM9_RENAME, FM9_RENAME_SUFFIX),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -4299,6 +4341,18 @@ const TESTS: &[QemuTest] = &[
                 occurrences: AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
                 suffix: "light",
                 assert: assert_files_window_light_screendump,
+            },
+            // FM9-a: the composited files window after it created and named a
+            // folder in `/Users/root`. The window is raised to the front (by
+            // the file-manager clicks) over the terminal, so by now windows
+            // cover most of the desktop; the assertion checks only that the
+            // files window's own region is composited, not that the desktop
+            // dominates the frame.
+            ScreendumpPlan {
+                marker: AUTOLOAD_WINDOW_EVENT_MARKER,
+                occurrences: FM9_FOLDER_DUMP,
+                suffix: "folder",
+                assert: assert_files_folder_screendump,
             },
         ],
         pointer_script: Some(autoload_desktop_pointer_script),
@@ -5386,6 +5440,20 @@ fn assert_files_window_light_screendump(t: &QemuTest, path: &Path) -> Result<(),
     assert_files_window_screendump(t, path, &tairix_theme::Theme::light())
 }
 
+/// [`ScreendumpPlan`] assertion for the FM9-a "named folder" dump: the files
+/// window, raised to the front after it created and named a folder in
+/// `/Users/root`, still occupies its cascade slot. Unlike the earlier window
+/// dumps this does **not** require the desktop colour to dominate the whole
+/// frame: by this stage the raised files window and the (large) terminal
+/// window cover most of the desktop, so the frame is dominated by window
+/// content, not the desktop. It asserts only that the files window's own
+/// region is composited — overwhelmingly *not* the (light) desktop colour —
+/// which is exactly the "the window is still there" evidence the dump adds on
+/// top of the kernel-attested `fs_mkdir`/`fs_rename` witnesses.
+fn assert_files_folder_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    assert_files_window_region_covered(t, path, &tairix_theme::Theme::light())
+}
+
 /// The served files window is on the desktop rendered with `theme`. The
 /// theme's desktop colour still dominates the frame (the window is far
 /// smaller than the screen), and the region where the session places the
@@ -5398,6 +5466,21 @@ fn assert_files_window_screendump(
     path: &Path,
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
+    assert_desktop_screendump(t, path, theme)?;
+    assert_files_window_region_covered(t, path, theme)
+}
+
+/// The files window's own region at the first cascade slot is composited: the
+/// inset window body is overwhelmingly *not* `theme`'s desktop colour, so a
+/// window frame covers it. Shared by [`assert_files_window_screendump`] (which
+/// additionally requires the desktop to dominate the whole frame) and the
+/// FM9-a [`assert_files_folder_screendump`] (which does not, because raised
+/// windows cover the desktop by then).
+fn assert_files_window_region_covered(
+    t: &QemuTest,
+    path: &Path,
+    theme: &tairix_theme::Theme,
+) -> Result<(), String> {
     // Inside the window body — inset from every edge — effectively every
     // pixel belongs to the window's frame; a sliver of tolerance covers
     // the cursor and anti-aliasing if they straddle the inset boundary.
@@ -5405,7 +5488,6 @@ fn assert_files_window_screendump(
     /// Pixels shaved off each window edge: clear of the rounded-corner
     /// radius and any chrome the compositor draws at the boundary.
     const INSET_PX: u32 = 16;
-    assert_desktop_screendump(t, path, theme)?;
     let image = read_screendump(t, path)?;
     let desktop = theme.palette().desktop;
     let background = (desktop.r, desktop.g, desktop.b);
@@ -5447,6 +5529,25 @@ fn assert_files_window_screendump(
         ));
     }
     Ok(())
+}
+
+/// A [`tairix_browse::DirectorySource`] that returns one fixed listing for
+/// every path queried. The FM9-a file-manager click-through builds a
+/// throwaway [`tairix_browse::Browser`] over a known directory's listing to
+/// reconstruct the browser's own row geometry (via
+/// [`tairix_browse::render::selection_rect`]) and toolbar geometry — the same
+/// layout code the guest renders with — so a navigation click lands on
+/// exactly the row/tool the guest draws, never a hand-copied coordinate
+/// (`AGENTS.md` §2.2).
+struct FixedListing(Vec<tairix_browse::Entry>);
+
+impl tairix_browse::DirectorySource for FixedListing {
+    fn list(
+        &mut self,
+        _components: &[String],
+    ) -> Result<Vec<tairix_browse::Entry>, tairix_abi::Errno> {
+        Ok(self.0.clone())
+    }
 }
 
 /// Build the AW3+AW4 desktop click script: pin the pointer to the
@@ -5575,6 +5676,121 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         "terminal window",
     )?;
 
+    // --- FM9-a: the file-manager New-Folder + inline-rename stage's click
+    // points. Every one is computed from the browser's own layout code — the
+    // same `render` module the guest paints with — over the known listing of
+    // each directory the click-through visits, so a click lands on exactly
+    // the row/tool the guest draws (`plans/NEW-FILEMANAGER.md` FM9-a,
+    // `AGENTS.md` §2.2). The files app renders with its own (default) theme
+    // and UI font; the geometry is theme-independent, so the shell's active
+    // theme supplies the identical metrics.
+    let files_theme = shell.session().active_theme();
+    let files_font =
+        tairix_font::BitmapFont::with_pixel_height(u32::from(files_theme.fonts().ui.size_px));
+    let files_vp = Rect::new(0, 0, tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT);
+    // The window manager decorates the served window with server-side
+    // furniture (a title bar + borders), so the client content the browser
+    // paints is inset from the window's outer (cascade) origin by
+    // `WindowFrame::insets` — the one definition the compositor decorates with.
+    // A file-manager click must land in the *client*, so every reconstructed
+    // window-local point is offset by this inset; the outer origin is where the
+    // frame sits, the client origin is where the browser draws.
+    let frame_insets =
+        tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState::default())
+            .insets(Scale::ONE, files_theme);
+    #[allow(clippy::cast_possible_wrap)] // Furniture insets are a few pixels.
+    let files_client_origin = Point::new(
+        files_origin.x + frame_insets.left as i32,
+        files_origin.y + frame_insets.top as i32,
+    );
+    // The screen point of the item-view row at `index` when `listing` is
+    // shown: build a throwaway browser over that listing, select the row, and
+    // measure its rect through the shared `selection_rect`, then offset by the
+    // files window's cascade origin. Only the row's index affects its rect in
+    // the default list view (full-width rows), so the listing need only place
+    // the target entry at the right index. The point is **left-biased** — a
+    // few pixels in from the row's left edge, not its centre — so the first
+    // file-manager click, which must land on the still-background files window
+    // to raise it, sits in the narrow strip left of the cascaded (raised)
+    // terminal window rather than under it. Full-width rows make any x within
+    // the row select the same entry, so later clicks are unaffected.
+    let files_row_point =
+        |listing: Vec<tairix_browse::Entry>, name: &str, what: &str| -> Result<Point, String> {
+            // Build the browser exactly as the app does: `open_root` applies the
+            // default sort (directories first, name ascending), so the entry's
+            // row index after the sort — found by name — matches the guest's,
+            // whatever order the listing was supplied in (`AGENTS.md` §2.2).
+            let mut browser = tairix_browse::Browser::open_root(FixedListing(listing))
+                .map_err(|e| format!("desktop pointer script: build {what} browser: {e:?}"))?;
+            let index = browser
+                .entries()
+                .iter()
+                .position(|entry| entry.name() == name)
+                .ok_or_else(|| format!("desktop pointer script: {what} entry {name:?} absent"))?;
+            browser
+                .select(index)
+                .map_err(|e| format!("desktop pointer script: select {what}: {e:?}"))?;
+            let rect =
+                tairix_browse::render::selection_rect(&browser, files_font, files_theme, files_vp)
+                    .ok_or_else(|| format!("desktop pointer script: {what} row has no rect"))?;
+            if rect.is_empty() {
+                return Err(format!(
+                    "desktop pointer script: {what} row region is empty"
+                ));
+            }
+            // A small left inset (one glyph advance) keeps the point inside the
+            // row but well left of centre; the row spans the full window width,
+            // so this still resolves to the same entry.
+            #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+            let x = rect.left() + files_font.advance().min(rect.width) as i32 / 2;
+            #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+            let y = rect.top() + (rect.height / 2) as i32;
+            Ok(Point::new(
+                files_client_origin.x + x,
+                files_client_origin.y + y,
+            ))
+        };
+    // The root view lists the four storage aliases (`System`, `Users`,
+    // `Apps`, `Storage`); the browser's default sort (directories first, name
+    // ascending) orders them `Apps`, `Storage`, `System`, `Users`, so `Users`
+    // is the fourth row. The reconstruction supplies all four and selects
+    // `Users` by name after the same sort, so its row matches the guest's.
+    let users_click = files_row_point(
+        vec![
+            tairix_browse::Entry::directory("System"),
+            tairix_browse::Entry::directory("Users"),
+            tairix_browse::Entry::directory("Apps"),
+            tairix_browse::Entry::directory("Storage"),
+        ],
+        "Users",
+        "Users row",
+    )?;
+    // `/Users` lists the single account directory `root`.
+    let root_click = files_row_point(
+        vec![tairix_browse::Entry::directory("root")],
+        "root",
+        "root row",
+    )?;
+    // The New Folder write tool sits in the toolbar strip after the read-only
+    // commands; its rect is independent of the (here empty) `/Users/root`
+    // listing, measured through the same `manager_tool_rect` the app clicks.
+    let new_folder_click = {
+        let browser = tairix_browse::Browser::open_root(FixedListing(Vec::new()))
+            .map_err(|e| format!("desktop pointer script: build New Folder browser: {e:?}"))?;
+        let rect = tairix_browse::render::manager_tool_rect(
+            &browser,
+            files_theme,
+            files_vp,
+            tairix_browse::MANAGER_TOOLS,
+            tairix_browse::ManagerTool::NewFolder,
+        )
+        .ok_or_else(|| "desktop pointer script: New Folder tool has no rect".to_string())?;
+        let local = centre(rect, "New Folder tool")?;
+        Point::new(
+            files_client_origin.x + local.x,
+            files_client_origin.y + local.y,
+        )
+    };
     // The reserved window endpoint's first reply on serial: the create
     // round-trip completed, so the served window exists in the compositor
     // (and the wake that created it presented the frame carrying it).
@@ -5761,6 +5977,50 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
             release,
         ),
+        // --- The FM9-a file-manager stage (`plans/NEW-FILEMANAGER.md`
+        // FM9-a). Gated on the window-event delivery counter, which stands at
+        // `FM9_TYPING_DONE_DELIVERIES` once the terminal command is typed and
+        // advances deterministically as the guest applies each injected event
+        // in order (the first click changes focus = 3 deliveries, a later
+        // same-window press = 1, and each seat-keyboard `Enter` — typed
+        // between these clicks by the enrolment's `typed_keys` — = 2). The two
+        // descend `Enter`s are seat-keyboard steps, so the pointer script
+        // holds only the three clicks; their gates sit past each preceding
+        // `Enter`'s deliveries so the pointer and keyboard cursors interleave
+        // in order.
+        //
+        // First click: the `Users` row at a left-biased column clear of the
+        // raised terminal window, so the desktop routes it to the background
+        // files window — raising it to the front and delivering the terminal's
+        // unfocus, the files window's focus, and the press (which selects the
+        // row). The seat keyboard then sends `Enter` to descend into `/Users`.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            FM9_USERS_CLICK,
+            move_by(terminal_window, users_click),
+        ),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_USERS_CLICK, press),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_USERS_CLICK, release),
+        // Select the `root` row (files is now frontmost, so this press just
+        // selects it). The seat keyboard then sends `Enter` to descend into
+        // `/Users/root`.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            FM9_ROOT_CLICK,
+            move_by(users_click, root_click),
+        ),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_ROOT_CLICK, press),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_ROOT_CLICK, release),
+        // Click the New Folder tool: the app makes `/Users/root/New Folder`
+        // (`fs_mkdir`) and opens the inline rename on it. The seat keyboard
+        // then types the rename suffix + Enter (`fs_rename`).
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            FM9_NEW_FOLDER,
+            move_by(root_click, new_folder_click),
+        ),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_NEW_FOLDER, press),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_NEW_FOLDER, release),
     ])
 }
 
@@ -6185,11 +6445,19 @@ mod tests {
         // terminal window existed, wedging the session (guest goes idle,
         // run times out). Counting creations is immune to repaints.
         let script = super::autoload_desktop_pointer_script().expect("build the pointer script");
-        assert!(
-            script.len() >= 3,
-            "the script ends with the terminal-window click's move/press/release"
+        // The terminal-window click is the group of steps gated on the
+        // window-creation `shm_map` marker — located by that marker, not by
+        // position, since the FM9-a file-manager stage appends further clicks
+        // after it (`plans/NEW-FILEMANAGER.md` FM9-a).
+        let terminal_click: Vec<&tairix_qemu::PointerStep> = script
+            .iter()
+            .filter(|step| step.ready_marker == super::AUTOLOAD_WINDOW_MAP_MARKER)
+            .collect();
+        assert_eq!(
+            terminal_click.len(),
+            3,
+            "the terminal-window click is one move + press + release, all on the map marker"
         );
-        let terminal_click = &script[script.len() - 3..];
 
         // The present-inclusive marker the fragile gate used, reconstructed
         // exactly as the script builds it, so this test fails if the gate

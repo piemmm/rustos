@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on five witnesses
+//! ## Why the PASS keys on seven witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -102,6 +102,19 @@
 //!    the AW4 shell round trip, every hop kernel-attested (the only
 //!    spawn that can occur after the typing gate is the shell executing
 //!    the typed command).
+//! 6. `AuditEvent::FsNodeMutated` (`EventId` 4100) with `op=mkdir`,
+//!    observed *after* the terminal round trip: the file-manager stage
+//!    (`plans/NEW-FILEMANAGER.md` FM9-a) refocused the files window,
+//!    descended into `/Users/root` by scripted pointer clicks and seat-
+//!    keyboard `Enter`s, and clicked the New Folder tool, so the app made
+//!    a real permission-checked `fs_mkdir` under the logged-in user's own
+//!    identity. The count gate excludes every boot- and login-time
+//!    directory creation.
+//! 7. `AuditEvent::FsNodeMutated` with `op=rename` (after witness 6): the
+//!    inline rename committed a distinct name through `fs_rename` — the
+//!    manager's create-then-name flow, end to end and kernel-attested.
+//!    (A refused mutation logs `FsMutationDenied`, a different id that
+//!    never satisfies these witnesses — fail closed.)
 //!
 //! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
@@ -117,7 +130,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all four witnesses, so the harness times out — the documented
+//! reaches all seven witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -177,20 +190,24 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all five witnesses have appeared: the per-kind
+    /// to QEMU once all seven witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
     /// unlocked the encrypted root end to end), the reserved
     /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
-    /// came up on its granted surface), and the AW4 shell round trip: a
+    /// came up on its granted surface), the AW4 shell round trip (a
     /// `ProcessSpawned` record observed once the kernel/ipc
     /// `MessageDelivered` count has reached the typed command's Enter
-    /// press (the crate's shared interaction contract) — the windowed
+    /// press — the crate's shared interaction contract — the windowed
     /// terminal received every typed key edge, wrote the line to its
-    /// hosted shell, and the shell spawned the typed program. The guest
-    /// exits only after the host has everything it needs
-    /// (`plans/APPWIN.md` AW3 + AW4).
+    /// hosted shell, and the shell spawned the typed program), and the
+    /// FM9-a file-manager mutations (`FsNodeMutated op=mkdir` then
+    /// `op=rename`, both after the terminal round trip — the manager
+    /// created and named a folder in `/Users/root` under the user's own
+    /// identity). The guest exits only after the host has everything it
+    /// needs (`plans/APPWIN.md` AW3 + AW4, `plans/NEW-FILEMANAGER.md`
+    /// FM9-a).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
@@ -198,6 +215,8 @@ mod kernel {
         display_endpoint_bound: AtomicBool,
         window_events_delivered: AtomicU32,
         shell_round_trip: AtomicBool,
+        fs_folder_created: AtomicBool,
+        fs_folder_renamed: AtomicBool,
     }
 
     impl AutoloadInputSink {
@@ -209,6 +228,8 @@ mod kernel {
                 display_endpoint_bound: AtomicBool::new(false),
                 window_events_delivered: AtomicU32::new(0),
                 shell_round_trip: AtomicBool::new(false),
+                fs_folder_created: AtomicBool::new(false),
+                fs_folder_renamed: AtomicBool::new(false),
             }
         }
 
@@ -226,6 +247,40 @@ mod kernel {
                     }
                     tairix_log::FieldValue::Str("pointer") => {
                         self.pointer_delivered.store(true, Ordering::Release);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        /// Latch the file-manager mutation witnesses from a `FsNodeMutated`
+        /// record's `op` field: `mkdir` then, once it has, `rename`. Only
+        /// mutations that occur *after* the AW4 terminal round trip are
+        /// counted (the delivery counter is at or past
+        /// [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many boot- and
+        /// login-time directory creations — all strictly before the desktop
+        /// click-through — can never latch these. `rename` requires `mkdir`
+        /// first, so a stray rename cannot satisfy PASS on its own, and the
+        /// refusal event (`FsMutationDenied`) is a different id that never
+        /// reaches here (fail closed).
+        fn note_fs_mutation(&self, event: &Event<'_>) {
+            if self.window_events_delivered.load(Ordering::Acquire)
+                < tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+            {
+                return;
+            }
+            for field in event.fields {
+                if field.key != "op" {
+                    continue;
+                }
+                match field.value {
+                    tairix_log::FieldValue::Str("mkdir") => {
+                        self.fs_folder_created.store(true, Ordering::Release);
+                    }
+                    tairix_log::FieldValue::Str("rename")
+                        if self.fs_folder_created.load(Ordering::Acquire) =>
+                    {
+                        self.fs_folder_renamed.store(true, Ordering::Release);
                     }
                     _ => {}
                 }
@@ -266,6 +321,8 @@ mod kernel {
                 self.users_db_loaded.store(true, Ordering::Release);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
                 self.note_endpoint_created(event);
+            } else if event.id.0 == AuditEvent::FsNodeMutated.id().0 {
+                self.note_fs_mutation(event);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
                 self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
             } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
@@ -287,6 +344,8 @@ mod kernel {
                 && self.users_db_loaded.load(Ordering::Acquire)
                 && self.display_endpoint_bound.load(Ordering::Acquire)
                 && self.shell_round_trip.load(Ordering::Acquire)
+                && self.fs_folder_created.load(Ordering::Acquire)
+                && self.fs_folder_renamed.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

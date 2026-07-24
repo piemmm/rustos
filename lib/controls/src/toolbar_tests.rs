@@ -132,6 +132,29 @@ fn tool_at_maps_points_to_tools() {
     );
 }
 
+#[test]
+fn tool_rect_is_the_forward_mirror_of_tool_at() {
+    let toolbar = grouped_toolbar();
+    let bounds = Rect::new(0, 0, W, H);
+    let theme = Theme::dark();
+    for index in 0..3 {
+        let rect = toolbar
+            .tool_rect(index, bounds, Scale::ONE, &theme)
+            .expect("in-range tool has a rect");
+        let centre = Point::new(
+            rect.left() + i32::try_from(rect.width).unwrap_or(0) / 2,
+            rect.top() + 1,
+        );
+        assert_eq!(
+            toolbar.tool_at(bounds, Scale::ONE, &theme, centre),
+            Some(index),
+            "the rect's centre hit-tests back to the same tool",
+        );
+    }
+    // Out of range fails closed.
+    assert_eq!(toolbar.tool_rect(3, bounds, Scale::ONE, &theme), None);
+}
+
 // --- Active tool --------------------------------------------------------
 
 #[test]

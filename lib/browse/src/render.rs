@@ -526,6 +526,28 @@ pub fn manager_tool_at<S: DirectorySource>(
     tools.get(tool_index).copied()
 }
 
+/// The window-local [`Rect`] the manager write `tool` occupies, or `None`
+/// when `tool` is not among `tools`. The forward mirror of
+/// [`manager_tool_at`] over the same rebuilt toolbar (read-only commands then
+/// the write tools), so a caller that must aim *at* a write tool — the desktop
+/// integration harness that clicks New Folder — reads the exact geometry
+/// [`render`] paints and [`manager_tool_at`] hit-tests, never a hand-copied
+/// position (§2.2). Fails closed: an out-of-range or unlisted tool is `None`.
+#[must_use]
+pub fn manager_tool_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    theme: &Theme,
+    viewport: Rect,
+    tools: &[ManagerTool],
+    tool: ManagerTool,
+) -> Option<Rect> {
+    let position = tools.iter().position(|&t| t == tool)?;
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
+    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
+    toolbar.tool_rect(index, bounds, Scale::ONE, theme)
+}
+
 /// The [`ListView`] for `browser` at the given content viewport.
 fn list_view<S: DirectorySource>(
     browser: &Browser<S>,
