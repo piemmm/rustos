@@ -68,12 +68,21 @@ pub const NETSTACK_BOUND: EventId = EventId(13_010);
 /// the next generation bump — never an error (fail-soft, like the driver
 /// store being unavailable).
 pub const NETSTACK_BIND_FAILED: EventId = EventId(13_011);
+/// The stack-wide `net.*` policy read from `system.conf` was delivered to
+/// the network stack and accepted (the `ApplyNetworkSettings` admin call
+/// succeeded). Recorded at `Info`: a one-time boot configuration step.
+pub const NETWORK_SETTINGS_DELIVERED: EventId = EventId(13_012);
+/// The `net.*` policy was read but the network stack refused it or was
+/// unreachable (its admin endpoint not yet bound). Retried on the next
+/// generation bump — never an error (fail-soft, like the driver store
+/// being unavailable). Recorded at `Warn`.
+pub const NETWORK_SETTINGS_DELIVERY_FAILED: EventId = EventId(13_013);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 11] = [
+    const ALL: [EventId; 13] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -85,6 +94,8 @@ mod tests {
         TREE_SEAM_FAILED,
         NETSTACK_BOUND,
         NETSTACK_BIND_FAILED,
+        NETWORK_SETTINGS_DELIVERED,
+        NETWORK_SETTINGS_DELIVERY_FAILED,
     ];
 
     #[test]

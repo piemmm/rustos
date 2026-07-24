@@ -20,7 +20,7 @@ workspace = true
 # into the kernel image (E0152 / allocator clash, `AGENTS.md` §17.4 / §1).
 [features]
 default = ["program"]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "dep:tairix-sysconfig"]
 
 # The package is both the `tairix-devmgr` match-policy library (above) and the
 # `Run` entry-point binary of the device-manager service installed at
@@ -43,6 +43,14 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The boot-time system-configuration store engine (`AGENTS.md` §16.2): the
+# one definition of the `system.conf` grammar the device manager reads the
+# stack-wide `net.*` policy from post-unlock, to deliver it to `netstack`
+# over the capability-gated admin op (`plans/NETWORK.md` N9b-2). Optional
+# and program-gated: only the service binary (and its host tests) parse the
+# store, so the kernel — which links the match-policy library with
+# `default-features = false` — never pulls it into the ring-0 image.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0", optional = true }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers

@@ -533,6 +533,10 @@ pub struct StackConfig {
     pub ipv4_ident_seed: u16,
     /// Per-interface multicast-group membership bound (per family).
     pub multicast_capacity: usize,
+    /// Whether IPv4 is administratively enabled (`net.ipv4.enabled`).
+    /// When `false` the interface accepts no IPv4 assignment and
+    /// answers no IPv4/ARP — it binds no address and answers nothing.
+    pub ipv4_enabled: bool,
 }
 
 impl StackConfig {
@@ -555,6 +559,7 @@ impl StackConfig {
             error_rate: 10,
             ipv4_ident_seed,
             multicast_capacity: MULTICAST_CAPACITY,
+            ipv4_enabled: true,
         }
     }
 }
@@ -609,6 +614,10 @@ pub struct Stack {
     /// the stack opted in: only then may a frame the driver marks
     /// checksum-validated skip the software fold.
     rx_csum_offload: bool,
+    /// Whether IPv4 is administratively enabled by policy
+    /// (`net.ipv4.enabled`). When `false` no IPv4 address may be
+    /// assigned and every inbound ARP/IPv4 frame is dropped.
+    ipv4_enabled: bool,
     /// Whether the device advertised transmit TCP-checksum offload and
     /// the stack opted in: only then does the engine emit a TCP segment
     /// with a partial checksum for the device to complete.
@@ -656,6 +665,7 @@ impl Stack {
             link_up: config.facts.link == LinkState::Up,
             hop_limit: crate::ipv6::DEFAULT_HOP_LIMIT,
             iface: Iface::new(&config.iface, now),
+            ipv4_enabled: config.ipv4_enabled,
             neighbors: NeighborTable::new(config.neighbor_capacity, config.neighbor),
             routes_v4: RoutingTable::new(),
             routes_v6: RoutingTable::new(),
@@ -720,6 +730,9 @@ impl Stack {
         prefix_len: u8,
         gateway: Option<Ipv4Addr>,
     ) -> Result<(), crate::iface::AddrError> {
+        if !self.ipv4_enabled {
+            return Err(crate::iface::AddrError::V4Disabled);
+        }
         let connected = Prefix::new(mask_v4(addr, prefix_len), prefix_len)
             .ok_or(crate::iface::AddrError::BadPrefixLen)?;
         if let Some(gw) = gateway {
@@ -794,6 +807,53 @@ impl Stack {
         self.routes_v4.insert(prefix, next_hop, RouteKind::Static);
         Ok(())
     }
+
+    /// Whether IPv4 is administratively enabled (`net.ipv4.enabled`).
+    #[must_use]
+    pub fn ipv4_enabled(&self) -> bool {
+        self.ipv4_enabled
+    }
+
+    /// Whether IPv6 is administratively enabled (`net.ipv6.enabled`) —
+    /// neither policy-disabled nor DAD-disabled.
+    #[must_use]
+    pub fn ipv6_enabled(&self) -> bool {
+        !self.iface.v6_admin_disabled() && !self.iface.v6_disabled()
+    }
+
+    /// Administratively enable or disable IPv4 (`net.ipv4.enabled`).
+    ///
+    /// Disabling drops the static IPv4 assignment and every IPv4 route,
+    /// so the interface binds no IPv4 address and answers no IPv4/ARP;
+    /// re-enabling permits [`Self::set_ipv4_config`] again. Idempotent;
+    /// re-enabling does not restore a previously assigned address (there
+    /// is no IPv4 auto-configuration — the admin re-assigns it).
+    pub fn set_ipv4_enabled(&mut self, enabled: bool) {
+        if self.ipv4_enabled == enabled {
+            return;
+        }
+        self.ipv4_enabled = enabled;
+        if !enabled {
+            self.iface.clear_ipv4();
+            self.routes_v4 = RoutingTable::new();
+        }
+    }
+
+    /// Administratively enable or disable IPv6 (`net.ipv6.enabled`).
+    ///
+    /// Delegates the address lifecycle to the interface engine (flush
+    /// on disable, re-form the link-local on enable) and additionally
+    /// clears the IPv6 routing table and default-router list on disable,
+    /// so no stale route can outlive the family. Idempotent.
+    pub fn set_ipv6_enabled(&mut self, enabled: bool, now: Duration64) {
+        self.iface.set_ipv6_enabled(enabled, now);
+        if !enabled {
+            self.routes_v6 = RoutingTable::new();
+            self.routers.clear();
+            self.ra_routes = 0;
+            self.redirect_routes = 0;
+        }
+    }
 }
 
 impl Stack {
@@ -836,6 +896,17 @@ impl Stack {
             ChecksumCheck::Verify
         };
         match frame.ethertype {
+            // A disabled family answers nothing: drop its frames before
+            // any parsing so no address forms (an inbound RA cannot
+            // SLAAC-configure a policy-disabled interface) and nothing
+            // is answered. IPv4 without an assignment is already silent,
+            // but the explicit gate keeps the two families symmetric.
+            ETHERTYPE_ARP | ETHERTYPE_IPV4 if !self.ipv4_enabled => {
+                self.counters.rx_dropped += 1;
+            }
+            ETHERTYPE_IPV6 if self.iface.v6_admin_disabled() => {
+                self.counters.rx_dropped += 1;
+            }
             ETHERTYPE_ARP => self.on_arp(out, frame.payload, now),
             ETHERTYPE_IPV4 => self.on_ipv4(out, frame.payload, check, now),
             ETHERTYPE_IPV6 => self.on_ipv6(out, frame.payload, check, now),

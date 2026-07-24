@@ -24,7 +24,7 @@
 use alloc::collections::BTreeSet;
 
 use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
-use tairix_abi::net_ipc::{validate_if_name, IF_NAME_LEN};
+use tairix_abi::net_ipc::{validate_if_name, NetworkSettings, IF_NAME_LEN};
 use tairix_abi::{Errno, HwNode};
 use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
 
@@ -54,6 +54,22 @@ pub trait NetstackBind {
     /// The stack's typed refusal, or a transport failure — treated
     /// fail-soft by the caller (retried on the next generation bump).
     fn bind_driver(&mut self, endpoint_id: u64, iface: &[u8; IF_NAME_LEN]) -> Result<(), Errno>;
+
+    /// Deliver the stack-wide `net.*` policy to the network stack
+    /// (`plans/NETWORK.md` N9b-2).
+    ///
+    /// The production implementation backs this with an `ipc_call` to the
+    /// [`NETSTACK_ENDPOINT`](tairix_abi::net_ipc::NETSTACK_ENDPOINT)
+    /// carrying a
+    /// [`NetstackRequest::ApplyNetworkSettings`](tairix_abi::net_ipc::NetstackRequest::ApplyNetworkSettings);
+    /// the kernel gates it on `CAP_NET_ADMIN`, so the seam adds no
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// The stack's typed refusal, or a transport failure — treated
+    /// fail-soft by the caller (retried on the next generation bump).
+    fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno>;
 }
 
 /// The device manager's memory of which NIC channels it has already handed
@@ -240,6 +256,10 @@ mod tests {
         ) -> Result<(), Errno> {
             self.calls.borrow_mut().push((endpoint_id, *iface));
             self.results.borrow_mut().pop().unwrap_or(Ok(()))
+        }
+
+        fn apply_settings(&mut self, _settings: NetworkSettings) -> Result<(), Errno> {
+            Ok(())
         }
     }
 

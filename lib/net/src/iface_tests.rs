@@ -368,6 +368,83 @@ fn next_deadline_tracks_earliest_pending_work() {
 }
 
 #[test]
+fn ipv6_disabled_by_policy_forms_no_link_local() {
+    let config = IfaceConfig {
+        ipv6_enabled: false,
+        ..IfaceConfig::new(IID)
+    };
+    let mut iface = Iface::new(&config, t(0));
+    assert!(iface.v6_admin_disabled());
+    assert!(iface.ipv6_addresses().is_empty());
+    // No DAD/RS activity is ever scheduled for a disabled family.
+    assert!(iface.advance(t(0)).is_empty());
+    assert_eq!(iface.next_deadline(), None);
+    // A static assignment is refused while disabled.
+    assert_eq!(
+        iface.add_ipv6_static(slaac_addr(), 64, t(0)),
+        Err(AddrError::V6Disabled)
+    );
+}
+
+#[test]
+fn re_enabling_ipv6_reforms_the_link_local() {
+    let config = IfaceConfig {
+        ipv6_enabled: false,
+        ..IfaceConfig::new(IID)
+    };
+    let mut iface = Iface::new(&config, t(0));
+    iface.set_ipv6_enabled(true, t(0));
+    assert!(!iface.v6_admin_disabled());
+    // Bring-up proceeds exactly as a fresh interface would.
+    assert_eq!(
+        iface.advance(t(0)),
+        [IfaceAction::SendDadSolicit {
+            target: link_local_addr()
+        }]
+    );
+    iface.advance(t(1));
+    assert_eq!(iface.link_local(), Some(link_local_addr()));
+}
+
+#[test]
+fn disabling_ipv6_flushes_every_address_and_halts_solicitation() {
+    let mut iface = ready_iface();
+    iface
+        .add_ipv6_static(slaac_addr(), 64, t(1))
+        .expect("static add");
+    assert!(!iface.ipv6_addresses().is_empty());
+    iface.set_ipv6_enabled(false, t(2));
+    assert!(iface.v6_admin_disabled());
+    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.candidates().is_empty());
+    assert_eq!(iface.next_deadline(), None);
+    assert!(iface.advance(t(3)).is_empty());
+}
+
+#[test]
+fn set_ipv6_enabled_is_idempotent() {
+    let mut iface = ready_iface();
+    // Enabling an already-enabled interface changes nothing.
+    iface.set_ipv6_enabled(true, t(2));
+    assert_eq!(iface.link_local(), Some(link_local_addr()));
+    iface.set_ipv6_enabled(false, t(2));
+    iface.set_ipv6_enabled(false, t(2));
+    assert!(iface.ipv6_addresses().is_empty());
+}
+
+#[test]
+fn re_enabling_after_dad_failure_does_not_reform_link_local() {
+    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    iface.advance(t(0));
+    iface.on_dad_evidence(link_local_addr());
+    assert!(iface.v6_disabled());
+    // A policy toggle cannot override the RFC 4862 DAD-failure disable.
+    iface.set_ipv6_enabled(false, t(1));
+    iface.set_ipv6_enabled(true, t(1));
+    assert!(iface.ipv6_addresses().is_empty());
+}
+
+#[test]
 fn eui64_splits_the_oui_and_inverts_the_universal_local_bit() {
     // A locally-administered example MAC: the u/l bit (0x02) of the first
     // octet flips, FF:FE fills the middle, and the low 24 bits pass

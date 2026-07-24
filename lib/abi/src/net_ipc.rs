@@ -120,6 +120,51 @@ pub fn validate_if_name(name: &[u8; IF_NAME_LEN]) -> Result<usize, Errno> {
     Ok(len)
 }
 
+/// Stack-wide network policy delivered to `netstack` from the
+/// `system.conf` `net.*` registry (`plans/NETWORK.md` §6.2).
+///
+/// `netstack` is the network-parsing sandbox and holds no filesystem
+/// capability, so it cannot read `system.conf` itself: an FS-capable
+/// component (init/devmgr) reads the config after the root unlock and
+/// pushes these settings over the [`NetstackRequest::ApplyNetworkSettings`]
+/// admin op. The mapping from the `lib/sysconfig` registry is exact —
+/// `net.ipv4.enabled`, `net.ipv6.enabled`, and `net.tcp.syncookies`
+/// (`always` ⇒ [`Self::syncookies_always`]; `auto` ⇒ the bounded
+/// default). `net.ipv6.privacy` is deliberately absent: it has no
+/// enforcement consumer until RFC 8981 temporary addresses land, so
+/// carrying it now would be speculative interface.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetworkSettings {
+    /// Whether the IPv4 family is enabled stack-wide. When `false` an
+    /// interface binds no IPv4 address and answers no IPv4/ARP, and a
+    /// socket `open` for the family is refused.
+    pub ipv4_enabled: bool,
+    /// Whether the IPv6 family is enabled stack-wide. When `false` an
+    /// interface forms no link-local, accepts no IPv6, and a socket
+    /// `open` for the family is refused.
+    pub ipv6_enabled: bool,
+    /// Whether TCP SYN cookies are used unconditionally
+    /// (`net.tcp.syncookies always`): the listener holds zero half-open
+    /// state and answers every SYN with a stateless cookie. `false`
+    /// selects the bounded half-open backlog (`auto`).
+    pub syncookies_always: bool,
+}
+
+impl Default for NetworkSettings {
+    /// The stack's safe pre-delivery defaults, matching the
+    /// `lib/sysconfig` registry defaults: both families enabled and SYN
+    /// cookies in `auto` mode (a bounded half-open backlog, not
+    /// unconditional cookies). These hold until an FS-capable component
+    /// delivers the real `system.conf` policy.
+    fn default() -> Self {
+        Self {
+            ipv4_enabled: true,
+            ipv6_enabled: true,
+            syncookies_always: false,
+        }
+    }
+}
+
 /// One netstack-service operation.
 ///
 /// Every request is one fixed-width frame; the service derives the
@@ -220,6 +265,11 @@ pub enum NetstackRequest {
         /// The interface's admin-chosen alias, NUL-padded.
         iface: [u8; IF_NAME_LEN],
     },
+    /// Apply the stack-wide `net.*` policy (admin surface). Pushed once
+    /// after the root unlock by an FS-capable component; the pure state
+    /// mutation the dispatcher applies (family enable at socket `open`
+    /// and interface auto-config, SYN-cookie mode at `listen`).
+    ApplyNetworkSettings(NetworkSettings),
 }
 
 /// Wire operation discriminant of [`NetstackRequest::InterfaceList`].
@@ -240,6 +290,8 @@ const OP_BIND_DRIVER: u16 = 7;
 const OP_IF_RATES: u16 = 8;
 /// Wire operation discriminant of [`NetstackRequest::Sockets`].
 const OP_SOCKETS: u16 = 9;
+/// Wire operation discriminant of [`NetstackRequest::ApplyNetworkSettings`].
+const OP_APPLY_NET_SETTINGS: u16 = 10;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -319,6 +371,12 @@ impl NetstackRequest {
                 put_u16(&mut out, 6, OP_BIND_DRIVER);
                 put_u64(&mut out, 8, endpoint_id);
                 out[16..32].copy_from_slice(&iface);
+            }
+            Self::ApplyNetworkSettings(settings) => {
+                put_u16(&mut out, 6, OP_APPLY_NET_SETTINGS);
+                out[8] = u8::from(settings.ipv4_enabled);
+                out[9] = u8::from(settings.ipv6_enabled);
+                out[10] = u8::from(settings.syncookies_always);
             }
         }
         out
@@ -428,6 +486,7 @@ impl NetstackRequest {
                 validate_if_name(&iface)?;
                 Ok(Self::BindDriver { endpoint_id, iface })
             }
+            OP_APPLY_NET_SETTINGS => Ok(Self::ApplyNetworkSettings(decode_settings(bytes)?)),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -465,6 +524,27 @@ fn paged_offset_limit(bytes: &[u8]) -> Result<(u32, u16), Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     Ok((offset, limit))
+}
+
+/// Decode the [`NetworkSettings`] operation block (three wire booleans at
+/// bytes 8..11) and enforce its zero reserved tail.
+fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
+    reserved_zero(bytes, 11)?;
+    Ok(NetworkSettings {
+        ipv4_enabled: decode_bool(bytes[8])?,
+        ipv6_enabled: decode_bool(bytes[9])?,
+        syncookies_always: decode_bool(bytes[10])?,
+    })
+}
+
+/// Decode a wire boolean: exactly `0` or `1`, failing closed on any
+/// other byte (a smuggled non-boolean value is rejected, not truncated).
+fn decode_bool(byte: u8) -> Result<bool, Errno> {
+    match byte {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Errno::OutOfRange),
+    }
 }
 
 /// Refuse a request whose reserved tail (from `from` to the end of the
@@ -1334,10 +1414,46 @@ mod tests {
                 offset: 0,
                 limit: NETSTACK_LIST_LIMIT_MAX,
             },
+            NetstackRequest::ApplyNetworkSettings(NetworkSettings {
+                ipv4_enabled: true,
+                ipv6_enabled: false,
+                syncookies_always: true,
+            }),
+            NetstackRequest::ApplyNetworkSettings(NetworkSettings {
+                ipv4_enabled: false,
+                ipv6_enabled: true,
+                syncookies_always: false,
+            }),
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn apply_network_settings_rejects_non_boolean_and_dirty_tail() {
+        let good = NetstackRequest::ApplyNetworkSettings(NetworkSettings {
+            ipv4_enabled: true,
+            ipv6_enabled: true,
+            syncookies_always: false,
+        })
+        .to_le_bytes();
+        // A byte that is neither 0 nor 1 in any flag position fails closed.
+        for pos in 8..=10 {
+            let mut smuggled = good;
+            smuggled[pos] = 2;
+            assert_eq!(
+                NetstackRequest::from_bytes(&smuggled),
+                Err(Errno::OutOfRange)
+            );
+        }
+        // A non-zero reserved tail byte is refused.
+        let mut dirty_tail = good;
+        dirty_tail[11] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&dirty_tail),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

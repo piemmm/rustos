@@ -26,6 +26,7 @@ use tairix_log::{log as log_event, Event, Level, Sink};
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
 use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
+use crate::netcfg::{deliver_network_settings, NetConfigState, NetworkConfigSource};
 use crate::observe::for_each_node;
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
@@ -126,7 +127,9 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
+    netcfg: &mut dyn NetworkConfigSource,
     netbind: &mut NetBindState,
+    netconfig: &mut NetConfigState,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
     state: &mut AutoloadState,
     tree_buf: &mut Vec<u8>,
@@ -169,6 +172,11 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     let candidates: Vec<DriverCandidate<'_>> =
         drivers.iter().map(CatalogueDriver::candidate).collect();
     match_and_load(&nodes, drivers, &candidates, store, reply_buf, state, sink);
+    // Deliver the stack-wide `net.*` policy to the network stack once,
+    // before binding any channel, so a freshly-bound interface adopts it at
+    // construction. Fail-soft: an unreadable store (pre-unlock) or a stack
+    // not yet up is retried on the next generation bump.
+    deliver_network_settings(netcfg, netconfig, netstack, sink);
     // Hand each newly-discovered NIC device channel (a `netchan` node a bound
     // NIC driver emitted) to the network stack, idempotently (each endpoint
     // once) and fail-soft (a stack not yet up is retried next bump).
@@ -216,11 +224,15 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
+    netcfg: &mut dyn NetworkConfigSource,
     sink: &dyn Sink,
     reply_buf: &mut [u8],
     budget: Option<u32>,
 ) -> Result<(), Errno> {
     let mut catalogue: Option<Vec<CatalogueDriver>> = None;
+    // The memory of whether the stack-wide `net.*` policy has been
+    // delivered to the network stack (once, `plans/NETWORK.md` N9b-2).
+    let mut netconfig = NetConfigState::new();
     // The memory of which NIC device channels have been handed to the
     // network stack: each `netchan` endpoint is bound exactly once across
     // every generation bump.
@@ -241,7 +253,9 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         tree,
         store,
         netstack,
+        netcfg,
         &mut netbind,
+        &mut netconfig,
         &mut catalogue,
         &mut state,
         &mut tree_buf,
@@ -258,7 +272,9 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             tree,
             store,
             netstack,
+            netcfg,
             &mut netbind,
+            &mut netconfig,
             &mut catalogue,
             &mut state,
             &mut tree_buf,
@@ -427,6 +443,23 @@ mod tests {
         ) -> Result<(), Errno> {
             Ok(())
         }
+
+        fn apply_settings(
+            &mut self,
+            _settings: tairix_abi::net_ipc::NetworkSettings,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
+    /// A no-op [`NetworkConfigSource`] for the loop tests: it never yields a
+    /// policy, so `deliver_network_settings` is a no-op. The delivery policy
+    /// itself is tested directly in `crate::netcfg`.
+    struct NoConfig;
+    impl NetworkConfigSource for NoConfig {
+        fn load(&mut self) -> Option<tairix_abi::net_ipc::NetworkSettings> {
+            None
+        }
     }
 
     fn bind(priority: u16, key: HwMatchKey) -> DriverBindKey {
@@ -456,6 +489,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -496,6 +530,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -538,6 +573,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -594,6 +630,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -634,6 +671,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -673,6 +711,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -719,6 +758,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(2),
@@ -768,6 +808,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(1),
@@ -808,6 +849,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(0),
@@ -836,6 +878,7 @@ mod tests {
                 &mut tree,
                 &mut store,
                 &mut NoNetstack,
+                &mut NoConfig,
                 &sink,
                 &mut reply_buf,
                 None
@@ -862,6 +905,7 @@ mod tests {
                 &mut tree,
                 &mut store,
                 &mut NoNetstack,
+                &mut NoConfig,
                 &sink,
                 &mut reply_buf,
                 None
@@ -983,6 +1027,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoConfig,
             &sink,
             &mut reply_buf,
             Some(0),

@@ -15,7 +15,8 @@ use tairix_abi::net::{
 use tairix_abi::net_ipc::{
     decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceCountersRecord,
     NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSockProto,
-    NetSockState, NetSocketRecord, NetstackRequest, IF_NAME_LEN, NETSTACK_MAX_REPLY,
+    NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
+    NETSTACK_MAX_REPLY,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -2195,4 +2196,179 @@ fn socket_listing_reports_open_sockets_and_is_broker_gated() {
         Err(Errno::PermissionDenied),
         "an admin capability does not open the socket listing"
     );
+}
+
+// --- N9b-2: net.* settings delivery + enforcement -------------------
+
+#[test]
+fn apply_network_settings_requires_cap_net_admin() {
+    let mut stack = managed_stack();
+    let sockets = SocketService::new();
+    let sink = RecordingSink::new();
+    let request = NetstackRequest::ApplyNetworkSettings(NetworkSettings {
+        ipv4_enabled: true,
+        ipv6_enabled: false,
+        syncookies_always: true,
+    });
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    // A broker capability (introspect) is not admin authority.
+    assert_eq!(
+        serve(
+            &mut stack,
+            &sockets,
+            &broker(),
+            &sink,
+            &request.to_le_bytes(),
+            &mut reply,
+            t(2),
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(sink.ids(), vec![16_002], "the denial is audited");
+    // The policy was not applied: the default (both families on) stands.
+    assert!(stack.settings().ipv6_enabled);
+}
+
+#[test]
+fn apply_network_settings_is_applied_and_audited() {
+    let mut stack = managed_stack();
+    let sockets = SocketService::new();
+    let sink = RecordingSink::new();
+    let request = NetstackRequest::ApplyNetworkSettings(NetworkSettings {
+        ipv4_enabled: false,
+        ipv6_enabled: true,
+        syncookies_always: true,
+    });
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    let len = serve(
+        &mut stack,
+        &sockets,
+        &admin(),
+        &sink,
+        &request.to_le_bytes(),
+        &mut reply,
+        t(2),
+    )
+    .expect("served");
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
+    assert_eq!(sink.ids(), vec![16_015], "the apply is audited");
+    let settings = stack.settings();
+    assert!(!settings.ipv4_enabled);
+    assert!(settings.ipv6_enabled);
+    assert!(settings.syncookies_always);
+}
+
+#[test]
+fn disabling_a_family_refuses_a_socket_open_for_it() {
+    let mut svc = SocketService::new();
+    let mut stack = managed_stack();
+    stack.apply_settings(
+        NetworkSettings {
+            ipv4_enabled: true,
+            ipv6_enabled: false,
+            syncookies_always: false,
+        },
+        t(2),
+    );
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+
+    // A v6 socket open is refused fail-closed for the disabled family.
+    let v6 = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V6,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &v6,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::NotSupported)
+    );
+    assert!(svc.is_empty(), "no socket is created for a disabled family");
+
+    // The still-enabled v4 family opens normally.
+    let v4 = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &v4,
+            &mut reply,
+            t(2),
+        )
+        .expect("v4 open");
+    decode_socket_reply(&reply[..out.len]).expect("socket id");
+    assert_eq!(svc.len(), 1);
+}
+
+#[test]
+fn applying_settings_reconfigures_an_existing_interface() {
+    let mut stack = managed_stack();
+    // The interface came up with its IPv6 link-local (still tentative).
+    assert!(!stack
+        .interface(name("wan"))
+        .expect("iface")
+        .stack()
+        .iface()
+        .ipv6_addresses()
+        .is_empty());
+    // Disabling IPv6 flushes it from the already-managed interface.
+    stack.apply_settings(
+        NetworkSettings {
+            ipv4_enabled: true,
+            ipv6_enabled: false,
+            syncookies_always: false,
+        },
+        t(2),
+    );
+    assert!(stack
+        .interface(name("wan"))
+        .expect("iface")
+        .stack()
+        .iface()
+        .ipv6_addresses()
+        .is_empty());
+    // Re-enabling brings the link-local back.
+    stack.apply_settings(NetworkSettings::default(), t(3));
+    assert!(!stack
+        .interface(name("wan"))
+        .expect("iface")
+        .stack()
+        .iface()
+        .ipv6_addresses()
+        .is_empty());
+}
+
+#[test]
+fn listen_config_maps_the_syncookie_policy() {
+    use crate::socket::listen_config;
+    use tairix_net::tcp::listen::ListenConfig;
+    // `always` holds no half-open state (every SYN → stateless cookie).
+    let always = listen_config(NetworkSettings {
+        ipv4_enabled: true,
+        ipv6_enabled: true,
+        syncookies_always: true,
+    });
+    assert_eq!(always.max_half_open, 0);
+    // `auto` keeps the bounded default backlog.
+    let auto = listen_config(NetworkSettings {
+        ipv4_enabled: true,
+        ipv6_enabled: true,
+        syncookies_always: false,
+    });
+    assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
 }

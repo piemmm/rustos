@@ -52,14 +52,15 @@ free-form key namespace and no second store.
 The `net.*` family is the stack-wide network configuration; its consumer is
 the user-space network stack (`netstack`). Because `netstack` is the
 network-parsing sandbox and holds **no** filesystem capability, it cannot
-read the store itself: the settings reach it over a capability-gated
-(`CAP_NET_ADMIN`) admin IPC, pushed by an FS-capable component after the
-root unlock. The engine surface (this crate) and the live apply path land
-as staged increments (`plans/NETWORK.md` N9b), mirroring how the
-per-interface `lib/netconfig` engine landed ahead of its wiring.
-Per-interface network settings (addresses, MTU, bonding) live in the
-separate `/System/Settings/Network/network.conf` store
-(`lib/netconfig`), never here.
+read the store itself: the **device manager** (`devmgr`, which is FS-capable
+and already drives the stack's admin endpoint) reads these keys after the
+root unlock and delivers them once over the capability-gated
+(`CAP_NET_ADMIN`) `ApplyNetworkSettings` admin op — audited, and
+fail-soft-retried until the stack accepts them (`plans/NETWORK.md` N9b-2).
+Until then the stack holds these same registry defaults. Per-interface
+network settings (addresses, MTU, bonding) live in the separate
+`/System/Settings/Network/network.conf` store (`lib/netconfig`), never
+here.
 
 ## The caching switches
 

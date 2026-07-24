@@ -46,10 +46,13 @@
 mod program {
     use tairix_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use tairix_abi::hwtree::HwDeviceClass;
-    use tairix_abi::net_ipc::{NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT};
+    use tairix_abi::net_ipc::{NetstackRequest, NetworkSettings, IF_NAME_LEN, NETSTACK_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
-    use tairix_abi::{Errno, HwNode, HwTreeHeader};
-    use tairix_devmgr::{events, DriverStoreCall, HwTreeService, NetstackBind};
+    use tairix_abi::{Errno, HwNode, HwTreeHeader, OpenFlags};
+    use tairix_devmgr::netcfg::settings_from_config;
+    use tairix_devmgr::{
+        events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
+    };
     use tairix_log::{log, Event, Field, Level};
     use tairix_rt::LogSink;
     use tairix_util::fmt::{format_hex_u64, format_usize};
@@ -236,6 +239,50 @@ mod program {
                 tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
             decode_status_reply(&reply[..len])
         }
+
+        fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno> {
+            let request = NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes();
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len =
+                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            decode_status_reply(&reply[..len])
+        }
+    }
+
+    /// The production [`NetworkConfigSource`] backing: reads the stack-wide
+    /// `net.*` policy from `/System/Settings/Configuration/system.conf` and
+    /// maps it through the one shared `lib/sysconfig` engine
+    /// ([`settings_from_config`]).
+    ///
+    /// Reading the world-readable machine-wide store needs `CAP_FS_ACCESS`
+    /// (the bundle requests it); the kernel re-checks it on `fs_open`, so
+    /// this seam adds no authority. It returns [`None`] on any failure — the
+    /// store not yet mounted (before the root unlock), an unreadable or
+    /// oversized document, or one the engine cannot parse — so delivery keeps
+    /// the network stack on its safe defaults and retries on the next
+    /// generation bump, never guessing at a policy (fail closed).
+    struct RtNetworkConfig;
+
+    impl NetworkConfigSource for RtNetworkConfig {
+        fn load(&mut self) -> Option<NetworkSettings> {
+            let fd = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+            if fd < 0 {
+                return None;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // `fd >= 0` checked above; descriptors are small kernel indices.
+            let fd = fd as u32;
+            // One bounded read suffices: the engine refuses any document
+            // longer than its own ceiling, so a store that does not fit this
+            // buffer could never parse anyway.
+            let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
+            let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
+            let _ = tairix_rt::fs_close(fd);
+            let len = outcome.ok()?;
+            let text = core::str::from_utf8(&buf[..len]).ok()?;
+            let config = tairix_sysconfig::SystemConfig::parse(text).ok()?;
+            Some(settings_from_config(&config))
+        }
     }
 
     /// Program entry point. Runs the reactive match-and-load loop for the
@@ -257,6 +304,7 @@ mod program {
             &mut RtTreeService,
             &mut RtStoreCall,
             &mut RtNetstackBind,
+            &mut RtNetworkConfig,
             &LogSink,
             &mut reply_buf,
             None,

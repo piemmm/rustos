@@ -1448,18 +1448,38 @@ the whole is too large for one change and each leaves the tree working.
   defaults, closed-value rejection, and round-trip. `netstack` delivery +
   enforcement is N9b-2.
 
-#### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[ ]`
-- `netstack` is the FS-capability-less parser sandbox (§0), so it cannot
-  read `system.conf`: add a `CAP_NET_ADMIN`
-  `NetstackRequest::ApplyNetworkSettings` admin op (audited, fail-closed)
-  pushed post-unlock by an FS-capable component (devmgr/init) over
-  `lib/sysconfig`.
-- Enforce family-enable at socket `open` (refuse a disabled family, typed
-  error + audit) and at interface auto-config (a disabled family binds no
-  address, answers nothing); map `net.tcp.syncookies always` →
-  `ListenConfig.max_half_open = 0`, `auto` → the bounded default.
-  (`net.ipv6.privacy` gains enforcement only when RFC 8981 temporary
-  addresses land, §2.4.)
+#### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[x]`
+- **ABI** (`lib/abi/src/net_ipc.rs`): `NetworkSettings { ipv4_enabled,
+  ipv6_enabled, syncookies_always }` (a `Default` matching the sysconfig
+  defaults) and `NetstackRequest::ApplyNetworkSettings` (op 10), fail-closed
+  encode/decode (booleans are exactly 0/1) + round-trip tests.
+  `net.ipv6.privacy` is deliberately **not** carried — no enforcement
+  consumer until RFC 8981 (§2.4).
+- **Engine** (`lib/net`): admin family-enable is engine state, not just
+  service policy. `IfaceConfig.ipv6_enabled` skips link-local formation;
+  `Iface::set_ipv6_enabled` flushes/reforms; `Stack.ipv4_enabled` +
+  `set_ipv4_enabled`/`set_ipv6_enabled` gate `set_ipv4_config`/
+  `add_ipv6_static`, clear routes on disable, and drop all inbound frames
+  of a disabled family before parsing (an RA can't SLAAC a disabled
+  interface). Host-tested (iface + stack suites).
+- **Service** (`userland/net/netstack`): `Netstack` stores the settings,
+  threads them into `add_interface`, and `apply_settings` re-applies to
+  every existing interface (idempotent, order-independent). `service.rs`
+  dispatches `ApplyNetworkSettings` under `CAP_NET_ADMIN` (audited,
+  `NETWORK_SETTINGS_APPLIED` = 16_015); socket `open` refuses a disabled
+  family (`Errno::NotSupported`, audited); `listen` maps
+  `syncookies_always` → `ListenConfig.max_half_open = 0`, else the bounded
+  default.
+- **Delivery**: `devmgr` (FS-capable, already drives the stack's admin
+  endpoint) reads `system.conf` post-unlock and pushes the settings once
+  over `ApplyNetworkSettings`, fail-soft-retried on each hardware-tree
+  generation bump (`netcfg` module: `NetworkConfigSource` seam +
+  `settings_from_config` mapping + `NetConfigState`; events 13_012/13_013).
+  `devmgr` gains `CAP_FS_ACCESS` (manifest + `DEVMGR_CEILING`) for that one
+  read; `netstack` stays filesystem-free (§0).
+- Deferred to N9b-3: runtime reload (the store is static this increment) and
+  a live QEMU vertical (the enforcement is host-tested; a knob whose effect
+  needs on-wire proof gets one when it lands).
 
 #### N9b-3 — the per-interface `network.conf` store, apply, bonding `[ ]`
 - `/System/Settings/Network/network.conf` laid out by `tools/mkimage`/

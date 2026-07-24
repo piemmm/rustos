@@ -197,6 +197,18 @@ lifetime updates apply the RFC 4862 §5.5.3(e) two-hour rule so an
 unauthenticated RA cannot instantly invalidate an address. Address
 count is capacity-bounded and fail-closed.
 
+IPv6 can be administratively disabled per interface (`net.ipv6.enabled`,
+distinct from the RFC 4862 §5.4.5 link-local-DAD-failure disable): a
+disabled interface forms no link-local at bring-up, refuses static
+assignment, and `set_ipv6_enabled` toggles it at runtime — flushing every
+IPv6 address and halting Router Solicitation on disable, re-forming the
+link-local on enable. `Stack` mirrors it for IPv4 (`ipv4_enabled` /
+`set_ipv4_enabled`, dropping the static assignment and routes on disable)
+and drops all inbound frames of a disabled family before parsing (so an
+inbound RA cannot SLAAC-configure a disabled interface), so the family
+binds no address and answers nothing. This is the enforcement the
+`netstack` service applies from the `net.*` policy.
+
 ### `stack` — the dual-stack host engine
 
 `Stack` composes the modules above into one per-interface host engine

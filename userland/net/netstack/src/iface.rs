@@ -16,7 +16,7 @@ use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    NetInterfaceStateRecord, NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -73,6 +73,13 @@ impl Interface {
 #[derive(Default)]
 pub struct Netstack {
     interfaces: Vec<Interface>,
+    /// Stack-wide `net.*` policy (`plans/NETWORK.md` §6.2). Its safe
+    /// default (both families on, SYN cookies `auto`) holds until an
+    /// FS-capable component delivers the real `system.conf` policy over
+    /// the `ApplyNetworkSettings` admin op; the delivered policy governs
+    /// both interfaces added afterwards and, by re-application, every
+    /// interface already present.
+    settings: NetworkSettings,
     /// Reusable RX pump scratch, sized lazily to the widest ring
     /// slot — allocated once, never per pumped frame (hot path).
     scratch: Vec<u8>,
@@ -128,7 +135,12 @@ impl Netstack {
         if self.find(name).is_some() {
             return Err(Errno::AlreadyExists);
         }
-        let config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
+        // A new interface adopts the current stack-wide family policy at
+        // construction: a disabled family forms no address (no link-local
+        // for v6) and the engine answers nothing for it.
+        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
+        config.ipv4_enabled = self.settings.ipv4_enabled;
+        config.iface.ipv6_enabled = self.settings.ipv6_enabled;
         let stack = Stack::new(&config, now).map_err(|_| Errno::OutOfRange)?;
         self.interfaces.push(Interface {
             name,
@@ -142,6 +154,30 @@ impl Netstack {
 
     fn find(&self, name: [u8; IF_NAME_LEN]) -> Option<usize> {
         self.interfaces.iter().position(|i| i.name == name)
+    }
+
+    /// The current stack-wide `net.*` policy.
+    #[must_use]
+    pub fn settings(&self) -> NetworkSettings {
+        self.settings
+    }
+
+    /// Apply a stack-wide `net.*` policy (`ApplyNetworkSettings`).
+    ///
+    /// Stores the policy so interfaces added later adopt it, and
+    /// re-applies the family switches to every interface already managed
+    /// — enabling a family re-forms its auto-configured address
+    /// (link-local for IPv6), disabling it flushes the family's addresses
+    /// and routes so the interface answers nothing. Idempotent, so a
+    /// redelivery of the same policy is a no-op. The SYN-cookie mode is
+    /// read at `listen` time from [`Self::settings`], so it needs no
+    /// per-interface re-application here.
+    pub fn apply_settings(&mut self, settings: NetworkSettings, now: Duration64) {
+        self.settings = settings;
+        for interface in &mut self.interfaces {
+            interface.stack.set_ipv4_enabled(settings.ipv4_enabled);
+            interface.stack.set_ipv6_enabled(settings.ipv6_enabled, now);
+        }
     }
 
     /// Borrow a managed interface by alias.
@@ -652,6 +688,7 @@ impl Netstack {
             interfaces,
             scratch,
             out,
+            settings: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();

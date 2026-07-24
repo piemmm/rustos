@@ -150,14 +150,19 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
-/// load matched drivers, and bind an autoloaded NIC driver's device
-/// channel into the network stack. `CAP_NET_ADMIN` is held only for that
-/// last act — the `BindDriver` admin call the stack gates on it — never to
-/// configure addresses or routes itself.
+/// load matched drivers, read the machine-wide network policy, and bind an
+/// autoloaded NIC driver's device channel into the network stack.
+/// `CAP_NET_ADMIN` is held both for the `BindDriver` admin call and to
+/// deliver the stack-wide `net.*` policy (`ApplyNetworkSettings`) it reads
+/// from `system.conf` — never to configure addresses or routes itself.
+/// `CAP_FS_ACCESS` is held only to read that world-readable config store
+/// post-unlock on the network stack's behalf (the stack is the parser
+/// sandbox and holds no filesystem capability).
 pub const DEVMGR_CEILING: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::DRV_LOAD,
     CapabilityId::NET_ADMIN,
+    CapabilityId::FS_ACCESS,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -304,7 +309,7 @@ mod tests {
     /// service ceiling contains a sibling's defining capability.
     #[test]
     fn service_ceilings_are_pinned_and_disjoint_in_authority() {
-        assert_eq!(DEVMGR_CEILING.len(), 4);
+        assert_eq!(DEVMGR_CEILING.len(), 5);
         assert_eq!(SYSINFOD_CEILING.len(), 4);
         assert_eq!(NETSTACK_CEILING.len(), 4);
         assert_eq!(SEATMGR_CEILING.len(), 3);

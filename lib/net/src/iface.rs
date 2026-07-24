@@ -86,6 +86,12 @@ pub struct IfaceConfig {
     /// jitter (the engine is deterministic, entropy stays at the
     /// seam).
     pub start_delay: Duration64,
+    /// Whether IPv6 is administratively enabled on this interface. When
+    /// `false` the engine forms no link-local address at bring-up, so
+    /// the interface neither solicits routers nor accepts any IPv6
+    /// traffic (the `net.ipv6.enabled` policy). Enable it later with
+    /// [`Iface::set_ipv6_enabled`].
+    pub ipv6_enabled: bool,
 }
 
 impl IfaceConfig {
@@ -99,6 +105,7 @@ impl IfaceConfig {
             dad_transmits: 1,
             retrans_timer: Duration64::from_secs(1),
             start_delay: Duration64::from_secs(0),
+            ipv6_enabled: true,
         }
     }
 }
@@ -187,6 +194,9 @@ pub enum AddrError {
     BadPrefixLen,
     /// IPv6 was disabled by a link-local DAD failure.
     V6Disabled,
+    /// IPv4 is administratively disabled by policy (`net.ipv4.enabled
+    /// false`), so no IPv4 address may be assigned.
+    V4Disabled,
 }
 
 /// Lifecycle state of one IPv6 address (RFC 4862 §5.5.4).
@@ -256,6 +266,11 @@ pub struct Iface {
     v4: Option<(Ipv4Addr, u8)>,
     v6: Vec<V6Addr>,
     v6_disabled: bool,
+    /// IPv6 is administratively disabled by policy (`net.ipv6.enabled
+    /// false`). Distinct from `v6_disabled`, which is the RFC 4862
+    /// §5.4.5 link-local-DAD-failure disable; this one is operator
+    /// policy and is reversible through [`Iface::set_ipv6_enabled`].
+    v6_admin_disabled: bool,
     rs: RsState,
 }
 
@@ -274,12 +289,52 @@ impl Iface {
             v4: None,
             v6: Vec::new(),
             v6_disabled: false,
+            v6_admin_disabled: !config.ipv6_enabled,
             rs: RsState::NotStarted,
         };
-        let link_local = iface.address_in(LINK_LOCAL_PREFIX);
-        let start = nanos(now).saturating_add(iface.start_delay);
-        iface.push_v6(link_local, 64, AddrOrigin::LinkLocal, NEVER, NEVER, start);
+        if !iface.v6_admin_disabled {
+            iface.start_link_local(now);
+        }
         iface
+    }
+
+    /// Form the link-local address and begin its DAD/RS bring-up at
+    /// `now`. Called at construction and when IPv6 is re-enabled; a
+    /// no-op if a link-local record already exists.
+    fn start_link_local(&mut self, now: Duration64) {
+        let link_local = self.address_in(LINK_LOCAL_PREFIX);
+        if self.find_v6(link_local).is_some() {
+            return;
+        }
+        let start = nanos(now).saturating_add(self.start_delay);
+        self.push_v6(link_local, 64, AddrOrigin::LinkLocal, NEVER, NEVER, start);
+    }
+
+    /// Administratively enable or disable IPv6 on this interface
+    /// (`net.ipv6.enabled`).
+    ///
+    /// Disabling flushes every IPv6 address (link-local, static, and
+    /// SLAAC), halts Router Solicitation, and makes the interface
+    /// refuse new IPv6 assignment and drop all inbound IPv6 — it binds
+    /// no address and answers nothing. Enabling re-forms the link-local
+    /// address and restarts bring-up at `now`. Idempotent.
+    ///
+    /// A DAD-failure disable ([`Iface::v6_disabled`]) is a separate,
+    /// stronger condition: re-enabling does not re-form a link-local
+    /// that a duplicate on the link already claimed.
+    pub fn set_ipv6_enabled(&mut self, enabled: bool, now: Duration64) {
+        if enabled {
+            if self.v6_admin_disabled {
+                self.v6_admin_disabled = false;
+                if !self.v6_disabled {
+                    self.start_link_local(now);
+                }
+            }
+        } else if !self.v6_admin_disabled {
+            self.v6_admin_disabled = true;
+            self.v6.clear();
+            self.rs = RsState::NotStarted;
+        }
     }
 
     /// The IPv4 static assignment, if configured.
@@ -327,7 +382,7 @@ impl Iface {
         prefix_len: u8,
         now: Duration64,
     ) -> Result<(), AddrError> {
-        if self.v6_disabled {
+        if self.v6_disabled || self.v6_admin_disabled {
             return Err(AddrError::V6Disabled);
         }
         if addr.is_unspecified() || addr.is_loopback() || addr.is_multicast() {
@@ -550,6 +605,14 @@ impl Iface {
     #[must_use]
     pub fn v6_disabled(&self) -> bool {
         self.v6_disabled
+    }
+
+    /// Whether IPv6 is administratively disabled by policy
+    /// (`net.ipv6.enabled false`). The stack drops all inbound IPv6
+    /// while this holds, so the interface answers nothing.
+    #[must_use]
+    pub fn v6_admin_disabled(&self) -> bool {
+        self.v6_admin_disabled
     }
 
     /// Source-selection candidates: every usable (non-tentative)

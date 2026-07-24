@@ -1665,3 +1665,83 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
         "device segmentation reproduces the per-MSS software segments byte-for-byte"
     );
 }
+
+#[test]
+fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    config.iface.ipv6_enabled = false;
+    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    assert!(a.iface().ipv6_addresses().is_empty());
+    // No DAD NS is emitted at bring-up for a disabled family.
+    assert!(a.advance_collect(t(0)).frames.is_empty());
+    // An inbound RA cannot SLAAC-configure a disabled interface: it is
+    // dropped before parsing, so no address forms and nothing is sent.
+    let ra = router_advertisement_frame(ALL_NODES, ipv6_multicast_mac(&ALL_NODES));
+    let before = a.counters().rx_dropped;
+    let out = a.on_frame_collect(&ra, t(2));
+    assert!(out.frames.is_empty());
+    assert_eq!(a.counters().rx_dropped, before + 1);
+    assert!(a.iface().ipv6_addresses().is_empty());
+}
+
+#[test]
+fn re_enabling_ipv6_on_a_stack_brings_the_link_local_up() {
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    config.iface.ipv6_enabled = false;
+    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    a.set_ipv6_enabled(true, t(0));
+    // Bring-up proceeds exactly as for a natively-enabled interface.
+    assert!(!a.advance_collect(t(0)).frames.is_empty()); // DAD NS
+    a.advance_collect(t(1)); // DAD completion
+    assert!(a.iface().is_assigned(link_local(IID_A)));
+}
+
+#[test]
+fn disabling_ipv6_at_runtime_flushes_addresses_and_clears_routes() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    bring_up(&mut a, &mut b);
+    // Learn a router + SLAAC prefix, then complete the SLAAC DAD.
+    let ra = router_advertisement_frame(ALL_NODES, ipv6_multicast_mac(&ALL_NODES));
+    a.on_frame_collect(&ra, t(2));
+    a.advance_collect(t(2));
+    a.advance_collect(t(3));
+    assert!(!a.iface().ipv6_addresses().is_empty());
+    a.set_ipv6_enabled(false, t(4));
+    assert!(a.iface().ipv6_addresses().is_empty());
+    // An off-link v6 destination now has no route (the router list was
+    // cleared), so origination fails closed rather than using a stale one.
+    let off_link = Ipv6Addr::new(0x2001, 0x0DB8, 0xFF, 0, 0, 0, 0, 1);
+    assert!(a
+        .send_echo_request_collect(IpAddr::V6(off_link), 1, 1, b"x", t(4))
+        .is_err());
+}
+
+#[test]
+fn ipv4_disabled_stack_refuses_assignment() {
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    config.ipv4_enabled = false;
+    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    assert_eq!(
+        a.set_ipv4_config(V4_A, 24, None),
+        Err(crate::iface::AddrError::V4Disabled)
+    );
+    assert!(a.iface().ipv4().is_none());
+}
+
+#[test]
+fn disabling_ipv4_at_runtime_drops_the_assignment_and_refuses_more() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("assign");
+    assert!(a.iface().ipv4().is_some());
+    a.set_ipv4_enabled(false);
+    assert!(a.iface().ipv4().is_none());
+    assert_eq!(
+        a.set_ipv4_config(V4_A, 24, None),
+        Err(crate::iface::AddrError::V4Disabled)
+    );
+    // Re-enabling permits assignment again (no auto-config restores it).
+    a.set_ipv4_enabled(true);
+    assert_eq!(a.set_ipv4_config(V4_A, 24, None), Ok(()));
+    assert_eq!(a.iface().ipv4(), Some((V4_A, 24)));
+}

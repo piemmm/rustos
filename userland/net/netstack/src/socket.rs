@@ -35,7 +35,7 @@ use tairix_abi::net::{
     SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, IF_NAME_LEN,
+    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetworkSettings, IF_NAME_LEN,
 };
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -400,7 +400,15 @@ impl SocketService {
                 family,
                 sock_type,
                 deliver_port,
-            } => self.open(caller, audit, family, sock_type, deliver_port, response),
+            } => self.open(
+                interfaces,
+                caller,
+                audit,
+                family,
+                sock_type,
+                deliver_port,
+                response,
+            ),
             SocketRequest::Bind { socket, local } => {
                 // Claiming a specific privileged (well-known) local port is
                 // a further gate beyond CAP_NET: an unprivileged process
@@ -440,7 +448,9 @@ impl SocketService {
             SocketRequest::LeaveMulticast { socket, group } => {
                 self.leave(interfaces, owner, socket, group, now, response)
             }
-            SocketRequest::Listen { socket } => self.listen(audit, owner, socket, response),
+            SocketRequest::Listen { socket } => {
+                self.listen(interfaces, audit, owner, socket, response)
+            }
             SocketRequest::Accept {
                 socket,
                 deliver_port,
@@ -468,8 +478,10 @@ impl SocketService {
     /// caller's quota and the global table. An ICMP-echo (raw) socket is a
     /// further gate beyond `CAP_NET`: forging or observing ICMP is raw-frame
     /// authority, so opening one requires `CAP_NET_RAW` (fail closed, audited).
+    #[allow(clippy::too_many_arguments)]
     fn open(
         &mut self,
+        interfaces: &Netstack,
         caller: &Caller,
         audit: &dyn Sink,
         family: NetAddrFamily,
@@ -477,6 +489,23 @@ impl SocketService {
         deliver_port: u64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
+        // A family the stack-wide policy has disabled (`net.ipv4.enabled`
+        // / `net.ipv6.enabled`) binds no address and answers nothing, so
+        // a socket for it can never carry traffic: refuse the open up
+        // front (fail closed, audited) rather than hand back a dead
+        // handle.
+        let settings = interfaces.settings();
+        let family_enabled = match family {
+            NetAddrFamily::V4 => settings.ipv4_enabled,
+            NetAddrFamily::V6 => settings.ipv6_enabled,
+        };
+        if !family_enabled {
+            return refuse(
+                audit,
+                "socket open denied: address family administratively disabled",
+                Errno::NotSupported,
+            );
+        }
         if sock_type == SocketType::IcmpEcho && !caller.capabilities().holds(CapabilityId::NET_RAW)
         {
             return refuse(
@@ -723,6 +752,7 @@ impl SocketService {
     /// privileged-port check was applied at [`bind`](Self::bind) time.
     fn listen(
         &mut self,
+        interfaces: &Netstack,
         audit: &dyn Sink,
         owner: ProcId,
         socket: SocketId,
@@ -745,8 +775,10 @@ impl SocketService {
             );
         }
         let local_port = self.sockets[index].local_port;
-        self.sockets[index].proto =
-            Proto::Listen(Box::new(Listener::new(local_port, ListenConfig::default())));
+        self.sockets[index].proto = Proto::Listen(Box::new(Listener::new(
+            local_port,
+            listen_config(interfaces.settings()),
+        )));
         emit(
             audit,
             Level::Info,
@@ -1748,6 +1780,23 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
         tx: Vec::new(),
         deliveries: Vec::new(),
     })
+}
+
+/// Build a new listener's [`ListenConfig`] from the stack-wide policy.
+///
+/// `net.tcp.syncookies always` sets `max_half_open = 0`, so the listener
+/// holds no half-open state and answers every SYN with a stateless RFC
+/// 4987 cookie (the unconditional-defence mode); `auto` keeps the bounded
+/// default backlog, falling back to cookies only once it overflows.
+pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
+    ListenConfig {
+        max_half_open: if settings.syncookies_always {
+            0
+        } else {
+            ListenConfig::default().max_half_open
+        },
+        ..ListenConfig::default()
+    }
 }
 
 /// Audit an after-capability refusal and return it as the typed error.

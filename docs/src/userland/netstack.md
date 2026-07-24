@@ -66,6 +66,7 @@ structured audit record (event range `16000..17000`).
 | `InterfaceRates` | `CAP_SYSINFO_INTROSPECT` | paged windowed throughput-rate records (carries the caller's averaging window) |
 | `Sockets` | `CAP_SYSINFO_INTROSPECT` | paged open-socket records (protocol, state, local/peer address, owning pid, queue depths) — the `ss`/`netstat` socket table |
 | `BindDriver` | `CAP_NET_ADMIN` | status frame (the device manager hands the stack a discovered NIC driver's device-channel endpoint under a `netN` alias) |
+| `ApplyNetworkSettings` | `CAP_NET_ADMIN` | status frame (the stack-wide `net.*` policy — IPv4/IPv6 family enable and the TCP SYN-cookie mode) |
 
 The facts/state reads are the *broker* surface: `netstack` answers
 whole-system interface state only to the System Information service,
@@ -73,6 +74,33 @@ exactly as the kernel's introspection primitive does, and all
 per-client narrowing lives in that audited broker (`sysinfod` gates
 facts on `CAP_SYSINFO_HW` — the record carries the MAC, stable
 hardware identity — and state on `CAP_SYSINFO_GLOBAL`).
+
+## Stack-wide network policy (`net.*`)
+
+`netstack` is the network-parsing sandbox and holds no filesystem
+capability (`plans/NETWORK.md` §0), so it never reads `system.conf`
+itself. The FS-capable device manager reads the `net.*` registry keys
+(`lib/sysconfig`, §6.2 — `net.ipv4.enabled`, `net.ipv6.enabled`,
+`net.tcp.syncookies`) after the root unlock and delivers them once over
+the `CAP_NET_ADMIN` `ApplyNetworkSettings` admin op (audited,
+fail-soft-retried; `plans/NETWORK.md` N9b-2). Until it arrives the stack
+holds safe defaults (both families enabled, SYN cookies `auto`).
+
+The policy is enforced, not advisory:
+
+- **A disabled family binds no address and answers nothing.** With
+  `net.ipv6.enabled false` an interface forms no link-local, accepts no
+  inbound IPv6 (an inbound Router Advertisement cannot SLAAC-configure
+  it), and a socket `open` for the family is refused up front
+  (`Errno::NotSupported`, audited) rather than handed a dead handle;
+  `net.ipv4.enabled false` is the symmetric IPv4 case. Applying the
+  policy reconfigures every interface already managed as well as those
+  bound later, so delivery order does not matter (idempotent).
+- **`net.tcp.syncookies always`** sets each new listener's
+  `max_half_open = 0`, so it holds no half-open state and answers every
+  SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default
+  backlog, falling back to cookies only on overflow. (`net.ipv6.privacy`
+  has no enforcement consumer yet and is deliberately not delivered.)
 
 ## Sockets (the data plane)
 

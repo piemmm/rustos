@@ -57,6 +57,17 @@ one range test. The assigned identifiers:
 | `16_012` | `INBOUND_ECHO_SERVED` | Info | An inbound ICMP/ICMPv6 echo to a local interface was answered. |
 | `16_013` | `SOCKET_LISTENING` | Info | A stream socket entered the passive LISTEN state. |
 | `16_014` | `SOCKET_ACCEPTED` | Info | A passive connection was accepted onto a child stream socket. |
+| `16_015` | `NETWORK_SETTINGS_APPLIED` | Info | The stack-wide `net.*` policy (family enable, SYN-cookie mode) was applied over the `ApplyNetworkSettings` admin op. |
+
+The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
+`net.tcp.syncookies`) is read from `system.conf` and delivered to
+`netstack` by the FS-capable device manager, which records the delivery
+in its own `devmgr` range: `13_012` `NETWORK_SETTINGS_DELIVERED` (Info,
+the policy was read and accepted) and `13_013`
+`NETWORK_SETTINGS_DELIVERY_FAILED` (Warn, the stack refused it or was
+unreachable — retried, fail-soft). `netstack` holds no filesystem
+capability, so this split (devmgr reads, netstack enforces) keeps the
+parser sandbox filesystem-free (`plans/NETWORK.md` §0, N9b-2).
 
 The socket-listing and counter/rate queries are additionally audited by
 the `sysinfod` broker under their `sysinfo-v1` query names

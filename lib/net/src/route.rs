@@ -336,6 +336,13 @@ impl DefaultRouterList {
         self.routers.is_empty()
     }
 
+    /// Forget every learned router, keeping the capacity bound. Used
+    /// when IPv6 is administratively disabled on the interface.
+    pub fn clear(&mut self) {
+        self.routers.clear();
+        self.cursor = 0;
+    }
+
     /// Apply a Router Advertisement's `router_lifetime` for `router`:
     /// zero removes it (the router resigned), a non-zero lifetime
     /// inserts or refreshes it. A new router beyond capacity is

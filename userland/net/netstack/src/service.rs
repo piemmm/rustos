@@ -145,6 +145,21 @@ pub fn serve(
         | NetstackRequest::InterfaceCounters { .. }
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. } => serve_read(stack, sockets, decoded, response, now),
+        NetstackRequest::ApplyNetworkSettings(settings) => {
+            // Pure state mutation (no I/O), so unlike `BindDriver` it is
+            // served here: store the policy and re-apply the family
+            // switches to every managed interface. The `CAP_NET_ADMIN`
+            // gate above already ran; record the audited outcome.
+            stack.apply_settings(settings, now);
+            emit(
+                audit,
+                Level::Info,
+                events::NETWORK_SETTINGS_APPLIED,
+                "network settings applied",
+                &[],
+            );
+            write_status(response)
+        }
         NetstackRequest::BindDriver { .. } => {
             // Binding a NIC driver's device channel creates and grants a
             // shared-memory region and issues IPC to the driver — I/O the
@@ -283,6 +298,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceState { .. } => "interface state",
         NetstackRequest::InterfaceRates { .. } => "interface rates",
         NetstackRequest::Sockets { .. } => "sockets",
+        NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
     };
     Field {
