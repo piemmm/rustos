@@ -3393,8 +3393,25 @@ transfer, landed in increments:
   test-kernel picker-open marker (the session's first post-rename
   `comm=desktop sc=fs_open`, the picker's home read) since the session-internal
   picker delivers no `MessageDelivered` and the user-authority session cannot
-  `log_emit`; non-flaky across repeated runs. **The remaining work is FM9-c**
-  (delete with confirm).
+  `log_emit`; non-flaky across repeated runs. **FM9-c (delete with confirm):
+  the product side is landed and host-tested; its end-to-end QEMU vertical is
+  staged.** A clickable **Delete** now joins the context menu
+  (`ContextCommand::Delete`, its `begin_delete` action already existed, §2.4),
+  routed to the same confirm-and-remove verb the `Delete` key drives. Reaching
+  it fixed a real defect that makes the *whole* context menu usable in the
+  desktop: secondary (right) button presses were dropped — `tairix_wm`'s input
+  router ignored them and the session router had a catch-all that swallowed
+  them. Now the WM router returns `InputResponse::SecondaryActivated` for a
+  client right-press and the session forwards it and delivers `WindowEvent`
+  `Pointer{Pressed(Secondary)}` to the app (host-tested in `tairix-wm` and
+  `tairix-desktop-session`; shared `Menu::row_rect` /
+  `render::context_menu_command_rect` locate the Delete row). The end-to-end
+  QEMU proof is staged: the QEMU HMP `mouse_button` right-button does not reach
+  the emulated `virtio-mouse` (every OS layer decodes BTN_RIGHT→Secondary
+  correctly, all host-tested, yet the injected right-click never arrives), so a
+  scripted right-click delete is a metal/real-mouse acceptance item; the delete
+  verb, confirm dialog, and `DeleteWalk` are host-proven in `lib/browse` and
+  `files.app`.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

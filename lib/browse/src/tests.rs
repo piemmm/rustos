@@ -3435,6 +3435,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
         ContextCommand::Cut,
         ContextCommand::Copy,
         ContextCommand::Properties,
+        ContextCommand::Delete,
     ] {
         assert!(!menu.is_enabled(command), "{command:?} without a selection");
     }
@@ -3456,6 +3457,7 @@ fn the_context_menu_enables_the_item_commands_on_a_directory() {
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
     assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
 #[test]
@@ -3473,6 +3475,7 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
 #[test]
@@ -3490,6 +3493,7 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
     assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
 #[test]
@@ -3508,10 +3512,10 @@ fn context_commands_list_covers_every_variant_once() {
     use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
 
     // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
-    // exactly once, in a stable order. Open With… now joins with its FM6b
-    // chooser verb; Delete and New Folder remain absent — the drawn menu has
-    // no verb to invoke for them yet, so they land with the stage that first
-    // wires their behaviour, never as speculative surface.
+    // exactly once, in a stable order. Open With… joined with its FM6b chooser
+    // verb; Delete now joins with FM9-c's confirm-and-remove verb. New Folder
+    // stays absent — the drawn menu has no verb to invoke for it (it is a
+    // toolbar write tool), so it would be speculative surface here.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
@@ -3522,6 +3526,7 @@ fn context_commands_list_covers_every_variant_once() {
             ContextCommand::Copy,
             ContextCommand::Paste,
             ContextCommand::Properties,
+            ContextCommand::Delete,
         ]
     );
 }
@@ -3672,6 +3677,41 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
         context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
         None
     );
+}
+
+#[test]
+fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
+    use crate::chrome::{ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::render::{build_context_menu, context_menu_command_at, context_menu_command_rect};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 400);
+    // A selection so the item commands (Delete among them) are enabled.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let menu = build_context_menu(model);
+    let anchor = Point::new(30, 24);
+
+    // The forward rect of each command centres inside a row that the hit-test
+    // resolves back to that same command — so the click point the harness aims
+    // at and the app's own hit-test can never disagree (§2.2). A disabled
+    // command still has a drawn (muted) row, so its rect exists but the
+    // hit-test declines it (fail closed).
+    for &command in CONTEXT_COMMANDS {
+        let rect = context_menu_command_rect(&menu, anchor, vp, font, &theme, command)
+            .expect("every listed command has a drawn row");
+        let centre = Point::new(
+            rect.left() + i32::try_from(rect.width / 2).unwrap(),
+            rect.top() + i32::try_from(rect.height / 2).unwrap(),
+        );
+        let hit = context_menu_command_at(&menu, anchor, vp, font, &theme, centre);
+        if model.is_enabled(command) {
+            assert_eq!(hit, Some(command), "{command:?} rect round-trips");
+        } else {
+            assert_eq!(hit, None, "{command:?} disabled row fails closed");
+        }
+    }
 }
 
 #[test]

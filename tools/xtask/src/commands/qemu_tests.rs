@@ -4294,7 +4294,8 @@ const TESTS: &[QemuTest] = &[
     // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
     // ~1 s login typing + session bring-up + the paced click script +
     // both app spawns + the typed command + the FM9-a file-manager
-    // New-Folder + inline-rename click-through on QEMU TCG.
+    // New-Folder + inline-rename click-through and the FM9-b Viewer launch +
+    // trusted-picker open-a-file, on QEMU TCG.
     QemuTest {
         package: "tairix-test-autoload-input-qemu-aarch64",
         binary: "tairix-test-autoload-input-qemu-aarch64",

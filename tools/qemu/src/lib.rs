@@ -330,8 +330,10 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
-    /// The button's bit in the HMP `mouse_button` state mask
-    /// (1 = left, 2 = middle, 4 = right).
+    /// The button's bit in the HMP `mouse_button` state mask, per the QEMU
+    /// this runner drives: **1 = left, 2 = middle, 4 = right** (the
+    /// `qemu-system-*` `mouse_button` help string). The secondary (right)
+    /// button is therefore bit 4 and the middle button bit 2.
     const fn mask_bit(self) -> u32 {
         match self {
             MouseButton::Primary => 1,

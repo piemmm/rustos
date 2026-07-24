@@ -2172,6 +2172,10 @@ mod program {
                 ClipboardVerb::Paste,
             ),
             ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
+            // The same modal-confirmed removal the `Delete` key opens: the menu
+            // adds no authority — the confirmed walk is the user's own
+            // permission-checked `fs_unlink`s (§2.2).
+            ContextCommand::Delete => begin_delete(browser, &mut overlays.delete),
         }
     }
 

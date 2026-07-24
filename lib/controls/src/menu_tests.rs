@@ -335,6 +335,31 @@ fn row_at_maps_points_to_rows() {
     );
 }
 
+#[test]
+fn row_rect_is_the_forward_mirror_of_row_at() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    // Every row's rect centre hit-tests back to that row, and an out-of-range
+    // index yields no rect (fail closed).
+    for index in 0..3 {
+        let rect = menu
+            .row_rect(index, bounds, Scale::ONE, &theme)
+            .expect("row rect");
+        let centre = Point::new(
+            rect.left() + i32::try_from(rect.width / 2).unwrap(),
+            rect.top() + i32::try_from(rect.height / 2).unwrap(),
+        );
+        assert_eq!(
+            menu.row_at(bounds, Scale::ONE, &theme, centre),
+            Some(index),
+            "row {index} rect round-trips"
+        );
+    }
+    assert_eq!(menu.row_rect(3, bounds, Scale::ONE, &theme), None);
+}
+
 // --- Theme switching and scale -----------------------------------------
 
 #[test]

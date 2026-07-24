@@ -531,6 +531,12 @@ fn release_primary() -> InputEvent {
     }
 }
 
+fn press_secondary() -> InputEvent {
+    InputEvent::PointerPressed {
+        button: PointerButton::Secondary,
+    }
+}
+
 fn moved(x: i32, y: i32) -> InputEvent {
     InputEvent::PointerMoved {
         to: Point::new(x, y),
@@ -578,6 +584,47 @@ fn press_activates_raises_and_focuses() {
     // overlap it wins, while a point only `top` covers still hits `top`.
     assert_eq!(c.window_at(Point::new(22, 5)), Some(bottom)); // overlap now bottom-on-top
     assert_eq!(c.window_at(Point::new(35, 5)), Some(top)); // only top covers here
+}
+
+#[test]
+fn secondary_press_activates_and_delivers_to_the_client() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let bottom = c.add_window(Point::new(0, 0), opaque(30, 30, RED));
+    let top = c.add_window(Point::new(20, 0), opaque(20, 30, RED));
+    let mut router = InputRouter::new();
+
+    // A right-click on the bottom window (where the top does not cover it)
+    // raises+focuses it exactly as a primary press does, and is delivered to
+    // the client as a secondary press — the event a client uses to open its
+    // context menu (undecorated test windows have no furniture, so the client
+    // area is the whole window).
+    router.handle(moved(5, 5), &mut c);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::SecondaryActivated {
+            window: bottom,
+            local: Point::new(5, 5),
+        }
+    );
+    assert_eq!(router.focused(), Some(bottom));
+    assert_eq!(c.window_at(Point::new(22, 5)), Some(bottom)); // raised over top
+    let _ = top;
+}
+
+#[test]
+fn secondary_press_on_desktop_opens_nothing() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+    assert!(router.focus(win, &c));
+
+    // A right-click on the bare desktop opens no menu and changes nothing —
+    // the window manager never synthesises a context menu of its own.
+    router.handle(moved(30, 30), &mut c);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::Ignored
+    );
 }
 
 #[test]
@@ -702,7 +749,10 @@ fn key_to_a_vanished_focus_is_ignored_and_drops_focus() {
 }
 
 #[test]
-fn non_primary_buttons_do_not_change_focus() {
+fn an_unhandled_button_does_not_change_focus() {
+    // The primary button activates and the secondary opens a context menu
+    // (both raise+focus); the middle button carries no window-manager meaning,
+    // so it is consumed without changing focus.
     let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
@@ -710,7 +760,7 @@ fn non_primary_buttons_do_not_change_focus() {
     router.handle(moved(5, 5), &mut c);
     let r = router.handle(
         InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
+            button: PointerButton::Middle,
         },
         &mut c,
     );

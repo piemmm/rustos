@@ -615,6 +615,41 @@ fn primary_press_over_a_window_routes_to_the_window_manager() {
 }
 
 #[test]
+fn secondary_press_over_a_window_routes_to_the_window_manager() {
+    // A right-click over a window must reach the window manager (which
+    // delivers it to the client so it can open its context menu) — the
+    // session router must not swallow it, as its catch-all once did.
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(250, 250),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::SecondaryActivated {
+            window,
+            local: Point::new(50, 50),
+        })
+    );
+    assert_eq!(router.focused(), Some(window));
+}
+
+#[test]
 fn primary_press_on_the_empty_desktop_routes_to_the_window_manager() {
     let mut session = session();
     let mut comp = compositor();

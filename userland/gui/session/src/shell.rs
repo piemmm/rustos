@@ -502,8 +502,10 @@ impl DesktopShell {
     fn mirror_focus(&mut self, response: &InputResponse, compositor: &mut Compositor) {
         let focus = match *response {
             // A furniture press (a scrollbar) activated its window exactly as a
-            // client press does, so the highlighted task follows it too.
+            // client press does, so the highlighted task follows it too; a
+            // secondary (right) press activates+focuses the same way.
             InputResponse::Activated { window, .. }
+            | InputResponse::SecondaryActivated { window, .. }
             | InputResponse::FurniturePressed { window } => Some(window),
             InputResponse::DesktopPressed => None,
             // A drag, resize, command-control activation, key, or scroll acts

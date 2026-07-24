@@ -771,6 +771,67 @@ mod program {
                         }
                     }
                 }
+                InputResponse::SecondaryActivated { window, local } => {
+                    // A right-click raises+focuses the window like a primary
+                    // press, then delivers a secondary-button press so the
+                    // client can open its context menu. Mirror the focus change
+                    // app-ward first (the old window unfocuses, the new one
+                    // focuses), then deliver the press. The trusted picker is a
+                    // read-only browser with no context menu, so a right-click
+                    // on it delivers focus only and opens nothing.
+                    let target = windows.ipc_id(window);
+                    if *focused != target {
+                        if let Some(old) = focused.take() {
+                            deliver(
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                &WindowEvent::Focus {
+                                    window_id: old,
+                                    focused: false,
+                                },
+                            );
+                        }
+                        if let Some(id) = target {
+                            deliver(
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                &WindowEvent::Focus {
+                                    window_id: id,
+                                    focused: true,
+                                },
+                            );
+                        }
+                        *focused = target;
+                    }
+                    if let (Some(id), Ok(x), Ok(y)) =
+                        (target, u32::try_from(local.x), u32::try_from(local.y))
+                    {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Pressed(
+                                    tairix_abi::input::PointerButtonCode::Secondary,
+                                ),
+                            },
+                        );
+                    }
+                }
                 InputResponse::DesktopPressed => {
                     if let Some(old) = focused.take() {
                         deliver(

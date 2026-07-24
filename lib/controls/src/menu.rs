@@ -490,6 +490,39 @@ impl Menu {
         (index < self.items.len()).then_some(index)
     }
 
+    /// The surface rectangle row `index` occupies for the given bounds, or
+    /// `None` when the index is out of range or the plate has no room for rows.
+    ///
+    /// The forward mirror of [`row_at`](Self::row_at) over the same inner
+    /// geometry, so a caller that must aim *at* a row — a test harness clicking
+    /// a specific command — reads the exact rectangle [`render`](Self::render)
+    /// paints and [`row_at`](Self::row_at) hit-tests, never a hand-copied
+    /// position. Fails closed on an out-of-range index.
+    #[must_use]
+    pub fn row_rect(
+        &self,
+        index: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        if index >= self.items.len() {
+            return None;
+        }
+        let (ix, iy, iw, _ih) = Self::inner(bounds, scale, theme)?;
+        let row_h = Self::row_height(scale, theme);
+        if row_h == 0 {
+            return None;
+        }
+        let offset = u32::try_from(index).ok()?.checked_mul(row_h)?;
+        Some(Rect::new(
+            to_i32(ix),
+            to_i32(iy).saturating_add(to_i32(offset)),
+            iw,
+            row_h,
+        ))
+    }
+
     /// Paint the menu into `surface` at `bounds` for the active theme.
     pub fn render(
         &self,

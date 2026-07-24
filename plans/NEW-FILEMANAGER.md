@@ -27,7 +27,7 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
+`in progress` — FM1–FM8 are landed; FM9 is landed except FM9-c's end-to-end QEMU vertical (its product side — the clickable Delete + the compositor right-click delivery fix — is landed and host-tested; the QEMU right-button emulation gap defers the vertical). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
@@ -71,10 +71,11 @@ the signed `AppInfo` MIME associations that resolve the viewer), and
 for a regular file; the drawn `render::build_open_with_menu` chooser offers the
 full `applications_for` result and launches the picked bundle through the same
 `DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
-**FM6b is now complete. FM9 is in progress: FM9-pre (the `FsNodeMutated`/
+**FM6b is complete. FM9-pre (the `FsNodeMutated`/
 `FsMutationDenied` filesystem-mutation audit events every write syscall emits,
 the robust serial witnesses the vertical keys on and a §5.4/§19.4 requirement
-in their own right) and FM9-a are landed.** FM9-a appends the New-Folder +
+in their own right), FM9-a, and FM9-b are landed; FM9-c's product side is
+landed and host-tested with its end-to-end QEMU vertical staged (below).** FM9-a appends the New-Folder +
 inline-rename click-through to the aarch64 `autoload_input` QEMU vertical after
 the AW4 terminal round trip: it descends into `/Users/root` by
 layout-reconstructed pointer clicks (`render::selection_rect` for rows, the new
@@ -95,9 +96,28 @@ picker-open marker (the session's first post-rename `comm=desktop sc=fs_open`,
 the picker's `open_at` home read), so it lands only once the picker is
 composited — no `MessageDelivered` fires for the session-internal picker and
 the user-authority session cannot `log_emit`, so the test sink turns that
-unique read into the deterministic gate. **What remains is FM9-c (delete with
-confirm), appended after FM9-b with its own kernel-attested PASS witness, plus
-its docs.** The starting point is
+unique read into the deterministic gate. **FM9-c (delete with confirm): the
+product side is landed and host-tested; its end-to-end QEMU vertical is
+staged.** FM9-c adds a clickable **Delete** to the context menu (its
+`begin_delete` action already existed, so this is not speculative surface,
+§2.4), routed through `dispatch_context_command` to the same confirm-and-remove
+verb the `Delete` key opens. Reaching it needed a real fix: the compositor
+input path **dropped secondary (right) button presses** — the window manager's
+router ignored them and the desktop session's router had a catch-all that
+swallowed them, so the right-click context menu was unreachable in the desktop.
+That is fixed: `tairix_wm`'s router now raises+focuses and delivers a
+right-press to the client (`InputResponse::SecondaryActivated`), and the
+session router forwards it to the WM, which delivers `WindowEvent::Pointer`
+`Pressed(Secondary)` to the app (host-tested in `tairix-wm` and
+`tairix-desktop-session`). The shared `Menu::row_rect` +
+`render::context_menu_command_rect` give a caller the drawn Delete row's rect
+(§2.2). **The QEMU `autoload_input` vertical does not yet exercise FM9-c**: the
+QEMU HMP `mouse_button` right-button does not reach the emulated
+`virtio-mouse` (proven: every OS layer decodes BTN_RIGHT→Secondary correctly
+and is host-tested, yet the injected right-click never arrives), so an
+end-to-end delete-with-confirm QEMU proof is an honest emulation gap staged for
+a metal/real-mouse path or a harness that can inject a virtio-input button
+event directly. The starting point was
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -119,8 +139,9 @@ Sort) and their actions already exist, so it needs no speculative surface. The
 `ContextMenuModel` as a `lib/controls::Menu` routed to the existing
 Open/Rename/Cut/Copy/Paste/Properties verbs; `OpenWith` **now re-joins**
 `CONTEXT_COMMANDS` with FM6b's chooser verb (enabled only for a regular file),
-exactly as it was staged to. Only Delete and New Folder remain staged out of
-the context menu until their own actions land.
+and **Delete** joined it with FM9-c's confirm-and-remove verb (enabled on any
+selection). New Folder stays off this menu — it is a *write* toolbar tool, not
+a menu command shared with the read-only picker.
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven) is done, and
@@ -1207,8 +1228,32 @@ the click-through that keys on them is written.
     serial line, and the runner gates the pick-click on it (the `fs_open`
     happens synchronously inside the `PickFile` serve, so the click lands in a
     later wake with the picker composited). Non-flaky across repeated runs.
-  - **FM9-c — delete with confirm**, gated on the `FsNodeMutated` `op=unlink`
-    /`op=rmdir` records.
+  - **FM9-c — delete with confirm — product `[x]` (done, host-tested); QEMU
+    vertical `[ ]` (staged, emulation gap).** A clickable **Delete** now joins
+    the context menu (`ContextCommand::Delete`, enabled on any selection),
+    routed through the app's `dispatch_context_command` to the *same*
+    `begin_delete` the `Delete` key opens — the action already existed, so this
+    is not speculative surface (§2.4). Delivering the right-click needed a real
+    compositor fix that also makes the *whole* context menu (Open/Rename/Cut/
+    Copy/Paste/Properties/Delete) usable in the desktop: the secondary (right)
+    button was being **dropped** — `tairix_wm`'s input router ignored it and the
+    desktop session's router had a catch-all that swallowed it. Now the WM
+    router raises+focuses and returns `InputResponse::SecondaryActivated` for a
+    client-area right-press, the session router forwards `PointerPressed`
+    `{Secondary}` to the WM, and the session delivers `WindowEvent::Pointer`
+    `Pressed(Secondary)` to the app so it opens its menu — host-tested in
+    `tairix-wm` (`secondary_press_activates_and_delivers_to_the_client`) and
+    `tairix-desktop-session` (`secondary_press_over_a_window_routes_to_the_window_manager`).
+    The shared `Menu::row_rect` + `render::context_menu_command_rect` give a
+    caller the drawn Delete row's rect (§2.2). **The end-to-end `autoload_input`
+    QEMU proof is staged**: the QEMU HMP `mouse_button` right-button does not
+    reach the emulated `virtio-mouse` (every OS layer decodes BTN_RIGHT→Secondary
+    correctly, all host-tested, yet the injected right-click never arrives in the
+    guest), so a scripted right-click delete cannot be driven in QEMU today. It
+    lands as a metal/real-mouse acceptance item (a real right-click follows the
+    host-tested path) or once a harness can inject a virtio-input button event
+    directly; the delete verb, confirm dialog, and `DeleteWalk` are already
+    host-proven in `lib/browse` and `files.app`.
 - **Docs** kept current in the same changes (§2.8, §13):
   `docs/src/desktop/apps.md` (the manager's design as each stage lands),
   the `lib/browse`/`lib/icon`/`lib/controls` rustdoc + `README.md`

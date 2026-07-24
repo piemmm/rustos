@@ -173,10 +173,16 @@ impl SessionInputRouter {
                 }
             }
             // The window manager takes the rest and the taskbar none of them:
-            // a primary release ends a move-grab, a scroll wheel routes to the
-            // root viewport under the pointer, and keys go to the focused
-            // window.
-            InputEvent::PointerReleased {
+            // a secondary (right) press opens the client's context menu (the
+            // taskbar has no right-click menu, so it never claims it; over the
+            // desktop or furniture the window manager consumes it and opens
+            // nothing), a primary release ends a move-grab, a scroll wheel
+            // routes to the root viewport under the pointer, and keys go to the
+            // focused window.
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            }
+            | InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             }
             | InputEvent::PointerScrolled { .. }

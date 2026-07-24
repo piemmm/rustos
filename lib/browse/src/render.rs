@@ -1545,6 +1545,30 @@ pub fn context_menu_command_at(
     chrome::CONTEXT_COMMANDS.get(index).copied()
 }
 
+/// The window-local [`Rect`] the context `menu` (opened at `anchor`) draws the
+/// row for `command` at, or `None` when `command` is not among
+/// [`chrome::CONTEXT_COMMANDS`]. The forward mirror of
+/// [`context_menu_command_at`] over the shared [`context_menu_rect`] placement
+/// and the menu's own [`Menu::row_rect`] geometry, so a caller that must aim
+/// *at* a command — the desktop integration harness that clicks Delete — reads
+/// the exact rectangle [`draw_context_menu`] paints and
+/// [`context_menu_command_at`] hit-tests, never a hand-copied position (§2.2).
+#[must_use]
+pub fn context_menu_command_rect(
+    menu: &Menu,
+    anchor: Point,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    command: ContextCommand,
+) -> Option<Rect> {
+    let index = chrome::CONTEXT_COMMANDS
+        .iter()
+        .position(|&c| c == command)?;
+    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
+    menu.row_rect(index, bounds, Scale::ONE, theme)
+}
+
 /// The index of the enabled row of `menu` (anchored at `anchor`) that
 /// window-local pixel `point` lands on, or `None` when the click is off the
 /// menu or on a disabled row (fail closed, §5.4).

@@ -284,6 +284,11 @@ pub enum ContextCommand {
     /// Show the selected entry's properties
     /// ([`Properties`](crate::properties::Properties)).
     Properties,
+    /// Delete the selected entry — the modal-confirmed recursive removal the
+    /// app drives through [`plan_delete`](Browser::plan_delete) and the shared
+    /// [`DeleteWalk`](crate::delete::DeleteWalk). Acts on the selection, so it
+    /// is offered only when one exists.
+    Delete,
 }
 
 /// The complete set of context-menu commands, in their top-to-bottom menu
@@ -300,6 +305,7 @@ pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Copy,
     ContextCommand::Paste,
     ContextCommand::Properties,
+    ContextCommand::Delete,
 ];
 
 impl ContextCommand {
@@ -316,6 +322,7 @@ impl ContextCommand {
             Self::Copy => "Copy",
             Self::Paste => "Paste",
             Self::Properties => "Properties",
+            Self::Delete => "Delete",
         }
     }
 
@@ -334,6 +341,7 @@ impl ContextCommand {
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
             Self::Properties => "Alt+Enter",
+            Self::Delete => "Delete",
         }
     }
 }
@@ -375,8 +383,9 @@ impl ContextMenuModel {
     /// Whether `command` is currently actionable and should render enabled.
     ///
     /// [`Open`](ContextCommand::Open), [`Rename`](ContextCommand::Rename),
-    /// [`Cut`](ContextCommand::Cut), [`Copy`](ContextCommand::Copy), and
-    /// [`Properties`](ContextCommand::Properties) act on the selected entry, so
+    /// [`Cut`](ContextCommand::Cut), [`Copy`](ContextCommand::Copy),
+    /// [`Properties`](ContextCommand::Properties), and
+    /// [`Delete`](ContextCommand::Delete) act on the selected entry, so
     /// they need a selection (an empty directory offers none).
     /// [`Paste`](ContextCommand::Paste) targets the current directory and needs
     /// only a held clipboard, not a selection.
@@ -387,7 +396,8 @@ impl ContextMenuModel {
             | ContextCommand::Rename
             | ContextCommand::Cut
             | ContextCommand::Copy
-            | ContextCommand::Properties => self.has_selection,
+            | ContextCommand::Properties
+            | ContextCommand::Delete => self.has_selection,
             // Open With… offers a chooser of applications, which only a regular
             // file has: a directory descends and a bundle launches itself, so
             // neither has an application to pick.

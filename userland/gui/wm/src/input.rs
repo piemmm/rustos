@@ -57,6 +57,20 @@ pub enum InputResponse {
         /// Press position relative to the window's top-left corner.
         local: Point,
     },
+    /// A secondary (right) press landed on `window`'s client area: the
+    /// window was raised to the top of the z-order and given focus, and the
+    /// press is delivered to the client as a secondary-button press (which a
+    /// client uses to open its context menu). `local` is the press position
+    /// in the window's surface coordinates. A secondary press on the
+    /// desktop or on window furniture opens no menu (it is
+    /// [`Ignored`](Self::Ignored) / consumed), so the window manager never
+    /// synthesises a context menu of its own — only the client decides.
+    SecondaryActivated {
+        /// The window whose client received the secondary press.
+        window: WindowId,
+        /// Press position relative to the window's top-left corner.
+        local: Point,
+    },
     /// A primary press landed on the desktop background; focus, if any,
     /// was cleared.
     DesktopPressed,
@@ -311,6 +325,9 @@ impl InputRouter {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => self.release_primary(compositor),
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            } => self.press_secondary(compositor),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 InputResponse::Ignored
             }
@@ -452,6 +469,52 @@ impl InputRouter {
             .window_client_rect(window)
             .map_or(Point::ORIGIN, |rect| rect.origin);
         InputResponse::Activated {
+            window,
+            local: Point::new(
+                self.pointer.x.saturating_sub(client.x),
+                self.pointer.y.saturating_sub(client.y),
+            ),
+        }
+    }
+
+    /// Handle a secondary (right) press at the current pointer position.
+    ///
+    /// Like [`press_primary`](Self::press_primary) it raises and focuses the
+    /// window under the pointer, but it starts no move/resize/control grab and
+    /// pages no scrollbar: a right-click's only meaning is "open the context
+    /// menu of the client under the pointer". A press on the client area is
+    /// delivered as [`InputResponse::SecondaryActivated`] for the client to
+    /// interpret; a press on the desktop or on window furniture opens no menu
+    /// (the window manager consumes it), so the WM never synthesises a menu of
+    /// its own — only the client decides what a right-click means.
+    fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        let Some(window) = compositor.window_at(self.pointer) else {
+            return InputResponse::Ignored;
+        };
+        compositor.raise(window);
+        self.focused = Some(window);
+        // A right-click on the outer decoration frame or the root-viewport
+        // furniture is not a client press: the window manager owns those
+        // regions and offers no context menu there, so consume it.
+        if let Some(part) = compositor.frame_hit(window, self.pointer) {
+            if !matches!(part, FurniturePart::Client | FurniturePart::Outside) {
+                return InputResponse::FurniturePressed { window };
+            }
+        }
+        if let Some(hit) = compositor.furniture_hit(window, self.pointer) {
+            if !matches!(hit, FurnitureHit::Client) {
+                return InputResponse::FurniturePressed { window };
+            }
+        }
+        // A client right-press returns the keyboard to the client and is
+        // delivered in content-local coordinates, exactly as the primary
+        // client press is, so the client's context-menu hit-test sees the
+        // same coordinate space its listing does.
+        self.furniture_key_focus = false;
+        let client = compositor
+            .window_client_rect(window)
+            .map_or(Point::ORIGIN, |rect| rect.origin);
+        InputResponse::SecondaryActivated {
             window,
             local: Point::new(
                 self.pointer.x.saturating_sub(client.x),

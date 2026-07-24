@@ -207,7 +207,7 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all seven witnesses have appeared: the per-kind
+    /// to QEMU once all nine witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
@@ -222,9 +222,10 @@ mod kernel {
     /// FM9-a file-manager mutations (`FsNodeMutated op=mkdir` then
     /// `op=rename`, both after the terminal round trip — the manager
     /// created and named a folder in `/Users/root` under the user's own
-    /// identity). The guest exits only after the host has everything it
-    /// needs (`plans/APPWIN.md` AW3 + AW4, `plans/NEW-FILEMANAGER.md`
-    /// FM9-a).
+    /// identity), and the FM9-b CU6 delegation (`fd_grant` then `fd_redeem` —
+    /// the session handing the user's chosen file to the Viewer). The guest
+    /// exits only after the host has everything it needs (`plans/APPWIN.md`
+    /// AW3 + AW4, `plans/NEW-FILEMANAGER.md` FM9-a/-b).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,

@@ -152,8 +152,8 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   the documented no-op.
 - `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable. **Open**,
-  **Rename**, **Cut**, **Copy**, and **Properties** act on the selected
-  entry, so they need a selection (an empty directory offers none).
+  **Rename**, **Cut**, **Copy**, **Properties**, and **Delete** act on the
+  selected entry, so they need a selection (an empty directory offers none).
   **Open With…** is offered only for a regular file — a directory descends and
   a bundle launches itself, so neither has an application to choose.
   **Paste** targets the current directory and needs only a held clipboard,
@@ -169,11 +169,10 @@ The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
 picker builds the same model). Only commands the file manager can actually
 carry out today are modelled, so none is speculative surface (`AGENTS.md`
-§2.4): **Open With…** now joins the set with its FM6b chooser verb (below).
-**Delete** (whose engine action does not exist yet) is still absent from
-`CONTEXT_COMMANDS` and lands with the stage that first wires its behaviour.
-**New Folder** is a *write* tool that lives on the manager-only toolbar
-(below), not on this menu shared with the read-only picker.
+§2.4): **Open With…** joined the set with its FM6b chooser verb (below), and
+**Delete** joined it with FM9-c's confirm-and-remove verb (its `begin_delete`
+action, below). **New Folder** is a *write* tool that lives on the manager-only
+toolbar (below), not on this menu shared with the read-only picker.
 
 The **context menu is now drawn and clickable**. A secondary-button
 (right-click) press selects the item under the pointer — or clears the
@@ -189,10 +188,14 @@ enabled command** (a press on a disabled row or off the menu resolves to
 nothing, failing closed). The `files.app` `Run` binary routes a chosen
 command through `dispatch_context_command` to the **exact same** app verbs
 the toolbar and keyboard already drive — Open (`activate`), Open With… (the
-chooser below), Rename, Cut, Copy, Paste, Properties — so the menu can never
-diverge from them (`AGENTS.md` §2.2) and adds no authority (every verb is the
-user's own §5.3-checked action). `Escape` or a press off the menu dismisses
-it.
+chooser below), Rename, Cut, Copy, Paste, Properties, and Delete (the same
+modal-confirmed `begin_delete` the `Delete` key opens, below) — so the menu can
+never diverge from them (`AGENTS.md` §2.2) and adds no authority (every verb is
+the user's own §5.3-checked action). `Escape` or a press off the menu dismisses
+it. Because the `Delete` key is not the only way in, the confirm-and-remove
+flow is reachable by pointer alone (`render::context_menu_command_rect` is the
+shared forward mirror of the hit-test, so a caller — including the desktop
+integration harness — can aim at exactly the drawn Delete row, §2.2).
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
@@ -748,6 +751,25 @@ terminal round trip so no boot- or login-time directory creation can satisfy
 them — so the mkdir and the rename are kernel-attested, under the logged-in
 user's own identity, and a refused mutation (`FsMutationDenied`) can never
 count (fail closed).
+
+The **confirm-and-remove** flow (`plans/NEW-FILEMANAGER.md` FM9-c) is reached
+by right-clicking the selection and choosing **Delete**, which runs the same
+`begin_delete` → confirm-dialog → `DeleteWalk` path the `Delete` key drives.
+Making the right-click reach the app required a compositor fix that makes the
+*whole* context menu usable in the desktop: secondary (right) button presses
+were being dropped, so `tairix_wm`'s input router now raises+focuses and
+delivers a client-area right-press as `InputResponse::SecondaryActivated`, the
+desktop session's router forwards it to the window manager, and the session
+delivers `WindowEvent::Pointer` `Pressed(Secondary)` to the app — host-tested
+in `tairix-wm` and `tairix-desktop-session`. The shared `Menu::row_rect` and
+`render::context_menu_command_rect` give a caller the drawn Delete row's rect
+(`AGENTS.md` §2.2). An end-to-end delete-with-confirm QEMU vertical is staged
+rather than landed: the QEMU HMP `mouse_button` right-button does not reach the
+emulated `virtio-mouse` (every OS layer decodes BTN_RIGHT→Secondary correctly,
+all host-tested, yet the injected right-click never arrives in the guest), so
+the scripted right-click delete is a metal/real-mouse acceptance item. The
+delete verb, confirm dialog, and recursive `DeleteWalk` are host-proven in
+`lib/browse` and `files.app`.
 
 ### The properties model
 
