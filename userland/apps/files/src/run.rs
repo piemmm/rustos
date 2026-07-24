@@ -361,22 +361,36 @@ mod program {
     }
 
     /// A running long file operation the event loop drives interleaved with
-    /// input (`plans/NEW-FILEMANAGER.md` `FM7b`): the driving walk plus its
+    /// input (`plans/NEW-FILEMANAGER.md` `FM7b`): the driving job plus its
     /// progress + latched-cancel display state.
     ///
-    /// `None` unless a confirmed delete is in progress. It owns the window while
-    /// it runs — no navigation happens behind it — and the event loop advances
-    /// it a bounded slice at a time ([`advance_delete`]), repainting the
-    /// progress panel and polling (non-blocking) for a mid-run cancel, so a
-    /// large recursive removal never freezes the window and never busy-spins
-    /// (§2.23). A latched cancel stops the walk at the next step boundary.
+    /// `None` unless a confirmed delete or a paste is in progress. It owns the
+    /// window while it runs — no navigation happens behind it — and the event
+    /// loop advances it a bounded slice at a time ([`advance_operation`]),
+    /// repainting the progress panel and polling (non-blocking) for a mid-run
+    /// cancel, so a large recursive removal or copy never freezes the window
+    /// and never busy-spins (§2.23). A latched cancel stops the job at the next
+    /// step boundary — between nodes, or between copy chunks, never mid-node.
     struct Operation {
-        /// The recursive-removal cursor, driven a bounded slice at a time; it
-        /// holds its exact position between steps, so a cancel or preemption
-        /// loses no work.
-        walk: DeleteWalk,
+        /// The long operation being driven — a recursive removal or a paste.
+        /// Each holds its exact position between slices, so a cancel or a
+        /// preemption loses no work.
+        job: Job,
         /// The progress + latched-cancel display state the panel renders.
         progress: ProgressModel,
+    }
+
+    /// The long file operation an [`Operation`] drives, interleaved with the
+    /// event loop.
+    enum Job {
+        /// A recursive removal, driven by a single [`DeleteWalk`]. The
+        /// cross-volume-move source cleanup inside a [`Paste`] reuses the same
+        /// walk definition, so a delete and a move's cleanup can never diverge
+        /// (§2.2).
+        Delete(DeleteWalk),
+        /// A move/copy paste of a captured plan, driven by the [`Paste`] state
+        /// machine.
+        Paste(Paste),
     }
 
     /// The open right-click context menu: the built [`Menu`] and the
@@ -585,7 +599,12 @@ mod program {
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
-                    apply_clipboard_verb(browser, &mut overlays.clipboard, verb)
+                    apply_clipboard_verb(
+                        browser,
+                        &mut overlays.clipboard,
+                        &mut overlays.operation,
+                        verb,
+                    )
                 } else {
                     apply_nav_key(
                         browser,
@@ -908,7 +927,7 @@ mod program {
                 // at open time, so a listing change cannot move what it targets;
                 // the view is re-listed when the operation finishes.
                 overlays.operation = Some(Operation {
-                    walk: DeleteWalk::from_plan(&confirm.plan),
+                    job: Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
                     progress: ProgressModel::new(ProgressOp::Delete),
                 });
                 (true, false)
@@ -934,9 +953,23 @@ mod program {
         Ignore,
     }
 
-    /// Advance the running delete `operation` by up to [`OPERATION_STEP_BUDGET`]
-    /// steps, returning `true` once it has finished — completed, cancelled at a
-    /// step boundary, or stopped fail-closed on a refusal.
+    /// Advance the running `operation` by up to [`OPERATION_STEP_BUDGET`]
+    /// bounded units of work, returning `true` once it has finished — completed,
+    /// cancelled at a step boundary, or stopped fail-closed on a refusal.
+    ///
+    /// Dispatches on the job kind so the event loop drives a delete and a paste
+    /// through one interleaving path (§2.2): each holds its exact position
+    /// between calls, so a bounded slice per turn keeps the window responsive
+    /// without losing or repeating work (§2.23).
+    fn advance_operation(operation: &mut Operation) -> bool {
+        match &mut operation.job {
+            Job::Delete(walk) => advance_delete_walk(walk, &mut operation.progress),
+            Job::Paste(paste) => advance_paste(paste, &mut operation.progress),
+        }
+    }
+
+    /// Advance a recursive removal `walk` by up to [`OPERATION_STEP_BUDGET`]
+    /// steps, returning `true` once it has finished.
     ///
     /// Each step reads a directory (`fs_readdir`) or unlinks a node
     /// (`fs_unlink`, depth-first so contents go before their container) under
@@ -946,16 +979,14 @@ mod program {
     /// next boundary (never mid-node); the first refused read or unlink stops
     /// the removal, states the reason on `stderr` (fail loud, §2.24), and
     /// leaves whatever was already removed removed rather than a fabricated
-    /// success (§5.4). The walk holds its exact position between calls, so a
-    /// bounded slice per event-loop turn keeps the window responsive without
-    /// losing or repeating work (§2.23).
-    fn advance_delete(operation: &mut Operation) -> bool {
+    /// success (§5.4).
+    fn advance_delete_walk(walk: &mut DeleteWalk, progress: &mut ProgressModel) -> bool {
         for _ in 0..OPERATION_STEP_BUDGET {
-            if operation.progress.is_cancel_requested() {
+            if progress.is_cancel_requested() {
                 return true;
             }
             // Copy the current step out so the walk is free to be mutated.
-            let step = operation.walk.next_action().map(|action| match action {
+            let step = walk.next_action().map(|action| match action {
                 DeleteAction::List(path) => (true, path.to_vec(), false),
                 DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
             });
@@ -967,7 +998,7 @@ mod program {
                     report_delete_refused(&path);
                     return true;
                 };
-                if operation.walk.expand(&children).is_err() {
+                if walk.expand(&children).is_err() {
                     report_error("delete stopped: a folder is nested too deep");
                     return true;
                 }
@@ -985,12 +1016,12 @@ mod program {
                     report_delete_refused(&path);
                     return true;
                 }
-                if operation.walk.complete_removal().is_err() {
+                if walk.complete_removal().is_err() {
                     report_error("delete stopped: internal walk error");
                     return true;
                 }
             }
-            operation.progress.set_done(operation.walk.removed());
+            progress.set_done(walk.removed());
         }
         false
     }
@@ -1132,6 +1163,7 @@ mod program {
     fn apply_clipboard_verb<S: DirectorySource>(
         browser: &mut Browser<S>,
         clipboard: &mut Option<Clipboard>,
+        operation: &mut Option<Operation>,
         verb: ClipboardVerb,
     ) -> (bool, bool) {
         match verb {
@@ -1147,27 +1179,33 @@ mod program {
                 }
                 (false, false)
             }
-            ClipboardVerb::Paste => run_paste(browser, clipboard),
+            ClipboardVerb::Paste => run_paste(browser, clipboard, operation),
         }
     }
 
-    /// Carry out a paste of the held `clipboard` into the current directory,
-    /// under the user's own identity (no new capability, no ambient authority
-    /// — every operation is the ordinary §5.3-checked write the user could
-    /// perform themselves).
+    /// Begin a paste of the held `clipboard` into the current directory as an
+    /// interleaved [`Operation`], under the user's own identity (no new
+    /// capability, no ambient authority — every step is the ordinary
+    /// §5.3-checked write the user could perform themselves).
     ///
     /// The plan is validated first ([`plan_paste`]): pasting a folder into
-    /// itself is refused outright (`WouldRecurse`) and nothing is touched. Each
-    /// item's move-vs-copy is then decided by [`paste_strategy`] from the two
-    /// nodes' volume ids — a same-volume move is one `fs_rename`, a cross-volume
-    /// move is copy-then-delete, a copy always streams. It is bounded and fail
-    /// closed: the first refused operation stops the paste, states the reason on
-    /// `stderr` (fail loud, §2.24), and leaves whatever already landed in place
-    /// rather than a fabricated success (§5.4). A completed `Cut` clears the
-    /// clipboard (its sources have moved); a `Copy` keeps it for another paste.
+    /// itself is refused outright (`WouldRecurse`) and nothing is enqueued. The
+    /// destination directory's volume is stat'd once (it decides same- vs
+    /// cross-volume for every item), and the plan is handed to a [`Paste`]
+    /// state machine the event loop then advances a bounded slice at a time —
+    /// showing progress and honouring a mid-run cancel, so a large copy never
+    /// freezes the window (§2.23). Each item's move-vs-copy is decided by
+    /// [`paste_strategy`] as it runs — a same-volume move is one `fs_rename`, a
+    /// cross-volume move is copy-then-delete, a copy always streams — and the
+    /// run is fail closed: the first refused operation stops the paste, states
+    /// the reason on `stderr` (fail loud, §2.24), and leaves whatever already
+    /// landed in place rather than a fabricated success (§5.4). A `Cut` is
+    /// consumed by initiating the paste (its sources are being moved); a `Copy`
+    /// keeps the clipboard for another paste.
     fn run_paste<S: DirectorySource>(
         browser: &mut Browser<S>,
         clipboard: &mut Option<Clipboard>,
+        operation: &mut Option<Operation>,
     ) -> (bool, bool) {
         let Some(clip) = clipboard.as_ref() else {
             return (false, false);
@@ -1188,66 +1226,21 @@ mod program {
         };
         let dest_vol = VolumeId::new(dest_stat.id.volume);
         let op = plan.op();
-        // One reused, fixed-size copy buffer (never a per-file allocation, and
-        // never a buffer sized to a file's length): a copy of any size streams
-        // through it a chunk at a time, so memory stays bounded (§2.23, §26.6).
-        let mut buf = alloc::vec![0u8; FS_IO_MAX];
-        for item in plan.items() {
-            if let Err(reason) = run_paste_item(op, item, dest_vol, &mut buf) {
-                report_paste_item_error(item.source(), reason);
-                break;
-            }
-        }
-        // A cut is consumed by the paste; a copy can be pasted again elsewhere.
+        // Hand the plan to the interleaved operation runner: the event loop
+        // carries it out a bounded chunk at a time, showing progress and
+        // honouring a mid-run cancel, so a large copy never freezes the window
+        // (§2.23). The view is re-listed when the operation finishes.
+        *operation = Some(Operation {
+            job: Job::Paste(Paste::new(op, dest_vol, plan.items().to_vec())),
+            progress: ProgressModel::new(ProgressOp::Copy),
+        });
+        // A cut is consumed by initiating the paste — its sources are being
+        // moved, so re-pasting the same cut elsewhere would name items that are
+        // gone; a copy is kept so it can be pasted again.
         if op == ClipboardOp::Cut {
             *clipboard = None;
         }
-        // Re-list so the view shows what actually landed — a partial paste left
-        // by a refusal is shown honestly (§2.24); a failed re-list leaves the
-        // browser where it was (fail closed).
-        let _ = browser.refresh();
         (true, false)
-    }
-
-    /// Carry out one planned paste item, returning a terse reason on the first
-    /// refusal (the paste stops; nothing after this item runs).
-    ///
-    /// An item whose destination equals its source ([`PasteItem::overwrites_source`])
-    /// is a paste back into the item's own directory: a `Cut` is a no-op (the
-    /// item is already where it would land) and a `Copy` is refused rather than
-    /// silently duplicating a file onto itself (§2.24). Otherwise the source is
-    /// stat'd for its kind and volume, [`paste_strategy`] chooses the mechanism,
-    /// and a pre-existing destination of a *different* name is refused by the
-    /// exclusive create in [`copy_file`] rather than clobbered — a deliberate
-    /// v1 scope boundary (overwrite/merge confirmation is future work), not a
-    /// silent overwrite.
-    fn run_paste_item(
-        op: ClipboardOp,
-        item: &PasteItem,
-        dest_vol: VolumeId,
-        buf: &mut [u8],
-    ) -> Result<(), &'static str> {
-        if item.overwrites_source() {
-            return match op {
-                ClipboardOp::Cut => Ok(()),
-                ClipboardOp::Copy => Err("an item cannot be copied onto itself"),
-            };
-        }
-        let source = item.source();
-        let dest = item.dest();
-        let Some(stat) = stat_node(source) else {
-            return Err("a source item could not be read");
-        };
-        let source_vol = VolumeId::new(stat.id.volume);
-        let is_directory = matches!(stat.kind, FileKind::Directory);
-        match paste_strategy(op, source_vol, dest_vol) {
-            PasteStrategy::Rename => rename_item(source, dest),
-            PasteStrategy::Copy => copy_tree(source, dest, is_directory, buf),
-            PasteStrategy::CopyThenDelete => {
-                copy_tree(source, dest, is_directory, buf)?;
-                delete_source(source, is_directory)
-            }
-        }
     }
 
     /// Move a same-volume item with a single `fs_rename` from its source to its
@@ -1261,137 +1254,438 @@ mod program {
         Ok(())
     }
 
-    /// Copy a source tree to its destination: a single [`copy_file`] for a
-    /// regular file, or a depth-first [`CopyWalk`] for a directory (or sealed
-    /// `.app` bundle), under the user's own identity.
-    fn copy_tree(
-        source: &[String],
-        dest: &[String],
-        is_directory: bool,
-        buf: &mut [u8],
-    ) -> Result<(), &'static str> {
-        if is_directory {
-            copy_dir(source, dest, buf)
-        } else {
-            copy_file(source, dest, buf)
-        }
+    /// A paste in progress: a captured plan carried out one bounded unit of
+    /// work at a time so the event loop stays responsive (§2.23).
+    ///
+    /// The move-vs-copy decision for each item is made as it runs
+    /// ([`paste_strategy`]) from the two nodes' volume ids; a same-volume move
+    /// is a single `fs_rename`, a copy streams the bytes through the reused
+    /// buffer a chunk at a time, and a cross-volume move copies then removes the
+    /// source through the shared delete walk (§2.2). Every step is the user's
+    /// own §5.3-checked write — no new capability, no ambient authority (§4,
+    /// §5.4) — so the read-only picker never builds a [`Paste`].
+    struct Paste {
+        /// Whether the plan moves (`Cut`) or copies (`Copy`) its items.
+        op: ClipboardOp,
+        /// The paste target directory's volume — one side of every item's
+        /// same- vs cross-volume decision.
+        dest_vol: VolumeId,
+        /// The resolved plan items, carried out in order.
+        items: alloc::vec::Vec<PasteItem>,
+        /// The next item to begin (once [`stage`](Self::stage) is idle).
+        index: usize,
+        /// The in-flight stage of the item currently being carried out.
+        stage: PasteStage,
+        /// The source of the item currently in flight, for fail-loud error
+        /// reporting (its leaf names the item the user sees).
+        current_source: alloc::vec::Vec<String>,
+        /// The honest count of nodes moved/copied so far (the progress figure);
+        /// cross-volume cleanup removals are not counted as copied.
+        done: usize,
+        /// One reused, fixed-size copy buffer — never a per-file allocation and
+        /// never sized to a file's length, so a copy of any size stays bounded
+        /// (§2.23, §26.6).
+        buf: alloc::vec::Vec<u8>,
     }
 
-    /// Copy one regular file from `source` to `dest` by driving a [`CopyCursor`]
-    /// in fixed `FS_IO_MAX`-sized chunks through the reused `buf`, so the copy
-    /// stays bounded and interruptible (§2.23).
-    ///
-    /// The destination is created exclusively: a pre-existing file of that name
-    /// is refused rather than clobbered (§2.24). A source that ends before its
-    /// stat'd length, or grows past it, fails closed rather than looping or
-    /// wrapping.
-    fn copy_file(source: &[String], dest: &[String], buf: &mut [u8]) -> Result<(), &'static str> {
-        let source_spelled = spell_path(source)?;
-        let dest_spelled = spell_path(dest)?;
-        let reader = tairix_rt::File::open(source_spelled.as_bytes(), OpenFlags::READ)
-            .map_err(|_| "a source file could not be opened")?;
-        let stat = reader
-            .stat()
-            .map_err(|_| "a source file could not be read")?;
-        let create = OpenFlags::WRITE
-            .union(OpenFlags::CREATE)
-            .union(OpenFlags::EXCLUSIVE);
-        let writer = tairix_rt::File::open(dest_spelled.as_bytes(), create)
-            .map_err(|_| "a destination of that name already exists")?;
-        let mut cursor = CopyCursor::new(stat.size);
-        while let Some(chunk) = cursor.next_chunk() {
+    /// The stage of the item a [`Paste`] is currently carrying out.
+    enum PasteStage {
+        /// No item in flight — [`Paste::step`] begins `items[index]` next, or
+        /// finishes the paste when the queue is drained.
+        Idle,
+        /// Copying the current item's tree (a [`CopyWalk`] over one item);
+        /// `transfer` is the in-flight leaf-file stream when a
+        /// [`CopyAction::CopyFile`] step is underway. `then_delete` names a
+        /// cross-volume move's source to remove once the copy fully succeeds.
+        Copying {
+            /// The recursive-copy cursor for this item's tree.
+            walk: CopyWalk,
+            /// The leaf file being streamed, or `None` between files.
+            transfer: Option<Transfer>,
+            /// A cross-volume move's `(source, is_directory)` to remove after
+            /// the copy completes; `None` for a plain copy.
+            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
+        },
+        /// Removing a cross-volume move's source after its copy fully succeeded,
+        /// through the shared delete walk (§2.2).
+        Deleting(DeleteWalk),
+    }
+
+    /// One leaf-file transfer in flight: the open source and destination
+    /// handles plus the resumable [`CopyCursor`] over them, stepped one bounded
+    /// chunk at a time so a large file never blocks the event loop (§2.23).
+    struct Transfer {
+        /// The source file opened read-only.
+        reader: tairix_rt::File,
+        /// The destination file, created exclusively (a pre-existing name is
+        /// refused, never clobbered, §2.24).
+        writer: tairix_rt::File,
+        /// The bounded, resumable copy cursor over the two handles.
+        cursor: CopyCursor,
+    }
+
+    impl Transfer {
+        /// Open the source (read-only) and create the destination (exclusively)
+        /// for a leaf-file copy, or a terse reason on refusal.
+        fn open(source: &[String], dest: &[String]) -> Result<Self, &'static str> {
+            let source_spelled = spell_path(source)?;
+            let dest_spelled = spell_path(dest)?;
+            let reader = tairix_rt::File::open(source_spelled.as_bytes(), OpenFlags::READ)
+                .map_err(|_| "a source file could not be opened")?;
+            let stat = reader
+                .stat()
+                .map_err(|_| "a source file could not be read")?;
+            let create = OpenFlags::WRITE
+                .union(OpenFlags::CREATE)
+                .union(OpenFlags::EXCLUSIVE);
+            let writer = tairix_rt::File::open(dest_spelled.as_bytes(), create)
+                .map_err(|_| "a destination of that name already exists")?;
+            Ok(Self {
+                reader,
+                writer,
+                cursor: CopyCursor::new(stat.size),
+            })
+        }
+
+        /// Carry one bounded chunk of the transfer through `buf`, returning
+        /// `Ok(true)` once the whole file has been copied and `Ok(false)` when
+        /// more remains. A source that ends before, or grows past, its stat'd
+        /// length fails closed rather than looping or wrapping (§26.5).
+        fn step(&mut self, buf: &mut [u8]) -> Result<bool, &'static str> {
+            let Some(chunk) = self.cursor.next_chunk() else {
+                return Ok(true);
+            };
             let want = usize::try_from(chunk.len()).map_err(|_| "a copy chunk was too large")?;
-            let read = reader
+            let read = self
+                .reader
                 .read_at(chunk.offset(), &mut buf[..want])
                 .map_err(|_| "a source file could not be read")?;
             if read == 0 {
                 return Err("a source file ended early");
             }
-            let wrote = writer
+            let wrote = self
+                .writer
                 .write_at(chunk.offset(), &buf[..read])
                 .map_err(|_| "a destination file could not be written")?;
             if wrote != read {
                 return Err("a destination file could not be fully written");
             }
             let carried = u64::try_from(read).map_err(|_| "a copy transfer was too large")?;
-            cursor
+            self.cursor
                 .advance(carried)
                 .map_err(|_| "a source file changed during the copy")?;
+            Ok(self.cursor.is_complete())
         }
-        Ok(())
     }
 
-    /// Copy a directory tree by driving a [`CopyWalk`] to completion: create
-    /// each destination directory before its contents (`fs_mkdir`), read each
-    /// source directory (`fs_readdir`, the same shared decode the browser and
-    /// the delete walk use), and stream each leaf file — depth-first, bounded,
-    /// under the user's own identity.
-    fn copy_dir(source: &[String], dest: &[String], buf: &mut [u8]) -> Result<(), &'static str> {
-        let Some(mut walk) =
-            CopyWalk::from_items(alloc::vec![(source.to_vec(), dest.to_vec(), true)])
-        else {
-            return Err("nothing to copy");
-        };
-        loop {
-            // Copy the current step out so the walk is free to be mutated.
-            enum Step {
-                MakeDir(alloc::vec::Vec<String>),
-                List(alloc::vec::Vec<String>),
-                CopyFile(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
+    /// One resolved [`CopyWalk`] step, copied out of the walk's borrowed
+    /// [`CopyAction`] so the walk is free to be mutated by the report call that
+    /// follows it.
+    enum CopyStep {
+        /// Create this destination directory (`fs_mkdir`).
+        MakeDir(alloc::vec::Vec<String>),
+        /// List this source directory's children (`fs_readdir`).
+        List(alloc::vec::Vec<String>),
+        /// Stream this leaf file's bytes from source to destination.
+        CopyFile(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
+    }
+
+    /// The outcome of one [`Paste::step`] unit of work.
+    enum StepOutcome {
+        /// One bounded unit was carried out; the paste has more to do.
+        Working,
+        /// Every item is done — the paste has finished.
+        Done,
+        /// The step was refused; the paste stops fail-closed with this reason
+        /// (stated on `stderr` naming the current item).
+        Failed(&'static str),
+    }
+
+    impl Paste {
+        /// A paste of `items` (in order) into a target on `dest_vol`, nothing
+        /// begun yet.
+        fn new(op: ClipboardOp, dest_vol: VolumeId, items: alloc::vec::Vec<PasteItem>) -> Self {
+            Self {
+                op,
+                dest_vol,
+                items,
+                index: 0,
+                stage: PasteStage::Idle,
+                current_source: alloc::vec::Vec::new(),
+                done: 0,
+                buf: alloc::vec![0u8; FS_IO_MAX],
             }
-            let step = match walk.next_action() {
-                None => return Ok(()),
-                Some(CopyAction::MakeDir { dest }) => Step::MakeDir(dest.to_vec()),
-                Some(CopyAction::List { source }) => Step::List(source.to_vec()),
+        }
+
+        /// The honest count of nodes moved/copied so far — the rising progress
+        /// figure (§2.24).
+        fn done(&self) -> usize {
+            self.done
+        }
+
+        /// The source of the item currently in flight, for fail-loud reporting.
+        fn current_source(&self) -> &[String] {
+            &self.current_source
+        }
+
+        /// Carry out one bounded unit of work, dispatching on the current
+        /// stage. The stage is taken out (leaving [`Idle`](PasteStage::Idle))
+        /// so each handler owns it and installs the next stage, sidestepping a
+        /// self-borrow across the open file handles a [`Transfer`] holds.
+        fn step(&mut self) -> StepOutcome {
+            match core::mem::replace(&mut self.stage, PasteStage::Idle) {
+                PasteStage::Idle => self.begin_next_item(),
+                PasteStage::Copying {
+                    walk,
+                    transfer,
+                    then_delete,
+                } => self.step_copy(walk, transfer, then_delete),
+                PasteStage::Deleting(walk) => self.step_delete(walk),
+            }
+        }
+
+        /// Begin the next planned item, or finish when the queue is drained.
+        ///
+        /// A `Cut` back into the item's own directory is a no-op (the item is
+        /// already where it would land); a `Copy` onto itself is refused rather
+        /// than duplicating a file onto itself (§2.24). Otherwise the source is
+        /// stat'd for its kind and volume and [`paste_strategy`] picks the
+        /// mechanism: a same-volume move renames in one syscall, a copy (and a
+        /// cross-volume move's copy phase) starts a [`CopyWalk`].
+        fn begin_next_item(&mut self) -> StepOutcome {
+            let Some(item) = self.items.get(self.index) else {
+                return StepOutcome::Done;
+            };
+            self.index += 1;
+            self.current_source = item.source().to_vec();
+            if item.overwrites_source() {
+                return match self.op {
+                    ClipboardOp::Cut => StepOutcome::Working,
+                    ClipboardOp::Copy => {
+                        StepOutcome::Failed("an item cannot be copied onto itself")
+                    }
+                };
+            }
+            let source = item.source().to_vec();
+            let dest = item.dest().to_vec();
+            let Some(stat) = stat_node(&source) else {
+                return StepOutcome::Failed("a source item could not be read");
+            };
+            let source_vol = VolumeId::new(stat.id.volume);
+            let is_directory = matches!(stat.kind, FileKind::Directory);
+            match paste_strategy(self.op, source_vol, self.dest_vol) {
+                PasteStrategy::Rename => match rename_item(&source, &dest) {
+                    Ok(()) => {
+                        self.done += 1;
+                        StepOutcome::Working
+                    }
+                    Err(reason) => StepOutcome::Failed(reason),
+                },
+                PasteStrategy::Copy => self.start_copy(source, dest, is_directory, None),
+                PasteStrategy::CopyThenDelete => self.start_copy(
+                    source.clone(),
+                    dest,
+                    is_directory,
+                    Some((source, is_directory)),
+                ),
+            }
+        }
+
+        /// Start copying one item's tree, installing the [`Copying`] stage.
+        fn start_copy(
+            &mut self,
+            source: alloc::vec::Vec<String>,
+            dest: alloc::vec::Vec<String>,
+            is_directory: bool,
+            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
+        ) -> StepOutcome {
+            match CopyWalk::from_items(alloc::vec![(source, dest, is_directory)]) {
+                Some(walk) => {
+                    self.stage = PasteStage::Copying {
+                        walk,
+                        transfer: None,
+                        then_delete,
+                    };
+                    StepOutcome::Working
+                }
+                None => StepOutcome::Failed("nothing to copy"),
+            }
+        }
+
+        /// Advance the current item's tree copy by one unit: carry one chunk of
+        /// an in-flight leaf file, or take the next [`CopyWalk`] step (create a
+        /// directory, list one, or open the next file). When the tree is
+        /// complete, either begin the cross-volume source removal or fall back
+        /// to idle for the next item.
+        fn step_copy(
+            &mut self,
+            mut walk: CopyWalk,
+            transfer: Option<Transfer>,
+            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
+        ) -> StepOutcome {
+            if let Some(mut transfer) = transfer {
+                return match transfer.step(&mut self.buf) {
+                    Ok(true) => {
+                        if walk.copied_file().is_err() {
+                            return StepOutcome::Failed("internal copy step error");
+                        }
+                        self.done += 1;
+                        self.stage = PasteStage::Copying {
+                            walk,
+                            transfer: None,
+                            then_delete,
+                        };
+                        StepOutcome::Working
+                    }
+                    Ok(false) => {
+                        self.stage = PasteStage::Copying {
+                            walk,
+                            transfer: Some(transfer),
+                            then_delete,
+                        };
+                        StepOutcome::Working
+                    }
+                    Err(reason) => StepOutcome::Failed(reason),
+                };
+            }
+            // Copy the current step out so the walk is free to be mutated.
+            let next = match walk.next_action() {
+                None => None,
+                Some(CopyAction::MakeDir { dest }) => Some(CopyStep::MakeDir(dest.to_vec())),
+                Some(CopyAction::List { source }) => Some(CopyStep::List(source.to_vec())),
                 Some(CopyAction::CopyFile { source, dest }) => {
-                    Step::CopyFile(source.to_vec(), dest.to_vec())
+                    Some(CopyStep::CopyFile(source.to_vec(), dest.to_vec()))
                 }
             };
+            let Some(step) = next else {
+                // The tree is fully copied. A cross-volume move now removes the
+                // source through the shared delete walk (§2.2); a plain copy is
+                // done with this item.
+                if let Some((source, is_directory)) = then_delete {
+                    let Some(plan) = DeletePlan::new(alloc::vec![(source, is_directory)]) else {
+                        return StepOutcome::Failed("a moved source could not be removed");
+                    };
+                    self.stage = PasteStage::Deleting(DeleteWalk::from_plan(&plan));
+                }
+                return StepOutcome::Working;
+            };
             match step {
-                Step::MakeDir(dest) => {
-                    let spelled = spell_path(&dest)?;
+                CopyStep::MakeDir(dest) => {
+                    let spelled = match spell_path(&dest) {
+                        Ok(spelled) => spelled,
+                        Err(reason) => return StepOutcome::Failed(reason),
+                    };
                     if tairix_rt::fs_mkdir(spelled.as_bytes()) != 0 {
-                        return Err("a destination folder could not be created");
+                        return StepOutcome::Failed("a destination folder could not be created");
                     }
-                    walk.created().map_err(|_| "internal copy step error")?;
+                    if walk.created().is_err() {
+                        return StepOutcome::Failed("internal copy step error");
+                    }
+                    self.done += 1;
+                    self.stage = PasteStage::Copying {
+                        walk,
+                        transfer: None,
+                        then_delete,
+                    };
+                    StepOutcome::Working
                 }
-                Step::List(source) => {
-                    let children =
-                        read_children(&source).map_err(|_| "a folder could not be read")?;
-                    walk.expand(&children)
-                        .map_err(|_| "a folder is nested too deep")?;
+                CopyStep::List(source) => {
+                    let Ok(children) = read_children(&source) else {
+                        return StepOutcome::Failed("a folder could not be read");
+                    };
+                    if walk.expand(&children).is_err() {
+                        return StepOutcome::Failed("a folder is nested too deep");
+                    }
+                    self.stage = PasteStage::Copying {
+                        walk,
+                        transfer: None,
+                        then_delete,
+                    };
+                    StepOutcome::Working
                 }
-                Step::CopyFile(source, dest) => {
-                    copy_file(&source, &dest, buf)?;
-                    walk.copied_file().map_err(|_| "internal copy step error")?;
+                CopyStep::CopyFile(source, dest) => match Transfer::open(&source, &dest) {
+                    Ok(transfer) => {
+                        self.stage = PasteStage::Copying {
+                            walk,
+                            transfer: Some(transfer),
+                            then_delete,
+                        };
+                        StepOutcome::Working
+                    }
+                    Err(reason) => StepOutcome::Failed(reason),
+                },
+            }
+        }
+
+        /// Advance a cross-volume move's source removal by one step, over the
+        /// shared delete walk (§2.2). These removals are cleanup, so they are
+        /// not counted toward the copied figure.
+        fn step_delete(&mut self, mut walk: DeleteWalk) -> StepOutcome {
+            // Copy the current step out so the walk is free to be mutated.
+            let step = walk.next_action().map(|action| match action {
+                DeleteAction::List(path) => (true, path.to_vec(), false),
+                DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
+            });
+            let Some((is_list, path, is_directory)) = step else {
+                // The source is gone; this item is done.
+                return StepOutcome::Working;
+            };
+            if is_list {
+                let Ok(children) = read_children(&path) else {
+                    return StepOutcome::Failed("a moved source could not be removed");
+                };
+                if walk.expand(&children).is_err() {
+                    return StepOutcome::Failed("a folder is nested too deep");
+                }
+            } else {
+                let spelled = match spell_path(&path) {
+                    Ok(spelled) => spelled,
+                    Err(reason) => return StepOutcome::Failed(reason),
+                };
+                let flags = if is_directory {
+                    UnlinkFlags::DIRECTORY
+                } else {
+                    UnlinkFlags::empty()
+                };
+                if tairix_rt::fs_unlink(spelled.as_bytes(), flags) != 0 {
+                    return StepOutcome::Failed("a moved source could not be removed");
+                }
+                if walk.complete_removal().is_err() {
+                    return StepOutcome::Failed("internal delete step error");
                 }
             }
+            self.stage = PasteStage::Deleting(walk);
+            StepOutcome::Working
         }
     }
 
-    /// Remove a cross-volume move's source once its copy has fully succeeded,
-    /// by driving the shared delete walk ([`advance_delete`]) over a one-item
-    /// [`DeletePlan`] under the user's own identity — the same one removal
-    /// definition the interactive Delete verb runs, so a move's cleanup and a
-    /// delete can never diverge (§2.2). The paste path is not yet interleaved
-    /// (progress + cancel for copy/paste is a staged follow-up), so the walk is
-    /// driven to completion here in one synchronous loop rather than across
-    /// event-loop turns. Any refusal is stated on `stderr` by `advance_delete`
-    /// itself, so a copied-but-not-removed source is reported, never silently
-    /// left (§2.24).
-    fn delete_source(source: &[String], is_directory: bool) -> Result<(), &'static str> {
-        let Some(plan) = DeletePlan::new(alloc::vec![(source.to_vec(), is_directory)]) else {
-            return Err("a moved source could not be removed");
-        };
-        let mut operation = Operation {
-            walk: DeleteWalk::from_plan(&plan),
-            progress: ProgressModel::new(ProgressOp::Delete),
-        };
-        // Each call advances a bounded slice; loop until the walk finishes
-        // (completed or stopped fail-closed on a refusal). No cancel is ever
-        // requested, so this drives to completion.
-        while !advance_delete(&mut operation) {}
-        Ok(())
+    /// Advance a running `paste` by up to [`OPERATION_STEP_BUDGET`] bounded
+    /// units of work, returning `true` once it has finished — completed,
+    /// cancelled at a step boundary, or stopped fail-closed on a refusal.
+    ///
+    /// A unit is one rename, one `fs_mkdir`, one directory listing, one copy
+    /// chunk, or one source-removal step, so a single large file cannot block
+    /// the event loop (each chunk is bounded, §2.23). A latched cancel stops at
+    /// the next unit boundary (never mid-chunk); the first refusal states its
+    /// reason on `stderr` naming the item (fail loud, §2.24) and leaves whatever
+    /// already landed in place (§5.4). The honest copied count is updated from
+    /// the paste's own figure after each unit.
+    fn advance_paste(paste: &mut Paste, progress: &mut ProgressModel) -> bool {
+        for _ in 0..OPERATION_STEP_BUDGET {
+            if progress.is_cancel_requested() {
+                return true;
+            }
+            match paste.step() {
+                StepOutcome::Working => {}
+                StepOutcome::Done => return true,
+                StepOutcome::Failed(reason) => {
+                    report_paste_item_error(paste.current_source(), reason);
+                    return true;
+                }
+            }
+            progress.set_done(paste.done());
+        }
+        false
     }
 
     /// Read a node's structural metadata (kind + size + volume id) through a
@@ -1598,15 +1892,24 @@ mod program {
             ContextCommand::Rename => {
                 begin_rename(browser, &mut overlays.rename, font, theme, viewport)
             }
-            ContextCommand::Cut => {
-                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Cut)
-            }
-            ContextCommand::Copy => {
-                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Copy)
-            }
-            ContextCommand::Paste => {
-                apply_clipboard_verb(browser, &mut overlays.clipboard, ClipboardVerb::Paste)
-            }
+            ContextCommand::Cut => apply_clipboard_verb(
+                browser,
+                &mut overlays.clipboard,
+                &mut overlays.operation,
+                ClipboardVerb::Cut,
+            ),
+            ContextCommand::Copy => apply_clipboard_verb(
+                browser,
+                &mut overlays.clipboard,
+                &mut overlays.operation,
+                ClipboardVerb::Copy,
+            ),
+            ContextCommand::Paste => apply_clipboard_verb(
+                browser,
+                &mut overlays.clipboard,
+                &mut overlays.operation,
+                ClipboardVerb::Paste,
+            ),
             ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
         }
     }
@@ -2269,13 +2572,14 @@ mod program {
             launcher: &launcher,
         });
         loop {
-            // A running long operation (a recursive delete) owns the window:
-            // drive it a bounded slice at a time, repaint the progress, and
-            // poll (non-blocking) for a mid-run cancel or a close — never
-            // parking while there is genuine work to do, and returning to the
-            // parked wait the instant the operation finishes (§2.23).
+            // A running long operation (a recursive delete, or a copy/move
+            // paste) owns the window: drive it a bounded slice at a time,
+            // repaint the progress, and poll (non-blocking) for a mid-run
+            // cancel or a close — never parking while there is genuine work to
+            // do, and returning to the parked wait the instant the operation
+            // finishes (§2.23).
             if overlays.operation.is_some() {
-                let finished = overlays.operation.as_mut().is_some_and(advance_delete);
+                let finished = overlays.operation.as_mut().is_some_and(advance_operation);
                 if present_frame(
                     &browser,
                     &overlays,

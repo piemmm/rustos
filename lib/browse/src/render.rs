@@ -1389,7 +1389,12 @@ pub fn draw_progress_dialog(
     let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
         return;
     };
-    let bar = Rect::new(content.left(), content.top(), content.width, row_height(font));
+    let bar = Rect::new(
+        content.left(),
+        content.top(),
+        content.width,
+        row_height(font),
+    );
     build_progress(model).render(surface, bar, Scale::ONE, theme, font);
     let cancel_rect = progress_cancel_rect(content, font);
     build_progress_cancel(model).render(surface, cancel_rect, Scale::ONE, theme, font);
@@ -1405,12 +1410,7 @@ pub fn draw_progress_dialog(
 /// a panel too small to place it — returns `false`, changing nothing (fail
 /// closed, §5.4).
 #[must_use]
-pub fn progress_cancel_at(
-    viewport: Rect,
-    font: BitmapFont,
-    theme: &Theme,
-    point: Point,
-) -> bool {
+pub fn progress_cancel_at(viewport: Rect, font: BitmapFont, theme: &Theme, point: Point) -> bool {
     let bounds = progress_dialog_rect(viewport, font, theme);
     // The content area is title-text-independent, so an empty-title panel
     // mirrors the titled panel [`draw_progress_dialog`] draws.

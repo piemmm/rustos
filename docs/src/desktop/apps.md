@@ -580,28 +580,31 @@ than a fabricated success; the view is then re-listed so a partial removal is
 shown honestly (`AGENTS.md` §5.4). Only the file manager builds and drives this
 — the read-only picker never deletes.
 
-A long removal shows **progress** and can be **cancelled**. Rather than driving
-the `DeleteWalk` to completion in one blocking pass, the confirmed removal is
-handed to an *interleaved operation* the event loop advances a bounded slice at
-a time (`advance_delete`, up to `OPERATION_STEP_BUDGET` steps per turn): between
-slices it repaints a modal progress panel and polls the event mailbox
-*non-blocking* for a mid-run cancel or a close, so a large recursive delete
+A long removal — and a long copy/paste — shows **progress** and can be
+**cancelled**. Rather than driving the walk to completion in one blocking pass,
+the confirmed operation is handed to an *interleaved operation* the event loop
+advances a bounded slice at a time (`advance_operation`, up to
+`OPERATION_STEP_BUDGET` units of work per turn — one directory read, one unlink,
+one `fs_mkdir`, one copy chunk, or one rename): between slices it repaints a
+modal progress panel and polls the event mailbox *non-blocking* for a mid-run
+cancel or a close, so even a large recursive delete or a multi-gigabyte copy
 never freezes the window and never busy-spins — continuously stepping the walk
-is genuine pending work, not a spin (`AGENTS.md` §2.23). The panel is the shared
-`lib/browse::progress` model (`ProgressModel` — the operation kind, the honest
-rising `DeleteWalk::removed` count, and a *latched* cancel) drawn by
-`render::draw_progress_dialog` as a `lib/controls` `Panel`, an indeterminate
-`Progress` "working" trace (no fabricated percentage, since the total is unknown
-until the reads reveal it, `AGENTS.md` §2.24), and a Cancel `Button`;
-`render::progress_cancel_at` mirrors the button geometry so a click resolves to
-exactly the drawn Cancel (fail closed off it, `AGENTS.md` §2.2, §5.4). A cancel
-is latched and stops the walk at the next step boundary — never mid-node — and a
-completed or cancelled/refused run alike re-lists so what actually remains is
-shown honestly. The same `advance_delete` drive is also what the
-cross-volume-move cleanup runs (there synchronously to completion), so a move's
-cleanup and an interactive delete share one removal definition (`AGENTS.md`
-§2.2). Progress + cancel for the copy/paste drive is a separately-staged
-follow-up reusing this same panel.
+is genuine pending work, not a spin (`AGENTS.md` §2.23). A single `Operation`
+carries either a `DeleteWalk` (a delete) or a `Paste` state machine (a
+copy/move), so both drive through one interleaving path (`AGENTS.md` §2.2). The
+panel is the shared `lib/browse::progress` model (`ProgressModel` — the
+operation kind, the honest rising `DeleteWalk::removed` / paste-node count, and
+a *latched* cancel) drawn by `render::draw_progress_dialog` as a `lib/controls`
+`Panel`, an indeterminate `Progress` "working" trace (no fabricated percentage,
+since the total is unknown until the reads reveal it, `AGENTS.md` §2.24), and a
+Cancel `Button`; `render::progress_cancel_at` mirrors the button geometry so a
+click resolves to exactly the drawn Cancel (fail closed off it, `AGENTS.md`
+§2.2, §5.4). A cancel is latched and stops the walk at the next unit boundary —
+never mid-node, and never mid-chunk — and a completed or cancelled/refused run
+alike re-lists so what actually remains is shown honestly. A cross-volume move's
+source-removal cleanup runs as a `Deleting` stage of the same interleaved
+`Paste`, over the shared delete walk, so a move's cleanup and an interactive
+delete share one removal definition (`AGENTS.md` §2.2).
 
 ### The cut / copy / paste verbs
 
@@ -613,13 +616,16 @@ current selection (`Browser::clipboard(op)`); with nothing selected the verb is
 simply unavailable (fail closed). Because the clipboard holds absolute paths it
 survives navigating to the paste target. **`Ctrl+V`** pastes it into the
 current directory: `plan_paste` validates the plan (a paste of a folder into
-itself is refused outright and nothing is touched), the app stats the
-destination directory for its `execute::VolumeId`, and each item is carried out
-under the launching user's own identity — **no new capability**, every
-operation an ordinary §5.3-checked VFS call the user could perform themselves.
-`execute::paste_strategy` chooses the mechanism per item from the two nodes'
-volume ids: a same-volume move is one `fs_rename`, a cross-volume move is
-copy-then-delete (the source removed through the shared delete path only once
+itself is refused outright and nothing is enqueued), the app stats the
+destination directory for its `execute::VolumeId`, and hands the plan to an
+interleaved `Paste` operation the event loop then carries out a bounded slice at
+a time (see the progress + cancel description above), so a large copy never
+freezes the window. Every item runs under the launching user's own identity —
+**no new capability**, every operation an ordinary §5.3-checked VFS call the
+user could perform themselves. `execute::paste_strategy` chooses the mechanism
+per item from the two nodes' volume ids: a same-volume move is one `fs_rename`,
+a cross-volume move is copy-then-delete (the source removed through the shared
+delete walk, as a `Deleting` stage of the same interleaved `Paste`, only once
 its copy has fully succeeded), and a copy streams — a single file through an
 `execute::CopyCursor` and a directory (or sealed `.app` bundle) through an
 `execute::CopyWalk`, both driven over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
@@ -628,14 +634,14 @@ unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). It is bounded and
 fail closed: the first refused operation stops the paste, states the reason on
 `stderr` naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
 already landed in place rather than a fabricated success (`AGENTS.md` §5.4); the
-view is then re-listed so a partial paste is shown honestly. A completed `Cut`
-clears the clipboard (its sources have moved); a `Copy` keeps it for another
-paste. A destination is created **exclusively**, so a pre-existing item of the
-same name is refused rather than clobbered, and a `Copy` back into an item's own
-directory is refused rather than silently duplicating a file onto itself
-(`AGENTS.md` §2.24) — overwrite/merge confirmation and a drawn progress/cancel
-surface for a long copy are a separately-staged follow-up. Only the file
-manager builds and drives this; the read-only picker never pastes.
+view is then re-listed so a partial paste is shown honestly. Initiating a `Cut`
+paste clears the clipboard (its sources are being moved, so re-pasting the same
+cut would name items that are gone); a `Copy` keeps it for another paste. A
+destination is created **exclusively**, so a pre-existing item of the same name
+is refused rather than clobbered, and a `Copy` back into an item's own directory
+is refused rather than silently duplicating a file onto itself (`AGENTS.md`
+§2.24) — overwrite/merge confirmation is a separately-staged follow-up. Only the
+file manager builds and drives this; the read-only picker never pastes.
 
 ### The new-folder model
 
