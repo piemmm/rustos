@@ -1813,6 +1813,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-ping"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-printf"
 version = "0.0.0"
 dependencies = [

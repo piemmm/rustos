@@ -23,7 +23,7 @@
 
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketAddr, SocketDatagram,
-    SocketId, SocketRequest, SocketStreamEvent, SocketType, NETSTACK_SOCKET_ENDPOINT,
+    SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType, NETSTACK_SOCKET_ENDPOINT,
     SOCKET_MAX_REPLY,
 };
 use tairix_abi::net_ipc::NetAddrFamily;
@@ -230,6 +230,59 @@ pub fn close(socket: SocketId) -> Result<(), Errno> {
     status_call(&SocketRequest::Close { socket })
 }
 
+/// Open an ICMP/`ICMPv6` echo socket of `family` (the `ping` path),
+/// delivering inbound echo replies ([`SocketEcho`]) to the async port
+/// `deliver_port` (an endpoint the caller has already bound).
+///
+/// Opening one requires [`CAP_NET_RAW`](tairix_abi::CapabilityId::NET_RAW),
+/// enforced by the stack; the stack owns the ICMP identifier, so a socket
+/// only ever receives replies to its own requests.
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::PermissionDenied`]
+/// without `CAP_NET`/`CAP_NET_RAW`, [`Errno::LimitExceeded`] at the socket
+/// quota, or a transport error.
+pub fn icmp_echo_socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errno> {
+    let request = SocketRequest::Socket {
+        family,
+        sock_type: SocketType::IcmpEcho,
+        deliver_port,
+    };
+    let mut buf = [0u8; REQUEST_HEADER_MAX];
+    let mut reply = [0u8; SOCKET_MAX_REPLY];
+    let len = call(&request, &mut buf, &mut reply)?;
+    decode_socket_reply(&reply[..len])
+}
+
+/// Send one ICMP/`ICMPv6` echo request from an echo `socket`. `dest` is
+/// [`None`] to use the connected peer (see [`connect`]); its port field is
+/// unused (ICMP has none) and must be zero. The caller chooses the
+/// `sequence`; the stack owns the identifier.
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::NotConnected`] with
+/// no `dest` and no connected peer, [`Errno::NetworkUnreachable`],
+/// [`Errno::MessageTooLarge`], or a transport error.
+pub fn send_echo(
+    socket: SocketId,
+    dest: Option<SocketAddr>,
+    sequence: u16,
+    payload: &[u8],
+) -> Result<(), Errno> {
+    let request = SocketRequest::SendEcho {
+        socket,
+        dest,
+        sequence,
+        payload,
+    };
+    let mut buf = alloc::vec![0u8; REQUEST_HEADER_MAX + payload.len()];
+    let mut reply = [0u8; SOCKET_MAX_REPLY];
+    let len = call(&request, &mut buf, &mut reply)?;
+    decode_status_reply(&reply[..len])
+}
+
 /// Join multicast `group` on `socket`, so it receives the group's traffic.
 ///
 /// # Errors
@@ -270,6 +323,29 @@ pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<(SocketDatagram<'_>, Or
     let origin = Origin::from_bytes(&sender)?;
     let datagram = SocketDatagram::parse(&buf[..len])?;
     Ok((datagram, origin))
+}
+
+/// Receive one inbound ICMP echo reply on the delivery port
+/// `deliver_port`, decoding it into `buf` and returning the reply together
+/// with the kernel-attested [`Origin`] of the sender.
+///
+/// As with [`recv`], the caller **must** verify the returned origin is the
+/// network stack before trusting the reply: the delivery port is otherwise
+/// an unauthenticated inbox any process could post to (fail closed).
+///
+/// # Errors
+///
+/// * The raw negative kernel result (as an [`Errno`] via
+///   [`Errno::from_syscall`]) if the receive fails.
+/// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the message
+///   is not a well-formed [`SocketEcho`], or the sender origin is
+///   malformed.
+pub fn recv_echo(deliver_port: u64, buf: &mut [u8]) -> Result<(SocketEcho<'_>, Origin), Errno> {
+    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+    let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
+    let origin = Origin::from_bytes(&sender)?;
+    let echo = SocketEcho::parse(&buf[..len])?;
+    Ok((echo, origin))
 }
 
 /// Encode `request` into `buf`, call the socket endpoint, and return the

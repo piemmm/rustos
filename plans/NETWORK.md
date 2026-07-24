@@ -1335,15 +1335,46 @@ the whole is too large for one change and each leaves the tree working.
   tables. Host-tested at every layer; no new QEMU vertical (the query is
   the N8a-precedent guest-driven path; the app is host-tested + planted).
 
-#### N8b-2b — the `ping` command app `[ ]`
-- `ping` (v4+v6, coreutils/iputils-familiar surface per §16.7) as a `.app`
-  bundle with a 13-locale Help/ tree. Needs a **new ICMP-echo socket path**
-  (the socket ABI has only `Stream`/`Datagram` today): a raw/ICMP socket
-  mode through `lib/abi/src/net.rs` + the netstack `SocketService` +
-  `lib/rt::net`, gated `CAP_NET_RAW`, audited, fail-closed (the
-  `lib/net::icmp` echo codec already exists). Plus its own live two-process
-  QEMU vertical (a guest `ping` answered by the host `netpeer`), since the
-  ICMP path is not exercised by the existing verticals.
+#### N8b-2b — the `ping` command app `[~]`
+
+##### N8b-2b-α — the ICMP-echo socket path + the `ping` app `[x]`
+- **The ICMP-echo socket path is landed end to end** (host-tested).
+  `SocketType::IcmpEcho` (wire value `3`) is served: `lib/abi/src/net.rs`
+  adds the `SendEcho` request op (caller-chosen sequence; the stack owns the
+  identifier) and the `SocketEcho` delivery frame (magic `"NSKE"`, the echo
+  analogue of `SocketDatagram`); `NetSockProto` gains `Icmp`/`Icmpv6` so the
+  socket lists in `ss`. The netstack `SocketService` gates the open on
+  `CAP_NET_RAW` (audited, fail-closed), assigns each socket a globally-unique
+  identifier, originates via the new `Netstack::originate_echo`, and
+  demultiplexes `StackEvent::EchoReply` to the owning socket (identifier +
+  connected-peer filtered). `lib/rt::net` gains `icmp_echo_socket` /
+  `send_echo` / `recv_echo`. The `lib/net::icmp` echo codec and
+  `Stack::send_echo_request` / `StackEvent::EchoReply` already existed and are
+  reused unchanged.
+- **`ping` (v4+v6, iputils-familiar §16.7)** lands as `userland/apps/ping`: a
+  pure host-testable engine (`command`/`error`/`io`/`net` seam/`client`) over
+  an injected `PingIo` clock+echo-socket+park seam, the freestanding `Run`
+  binary driving it over `tairix_rt::net` + `clock_get`/`waitset`, a
+  13-locale `Help/` tree (help-lint clean), and a README. Options
+  `-c/-i/-s/-W/-w/-4/-6/-n/-q` + `-?/--help`; the target is a literal IP
+  (no DNS in this plan — a hostname is a loud usage error). The reply line
+  omits `ttl=` (not exposed by the echo socket — a documented divergence).
+  Registered in the kernel `program_manifests` pin and the harness discovery
+  test. Covered by unit tests at every layer (ABI round-trip/fail-closed,
+  netstack open-gate/send/deliver, engine loss/quiet/verify).
+
+##### N8b-2b-β — the live two-process QEMU vertical `[ ]`
+- Remaining: a guest `ping` answered by the host `netpeer`, since the ICMP
+  path is not exercised by the existing verticals. Concretely — a passive
+  ICMP-responder peer body in `tools/xtask/src/commands/netpeer.rs` (the
+  "serve" half of `run_peer`: `stack.on_frame` auto-answers echo requests +
+  ND; succeed on ≥1 `EchoRequestServed`), a `NetPeerMode::V6PingResponder`,
+  a net-only `FsDisk` that plants the standard app store (so the real `ping`
+  bundle is present) plus the signed virtio-net driver, and a
+  `tairix-test-netstack-ping-qemu-aarch64` crate (modelled on the stream
+  vertical's guest tail: arm on `comm=ping` audited `exit`, PASS on the shell
+  `exit`, plus the peer's served-echo verdict). The serial script types
+  `ping -c N <peer-v6-link-local>` at the root shell.
 
 ### N9 — interface configuration, bonding, failover `[ ]`
 - `lib/netconfig` (grammar, closed registry, fail-closed parse,

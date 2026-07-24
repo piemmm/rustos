@@ -851,9 +851,9 @@ mod tests {
     #[test]
     fn mem_map_reserve_non_fixed_routes_to_the_placement_reservation() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(11, fake);
+        let _guard = publish_live_space_for_test(9, fake);
 
-        let producer = LiveMemMap::new(arch_at(11));
+        let producer = LiveMemMap::new(arch_at(9));
         // A non-`FIXED` `mem_map` reserves address space only (no eager
         // commit); the placed base flows back unchanged.
         let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::empty(), 0xDEAD_0000);
@@ -869,9 +869,9 @@ mod tests {
     #[test]
     fn mem_map_reserve_fixed_routes_to_the_placed_reservation() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(12, fake);
+        let _guard = publish_live_space_for_test(10, fake);
 
-        let producer = LiveMemMap::new(arch_at(12));
+        let producer = LiveMemMap::new(arch_at(10));
         let base = 0x4000;
         let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::FIXED, base);
         assert_eq!(got, Ok(base));
@@ -885,7 +885,7 @@ mod tests {
     fn mem_map_with_no_published_space_fails_closed_for_a_non_fixed_request() {
         // No live space published on this CPU: a non-`FIXED` placement must
         // also fail closed rather than fabricating a base.
-        let producer = LiveMemMap::new(arch_at(9));
+        let producer = LiveMemMap::new(arch_at(11));
         assert_eq!(
             producer.map(PAGE, MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
@@ -921,9 +921,9 @@ mod tests {
     #[test]
     fn file_map_reserve_routes_to_the_current_live_space() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(10, fake);
+        let _guard = publish_live_space_for_test(12, fake);
 
-        let producer = LiveMemMap::new(arch_at(10));
+        let producer = LiveMemMap::new(arch_at(12));
         // The byte length rounds up to whole pages; the reserved base flows
         // back unchanged.
         assert_eq!(FileMap::reserve(&producer, PAGE as u64 + 1), Ok(FILE_BASE));
@@ -935,9 +935,9 @@ mod tests {
     #[test]
     fn file_map_page_and_release_route_to_the_current_live_space() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(11, fake);
+        let _guard = publish_live_space_for_test(13, fake);
 
-        let producer = LiveMemMap::new(arch_at(11));
+        let producer = LiveMemMap::new(arch_at(13));
         assert_eq!(producer.map_page(FILE_BASE, &[7; 12]), Ok(()));
         assert_eq!(
             producer.release(FILE_BASE, 4 * PAGE as u64),
@@ -955,7 +955,7 @@ mod tests {
         // announces the inert interface rather than pretending anything was
         // reserved, backed, or freed. A zero length is refused before the
         // space is even consulted.
-        let producer = LiveMemMap::new(arch_at(12));
+        let producer = LiveMemMap::new(arch_at(14));
         assert_eq!(
             FileMap::reserve(&producer, PAGE as u64),
             Err(Errno::NotImplemented)
@@ -989,9 +989,9 @@ mod tests {
     #[test]
     fn mmio_map_routes_a_write_combining_framebuffer_to_the_scanout_path() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(9, fake);
+        let _guard = publish_live_space_for_test(15, fake);
 
-        let producer = LiveMmioMap::new(arch_at(9));
+        let producer = LiveMmioMap::new(arch_at(15));
         let va = producer.map_window(
             0x8000_0000,
             0x30_0000,
@@ -1036,9 +1036,9 @@ mod tests {
     #[test]
     fn dma_alloc_routes_a_carve_to_the_current_live_space() {
         let (fake, ptr) = leak_fake();
-        let _guard = publish_live_space_for_test(10, fake);
+        let _guard = publish_live_space_for_test(16, fake);
 
-        let producer = LiveDmaAlloc::new(arch_at(10));
+        let producer = LiveDmaAlloc::new(arch_at(16));
         let carve = producer.alloc(2 * PAGE, 0x4000_0000);
         // The CPU VA and the physical-base-as-device-address flow back from
         // the live space unchanged.
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn dma_alloc_with_no_published_space_fails_closed() {
-        let producer = LiveDmaAlloc::new(arch_at(11));
+        let producer = LiveDmaAlloc::new(arch_at(17));
         assert_eq!(producer.alloc(PAGE, 0), Err(Errno::NotImplemented));
     }
 
@@ -1066,9 +1066,9 @@ mod tests {
             next: Some(LiveSpaceError::Dma(DmaError::AddrLimitExceeded)),
             ..FakeLive::default()
         });
-        let _guard = publish_live_space_for_test(12, fake);
+        let _guard = publish_live_space_for_test(18, fake);
 
-        let producer = LiveDmaAlloc::new(arch_at(12));
+        let producer = LiveDmaAlloc::new(arch_at(18));
         assert_eq!(producer.alloc(PAGE, 0x1000), Err(Errno::OutOfRange));
     }
 }

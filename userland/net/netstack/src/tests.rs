@@ -1073,6 +1073,210 @@ fn inbound_datagram_is_delivered_to_the_bound_socket() {
     assert!(svc.deliver(&other).is_empty());
 }
 
+/// A caller holding `CAP_NET` **and** `CAP_NET_RAW` (plus the privileged
+/// bind grant), keyed to process instance `proc_byte` — the authority
+/// required to open an ICMP echo socket (the `ping` path).
+fn raw_caller(proc_byte: u8) -> Caller {
+    let mut summary = CapabilitySummary::EMPTY;
+    summary.insert(CapabilityId::NET);
+    summary.insert(CapabilityId::NET_RAW);
+    summary.insert(CapabilityId::NET_BIND_PRIVILEGED);
+    Caller::new(Origin::new(
+        TrustDomain::User,
+        1000,
+        100,
+        u64::from(proc_byte),
+        ProcId::from_raw([proc_byte; 16]),
+        summary,
+        tairix_abi::ORIGIN_CONSOLE_NONE,
+    ))
+}
+
+#[test]
+fn icmp_echo_socket_open_requires_cap_net_raw() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::IcmpEcho,
+        deliver_port: 0x6000,
+    });
+    // A CAP_NET caller without CAP_NET_RAW cannot open an echo socket.
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(svc.is_empty());
+    // With CAP_NET_RAW the same open succeeds.
+    svc.serve(
+        &mut stack,
+        &raw_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("open echo socket");
+    assert_eq!(svc.len(), 1);
+}
+
+#[test]
+fn echo_request_is_originated_and_the_reply_is_delivered() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    // Open an ICMP echo socket delivering to port 0x6000.
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::IcmpEcho,
+        deliver_port: 0x6000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &raw_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    // Connect to V4_B (an echo peer carries no port).
+    let request = encode_request(&SocketRequest::Connect {
+        socket: id,
+        peer: v4_addr(10, 0, 2, 2, 0),
+    });
+    svc.serve(
+        &mut stack,
+        &raw_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("connect");
+    // The stack-assigned identifier is the socket's local id, observable
+    // through the listing record.
+    let identifier = svc.socket_records(0, 8)[0].local_port;
+    assert_ne!(identifier, 0);
+    // Send an echo request (sequence 1) to the connected peer.
+    let request = encode_request(&SocketRequest::SendEcho {
+        socket: id,
+        dest: None,
+        sequence: 1,
+        payload: b"ping",
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &raw_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("send_echo");
+    decode_status_reply(&reply[..out.len]).expect("echo accepted");
+    assert!(!out.tx.is_empty(), "the echo request produced frames");
+
+    // A matching reply is delivered as a SocketEcho on the bound port.
+    let event = StackEvent::EchoReply {
+        source: IpAddr::V4(V4_B),
+        identifier,
+        sequence: 1,
+        payload: b"ping".to_vec(),
+    };
+    let deliveries = svc.deliver(&event);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].deliver_port, 0x6000);
+    let echo = tairix_abi::net::SocketEcho::parse(&deliveries[0].datagram).expect("echo");
+    assert_eq!(echo.socket, id);
+    assert_eq!(echo.sequence, 1);
+    assert_eq!(echo.payload, b"ping");
+    assert_eq!(echo.source.family, NetAddrFamily::V4);
+    assert_eq!(&echo.source.addr[..4], &[10, 0, 2, 2]);
+
+    // A reply bearing a different identifier reaches no socket.
+    let stray = StackEvent::EchoReply {
+        source: IpAddr::V4(V4_B),
+        identifier: identifier ^ 0x1,
+        sequence: 1,
+        payload: b"ping".to_vec(),
+    };
+    assert!(svc.deliver(&stray).is_empty());
+
+    // A reply from a different source than the connected peer is filtered.
+    let wrong_peer = StackEvent::EchoReply {
+        source: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)),
+        identifier,
+        sequence: 1,
+        payload: b"ping".to_vec(),
+    };
+    assert!(svc.deliver(&wrong_peer).is_empty());
+}
+
+#[test]
+fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::IcmpEcho,
+        deliver_port: 0x6000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &raw_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    let request = encode_request(&SocketRequest::SendEcho {
+        socket: id,
+        dest: None,
+        sequence: 1,
+        payload: b"ping",
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &raw_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::NotConnected)
+    );
+}
+
 #[test]
 fn a_connected_socket_only_receives_from_its_peer() {
     let mut svc = SocketService::new();

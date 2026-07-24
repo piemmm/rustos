@@ -102,9 +102,10 @@ fields.
 | `JoinMulticast` / `LeaveMulticast` | socket, group `SocketAddr` (port must be `0`) | status |
 | `Listen` | socket (a bound stream socket) | status |
 | `Accept` | listening socket, child delivery-port endpoint id | child `SocketId` (`encode_socket_reply`), or `WouldBlock` |
+| `SendEcho` | socket, optional dest (`None` ⇒ connected peer; port must be `0`), sequence, payload | status |
 
-`SocketType` serves `Datagram` (`2`) and `Stream` (`1`); the reserved raw
-(`3`) value fails closed at decode. A `SocketAddr` is a family, a 16-byte
+`SocketType` serves `Datagram` (`2`), `Stream` (`1`), and `IcmpEcho` (`3`);
+any other value fails closed at decode. A `SocketAddr` is a family, a 16-byte
 address (IPv4 uses the first four; the tail must be zero), and a host-order
 port. For a stream socket `Send` carries no destination (`dest` must be
 `None` — the peer is fixed at `Connect`) and its reply is the accepted byte
@@ -174,21 +175,48 @@ The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
 like `recv`, returns the kernel-attested sender `Origin` for fail-closed
 authentication).
 
-## Delivery (`SocketDatagram`)
+## ICMP echo sockets (`ping`, N8b-2b)
+
+An ICMP/`ICMPv6` echo socket is opened with `SocketType::IcmpEcho`. Opening
+one is a further gate beyond `CAP_NET`: it requires `CapabilityId::NET_RAW`
+(forging or observing ICMP is raw-frame authority), checked before any state
+is touched, fail-closed and audited. The stack **owns the echo identifier**
+— it assigns each echo socket a globally-unique identifier (its `local_port`
+slot) on connect/first send and never lets the caller choose it, so a socket
+only ever receives replies to its own requests and cannot observe another's.
+
+`Connect` records a default peer address (an echo peer carries no port, so
+the port field must be `0`). `SendEcho` originates one echo request: the
+caller chooses the `sequence`, the stack fills in the identifier, and the
+payload follows the header. Inbound `StackEvent::EchoReply`s are
+demultiplexed to the echo socket whose identifier matches (and, when
+connected, whose peer matches the source) and delivered as a `SocketEcho`
+frame (magic `"NSKE"`) to the socket's delivery port. The IP time-to-live is
+not surfaced through this socket, so the `ping` tool prints no `ttl=` field.
+
+The client links `tairix_rt::net::icmp_echo_socket` / `connect` /
+`send_echo` and drains replies with `recv_echo` (which, like `recv`, returns
+the kernel-attested sender `Origin` for fail-closed authentication). The
+user-facing tool is `userland/apps/ping`.
+
+## Delivery (`SocketDatagram` / `SocketEcho`)
 
 A `SocketDatagram` is the 36-byte-header-plus-payload frame the stack
 `ipc_send`s to a datagram socket's delivery port: the receiving `SocketId`,
-the peer `SocketAddr` it came from, and the payload. The client decodes it
-after `ipc_recv`.
+the peer `SocketAddr` it came from, and the payload. A `SocketEcho` is the
+equivalent 36-byte-header frame for an echo socket: the receiving
+`SocketId`, the source `SocketAddr` (no port), the echoed sequence number,
+and the echoed payload. The client decodes either after `ipc_recv`.
 
 ## Fail-closed decoding
 
 Every decoder (`SocketRequest::from_bytes`, `SocketDatagram::parse`,
 `SocketStreamEvent::parse`, and the reply decoders) is total and fails
 closed: an unknown magic, version, operation, family, socket type, or
-stream-event kind, a dirty reserved field, a group address carrying a port,
-or an over-length payload is refused with a typed `Errno` rather than
-guessed. The decoders are exercised by the `lib/abi` never-panic/round-trip
+stream-event kind, a dirty reserved field, a group address (or echo
+destination) carrying a port, or an over-length payload is refused with a
+typed `Errno` rather than guessed. The decoders are exercised by the
+`lib/abi` never-panic/round-trip
 fuzz harness (`tests/fuzz_decode.rs`).
 
 ## Error vocabulary

@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for the `ping` command app
+# (plans/NETWORK.md N8b-2b). Discovered by the build's app-bundle composer;
+# the capability list is the bundle's request, intersected with the launching
+# user's grants. CAP_CONSOLE_WRITE covers the inherited standard output/error
+# streams; CAP_FS_ACCESS reads the tool's own bundle payload (its Help/
+# documents) through the secured VFS; CAP_NET originates transport-layer
+# traffic; CAP_NET_RAW opens the ICMP/ICMPv6 echo socket the tool pings with
+# (the stack re-checks it and audits the open, fail-closed). It reads no
+# standard input.
+id = "os.tairix.ping"
+name = "ping"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_RAW"]

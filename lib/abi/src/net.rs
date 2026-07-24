@@ -57,6 +57,11 @@ pub const SOCKET_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"NSKR");
 /// Magic number identifying a delivered datagram (`"NSKD"` little-endian).
 pub const SOCKET_DATAGRAM_MAGIC: u32 = u32::from_le_bytes(*b"NSKD");
 
+/// Magic number identifying a delivered ICMP echo reply (`"NSKE"`
+/// little-endian) — the [`SocketType::IcmpEcho`] analogue of a
+/// [`SocketDatagram`].
+pub const SOCKET_ECHO_MAGIC: u32 = u32::from_le_bytes(*b"NSKE");
+
 /// Magic number identifying a delivered stream event (`"NSKS"`
 /// little-endian) — the connection-oriented (TCP) analogue of a
 /// [`SocketDatagram`].
@@ -85,10 +90,13 @@ pub const SOCKET_PRIVILEGED_PORT_MAX: u16 = 1023;
 
 /// The transport type of a socket.
 ///
-/// Datagram (UDP) and stream (TCP) sockets are served. The raw socket type
-/// takes the reserved wire value (`3`, mirroring the POSIX `SOCK_*`
-/// conventions) and the decoder fails closed on it, so no unserved type is
-/// silently accepted.
+/// Datagram (UDP), stream (TCP), and ICMP-echo sockets are served. The
+/// ICMP-echo type takes the reserved raw wire value (`3`, mirroring the
+/// POSIX `SOCK_RAW`/`SOCK_DGRAM IPPROTO_ICMP` conventions); opening one
+/// requires [`CAP_NET_RAW`](crate::CapabilityId::NET_RAW), and the stack
+/// owns the ICMP identifier so a socket only ever receives replies to its
+/// own requests. The decoder still fails closed on every value it does not
+/// serve, so no unserved type is silently accepted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SocketType {
@@ -96,6 +104,10 @@ pub enum SocketType {
     Stream = 1,
     /// A connectionless UDP datagram socket.
     Datagram = 2,
+    /// An ICMP/`ICMPv6` echo socket: it sends echo requests and receives
+    /// the matching echo replies (the `ping` path). Capability-gated on
+    /// [`CAP_NET_RAW`](crate::CapabilityId::NET_RAW).
+    IcmpEcho = 3,
 }
 
 impl SocketType {
@@ -109,13 +121,13 @@ impl SocketType {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for any value this increment does not serve —
-    /// including the reserved raw (`3`) value — so an unimplemented socket
-    /// type is refused, never guessed.
+    /// [`Errno::OutOfRange`] for any value this increment does not serve, so
+    /// an unimplemented socket type is refused, never guessed.
     pub const fn from_u8(value: u8) -> Result<Self, Errno> {
         match value {
             1 => Ok(Self::Stream),
             2 => Ok(Self::Datagram),
+            3 => Ok(Self::IcmpEcho),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -169,6 +181,8 @@ const SOCKET_OFFSET: usize = 8;
 const TYPE_OFFSET: usize = 12;
 /// Byte offset of the family field (`Socket` only).
 const FAMILY_OFFSET: usize = 13;
+/// Byte offset of the ICMP echo sequence field (`SendEcho` only).
+const SEQUENCE_OFFSET: usize = 14;
 /// Byte offset of the delivery-port field (`Socket` only).
 const DELIVER_OFFSET: usize = 36;
 
@@ -190,6 +204,8 @@ const OP_LEAVE: u16 = 7;
 const OP_LISTEN: u16 = 8;
 /// Wire operation discriminant of [`SocketRequest::Accept`].
 const OP_ACCEPT: u16 = 9;
+/// Wire operation discriminant of [`SocketRequest::SendEcho`].
+const OP_SEND_ECHO: u16 = 10;
 
 /// A server-assigned socket handle, scoped to the creating principal.
 ///
@@ -285,6 +301,22 @@ pub enum SocketRequest<'a> {
         /// The async port the new child socket's stream events go to.
         deliver_port: u64,
     },
+    /// Send one ICMP/`ICMPv6` echo request from an [`SocketType::IcmpEcho`]
+    /// socket. `dest` is [`None`] to use the connected peer (the port field
+    /// of an echo destination is unused — ICMP has no ports — and must be
+    /// zero). The stack owns the echo *identifier* (assigned per socket);
+    /// the caller chooses the `sequence`. The echo payload follows the
+    /// header.
+    SendEcho {
+        /// The socket handle.
+        socket: SocketId,
+        /// The destination, or [`None`] to use the connected peer.
+        dest: Option<SocketAddr>,
+        /// The echo sequence number, echoed back unchanged by the peer.
+        sequence: u16,
+        /// The echo payload (at most [`SOCKET_MAX_DATAGRAM`] bytes).
+        payload: &'a [u8],
+    },
 }
 
 impl<'a> SocketRequest<'a> {
@@ -304,7 +336,7 @@ impl<'a> SocketRequest<'a> {
     ///   [`SOCKET_MAX_DATAGRAM`].
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let payload = match self {
-            Self::Send { payload, .. } => *payload,
+            Self::Send { payload, .. } | Self::SendEcho { payload, .. } => *payload,
             _ => &[],
         };
         if payload.len() > SOCKET_MAX_DATAGRAM {
@@ -378,6 +410,20 @@ impl<'a> SocketRequest<'a> {
                 put_u32(out, SOCKET_OFFSET, socket);
                 put_u64(out, DELIVER_OFFSET, deliver_port);
             }
+            Self::SendEcho {
+                socket,
+                dest,
+                sequence,
+                payload,
+            } => {
+                put_u16(out, 6, OP_SEND_ECHO);
+                put_u32(out, SOCKET_OFFSET, socket);
+                put_u16(out, SEQUENCE_OFFSET, sequence);
+                if let Some(dest) = dest {
+                    dest.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                }
+                out[Self::HEADER_LEN..total].copy_from_slice(payload);
+            }
         }
         Ok(total)
     }
@@ -406,8 +452,9 @@ impl<'a> SocketRequest<'a> {
         }
         let op = read_u16(bytes, 6);
         let payload = &bytes[Self::HEADER_LEN..];
-        // Only Send carries a payload; every other operation is header-only.
-        if op != OP_SEND && !payload.is_empty() {
+        // Only the send operations carry a payload; every other operation is
+        // header-only.
+        if op != OP_SEND && op != OP_SEND_ECHO && !payload.is_empty() {
             return Err(Errno::LengthOutOfRange);
         }
         if payload.len() > SOCKET_MAX_DATAGRAM {
@@ -415,6 +462,17 @@ impl<'a> SocketRequest<'a> {
         }
         let socket = read_u32(bytes, SOCKET_OFFSET);
         let addr_block = &bytes[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN];
+        Self::dispatch(op, bytes, addr_block, socket, payload)
+    }
+
+    /// Route a validated request header to its operation decoder.
+    fn dispatch(
+        op: u16,
+        bytes: &'a [u8],
+        addr_block: &'a [u8],
+        socket: SocketId,
+        payload: &'a [u8],
+    ) -> Result<Self, Errno> {
         match op {
             OP_SOCKET => Self::decode_socket_op(bytes, addr_block),
             OP_BIND | OP_CONNECT | OP_JOIN | OP_LEAVE => {
@@ -494,8 +552,46 @@ impl<'a> SocketRequest<'a> {
                     deliver_port: read_u64(bytes, DELIVER_OFFSET),
                 })
             }
+            OP_SEND_ECHO => Self::decode_send_echo(bytes, addr_block, socket, payload),
             _ => Err(Errno::OutOfRange),
         }
+    }
+
+    /// Decode an [`OP_SEND_ECHO`] header: the handle, the sequence (bytes
+    /// 14..16), an optional destination, and the payload. The socket-type,
+    /// family, and delivery-port fields belong to `Socket` alone and must be
+    /// zero; an echo destination carries no port (ICMP has none), so a
+    /// non-zero port is wire corruption and fails closed.
+    fn decode_send_echo(
+        bytes: &[u8],
+        addr_block: &[u8],
+        socket: SocketId,
+        payload: &'a [u8],
+    ) -> Result<Self, Errno> {
+        if bytes[TYPE_OFFSET] != 0
+            || bytes[FAMILY_OFFSET] != 0
+            || read_u64(bytes, DELIVER_OFFSET) != 0
+        {
+            return Err(Errno::BadMagic);
+        }
+        let sequence = read_u16(bytes, SEQUENCE_OFFSET);
+        // A zeroed address block means "use the connected peer"; anything
+        // else is an explicit destination.
+        let dest = if addr_block.iter().all(|&b| b == 0) {
+            None
+        } else {
+            let addr = SocketAddr::read(addr_block)?;
+            if addr.port != 0 {
+                return Err(Errno::OutOfRange);
+            }
+            Some(addr)
+        };
+        Ok(Self::SendEcho {
+            socket,
+            dest,
+            sequence,
+            payload,
+        })
     }
 
     /// Decode an [`OP_SOCKET`] header: the socket type and family live in
@@ -727,6 +823,122 @@ impl<'a> SocketDatagram<'a> {
         Ok(Self {
             socket,
             source: SocketAddr { family, addr, port },
+            payload,
+        })
+    }
+}
+
+/// An ICMP/`ICMPv6` echo reply the stack delivers to an
+/// [`SocketType::IcmpEcho`] socket's async port.
+///
+/// The stack [`crate::SyscallNumber::IPC_SEND`]s this frame to the port the
+/// client named in [`SocketRequest::Socket`] when a reply arrives whose ICMP
+/// identifier matches the socket's stack-assigned identifier (so a socket
+/// only ever sees replies to its own requests). It identifies the receiving
+/// socket, the source that answered, the echoed sequence number, and the
+/// echoed payload. ICMP has no ports, so — unlike a [`SocketDatagram`] — the
+/// source carries no port; the wire layout reuses that field for the
+/// sequence number.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SocketEcho<'a> {
+    /// The socket the reply was delivered to.
+    pub socket: SocketId,
+    /// The source that sent the reply.
+    pub source: SocketAddr,
+    /// The echoed sequence number, matching the originating request.
+    pub sequence: u16,
+    /// The echoed payload.
+    pub payload: &'a [u8],
+}
+
+impl<'a> SocketEcho<'a> {
+    /// Byte length of the fixed delivery header preceding the payload.
+    pub const HEADER_LEN: usize = 36;
+
+    /// Largest delivery message: the header plus a maximum-size payload.
+    pub const MAX_WIRE_LEN: usize = Self::HEADER_LEN + SOCKET_MAX_DATAGRAM;
+
+    /// Encode `self` little-endian into `out`, returning the byte length.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] — the payload exceeds
+    ///   [`SOCKET_MAX_DATAGRAM`].
+    /// * [`Errno::BufferTooSmall`] — `out` cannot hold the message.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        if self.payload.len() > SOCKET_MAX_DATAGRAM {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let total = Self::HEADER_LEN + self.payload.len();
+        if out.len() < total {
+            return Err(Errno::BufferTooSmall);
+        }
+        for byte in &mut out[..Self::HEADER_LEN] {
+            *byte = 0;
+        }
+        put_u32(out, 0, SOCKET_ECHO_MAGIC);
+        put_u16(out, 4, SOCKET_VERSION_V1);
+        put_u32(out, 8, self.socket);
+        out[12] = self.source.family.as_u8();
+        put_u16(out, 14, self.sequence);
+        out[16..32].copy_from_slice(&self.source.addr);
+        // Payload length fits u32: bounded by SOCKET_MAX_DATAGRAM above.
+        put_u32(
+            out,
+            32,
+            u32::try_from(self.payload.len()).map_err(|_| Errno::LengthOutOfRange)?,
+        );
+        out[Self::HEADER_LEN..total].copy_from_slice(self.payload);
+        Ok(total)
+    }
+
+    /// Decode a delivery message from `bytes`, failing closed.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than the header or
+    ///   the declared payload.
+    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::AbiVersionUnsupported`] — not `netsock-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown family.
+    /// * [`Errno::LengthOutOfRange`] — a declared payload beyond
+    ///   [`SOCKET_MAX_DATAGRAM`].
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::HEADER_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != SOCKET_ECHO_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if read_u16(bytes, 6) != 0 || bytes[13] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let socket = read_u32(bytes, 8);
+        let family = NetAddrFamily::from_u8(bytes[12])?;
+        let sequence = read_u16(bytes, 14);
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&bytes[16..32]);
+        if family == NetAddrFamily::V4 && addr[4..].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let payload_len = read_u32(bytes, 32) as usize;
+        if payload_len > SOCKET_MAX_DATAGRAM {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let payload = bytes
+            .get(Self::HEADER_LEN..Self::HEADER_LEN + payload_len)
+            .ok_or(Errno::BufferTooSmall)?;
+        Ok(Self {
+            socket,
+            source: SocketAddr {
+                family,
+                addr,
+                port: 0,
+            },
+            sequence,
             payload,
         })
     }
@@ -1036,6 +1248,7 @@ mod tests {
     fn magics_are_the_ascii_tags() {
         assert_eq!(SOCKET_REQUEST_MAGIC, u32::from_le_bytes(*b"NSKR"));
         assert_eq!(SOCKET_DATAGRAM_MAGIC, u32::from_le_bytes(*b"NSKD"));
+        assert_eq!(SOCKET_ECHO_MAGIC, u32::from_le_bytes(*b"NSKE"));
         assert_eq!(
             NETSTACK_SOCKET_ENDPOINT,
             u64::from_le_bytes(*b"NSK1\0\0\0\0")
@@ -1046,9 +1259,10 @@ mod tests {
     fn socket_type_round_trips_and_fails_closed() {
         assert_eq!(SocketType::from_u8(1), Ok(SocketType::Stream));
         assert_eq!(SocketType::from_u8(2), Ok(SocketType::Datagram));
-        // The reserved raw value and everything else are refused.
-        assert_eq!(SocketType::from_u8(3), Err(Errno::OutOfRange));
+        assert_eq!(SocketType::from_u8(3), Ok(SocketType::IcmpEcho));
+        // Everything else is refused.
         assert_eq!(SocketType::from_u8(0), Err(Errno::OutOfRange));
+        assert_eq!(SocketType::from_u8(4), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -1197,6 +1411,69 @@ mod tests {
             socket: 8,
             deliver_port: 0,
         });
+        round_trip(SocketRequest::Socket {
+            family: NetAddrFamily::V6,
+            sock_type: SocketType::IcmpEcho,
+            deliver_port: 0x50,
+        });
+        round_trip(SocketRequest::SendEcho {
+            socket: 6,
+            dest: Some(v4(10, 0, 2, 2, 0)),
+            sequence: 42,
+            payload: b"ping payload",
+        });
+        round_trip(SocketRequest::SendEcho {
+            socket: 6,
+            dest: None,
+            sequence: 65_535,
+            payload: &[],
+        });
+        round_trip(SocketRequest::SendEcho {
+            socket: 7,
+            dest: Some(SocketAddr {
+                family: NetAddrFamily::V6,
+                addr: [0xFE; 16],
+                port: 0,
+            }),
+            sequence: 1,
+            payload: b"v6 echo",
+        });
+    }
+
+    #[test]
+    fn send_echo_with_a_dest_port_is_refused() {
+        // ICMP has no ports; an echo destination carrying one is corruption.
+        let request = SocketRequest::SendEcho {
+            socket: 6,
+            dest: Some(v4(10, 0, 2, 2, 0)),
+            sequence: 3,
+            payload: b"x",
+        };
+        let mut buf = [0u8; SocketRequest::HEADER_LEN + 1];
+        let n = request.encode(&mut buf).expect("encode");
+        // Smuggle a non-zero port into the address block (offset +2..+4).
+        let mut dirty = buf;
+        dirty[ADDR_OFFSET + 2] = 5;
+        assert_eq!(
+            SocketRequest::from_bytes(&dirty[..n]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn send_echo_rejects_socket_only_fields() {
+        let request = SocketRequest::SendEcho {
+            socket: 6,
+            dest: None,
+            sequence: 9,
+            payload: b"x",
+        };
+        let mut buf = [0u8; SocketRequest::HEADER_LEN + 1];
+        let n = request.encode(&mut buf).expect("encode");
+        // A stray family byte belongs only to Socket.
+        let mut dirty = buf;
+        dirty[FAMILY_OFFSET] = 2;
+        assert_eq!(SocketRequest::from_bytes(&dirty[..n]), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -1385,5 +1662,42 @@ mod tests {
         let n = dg.encode(&mut out).expect("encode");
         assert_eq!(n, SocketDatagram::HEADER_LEN);
         assert_eq!(SocketDatagram::parse(&out[..n]), Ok(dg));
+    }
+
+    #[test]
+    fn echo_reply_round_trips_and_fails_closed() {
+        // A v6 echo reply carries no port; its sequence rides the port slot.
+        let echo = SocketEcho {
+            socket: 7,
+            source: SocketAddr {
+                family: NetAddrFamily::V6,
+                addr: [0x20; 16],
+                port: 0,
+            },
+            sequence: 4321,
+            payload: b"echoed payload",
+        };
+        let mut out = [0u8; SocketEcho::MAX_WIRE_LEN];
+        let n = echo.encode(&mut out).expect("encode");
+        assert_eq!(SocketEcho::parse(&out[..n]), Ok(echo));
+        // Truncation past the declared payload fails closed.
+        assert_eq!(SocketEcho::parse(&out[..n - 1]), Err(Errno::BufferTooSmall));
+        let mut bad_magic = out;
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(SocketEcho::parse(&bad_magic[..n]), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn empty_echo_reply_round_trips() {
+        let echo = SocketEcho {
+            socket: 3,
+            source: v4(198, 51, 100, 1, 0),
+            sequence: 1,
+            payload: &[],
+        };
+        let mut out = [0u8; SocketEcho::HEADER_LEN];
+        let n = echo.encode(&mut out).expect("encode");
+        assert_eq!(n, SocketEcho::HEADER_LEN);
+        assert_eq!(SocketEcho::parse(&out[..n]), Ok(echo));
     }
 }

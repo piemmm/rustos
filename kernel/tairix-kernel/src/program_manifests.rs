@@ -878,6 +878,19 @@ mod tests {
         CapabilityId::SYSINFO_GLOBAL,
     ];
 
+    // The `ping` tool (plans/NETWORK.md N8b-2b): console write for its
+    // output/diagnostics, filesystem access to read its own bundle Help/
+    // payload, and `CAP_NET` + `CAP_NET_RAW` to open the ICMP/ICMPv6 echo
+    // socket it pings with (the stack re-checks both and audits the open).
+    // Not an embedded spawn-floor program, so the list lives only in this
+    // pin.
+    const PING_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
+        CapabilityId::NET_RAW,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -921,6 +934,7 @@ mod tests {
             ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("mv", AppKind::Command, FILE_TOOL_REQUEST),
             ("netstack", AppKind::Service, NETSTACK_MANIFEST),
+            ("ping", AppKind::Command, PING_TOOL_REQUEST),
             ("printf", AppKind::Command, PURE_TOOL_REQUEST),
             ("ps", AppKind::Command, PS_MANIFEST),
             ("reset", AppKind::Command, RESET_MANIFEST),

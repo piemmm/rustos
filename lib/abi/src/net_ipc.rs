@@ -964,10 +964,14 @@ impl NetInterfaceRatesRecord {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum NetSockProto {
+    /// ICMP (an IPv4 [`crate::net::SocketType::IcmpEcho`] socket).
+    Icmp = 1,
     /// TCP (a [`crate::net::SocketType::Stream`] socket).
     Tcp = 6,
     /// UDP (a [`crate::net::SocketType::Datagram`] socket).
     Udp = 17,
+    /// `ICMPv6` (an IPv6 [`crate::net::SocketType::IcmpEcho`] socket).
+    Icmpv6 = 58,
 }
 
 impl NetSockProto {
@@ -984,8 +988,10 @@ impl NetSockProto {
     /// [`Errno::OutOfRange`] — not a protocol the socket layer lists.
     pub const fn from_u8(value: u8) -> Result<Self, Errno> {
         match value {
+            1 => Ok(Self::Icmp),
             6 => Ok(Self::Tcp),
             17 => Ok(Self::Udp),
+            58 => Ok(Self::Icmpv6),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1406,8 +1412,12 @@ mod tests {
         assert_eq!(NetSockState::Established.label(), "ESTAB");
         assert_eq!(NetSockState::Listen.label(), "LISTEN");
         assert_eq!(NetSockState::Unconnected.label(), "UNCONN");
+        assert_eq!(NetSockProto::Icmp.as_u8(), 1);
         assert_eq!(NetSockProto::Tcp.as_u8(), 6);
         assert_eq!(NetSockProto::Udp.as_u8(), 17);
+        assert_eq!(NetSockProto::Icmpv6.as_u8(), 58);
+        assert_eq!(NetSockProto::from_u8(1), Ok(NetSockProto::Icmp));
+        assert_eq!(NetSockProto::from_u8(58), Ok(NetSockProto::Icmpv6));
         for value in 0u8..=11 {
             assert!(NetSockState::from_u8(value).is_ok());
         }

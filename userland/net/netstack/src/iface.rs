@@ -337,6 +337,45 @@ impl Netstack {
         Ok(batches)
     }
 
+    /// Originate an ICMP/`ICMPv6` echo request to the unicast `dest`,
+    /// returning the frames the first interface that can reach it produced
+    /// tagged by its alias. An echo destination is always unicast, so —
+    /// unlike [`originate`](Self::originate) — the first accepting interface
+    /// carries it and the search stops there.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::MessageTooLarge`] — the payload cannot fit the path MTU on
+    ///   an interface that otherwise matched.
+    /// * [`Errno::OutOfRange`] — the destination is not a legal echo target
+    ///   (multicast / unspecified).
+    /// * [`Errno::NetworkUnreachable`] — no interface has a route to the
+    ///   destination, a usable source address, or an up link.
+    pub fn originate_echo(
+        &mut self,
+        dest: IpAddr,
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<FrameBatch, Errno> {
+        let mut deferred: Option<Errno> = None;
+        for iface in &mut self.interfaces {
+            match iface
+                .stack
+                .send_echo_request(dest, identifier, sequence, payload, now)
+            {
+                Ok(out) => return Ok(alloc::vec![(iface.name, out.frames)]),
+                Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
+                Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
+                // No route / no source / link down on this interface: try
+                // the next, remembering the fail-closed default.
+                Err(_) => deferred = deferred.or(Some(Errno::NetworkUnreachable)),
+            }
+        }
+        Err(deferred.unwrap_or(Errno::NetworkUnreachable))
+    }
+
     /// Originate one TCP segment out the interface named `name`.
     ///
     /// A connected stream is bound to one egress interface for its life

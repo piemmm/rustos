@@ -760,7 +760,9 @@ mod program {
                         Level::Info,
                         "netstack: inbound echo request served (reply queued)",
                     ),
-                    StackEvent::UdpDatagram { .. } => emit_deliveries(&sockets.deliver(event)),
+                    StackEvent::UdpDatagram { .. } | StackEvent::EchoReply { .. } => {
+                        emit_deliveries(&sockets.deliver(event));
+                    }
                     StackEvent::TcpSegment {
                         source,
                         destination,

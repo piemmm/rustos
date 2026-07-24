@@ -102,6 +102,9 @@ fn passes_proto(record: &NetSocketRecord, options: &Options) -> bool {
     match record.proto {
         NetSockProto::Tcp => options.tcp,
         NetSockProto::Udp => options.udp,
+        // ICMP echo sockets are neither TCP nor UDP: an explicit `-t`/`-u`
+        // filter excludes them (they show only in the unfiltered view).
+        NetSockProto::Icmp | NetSockProto::Icmpv6 => false,
     }
 }
 
@@ -136,7 +139,11 @@ fn passes_state(record: &NetSocketRecord, options: &Options) -> bool {
 fn is_listening(record: &NetSocketRecord) -> bool {
     match record.proto {
         NetSockProto::Tcp => record.state == NetSockState::Listen,
-        NetSockProto::Udp => record.state == NetSockState::Unconnected,
+        // A connectionless socket with no default peer is the `UNCONN`
+        // "listening"-like state the default view hides.
+        NetSockProto::Udp | NetSockProto::Icmp | NetSockProto::Icmpv6 => {
+            record.state == NetSockState::Unconnected
+        }
     }
 }
 
@@ -173,6 +180,8 @@ fn render_row(record: &NetSocketRecord, options: &Options) -> String {
     let netid = match record.proto {
         NetSockProto::Tcp => "tcp",
         NetSockProto::Udp => "udp",
+        NetSockProto::Icmp => "icmp",
+        NetSockProto::Icmpv6 => "icmp6",
     };
     let local = format_endpoint(record.family, &record.local_addr, record.local_port);
     let peer = format_endpoint(record.family, &record.peer_addr, record.peer_port);

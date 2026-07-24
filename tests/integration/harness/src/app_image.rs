@@ -642,6 +642,7 @@ mod tests {
                 "mkdir",
                 "mv",
                 "netstack",
+                "ping",
                 "printf",
                 "ps",
                 "reset",

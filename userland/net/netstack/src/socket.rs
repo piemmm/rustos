@@ -31,8 +31,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::net::{
     encode_bind_reply, encode_send_reply, encode_socket_reply, SocketAddr, SocketDatagram,
-    SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM,
-    SOCKET_PRIVILEGED_PORT_MAX,
+    SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason,
+    SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, IF_NAME_LEN,
@@ -88,6 +88,18 @@ struct DatagramState {
     peer: Option<SocketAddr>,
     /// Multicast groups this socket joined (for leave-on-close).
     groups: Vec<[u8; 16]>,
+}
+
+/// Per-socket state of an ICMP/`ICMPv6` echo socket (the `ping` path).
+///
+/// The socket's stack-assigned ICMP *identifier* lives in the entry's
+/// `local_port` field (globally unique across every socket, so a reply
+/// can never be routed to the wrong socket). Only the connected default
+/// peer, if any, is transport-specific state.
+struct EchoState {
+    /// Connected default peer address, if [`SocketRequest::Connect`] was
+    /// called (the port is always zero — ICMP has none).
+    peer: Option<SocketAddr>,
 }
 
 /// Per-socket state of a connection-oriented stream socket, once
@@ -146,6 +158,8 @@ enum Proto {
     /// defence (bounded half-open backlog, stateless SYN cookies on
     /// overflow) and is boxed so a non-listening entry stays small.
     Listen(Box<Listener>),
+    /// An ICMP/`ICMPv6` echo socket (the `ping` path).
+    Echo(EchoState),
 }
 
 /// One open socket, owned by exactly one principal.
@@ -205,6 +219,16 @@ impl SocketEntry {
                 conn.tcb.send_queued() as u64,
             ),
             Proto::Listen(_) => (NetSockProto::Tcp, NetSockState::Listen, [0u8; 16], 0, 0, 0),
+            Proto::Echo(echo) => {
+                let proto = match self.family {
+                    NetAddrFamily::V4 => NetSockProto::Icmp,
+                    NetAddrFamily::V6 => NetSockProto::Icmpv6,
+                };
+                match echo.peer {
+                    Some(peer) => (proto, NetSockState::Established, peer.addr, 0, 0, 0),
+                    None => (proto, NetSockState::Unconnected, [0u8; 16], 0, 0, 0),
+                }
+            }
         };
         NetSocketRecord {
             proto,
@@ -376,15 +400,7 @@ impl SocketService {
                 family,
                 sock_type,
                 deliver_port,
-            } => self.open(
-                audit,
-                owner,
-                caller.origin().pid(),
-                family,
-                sock_type,
-                deliver_port,
-                response,
-            ),
+            } => self.open(caller, audit, family, sock_type, deliver_port, response),
             SocketRequest::Bind { socket, local } => {
                 // Claiming a specific privileged (well-known) local port is
                 // a further gate beyond CAP_NET: an unprivileged process
@@ -437,22 +453,40 @@ impl SocketService {
                 now,
                 response,
             ),
+            SocketRequest::SendEcho {
+                socket,
+                dest,
+                sequence,
+                payload,
+            } => self.send_echo(
+                interfaces, entropy, audit, owner, socket, dest, sequence, payload, now, response,
+            ),
         }
     }
 
     /// Open a socket of the requested transport, accounting it against the
-    /// caller's quota and the global table.
-    #[allow(clippy::too_many_arguments)]
+    /// caller's quota and the global table. An ICMP-echo (raw) socket is a
+    /// further gate beyond `CAP_NET`: forging or observing ICMP is raw-frame
+    /// authority, so opening one requires `CAP_NET_RAW` (fail closed, audited).
     fn open(
         &mut self,
+        caller: &Caller,
         audit: &dyn Sink,
-        owner: ProcId,
-        owner_pid: u64,
         family: NetAddrFamily,
         sock_type: SocketType,
         deliver_port: u64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
+        if sock_type == SocketType::IcmpEcho && !caller.capabilities().holds(CapabilityId::NET_RAW)
+        {
+            return refuse(
+                audit,
+                "socket open denied: ICMP echo socket needs CAP_NET_RAW",
+                Errno::PermissionDenied,
+            );
+        }
+        let owner = caller.origin().proc_id();
+        let owner_pid = caller.origin().pid();
         if deliver_port == 0 {
             return refuse(
                 audit,
@@ -470,6 +504,7 @@ impl SocketService {
             );
         }
         let proto = match sock_type {
+            SocketType::IcmpEcho => Proto::Echo(EchoState { peer: None }),
             SocketType::Datagram => Proto::Datagram(DatagramState {
                 peer: None,
                 groups: Vec::new(),
@@ -567,6 +602,23 @@ impl SocketService {
             Proto::Stream(None) => {
                 self.connect_stream(interfaces, entropy, index, peer, now, response)
             }
+            Proto::Echo(_) => {
+                // An echo socket's default peer is an address only; ICMP has
+                // no port, so a non-zero port is a malformed connect.
+                if peer.port != 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                // Assign the stack-owned ICMP identifier now (its lifetime
+                // is the socket's), so it is stable across every send.
+                if self.sockets[index].local_port == 0 {
+                    let ident = self.assign_port(entropy, 0)?;
+                    self.sockets[index].local_port = ident;
+                }
+                if let Proto::Echo(echo) = &mut self.sockets[index].proto {
+                    echo.peer = Some(peer);
+                }
+                status_reply(response)
+            }
         }
     }
 
@@ -599,6 +651,10 @@ impl SocketService {
             // A listening socket is passive: it originates no data. The
             // client sends on the accepted child sockets instead.
             Proto::Listen(_) => Err(Errno::NotConnected),
+            // An echo socket sends only through the dedicated `SendEcho`
+            // operation (which carries the sequence number); a plain
+            // datagram `send` on it is malformed.
+            Proto::Echo(_) => Err(Errno::OutOfRange),
         }
     }
 
@@ -795,7 +851,7 @@ impl SocketService {
         let family = self.sockets[index].family;
         let peer = match &self.sockets[index].proto {
             Proto::Datagram(dg) => dg.peer,
-            Proto::Stream(_) | Proto::Listen(_) => None,
+            Proto::Stream(_) | Proto::Listen(_) | Proto::Echo(_) => None,
         };
         let Some(target) = dest.or(peer) else {
             return refuse(
@@ -822,6 +878,63 @@ impl SocketService {
                 })
             }
             Err(err) => refuse(audit, "socket send refused", err),
+        }
+    }
+
+    /// Send one ICMP/`ICMPv6` echo request from an echo socket, assigning
+    /// the socket's stack-owned ICMP identifier on first use. The caller
+    /// chooses the `sequence`; the identifier is never caller-controlled, so
+    /// a socket only ever receives replies to its own requests.
+    #[allow(clippy::too_many_arguments)]
+    fn send_echo(
+        &mut self,
+        interfaces: &mut Netstack,
+        entropy: &mut dyn FnMut() -> u32,
+        audit: &dyn Sink,
+        owner: ProcId,
+        socket: SocketId,
+        dest: Option<SocketAddr>,
+        sequence: u16,
+        payload: &[u8],
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        let index = self.owned_index(owner, socket)?;
+        let family = self.sockets[index].family;
+        let peer = match &self.sockets[index].proto {
+            Proto::Echo(echo) => echo.peer,
+            // A non-echo socket cannot originate an echo request.
+            Proto::Datagram(_) | Proto::Stream(_) | Proto::Listen(_) => {
+                return Err(Errno::OutOfRange)
+            }
+        };
+        let Some(target) = dest.or(peer) else {
+            return refuse(
+                audit,
+                "socket echo refused: not connected",
+                Errno::NotConnected,
+            );
+        };
+        if target.family != family {
+            return Err(Errno::OutOfRange);
+        }
+        // The identifier is the socket's globally-unique local id; assign
+        // it on first send so replies demux to exactly this socket.
+        if self.sockets[index].local_port == 0 {
+            let ident = self.assign_port(entropy, 0)?;
+            self.sockets[index].local_port = ident;
+        }
+        let identifier = self.sockets[index].local_port;
+        match interfaces.originate_echo(ip_of(target), identifier, sequence, payload, now) {
+            Ok(tx) => {
+                let len = status_reply(response)?.len;
+                Ok(SocketReply {
+                    len,
+                    tx,
+                    deliveries: Vec::new(),
+                })
+            }
+            Err(err) => refuse(audit, "socket echo refused", err),
         }
     }
 
@@ -1173,9 +1286,9 @@ impl SocketService {
                     io.deliveries
                         .extend(self.drain_listener_accepts(interfaces, i, now));
                 }
-                // A datagram socket and an unconnected stream socket have no
-                // timers to advance.
-                Proto::Datagram(_) | Proto::Stream(None) => {}
+                // A datagram socket, an echo socket, and an unconnected
+                // stream socket have no timers to advance.
+                Proto::Datagram(_) | Proto::Stream(None) | Proto::Echo(_) => {}
             }
             i += 1;
         }
@@ -1347,12 +1460,75 @@ impl SocketService {
         })
     }
 
-    /// Route one engine [`StackEvent::UdpDatagram`] to the datagram
-    /// sockets that should receive it, returning an encoded
-    /// [`SocketDatagram`] delivery per matching socket. A non-datagram
-    /// event yields nothing.
+    /// Route one engine receive [`StackEvent`] to the sockets that should
+    /// receive it, returning an encoded delivery per matching socket: a
+    /// [`SocketDatagram`] for a [`StackEvent::UdpDatagram`], or a
+    /// [`SocketEcho`] for a [`StackEvent::EchoReply`]. Any other event
+    /// yields nothing.
     #[must_use]
     pub fn deliver(&self, event: &StackEvent) -> Vec<Delivery> {
+        match event {
+            StackEvent::UdpDatagram { .. } => self.deliver_datagram(event),
+            StackEvent::EchoReply { .. } => self.deliver_echo(event),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Route one [`StackEvent::EchoReply`] to the echo socket whose
+    /// stack-assigned identifier matches the reply's, filtered to the
+    /// connected peer when one is set.
+    fn deliver_echo(&self, event: &StackEvent) -> Vec<Delivery> {
+        let StackEvent::EchoReply {
+            source,
+            identifier,
+            sequence,
+            payload,
+        } = event
+        else {
+            return Vec::new();
+        };
+        let (src_family, src_bytes) = parts_of(*source);
+        let mut out = Vec::new();
+        for entry in &self.sockets {
+            let Proto::Echo(echo) = &entry.proto else {
+                continue;
+            };
+            // The identifier lives in `local_port` and is globally unique,
+            // so at most one socket matches — a reply never crosses sockets.
+            if entry.family != src_family || entry.local_port != *identifier {
+                continue;
+            }
+            if let Some(peer) = echo.peer {
+                if peer.family != src_family || peer.addr != src_bytes {
+                    continue;
+                }
+            }
+            let echo_msg = SocketEcho {
+                socket: entry.id,
+                source: SocketAddr {
+                    family: src_family,
+                    addr: src_bytes,
+                    port: 0,
+                },
+                sequence: *sequence,
+                payload,
+            };
+            let mut buf = alloc::vec![0u8; SocketEcho::HEADER_LEN + payload.len()];
+            if let Ok(len) = echo_msg.encode(&mut buf) {
+                buf.truncate(len);
+                out.push(Delivery {
+                    deliver_port: entry.deliver_port,
+                    datagram: buf,
+                });
+            }
+        }
+        out
+    }
+
+    /// Route one [`StackEvent::UdpDatagram`] to the datagram sockets that
+    /// should receive it, returning an encoded [`SocketDatagram`] delivery
+    /// per matching socket.
+    fn deliver_datagram(&self, event: &StackEvent) -> Vec<Delivery> {
         let StackEvent::UdpDatagram {
             source,
             destination,
@@ -1630,6 +1806,7 @@ fn op_field(request: &SocketRequest<'_>) -> Field<'static> {
         SocketRequest::LeaveMulticast { .. } => "leave",
         SocketRequest::Listen { .. } => "listen",
         SocketRequest::Accept { .. } => "accept",
+        SocketRequest::SendEcho { .. } => "send_echo",
     };
     Field {
         key: "op",
