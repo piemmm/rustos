@@ -34,7 +34,9 @@ use tairix_abi::net::{
     SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM,
     SOCKET_PRIVILEGED_PORT_MAX,
 };
-use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
+use tairix_abi::net_ipc::{
+    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, IF_NAME_LEN,
+};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
@@ -152,6 +154,10 @@ struct SocketEntry {
     id: SocketId,
     /// The unforgeable process instance that opened it.
     owner: ProcId,
+    /// The owning process's pid, kept for the socket-listing diagnostic
+    /// so a listing names a human process id rather than the opaque
+    /// instance token. Never used for authority (that is `owner`).
+    owner_pid: u64,
     /// The client async port inbound datagrams/stream events go to.
     deliver_port: u64,
     /// Address family of the socket.
@@ -162,6 +168,76 @@ struct SocketEntry {
     local_port: u16,
     /// The transport-specific state.
     proto: Proto,
+}
+
+impl SocketEntry {
+    /// Derive this socket's read-only [`NetSocketRecord`] for the listing
+    /// query. A datagram socket reports `UNCONN` until `connect` sets a
+    /// default peer; a stream socket reports its RFC 9293 state and its
+    /// connection's peer and queue depths; a listener reports `LISTEN`.
+    fn to_record(&self) -> NetSocketRecord {
+        let (proto, state, peer_addr, peer_port, recv_q, send_q) = match &self.proto {
+            Proto::Datagram(datagram) => match datagram.peer {
+                Some(peer) => (
+                    NetSockProto::Udp,
+                    NetSockState::Established,
+                    peer.addr,
+                    peer.port,
+                    0,
+                    0,
+                ),
+                None => (
+                    NetSockProto::Udp,
+                    NetSockState::Unconnected,
+                    [0u8; 16],
+                    0,
+                    0,
+                    0,
+                ),
+            },
+            Proto::Stream(None) => (NetSockProto::Tcp, NetSockState::Closed, [0u8; 16], 0, 0, 0),
+            Proto::Stream(Some(conn)) => (
+                NetSockProto::Tcp,
+                map_tcp_state(conn.tcb.state()),
+                conn.peer.addr,
+                conn.peer.port,
+                conn.tcb.recv_len() as u64,
+                conn.tcb.send_queued() as u64,
+            ),
+            Proto::Listen(_) => (NetSockProto::Tcp, NetSockState::Listen, [0u8; 16], 0, 0, 0),
+        };
+        NetSocketRecord {
+            proto,
+            state,
+            family: self.family,
+            local_addr: self.local_addr,
+            local_port: self.local_port,
+            peer_addr,
+            peer_port,
+            owner: self.owner_pid,
+            recv_q,
+            send_q,
+        }
+    }
+}
+
+/// Map an RFC 9293 [`State`] onto the ABI [`NetSockState`] (a 1:1
+/// vocabulary; the ABI adds only the UDP `Unconnected` value the state
+/// machine has no analogue for).
+fn map_tcp_state(state: State) -> NetSockState {
+    match state {
+        State::Closed => NetSockState::Closed,
+        State::Listen => NetSockState::Listen,
+        State::SynSent => NetSockState::SynSent,
+        State::SynReceived => NetSockState::SynReceived,
+        State::Established => NetSockState::Established,
+        State::FinWait1 => NetSockState::FinWait1,
+        State::FinWait2 => NetSockState::FinWait2,
+        State::CloseWait => NetSockState::CloseWait,
+        State::Closing => NetSockState::Closing,
+        State::LastAck => NetSockState::LastAck,
+        State::TimeWait => NetSockState::TimeWait,
+    }
 }
 
 /// The outcome of serving one control-plane request: the encoded reply
@@ -230,6 +306,23 @@ impl SocketService {
         self.sockets.is_empty()
     }
 
+    /// Snapshot the open sockets as wire records for the `ss`/`netstat`
+    /// listing query, starting at `offset` and returning at most `limit`.
+    ///
+    /// A read-only diagnostic: it derives each socket's protocol, state,
+    /// local/peer addresses, owning pid, and queue depths without touching
+    /// any connection. Serving it is gated on `CAP_SYSINFO_GLOBAL` at the
+    /// sysinfo broker; the table order is stable within a page.
+    #[must_use]
+    pub fn socket_records(&self, offset: u32, limit: u16) -> Vec<NetSocketRecord> {
+        self.sockets
+            .iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(SocketEntry::to_record)
+            .collect()
+    }
+
     /// Serve one `netsock-v1` control-plane request on behalf of `caller`.
     ///
     /// Enforces `CAP_NET` against the caller's attested origin **before
@@ -283,7 +376,15 @@ impl SocketService {
                 family,
                 sock_type,
                 deliver_port,
-            } => self.open(audit, owner, family, sock_type, deliver_port, response),
+            } => self.open(
+                audit,
+                owner,
+                caller.origin().pid(),
+                family,
+                sock_type,
+                deliver_port,
+                response,
+            ),
             SocketRequest::Bind { socket, local } => {
                 // Claiming a specific privileged (well-known) local port is
                 // a further gate beyond CAP_NET: an unprivileged process
@@ -341,10 +442,12 @@ impl SocketService {
 
     /// Open a socket of the requested transport, accounting it against the
     /// caller's quota and the global table.
+    #[allow(clippy::too_many_arguments)]
     fn open(
         &mut self,
         audit: &dyn Sink,
         owner: ProcId,
+        owner_pid: u64,
         family: NetAddrFamily,
         sock_type: SocketType,
         deliver_port: u64,
@@ -377,6 +480,7 @@ impl SocketService {
         self.sockets.push(SocketEntry {
             id,
             owner,
+            owner_pid,
             deliver_port,
             family,
             local_addr: [0u8; 16],
@@ -973,6 +1077,7 @@ impl SocketService {
         now: Duration64,
     ) -> Vec<Delivery> {
         let owner = self.sockets[lindex].owner;
+        let owner_pid = self.sockets[lindex].owner_pid;
         let deliver_port = self.sockets[lindex].deliver_port;
         let family = self.sockets[lindex].family;
         let local_port = self.sockets[lindex].local_port;
@@ -1007,6 +1112,7 @@ impl SocketService {
             self.sockets.push(SocketEntry {
                 id,
                 owner,
+                owner_pid,
                 // Inherited until `Accept` rebinds it to the client's port.
                 deliver_port,
                 family,

@@ -64,6 +64,7 @@ structured audit record (event range `16000..17000`).
 | `AddrAdd` / `RouteAdd` | `CAP_NET_ADMIN` | status frame |
 | `InterfaceFacts` / `InterfaceState` / `InterfaceCounters` | `CAP_SYSINFO_INTROSPECT` | paged facts / link+address / monotonic-counter records |
 | `InterfaceRates` | `CAP_SYSINFO_INTROSPECT` | paged windowed throughput-rate records (carries the caller's averaging window) |
+| `Sockets` | `CAP_SYSINFO_INTROSPECT` | paged open-socket records (protocol, state, local/peer address, owning pid, queue depths) — the `ss`/`netstat` socket table |
 | `BindDriver` | `CAP_NET_ADMIN` | status frame (the device manager hands the stack a discovered NIC driver's device-channel endpoint under a `netN` alias) |
 
 The facts/state reads are the *broker* surface: `netstack` answers

@@ -29,6 +29,8 @@
 //!   shared columnar rendering.
 //! * [`for_each_mount`] and [`render_mount`], the paged mount-table walk and
 //!   its `source on target type fstype (options)` row rendering.
+//! * [`for_each_net_socket`], the paged open-socket-table walk the `ss`
+//!   socket-statistics tool renders.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor.
@@ -59,6 +61,7 @@
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
+//! * [`netsock`] — the open-socket-table paging walk.
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
 //!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
 //! * [`mod@resolve`] — the `info:`/`stats:` resource-reference resolver.
@@ -89,6 +92,7 @@ pub mod hwtree;
 pub mod kstats;
 pub mod list;
 pub mod mount;
+pub mod netsock;
 pub mod process;
 pub mod request;
 pub mod resinfo;
@@ -107,6 +111,7 @@ pub use kstats::{
 };
 pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
+pub use netsock::{for_each_net_socket, NET_SOCKET_PAGE};
 pub use process::{
     emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
     PROCESS_PAGE,

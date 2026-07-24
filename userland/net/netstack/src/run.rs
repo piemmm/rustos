@@ -285,6 +285,7 @@ mod program {
             match token {
                 ENDPOINT_TOKEN => serve_admin(
                     &mut stack,
+                    &sockets,
                     &mut channels,
                     pid,
                     set,
@@ -342,8 +343,10 @@ mod program {
     /// origin **before any state is touched**, exactly as [`serve`] gates
     /// every other admin op; every other request goes to [`serve`]
     /// unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn serve_admin(
         stack: &mut Netstack,
+        sockets: &SocketService,
         channels: &mut [Option<Channel>],
         pid: u64,
         set: u64,
@@ -370,6 +373,7 @@ mod program {
         }
         match serve(
             stack,
+            sockets,
             &caller,
             &LogSink,
             &request[..request_len],
