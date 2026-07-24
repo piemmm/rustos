@@ -640,3 +640,58 @@ fn the_wipe_zeroes_the_payload_in_place() {
     assert_eq!(data.len(), BS as usize, "the wipe keeps the length");
     assert!(data.iter().all(|&b| b == 0), "every byte is wiped");
 }
+
+/// A leaked cache-admission control with the block class disabled
+/// (`cache.block off`), for the switch tests below. Its own instance, so
+/// it never touches the process-global control other tests rely on.
+fn block_disabled_control() -> &'static CacheControl {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    control.set(CacheClass::Block, tairix_kernel_core::CacheMode::Off);
+    control
+}
+
+#[test]
+fn a_disabled_block_cache_admits_nothing_and_always_reads_the_device() {
+    let (store, disk) = MemDisk::new();
+    let mut cache = BlockCache::new(disk, budget(), unpressured(), sink())
+        .expect("geometry queried")
+        .with_cache_control(block_disabled_control());
+    let mut first = block_of(0);
+    cache.read_blocks(3, &mut first).unwrap();
+    assert_eq!(store.borrow().reads, 1);
+    assert_eq!(cache.accounting().total_bytes(), 0, "off admits nothing");
+
+    // A second read of the same block still reaches the device: the
+    // switch is a real bypass, not a flag that is read and ignored.
+    let mut second = block_of(0);
+    cache.read_blocks(3, &mut second).unwrap();
+    assert_eq!(
+        store.borrow().reads,
+        2,
+        "every read hits the device when off"
+    );
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert_eq!(cache.accounting().hits(), 0);
+}
+
+#[test]
+fn flipping_the_block_switch_off_purges_the_held_blocks() {
+    // Start enabled: the cache fills as usual.
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let (store, disk) = MemDisk::new();
+    let mut cache = BlockCache::new(disk, budget(), unpressured(), sink())
+        .expect("geometry queried")
+        .with_cache_control(control);
+    let mut buf = block_of(0);
+    cache.read_blocks(3, &mut buf).unwrap();
+    assert_eq!(cache.accounting().total_bytes(), COST);
+
+    // The operator disables the class: the next operation drops (wiping)
+    // everything the cache held, then serves from the device.
+    control.set(CacheClass::Block, tairix_kernel_core::CacheMode::Off);
+    let reads_before = store.borrow().reads;
+    cache.read_blocks(3, &mut buf).unwrap();
+    assert_eq!(cache.accounting().total_bytes(), 0, "the purge dropped it");
+    assert_eq!(store.borrow().reads, reads_before + 1, "served from device");
+    assert!(cache.accounting().teardowns() >= 1);
+}

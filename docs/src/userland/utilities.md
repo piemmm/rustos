@@ -657,6 +657,8 @@ shows that setting; with a key and a value it changes it:
 configure                          # list every setting
 configure os.loginType             # show one setting
 configure os.loginType graphical   # set it (boot to the graphical login)
+configure cache.all off            # disable every memory cache system-wide
+configure cache.filesystem off     # disable only the filesystem cache
 ```
 
 The store's grammar, closed key registry, fail-closed parse, and canonical
@@ -668,7 +670,12 @@ refused with the reason (and the valid choices) stated, and changes
 nothing; a set rewrites the whole document in canonical form, never a
 partial patch. The store lives on the encrypted root, so a change takes
 effect when its consumer next parses it — `os.loginType` at the next login
-prompt.
+prompt, and the `cache.*` caching switches at the next boot's root unlock
+(the kernel applies them into its cache-admission control). The `cache.*`
+keys are a dedicated caching domain: a master `cache.all` (`on`/`off`)
+ceiling over the per-class `cache.filesystem` / `cache.block` /
+`cache.transform` / `cache.semantic` (`auto`/`off`) switches — see
+`docs/src/lib/sysconfig.md`.
 
 The pure grammar/engine core is host-tested against in-memory seams; the
 `Run` binary wires the syscall-backed store file, the shared own-bundle

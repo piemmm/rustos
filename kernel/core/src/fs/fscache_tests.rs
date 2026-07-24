@@ -163,6 +163,34 @@ fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
     CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
 }
 
+/// A leaked cache-admission control with the filesystem class disabled
+/// (`cache.filesystem off`), its own instance so it never touches the
+/// process-global control other tests rely on.
+fn fs_disabled_control() -> &'static CacheControl {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    control.set(CacheClass::Filesystem, crate::CacheMode::Off);
+    control
+}
+
+/// Like [`fixture`], but binding `control` instead of the global.
+fn fixture_with_control(
+    contents: &[u8],
+    control: &'static CacheControl,
+) -> CachedFs<Counting<RwMockFs>> {
+    let mut fs = RwMockFs::new();
+    let root = fs.root();
+    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    let dir = fs.lookup(root, b"dir").expect("dir resolves");
+    fs.create(dir, b"file.txt", NodeKind::RegularFile)
+        .expect("create");
+    let written = fs
+        .write_at(dir, b"file.txt", 0, contents)
+        .expect("seed contents");
+    assert_eq!(written, contents.len());
+    CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .with_cache_control(control)
+}
+
 fn dir_of(cache: &mut CachedFs<Counting<RwMockFs>>) -> NodeId {
     let root = cache.root();
     cache.lookup(root, b"dir").expect("dir resolves")
@@ -825,4 +853,46 @@ fn normal_operation_emits_no_audit_records() {
     cache.read_at(file, 0, &mut buf).expect("reads");
     cache.node_info(file).expect("stat");
     assert!(captured.snapshot().is_empty());
+}
+
+#[test]
+fn a_disabled_filesystem_cache_serves_correctly_but_caches_nothing() {
+    let mut cache = fixture_with_control(b"hello, cache", fs_disabled_control());
+    let file = file_of(&mut cache);
+
+    let mut first = [0u8; 32];
+    let n = cache.read_at(file, 0, &mut first).expect("reads");
+    assert_eq!(&first[..n], b"hello, cache");
+    assert_eq!(cache.accounting().total_bytes(), 0, "off admits nothing");
+
+    // Every read reaches the driver: the switch is a real bypass.
+    let calls_before = calls(&cache);
+    let mut second = [0u8; 32];
+    cache.read_at(file, 0, &mut second).expect("reads");
+    assert!(
+        calls(&cache) > calls_before,
+        "a disabled cache never serves a warm read"
+    );
+    assert_eq!(cache.accounting().hits(), 0);
+    assert_eq!(cache.accounting().total_bytes(), 0);
+}
+
+#[test]
+fn flipping_the_filesystem_switch_off_purges_the_cache() {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let mut cache = fixture_with_control(b"warm me", control);
+    let file = file_of(&mut cache);
+
+    let mut buf = [0u8; 16];
+    cache.read_at(file, 0, &mut buf).expect("warm");
+    let _ = cache.node_info(file).expect("stat");
+    assert!(cache.accounting().total_bytes() > 0, "the cache filled");
+
+    // The operator disables the class: the next operation drops (zeroing)
+    // everything held, and thereafter every read reaches the driver.
+    control.set(CacheClass::Filesystem, crate::CacheMode::Off);
+    let mut again = [0u8; 16];
+    cache.read_at(file, 0, &mut again).expect("still serves");
+    assert_eq!(cache.accounting().total_bytes(), 0, "the purge dropped it");
+    assert!(cache.accounting().teardowns() >= 1);
 }

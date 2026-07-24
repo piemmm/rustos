@@ -31,14 +31,45 @@ account can read the settings but not change them.
 
 ## The registry
 
-| Key            | Values               | Consumer                                                        |
-|----------------|----------------------|-----------------------------------------------------------------|
-| `os.loginType` | `text` \| `graphical` | `login`: the boot-default session type (`text` keeps the prompt; `graphical` starts the desktop directly when one is available, degrading to text otherwise) |
+| Key               | Values               | Consumer                                                        |
+|-------------------|----------------------|-----------------------------------------------------------------|
+| `os.loginType`    | `text` \| `graphical` | `login`: the boot-default session type (`text` keeps the prompt; `graphical` starts the desktop directly when one is available, degrading to text otherwise) |
+| `cache.all`       | `on` \| `off`         | the kernel cache-admission control: the master caching switch / ceiling |
+| `cache.filesystem`| `auto` \| `off`       | the kernel filesystem cache (`kernel/core::fs::CachedFs`) |
+| `cache.block`     | `auto` \| `off`       | the kernel whole-disk block cache (`kernel/tairix-kernel::block_cache`) |
+| `cache.transform` | `auto` \| `off`       | the ARXFS decompressed-cluster cache (`kernel/tairix-kernel::transform_cache`) |
+| `cache.semantic`  | `auto` \| `off`       | the application-launch cache (`kernel/core::launch_cache`) |
 
 Adding a key is adding a `Key` variant (plus its `SystemConfig` field and
 match arms) **and** its consumer in the same change — the compiler then
 forces every reader to state what the new key means for it. There is no
 free-form key namespace and no second store.
+
+## The caching switches
+
+Caching is a first-class, classed subsystem (`plans/SMARTRAM.md`), so its
+switches live in a dedicated `cache.*` domain rather than scattered under
+`fs`/`net`/… A master `cache.all` sits above the per-class switches as a
+**ceiling**: `SystemConfig::effective_cache(class)` is `off` whenever
+`cache.all` is `off`, otherwise the class's own value — one canonical,
+fail-closed interpretation of the two persisted keys, never an ambiguous
+contradiction.
+
+The per-class values are `auto` (the pressure governor manages the class —
+today's behaviour, and the absent-store default) and `off` (a hard bypass:
+the cache admits and holds nothing). There is deliberately **no** per-class
+`on` — a class cannot be forced to ignore memory pressure without breaking
+the SMARTRAM reserve invariants. Only classes whose cache exists today have
+a key; a shelved or future cache gains its key in the change that lands it.
+
+The switch is safe because every SMARTRAM cache is a reclaimable
+accelerator that is never the source of truth: disabling any or all of them
+is degrade-gracefully (slower, still correct), never a behavioural change.
+The kernel applies these switches once at unlock (`kernel/core::syscfg`
+reads the store off the just-unlocked root and calls
+`CacheControl::apply`), into the one process-global control every cache
+consults at admission — so `off` takes effect on each cache's next
+operation, dropping (and zeroing any decrypted plaintext) what it held.
 
 ## API shape
 
@@ -51,6 +82,11 @@ free-form key namespace and no second store.
   lists and edits through.
 - `Key::{ALL, name, from_name, values}` — the closed registry, for
   listings and stated-choice diagnostics.
+- `SystemConfig::effective_cache(CacheClass) -> CacheMode` — the master
+  `cache.all` ceiling folded over a class's own switch, the one
+  interpretation the kernel cache-admission control applies.
+- `CacheClass::{ALL, key}` / `CacheMode` / `CacheSwitch` — the closed
+  cache-switch vocabulary the kernel reuses (no duplicate enum).
 
 The crate is `no_std` + `alloc`, performs no I/O, holds no authority, and
 is host-unit-tested in `src/lib.rs`. Stability tier: experimental

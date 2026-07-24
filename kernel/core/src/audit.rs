@@ -395,6 +395,28 @@ pub enum AuditEvent {
     /// refusal's `errno`, so an attempt to mutate state the caller may not
     /// touch is as visible as a successful one.
     FsMutationDenied,
+    /// The boot-time system configuration store
+    /// (`/System/Settings/Configuration/system.conf`) was read off the
+    /// unlocked root and applied (`crate::syscfg`).
+    ///
+    /// Emitted once at unlock after the operator's cache switches are
+    /// applied to the live cache-admission control. The record names
+    /// whether the store was present (`source`: `store` / `default`) and
+    /// the effective mode of each cache class (`cache.filesystem`,
+    /// `cache.block`, `cache.transform`, `cache.semantic`) — a
+    /// security-relevant boot policy, never any secret.
+    SystemConfigApplied,
+    /// The boot-time system configuration store could not be read or
+    /// parsed; the kernel fell back to the all-caches-enabled defaults
+    /// (fail-safe: the caches are accelerators, never the source of
+    /// truth) and applied them (`crate::syscfg`).
+    ///
+    /// Emitted once at unlock when the store is present but malformed
+    /// (unreadable, not UTF-8, or outside the closed grammar). A simply
+    /// *absent* store is not a rejection — it is the normal default case
+    /// and emits [`SystemConfigApplied`](Self::SystemConfigApplied) with
+    /// `source: default`. Carries a `cause` naming the refusal.
+    SystemConfigRejected,
 }
 
 impl AuditEvent {
@@ -443,6 +465,8 @@ impl AuditEvent {
             Self::IrqLineQuarantined => 4090,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
+            Self::SystemConfigApplied => 4110,
+            Self::SystemConfigRejected => 4111,
         })
     }
 
@@ -493,6 +517,8 @@ impl AuditEvent {
             Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
+            Self::SystemConfigApplied => "system configuration applied",
+            Self::SystemConfigRejected => "system configuration rejected",
         }
     }
 }
@@ -557,6 +583,8 @@ mod tests {
             AuditEvent::IrqLineQuarantined,
             AuditEvent::FsNodeMutated,
             AuditEvent::FsMutationDenied,
+            AuditEvent::SystemConfigApplied,
+            AuditEvent::SystemConfigRejected,
         ] {
             let id = ev.id().0;
             assert!(
@@ -609,6 +637,8 @@ mod tests {
             AuditEvent::IrqLineQuarantined.id().0,
             AuditEvent::FsNodeMutated.id().0,
             AuditEvent::FsMutationDenied.id().0,
+            AuditEvent::SystemConfigApplied.id().0,
+            AuditEvent::SystemConfigRejected.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

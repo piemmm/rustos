@@ -1489,6 +1489,7 @@ dependencies = [
  "tairix-rng",
  "tairix-seat",
  "tairix-sync",
+ "tairix-sysconfig",
  "tairix-users",
  "tairix-util",
  "tairix-vt",

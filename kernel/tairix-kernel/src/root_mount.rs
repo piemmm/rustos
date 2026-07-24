@@ -463,6 +463,17 @@ pub fn unlock_root_and_load_users<B: Block>(
     //    refusal fails the unlock closed rather than installing a partial
     //    identity (no invented principal).
     let groups_db = load_groups_db(&mut fs, audit).map_err(RootMountError::Groups)?;
+
+    // Apply the operator's boot-time system configuration (the caching
+    // switches) off the same unlocked root, into the process-global cache
+    // control every SMARTRAM cache consults. Fail-safe: an absent or
+    // malformed store leaves every cache enabled and never fails the unlock —
+    // the caches are reclaimable accelerators, never the source of truth.
+    tairix_kernel_core::load_and_apply_system_config(
+        &mut fs,
+        &tairix_kernel_core::CACHE_CONTROL,
+        audit,
+    );
     let users_snapshot = users
         .text()
         .map_err(|_| RootMountError::Identity(Errno::NotImplemented))?;

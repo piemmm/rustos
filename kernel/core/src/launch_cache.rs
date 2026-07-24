@@ -69,6 +69,8 @@ use tairix_kernel_mem::{
 };
 use tairix_log::Sink;
 
+use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
+
 /// Approximate per-entry bookkeeping cost (map nodes, the LRU index
 /// slot, the fixed entry fields, the `Arc` control block) charged on
 /// top of an entry's payload so the ledger tracks real heap footprint.
@@ -95,6 +97,12 @@ struct Entry {
 /// the `/System` mount is published. See the module docs.
 pub struct LaunchCache {
     budget: CacheBudget,
+    /// The live cache-admission control (the operator's `cache.semantic`
+    /// / `cache.all` switch). Sampled at the head of every operation: when
+    /// the semantic class is disabled the cache admits nothing and drops
+    /// what it holds, a real bypass. Defaults to the process-global
+    /// [`CACHE_CONTROL`]; a test binds its own.
+    control: &'static CacheControl,
     /// The system memory-pressure gauge, sampled at the head of every
     /// operation: the band's forced-shrink target is applied before the
     /// cache is read or grown, and admission is refused outside normal
@@ -153,6 +161,7 @@ impl LaunchCache {
         };
         Self {
             budget,
+            control: &CACHE_CONTROL,
             pressure,
             sink,
             accounting: Arc::new(CacheAccounting::new()),
@@ -162,6 +171,17 @@ impl LaunchCache {
             entries: BTreeMap::new(),
             lru: BTreeMap::new(),
         }
+    }
+
+    /// Bind a specific [`CacheControl`] instead of the process-global
+    /// [`CACHE_CONTROL`] this cache consults by default. Production uses
+    /// the shared global the unlock path applies the operator's
+    /// configuration to; a host test drives the disable path against its
+    /// own control through this builder.
+    #[must_use]
+    pub fn with_cache_control(mut self, control: &'static CacheControl) -> Self {
+        self.control = control;
+        self
     }
 
     /// The cache's byte ledger and event counters.
@@ -251,6 +271,13 @@ impl LaunchCache {
             log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
         }
         self.poisoned = true;
+        self.discard_all();
+    }
+
+    /// Drop every entry, counting the drain as a teardown and rebalancing
+    /// the ledger to empty. Shared by [`Self::poison`] and the disabled-
+    /// class drain so the whole-cache drop has one definition.
+    fn discard_all(&mut self) {
         self.accounting
             .record_teardown(ReclaimClass::SemanticAppCache);
         self.entries.clear();
@@ -283,6 +310,16 @@ impl LaunchCache {
     /// zero from moderate pressure on.
     fn enforce_pressure(&mut self) {
         if self.poisoned {
+            return;
+        }
+        // The operator disabled the launch cache (`cache.semantic` or the
+        // master `cache.all` off): drop everything and admit nothing
+        // further — a real bypass, every launch runs the full load gate.
+        // Re-enabling lets the next verification refill it.
+        if !self.control.admits(CacheClass::Semantic) {
+            if self.accounting.total_bytes() > 0 {
+                self.discard_all();
+            }
             return;
         }
         let band = self.pressure.sample();
@@ -330,6 +367,11 @@ impl LaunchCache {
             return;
         }
         self.enforce_pressure();
+        if !self.control.admits(CacheClass::Semantic) {
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
+            return;
+        }
         if bundle.len() > MAX_BUNDLE_KEY {
             self.accounting
                 .record_refusal(ReclaimClass::SemanticAppCache);

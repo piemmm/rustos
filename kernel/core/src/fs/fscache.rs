@@ -90,6 +90,7 @@ use tairix_log::Sink;
 use zeroize::Zeroize;
 
 use super::path::MAX_COMPONENT_LEN;
+use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
 
 /// A cached file-data chunk covers exactly one page-aligned window.
 const CHUNK: usize = PAGE_SIZE;
@@ -159,6 +160,12 @@ struct DataEntry {
 pub struct CachedFs<F> {
     inner: F,
     budget: CacheBudget,
+    /// The live cache-admission control (the operator's `cache.filesystem`
+    /// / `cache.all` switch). Sampled at admission and at the head of every
+    /// operation: when the filesystem class is disabled the cache admits
+    /// nothing and purges what it holds, a real bypass. Defaults to the
+    /// process-global [`CACHE_CONTROL`]; a test binds its own.
+    control: &'static CacheControl,
     /// The system memory-pressure gauge, sampled at the head of every
     /// operation: the band's forced-shrink targets are applied before
     /// the cache is read or grown, and admission is refused outside
@@ -248,6 +255,7 @@ impl<F> CachedFs<F> {
         Self {
             inner,
             budget,
+            control: &CACHE_CONTROL,
             pressure,
             sink,
             accounting: Arc::new(CacheAccounting::new()),
@@ -262,6 +270,19 @@ impl<F> CachedFs<F> {
             lru_data: BTreeMap::new(),
             lru_meta: BTreeMap::new(),
         }
+    }
+
+    /// Bind a specific [`CacheControl`] instead of the process-global
+    /// [`CACHE_CONTROL`] this cache consults by default.
+    ///
+    /// Production wraps every volume through [`CachedFs::new`], which binds
+    /// the shared global the unlock path applies the operator's
+    /// configuration to; this builder lets a host test drive the disable
+    /// path against its own control without touching that global.
+    #[must_use]
+    pub fn with_cache_control(mut self, control: &'static CacheControl) -> Self {
+        self.control = control;
+        self
     }
 
     /// The cache's byte ledger and event counters.
@@ -474,6 +495,17 @@ impl<F> CachedFs<F> {
         if self.poisoned {
             return;
         }
+        // The operator disabled the filesystem cache (`cache.filesystem` or
+        // the master `cache.all` off): drop everything it holds (zeroed by
+        // `purge`) and admit nothing further — a real bypass, the volume
+        // keeps serving from the driver. Re-enabling lets the next
+        // admission refill it.
+        if !self.control.admits(CacheClass::Filesystem) {
+            if self.accounting.total_bytes() > 0 {
+                self.purge();
+            }
+            return;
+        }
         let band = self.pressure.sample();
         let data_target = shrink_target(band, ReclaimClass::CleanFileData, self.budget);
         let meta_target = shrink_target(band, ReclaimClass::FsMetadata, self.budget);
@@ -505,6 +537,10 @@ impl<F> CachedFs<F> {
     /// cannot account it) — the caller then serves without caching.
     fn admit(&mut self, key: KeyRef, payload: usize, metadata: usize) -> Option<u64> {
         let class = Self::class_of(&key);
+        if !self.control.admits(CacheClass::Filesystem) {
+            self.accounting.record_refusal(class);
+            return None;
+        }
         let cost = payload.saturating_add(metadata);
         if self.poisoned || cost > self.budget.hard() {
             self.accounting.record_refusal(class);

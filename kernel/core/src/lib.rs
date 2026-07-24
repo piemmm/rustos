@@ -75,6 +75,7 @@ pub mod audit;
 pub mod blockwait;
 pub mod boot_id;
 pub mod bootinfo;
+pub mod cache_control;
 pub mod callreg;
 pub mod console;
 mod cpu_state;
@@ -119,6 +120,7 @@ pub mod smp;
 pub mod spawn;
 pub mod spawn_services;
 pub mod syscalls;
+pub mod syscfg;
 pub mod useradmin;
 pub mod users;
 pub mod waitq;
@@ -163,6 +165,7 @@ pub use aspace::{AddressSpaceRegistry, AspaceError, StackSpan};
 pub use audit::AuditEvent;
 pub use blockwait::{FallbackPark, IrqParkWaiter};
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
+pub use cache_control::{CacheClass, CacheControl, CacheMode, CACHE_CONTROL};
 pub use console::{
     BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
     NullConsole, NullConsoleInput, NullConsoleRead, SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY,
@@ -244,6 +247,7 @@ pub use spawn_services::{
     SpawnServices, SpawnServicesAlreadyInstalled,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
+pub use syscfg::load_and_apply_system_config;
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
     UsersAdminAlreadyInstalled, NULL_USERS_ADMIN,

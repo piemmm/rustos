@@ -86,6 +86,11 @@ tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
+# The single boot-time system-configuration store engine (`AGENTS.md` §2.2):
+# the `cache_control` module reuses `tairix_sysconfig::{CacheClass, CacheMode}`
+# (the closed cache-switch vocabulary) so the kernel's live cache-admission
+# control and the `configure`/`system.conf` store can never diverge.
+tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
 # The single terminal key map (`AGENTS.md` §2.2): the seat registry's text
 # sink (`src/seat.rs`) encodes a decoded `KeyInput` record to the console
 # (tty) bytes a terminal sends through `tairix_keymap::encode_key_input`

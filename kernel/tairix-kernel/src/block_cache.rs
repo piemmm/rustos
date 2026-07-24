@@ -69,6 +69,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
+use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_kernel_mem::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
@@ -113,6 +114,12 @@ pub struct BlockCache<B: Block> {
     device: B,
     geometry: BlockGeometry,
     budget: CacheBudget,
+    /// The live cache-admission control (the operator's `cache.block` /
+    /// `cache.all` switch). Sampled at the head of every operation: when
+    /// the block class is disabled the cache admits nothing and drops
+    /// (wiping) what it holds, a real bypass. Defaults to the process-
+    /// global [`CACHE_CONTROL`]; a test binds its own.
+    control: &'static CacheControl,
     /// The system memory-pressure gauge, sampled at the head of every
     /// operation: the band's forced-shrink target is applied before
     /// the cache is read or grown, and admission is refused outside
@@ -182,6 +189,7 @@ impl<B: Block> BlockCache<B> {
             device,
             geometry,
             budget,
+            control: &CACHE_CONTROL,
             pressure,
             sink,
             accounting: Arc::new(CacheAccounting::new()),
@@ -220,6 +228,17 @@ impl<B: Block> BlockCache<B> {
             pressure,
             sink,
         )
+    }
+
+    /// Bind a specific [`CacheControl`] instead of the process-global
+    /// [`CACHE_CONTROL`] this cache consults by default. Production uses
+    /// the shared global the unlock path applies the operator's
+    /// configuration to; a host test drives the disable path against its
+    /// own control through this builder.
+    #[must_use]
+    pub fn with_cache_control(mut self, control: &'static CacheControl) -> Self {
+        self.control = control;
+        self
     }
 
     /// The cache's byte ledger and event counters.
@@ -355,6 +374,16 @@ impl<B: Block> BlockCache<B> {
         if self.poisoned {
             return;
         }
+        // The operator disabled the block cache (`cache.block` or the
+        // master `cache.all` off): drop (wiping) everything and admit
+        // nothing further — a real bypass, every operation passes straight
+        // through to the device. Re-enabling lets the next read refill it.
+        if !self.control.admits(CacheClass::Block) {
+            if self.accounting.total_bytes() > 0 {
+                self.drop_all();
+            }
+            return;
+        }
         let band = self.pressure.sample();
         let target = shrink_target(band, ReclaimClass::CleanFileData, self.budget);
         if self.accounting.total_bytes() > target {
@@ -398,6 +427,10 @@ impl<B: Block> BlockCache<B> {
     /// at the first refused admission: one refusal means the next
     /// insert faces the same gate.
     fn populate(&mut self, lba: u64, blocks: u64, buf: &[u8]) {
+        if !self.control.admits(CacheClass::Block) {
+            self.accounting.record_refusal(ReclaimClass::CleanFileData);
+            return;
+        }
         let bs = self.block_size();
         let (payload, metadata) = self.cost_of();
         let cost = payload.saturating_add(metadata);

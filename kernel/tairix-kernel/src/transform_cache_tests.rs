@@ -611,3 +611,39 @@ fn both_cache_layers_share_one_gauge_and_drain_before_the_ramzip_handoff() {
         "moderate pressure drained the transform cache below it"
     );
 }
+
+/// A leaked cache-admission control with the transform class disabled
+/// (`cache.transform off`), its own instance so it never touches the
+/// process-global control other tests rely on.
+fn transform_disabled_control() -> &'static CacheControl {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    control.set(CacheClass::Transform, tairix_kernel_core::CacheMode::Off);
+    control
+}
+
+#[test]
+fn a_disabled_transform_cache_admits_nothing() {
+    let mut cache = cache().with_cache_control(transform_disabled_control());
+    cache.put(10, 3, &payload(0xAB));
+    assert!(cache.get(10).is_none(), "off admits nothing");
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert!(cache.accounting().refusals() >= 1);
+}
+
+#[test]
+fn flipping_the_transform_switch_off_purges_the_held_clusters() {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let mut cache = cache().with_cache_control(control);
+    cache.put(10, 3, &payload(0xAB));
+    assert_eq!(
+        cache.accounting().class_bytes(ReclaimClass::TransformCache),
+        1024 + ENTRY_OVERHEAD
+    );
+
+    // The operator disables the class: the next operation drops (wiping)
+    // the held plaintext and thereafter serves nothing from cache.
+    control.set(CacheClass::Transform, tairix_kernel_core::CacheMode::Off);
+    assert!(cache.get(10).is_none(), "the purge dropped it");
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert!(cache.accounting().teardowns() >= 1);
+}

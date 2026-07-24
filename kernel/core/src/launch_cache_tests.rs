@@ -364,3 +364,40 @@ fn the_cost_model_charges_strings_beside_the_image() {
         + "/System/Apps/ps.app".len();
     assert!(cache.accounting().total_bytes() > floor);
 }
+
+/// A leaked cache-admission control with the semantic class disabled
+/// (`cache.semantic off`), its own instance so it never touches the
+/// process-global control other tests rely on.
+fn launch_disabled_control() -> &'static CacheControl {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    control.set(CacheClass::Semantic, crate::CacheMode::Off);
+    control
+}
+
+#[test]
+fn a_disabled_launch_cache_admits_nothing() {
+    let mut cache = LaunchCache::new(budget(), unpressured(), sink())
+        .with_cache_control(launch_disabled_control());
+    cache.insert("/System/Apps/ps.app", &verified_app());
+    assert!(
+        cache.lookup("/System/Apps/ps.app").is_none(),
+        "off is a miss"
+    );
+    assert_eq!(cache.accounting().total_bytes(), 0, "off admits nothing");
+    assert!(cache.accounting().refusals() >= 1);
+}
+
+#[test]
+fn flipping_the_semantic_switch_off_drops_the_cache() {
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let mut cache = LaunchCache::new(budget(), unpressured(), sink()).with_cache_control(control);
+    cache.insert("/System/Apps/ps.app", &verified_app());
+    assert!(cache.accounting().total_bytes() > 0, "the cache filled");
+
+    // The operator disables the class: the next operation drops everything
+    // and thereafter every launch runs the full load gate.
+    control.set(CacheClass::Semantic, crate::CacheMode::Off);
+    assert!(cache.lookup("/System/Apps/ps.app").is_none(), "purged");
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert!(cache.accounting().teardowns() >= 1);
+}

@@ -27,6 +27,18 @@
 //!   the login service offers as the boot default (`plans/DISPLAY.md` D7d;
 //!   a graphical default still degrades to text when no desktop session is
 //!   installed — never an error).
+//! * `cache.all` — `on` (default) or `off`: the master caching switch. `off`
+//!   is a ceiling that disables every SMARTRAM cache regardless of the
+//!   per-class settings below.
+//! * `cache.filesystem`, `cache.block`, `cache.transform`, `cache.semantic` —
+//!   `auto` (default) or `off`: the per-class caching switches for the four
+//!   live SMARTRAM caches (`plans/SMARTRAM.md`). `auto` lets the memory-
+//!   pressure governor manage the class (today's behaviour); `off` hard-
+//!   disables it (a real bypass — the cache admits and holds nothing). There
+//!   is deliberately no per-class `on`: a class cannot be forced to ignore
+//!   memory pressure without breaking the SMARTRAM reserve invariants. The
+//!   effective mode of a class is `off` whenever `cache.all` is `off`, else
+//!   the class's own value (see [`SystemConfig::effective_cache`]).
 //!
 //! # Security
 //!
@@ -102,6 +114,129 @@ impl LoginType {
     }
 }
 
+/// The master caching switch (`cache.all`): a pure kill switch and ceiling
+/// over every per-class caching mode.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum CacheSwitch {
+    /// Caching is permitted; each class follows its own [`CacheMode`]. The
+    /// default, and the value an absent store implies.
+    #[default]
+    On,
+    /// Caching is disabled system-wide: every SMARTRAM cache is off
+    /// regardless of its per-class setting.
+    Off,
+}
+
+impl CacheSwitch {
+    /// The canonical value spelling (`on` / `off`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set
+    /// (case-sensitive — one canonical spelling).
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// A per-class caching mode (`cache.<class>`).
+///
+/// There is deliberately no `On` variant: a class is never forced to ignore
+/// memory pressure — that would break the SMARTRAM reserve invariants
+/// (`plans/SMARTRAM.md` section 7). A class is either governed by the
+/// pressure governor ([`Auto`](Self::Auto)) or hard-disabled
+/// ([`Off`](Self::Off)).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum CacheMode {
+    /// The memory-pressure governor manages the class (today's behaviour,
+    /// and the value an absent store implies).
+    #[default]
+    Auto,
+    /// The class is hard-disabled: the cache admits and holds nothing.
+    Off,
+}
+
+impl CacheMode {
+    /// The canonical value spelling (`auto` / `off`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set
+    /// (case-sensitive — one canonical spelling).
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Whether a class in this mode admits entries. `true` for
+    /// [`Auto`](Self::Auto), `false` for [`Off`](Self::Off).
+    #[must_use]
+    pub const fn admits(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+/// The classes of live SMARTRAM cache a per-class switch governs.
+///
+/// Only classes whose cache exists in the tree today are listed; adding a
+/// key for a shelved or future cache would be speculative surface. When a
+/// new cache lands, it gains its variant here, its `cache.<class>` key, and
+/// its wiring in the same change.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CacheClass {
+    /// The clean, rebuildable filesystem cache (`kernel/core::fs::CachedFs`).
+    Filesystem,
+    /// The whole-disk block-level cache
+    /// (`kernel/tairix-kernel::block_cache::BlockCache`).
+    Block,
+    /// The ARXFS transform (decrypted/decompressed cluster) cache
+    /// (`kernel/tairix-kernel::transform_cache::TransformClusterCache`).
+    Transform,
+    /// The semantic application-launch cache
+    /// (`kernel/core::launch_cache::LaunchCache`).
+    Semantic,
+}
+
+impl CacheClass {
+    /// Every cache class, in the canonical listing order.
+    pub const ALL: &'static [Self] = &[
+        Self::Filesystem,
+        Self::Block,
+        Self::Transform,
+        Self::Semantic,
+    ];
+
+    /// The registry key that carries this class's per-class switch.
+    #[must_use]
+    pub const fn key(self) -> Key {
+        match self {
+            Self::Filesystem => Key::CacheFilesystem,
+            Self::Block => Key::CacheBlock,
+            Self::Transform => Key::CacheTransform,
+            Self::Semantic => Key::CacheSemantic,
+        }
+    }
+}
+
 /// One key of the closed configuration registry.
 ///
 /// Adding a key means adding a variant here, its row in [`Key::ALL`], its
@@ -113,17 +248,39 @@ impl LoginType {
 pub enum Key {
     /// `os.loginType` — the login service's boot-default session type.
     LoginType,
+    /// `cache.all` — the master caching switch / ceiling.
+    CacheAll,
+    /// `cache.filesystem` — the filesystem cache's per-class switch.
+    CacheFilesystem,
+    /// `cache.block` — the block cache's per-class switch.
+    CacheBlock,
+    /// `cache.transform` — the transform cache's per-class switch.
+    CacheTransform,
+    /// `cache.semantic` — the launch cache's per-class switch.
+    CacheSemantic,
 }
 
 impl Key {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: &'static [Self] = &[Self::LoginType];
+    pub const ALL: &'static [Self] = &[
+        Self::LoginType,
+        Self::CacheAll,
+        Self::CacheFilesystem,
+        Self::CacheBlock,
+        Self::CacheTransform,
+        Self::CacheSemantic,
+    ];
 
     /// The canonical key spelling.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::LoginType => "os.loginType",
+            Self::CacheAll => "cache.all",
+            Self::CacheFilesystem => "cache.filesystem",
+            Self::CacheBlock => "cache.block",
+            Self::CacheTransform => "cache.transform",
+            Self::CacheSemantic => "cache.semantic",
         }
     }
 
@@ -140,6 +297,11 @@ impl Key {
     pub const fn values(self) -> &'static [&'static str] {
         match self {
             Self::LoginType => &["text", "graphical"],
+            Self::CacheAll => &["on", "off"],
+            Self::CacheFilesystem
+            | Self::CacheBlock
+            | Self::CacheTransform
+            | Self::CacheSemantic => &["auto", "off"],
         }
     }
 }
@@ -186,6 +348,17 @@ impl fmt::Display for ConfigError {
 pub struct SystemConfig {
     /// The login service's boot-default session type (`os.loginType`).
     pub login_type: LoginType,
+    /// The master caching switch (`cache.all`): a ceiling over every
+    /// per-class mode below.
+    pub cache_all: CacheSwitch,
+    /// The filesystem cache's per-class switch (`cache.filesystem`).
+    pub cache_filesystem: CacheMode,
+    /// The block cache's per-class switch (`cache.block`).
+    pub cache_block: CacheMode,
+    /// The transform cache's per-class switch (`cache.transform`).
+    pub cache_transform: CacheMode,
+    /// The launch cache's per-class switch (`cache.semantic`).
+    pub cache_semantic: CacheMode,
 }
 
 impl SystemConfig {
@@ -239,6 +412,32 @@ impl SystemConfig {
     pub const fn get(&self, key: Key) -> &'static str {
         match key {
             Key::LoginType => self.login_type.as_str(),
+            Key::CacheAll => self.cache_all.as_str(),
+            Key::CacheFilesystem => self.cache_filesystem.as_str(),
+            Key::CacheBlock => self.cache_block.as_str(),
+            Key::CacheTransform => self.cache_transform.as_str(),
+            Key::CacheSemantic => self.cache_semantic.as_str(),
+        }
+    }
+
+    /// The **effective** caching mode for `class`, applying the master
+    /// ceiling: [`CacheMode::Off`] whenever `cache.all` is
+    /// [`CacheSwitch::Off`], otherwise the class's own configured mode.
+    ///
+    /// This is the one canonical interpretation of the two persisted keys —
+    /// deterministic and fail-closed: the master `off` disables everything,
+    /// a per-class `off` disables just that class, and they can never
+    /// contradict ambiguously.
+    #[must_use]
+    pub const fn effective_cache(&self, class: CacheClass) -> CacheMode {
+        if matches!(self.cache_all, CacheSwitch::Off) {
+            return CacheMode::Off;
+        }
+        match class {
+            CacheClass::Filesystem => self.cache_filesystem,
+            CacheClass::Block => self.cache_block,
+            CacheClass::Transform => self.cache_transform,
+            CacheClass::Semantic => self.cache_semantic,
         }
     }
 
@@ -253,6 +452,24 @@ impl SystemConfig {
         match key {
             Key::LoginType => {
                 self.login_type = LoginType::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CacheAll => {
+                self.cache_all = CacheSwitch::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CacheFilesystem => {
+                self.cache_filesystem =
+                    CacheMode::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CacheBlock => {
+                self.cache_block = CacheMode::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CacheTransform => {
+                self.cache_transform =
+                    CacheMode::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CacheSemantic => {
+                self.cache_semantic =
+                    CacheMode::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
         }
         Ok(())
@@ -298,7 +515,10 @@ mod tests {
     use std::format;
     use std::string::String;
 
-    use super::{ConfigError, Key, LoginType, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
+    use super::{
+        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, SystemConfig, CONFIG_PATH,
+        MAX_CONFIG_LEN,
+    };
 
     #[test]
     fn an_empty_store_is_the_default_configuration() {
@@ -378,9 +598,98 @@ mod tests {
     #[test]
     fn render_parse_round_trips_exactly() {
         for login_type in [LoginType::Text, LoginType::Graphical] {
-            let config = SystemConfig { login_type };
-            assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+            for cache_all in [CacheSwitch::On, CacheSwitch::Off] {
+                for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
+                    let config = SystemConfig {
+                        login_type,
+                        cache_all,
+                        cache_filesystem,
+                        cache_block: CacheMode::Off,
+                        cache_transform: CacheMode::Auto,
+                        cache_semantic: CacheMode::Off,
+                    };
+                    assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                }
+            }
         }
+    }
+
+    #[test]
+    fn cache_defaults_are_all_enabled() {
+        // An absent store reproduces today's behaviour: every cache on.
+        let config = SystemConfig::default();
+        assert_eq!(config.cache_all, CacheSwitch::On);
+        for class in CacheClass::ALL {
+            assert_eq!(config.effective_cache(*class), CacheMode::Auto);
+            assert!(config.effective_cache(*class).admits());
+        }
+    }
+
+    #[test]
+    fn cache_keys_parse_their_closed_value_sets() {
+        let config = SystemConfig::parse(
+            "cache.all off\n\
+             cache.filesystem off\n\
+             cache.block auto\n\
+             cache.transform off\n\
+             cache.semantic auto\n",
+        )
+        .expect("parses");
+        assert_eq!(config.cache_all, CacheSwitch::Off);
+        assert_eq!(config.cache_filesystem, CacheMode::Off);
+        assert_eq!(config.cache_block, CacheMode::Auto);
+        assert_eq!(config.cache_transform, CacheMode::Off);
+        assert_eq!(config.cache_semantic, CacheMode::Auto);
+    }
+
+    #[test]
+    fn cache_all_off_is_a_ceiling_over_every_class() {
+        // Master off disables every class regardless of the per-class value.
+        let config = SystemConfig::parse("cache.all off\ncache.filesystem auto\n").expect("parses");
+        for class in CacheClass::ALL {
+            assert_eq!(config.effective_cache(*class), CacheMode::Off);
+            assert!(!config.effective_cache(*class).admits());
+        }
+    }
+
+    #[test]
+    fn per_class_off_disables_only_that_class() {
+        let config = SystemConfig::parse("cache.filesystem off\n").expect("parses");
+        assert_eq!(
+            config.effective_cache(CacheClass::Filesystem),
+            CacheMode::Off
+        );
+        assert_eq!(config.effective_cache(CacheClass::Block), CacheMode::Auto);
+        assert_eq!(
+            config.effective_cache(CacheClass::Transform),
+            CacheMode::Auto
+        );
+        assert_eq!(
+            config.effective_cache(CacheClass::Semantic),
+            CacheMode::Auto
+        );
+    }
+
+    #[test]
+    fn cache_class_maps_to_its_key() {
+        for class in CacheClass::ALL {
+            // The key a class points at must decode its own per-class value
+            // set (`auto`/`off`), never the master's (`on`/`off`).
+            assert_eq!(class.key().values(), &["auto", "off"]);
+        }
+    }
+
+    #[test]
+    fn cache_rejects_the_wrong_value_vocabulary() {
+        // The master takes on/off, a per-class takes auto/off; they never mix.
+        assert_eq!(
+            SystemConfig::parse("cache.all auto\n"),
+            Err(ConfigError::InvalidValue),
+        );
+        assert_eq!(
+            SystemConfig::parse("cache.filesystem on\n"),
+            Err(ConfigError::InvalidValue),
+        );
     }
 
     #[test]
