@@ -267,15 +267,27 @@ as the child's reserved `LOAD_*` exit status, named by the reap (the shared
 `load_failure_reason` wording). The manager **reaps** every launched child on a
 new any-child wait-set member, drained in the event source's park branch the
 instant it fires, so a launched app is never left a zombie and the wake never
-degrades into a busy-poll (`AGENTS.md` §2.23). Acting on a regular file's
-`OpenFile` decision — handing the file to its associated viewer, and
-"Open With…" — remains the rest of FM6b: the correct mechanism is the
-race-free spawn-time `spawn_attached` + `FdWire::Handle` inheritance (the
-manager `fs_open`s the file read-only and the kernel clones that read-only
-open description into the spawned viewer, which reads it with no filesystem
-capability of its own). Activating a file today leaves the listing unchanged
-rather than fabricating an action, so the right-click **Open** on a file is
-that same honest no-op until the hand-off lands.
+degrades into a busy-poll (`AGENTS.md` §2.23). An `OpenFile { path }`
+decision **opens the file in its associated viewer** — the inherited-document
+hand-off, the TAIRiX spelling of `viewer < file`: the manager resolves the
+associated application from the installed bundles' declared file-type
+associations (`RtBundleSource` + `applications_for`, keyed off the file's leaf
+name — never a hard-coded viewer path), opens the file **read-only in its own
+table**, and spawns that bundle's `Run` with the descriptor wired onto the
+child's `STDIN` slot (`FdWire::Handle`) plus the reserved `DOCUMENT_ROLE_ARG`
+token and the leaf name for the window title. The kernel clones the read-only
+open description into the child owner-checked, so the viewer reads its document
+with **no filesystem capability of its own** (least privilege) and there is no
+post-spawn channel or ordering race; the manager closes its own descriptor
+immediately and reaps the child on the same any-child member as a launched
+bundle. Launching is asynchronous and fail-loud: a file no installed
+application claims leaves the listing unchanged and states the refusal on
+`stderr`, never a fabricated open (`AGENTS.md` §2.24). The viewer detects
+`DOCUMENT_ROLE_ARG` at start-up and displays the handed-over document instead
+of prompting the session's trusted picker (its standalone launch is
+unchanged). The explicit **"Open With…"** chooser — offering the full
+`applications_for` candidate list as a `lib/controls` `Menu` — is the remaining
+FM6b increment; the default-open above is complete on its own.
 
 ### "Open With…" — the type→bundle association
 

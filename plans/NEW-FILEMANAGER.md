@@ -62,10 +62,13 @@ and FM4b's drawn context menu (a secondary-button press opens a
 `dispatch_context_command` to the *same* Open/Rename/Cut/Copy/Paste/Properties
 verbs the toolbar and keyboard drive, fail-closed on a disabled row or a press
 off the menu)
-are done** — completing FM4b's drawn chrome and all of FM7b's app-side verbs;
-the rest of FM6b (the `OpenFile`/"Open With…" viewer hand-off, whose correct
-race-free spawn-time `FdWire::Handle` design is recorded in FM6b below) and FM9
-are `planned`. The starting point is
+are done** — completing FM4b's drawn chrome and all of FM7b's app-side verbs,
+plus **FM6b's app-side `OpenFile` hand-off** (opening a data file in its
+associated viewer via the inherited-document `DOCUMENT_ROLE_ARG` + `STDIN`
+spawn-time hand-off, with the viewer's own inherited-document startup path and
+the signed `AppInfo` MIME associations that resolve the viewer). Only FM6b's
+explicit "Open With…" chooser (the default-open picks the first association)
+and FM9 remain `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -100,16 +103,17 @@ selection dispatches through `Browser::activate_selected`, and a `LaunchBundle`
 spawns the `<Name>.app` bundle's own `Run` through the ordinary signed load
 gate under the `CAP_PROC_SPAWN` grant this stage added (async and
 non-blocking, with launched children reaped on an any-child wait-set member).
-The rest of **FM6b** — handing a data file to its associated viewer (`OpenFile`)
-and the "Open With…" chooser over the done association model — stays `planned`.
-The correct mechanism is the race-free spawn-time `spawn_attached` +
-`FdWire::Handle` inheritance (the manager `fs_open`s the file read-only and the
-kernel clones that read-only open description into the spawned viewer, which
-reads it with no filesystem capability of its own); this supersedes the earlier
-fd_grant-after-spawn sketch (`fd_grant`/`fd_redeem` remain the picker's post-hoc
-delegation to an already-running window owner). See FM6b below for the full
-design and the remaining app-side work (the viewer's inherited-document startup
-path, the app-store `BundleSource`, and the chooser).
+**Handing a data file to its associated viewer (`OpenFile`) is now done too**:
+`Activation::OpenFile` resolves the viewer from the installed bundles' signed
+`AppInfo` MIME associations (`RtBundleSource` + `applications_for`) and hands
+the file over through the race-free spawn-time inheritance — `fs_open`
+read-only + `spawn_attached` with the descriptor wired onto the child's `STDIN`
+(`FdWire::Handle`) and the reserved `DOCUMENT_ROLE_ARG` token, so the viewer
+reads its document with no filesystem capability of its own. This supersedes
+the earlier fd_grant-after-spawn sketch (`fd_grant`/`fd_redeem` remain the
+picker's post-hoc delegation to an already-running window owner). Only the
+explicit "Open With…" chooser over the full `applications_for` result stays
+`planned` (the default-open picks the first association). See FM6b below.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -575,36 +579,56 @@ The app wiring rides the FM9 autoload vertical; the freestanding `Run` builds
 and clippy-clean cross-compiled, and the manifest grant is pinned by the kernel
 `appinfo_sources_match_the_embedded_registry` host test.
 
+**Opening a data file in its associated viewer (`OpenFile`) is now done** —
+the defining "make items *do* something" behaviour. The inherited-document
+hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
+
+- **The launch convention** is `tairix_abi::DOCUMENT_ROLE_ARG` (a reserved
+  launch-argument token, modelled on `SPAWN_SELF`) plus the `STDIN` stream: a
+  launcher that opens a document for a viewer opens the file read-only in its
+  **own** table, spawns the viewer with a `SpawnAttach` block wiring that
+  descriptor onto the child's `STDIN` slot (`FdWire::Handle`), and passes the
+  token as an argument. The kernel clones the read-only *open description* into
+  the child owner-checked, so the viewer reads its document with **no
+  filesystem capability of its own** (least privilege, §5.2) and there is no
+  post-spawn channel, handle-forwarding, or ordering race. This **supersedes**
+  the earlier fd_grant-to-attested-PID sketch (`fd_grant`/`fd_redeem` stay the
+  picker's *post-hoc* delegation to an already-running window owner; §2.13).
+- **The signed `AppInfo` now carries file-type associations.** The bundle
+  composer parses an optional `associations` MIME array from `AppInfo.toml`
+  and emits the signed MIME table the ABI already reserved (`mime_count` /
+  `mime_type_at`); the whole body — capabilities then MIME table — is under the
+  signature, so a tampered association breaks the bundle. `viewer.app` declares
+  the text/structured-config types it displays.
+- **The running-system `BundleSource` is `files.app`'s `RtBundleSource`**: a
+  bounded recursive walk of `/System/Apps` then `/Apps`, reading each
+  `<Name>.app/AppInfo` through the shared, host-tested
+  `lib/browse::association_from_appinfo` decode (fail-closed — a corrupt
+  manifest is skipped, never offered). `Activation::OpenFile { path }` resolves
+  the associated bundle via `applications_for` (keyed off the file's leaf
+  name — never a hard-coded viewer path), and `Launcher::open_file` /
+  `launch_viewer` `fs_open`s the file read-only and `spawn_attached`es the
+  bundle's `Run` with the `STDIN` wire + `DOCUMENT_ROLE_ARG` + the leaf-name
+  title, closing its own descriptor and reaping the child on the same any-child
+  member. A file no installed application claims is stated fail-loud on
+  `stderr`, never a fabricated open (§2.24). Only the write/spawn-capable file
+  manager does this; the read-only picker composes the same `Browser` and never
+  launches. Host-tested (`association_from_appinfo` valid / empty / fail-closed);
+  the app wiring rides the FM9 vertical and builds clippy-clean cross-compiled.
+- **The viewer's inherited-document startup path is done**: `viewer.app`
+  detects `DOCUMENT_ROLE_ARG` and reads its document from the inherited `STDIN`
+  descriptor (titling its window from the leaf name), distinct from its
+  interactive picker path (its standalone launch is unchanged).
+
 The remaining app-side wiring (still `planned`):
 
-- **Open a data file in its associated viewer (`OpenFile`).** Activating a
-  regular file today leaves the listing unchanged (an honest no-op, never a
-  fabricated action); wiring it hands the file to a spawned viewer. **The
-  correct mechanism already exists and is race-free at spawn: `spawn_attached`
-  with an `FdWire::Handle` wire** (`lib/abi::process`). The manager `fs_open`s
-  the file read-only and spawns the associated viewer with a `SpawnAttach`
-  block that wires that descriptor onto one of the child's standard streams;
-  the kernel resolves it owner-checked against the manager's kernel-attested
-  identity and clones the read-only *open description* into the child, so the
-  viewer reads its document with **no filesystem capability of its own** (least
-  privilege, §5.2) and there is no post-spawn channel, handle-forwarding, or
-  ordering race to get right. This **supersedes** the earlier fd_grant-to-
-  attested-PID sketch (`fd_grant`/`fd_redeem` stay the picker's *post-hoc*
-  delegation to an already-running window owner; a spawn-time inheritance is
-  the cleaner tool for a child the manager itself launches — evolve in place,
-  §2.13). The viewer gains a "read my document from the inherited descriptor"
-  startup path (distinct from its interactive `PickFile` path); that viewer
-  change plus the manager's `fs_open`+`spawn_attached` wiring is its own
-  increment.
 - **"Open With…"** draws the bundles the done `open_with` model returns as a
   `lib/controls` `Menu` and launches the chosen one via the same
-  `spawn_attached`+`FdWire::Handle` hand-off; the remaining work is the
-  app-side `BundleSource` backed by the real app store (runtime bundle
-  enumeration + `AppInfo` MIME associations) and the chooser menu over
-  `applications_for`'s result. It lands with the `OpenFile` hand-off above
-  (both inherit the file into the spawned viewer), and **re-adds** the
-  `OpenWith` entry to `chrome::CONTEXT_COMMANDS` (staged out of the drawn
-  context menu until this verb exists, §2.4).
+  `DOCUMENT_ROLE_ARG` + `STDIN` hand-off `open_file` already uses; the
+  remaining work is the chooser menu over `applications_for`'s full result
+  (the default-open above picks the first) and **re-adding** the `OpenWith`
+  entry to `chrome::CONTEXT_COMMANDS` (staged out of the drawn context menu
+  until this verb exists, §2.4).
 - **Double-click activation.** Activation is keyboard-driven (`Enter`) today;
   a pointer double-click needs press-time tracking and lands with the pointer
   refinements, not as speculative state now (§2.4).

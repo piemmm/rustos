@@ -26,10 +26,10 @@
 //! identity (so the read-only picker, which composes the same engine, never
 //! launches). Deciding a file's type here never opens it.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{mime_type_at, AppInfoHeader, Errno};
 
 use crate::icon::extension;
 
@@ -91,6 +91,35 @@ impl AppAssociation {
             .iter()
             .any(|declared| declared.eq_ignore_ascii_case(mime))
     }
+}
+
+/// Build an [`AppAssociation`] from a bundle's raw `AppInfo` manifest bytes and
+/// its `<Name>.app` directory path.
+///
+/// This is the pure decode the running-system [`BundleSource`] uses per bundle:
+/// it reads the manifest header and the declared MIME table (the same body
+/// layout the loader reads) and returns the bundle's name and declared types.
+/// It is **fail-closed** — a manifest that does not parse, or whose MIME table
+/// is malformed or non-UTF-8, yields `None`, so a corrupt bundle is silently
+/// skipped rather than offered on a guess. The MIME set is a display *hint*
+/// only: this does **not** verify the manifest signature (the signed load gate
+/// does that when the chosen bundle is launched), it only reads what the
+/// bundle claims. Keeping the decode here means it is host-tested without a
+/// kernel, exactly like the rest of this model.
+#[must_use]
+pub fn association_from_appinfo(bundle_path: &str, appinfo: &[u8]) -> Option<AppAssociation> {
+    let header = AppInfoHeader::from_bytes(appinfo).ok()?;
+    let body = appinfo.get(AppInfoHeader::WIRE_LEN..)?;
+    let caps = usize::from(header.capability_count);
+    let mut mimes = Vec::with_capacity(usize::from(header.mime_count));
+    for index in 0..usize::from(header.mime_count) {
+        mimes.push(mime_type_at(body, caps, index).ok()?.to_string());
+    }
+    Some(AppAssociation::new(
+        header.bundle_name(),
+        bundle_path,
+        mimes,
+    ))
 }
 
 /// The installed-application enumeration seam — the "Open With…" analogue of

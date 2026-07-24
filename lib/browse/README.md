@@ -117,6 +117,12 @@ can never diverge in navigation semantics, listing policy, or look.
   answer — a "no application" notice, never a fabricated default — and the type
   decision is a display hint only: the load gate still verifies and
   capability-checks whichever bundle the user picks. The engine never spawns.
+  `association_from_appinfo(bundle_path, appinfo)` is the pure, fail-closed
+  decode a running-system `BundleSource` uses per bundle: it reads a manifest's
+  header and declared MIME table (the same body layout the loader reads) into an
+  `AppAssociation`, skipping a corrupt or non-parsing manifest rather than
+  offering it on a guess. It reads the declared types as a hint only and never
+  verifies the signature — the signed load gate does that at launch.
 - **Multi-selection** (`select`, `Browser` selection methods,
   `plans/NEW-FILEMANAGER.md` FM7): the per-listing set of marked entries the
   management verbs act on. `Selection` models a plain click (`single`), a

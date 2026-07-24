@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, ABI_VERSION_CURRENT,
-    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX,
-    BUNDLE_VERSION_MAX,
+    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -93,6 +93,15 @@ pub struct AppManifestSource {
     pub kind: AppKind,
     /// The bundle's requested capabilities, in manifest order.
     pub capabilities: Vec<CapabilityId>,
+    /// The file-type (MIME) associations the bundle declares it can open,
+    /// in manifest order. Empty when the bundle declares none (the
+    /// `associations` key is optional): a program that opens no operand
+    /// file — a pure command — carries no associations, exactly as it
+    /// carries no `OpenFile` behaviour. These are a display *hint* the
+    /// file manager offers "Open With…" candidates from; the signed load
+    /// gate still verifies and capability-checks whichever bundle is
+    /// launched (`plans/NEW-FILEMANAGER.md` `FM6b`).
+    pub associations: Vec<String>,
 }
 
 impl AppManifestSource {
@@ -112,6 +121,7 @@ impl AppManifestSource {
         let mut version = None;
         let mut kind = None;
         let mut capabilities = None;
+        let mut associations = None;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -130,6 +140,9 @@ impl AppManifestSource {
                 "capabilities" => {
                     set(&at, key, &mut capabilities, parse_capabilities(&at, value)?)?;
                 }
+                "associations" => {
+                    set(&at, key, &mut associations, parse_associations(&at, value)?)?;
+                }
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -141,6 +154,9 @@ impl AppManifestSource {
             version: require(version, "version")?,
             kind: require(kind, "kind")?,
             capabilities: require(capabilities, "capabilities")?,
+            // `associations` is optional: a bundle that opens no operand
+            // file declares none.
+            associations: associations.unwrap_or_default(),
         };
         manifest.validate()?;
         Ok(manifest)
@@ -170,6 +186,12 @@ impl AppManifestSource {
         }
         if self.capabilities.len() > usize::from(APPINFO_MAX_CAPABILITIES) {
             return Err(AppImageError::new(ctx, "too many capabilities"));
+        }
+        if self.associations.len() > usize::from(APPINFO_MAX_MIME) {
+            return Err(AppImageError::new(ctx, "too many associations"));
+        }
+        for mime in &self.associations {
+            check_len(ctx, "association", mime, MIME_TYPE_MAX)?;
         }
         Ok(())
     }
@@ -245,6 +267,32 @@ fn parse_capabilities(at: &str, value: &str) -> Result<Vec<CapabilityId>, AppIma
         caps.push(cap);
     }
     Ok(caps)
+}
+
+/// Parse a single-line array of double-quoted MIME-type strings — the
+/// bundle's declared file-type associations. Duplicate types are refused
+/// (a bundle names each type it handles once).
+fn parse_associations(at: &str, value: &str) -> Result<Vec<String>, AppImageError> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| AppImageError::new(at, "expected a single-line `[...]` array"))?
+        .trim();
+    let mut mimes = Vec::new();
+    if inner.is_empty() {
+        return Ok(mimes);
+    }
+    for item in inner.split(',') {
+        let mime = parse_string(at, item.trim())?;
+        if mimes.contains(&mime) {
+            return Err(AppImageError::new(
+                at,
+                format!("duplicate association `{mime}`"),
+            ));
+        }
+        mimes.push(mime);
+    }
+    Ok(mimes)
 }
 
 /// One program crate the discovery walk found: its cargo package name (the
@@ -408,12 +456,14 @@ pub fn compose_signed_appinfo(
 
     let capability_count = u16::try_from(manifest.capabilities.len())
         .map_err(|_| AppImageError::new(ctx, "too many capabilities"))?;
+    let mime_count = u16::try_from(manifest.associations.len())
+        .map_err(|_| AppImageError::new(ctx, "too many associations"))?;
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
         flags: 0,
         capability_count,
-        mime_count: 0,
+        mime_count,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
         version_len: inline_len(ctx, "version", &manifest.version, BUNDLE_VERSION_MAX)?,
@@ -427,10 +477,27 @@ pub fn compose_signed_appinfo(
         signature: [0; 64],
     };
 
-    let mut bytes = Vec::with_capacity(AppInfoHeader::WIRE_LEN + manifest.capabilities.len() * 2);
+    let mut bytes = Vec::with_capacity(
+        AppInfoHeader::WIRE_LEN
+            + manifest.capabilities.len() * 2
+            + manifest.associations.len() * MIME_ENTRY_LEN,
+    );
     bytes.extend_from_slice(&header.to_le_bytes());
     for cap in &manifest.capabilities {
         bytes.extend_from_slice(&cap.as_u16().to_le_bytes());
+    }
+    // The MIME table follows the capability-id list (the body layout
+    // `mime_type_at` reads): one fixed-length entry per association, a
+    // length byte then the bytes in a `MIME_TYPE_MAX` buffer. The whole
+    // body — capabilities then MIME table — is covered by the signature
+    // below, so a tampered association breaks the bundle.
+    for mime in &manifest.associations {
+        let len = u8::try_from(mime.len())
+            .map_err(|_| AppImageError::new(ctx, "association too long"))?;
+        let mut entry = [0u8; MIME_ENTRY_LEN];
+        entry[0] = len;
+        entry[1..=mime.len()].copy_from_slice(mime.as_bytes());
+        bytes.extend_from_slice(&entry);
     }
 
     let mut signed = Vec::with_capacity(bytes.len() - 64);
@@ -461,7 +528,7 @@ fn inline_buf<const N: usize>(value: &str) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_abi::decode_capability_ids;
+    use tairix_abi::{decode_capability_ids, mime_type_at};
     use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
     const GOOD: &str = "# a comment\n\
@@ -697,6 +764,63 @@ mod tests {
         })
         .expect("frames");
         assert_ne!(header.content_hash, sha256(&other_framing));
+    }
+
+    #[test]
+    fn associations_are_optional_and_default_empty() {
+        let manifest = AppManifestSource::parse(GOOD).expect("valid");
+        assert!(manifest.associations.is_empty());
+    }
+
+    #[test]
+    fn associations_parse_in_order_and_reject_duplicates() {
+        let text = format!("{GOOD}associations = [\"text/plain\", \"text/markdown\"]\n");
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        assert_eq!(manifest.associations, ["text/plain", "text/markdown"]);
+
+        let dup = format!("{GOOD}associations = [\"text/plain\", \"text/plain\"]\n");
+        assert!(AppManifestSource::parse(&dup).is_err());
+    }
+
+    #[test]
+    fn composed_appinfo_carries_the_signed_mime_table() {
+        let text = format!("{GOOD}associations = [\"text/plain\", \"text/markdown\"]\n");
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        let composed = compose_signed_appinfo(
+            &[9u8; 32],
+            &manifest,
+            [0x11; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program",
+            }],
+        )
+        .expect("composes");
+
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(header.mime_count, 2);
+
+        // The MIME table follows the capability body and reads back the
+        // declared types in order.
+        let body = &composed.bytes[AppInfoHeader::WIRE_LEN..];
+        let caps = usize::from(header.capability_count);
+        assert_eq!(mime_type_at(body, caps, 0), Ok("text/plain"));
+        assert_eq!(mime_type_at(body, caps, 1), Ok("text/markdown"));
+
+        // The MIME table is covered by the signature — a flipped byte in it
+        // breaks verification.
+        let mut signed = Vec::new();
+        signed.extend_from_slice(&composed.bytes[AppInfoHeader::signed_range()]);
+        signed.extend_from_slice(body);
+        let key = Ed25519PublicKey::from_bytes(&composed.signer_pubkey).expect("key");
+        key.verify(&signed, &Ed25519Signature(header.signature))
+            .expect("verifies");
+        let mut tampered = signed.clone();
+        let mime_at = AppInfoHeader::signed_range().end + caps * 2 + 1;
+        tampered[mime_at] ^= 0xFF;
+        assert!(key
+            .verify(&tampered, &Ed25519Signature(header.signature))
+            .is_err());
     }
 
     #[test]

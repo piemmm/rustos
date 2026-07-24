@@ -2147,6 +2147,89 @@ fn bundle_source_propagates_a_refused_enumeration() {
     );
 }
 
+/// Build a minimal, well-formed `AppInfo` wire image (a header, the capability
+/// body, then the MIME table) for the [`association_from_appinfo`] tests. The
+/// signature is left zero: `association_from_appinfo` reads the declared types
+/// as a display hint and never verifies the signature (the signed load gate
+/// does that at launch), so an unsigned fixture exercises exactly the decode.
+fn build_appinfo(name: &str, mimes: &[&str]) -> Vec<u8> {
+    use tairix_abi::{
+        AppInfoHeader, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+        BUNDLE_VERSION_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    };
+    fn inline<const N: usize>(value: &str) -> [u8; N] {
+        let mut buf = [0u8; N];
+        buf[..value.len()].copy_from_slice(value.as_bytes());
+        buf
+    }
+    let id = "os.tairix.fixture";
+    let version = "0.1.0";
+    let header = AppInfoHeader {
+        magic: APPINFO_MAGIC,
+        abi_version: ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: 0,
+        mime_count: u16::try_from(mimes.len()).expect("mime count fits"),
+        id_len: u8::try_from(id.len()).expect("id fits"),
+        name_len: u8::try_from(name.len()).expect("name fits"),
+        version_len: u8::try_from(version.len()).expect("version fits"),
+        reserved0: 0,
+        id: inline::<BUNDLE_ID_MAX>(id),
+        name: inline::<BUNDLE_NAME_MAX>(name),
+        version: inline::<BUNDLE_VERSION_MAX>(version),
+        syscall_table_hash: [0; 32],
+        content_hash: [0; 32],
+        signer_pubkey: [0; 32],
+        signature: [0; 64],
+    };
+    let mut bytes = header.to_le_bytes().to_vec();
+    for mime in mimes {
+        let mut entry = [0u8; MIME_ENTRY_LEN];
+        assert!(mime.len() <= MIME_TYPE_MAX);
+        entry[0] = u8::try_from(mime.len()).expect("mime fits");
+        entry[1..=mime.len()].copy_from_slice(mime.as_bytes());
+        bytes.extend_from_slice(&entry);
+    }
+    bytes
+}
+
+#[test]
+fn association_from_appinfo_reads_the_name_and_declared_types() {
+    let bytes = build_appinfo("viewer", &["text/plain", "text/markdown"]);
+    let assoc = crate::open_with::association_from_appinfo("/System/Apps/viewer.app", &bytes)
+        .expect("decodes");
+    assert_eq!(assoc.name(), "viewer");
+    assert_eq!(assoc.bundle_path(), "/System/Apps/viewer.app");
+    assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
+    // It composes with the matcher exactly as the mock store does.
+    assert!(applications_for("notes.txt", core::slice::from_ref(&assoc))
+        .iter()
+        .any(|b| b.name() == "viewer"));
+}
+
+#[test]
+fn association_from_appinfo_reads_a_bundle_that_declares_no_types() {
+    // A pure command declares no associations: it decodes to an empty MIME
+    // set (never an error) and is simply never an "open with" candidate.
+    let bytes = build_appinfo("printf", &[]);
+    let assoc = crate::open_with::association_from_appinfo("/System/Apps/printf.app", &bytes)
+        .expect("decodes");
+    assert!(assoc.mime_types().is_empty());
+    assert!(applications_for("notes.txt", core::slice::from_ref(&assoc)).is_empty());
+}
+
+#[test]
+fn association_from_appinfo_fails_closed_on_garbage() {
+    // A truncated or non-manifest blob is skipped, never offered on a guess.
+    assert!(crate::open_with::association_from_appinfo("/x.app", b"not a manifest").is_none());
+    assert!(crate::open_with::association_from_appinfo("/x.app", &[]).is_none());
+    // A header claiming a MIME entry the body does not carry fails closed too.
+    let mut bytes = build_appinfo("viewer", &["text/plain"]);
+    let short = bytes.len() - 4;
+    bytes.truncate(short);
+    assert!(crate::open_with::association_from_appinfo("/x.app", &bytes).is_none());
+}
+
 // ---------------------------------------------------------------------------
 // FM7 — multi-selection and the cut/copy clipboard (pure engine model).
 // ---------------------------------------------------------------------------

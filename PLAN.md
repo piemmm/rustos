@@ -3358,10 +3358,19 @@ transfer, landed in increments:
   row via `render::draw_properties_editable`/`permission_cell_at`, committed
   through `Browser::set_mode_selected` over `fs_set_mode` under the user's own
   identity — the read-only picker never draws or resolves a toggle).
-  FM2/FM4/FM6/FM7/FM8 were each split (§2.19); the remaining work is the
-  **drawn** FM4b context menu (landing with the verbs it invokes, §2.4), the
-  FM6b/FM7b app-side spawn/delegation/move-copy-delete verbs, **FM8b's
-  ownership editing**, and FM9.
+  FM2/FM4/FM6/FM7/FM8 were each split (§2.19). FM4b's **drawn context menu**,
+  all of FM7b's **app-side move/copy/paste/delete/new-folder verbs** (with
+  interleaved progress + cancel), FM8b's **ownership editing**, and FM6b's
+  **app-side bundle launch and `OpenFile` file→viewer hand-off** are now done:
+  `OpenFile` resolves the associated viewer from the installed bundles' signed
+  `AppInfo` MIME associations (the composer now emits that MIME table; the
+  `files.app` `RtBundleSource` reads it via the shared
+  `association_from_appinfo`) and hands the file over race-free at spawn —
+  `fs_open` read-only + `spawn_attached` wiring the descriptor onto the child's
+  `STDIN` with the reserved `tairix_abi::DOCUMENT_ROLE_ARG` token, so the
+  viewer reads its document with no filesystem capability of its own. The
+  remaining work is FM6b's explicit **"Open With…" chooser** (the default-open
+  picks the first association) and FM9 (the autoload QEMU vertical + docs).
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

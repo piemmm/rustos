@@ -17,3 +17,9 @@ name = "viewer"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+# File-type associations: the text content the viewer can display. The file
+# manager offers the viewer as an "Open With…" candidate for a file of one of
+# these types and, on a plain open, hands it the file on STDIN (the inherited-
+# document hand-off, plans/NEW-FILEMANAGER.md FM6b). A display hint only — the
+# signed load gate still verifies and capability-checks the launch.
+associations = ["text/plain", "text/markdown", "text/csv", "application/json", "application/yaml", "application/xml"]

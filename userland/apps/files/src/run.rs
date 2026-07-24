@@ -67,8 +67,10 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        load_failure_reason, CapabilityId, Errno, Origin, ProcId, UnlinkFlags, WaitFlags,
-        WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        load_failure_reason, CapabilityId, Errno, FdWire, Origin, ProcId, SpawnAttach, UnlinkFlags,
+        WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
+        ORIGIN_WIRE_LEN, STDIN, STD_STREAM_COUNT, SYSTEM_APP_STORE, USER_APP_STORE,
+        WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
         build_context_menu, build_delete_dialog, context_menu_command_at, delete_dialog_action_at,
@@ -77,7 +79,8 @@ mod program {
         progress_cancel_at, render, OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        paste_strategy, plan_paste, suggest_new_dir_name, validate_new_name, Activation, Browser,
+        applications_for, association_from_appinfo, paste_strategy, plan_paste,
+        suggest_new_dir_name, validate_new_name, Activation, AppAssociation, Browser, BundleSource,
         Clipboard, ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
         DeleteAction, DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange,
         PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
@@ -253,16 +256,204 @@ mod program {
                 }
             }
         }
+
+        /// Open the data file at the validated absolute path `file_path` in its
+        /// associated viewer — the `OpenFile` half of activation.
+        ///
+        /// The associated application is resolved from the installed bundles'
+        /// declared file-type associations ([`RtBundleSource`] +
+        /// [`applications_for`], keyed off the file's leaf name), never a
+        /// hard-coded viewer path. The first bundle that claims the file's type
+        /// is launched with the file handed to it on `STDIN` (see
+        /// [`launch_viewer`](Self::launch_viewer)). When no installed
+        /// application claims the type the refusal is stated fail-loud on
+        /// `stderr` and nothing is launched — an honest answer, never a
+        /// fabricated open (§2.24).
+        fn open_file(&mut self, file_path: &str) {
+            let name = path_leaf(file_path);
+            let mut source = RtBundleSource;
+            // A store that cannot be enumerated yields no candidate rather than
+            // an error the user cannot act on; the honest "no application"
+            // path below reports it.
+            let bundles = source.installed_bundles().unwrap_or_default();
+            // Copy the chosen bundle path out so the `bundles` borrow does not
+            // outlive the launch call below.
+            let chosen = applications_for(name, &bundles)
+                .first()
+                .map(|assoc| String::from(assoc.bundle_path()));
+            match chosen {
+                Some(bundle_path) => self.launch_viewer(&bundle_path, file_path, name),
+                None => report_error(&alloc::format!("no application to open {name}")),
+            }
+        }
+
+        /// Launch the viewer bundle at `bundle_path`, handing it the file at
+        /// `file_path` on `STDIN` — the inherited-document hand-off (the TAIRiX
+        /// spelling of `viewer < file`, `plans/NEW-FILEMANAGER.md` `FM6b`).
+        ///
+        /// The file manager opens the file **read-only in its own table** and
+        /// wires that descriptor onto the child's `STDIN` slot
+        /// ([`FdWire::Handle`]); the kernel clones the read-only open
+        /// description into the child owner-checked, so the viewer reads the
+        /// document with no filesystem capability of its own and there is no
+        /// post-spawn channel or ordering race. The [`DOCUMENT_ROLE_ARG`] token
+        /// tells the viewer it was handed a document (rather than to prompt),
+        /// and the leaf name titles its window. The manager's own descriptor is
+        /// closed regardless of the spawn outcome — the child holds its own
+        /// counted clone. Launching is asynchronous and the child is reaped on
+        /// the any-child wake exactly as [`launch`](Self::launch)'s children
+        /// are; a refusal is stated fail-loud, never a fabricated open (§2.24).
+        fn launch_viewer(&mut self, bundle_path: &str, file_path: &str, display_name: &str) {
+            // A negative (error) or out-of-range result is not a descriptor:
+            // state the refusal and launch nothing (fail closed).
+            let Ok(fd) = u32::try_from(tairix_rt::fs_open(file_path.as_bytes(), OpenFlags::READ))
+            else {
+                report_error(&alloc::format!("could not open {display_name}"));
+                return;
+            };
+            let mut run_path = String::from(bundle_path);
+            run_path.push_str("/Run");
+            let label = bundle_leaf(bundle_path);
+            let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
+            wires[STDIN as usize] = FdWire::Handle(fd);
+            let attach = SpawnAttach {
+                wires,
+                ..SpawnAttach::INHERIT
+            };
+            let pid = tairix_rt::spawn_attached(
+                run_path.as_bytes(),
+                &attach,
+                &[
+                    run_path.as_bytes(),
+                    DOCUMENT_ROLE_ARG,
+                    display_name.as_bytes(),
+                ],
+                &[],
+            );
+            // The child holds its own counted clone of the read-only open
+            // description; drop the manager's copy either way so nothing leaks.
+            let _ = tairix_rt::fs_close(fd);
+            if pid < 0 {
+                report_error(&alloc::format!("could not launch {label}"));
+                return;
+            }
+            #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
+            self.in_flight.insert(pid as u64, label);
+        }
+    }
+
+    /// The last non-empty component of a `/`-separated path
+    /// (`/Apps/Notes.app` → `Notes.app`, `/Users/me/notes.txt` → `notes.txt`) —
+    /// the leaf the user already sees, carrying no path prefix. An empty or
+    /// `/`-only path (which the validated activation paths never produce) falls
+    /// back to the whole string rather than an empty name.
+    fn path_leaf(path: &str) -> &str {
+        path.rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(path)
     }
 
     /// The bundle directory's leaf name (`/Apps/Notes.app` → `Notes.app`) — the
-    /// label the fail-loud launch diagnosis names, carrying no path prefix
-    /// beyond the bundle name the user already sees. An empty or `/`-only path
-    /// (which the validated activation path never produces) falls back to the
-    /// whole string rather than an empty name.
+    /// label the fail-loud launch diagnosis names.
     fn bundle_leaf(bundle_path: &str) -> String {
-        let leaf = bundle_path.rsplit('/').find(|part| !part.is_empty());
-        String::from(leaf.unwrap_or(bundle_path))
+        String::from(path_leaf(bundle_path))
+    }
+
+    /// The largest `AppInfo` manifest the bundle scan reads: a signed manifest
+    /// is a small fixed header plus a bounded capability/MIME body, far under
+    /// this, so a file larger than this at a bundle's `AppInfo` path is
+    /// malformed and skipped (bounded read, never unbounded memory, §24.1).
+    const APPINFO_READ_MAX: usize = 64 * 1024;
+
+    /// Depth bound on the app-store walk: bundles may be filed in nested plain
+    /// subdirectories, but a pathological tree must not recurse without limit
+    /// (fail closed, §24.1). Ample for the store's real nesting.
+    const MAX_BUNDLE_SCAN_DEPTH: usize = 8;
+
+    /// The running-system [`BundleSource`]: the installed applications and the
+    /// file types each declares, read from the on-disk app stores under the
+    /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list, §16.5).
+    ///
+    /// It walks the machine-wide stores (`/System/Apps` then `/Apps`),
+    /// descending nested plain subdirectories and reading each `<Name>.app`
+    /// bundle's `AppInfo` manifest for its declared MIME associations
+    /// ([`association_from_appinfo`]). The MIME table is a display *hint* only:
+    /// a bundle offered here is still launched through the ordinary signed load
+    /// gate, which verifies its signature and capabilities. A store or manifest
+    /// that cannot be read is skipped fail-closed, so a corrupt bundle is never
+    /// offered on a guess (§2.24).
+    struct RtBundleSource;
+
+    impl BundleSource for RtBundleSource {
+        fn installed_bundles(&mut self) -> Result<alloc::vec::Vec<AppAssociation>, Errno> {
+            let mut out = alloc::vec::Vec::new();
+            for store in [SYSTEM_APP_STORE, USER_APP_STORE] {
+                collect_bundles(store, 0, &mut out);
+            }
+            Ok(out)
+        }
+    }
+
+    /// Collect every `<Name>.app` bundle's declared associations under the
+    /// directory `dir` into `out`, descending nested plain subdirectories to
+    /// [`MAX_BUNDLE_SCAN_DEPTH`]. A directory that cannot be listed is skipped
+    /// (an absent `/Apps` is not an error); a `.app` is a sealed unit and is
+    /// never descended into.
+    fn collect_bundles(dir: &str, depth: usize, out: &mut alloc::vec::Vec<AppAssociation>) {
+        let Ok(stream) = tairix_rt::read_dir_all(dir.as_bytes()) else {
+            return;
+        };
+        let Ok(entries) = tairix_browse::vfs::entries_from_dir_stream(&stream) else {
+            return;
+        };
+        for entry in entries {
+            let name = entry.name();
+            let mut path = String::from(dir);
+            path.push('/');
+            path.push_str(name);
+            if name.ends_with(BUNDLE_SUFFIX) {
+                if let Some(assoc) = read_bundle_association(&path) {
+                    out.push(assoc);
+                }
+            } else if entry.is_directory_backed() && depth < MAX_BUNDLE_SCAN_DEPTH {
+                collect_bundles(&path, depth + 1, out);
+            }
+        }
+    }
+
+    /// Read the `AppInfo` manifest of the bundle at `bundle_path` and decode
+    /// its declared associations, or `None` when the manifest cannot be read or
+    /// does not parse (fail closed — the bundle is simply not offered).
+    fn read_bundle_association(bundle_path: &str) -> Option<AppAssociation> {
+        let mut manifest_path = String::from(bundle_path);
+        manifest_path.push_str("/AppInfo");
+        let bytes = read_bounded_file(manifest_path.as_bytes())?;
+        association_from_appinfo(bundle_path, &bytes)
+    }
+
+    /// Read up to [`APPINFO_READ_MAX`] bytes of the file at `path` (opened
+    /// read-only), or `None` on any refusal. Bounded so a manifest path that
+    /// resolves to an unexpectedly huge file is skipped rather than read
+    /// without limit (§24.1); the descriptor is closed either way.
+    fn read_bounded_file(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+        let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
+        let mut content = alloc::vec::Vec::new();
+        // A modest heap read buffer: a manifest is small, and a stack array of
+        // the full per-call I/O maximum would be a large-stack-array defect.
+        let mut chunk = alloc::vec![0u8; FS_IO_MAX];
+        while content.len() < APPINFO_READ_MAX {
+            let want = chunk.len().min(APPINFO_READ_MAX - content.len());
+            let Ok(got) = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]) else {
+                let _ = tairix_rt::fs_close(fd);
+                return None;
+            };
+            if got == 0 {
+                break;
+            }
+            content.extend_from_slice(&chunk[..got]);
+        }
+        let _ = tairix_rt::fs_close(fd);
+        Some(content)
     }
 
     /// The production [`EventSource`]: drain the app's own event
@@ -819,10 +1010,12 @@ mod program {
     ///   launched through the ordinary signed app-load gate ([`Launcher`]),
     ///   asynchronously so the event loop never blocks behind the load.
     ///   Launching changes nothing on screen, so nothing repaints.
-    /// * [`Activation::OpenFile`] — opening a data file in its associated
-    ///   viewer is a later stage (the file hand-off / "Open With…"); until it
-    ///   is wired, activating a file leaves the listing exactly as it was,
-    ///   never a fabricated action.
+    /// * [`Activation::OpenFile`] — the entry is a data file, opened in its
+    ///   associated viewer ([`Launcher::open_file`]): the file manager opens
+    ///   it read-only and hands it to the resolved viewer on `STDIN` (the
+    ///   inherited-document hand-off), asynchronously so the event loop never
+    ///   blocks. A file no installed application claims leaves the listing
+    ///   unchanged and states the refusal fail-loud, never a fabricated open.
     ///
     /// A refused activation (an unreadable directory the engine could not
     /// descend into) leaves the browser where it was and repaints nothing
@@ -843,7 +1036,11 @@ mod program {
                 launcher.borrow_mut().launch(&path);
                 (false, false)
             }
-            Ok(Activation::OpenFile { .. }) | Err(_) => (false, false),
+            Ok(Activation::OpenFile { path }) => {
+                launcher.borrow_mut().open_file(&path);
+                (false, false)
+            }
+            Err(_) => (false, false),
         }
     }
 
