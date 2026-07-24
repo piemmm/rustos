@@ -618,6 +618,33 @@ the live controller behaviour is host- and CI-proven first.
     on-metal ring corruption from the old recursion is not host-reproducible;
     the mock exercises the deferred-recovery contract, and the non-re-entrant
     structure removes the recursion by construction.)
+  - **A transaction fault *while a device's control pipe is being
+    established* is a disturbed device, not a broken one: enumeration re-drives
+    a fresh slot, bounded.** Address Device and the descriptor reads
+    (`EnumStage::is_pipe_bringup`: `EnableSlot`/`AddressDevice`/
+    `GetDeviceDescriptor`/`GetConfigDescriptor`) for a full/low-speed device
+    split through the hub's transaction translator, and a device hammered with
+    input *while it is still being addressed* — a keyboard typed on during
+    boot, before USB bring-up — makes that split complete with a
+    `SplitTransactionError` (the on-metal `enum_stage=3 completion=36`). Such a
+    fault means the device never received the request, so it stays in Default
+    state; `attach_on_rebound_region` disables the slot and re-drives a fresh
+    Enable Slot + Address Device up to `ENUM_ATTEMPTS` (4) times, exactly as
+    production stacks re-initialise a port (Linux `hub_port_init`'s
+    `PORT_INIT_TRIES`). Before this, one transient split fault failed the
+    attach; because the Pi 4's only connected root port is its onboard hub,
+    that took the *whole* controller down (`bring_up` attached nothing →
+    errored → the HCD task exited nonzero). The retry is scoped to the
+    pipe-bring-up phase and to a *transaction* fault
+    (`CompletionCode::indicates_device_unreachable`): a device that *answers*
+    with an error (STALL/babble), a forged descriptor, or a fault on
+    `SET_CONFIGURATION`/`CONFIGURE_ENDPOINT`/an optional HID class request is
+    surfaced on the first attempt, never re-driven — a bounded recovery, never
+    a retry-until-it-works. Regressions:
+    `a_transient_split_fault_during_enumeration_retries_and_serves_the_device`,
+    `an_active_device_error_during_enumeration_is_not_retried` (QEMU models no
+    Pi USB, so the register-level mock injects the one-shot Address Device
+    split fault the metal produced).
   - **Interrupt moderation is left at the 1 ms xHCI reset default, never
     disabled.** `enable_interrupter` programs `IR_IMOD` to
     `regs::IMODI_DEFAULT` (4000 × 250 ns = 1 ms). Disabling moderation

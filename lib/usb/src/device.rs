@@ -146,6 +146,26 @@ const AWAIT_EVENT_BUDGET_US: u64 = 5_000_000;
 /// not a scalable capacity.
 const CONNECT_WINDOW_US: u64 = 500_000;
 
+/// How many times enumeration re-drives a fresh slot for one device when the
+/// controller reports a *transaction* fault (a USB or split transaction
+/// error) rather than the device actively responding with an error.
+///
+/// A CRC/timeout/bad-PID or a hub transaction-translator split failure is
+/// exactly what a device that is *present but momentarily disturbed*
+/// produces — for instance a keyboard or mouse hammered with input while its
+/// control endpoint is still being brought up (the on-metal defect: typing
+/// during boot, before USB bring-up, intermittently killed the whole USB
+/// controller). Such a fault means the device never received or acknowledged
+/// the command, so it stays in its prior (Default) state and a fresh Enable
+/// Slot + Address Device cleanly re-drives it. A device that *answers* with an
+/// error (STALL, babble) or a forged descriptor is not retried — those
+/// re-fail deterministically. This is the enumeration analogue of the report-
+/// endpoint transaction-fault recovery, and mirrors the bounded
+/// re-initialisation real xHCI stacks perform (Linux `hub_port_init`'s
+/// `PORT_INIT_TRIES`). A recovery bound, not a scalable capacity, and never an
+/// unbounded retry-until-it-works.
+const ENUM_ATTEMPTS: u32 = 4;
+
 /// TRB slots in the command, EP0, and interrupt transfer rings and in
 /// the event segment. Protocol working sets for one device, not
 /// scalable capacities: the command and EP0 rings only ever hold a
@@ -1881,6 +1901,28 @@ impl EnumStage {
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
+    }
+
+    /// Whether this is a step of *establishing the device's control pipe* —
+    /// assigning its address and reading its descriptors — as opposed to the
+    /// later configuration and HID class requests.
+    ///
+    /// A transaction fault in this phase is a device disturbed while it is
+    /// still being brought up (see [`ENUM_ATTEMPTS`]): it never received the
+    /// request, so it stays in Default state and a fresh slot cleanly
+    /// re-drives it. A transaction fault *after* this phase — on
+    /// `SET_CONFIGURATION`/`CONFIGURE_ENDPOINT` or an (optional) HID class
+    /// request — is not re-driven here: the pipe is already up, so it is
+    /// surfaced as the genuine fault it is (a STALL on the optional class
+    /// requests is separately tolerated where they are issued).
+    const fn is_pipe_bringup(self) -> bool {
+        matches!(
+            self,
+            Self::EnableSlot
+                | Self::AddressDevice
+                | Self::GetDeviceDescriptor
+                | Self::GetConfigDescriptor
+        )
     }
 }
 
@@ -5472,6 +5514,13 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// enumeration into the table entry. A failure after the slot was
     /// assigned releases it (Disable Slot, DCBAA cleared, trailing events
     /// tolerated), so an aborted attach leaks nothing.
+    ///
+    /// A *transaction* fault (a USB or split transaction error) *while the
+    /// control pipe is being established* ([`EnumStage::is_pipe_bringup`]) is a
+    /// present-but-disturbed device, not a broken one, so enumeration re-drives
+    /// a fresh slot up to [`ENUM_ATTEMPTS`] times before giving up (see there);
+    /// a device that answers with an error (STALL/babble), a forged descriptor,
+    /// or a fault past the pipe-bring-up phase is surfaced on the first attempt.
     fn attach_on_rebound_region(
         &mut self,
         index: usize,
@@ -5505,14 +5554,6 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             None => (0, 0, 0, 0),
         };
         let (hub_index, down_port) = parent.unwrap_or((0, 0));
-        self.stage = EnumStage::EnableSlot;
-        let event = self.command(Trb::new(TrbType::EnableSlot, 0, 0, 0))?;
-        let slot = event.slot_id();
-        if slot == 0 || slot > self.xhci.max_slots() || (parent.is_some() && slot == parent_slot) {
-            return Err(DriverError::DeviceFault);
-        }
-        self.slot = slot;
-
         let base = SlotCtxBase {
             speed,
             root_port,
@@ -5520,54 +5561,86 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             tt_hub_slot,
             tt_port,
         };
-        let attached = self
-            .address_device(base, slot, max_packet)
-            .and_then(|()| self.finish_enumeration(slot, base, index, down_port, hub_index))
-            .and_then(|descriptor| {
-                if descriptor.is_hub() {
-                    // The child is itself a hub: install it into the hub
-                    // table, claiming the device region its contexts were
-                    // enumerated on. The caller descends it after its
-                    // latches are drained and the cursor rested.
-                    self.install_hub(
-                        parent.map(|(hub_index, _)| hub_index),
-                        down_port,
-                        base,
-                        Some(index),
-                    )
-                    .map(AttachOutcome::Hub)
-                } else {
-                    Ok(AttachOutcome::Device(index))
-                }
-            });
-        match attached {
-            Ok(outcome) => Ok(outcome),
-            Err(err) => {
-                // Preserve the failure's live breadcrumb across the cleanup:
-                // the Disable Slot below runs its own command wait, which
-                // would overwrite the stage/completion/reject state a
-                // capture needs to name the step that actually failed.
-                let (stage, completion, event_type, reject) = (
-                    self.stage,
-                    self.last_completion,
-                    self.last_event_type,
-                    self.last_reject,
-                );
-                // Release the slot the failed attach claimed and tolerate any
-                // trailing completion it still posts, so the shared event ring
-                // consumers never fault on the aborted device.
-                self.disable_slot_best_effort(slot);
-                let _ = self.dma.write(
-                    self.layout.dcbaa + usize::from(slot) * 8,
-                    &0u64.to_le_bytes(),
-                );
-                self.tolerate_freed_slot(slot);
-                self.stage = stage;
-                self.last_completion = completion;
-                self.last_event_type = event_type;
-                self.last_reject = reject;
-                Err(err)
+        // Enable a slot, address the device, and complete enumeration —
+        // re-driving a fresh slot on a *transaction* fault (a present-but-
+        // disturbed device, see [`ENUM_ATTEMPTS`]). A fault that means the
+        // device actively answered wrong (STALL/babble/forged descriptor) is
+        // not retried; it re-fails deterministically and is surfaced at once.
+        let mut attempt: u32 = 0;
+        loop {
+            self.stage = EnumStage::EnableSlot;
+            let event = self.command(Trb::new(TrbType::EnableSlot, 0, 0, 0))?;
+            let slot = event.slot_id();
+            if slot == 0
+                || slot > self.xhci.max_slots()
+                || (parent.is_some() && slot == parent_slot)
+            {
+                return Err(DriverError::DeviceFault);
             }
+            self.slot = slot;
+
+            let attached = self
+                .address_device(base, slot, max_packet)
+                .and_then(|()| self.finish_enumeration(slot, base, index, down_port, hub_index))
+                .and_then(|descriptor| {
+                    if descriptor.is_hub() {
+                        // The child is itself a hub: install it into the hub
+                        // table, claiming the device region its contexts were
+                        // enumerated on. The caller descends it after its
+                        // latches are drained and the cursor rested.
+                        self.install_hub(
+                            parent.map(|(hub_index, _)| hub_index),
+                            down_port,
+                            base,
+                            Some(index),
+                        )
+                        .map(AttachOutcome::Hub)
+                    } else {
+                        Ok(AttachOutcome::Device(index))
+                    }
+                });
+            let err = match attached {
+                Ok(outcome) => return Ok(outcome),
+                Err(err) => err,
+            };
+            // Preserve the failure's live breadcrumb across the cleanup:
+            // the Disable Slot below runs its own command wait, which
+            // would overwrite the stage/completion/reject state a
+            // capture needs to name the step that actually failed.
+            let (stage, completion, event_type, reject) = (
+                self.stage,
+                self.last_completion,
+                self.last_event_type,
+                self.last_reject,
+            );
+            // Release the slot the failed attach claimed and tolerate any
+            // trailing completion it still posts, so the shared event ring
+            // consumers never fault on the aborted device.
+            self.disable_slot_best_effort(slot);
+            let _ = self.dma.write(
+                self.layout.dcbaa + usize::from(slot) * 8,
+                &0u64.to_le_bytes(),
+            );
+            self.tolerate_freed_slot(slot);
+            self.stage = stage;
+            self.last_completion = completion;
+            self.last_event_type = event_type;
+            self.last_reject = reject;
+
+            // A transaction fault while the control pipe is still being
+            // established leaves the device in its prior (Default) state — it
+            // never saw the command — so a fresh slot re-drives it cleanly.
+            // Retry a bounded number of times; a fault that means the device
+            // answered wrong, one past the pipe-bring-up phase, or the final
+            // attempt surfaces the error.
+            attempt += 1;
+            let transient = stage.is_pipe_bringup()
+                && CompletionCode::from_raw(u32::from(completion))
+                    .is_ok_and(CompletionCode::indicates_device_unreachable);
+            if transient && attempt < ENUM_ATTEMPTS {
+                continue;
+            }
+            return Err(err);
         }
     }
 

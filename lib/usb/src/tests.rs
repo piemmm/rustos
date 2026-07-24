@@ -749,6 +749,13 @@ struct MockXhci {
     /// delivered (a single rejected report must never silence the
     /// keyboard).
     fault_one_report_completion: Option<CompletionCode>,
+    /// When set, the **next** Address Device command posts this completion
+    /// code (instead of Success) and clears the knob — modelling a single
+    /// transaction/split fault during enumeration, as a device disturbed by
+    /// input (a keyboard hammered before USB bring-up) produces. The driver's
+    /// bounded enumeration retry must re-drive a fresh slot and still serve
+    /// the device.
+    fault_next_address_device: Option<CompletionCode>,
     /// When set, the device is physically **gone**: a device-side
     /// `CLEAR_FEATURE(ENDPOINT_HALT)` on the interrupt endpoint — the last
     /// step of the interrupt-IN halt recovery — faults with a device-
@@ -1204,6 +1211,7 @@ impl MockXhci {
             fault_class_requests: false,
             forge_report_residual: false,
             fault_one_report_completion: None,
+            fault_next_address_device: None,
             device_gone: false,
             inject_int_fault_on_clear: None,
             suppress_disable_completion: false,
@@ -1807,6 +1815,22 @@ impl MockXhci {
     }
 
     fn handle_address_device(&mut self, input_ctx: u64) -> CompletionCode {
+        // A one-shot transaction/split fault on the *downstream* device (a
+        // full/low-speed device behind the hub's transaction translator, the
+        // only place a Split Transaction Error occurs): the device never
+        // receives the Set Address, so it stays in Default state and none of
+        // the slot's context is touched — modelling a device disturbed by
+        // input during bring-up (a keyboard hammered before USB bring-up).
+        // The driver's bounded enumeration retry re-drives a fresh slot.
+        let addressing_downstream = {
+            let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 1);
+            slot_ctx[0] & 0x000F_FFFF != 0
+        };
+        if addressing_downstream {
+            if let Some(code) = self.fault_next_address_device.take() {
+                return code;
+            }
+        }
         let control = self.read_dwords(input_ctx, 2);
         // Add flags must name the slot context and EP0 (A0 | A1).
         if control[1] & 0b11 != 0b11 {
@@ -5895,6 +5919,88 @@ fn rejected_report_records_its_completion_code_surviving_a_later_control_transfe
         device.last_report_fault_code(0),
         CompletionCode::UsbTransactionError.as_u8(),
         "the report fault code survives a later control transfer"
+    );
+}
+
+#[test]
+fn a_transient_split_fault_during_enumeration_retries_and_serves_the_device() {
+    // The on-metal defect: pressing keys during boot, *before* USB bring-up,
+    // intermittently killed the whole USB controller. A full/low-speed
+    // keyboard hammered with input while its control endpoint is being
+    // brought up makes its Address Device — a split transaction through the
+    // onboard hub's transaction translator — complete with a Split
+    // Transaction Error (the boot log's `enum_stage=3 completion=36`). That is
+    // a present-but-disturbed device, not a broken one: the device never saw
+    // the Set Address, so it stays in Default state. Enumeration must re-drive
+    // a fresh slot (Linux's `hub_port_init` retries the same way) and still
+    // serve the keyboard, instead of failing the attach — which, on the Pi 4
+    // where the only connected root port is the onboard hub, would take the
+    // whole controller down (attach 0 → `bring_up` errors → task exits).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // A full-speed downstream keyboard: connect status only, no high-speed
+    // bit, so its transactions split through the hub's TT — where a Split
+    // Transaction Error genuinely occurs.
+    mock.hub_downstream_status = 1 << 0;
+    // The next downstream Address Device faults once with the exact log code.
+    mock.fault_next_address_device = Some(CompletionCode::SplitTransactionError);
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("a transiently-disturbed keyboard is retried, not fatal");
+
+    // The keyboard behind the hub is served after the retry (a distinct slot
+    // from the hub's), and no port was left counted as skipped.
+    let keyboard = (0..device.device_table_len())
+        .find(|&index| {
+            device.device_live(index)
+                && device
+                    .device_identity(index)
+                    .is_some_and(|id| id.vendor_id == 0x046D && id.product_id == 0xC077)
+        })
+        .expect("the keyboard enumerated after the transient split fault");
+    assert_eq!(
+        device.skipped_port_count(),
+        0,
+        "the transient fault was recovered, not counted as an unserved port"
+    );
+
+    // The recovered device delivers input, proving it is fully configured.
+    arm_report_request_for(&mut device, keyboard);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(keyboard, &mut buf)
+        .expect("a report drains")
+        .expect("a report is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+#[test]
+fn an_active_device_error_during_enumeration_is_not_retried() {
+    // The retry is only for a *transaction* fault (a non-responding device).
+    // A device that actively answers wrong must fail the attach on the first
+    // attempt, never be re-driven: a forged/garbled hub descriptor (a
+    // successful transfer carrying bytes that are not a hub descriptor) is
+    // rejected fail-closed, not retried as if the device were merely
+    // disturbed.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.forge_hub_descriptor = true;
+    let mut device = started_device(mock, &mem);
+    // The hub's own descriptor is forged, so the root attach fails; with the
+    // hub the only connected root port, the whole bring-up surfaces it rather
+    // than silently retrying a device that answered with bad data.
+    assert!(
+        device.bring_up(&TestDelay::default()).is_err(),
+        "an active bad-descriptor answer fails closed, it is not retried"
     );
 }
 
