@@ -135,6 +135,72 @@ fn open_root_fails_closed_when_the_root_is_unreadable() {
 }
 
 #[test]
+fn open_at_starts_at_the_named_directory_with_working_climb() {
+    // Opening at `/System` starts *there* — its listing, its breadcrumb — and
+    // climbing returns toward the root exactly as a descent would have.
+    let start = crate::vfs::components_from_absolute_path("/System").expect("valid path");
+    let mut browser = Browser::open_at(MockFs::fixture(), start).expect("System lists");
+    assert!(!browser.is_root());
+    assert_eq!(browser.path(), "/System");
+    assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
+    assert_eq!(browser.selected_index(), Some(0));
+    // A fresh open has no back history, so the first climb goes to the parent
+    // rather than a remembered directory.
+    assert_eq!(browser.go_up(), Ok(true));
+    assert_eq!(browser.path(), "/");
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+}
+
+#[test]
+fn open_at_empty_components_is_exactly_open_root() {
+    // `open_root` is defined as `open_at(source, [])`; prove the empty path
+    // opens the root so the trusted picker's home-or-root fallback is honest.
+    let browser = Browser::open_at(MockFs::fixture(), Vec::new()).expect("root lists");
+    assert!(browser.is_root());
+    assert_eq!(browser.path(), "/");
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+}
+
+#[test]
+fn open_at_fails_closed_when_the_directory_is_unreadable() {
+    // A start directory that cannot be listed refuses the open (an `Err`), so
+    // the caller can fall back to a directory it can name rather than opening
+    // an empty or guessed view.
+    let start = crate::vfs::components_from_absolute_path("/System/Security").expect("valid path");
+    let result = Browser::open_at(MockFs::fixture(), start);
+    assert_eq!(
+        result.err(),
+        Some(BrowseError::Source(Errno::PermissionDenied))
+    );
+}
+
+#[test]
+fn components_from_absolute_path_parses_and_collapses_slashes() {
+    use crate::vfs::components_from_absolute_path as parse;
+    // The bare root and the empty string carry no components.
+    assert_eq!(parse("/"), Ok(Vec::new()));
+    assert_eq!(parse(""), Ok(Vec::new()));
+    // Leading, trailing, and repeated separators collapse to the same list.
+    let want = vec!["Users".to_string(), "root".to_string()];
+    assert_eq!(parse("/Users/root"), Ok(want.clone()));
+    assert_eq!(parse("/Users/root/"), Ok(want.clone()));
+    assert_eq!(parse("//Users//root//"), Ok(want));
+    // The parse is the exact inverse of the shared spelling.
+    let round = parse("/Users/root").expect("parses");
+    assert_eq!(crate::vfs::spell_absolute_path(&round), "/Users/root");
+}
+
+#[test]
+fn components_from_absolute_path_rejects_a_malformed_segment() {
+    use crate::vfs::components_from_absolute_path as parse;
+    // `.`/`..` and a resource-reference `:` are not real leaf names, so the
+    // whole path is refused rather than silently reinterpreted.
+    assert_eq!(parse("/Users/.."), Err(Errno::OutOfRange));
+    assert_eq!(parse("/Users/."), Err(Errno::OutOfRange));
+    assert_eq!(parse("/disk:backup"), Err(Errno::OutOfRange));
+}
+
+#[test]
 fn descend_and_climb_track_the_path_and_entries() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     // Sorted root order is [Apps, Storage, System, Users]; System is index 2.

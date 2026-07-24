@@ -1862,6 +1862,43 @@ fn picker_begin_fails_closed_when_the_listing_is_refused() {
     assert_eq!(picker.wm_id(), None, "nothing half-open remains");
 }
 
+/// `starting_at` opens the picker at the named directory (the user's home
+/// in production), so its first listing is that directory's — proven by
+/// choosing the file directly, without first descending from the root.
+#[test]
+fn picker_starting_at_opens_at_the_named_directory() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker =
+        SessionPicker::new(TreeSource::fixture).starting_at(vec![String::from("Docs")]);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    // `Docs/` holds only `notes.txt`, which is selected first; one Enter
+    // chooses it, so the picker must have opened *in* `Docs`, not the root.
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let concluded = picker
+        .handle_key(&enter, &mut shell, &mut comp)
+        .expect("choosing the file concludes");
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+    );
+}
+
+/// A `starting_at` directory that cannot be listed falls back to the root
+/// rather than refusing the pick, so the user can still choose a file.
+#[test]
+fn picker_starting_at_unlistable_home_falls_back_to_root() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture)
+        .starting_at(vec![String::from("Nowhere"), String::from("missing")]);
+    picker
+        .begin(7, &mut shell, &mut comp)
+        .expect("a bad home falls back to the listable root, not a refusal");
+    assert!(
+        picker.wm_id().is_some(),
+        "the picker opened at the root fallback"
+    );
+}
+
 /// Enter descends into a selected directory and chooses a selected file,
 /// concluding with the shared absolute-path spelling and closing the
 /// picker window.

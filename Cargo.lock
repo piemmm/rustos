@@ -2218,6 +2218,7 @@ dependencies = [
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-ipc",
+ "tairix-kernel-syscall",
  "tairix-log",
  "tairix-util",
 ]

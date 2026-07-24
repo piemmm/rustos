@@ -3382,9 +3382,19 @@ transfer, landed in increments:
   `WindowFrame::insets` client inset) and seat-keyboard `Enter`s, creating and
   naming a folder; the guest PASS gate latches two new `FsNodeMutated`
   `op=mkdir`→`op=rename` witnesses (counted only after the terminal round trip,
-  fail-closed) plus a "named folder" screendump. **The remaining work is FM9-b**
-  (open a file into the viewer via CU6 delegation) **and FM9-c** (delete with
-  confirm).
+  fail-closed) plus a "named folder" screendump. **FM9-b is landed too**: the
+  trusted picker now opens at the user's home (`Browser::open_at` over the
+  session's `HOME`, falling back to `/`), the shared users-root fixture plants
+  a readable document in `/Users/root`, and the vertical launches the Viewer
+  from the start menu, lets its auto-opened picker read the home, and clicks
+  the document row — the session `fd_grant`s the chosen file to the Viewer and
+  the Viewer `fd_redeem`s it (two new guest witnesses `sc=fd_grant`→
+  `sc=fd_redeem`, after the FM9-a rename). The pick-click is gated on a
+  test-kernel picker-open marker (the session's first post-rename
+  `comm=desktop sc=fs_open`, the picker's home read) since the session-internal
+  picker delivers no `MessageDelivered` and the user-authority session cannot
+  `log_emit`; non-flaky across repeated runs. **The remaining work is FM9-c**
+  (delete with confirm).
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

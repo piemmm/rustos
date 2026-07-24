@@ -516,13 +516,23 @@ mod program {
         let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
-        // pick starts from a fresh root listing under the session's
-        // authority; the app never lists anything itself.
+        // pick starts from a fresh listing under the session's authority;
+        // the app never lists anything itself. The picker opens at the
+        // logged-in user's home (`HOME`, exported by login) so the user
+        // lands among their own files rather than at the storage-forest
+        // root; an unset or malformed `HOME` parses to no components (the
+        // root), and a home that cannot be listed when a pick begins falls
+        // back to the root there (fail closed, never a guessed path).
+        let picker_start = tairix_rt::env_var(b"HOME")
+            .and_then(|home| core::str::from_utf8(home).ok())
+            .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
+            .unwrap_or_default();
         let mut picker = SessionPicker::new(|| {
             VfsDirectorySource::new(|path: &str| {
                 tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
             })
-        });
+        })
+        .starting_at(picker_start);
 
         let mut token = 0u64;
         loop {

@@ -400,6 +400,15 @@ const FM9_RENAME_SUFFIX: &str = tairix_test_autoload_input_qemu_aarch64::FM9_REN
 /// Gate for the "named folder" screendump: after the rename suffix is typed.
 const FM9_FOLDER_DUMP: u32 = tairix_test_autoload_input_qemu_aarch64::FM9_FOLDER_DUMP_DELIVERIES;
 
+/// FM9-b: gate for the start-menu-open + Viewer-launch clicks (the FM9-a
+/// folder-dump delivery count; the runner also holds them behind that dump).
+const FM9B_VIEWER_LAUNCH: u32 =
+    tairix_test_autoload_input_qemu_aarch64::FM9B_VIEWER_LAUNCH_DELIVERIES;
+
+/// FM9-b: serial marker the test kernel prints when the trusted picker has
+/// read the user's home (composited and ready) — the gate for the pick-click.
+const FM9B_PICKER_OPEN: &str = tairix_test_autoload_input_qemu_aarch64::FM9B_PICKER_OPEN_MARKER;
+
 /// Serial marker after which the autoload vertical types the login +
 /// desktop-command dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
@@ -5584,7 +5593,7 @@ impl tairix_browse::DirectorySource for FixedListing {
 fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_desktop_session::windows::cascade_origin_for;
     use tairix_desktop_session::{
-        DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, TERMINAL_LABEL,
+        DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, PICKER_ORIGIN, TERMINAL_LABEL,
         TERMINAL_LAUNCHER, VIEWER_LABEL, VIEWER_LAUNCHER,
     };
     use tairix_geometry::{Point, Rect, Scale};
@@ -5642,6 +5651,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let files_row = row(FILES_LABEL)?;
     let terminal_row = row(TERMINAL_LABEL)?;
     let toggle_row = row(APPEARANCE_LABEL)?;
+    let viewer_row = row(VIEWER_LABEL)?;
     // The centre of each served window: the session cascades them in
     // open order through the one shared placement rule, each sized by
     // its app's own constants — the same values the dump assertion
@@ -5790,6 +5800,46 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             files_client_origin.x + local.x,
             files_client_origin.y + local.y,
         )
+    };
+    // FM9-b: the pick-click on the planted document's row in the trusted
+    // picker. The picker opens at the user's home `/Users/root` (the session
+    // reads `HOME`), which by this stage holds FM9-a's created directory
+    // (`New Folder` + the rename suffix) and the fixture's planted document;
+    // the default sort (directories first, name ascending) puts the directory
+    // first, so the document is the second row. The picker window is
+    // UNDECORATED session chrome (no server-side furniture), so its client
+    // content sits at `PICKER_ORIGIN` with no frame inset — unlike the files
+    // window above. The row rect is measured through the same shared
+    // `selection_rect`, so the click lands on exactly the row the picker draws
+    // (`AGENTS.md` §2.2).
+    let welcome_pick = {
+        let folder = format!(
+            "{}{}",
+            tairix_browse::mkdir::NEW_FOLDER_BASE,
+            FM9_RENAME_SUFFIX.trim_end()
+        );
+        let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
+            .map_err(|_| "desktop pointer script: home document name is not utf-8".to_string())?;
+        let mut browser = tairix_browse::Browser::open_root(FixedListing(vec![
+            tairix_browse::Entry::directory(folder),
+            tairix_browse::Entry::file(doc),
+        ]))
+        .map_err(|e| format!("desktop pointer script: build picker browser: {e:?}"))?;
+        let index = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == doc)
+            .ok_or_else(|| "desktop pointer script: picker document row absent".to_string())?;
+        browser
+            .select(index)
+            .map_err(|e| format!("desktop pointer script: select picker document: {e:?}"))?;
+        let rect =
+            tairix_browse::render::selection_rect(&browser, files_font, files_theme, files_vp)
+                .ok_or_else(|| {
+                    "desktop pointer script: picker document row has no rect".to_string()
+                })?;
+        let local = centre(rect, "picker document row")?;
+        Point::new(PICKER_ORIGIN.x + local.x, PICKER_ORIGIN.y + local.y)
     };
     // The reserved window endpoint's first reply on serial: the create
     // round-trip completed, so the served window exists in the compositor
@@ -6021,6 +6071,37 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ),
         step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_NEW_FOLDER, press),
         step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9_NEW_FOLDER, release),
+        // --- FM9-b: open a file into the viewer via the trusted picker +
+        // CU6 delegation (`plans/NEW-FILEMANAGER.md` FM9-b). Launch the
+        // Viewer from the start menu (session-internal taskbar clicks, gated
+        // on the FM9-a folder-dump delivery count and held behind that dump);
+        // the Viewer, handed no document, asks the session's trusted picker,
+        // which opens at the user's home `/Users/root`.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            FM9B_VIEWER_LAUNCH,
+            move_by(new_folder_click, start),
+        ),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9B_VIEWER_LAUNCH, press),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9B_VIEWER_LAUNCH, release),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            FM9B_VIEWER_LAUNCH,
+            move_by(start, viewer_row),
+        ),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9B_VIEWER_LAUNCH, press),
+        step(AUTOLOAD_WINDOW_EVENT_MARKER, FM9B_VIEWER_LAUNCH, release),
+        // The pick-click on the document row in the trusted picker, gated on
+        // the test kernel's picker-open marker (the session's `open_at`
+        // directory read, emitted once) so the click is processed in a later
+        // wake with the picker composited and ready — never before it exists.
+        // Choosing the file concludes the pick: the session `fd_grant`s the
+        // chosen file to the viewer, delivers `FilePicked`, and the viewer
+        // `fd_redeem`s and reads it (the CU6 one-shot delegation, the guest's
+        // `fd_grant`/`fd_redeem` PASS witnesses).
+        step(FM9B_PICKER_OPEN, 1, move_by(viewer_row, welcome_pick)),
+        step(FM9B_PICKER_OPEN, 1, press),
+        step(FM9B_PICKER_OPEN, 1, release),
     ])
 }
 

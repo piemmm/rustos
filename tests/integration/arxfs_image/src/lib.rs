@@ -91,6 +91,18 @@ pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
 pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to arxfs over virtio-blk.\n";
 
+/// A document planted in the fixture account's home (`/Users/root`) on the
+/// users-root volume, so the desktop session's trusted file picker — which
+/// opens at the user's home — has a real regular file to choose. Choosing it
+/// drives the CU6 one-shot `fd_grant`/`fd_redeem` delegation into the viewer
+/// (`plans/NEW-FILEMANAGER.md` FM9-b).
+pub const HOME_DOC_NAME: &[u8] = b"Welcome.txt";
+
+/// Contents of [`HOME_DOC_NAME`], displayed by the viewer once the picked
+/// file's delegated descriptor is redeemed and read.
+pub const HOME_DOC_CONTENT: &[u8] =
+    b"Welcome to TAIRiX.\nThis document was opened through the trusted file picker.\n";
+
 /// Username of the interactive account planted on the users-root volume
 /// ([`build_users_root_image`]) on top of the canonical default
 /// system/service set.
@@ -330,6 +342,27 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
                     tairix_users::FIRST_USER_GID,
                 ),
             )?;
+            // A readable document in the account's home so the desktop
+            // session's trusted file picker — which opens at the user's
+            // home — shows a real regular file to choose, exercising the
+            // CU6 one-shot `fd_grant`/`fd_redeem` delegation into the
+            // viewer (`plans/NEW-FILEMANAGER.md` FM9-b). Owned by the
+            // account and world-unreadable-but-owner-readable (0644 under
+            // the owner-only home), so only a process running as the user
+            // reaches it, exactly as a user's own document is.
+            let doc = fs.create(home, HOME_DOC_NAME, NodeKind::RegularFile)?;
+            fs.set_security(
+                doc,
+                Security::new(
+                    0o644,
+                    tairix_users::FIRST_USER_UID,
+                    tairix_users::FIRST_USER_GID,
+                ),
+            )?;
+            let written = fs.write_at(home, HOME_DOC_NAME, 0, HOME_DOC_CONTENT)?;
+            if written != HOME_DOC_CONTENT.len() {
+                return Err(DriverError::DeviceFault);
+            }
         }
         if name == "System" {
             let security = fs.create(node, b"Security", NodeKind::Directory)?;
@@ -466,6 +499,20 @@ mod tests {
         assert_eq!(sec.mode, 0o700);
         assert_eq!(sec.uid, tairix_users::FIRST_USER_UID);
         assert_eq!(sec.gid, tairix_users::FIRST_USER_GID);
+
+        // The pickable home document exists, is owner-readable, and reads
+        // back its known contents, so the trusted picker (opening at the
+        // user's home) finds a real file to delegate into the viewer.
+        let doc = fs
+            .lookup(home, HOME_DOC_NAME)
+            .expect("/Users/root/Welcome.txt present");
+        let doc_sec = fs.security(doc).expect("document security present");
+        assert_eq!(doc_sec.mode, 0o644);
+        assert_eq!(doc_sec.uid, tairix_users::FIRST_USER_UID);
+        assert_eq!(doc_sec.gid, tairix_users::FIRST_USER_GID);
+        let mut buf = [0u8; 128];
+        let n = fs.read_at(doc, 0, &mut buf).expect("read home document");
+        assert_eq!(&buf[..n], HOME_DOC_CONTENT);
     }
 
     #[test]

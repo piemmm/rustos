@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on seven witnesses
+//! ## Why the PASS keys on nine witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -115,6 +115,23 @@
 //!    manager's create-then-name flow, end to end and kernel-attested.
 //!    (A refused mutation logs `FsMutationDenied`, a different id that
 //!    never satisfies these witnesses — fail closed.)
+//! 8. `AuditEvent::SyscallInvoked` (`EventId` 5000) with `sc=fd_grant`,
+//!    observed after the FM9-a rename (`plans/NEW-FILEMANAGER.md` FM9-b):
+//!    the desktop session launched the Viewer from the start menu, the
+//!    Viewer (handed no document) asked the session's trusted file picker
+//!    (`plans/APPWIN.md` AW5), the picker opened at the user's home
+//!    `/Users/root`, and a scripted click on the planted document row
+//!    concluded the pick — so the session delegated the user's chosen file
+//!    to the Viewer through the CU6 one-shot `fd_grant`. In this image the
+//!    trusted picker is the only `fd_grant` caller, so the witness is
+//!    unambiguous.
+//! 9. `AuditEvent::SyscallInvoked` with `sc=fd_redeem` (after witness 8):
+//!    the Viewer redeemed the one-shot delegation handle, installing the
+//!    delegated read-only descriptor under the session's captured identity
+//!    — it now reads exactly the one file the user chose, with no
+//!    filesystem capability of its own. The CU6 delegation, end to end and
+//!    kernel-attested; the pick-click is gated on the test kernel's
+//!    picker-open marker so it lands only once the picker is composited.
 //!
 //! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
@@ -130,7 +147,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all seven witnesses, so the harness times out — the documented
+//! reaches all nine witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -217,6 +234,9 @@ mod kernel {
         shell_round_trip: AtomicBool,
         fs_folder_created: AtomicBool,
         fs_folder_renamed: AtomicBool,
+        fd_delegation_granted: AtomicBool,
+        fd_delegation_redeemed: AtomicBool,
+        picker_open_marked: AtomicBool,
     }
 
     impl AutoloadInputSink {
@@ -230,6 +250,9 @@ mod kernel {
                 shell_round_trip: AtomicBool::new(false),
                 fs_folder_created: AtomicBool::new(false),
                 fs_folder_renamed: AtomicBool::new(false),
+                fd_delegation_granted: AtomicBool::new(false),
+                fd_delegation_redeemed: AtomicBool::new(false),
+                picker_open_marked: AtomicBool::new(false),
             }
         }
 
@@ -287,6 +310,61 @@ mod kernel {
             }
         }
 
+        /// Latch the file-manager open-a-file witnesses (`plans/NEW-FILEMANAGER.md`
+        /// FM9-b) from a `SyscallInvoked` record's `sc` field: `fd_grant` then,
+        /// once it has, `fd_redeem`. These fire only *after* the FM9-a rename
+        /// committed (`fs_folder_renamed`), so no earlier delegation could
+        /// satisfy them — and in this image the trusted file picker is the only
+        /// `fd_grant` caller and the viewer the only `fd_redeem` caller, both
+        /// reached only by this stage's scripted Viewer launch and pick. The
+        /// grant is the session delegating the user's chosen file; the redemption
+        /// is the viewer installing the delegated read-only descriptor — the CU6
+        /// one-shot delegation, end to end and kernel-attested. `fd_redeem`
+        /// requires `fd_grant` first, so a stray redemption cannot satisfy PASS
+        /// on its own.
+        fn note_syscall(&self, event: &Event<'_>) {
+            if !self.fs_folder_renamed.load(Ordering::Acquire) {
+                return;
+            }
+            // Read the record's `comm` (calling process) and `sc` (syscall
+            // name) once; both are `SyscallInvoked` fields.
+            let mut comm = "";
+            let mut sc = "";
+            for field in event.fields {
+                match (field.key, field.value) {
+                    ("comm", tairix_log::FieldValue::Str(value)) => comm = value,
+                    ("sc", tairix_log::FieldValue::Str(value)) => sc = value,
+                    _ => {}
+                }
+            }
+            match sc {
+                "fd_grant" => {
+                    self.fd_delegation_granted.store(true, Ordering::Release);
+                }
+                "fd_redeem" if self.fd_delegation_granted.load(Ordering::Acquire) => {
+                    self.fd_delegation_redeemed.store(true, Ordering::Release);
+                }
+                // The desktop session's first directory read after the FM9-a
+                // rename is the trusted picker's `open_at` listing of the
+                // user's home (done synchronously inside the `PickFile`
+                // serve). Emit the deterministic marker the runner gates its
+                // pick-click on, exactly once, so the click lands in a later
+                // wake with the picker composited.
+                "fs_open"
+                    if comm == tairix_test_autoload_input_qemu_aarch64::SESSION_COMM
+                        && !self.picker_open_marked.swap(true, Ordering::AcqRel) =>
+                {
+                    SerialSink::new().write_event(&Event {
+                        level: tairix_log::Level::Info,
+                        id: tairix_log::EventId(0),
+                        message: tairix_test_autoload_input_qemu_aarch64::FM9B_PICKER_OPEN_MARKER,
+                        fields: &[],
+                    });
+                }
+                _ => {}
+            }
+        }
+
         /// Latch the display-service witness when a `CallEndpointCreated`
         /// record names the reserved `DISPLAY_ENDPOINT` — compared against
         /// the exact hex spelling the kernel/ipc audit fields render
@@ -323,6 +401,8 @@ mod kernel {
                 self.note_endpoint_created(event);
             } else if event.id.0 == AuditEvent::FsNodeMutated.id().0 {
                 self.note_fs_mutation(event);
+            } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
+                self.note_syscall(event);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
                 self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
             } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
@@ -346,6 +426,8 @@ mod kernel {
                 && self.shell_round_trip.load(Ordering::Acquire)
                 && self.fs_folder_created.load(Ordering::Acquire)
                 && self.fs_folder_renamed.load(Ordering::Acquire)
+                && self.fd_delegation_granted.load(Ordering::Acquire)
+                && self.fd_delegation_redeemed.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

@@ -82,9 +82,22 @@ forward `render::manager_tool_rect` over the new `Toolbar::tool_rect` for the
 New Folder tool, offset by the WM's `WindowFrame::insets` client inset) and
 seat-keyboard `Enter`s, creates+names a folder, and the guest PASS latches two
 new `FsNodeMutated` `op=mkdir`→`op=rename` witnesses (post-terminal-round-trip,
-fail-closed) plus a "named folder" screendump. **What remains is FM9-b (open a
-file via CU6) and FM9-c (delete with confirm), each appended after FM9-a with
-its own kernel-attested PASS witness, plus its docs.** The starting point is
+fail-closed) plus a "named folder" screendump. **FM9-b is now landed too**
+(open a file into the viewer via the CU6 one-shot delegation): the trusted
+picker now opens at the user's home (`Browser::open_at` over the session's
+`HOME`, falling back to `/`), the fixture plants a readable document in
+`/Users/root`, and the aarch64 `autoload_input` vertical launches the Viewer
+from the start menu, lets the auto-opened picker read the home, clicks the
+document row, and latches two new guest PASS witnesses — `SyscallInvoked
+sc=fd_grant` then `sc=fd_redeem` (after the FM9-a rename, so no earlier
+delegation can satisfy them). The pick-click is gated on a test-kernel
+picker-open marker (the session's first post-rename `comm=desktop sc=fs_open`,
+the picker's `open_at` home read), so it lands only once the picker is
+composited — no `MessageDelivered` fires for the session-internal picker and
+the user-authority session cannot `log_emit`, so the test sink turns that
+unique read into the deterministic gate. **What remains is FM9-c (delete with
+confirm), appended after FM9-b with its own kernel-attested PASS witness, plus
+its docs.** The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -1167,8 +1180,33 @@ the click-through that keys on them is written.
     satisfy them (fail closed — `FsMutationDenied` is id 4101 and never
     latches), plus a "named folder" screendump asserting the files window is
     composited at its slot.
-  - **FM9-b — open a file into the viewer via CU6 delegation**, gated on the
-    `fd_grant`/`fd_redeem` audit ids (reuses AW5).
+  - **FM9-b — open a file into the viewer via CU6 delegation `[x]` (done).**
+    The trusted picker now opens at the user's home (`Browser::open_at` over
+    the session's `HOME`, parsed with the shared
+    `vfs::components_from_absolute_path`, falling back to `/`), and the shared
+    users-root fixture plants a readable document (`HOME_DOC_NAME`) in
+    `/Users/root`. After FM9-a, the vertical opens the start menu and clicks
+    the **Viewer** launcher (session-internal taskbar clicks, gated on the
+    FM9-a folder-dump delivery count and held behind that dump); the Viewer,
+    handed no document, asks the picker, which opens the home. A single
+    pointer click on the document row (reconstructed through the same
+    `render::selection_rect`, at `PICKER_ORIGIN` with **no** frame inset —
+    the picker is undecorated session chrome) concludes the pick, so the
+    session `fd_grant`s the chosen file to the Viewer and the Viewer
+    `fd_redeem`s it. Two new guest PASS witnesses latch from `SyscallInvoked`
+    `sc=fd_grant` then `sc=fd_redeem` (after the FM9-a rename, so no earlier
+    delegation can satisfy them; the picker is the only `fd_grant` caller and
+    the Viewer the only `fd_redeem` caller in the image). **Sequencing the
+    pick was the hard part** and is solved without any production change: the
+    session-internal picker delivers no `MessageDelivered`, maps no `shm`
+    frame, and — being user-authority — cannot `log_emit`, so there is no
+    kernel-audited event at picker-open. But the picker's `open_at` home
+    listing is the session's *first* directory read after the FM9-a rename, a
+    `SyscallInvoked` `comm=desktop sc=fs_open`; the test kernel's audit sink
+    turns that unique event into the deterministic `FM9B_PICKER_OPEN_MARKER`
+    serial line, and the runner gates the pick-click on it (the `fs_open`
+    happens synchronously inside the `PickFile` serve, so the click lands in a
+    later wake with the picker composited). Non-flaky across repeated runs.
   - **FM9-c — delete with confirm**, gated on the `FsNodeMutated` `op=unlink`
     /`op=rmdir` records.
 - **Docs** kept current in the same changes (§2.8, §13):

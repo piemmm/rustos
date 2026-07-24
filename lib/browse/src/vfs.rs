@@ -51,6 +51,40 @@ pub fn spell_absolute_path(components: &[String]) -> String {
     path
 }
 
+/// Parse an absolute path string into validated root-first components — the
+/// inverse of [`spell_absolute_path`].
+///
+/// This is how a consumer turns a path it was *handed* (the `HOME`
+/// environment the desktop session reads to open its picker at the user's
+/// home) into the component list the [`Browser`](crate::Browser) navigates,
+/// using the *same* per-component rule [`absolute_path`] spells with (§2.2):
+/// every segment between `/`s must be a real single filesystem leaf name
+/// ([`tairix_path::validate_file_name`]). Leading, trailing, and repeated
+/// `/`s collapse (so `/Users/root/` and `/Users/root` parse alike); the bare
+/// root `/` (and the empty string) parse to no components.
+///
+/// # Errors
+///
+/// * [`Errno::OutOfRange`] if any segment is not a valid leaf name (`.`,
+///   `..`, a control character, `:`, or over the name bound), so a caller
+///   falls back to a directory it can name rather than guessing.
+/// * [`Errno::LengthOutOfRange`] if the re-spelled path exceeds
+///   [`FS_PATH_MAX`].
+pub fn components_from_absolute_path(path: &str) -> Result<Vec<String>, Errno> {
+    let mut components = Vec::new();
+    for segment in path.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        tairix_path::validate_file_name(segment).map_err(|_| Errno::OutOfRange)?;
+        components.push(String::from(segment));
+    }
+    if spell_absolute_path(&components).len() > FS_PATH_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(components)
+}
+
 /// Validate `components` and spell them as the absolute path handed to the
 /// kernel.
 ///

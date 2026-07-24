@@ -172,3 +172,49 @@ pub const FM9_RENAME_SUFFIX: &str = "x\n";
 /// four from [`FM9_RENAME_DELIVERIES`]. By then the inline editor has
 /// committed and closed and the named folder is on screen.
 pub const FM9_FOLDER_DUMP_DELIVERIES: u32 = FM9_RENAME_DELIVERIES + 4;
+
+// --- FM9-b: open a file into the viewer via the trusted picker + CU6
+// one-shot delegation (`plans/NEW-FILEMANAGER.md` FM9-b), appended after
+// FM9-a. The Viewer is launched from the start menu with no document, so it
+// asks the session's trusted picker (`plans/APPWIN.md` AW5); the picker opens
+// at the user's home (`/Users/root`, where the fixture plants a document),
+// the user clicks the document row, and the session `fd_grant`s the chosen
+// file to the viewer, which `fd_redeem`s and reads it.
+//
+// The start-menu button and the Viewer row are the taskbar's own session-
+// internal surfaces (not app-served windows), and the trusted picker is a
+// session-owned compositor window — none of them deliver app-ward window
+// events, so this stage's clicks do not advance the [`MessageDelivered`]
+// counter. They are therefore gated on the FM9-a folder-dump delivery count
+// (the last app-ward delivery) and, for the pick itself, on a serial marker
+// that appears only once the picker is composited and ready.
+
+/// Gate for the start-menu-open + Viewer-launch clicks: the FM9-a folder
+/// dump's delivery count (the last app-ward delivery). These clicks are
+/// session-internal (taskbar), so they add no deliveries; the runner also
+/// holds them behind the pending folder dump, so the Viewer is launched only
+/// once FM9-a is provably complete.
+pub const FM9B_VIEWER_LAUNCH_DELIVERIES: u32 = FM9_FOLDER_DUMP_DELIVERIES;
+
+/// Serial marker the freestanding test kernel prints once it observes the
+/// desktop session read a directory *after* the FM9-a rename — the trusted
+/// picker's `open_at` listing of the user's home, done synchronously inside
+/// the `PickFile` serve, so the picker window is composited in that same wake.
+///
+/// There is no kernel-audited event at picker-open (the picker is a
+/// session-owned compositor surface, and the user-authority session cannot
+/// emit to the diagnostic log), and no app-ward `MessageDelivered` fires. But
+/// the session's `read_dir_all` for the picker's home listing is a
+/// `SyscallInvoked` (`sc=fs_open`) attributed to `comm=desktop`, and after
+/// FM9-a the session performs no other `fs_open` before this one — so the
+/// test's audit sink turns that unique event into this deterministic marker.
+/// The runner gates its pick-click on it, so the click is processed in a
+/// *later* wake, strictly after the picker is open (the FM9-a "later wake"
+/// discipline). This is a test-only observation (`src/main.rs`), never a
+/// production log line.
+pub const FM9B_PICKER_OPEN_MARKER: &str = "FM9B trusted picker open";
+
+/// The session process's `comm` (its bundle leaf `desktop.app` → `desktop`),
+/// the `SyscallInvoked` `comm` field value the test sink matches to attribute
+/// the picker directory-read to the session and nothing else.
+pub const SESSION_COMM: &str = "desktop";

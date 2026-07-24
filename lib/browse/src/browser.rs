@@ -73,9 +73,30 @@ impl<S: DirectorySource> Browser<S> {
     /// # Errors
     ///
     /// Returns [`BrowseError::Source`] if the root directory cannot be listed.
-    pub fn open_root(mut source: S) -> Result<Self, BrowseError> {
+    pub fn open_root(source: S) -> Result<Self, BrowseError> {
+        Self::open_at(source, Vec::new())
+    }
+
+    /// Open the browser at the directory named by root-first `components`,
+    /// listing its children (an empty slice is the root `/`, so
+    /// [`open_root`](Self::open_root) is exactly `open_at(source, [])`).
+    ///
+    /// The browser starts *at* that directory: its breadcrumb shows the given
+    /// path and [`go_up`](Self::go_up) climbs toward the root from there, with
+    /// an empty back/forward history exactly as a fresh open has. This is how a
+    /// consumer opens where the user expects to start — the trusted file picker
+    /// opens at the user's home rather than dumping them at the storage-forest
+    /// root — without a second navigation model (§2.2): the same listing, sort,
+    /// and selection path `open_root` uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::Source`] if that directory cannot be listed
+    /// (an unreadable, missing, or malformed path) — so a caller can fall back
+    /// to a directory it can list (e.g. the root) rather than open nothing.
+    pub fn open_at(mut source: S, components: Vec<String>) -> Result<Self, BrowseError> {
         let sort_mode = SortMode::default_order();
-        let mut entries = source.list(&[]).map_err(BrowseError::Source)?;
+        let mut entries = source.list(&components).map_err(BrowseError::Source)?;
         sort_entries(&mut entries, sort_mode);
         let mut selection = Selection::new();
         if !entries.is_empty() {
@@ -83,7 +104,7 @@ impl<S: DirectorySource> Browser<S> {
         }
         Ok(Self {
             source,
-            components: Vec::new(),
+            components,
             entries,
             selected: 0,
             selection,

@@ -82,7 +82,13 @@ no permission decision of its own.
 `Browser` holds the current directory's path and entries plus a selection
 cursor:
 
-- `open_root` opens at `/` and lists it.
+- `open_root` opens at `/` and lists it; `open_at(source, components)` opens
+  *at* a given directory (root-first `components`, empty being `/`, so
+  `open_root` is exactly `open_at(source, [])`). Its breadcrumb shows that
+  path and `go_up` climbs from there, with a fresh (empty) history — the one
+  way a consumer starts somewhere other than `/` without a second navigation
+  model. The desktop session's trusted picker opens at the user's home this
+  way (below).
 - `open_index` / `open_selected` descend into a directory entry; `go_up`
   climbs to the parent and returns `Ok(false)` at the root (no parent is not
   an error).
@@ -452,6 +458,29 @@ fabricated success. On success the directory is re-listed and the selection
 follows the entry to its new name. The trusted file picker composes the same
 `Browser` and simply never calls the write path, so it stays read-only
 (`plans/CAPABILITY_USE.md` CU6).
+
+### The trusted picker opens at the user's home
+
+The desktop session's trusted file picker (the CU6 delegation UI,
+`plans/APPWIN.md` AW5) opens at the logged-in user's home rather than the
+storage-forest root: the session reads its `HOME` environment (exported by
+login), parses it through the shared `vfs::components_from_absolute_path`, and
+`open_at`s the picker's `Browser` there, falling back to `/` when `HOME` is
+unset or a pick-time listing of it is refused (fail closed, never a guessed
+path). So the user lands among their own files, one click from a document,
+instead of drilling down from `/` every time — and the read-only picker still
+composes the exact same `Browser` (it only chose a different starting
+directory, `AGENTS.md` §2.2).
+
+Opening a file into a viewer through this picker is proven end to end on the
+aarch64 desktop QEMU vertical (`plans/NEW-FILEMANAGER.md` FM9-b): the session
+launches the Viewer from the start menu, the Viewer (handed no document) asks
+the picker, the picker opens at `/Users/root`, a scripted click on the planted
+document row concludes the pick, and the session delegates the chosen file to
+the Viewer through the CU6 one-shot `fd_grant` / `fd_redeem` — the Viewer then
+reads exactly that one file with no filesystem capability of its own. The
+run's guest PASS keys on the kernel-attested `sc=fd_grant` then `sc=fd_redeem`
+audit records.
 
 ### Multi-selection and the clipboard model
 

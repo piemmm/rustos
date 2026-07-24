@@ -108,16 +108,34 @@ struct ActivePick<S: DirectorySource> {
 /// live VFS listing calls in production, an in-memory tree in tests).
 pub struct SessionPicker<S: DirectorySource, F: FnMut() -> S> {
     source: F,
+    /// Root-first components of the directory each pick opens at — the
+    /// user's home in production, so the picker starts among the user's own
+    /// files rather than at the storage-forest root. Empty means the root
+    /// `/`, which is also the fallback when the start directory cannot be
+    /// listed.
+    start: Vec<String>,
     active: Option<ActivePick<S>>,
 }
 
 impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
-    /// An idle picker over `source`.
+    /// An idle picker over `source`, opening each pick at the root `/`.
     pub const fn new(source: F) -> Self {
         Self {
             source,
+            start: Vec::new(),
             active: None,
         }
+    }
+
+    /// Open each pick at the directory named by root-first `start` instead of
+    /// the root — the session points its picker at the logged-in user's home
+    /// so the user lands among their own files. A start directory that cannot
+    /// be listed when a pick begins falls back to the root rather than
+    /// refusing the pick (see [`begin`](PickerSlot::begin)).
+    #[must_use]
+    pub fn starting_at(mut self, start: Vec<String>) -> Self {
+        self.start = start;
+        self
     }
 
     /// The compositor window of the showing picker, if one is active.
@@ -285,11 +303,20 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         if self.active.is_some() {
             return Err(Errno::AlreadyExists);
         }
-        // List the root under the session's own authority before any UI
-        // state exists: a refused listing refuses the whole pick and
-        // leaves the slot idle (fail closed, nothing half-open).
-        let browser = Browser::open_root((self.source)())
-            .map_err(|err| err.source_errno().unwrap_or(Errno::PermissionDenied))?;
+        // List the start directory under the session's own authority before
+        // any UI state exists. The picker opens at the user's home; a home
+        // that cannot be listed (missing, or its capability refused) falls
+        // back to the root rather than refusing the pick, so the user can
+        // still choose a file. Only when the root itself cannot be listed is
+        // the whole pick refused (fail closed, nothing half-open).
+        let browser = match Browser::open_at((self.source)(), self.start.clone()) {
+            Ok(browser) => browser,
+            Err(_) if !self.start.is_empty() => Browser::open_root((self.source)())
+                .map_err(|err| err.source_errno().unwrap_or(Errno::PermissionDenied))?,
+            Err(err) => {
+                return Err(err.source_errno().unwrap_or(Errno::PermissionDenied));
+            }
+        };
         let surface = render_surface(&browser, shell).ok_or(Errno::LengthOutOfRange)?;
         let wm = shell
             .open_window(compositor, PICKER_ORIGIN, surface, PICKER_TITLE)
