@@ -1518,11 +1518,39 @@ alias).
   increment is host-tested; the guest path is guest-driven and exercised
   once an image carries a configured static interface).
 
-#### N9b-3-2 — bonding, failover, reload, observability, QEMU vertical `[ ]`
-- `netstack`: bond interface kind with `active-backup` + `balance` (§6.3),
-  member health monitor, gratuitous ARP/NA on failover; `match.node`
-  binding (define the tree node→device semantics with member resolution);
-  runtime config reload.
+#### N9b-3-2-α — the pure `lib/net::bond` engine `[x]`
+The link-aggregation decision core (`lib/net::bond`), landed ahead of its
+netstack wiring (the N9a/N6b-2-α "engine before wiring" precedent). It is a
+pure, family-agnostic, `neigh`/`mcast`-shaped state machine over member
+NICs, driven by injected time and link reports; it owns no addresses,
+routes, or I/O.
+- **Modes** (closed set, §6.3): `active-backup` (one transmitting member,
+  ordered failover, a declared `primary` reclaims the path) and `balance`
+  (flow-hashed spread over the eligible members via a family-agnostic
+  `flow_hash` — one flow stays on one member).
+- **Health**: link-state driven with an anti-flap discipline — a member
+  fails out **immediately** on link-down (fast failover), and is readmitted
+  only after one `monitor_interval` up-delay (deliberate failback, never
+  flapping). The monitor is tickless (`next_deadline` arms a one-shot only
+  while a member awaits admission).
+- **Events**: each mutation returns `BondEvent`s the composing interface
+  acts on — `PathChanged` (emit gratuitous ARP / unsolicited NA + audit)
+  and `WentDown` (transmit fails closed). `transmit_member` returns `None`
+  when no member is eligible; the member set is bounded by
+  `MAX_BOND_MEMBERS`. Runtime `set_mode`/`set_primary`/`add_member`/
+  `remove_member` recompute through the one selection point.
+- Covered by 15 `bond` host tests (admission/up-delay, immediate failover,
+  deliberate + no-op failback, balance stickiness + spread, fail-closed
+  transmit, runtime reconfig, flow-hash determinism). Not a byte decoder,
+  so no new fuzz harness (§19.6). Docs: `lib/net` lib.rs, `README.md`,
+  `docs/src/lib/net.md`.
+
+#### N9b-3-2-β — bonding wiring, failover, reload, observability, QEMU vertical `[ ]`
+- `netstack`: compose bond members over the interface table (the bond owns
+  addresses/neighbour caches/routes; members carry none and refuse direct
+  address assignment); drive `lib/net::bond` from member link reports;
+  gratuitous ARP/NA on `PathChanged`; `match.node` binding (define the tree
+  node→device semantics with member resolution); runtime config reload.
 - `info:`/`state:`/`stats:` members for bonds and the remaining §5
   counter/rate queries; `SysinfoQueryId` additions; `lib/procinfo`
   resolver mapping.

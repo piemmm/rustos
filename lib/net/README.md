@@ -110,6 +110,20 @@ connection state machine, and the listener + SYN-cookie driver),
   "one core, two providers" shape): reference-counted join/leave,
   robustness retransmission, jittered query responses, bounded and
   fail-closed at capacity.
+- `bond` — the pure link-aggregation decision core (`plans/NETWORK.md`
+  §6.3): a family-agnostic bond state machine over member NICs, the
+  `neigh`/`mcast` "one pure core, injected time" shape. Member health is
+  link-state driven — a member fails out **immediately** on link-down and
+  is readmitted only after one `monitor_interval` up-delay (deliberate
+  failback, never flapping). `active-backup` runs one transmitting member
+  with ordered failover (a declared `primary` reclaims the path); `balance`
+  spreads flows across the eligible members by a `flow_hash` over the
+  4-tuple, so a flow never reorders across links. Every mutation returns
+  the `BondEvent`s the composing interface acts on (`PathChanged` ⇒
+  gratuitous ARP / unsolicited NA + audit; `WentDown` ⇒ transmit fails
+  closed); the member set is bounded and `transmit_member` fails closed to
+  `None` when no member is eligible. The monitor is tickless
+  (`next_deadline` arms only while a member awaits admission).
 - `tcp` — the TCP segment codec (RFC 9293): the fixed header, the eight
   control flags (`TcpFlags`), the recognised options (MSS, window scale,
   timestamps, SACK-permitted, and up to `MAX_SACK_BLOCKS` SACK blocks),
@@ -161,11 +175,13 @@ connection state machine, and the listener + SYN-cookie driver),
   event-driven like the rest of the crate (`advance`/`next_deadline` drive
   half-open retransmit + expiry).
 
-One increment remains and evolves this crate in place: multiqueue receive
-(`plans/NETWORK.md` N7c-2, deferred until a device presents more than one
-receive queue). UDP transmit-checksum offload is deliberately not done —
-the virtio partial-checksum contract cannot honour UDP's
-`0x0000`→`0xFFFF` rule, so UDP stays on the software path (N7b-2).
+The remaining work evolves this crate in place: wiring `bond` into the
+`netstack` interface table (composing members, gratuitous ARP/NA on
+failover, config reload — `plans/NETWORK.md` N9b-3-2) and multiqueue
+receive (N7c-2, deferred until a device presents more than one receive
+queue). UDP transmit-checksum offload is deliberately not done — the
+virtio partial-checksum contract cannot honour UDP's `0x0000`→`0xFFFF`
+rule, so UDP stays on the software path (N7b-2).
 
 ## Security
 

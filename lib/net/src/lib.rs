@@ -54,6 +54,14 @@
 //!   driven by two protocol providers, exactly as [`neigh`] is one
 //!   cache driven by ARP and Neighbour Discovery.
 //!
+//! - [`bond`] — the pure link-aggregation decision core (`plans/NETWORK.md`
+//!   §6.3): a family-agnostic bond state machine over member NICs with
+//!   `active-backup` and `balance` transmit policies, link-state-driven
+//!   health with an anti-flap up-delay and deliberate `primary` failback,
+//!   a tickless one-shot monitor deadline, and the transmit-path-change
+//!   events that drive gratuitous ARP / unsolicited NA — exactly as
+//!   [`neigh`] and [`mcast`] are pure cores driven by injected time.
+//!
 //! - [`rate`] — the pure, tickless windowed-throughput meter that turns
 //!   an interface's byte/packet counters into the live `rx.pps`/`tx.bps`
 //!   rates the observability surface (`stats:net/<iface>/…`, plan §5)
@@ -101,6 +109,7 @@ extern crate alloc;
 
 pub mod addr;
 pub mod arp;
+pub mod bond;
 pub mod checksum;
 pub mod eth;
 pub mod frag;

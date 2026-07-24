@@ -306,6 +306,42 @@ ring depth and sampling gap are a fixed measurement *resolution*, not a
 per-device capacity. `netstack` owns one meter per interface and answers
 the `NET_INTERFACE_RATES` broker read from it.
 
+### `bond` — the link-aggregation decision core
+
+`Bond` is the pure decision core for link aggregation (`plans/NETWORK.md`
+§6.3): a bond is a virtual interface `netstack` composes over two or more
+member NICs, so any driver serving the frame-ring seam participates with
+zero driver changes — aggregation is a stack construct, not a device
+feature. Like `neigh` and `mcast`, it is pure and event-driven: it owns no
+addresses, no routes, and no I/O; the caller feeds member link-state
+reports and explicit `now`, and it answers *which member should carry a
+transmit* and *when a peer must relearn the bond's location*.
+
+Member health is link-state driven with a deliberate anti-flap discipline.
+A member that loses its link becomes ineligible **immediately**, so the
+transmit path fails over within one link-down report — never a polling
+delay. A member that regains its link is admitted only after it has been
+continuously up for one `monitor_interval` (the equivalent of a bonding
+driver's up-delay); this is the "failback is deliberate, never flapping"
+rule — a recovered `primary` reclaims the path one interval after it comes
+back, not the instant a flapping link reports up. The monitor is tickless:
+`next_deadline` arms a one-shot only while a member is up but not yet
+admitted, and is unarmed once the set is stable.
+
+Two transmit policies form a closed set (LACP is a future in-place
+extension, not speculated here). `active-backup` keeps one transmitting
+member at a time with ordered failover to the next eligible member; a
+declared `primary` makes it a deliberate failover interface. `balance`
+spreads transmits across the eligible members by a family-agnostic
+`flow_hash` over the 4-tuple, so one flow stays on one member (a TCP stream
+never reorders across links) while that member stays eligible. Every
+mutation returns the `BondEvent`s the composing interface acts on:
+`PathChanged` (emit a gratuitous ARP / unsolicited NA so peers relearn the
+path, and audit the change) and `WentDown` (the bond lost its last eligible
+member; transmit now fails closed). The member set is bounded by
+`MAX_BOND_MEMBERS`, and `transmit_member` returns `None` — fail closed —
+whenever no member is eligible.
+
 ### `tcp` — the TCP segment codec and sequence arithmetic
 
 The RFC 9293 wire layer: the fixed 20-byte header, the eight control
