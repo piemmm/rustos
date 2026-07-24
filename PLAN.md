@@ -3394,8 +3394,9 @@ transfer, landed in increments:
   `comm=desktop sc=fs_open`, the picker's home read) since the session-internal
   picker delivers no `MessageDelivered` and the user-authority session cannot
   `log_emit`; non-flaky across repeated runs. **FM9-c (delete with confirm):
-  the product side is landed and host-tested; its end-to-end QEMU vertical is
-  staged.** A clickable **Delete** now joins the context menu
+  the product side is landed and host-tested; the QEMU right-button injection
+  it depends on is now fixed and proven; only the full delete click-through
+  remains, staged.** A clickable **Delete** now joins the context menu
   (`ContextCommand::Delete`, its `begin_delete` action already existed, §2.4),
   routed to the same confirm-and-remove verb the `Delete` key drives. Reaching
   it fixed a real defect that makes the *whole* context menu usable in the
@@ -3405,13 +3406,20 @@ transfer, landed in increments:
   client right-press and the session forwards it and delivers `WindowEvent`
   `Pointer{Pressed(Secondary)}` to the app (host-tested in `tairix-wm` and
   `tairix-desktop-session`; shared `Menu::row_rect` /
-  `render::context_menu_command_rect` locate the Delete row). The end-to-end
-  QEMU proof is staged: the QEMU HMP `mouse_button` right-button does not reach
-  the emulated `virtio-mouse` (every OS layer decodes BTN_RIGHT→Secondary
-  correctly, all host-tested, yet the injected right-click never arrives), so a
-  scripted right-click delete is a metal/real-mouse acceptance item; the delete
-  verb, confirm dialog, and `DeleteWalk` are host-proven in `lib/browse` and
-  `files.app`.
+  `render::context_menu_command_rect` locate the Delete row). The earlier
+  "the injected right-click never arrives in QEMU" was a `tools/qemu` **harness
+  bug**, not an emulator limit: QEMU's HMP `mouse_button` help string
+  ("1=L, 2=M, 4=R") is wrong — `hmp_mouse_button` maps state bit `0x2` to the
+  right button and `0x4` to the middle, so the harness (trusting the help
+  string) sent a right-click as bit `0x4`, which QEMU delivered as a middle
+  button. `MouseButton::mask_bit` now sends `0x2`, and the dedicated
+  `tairix-test-pointer-button-virtio-mmio-qemu-aarch64` vertical proves a real
+  right-click reaches the guest as `BTN_RIGHT` `0x111` (it times out with the
+  old mask, passes with the fix — the fails-before/passes-after guard). The one
+  remaining FM9-c increment is wiring the full right-click→Delete→confirm
+  click-through into the intricate `autoload_input` sequence, which now has a
+  working right-button injection to build on; the delete verb, confirm dialog,
+  and `DeleteWalk` are host-proven in `lib/browse` and `files.app`.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

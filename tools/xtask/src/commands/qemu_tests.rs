@@ -4879,6 +4879,41 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/NEW-FILEMANAGER.md` FM9-c: the aarch64 virtio-input
+    // **pointer-button** vertical — the mouse-button sibling of the
+    // `input_virtio_mmio` keyboard vertical. It brings the `virt` board up
+    // to EL1, builds the virtio-MMIO bus from the embedded device tree,
+    // provisions an `MmioTransport`, arms the device's GICv2 SPI, mints a
+    // `KernelVirtioHost`, loads the signed virtio-input `.rxe`, and decodes
+    // a real injected **secondary (right) button** press then release. The
+    // runner attaches a `virtio-mouse-device` (implied by the pointer
+    // script) and, once the guest logs the event-queue-armed marker, sends
+    // `mouse_button` presses over the monitor; the eventq IRQ fires and the
+    // shared `virtio_input_button` tail asserts the decoded button is
+    // `BTN_RIGHT` (`0x111`), never the middle button (`0x112`). This guards
+    // the `tools/qemu` fix for QEMU's mislabelled HMP `mouse_button` state
+    // bits: before it, a scripted right-click was delivered as a middle
+    // button and the file manager's right-click context menu was
+    // unreachable in QEMU. No keyboard is attached (a mouse-only topology),
+    // so the guest opens the single virtio-input node — the mouse. Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // input verticals.
+    QemuTest {
+        package: "tairix-test-pointer-button-virtio-mmio-qemu-aarch64",
+        binary: "tairix-test-pointer-button-virtio-mmio-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: Some(pointer_button_script),
+        serial: &[],
+    },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
     // the `virt`-board virtio-input MMIO analogue of the aarch64 input
     // vertical, completing the `input` row of the QEMU matrix for
@@ -5539,6 +5574,39 @@ fn assert_files_window_region_covered(
         ));
     }
     Ok(())
+}
+
+/// The virtio-input readiness marker the pointer-button vertical's guest
+/// logs once its (single) mouse driver instance has armed its event
+/// queue — the gate both button steps wait on before the runner injects.
+const POINTER_BUTTON_READY_MARKER: &str = "virtio-qemu: virtio-input eventq armed";
+
+/// Build the pointer-button vertical's injection script: press then
+/// release the **secondary (right)** button, each once the guest's mouse
+/// driver has armed its event queue. Proves a scripted right-click reaches
+/// the emulated virtio-mouse as a right button (`BTN_RIGHT`, `0x111`),
+/// guarding the `tools/qemu` button-mask fix that made the file manager's
+/// right-click context menu reachable in QEMU (`plans/NEW-FILEMANAGER.md`
+/// FM9-c). A single virtio-input node (the mouse) arms once, so each step
+/// gates on the first occurrence of the readiness marker.
+// The `Result` is required by the shared `PointerScriptBuilder` fn-pointer
+// type (a fallible sibling like `autoload_desktop_pointer_script` can fail);
+// this script is statically known and never errors.
+#[allow(clippy::unnecessary_wraps)]
+fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::{MouseButton, PointerAction, PointerStep};
+    Ok(vec![
+        PointerStep {
+            ready_marker: POINTER_BUTTON_READY_MARKER.to_string(),
+            ready_occurrences: 1,
+            action: PointerAction::Press(MouseButton::Secondary),
+        },
+        PointerStep {
+            ready_marker: POINTER_BUTTON_READY_MARKER.to_string(),
+            ready_occurrences: 1,
+            action: PointerAction::Release(MouseButton::Secondary),
+        },
+    ])
 }
 
 /// A [`tairix_browse::DirectorySource`] that returns one fixed listing for

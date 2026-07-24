@@ -330,15 +330,26 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
-    /// The button's bit in the HMP `mouse_button` state mask, per the QEMU
-    /// this runner drives: **1 = left, 2 = middle, 4 = right** (the
-    /// `qemu-system-*` `mouse_button` help string). The secondary (right)
-    /// button is therefore bit 4 and the middle button bit 2.
+    /// The button's bit in the HMP `mouse_button` state mask, **as QEMU's
+    /// `hmp_mouse_button` actually decodes it**: bit `0x1` = left,
+    /// `0x2` = right, `0x4` = middle.
+    ///
+    /// The `qemu-system-*` `mouse_button` help string ("1=L, 2=M, 4=R") is
+    /// wrong: `hmp_mouse_button` (`ui/ui-hmp-cmds.c`) feeds the state mask to
+    /// `qemu_input_update_buttons` through a `bmap` whose entries are the
+    /// legacy `MOUSE_EVENT_*` bits (`include/ui/console.h`) —
+    /// `MOUSE_EVENT_LBUTTON = 0x1`, `MOUSE_EVENT_RBUTTON = 0x2`,
+    /// `MOUSE_EVENT_MBUTTON = 0x4`. So state bit `0x2` raises
+    /// `INPUT_BUTTON_RIGHT` and bit `0x4` raises `INPUT_BUTTON_MIDDLE`,
+    /// the opposite of what the help string claims. Following the help
+    /// string sent the secondary press as bit `0x4`, which QEMU delivered
+    /// to the guest as a *middle*-button event — so a scripted right-click
+    /// never reached the emulated virtio-mouse as a right-click at all.
     const fn mask_bit(self) -> u32 {
         match self {
-            MouseButton::Primary => 1,
-            MouseButton::Middle => 2,
-            MouseButton::Secondary => 4,
+            MouseButton::Primary => 0x1,
+            MouseButton::Secondary => 0x2,
+            MouseButton::Middle => 0x4,
         }
     }
 }
@@ -2226,13 +2237,15 @@ mod tests {
     }
 
     #[test]
-    fn mouse_button_mask_bits_are_the_hmp_state_bits() {
-        // The HMP `mouse_button` state mask: 1 = left, 2 = middle,
-        // 4 = right — a press ORs its bit in, a release clears only its
-        // own, so overlapping holds report faithfully.
-        assert_eq!(MouseButton::Primary.mask_bit(), 1);
-        assert_eq!(MouseButton::Middle.mask_bit(), 2);
-        assert_eq!(MouseButton::Secondary.mask_bit(), 4);
+    fn mouse_button_mask_bits_match_qemus_actual_button_decode() {
+        // The bits QEMU's `hmp_mouse_button` actually decodes (via the
+        // legacy `MOUSE_EVENT_*` `bmap`), *not* the wrong help string
+        // ("1=L, 2=M, 4=R"): state bit 0x2 raises the right button and
+        // 0x4 the middle. A press ORs its bit in, a release clears only
+        // its own, so overlapping holds report faithfully.
+        assert_eq!(MouseButton::Primary.mask_bit(), 0x1);
+        assert_eq!(MouseButton::Secondary.mask_bit(), 0x2);
+        assert_eq!(MouseButton::Middle.mask_bit(), 0x4);
     }
 
     #[test]

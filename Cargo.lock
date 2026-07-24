@@ -3087,6 +3087,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-pointer-button-virtio-mmio-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-input-virtio-input",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "tairix-test-posix-fs-suite"
 version = "0.0.0"
 dependencies = [

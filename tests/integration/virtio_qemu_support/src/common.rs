@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, POINTER_BUTTON_CODE_BASE};
 use tairix_abi::{CapabilityId, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
@@ -570,6 +570,82 @@ pub fn virtio_input_keypress<Tr: Transport>(
         return Err("virtio-input: no key release decoded");
     }
     env.log("virtio-qemu: virtio-input key release decoded");
+    Ok(())
+}
+
+/// The `evdev` code of the secondary (right) pointer button
+/// ([`POINTER_BUTTON_CODE_BASE`] `+ 1` = `0x111`, `BTN_RIGHT`) — what a
+/// virtio pointer device delivers for a right-button edge, and what the
+/// button vertical asserts the driver decodes.
+///
+/// Distinguishing it from the middle button's `0x112` is the whole point.
+/// QEMU's HMP `mouse_button` help string mislabels the state bits
+/// ("1=L, 2=M, 4=R") while `hmp_mouse_button` actually maps state bit
+/// `0x2` to the right button and `0x4` to the middle. A runner that
+/// followed the help string sent a scripted right-click as state bit
+/// `0x4`, so the guest received the *middle* button (`0x112`) and never a
+/// right-click — requiring `0x111` here fails closed if that regression
+/// ever returns.
+const POINTER_BUTTON_RIGHT_CODE: u16 = POINTER_BUTTON_CODE_BASE + 1;
+
+/// Drain the event queue until a pointer-button `Key` event with the
+/// requested `code` and `value` (`1` = press, `0` = release) is decoded,
+/// or the bounded budget is exhausted. Frame markers (`EV_SYN`) and any
+/// non-matching event (a different button, an `EV_REL` motion) are
+/// skipped.
+fn wait_for_button<Tr: Transport>(
+    input: &mut VirtioInput<'_, Tr>,
+    code: u16,
+    value: i32,
+) -> Result<bool, &'static str> {
+    let mut events = [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; 1];
+    for _ in 0..MAX_INPUT_POLLS {
+        let n = input.poll(&mut events).map_err(|_| "virtio-input poll")?;
+        if n >= 1
+            && events[0].kind == InputEventKind::Key
+            && events[0].code == code
+            && events[0].value == value
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// virtio-input device tail proving a real **right (secondary) button**
+/// edge reaches the driver: bring the device online over `transport`,
+/// announce readiness, then decode an injected right-button press
+/// followed by its release. Generic over the transport like
+/// [`virtio_input_keypress`].
+///
+/// The button is injected by the QEMU runner through the monitor once it
+/// observes [`INPUT_READY_MARKER`] — a real device→driver event, not a
+/// guest-side fabrication. The decode requires [`POINTER_BUTTON_RIGHT_CODE`]
+/// (`0x111`), so this fails closed if the runner ever again delivers a
+/// scripted right-click as a middle-button event (`0x112`) — the harness
+/// button-mask regression this vertical guards.
+pub fn virtio_input_button<Tr: Transport>(
+    env: &dyn QemuEnv,
+    transport: Tr,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    let mut input = VirtioInput::open(transport, vhost).map_err(|_| "virtio-input open")?;
+    env.log(INPUT_READY_MARKER);
+
+    if !wait_for_button(&mut input, POINTER_BUTTON_RIGHT_CODE, 1)? {
+        return Err("virtio-input: no right-button press decoded");
+    }
+    env.log("virtio-qemu: virtio-input right-button press decoded");
+
+    if !wait_for_button(&mut input, POINTER_BUTTON_RIGHT_CODE, 0)? {
+        return Err("virtio-input: no right-button release decoded");
+    }
+    env.log("virtio-qemu: virtio-input right-button release decoded");
     Ok(())
 }
 

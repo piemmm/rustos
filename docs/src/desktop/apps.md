@@ -763,13 +763,25 @@ desktop session's router forwards it to the window manager, and the session
 delivers `WindowEvent::Pointer` `Pressed(Secondary)` to the app — host-tested
 in `tairix-wm` and `tairix-desktop-session`. The shared `Menu::row_rect` and
 `render::context_menu_command_rect` give a caller the drawn Delete row's rect
-(`AGENTS.md` §2.2). An end-to-end delete-with-confirm QEMU vertical is staged
-rather than landed: the QEMU HMP `mouse_button` right-button does not reach the
-emulated `virtio-mouse` (every OS layer decodes BTN_RIGHT→Secondary correctly,
-all host-tested, yet the injected right-click never arrives in the guest), so
-the scripted right-click delete is a metal/real-mouse acceptance item. The
-delete verb, confirm dialog, and recursive `DeleteWalk` are host-proven in
-`lib/browse` and `files.app`.
+(`AGENTS.md` §2.2).
+
+The earlier note that a scripted right-click "never arrives in the guest" was a
+test-harness bug, not an emulator limit, and is now fixed and proven. QEMU's
+HMP `mouse_button` help string ("1=L, 2=M, 4=R") is wrong: `hmp_mouse_button`
+maps state bit `0x2` to the right button and `0x4` to the middle (the legacy
+`MOUSE_EVENT_*` `bmap`). The QEMU test harness (`tools/qemu`) had trusted the
+help string and sent a secondary press as bit `0x4`, so QEMU delivered a
+*middle*-button event and no OS layer ever saw a right-click.
+`MouseButton::mask_bit` now sends `0x2` for the secondary button, and a
+dedicated aarch64 vertical
+(`tairix-test-pointer-button-virtio-mmio-qemu-aarch64`) proves it: it attaches
+a `virtio-mouse-device`, injects a secondary press+release, and asserts the
+driver decodes `BTN_RIGHT` (`0x111`), never the middle button (`0x112`) — it
+times out with the old mask and passes with the fix. The one FM9-c increment
+still staged is wiring the full right-click → Delete → confirm click-through
+into the intricate `autoload_input` sequence; it now has a working right-button
+injection to build on, and the delete verb, confirm dialog, and recursive
+`DeleteWalk` are already host-proven in `lib/browse` and `files.app`.
 
 ### The properties model
 
