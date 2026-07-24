@@ -1412,22 +1412,41 @@ the whole is too large for one change and each leaves the tree working.
   the `CAP_NET_BIND_PRIVILEGED` precedent. The pinned administrator-ceiling
   count is 21→22. Ordinary transport use stays baseline `CAP_NET`.
 
-### N9 — interface configuration, bonding, failover `[ ]`
-- `lib/netconfig` (grammar, closed registry, fail-closed parse,
-  canonical render; §6 README + stability tier; fuzz
-  `fuzz_netconfig`); `/System/Settings/Network/network.conf` laid out
-  by `tools/mkimage`/installer; `configure` gains the `net.*`
-  stack-wide keys in `lib/sysconfig`'s registry (§6.2).
+### N9 — interface configuration, bonding, failover
+
+#### N9a — the `lib/netconfig` store engine `[x]`
+- `lib/netconfig` is the one definition of the
+  `/System/Settings/Network/network.conf` document: the per-interface
+  `<iface>.<key>` grammar, the closed `IfaceKey` registry (`kind`,
+  `match.mac`/`match.node`, `ipv4.*`/`ipv6.*`, `mtu`, `bond.*`), the typed
+  value vocabulary (`IfaceKind`/`Ipv4Method`/`Ipv6Method`/`BondMode`/
+  `MacAddr`/`Ipv4Cidr`/`Ipv6Cidr`), the bounded fail-closed parser
+  (`MAX_CONFIG_LEN`/`MAX_INTERFACES`/`MAX_BOND_MEMBERS`; line-numbered
+  `ParseError`), and the canonical render. Interfaces are stable admin
+  aliases bound to hardware by identity; every field is `Option`-per-key so
+  render emits only set keys and round-trips exactly.
+- Whole-document `validate` enforces the bond invariants a per-line parse
+  cannot: `bond.*` only on a `kind bond`, ≥2 members, `primary`∈members,
+  every member a declared address-free `ethernet` enrolled in one bond,
+  and static-method↔address agreement — all fail-closed
+  (`ConfigError::InconsistentInterface`).
+- `no_std`+`alloc`, no I/O, no authority; host-unit-tested (36) + fuzzed
+  (`fuzz_netconfig`, registered in `cargo xtask fuzz`). README (experimental
+  tier) + `docs/src/lib/netconfig.md`.
+
+#### N9b — store deployment, `configure net.*`, apply, bonding, observability `[ ]`
+- `/System/Settings/Network/network.conf` laid out by `tools/mkimage`/
+  installer; `configure` gains the `net.*` stack-wide keys in
+  `lib/sysconfig`'s registry (§6.2).
 - `netstack`: config load/reload/apply (atomic per interface, audited),
   bond interface kind with `active-backup` + `balance` (§6.3), member
   health monitor, gratuitous ARP/NA on failover.
 - `info:`/`state:`/`stats:` members for bonds and the remaining §5
   counter/rate queries; `SysinfoQueryId` additions; `lib/procinfo`
   resolver mapping.
-- Tests: parser round-trip/adversarial corpora, bond failover QEMU
-  vertical (kill a member mid-TCP-transfer, assert the flow survives
-  within the monitor budget), config-reject-leaves-state tests,
-  audited-refusal tests.
+- Tests: bond failover QEMU vertical (kill a member mid-TCP-transfer,
+  assert the flow survives within the monitor budget), config-reject-
+  leaves-state tests, audited-refusal tests.
 - Docs: `docs/src/userland/networking.md` configuration chapter;
   `userland/apps/configure` Help/ + README for `net.*`.
 

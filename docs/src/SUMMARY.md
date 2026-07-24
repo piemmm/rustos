@@ -61,6 +61,7 @@
   - [`tairix-log`](./lib/log.md)
   - [`tairix-multiboot2`](./lib/multiboot2.md)
   - [`tairix-net`](./lib/net.md)
+  - [`tairix-netconfig`](./lib/netconfig.md)
   - [`tairix-path`](./lib/path.md)
   - [`tairix-resref`](./lib/resref.md)
   - [`tairix-rng`](./lib/rng.md)

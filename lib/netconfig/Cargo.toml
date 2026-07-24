@@ -1,0 +1,20 @@
+[package]
+name = "tairix-netconfig"
+description = "TAIRiX network interface-configuration store engine: the one definition of the `/System/Settings/Network/network.conf` document — its per-interface `<iface>.<key>` grammar, closed key registry, typed value sets, bounded fail-closed parser, and canonical render — shared by the writer (`configure`, the installer) and the one reader (`netstack`) so producer and consumer can never diverge (§3 `lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

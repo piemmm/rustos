@@ -72,6 +72,7 @@ members = [
     "lib/log",
     "lib/multiboot2",
     "lib/net",
+    "lib/netconfig",
     "lib/partition",
     "lib/path",
     "lib/pci",

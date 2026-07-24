@@ -124,6 +124,11 @@ pub const TARGETS: &[Target] = &[
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
     },
     Target {
+        package: "tairix-netconfig",
+        test: "fuzz_netconfig",
+        description: "network.conf store engine (per-interface parse, bounds, render round-trip)",
+    },
+    Target {
         package: "tairix-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
