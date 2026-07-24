@@ -64,6 +64,7 @@ use std::time::{Duration, Instant};
 
 pub mod aarch64;
 pub mod disk;
+pub mod display;
 pub mod riscv64;
 pub mod screendump;
 pub mod x86_64;
@@ -934,11 +935,37 @@ impl Runner {
     pub fn run_interactive(spec: &Spec) -> io::Result<i32> {
         validate_boot_inputs(spec)?;
 
-        let mut cmd = Command::new(spec.arch.qemu_binary());
+        // A windowed session must open a real host window. QEMU's *implicit*
+        // default display is not portable — a build without GTK/SDL silently
+        // falls back to a headless VNC server and no window ever appears — so
+        // select a binary and windowing backend explicitly and fail loud if
+        // none can present a window.
+        let interactive = (spec.session == SessionKind::WindowedInteractive)
+            .then(|| display::select_interactive(spec.arch.qemu_binary()))
+            .transpose()
+            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+
+        let program: PathBuf = match &interactive {
+            Some(sel) => sel.binary.clone(),
+            None => PathBuf::from(spec.arch.qemu_binary()),
+        };
+        let mut cmd = Command::new(&program);
         match spec.arch {
             Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &spec.kernel),
             Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &spec.kernel),
             Arch::Aarch64 => aarch64::push_argv(&mut cmd, spec, &spec.kernel),
+        }
+        // The per-arch builders omit `-display` for a windowed session; the
+        // chosen windowing backend is appended here, in one place, so the
+        // selection logic is never duplicated across ports.
+        if let Some(sel) = &interactive {
+            cmd.arg("-display");
+            cmd.arg(sel.backend.qemu_name());
+            eprintln!(
+                "tairix-qemu: [run] interactive display via {} -display {}",
+                program.display(),
+                sel.backend.qemu_name(),
+            );
         }
         for a in &spec.extra_args {
             cmd.arg(a);

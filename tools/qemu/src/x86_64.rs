@@ -86,8 +86,13 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // want without that implicit muxing.
     let mut argv: Vec<OsString> = Vec::with_capacity(16 + spec.extra_args.len());
     argv.push("-no-reboot".into());
-    argv.push("-display".into());
-    argv.push("none".into());
+    // Headless by default (the test runner captures serial only); an
+    // interactive windowed run omits `-display` here so the runner can append
+    // the windowing backend it selected at spawn time.
+    if spec.session == SessionKind::HeadlessTest {
+        argv.push("-display".into());
+        argv.push("none".into());
+    }
     argv.push("-serial".into());
     argv.push("stdio".into());
     argv.push("-m".into());
@@ -498,5 +503,19 @@ mod tests {
         assert!(argv
             .iter()
             .any(|a| a == "virtio-mouse-pci,disable-legacy=on"));
+    }
+
+    #[test]
+    fn windowed_interactive_argv_omits_display_for_the_runner_to_choose() {
+        // The interactive display backend is selected and appended by the
+        // runner at spawn time; the builder must not pin `-display none`, or
+        // the window would never open.
+        let mut spec = fixture_spec(1);
+        spec.session = SessionKind::WindowedInteractive;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a == "-display"),
+            "windowed run leaves the display for the runner to select"
+        );
     }
 }

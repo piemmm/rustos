@@ -48,7 +48,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_dgram_arg, Outcome, Spec};
+use crate::{net_device_arg, netdev_dgram_arg, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
 /// test.
@@ -164,8 +164,13 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("-cpu".into());
     argv.push(CPU.into());
     argv.push("-no-reboot".into());
-    argv.push("-display".into());
-    argv.push("none".into());
+    // Headless by default (the test runner captures serial only); an
+    // interactive windowed run omits `-display` here so the runner can append
+    // the windowing backend it selected at spawn time.
+    if spec.session == SessionKind::HeadlessTest {
+        argv.push("-display".into());
+        argv.push("none".into());
+    }
     argv.push("-serial".into());
     argv.push("stdio".into());
     argv.push("-m".into());
@@ -358,6 +363,20 @@ mod tests {
         assert!(argv.iter().any(|a| a == "none"));
         assert!(argv.iter().any(|a| a == "-serial"));
         assert!(argv.iter().any(|a| a == "stdio"));
+    }
+
+    #[test]
+    fn windowed_interactive_argv_omits_display_for_the_runner_to_choose() {
+        // The interactive display backend is selected and appended by the
+        // runner at spawn time; the builder must not pin `-display none`, or
+        // the window would never open.
+        let mut spec = fixture_spec(1);
+        spec.session = SessionKind::WindowedInteractive;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a == "-display"),
+            "windowed run leaves the display for the runner to select"
+        );
     }
 
     #[test]
