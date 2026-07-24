@@ -71,8 +71,12 @@ the signed `AppInfo` MIME associations that resolve the viewer), and
 for a regular file; the drawn `render::build_open_with_menu` chooser offers the
 full `applications_for` result and launches the picked bundle through the same
 `DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
-**FM6b is now complete; only FM9 (the autoload QEMU vertical + docs) remains
-`planned`.** The starting point is
+**FM6b is now complete. FM9 is in progress: its prerequisite audit gates
+(FM9-pre — the `FsNodeMutated`/`FsMutationDenied` filesystem-mutation audit
+events every write syscall now emits, the robust serial witnesses the vertical
+keys on and a §5.4/§19.4 requirement in their own right) are landed; the
+autoload QEMU click-through vertical (which also needs a writable fixture
+volume) and its docs remain.** The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -1083,15 +1087,39 @@ panicking on a degenerate viewport). Docs: `docs/src/desktop/apps.md`,
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 
-- **Extend the desktop autoload vertical** (the AW3/AW5 interaction
+FM9 is split (§2.19) so the vertical's robust, non-fragile gates exist before
+the click-through that keys on them is written.
+
+- **FM9-pre — filesystem-mutation audit gates `[x]` (done).** The write
+  syscalls the vertical must observe (`fs_mkdir`, `fs_unlink`, `fs_rename`,
+  `fs_set_mode`, `fs_set_owner`) emitted **no** audit record, so there was no
+  kernel-attested serial witness for a New-Folder / rename / delete step to
+  gate on — and, independently, mutating on-disk state is a security-relevant
+  decision the charter (§5.4(4)/§19.4) requires be logged. Landed: two stable
+  events in `kernel/core` — `FsNodeMutated` (id 4100, `Info`) on a successful
+  mutation and `FsMutationDenied` (id 4101, `Warn`, carrying the refusal's
+  `errno`) — emitted by every write handler after the secured VFS decides,
+  under the caller's kernel-attested uid, via the free `emit_fs_mutation`
+  (with `audit_path_field` bounding the path on a char boundary so an
+  over-long path can never drop the record, and `format_mode_octal` for the
+  chmod field). Fields: `op` (`mkdir`/`rmdir`/`unlink`/`rename`/`chmod`/
+  `chown`), `uid`, `path`, plus `to` (rename dest), `mode` (chmod), and
+  `owner`/`group` (chown); read-only ops are not audited; no token/secret is
+  logged. Host-tested in `kernel/core` (`fs_audit_tests`: allow+deny id/level/
+  fields per op, path-bounding incl. multibyte boundary + always-emitted, octal
+  mode). Docs: `docs/src/architecture/kernel.md` audit catalogue.
+- **FM9 — extend the desktop autoload vertical** (the AW3/AW5 interaction
   contract) with a file-manager stage: start menu → Files → click a
   folder icon (descend) → New Folder → inline-rename → open a file into
   the viewer via CU6 delegation → delete with confirm — each step gated
   on kernel-attested serial records (window replies, `fd_grant`/
-  `fd_redeem` audit ids, the `fs_rename`/`fs_mkdir`/`fs_unlink` audit
-  events), never a faked screendump (§2.1). Every delivery count / reply
-  index / cascade slot the new steps shift is re-derived in the contract's
-  lib target, landed as its own increment (the AW5 "remaining" discipline).
+  `fd_redeem` audit ids, the FM9-pre `FsNodeMutated` records matched by
+  `op`), never a faked screendump (§2.1). The autoload fixture's `/System`
+  volume is read-only, so this increment must first give the fixture a
+  **writable** volume for the manager to act on. Every delivery count /
+  reply index / cascade slot the new steps shift is re-derived in the
+  contract's lib target, landed as its own increment (the AW5 "remaining"
+  discipline).
 - **Docs** kept current in the same changes (§2.8, §13):
   `docs/src/desktop/apps.md` (the manager's design as each stage lands),
   the `lib/browse`/`lib/icon`/`lib/controls` rustdoc + `README.md`

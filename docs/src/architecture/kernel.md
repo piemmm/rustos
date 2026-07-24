@@ -225,6 +225,25 @@ record under the `log` phase and halts.
 | 4083 | Warn  | `CPU_HARD_LOCKUP_CLEARED`   | audit  |
 | 4084 | Warn  | `CPU_LOCKUP_RECOVERY`       | audit  |
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
+| 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
+| 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
+
+`FS_NODE_MUTATED` / `FS_MUTATION_DENIED` are the filesystem-mutation audit
+pair. Every state-changing filesystem syscall — `fs_mkdir`, `fs_unlink`
+(recorded as `rmdir` when the directory flag is set, else `unlink`),
+`fs_rename`, `fs_set_mode` (`chmod`), and `fs_set_owner` (`chown`) — emits
+exactly one record after the secured VFS decides it under the caller's
+kernel-attested identity: `FS_NODE_MUTATED` (`Info`) when the change was
+applied, `FS_MUTATION_DENIED` (`Warn`, carrying the refusal's `errno`) when
+the VFS refused it and nothing changed (fail closed). Both carry the
+operation (`op`), the caller's uid (`uid`), and the target `path`, plus the
+operation-specific content that makes the trail actionable: `to` (a rename's
+destination), `mode` (a chmod's new permission word, octal), and
+`owner`/`group` (a chown's new ids). Read-only operations are **not** audited
+(only mutations are security-relevant decisions). Paths are bounded to the
+log field limit on a character boundary so an over-long path can never make
+the record fail to encode and drop — a mutation can never escape the trail.
+No capability token or secret is ever placed in a field.
 
 `IRQ_LINE_QUARANTINED` is the runaway-interrupt safety net
 (`tairix_kernel_irq`). Under mask-before-wake a bound line can only re-fire

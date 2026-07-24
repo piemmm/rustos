@@ -112,7 +112,7 @@ use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers,
 use tairix_log::{Event, EventId, Field, Level, Sink};
 use tairix_seat::{ConsoleIndex, SeatOwner};
 use tairix_sync::RwLock;
-use tairix_util::fmt::format_hex_u64;
+use tairix_util::fmt::{format_hex_u64, format_usize};
 use zeroize::Zeroize;
 
 use alloc::boxed::Box;
@@ -2854,6 +2854,150 @@ where
             supplementary_gids,
             Some(ceiling),
         ))
+    }
+}
+
+/// The operation-specific detail a filesystem-mutation audit record carries
+/// beyond the common `op`/`uid`/`path` fields.
+///
+/// Each variant names the security-relevant *content* of its mutation — the
+/// destination of a rename, the new mode of a chmod, the new owner of a
+/// chown — so the audit trail records not just that state changed but what it
+/// changed to, without a capability token or secret ever reaching the log.
+#[derive(Clone, Copy)]
+enum FsAuditDetail<'a> {
+    /// A `mkdir` or `unlink`: the target path alone is the whole record.
+    None,
+    /// A `rename`: `to` is the destination path.
+    Rename { to: &'a str },
+    /// A `set_mode` (chmod): `mode` is the new permission word.
+    Mode { mode: u32 },
+    /// A `set_owner` (chown): the new owner and owning group ids.
+    Owner { owner: u32, group: u32 },
+}
+
+/// Bound a path to the audit log's per-field value limit on a character
+/// boundary.
+///
+/// A log field value that exceeds the limit fails to encode, which would
+/// silently drop the whole record — letting a mutation on an over-long path
+/// escape the audit trail. Bounding first guarantees the record always
+/// encodes; the trail records a prefix rather than nothing.
+fn audit_path_field(path: &str) -> &str {
+    let limit = tairix_abi::LOG_FIELD_VALUE_MAX;
+    if path.len() <= limit {
+        return path;
+    }
+    let mut end = limit;
+    while end > 0 && !path.is_char_boundary(end) {
+        end -= 1;
+    }
+    &path[..end]
+}
+
+/// Render a permission `mode` word as its conventional leading-zero octal
+/// spelling (e.g. `0755`) for the chmod audit record's `mode` field.
+fn format_mode_octal(mode: u32, buf: &mut [u8; 12]) -> &str {
+    let mut i = buf.len();
+    let mut v = mode;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v & 0o7) as u8;
+        v >>= 3;
+        if v == 0 {
+            break;
+        }
+    }
+    if i > 0 {
+        i -= 1;
+        buf[i] = b'0';
+    }
+    // Every written byte is an ASCII octal digit, so the slice is UTF-8;
+    // fall back to the empty string rather than panic if that ever fails.
+    core::str::from_utf8(&buf[i..]).unwrap_or("")
+}
+
+/// Emit the audit record for a filesystem-mutating syscall through `sink`.
+///
+/// A successful mutation logs [`AuditEvent::FsNodeMutated`] at `Info`; a
+/// refused one logs [`AuditEvent::FsMutationDenied`] at `Warn` carrying the
+/// refusal's `errno`. Both name the operation, the caller's kernel-attested
+/// uid, and the target path(s) or new mode/owner — never a capability token
+/// or secret. The record is always emitted (paths are bounded so encoding
+/// cannot fail and drop it), so no attempt to mutate on-disk state — allowed
+/// or refused — escapes the audit trail.
+fn emit_fs_mutation(
+    sink: &dyn Sink,
+    op: &'static str,
+    uid: u32,
+    path: &str,
+    detail: &FsAuditDetail<'_>,
+    outcome: Result<(), Errno>,
+) {
+    let mut uid_buf = [0u8; 12];
+    let uid_s = format_usize(uid as usize, &mut uid_buf);
+    let mut errno_buf = [0u8; 12];
+    let (event, level, errno) = match outcome {
+        Ok(()) => (AuditEvent::FsNodeMutated, Level::Info, ""),
+        Err(err) => (
+            AuditEvent::FsMutationDenied,
+            Level::Warn,
+            format_usize(err as usize, &mut errno_buf),
+        ),
+    };
+    let op_f = Field {
+        key: "op",
+        value: tairix_log::FieldValue::Str(op),
+    };
+    let uid_f = Field {
+        key: "uid",
+        value: tairix_log::FieldValue::Str(uid_s),
+    };
+    let path_f = Field {
+        key: "path",
+        value: tairix_log::FieldValue::Str(audit_path_field(path)),
+    };
+    let errno_f = Field {
+        key: "errno",
+        value: tairix_log::FieldValue::Str(errno),
+    };
+    let mut mode_buf = [0u8; 12];
+    let mut owner_buf = [0u8; 12];
+    let mut group_buf = [0u8; 12];
+    match *detail {
+        FsAuditDetail::None => {
+            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, errno_f]);
+        }
+        FsAuditDetail::Rename { to } => {
+            let to_f = Field {
+                key: "to",
+                value: tairix_log::FieldValue::Str(audit_path_field(to)),
+            };
+            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, to_f, errno_f]);
+        }
+        FsAuditDetail::Mode { mode } => {
+            let mode_f = Field {
+                key: "mode",
+                value: tairix_log::FieldValue::Str(format_mode_octal(mode, &mut mode_buf)),
+            };
+            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, mode_f, errno_f]);
+        }
+        FsAuditDetail::Owner { owner, group } => {
+            let owner_f = Field {
+                key: "owner",
+                value: tairix_log::FieldValue::Str(format_usize(owner as usize, &mut owner_buf)),
+            };
+            let group_f = Field {
+                key: "group",
+                value: tairix_log::FieldValue::Str(format_usize(group as usize, &mut group_buf)),
+            };
+            crate::audit::emit(
+                sink,
+                level,
+                event,
+                &[op_f, uid_f, path_f, owner_f, group_f, errno_f],
+            );
+        }
     }
 }
 
@@ -7315,7 +7459,16 @@ where
         // are the secured VFS's, under the caller's attested identity.
         let path = self.copy_path_in(caller, path, path_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem.mkdir(uid, caller.caps.effective(), &path)?;
+        let outcome = self.filesystem.mkdir(uid, caller.caps.effective(), &path);
+        emit_fs_mutation(
+            self.audit,
+            "mkdir",
+            uid,
+            &path,
+            &FsAuditDetail::None,
+            outcome,
+        );
+        outcome?;
         Ok(0)
     }
 
@@ -7332,8 +7485,16 @@ where
         // (empty) directory, decided under its own lock.
         let path = self.copy_path_in(caller, path, path_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .unlink(uid, caller.caps.effective(), &path, flags)?;
+        let op = if flags.is_directory_only() {
+            "rmdir"
+        } else {
+            "unlink"
+        };
+        let outcome = self
+            .filesystem
+            .unlink(uid, caller.caps.effective(), &path, flags);
+        emit_fs_mutation(self.audit, op, uid, &path, &FsAuditDetail::None, outcome);
+        outcome?;
         Ok(0)
     }
 
@@ -7352,8 +7513,18 @@ where
         let src = self.copy_path_in(caller, src, src_len)?;
         let dst = self.copy_path_in(caller, dst, dst_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .rename(uid, caller.caps.effective(), &src, &dst)?;
+        let outcome = self
+            .filesystem
+            .rename(uid, caller.caps.effective(), &src, &dst);
+        emit_fs_mutation(
+            self.audit,
+            "rename",
+            uid,
+            &src,
+            &FsAuditDetail::Rename { to: &dst },
+            outcome,
+        );
+        outcome?;
         Ok(0)
     }
 
@@ -7370,8 +7541,18 @@ where
         // under the caller's attested identity.
         let path = self.copy_path_in(caller, path, path_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .set_mode(uid, caller.caps.effective(), &path, mode)?;
+        let outcome = self
+            .filesystem
+            .set_mode(uid, caller.caps.effective(), &path, mode);
+        emit_fs_mutation(
+            self.audit,
+            "chmod",
+            uid,
+            &path,
+            &FsAuditDetail::Mode { mode },
+            outcome,
+        );
+        outcome?;
         Ok(0)
     }
 
@@ -7391,8 +7572,18 @@ where
         // and capability set — never a caller-supplied one.
         let path = self.copy_path_in(caller, path, path_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .set_owner(uid, caller.caps.effective(), &path, owner, group)?;
+        let outcome = self
+            .filesystem
+            .set_owner(uid, caller.caps.effective(), &path, owner, group);
+        emit_fs_mutation(
+            self.audit,
+            "chown",
+            uid,
+            &path,
+            &FsAuditDetail::Owner { owner, group },
+            outcome,
+        );
+        outcome?;
         Ok(0)
     }
 
@@ -27870,5 +28061,183 @@ mod tests {
 
         assert_eq!(ep.outstanding(), 0, "every ticket is retired");
         crate::callreg::unregister(EndpointId(id));
+    }
+}
+
+#[cfg(test)]
+mod fs_audit_tests {
+    //! Filesystem-mutation audit-record emission: every allowed and refused
+    //! `mkdir`/`rmdir`/`unlink`/`rename`/`chmod`/`chown` produces exactly one
+    //! stable audit record, so no on-disk mutation escapes the trail.
+
+    use super::{audit_path_field, emit_fs_mutation, format_mode_octal, FsAuditDetail};
+    use crate::audit::AuditEvent;
+    use crate::test_sink::{CapturedEvent, TestSink};
+    use alloc::format;
+    use tairix_abi::{Errno, LOG_FIELD_VALUE_MAX};
+    use tairix_log::Level;
+
+    fn field<'a>(ev: &'a CapturedEvent, key: &str) -> Option<&'a str> {
+        ev.fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn format_mode_octal_renders_leading_zero_octal() {
+        let mut b = [0u8; 12];
+        assert_eq!(format_mode_octal(0o755, &mut b), "0755");
+        let mut b = [0u8; 12];
+        assert_eq!(format_mode_octal(0o644, &mut b), "0644");
+        let mut b = [0u8; 12];
+        assert_eq!(format_mode_octal(0o7777, &mut b), "07777");
+        let mut b = [0u8; 12];
+        // Zero renders as a single octal digit behind the leading zero.
+        assert_eq!(format_mode_octal(0, &mut b), "00");
+    }
+
+    #[test]
+    fn short_path_passes_through_unbounded() {
+        let path = "/Users/me/Documents";
+        assert_eq!(audit_path_field(path), path);
+    }
+
+    #[test]
+    fn over_long_path_is_bounded_and_record_still_emitted() {
+        // A path far longer than the field limit must still yield a valid,
+        // bounded UTF-8 prefix and a record that is actually emitted — a
+        // dropped record would let the mutation escape the audit trail.
+        let path = format!("/{}", "a".repeat(LOG_FIELD_VALUE_MAX * 2));
+        let bounded = audit_path_field(&path);
+        assert!(bounded.len() <= LOG_FIELD_VALUE_MAX);
+        assert!(path.starts_with(bounded));
+
+        let sink = TestSink::new();
+        emit_fs_mutation(&sink, "mkdir", 1, &path, &FsAuditDetail::None, Ok(()));
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1, "the record must always be emitted");
+        assert_eq!(field(&events[0], "path"), Some(bounded));
+    }
+
+    #[test]
+    fn bound_respects_multibyte_char_boundary() {
+        // The limit lands in the middle of a two-byte character, so a naive
+        // byte slice would panic; the boundary-aware bound must not.
+        let path = format!("/{}", "é".repeat(LOG_FIELD_VALUE_MAX));
+        let bounded = audit_path_field(&path);
+        assert!(bounded.len() <= LOG_FIELD_VALUE_MAX);
+        assert!(path.starts_with(bounded));
+        // A valid `&str` is UTF-8 by construction; re-validate defensively.
+        assert!(core::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn successful_mkdir_emits_fs_node_mutated() {
+        let sink = TestSink::new();
+        emit_fs_mutation(
+            &sink,
+            "mkdir",
+            1000,
+            "/Users/me/x",
+            &FsAuditDetail::None,
+            Ok(()),
+        );
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::FsNodeMutated.id());
+        assert_eq!(ev.level, Level::Info);
+        assert_eq!(field(ev, "op"), Some("mkdir"));
+        assert_eq!(field(ev, "uid"), Some("1000"));
+        assert_eq!(field(ev, "path"), Some("/Users/me/x"));
+        assert_eq!(field(ev, "errno"), Some(""));
+    }
+
+    #[test]
+    fn denied_unlink_emits_fs_mutation_denied_with_errno() {
+        let sink = TestSink::new();
+        emit_fs_mutation(
+            &sink,
+            "unlink",
+            0,
+            "/System/x",
+            &FsAuditDetail::None,
+            Err(Errno::PermissionDenied),
+        );
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::FsMutationDenied.id());
+        assert_eq!(ev.level, Level::Warn);
+        assert_eq!(field(ev, "op"), Some("unlink"));
+        assert_eq!(field(ev, "path"), Some("/System/x"));
+        let mut b = [0u8; 12];
+        let expected = tairix_util::fmt::format_usize(Errno::PermissionDenied as usize, &mut b);
+        assert_eq!(field(ev, "errno"), Some(expected));
+    }
+
+    #[test]
+    fn rename_records_destination_path() {
+        let sink = TestSink::new();
+        emit_fs_mutation(
+            &sink,
+            "rename",
+            7,
+            "/a",
+            &FsAuditDetail::Rename { to: "/b" },
+            Ok(()),
+        );
+        let events = sink.snapshot();
+        let ev = &events[0];
+        assert_eq!(field(ev, "op"), Some("rename"));
+        assert_eq!(field(ev, "path"), Some("/a"));
+        assert_eq!(field(ev, "to"), Some("/b"));
+    }
+
+    #[test]
+    fn chmod_records_new_octal_mode() {
+        let sink = TestSink::new();
+        emit_fs_mutation(
+            &sink,
+            "chmod",
+            7,
+            "/a",
+            &FsAuditDetail::Mode { mode: 0o640 },
+            Ok(()),
+        );
+        let events = sink.snapshot();
+        assert_eq!(field(&events[0], "mode"), Some("0640"));
+    }
+
+    #[test]
+    fn chown_records_new_owner_and_group() {
+        let sink = TestSink::new();
+        emit_fs_mutation(
+            &sink,
+            "chown",
+            7,
+            "/a",
+            &FsAuditDetail::Owner {
+                owner: 1001,
+                group: 2002,
+            },
+            Ok(()),
+        );
+        let events = sink.snapshot();
+        let ev = &events[0];
+        assert_eq!(field(ev, "owner"), Some("1001"));
+        assert_eq!(field(ev, "group"), Some("2002"));
+    }
+
+    #[test]
+    fn rmdir_and_unlink_use_distinct_operation_names() {
+        // The two `fs_unlink` shapes are recorded under distinct `op`
+        // values, matching how the handler picks them from the flags.
+        for op in ["rmdir", "unlink"] {
+            let sink = TestSink::new();
+            emit_fs_mutation(&sink, op, 5, "/d", &FsAuditDetail::None, Ok(()));
+            assert_eq!(field(&sink.snapshot()[0], "op"), Some(op));
+        }
     }
 }

@@ -36,6 +36,8 @@
 //! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
 //! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
 //! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
+//! | 4100 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
+//! | 4101 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -372,6 +374,27 @@ pub enum AuditEvent {
     /// and the owning `task`; the waiter's syscall then fails closed with
     /// `Errno::Io`. A fresh `irq_bind` clears the quarantine.
     IrqLineQuarantined,
+    /// A capability- and permission-checked filesystem mutation succeeded.
+    ///
+    /// Emitted by the `fs_mkdir` / `fs_unlink` / `fs_rename` / `fs_set_mode`
+    /// / `fs_set_owner` syscall handlers after the secured VFS applied the
+    /// change under the caller's kernel-attested identity. The record names
+    /// the operation (`op`), the caller's uid (`uid`), and the target path
+    /// (`path`, plus `to` for a rename) — never a capability token or
+    /// secret. Every mutation of on-disk state is a security-relevant
+    /// decision, so it is auditable; the paths are bounded to the log
+    /// field limit on a character boundary so the record can never fail to
+    /// encode and drop, which would let a mutation escape the trail.
+    FsNodeMutated,
+    /// A filesystem mutation was refused; nothing changed (fail closed).
+    ///
+    /// The refusing counterpart of [`FsNodeMutated`](Self::FsNodeMutated),
+    /// emitted by the same handlers when the secured VFS returns an error
+    /// (a permission, capability, mount-flag, or validation refusal). The
+    /// record carries the same `op`/`uid`/`path`(/`to`) fields plus the
+    /// refusal's `errno`, so an attempt to mutate state the caller may not
+    /// touch is as visible as a successful one.
+    FsMutationDenied,
 }
 
 impl AuditEvent {
@@ -418,6 +441,8 @@ impl AuditEvent {
             Self::CpuHardLockupCleared => 4083,
             Self::CpuLockupRecovery => 4084,
             Self::IrqLineQuarantined => 4090,
+            Self::FsNodeMutated => 4100,
+            Self::FsMutationDenied => 4101,
         })
     }
 
@@ -466,6 +491,8 @@ impl AuditEvent {
             Self::CpuHardLockupCleared => "cpu hard lockup cleared",
             Self::CpuLockupRecovery => "cpu lockup recovery requested",
             Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
+            Self::FsNodeMutated => "filesystem node mutated",
+            Self::FsMutationDenied => "filesystem mutation denied",
         }
     }
 }
@@ -528,6 +555,8 @@ mod tests {
             AuditEvent::CpuHardLockupCleared,
             AuditEvent::CpuLockupRecovery,
             AuditEvent::IrqLineQuarantined,
+            AuditEvent::FsNodeMutated,
+            AuditEvent::FsMutationDenied,
         ] {
             let id = ev.id().0;
             assert!(
@@ -578,6 +607,8 @@ mod tests {
             AuditEvent::CpuHardLockupCleared.id().0,
             AuditEvent::CpuLockupRecovery.id().0,
             AuditEvent::IrqLineQuarantined.id().0,
+            AuditEvent::FsNodeMutated.id().0,
+            AuditEvent::FsMutationDenied.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
