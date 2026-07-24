@@ -148,6 +148,8 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   `ContextCommand` the right-click menu offers is actionable. **Open**,
   **Rename**, **Cut**, **Copy**, and **Properties** act on the selected
   entry, so they need a selection (an empty directory offers none).
+  **Open With…** is offered only for a regular file — a directory descends and
+  a bundle launches itself, so neither has an application to choose.
   **Paste** targets the current directory and needs only a held clipboard,
   not a selection; because the clipboard lives in the app rather than the
   browser (`Browser::clipboard` *captures* a fresh one from the selection),
@@ -161,11 +163,11 @@ The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
 picker builds the same model). Only commands the file manager can actually
 carry out today are modelled, so none is speculative surface (`AGENTS.md`
-§2.4): **Open With…** (which needs the file→viewer hand-off, the rest of
-FM6b) and **Delete** (whose engine action does not exist yet) are absent from
-`CONTEXT_COMMANDS` and each lands with the stage that first wires its
-behaviour. **New Folder** is a *write* tool that lives on the manager-only
-toolbar (below), not on this menu shared with the read-only picker.
+§2.4): **Open With…** now joins the set with its FM6b chooser verb (below).
+**Delete** (whose engine action does not exist yet) is still absent from
+`CONTEXT_COMMANDS` and lands with the stage that first wires its behaviour.
+**New Folder** is a *write* tool that lives on the manager-only toolbar
+(below), not on this menu shared with the read-only picker.
 
 The **context menu is now drawn and clickable**. A secondary-button
 (right-click) press selects the item under the pointer — or clears the
@@ -180,10 +182,11 @@ window, `render::draw_context_menu` paints it topmost, and
 enabled command** (a press on a disabled row or off the menu resolves to
 nothing, failing closed). The `files.app` `Run` binary routes a chosen
 command through `dispatch_context_command` to the **exact same** app verbs
-the toolbar and keyboard already drive — Open (`activate`), Rename, Cut,
-Copy, Paste, Properties — so the menu can never diverge from them (`AGENTS.md`
-§2.2) and adds no authority (every verb is the user's own §5.3-checked
-action). `Escape` or a press off the menu dismisses it.
+the toolbar and keyboard already drive — Open (`activate`), Open With… (the
+chooser below), Rename, Cut, Copy, Paste, Properties — so the menu can never
+diverge from them (`AGENTS.md` §2.2) and adds no authority (every verb is the
+user's own §5.3-checked action). `Escape` or a press off the menu dismisses
+it.
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
@@ -285,9 +288,24 @@ application claims leaves the listing unchanged and states the refusal on
 `stderr`, never a fabricated open (`AGENTS.md` §2.24). The viewer detects
 `DOCUMENT_ROLE_ARG` at start-up and displays the handed-over document instead
 of prompting the session's trusted picker (its standalone launch is
-unchanged). The explicit **"Open With…"** chooser — offering the full
-`applications_for` candidate list as a `lib/controls` `Menu` — is the remaining
-FM6b increment; the default-open above is complete on its own.
+unchanged).
+
+The explicit **"Open With…"** chooser is now drawn and wired. Choosing **Open
+With…** from the right-click menu on a regular file resolves the file's
+absolute path (the one shared `selected_target_path` spelling), enumerates the
+full `applications_for` candidate list over `RtBundleSource`, and — when at
+least one application claims the type — paints it as a `lib/controls` `Menu`
+(`render::build_open_with_menu`, one row per candidate in source order,
+anchored where the context menu was through the shared `context_menu_rect`).
+The chooser owns input while open: a primary-button press resolves through
+`render::open_with_index_at` (the shared enabled-row hit-test the context menu
+also uses, so paint and click cannot disagree, `AGENTS.md` §2.2) to the chosen
+candidate, which is launched through the **same** `DOCUMENT_ROLE_ARG` + `STDIN`
+hand-off the default open uses; `Escape` or a press off the menu dismisses it.
+A file no installed application claims is stated fail-loud on `stderr` and
+opens nothing — an honest "no application" answer, never an empty menu
+(`AGENTS.md` §2.24). The default open still picks the first association; the
+chooser lets the user pick any of them.
 
 ### "Open With…" — the type→bundle association
 
@@ -318,8 +336,8 @@ still verifies and capability-checks whichever bundle the user picks. The
 engine holds no launch authority and never opens the file — spawning the chosen
 bundle and the spawn-time `FdWire::Handle` file hand-off stay in the
 `files.app` `Run` binary's own capability-checked tail under the user's
-identity (FM6b), so the read-only picker composes the same engine and never
-launches.
+identity (both the default open and the explicit chooser above), so the
+read-only picker composes the same engine and never launches.
 
 ### Rendering
 

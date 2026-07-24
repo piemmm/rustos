@@ -51,6 +51,7 @@ use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
+use crate::open_with::AppAssociation;
 use crate::progress::ProgressModel;
 use crate::properties::Properties;
 use crate::source::DirectorySource;
@@ -1518,10 +1519,68 @@ pub fn context_menu_command_at(
     theme: &Theme,
     point: Point,
 ) -> Option<ContextCommand> {
+    let index = menu_enabled_row_at(menu, anchor, viewport, font, theme, point)?;
+    chrome::CONTEXT_COMMANDS.get(index).copied()
+}
+
+/// The index of the enabled row of `menu` (anchored at `anchor`) that
+/// window-local pixel `point` lands on, or `None` when the click is off the
+/// menu or on a disabled row (fail closed, §5.4).
+///
+/// The one placement + row geometry the drawn menus resolve a click through:
+/// both the right-click [`context_menu_command_at`] and the "Open With…"
+/// chooser [`open_with_index_at`] map a press to a row this way, so a menu's
+/// paint and its hit-test can never disagree (§2.2).
+fn menu_enabled_row_at(
+    menu: &Menu,
+    anchor: Point,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<usize> {
     let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
     let index = menu.row_at(bounds, Scale::ONE, theme, point)?;
     if !menu.items().get(index)?.state().is_actionable() {
         return None;
     }
-    chrome::CONTEXT_COMMANDS.get(index).copied()
+    Some(index)
+}
+
+/// Build the drawn "Open With…" chooser [`Menu`] from `apps` — the installed
+/// applications [`applications_for`](crate::open_with::applications_for)
+/// returned for the file, in that source order: one enabled [`MenuItem`] per
+/// candidate, captioned with the bundle's name.
+///
+/// The rows carry no keyboard shortcut (a chosen application is picked by
+/// pointer) and are all actionable, since each is a genuine candidate. The
+/// caller only opens this chooser when `apps` is non-empty — no application is
+/// an honest "no application" answer stated elsewhere, never an empty menu
+/// (§2.24). The menu performs nothing itself: launching the chosen bundle is
+/// the file manager's own capability-checked hand-off, so composing it grants
+/// no authority (the read-only picker never opens it).
+#[must_use]
+pub fn build_open_with_menu(apps: &[&AppAssociation]) -> Menu {
+    let items: Vec<MenuItem> = apps.iter().map(|app| MenuItem::new(app.name())).collect();
+    Menu::new(items)
+}
+
+/// The index into the "Open With…" chooser's application list that the drawn
+/// `menu` (opened at `anchor`) resolves window-local pixel `point` to, or
+/// `None` when the click is off the menu (fail closed, §5.4).
+///
+/// [`build_open_with_menu`] builds the menu from the candidate list in order,
+/// so the returned index maps straight back to that application. It shares the
+/// placement and row geometry the right-click menu uses
+/// ([`context_menu_command_at`]), so paint and click agree (§2.2).
+#[must_use]
+pub fn open_with_index_at(
+    menu: &Menu,
+    anchor: Point,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<usize> {
+    menu_enabled_row_at(menu, anchor, viewport, font, theme, point)
 }

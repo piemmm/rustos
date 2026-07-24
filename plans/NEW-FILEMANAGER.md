@@ -66,9 +66,13 @@ are done** — completing FM4b's drawn chrome and all of FM7b's app-side verbs,
 plus **FM6b's app-side `OpenFile` hand-off** (opening a data file in its
 associated viewer via the inherited-document `DOCUMENT_ROLE_ARG` + `STDIN`
 spawn-time hand-off, with the viewer's own inherited-document startup path and
-the signed `AppInfo` MIME associations that resolve the viewer). Only FM6b's
-explicit "Open With…" chooser (the default-open picks the first association)
-and FM9 remain `planned`. The starting point is
+the signed `AppInfo` MIME associations that resolve the viewer), and
+**FM6b's explicit "Open With…" chooser** (`OpenWith` re-joins the context menu
+for a regular file; the drawn `render::build_open_with_menu` chooser offers the
+full `applications_for` result and launches the picked bundle through the same
+`DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
+**FM6b is now complete; only FM9 (the autoload QEMU vertical + docs) remains
+`planned`.** The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -88,10 +92,10 @@ toolbar** is now done too — its commands (Back/Forward/Up/Refresh/ToggleView/
 Sort) and their actions already exist, so it needs no speculative surface. The
 **drawn context menu is now done** — a secondary-button press paints the shared
 `ContextMenuModel` as a `lib/controls::Menu` routed to the existing
-Open/Rename/Cut/Copy/Paste/Properties verbs. `OpenWith` was staged *out* of
-`CONTEXT_COMMANDS` (it has no app verb until FM6b's file→viewer hand-off), so no
-menu entry is built as speculative surface ahead of the behaviour it invokes
-(§2.4); it re-joins the set with that stage, as Delete and New Folder did.
+Open/Rename/Cut/Copy/Paste/Properties verbs; `OpenWith` **now re-joins**
+`CONTEXT_COMMANDS` with FM6b's chooser verb (enabled only for a regular file),
+exactly as it was staged to. Only Delete and New Folder remain staged out of
+the context menu until their own actions land.
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven) is done, and
@@ -111,9 +115,10 @@ read-only + `spawn_attached` with the descriptor wired onto the child's `STDIN`
 (`FdWire::Handle`) and the reserved `DOCUMENT_ROLE_ARG` token, so the viewer
 reads its document with no filesystem capability of its own. This supersedes
 the earlier fd_grant-after-spawn sketch (`fd_grant`/`fd_redeem` remain the
-picker's post-hoc delegation to an already-running window owner). Only the
-explicit "Open With…" chooser over the full `applications_for` result stays
-`planned` (the default-open picks the first association). See FM6b below.
+picker's post-hoc delegation to an already-running window owner). **The
+explicit "Open With…" chooser over the full `applications_for` result is now
+done too** — the default open picks the first association, the chooser lets the
+user pick any. See FM6b below. FM6b is complete.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -532,7 +537,7 @@ to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_sel
   descent into an unreadable directory failing closed and staying put. Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-### FM6b — the app: launch `.app`, open a file, "Open With…" `[~]`
+### FM6b — the app: launch `.app`, open a file, "Open With…" `[x]`
 
 Make items *do* something end-to-end — the defining first-class behaviour. The
 `files.app` `Run` binary acts on the FM6a decision; this stage needs the spawn
@@ -620,18 +625,33 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   descriptor (titling its window from the leaf name), distinct from its
   interactive picker path (its standalone launch is unchanged).
 
-The remaining app-side wiring (still `planned`):
+**The explicit "Open With…" chooser is now done.** `OpenWith` re-joins
+`chrome::ContextCommand`/`CONTEXT_COMMANDS` (enabled only for a regular file —
+a directory descends and a bundle launches itself, so `ContextMenuModel` tracks
+`selection_is_file` again) and the drawn context menu offers it. Choosing it
+resolves the file's absolute path (the shared `selected_target_path`),
+enumerates the full `applications_for` candidate list over `RtBundleSource`,
+and — when at least one application claims the type — paints it as a
+`lib/controls` `Menu` (`render::build_open_with_menu`, one row per candidate in
+source order, anchored where the context menu was via the shared
+`context_menu_rect`). The chooser owns input while open: a primary-button press
+resolves through `render::open_with_index_at` (the *same* enabled-row hit-test
+the context menu uses — `menu_enabled_row_at` — so paint and click cannot
+disagree, §2.2) and launches the chosen candidate through the **same**
+`DOCUMENT_ROLE_ARG` + `STDIN` hand-off `open_file` already uses; `Escape` or a
+press off the menu dismisses it. A file no installed application claims is
+stated fail-loud on `stderr` and opens nothing (§2.24). The default open still
+picks the first association; the chooser lets the user pick any. Host-tested in
+`lib/browse` (the context-menu `OpenWith` enablement over file/directory/bundle/
+empty, `build_open_with_menu` labels + order, and the `open_with_index_at`
+full-window mirror + fail-closed off the menu); the app wiring rides the FM9
+vertical and builds clippy-clean cross-compiled. Docs: `docs/src/desktop/apps.md`,
+`lib/browse/README.md` + rustdoc.
 
-- **"Open With…"** draws the bundles the done `open_with` model returns as a
-  `lib/controls` `Menu` and launches the chosen one via the same
-  `DOCUMENT_ROLE_ARG` + `STDIN` hand-off `open_file` already uses; the
-  remaining work is the chooser menu over `applications_for`'s full result
-  (the default-open above picks the first) and **re-adding** the `OpenWith`
-  entry to `chrome::CONTEXT_COMMANDS` (staged out of the drawn context menu
-  until this verb exists, §2.4).
-- **Double-click activation.** Activation is keyboard-driven (`Enter`) today;
-  a pointer double-click needs press-time tracking and lands with the pointer
-  refinements, not as speculative state now (§2.4).
+Deliberately deferred to a later pointer pass (not FM6b): **double-click
+activation.** Activation is keyboard-driven (`Enter`) and pointer-driven via
+the context-menu Open today; a pointer double-click needs press-time tracking
+and lands with the pointer refinements, not as speculative state now (§2.4).
 
 ### FM7a — the selection + clipboard model `[x]`
 

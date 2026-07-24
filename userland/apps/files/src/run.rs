@@ -73,10 +73,11 @@ mod program {
         WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
-        build_context_menu, build_delete_dialog, context_menu_command_at, delete_dialog_action_at,
-        draw_context_menu, draw_delete_dialog, draw_owner_control, draw_progress_dialog,
-        draw_properties_editable, manager_tool_at, owner_field_at, permission_cell_at,
-        progress_cancel_at, render, OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
+        delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
+        draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
+        owner_field_at, permission_cell_at, progress_cancel_at, render, OwnerField,
+        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_appinfo, paste_strategy, plan_paste,
@@ -600,6 +601,35 @@ mod program {
         menu: Menu,
     }
 
+    /// The open "Open With…" application chooser: the drawn [`Menu`] of the
+    /// installed applications that can open the selected file, the point it is
+    /// anchored at, and — index-aligned with the menu rows — the bundle paths a
+    /// chosen row launches and the file it hands them.
+    ///
+    /// `None` unless the user chose Open With… on a regular file that at least
+    /// one installed application claims (no application is an honest refusal
+    /// stated on `stderr`, never an empty menu, §2.24). It owns input while
+    /// open and performs nothing itself — a chosen application is launched by
+    /// the manager's own capability-checked hand-off
+    /// ([`Launcher::launch_viewer`]), exactly the path the default open uses.
+    struct OpenWithMenu {
+        /// The window-local point the chooser is placed at and hit-tested
+        /// against (the right-click point Open With… was invoked from, so the
+        /// chooser appears where the menu that opened it was).
+        anchor: Point,
+        /// The drawn chooser menu, built from the candidate applications in
+        /// order ([`build_open_with_menu`]).
+        menu: Menu,
+        /// The candidate bundle directory paths, index-aligned with the menu
+        /// rows: a chosen row `i` launches `bundles[i]`.
+        bundles: alloc::vec::Vec<String>,
+        /// The absolute path of the file the chosen application opens.
+        file_path: String,
+        /// The file's leaf name — the title handed to the launched viewer and
+        /// the name the "no application" refusal states.
+        display_name: String,
+    }
+
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
     /// reflect stay in step. At most one of `rename`/`properties`/`delete` is
@@ -615,6 +645,9 @@ mod program {
         delete: Option<DeleteConfirm>,
         /// The right-click context menu, when open (secondary-button press).
         menu: Option<ContextMenu>,
+        /// The "Open With…" application chooser, when open (chosen from the
+        /// context menu on a regular file).
+        open_with: Option<OpenWithMenu>,
         /// The running long file operation (a recursive delete), when one is in
         /// progress. While it is set the event loop drives it interleaved with
         /// input rather than parking, showing progress and honouring a cancel.
@@ -698,6 +731,19 @@ mod program {
         if let Some(ctx) = overlays.menu.as_ref() {
             draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, theme, font, viewport);
         }
+        // The "Open With…" chooser draws on top of the view exactly as the
+        // context menu does; the two are never open together (the chooser
+        // replaces the context menu that opened it).
+        if let Some(chooser) = overlays.open_with.as_ref() {
+            draw_context_menu(
+                &mut surface,
+                &chooser.menu,
+                chooser.anchor,
+                theme,
+                font,
+                viewport,
+            );
+        }
         // A running long operation's progress + cancel panel is modal: drawn
         // last so it is topmost while the walk runs interleaved with input.
         if let Some(operation) = overlays.operation.as_ref() {
@@ -744,6 +790,13 @@ mod program {
         // in the launcher-less modal router.
         if overlays.menu.is_some() {
             return apply_menu_event(browser, overlays, launcher, font, theme, viewport, event);
+        }
+
+        // The "Open With…" chooser likewise owns input while open (it replaces
+        // the context menu that opened it) and needs the launcher to hand the
+        // chosen application its file.
+        if overlays.open_with.is_some() {
+            return apply_open_with_event(overlays, launcher, font, theme, viewport, event);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
@@ -2061,6 +2114,13 @@ mod program {
                     return (false, false);
                 };
                 match context_menu_command_at(&ctx.menu, ctx.anchor, viewport, font, theme, point) {
+                    // Open With… uniquely opens a submenu at the right-click
+                    // anchor rather than acting at once, so it is handled here
+                    // where the anchor is in hand; every other command runs its
+                    // verb through the one shared dispatch.
+                    Some(ContextCommand::OpenWith) => {
+                        begin_open_with(browser, overlays, ctx.anchor)
+                    }
                     Some(command) => dispatch_context_command(
                         browser, overlays, launcher, font, theme, viewport, command,
                     ),
@@ -2086,6 +2146,10 @@ mod program {
     ) -> (bool, bool) {
         match command {
             ContextCommand::Open => activate(browser, launcher, font, theme, viewport),
+            // Open With… opens a submenu anchored at the right-click point, so
+            // it is dispatched by `apply_menu_event` (which holds the anchor)
+            // rather than here.
+            ContextCommand::OpenWith => (false, false),
             ContextCommand::Rename => {
                 begin_rename(browser, &mut overlays.rename, font, theme, viewport)
             }
@@ -2108,6 +2172,128 @@ mod program {
                 ClipboardVerb::Paste,
             ),
             ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
+        }
+    }
+
+    /// Open the "Open With…" application chooser for the selected regular file,
+    /// anchored at `anchor` (the right-click point Open With… was chosen from).
+    ///
+    /// The chooser is offered only for a regular file — a directory descends
+    /// and a bundle launches itself, so neither has an application to pick (the
+    /// context-menu model already disables the command otherwise; this guards
+    /// it again, fail closed). The candidate applications are the installed
+    /// bundles whose declared associations claim the file's type
+    /// ([`RtBundleSource`] + [`applications_for`], keyed off the leaf name,
+    /// never a hard-coded viewer). When no installed application claims the
+    /// file the refusal is stated fail-loud on `stderr` and nothing is opened —
+    /// an honest answer, never an empty menu or a fabricated open (§2.24). The
+    /// chooser itself launches nothing: a chosen row runs the same
+    /// capability-checked hand-off the default open uses
+    /// ([`apply_open_with_event`]).
+    fn begin_open_with<S: DirectorySource>(
+        browser: &Browser<S>,
+        overlays: &mut Overlays,
+        anchor: Point,
+    ) -> (bool, bool) {
+        let Some(entry) = browser.selected_entry() else {
+            return (false, false);
+        };
+        if entry.kind() != EntryKind::File {
+            return (false, false);
+        }
+        let name = entry.name().to_string();
+        // The selection must still name a valid absolute path (the same
+        // spelling every open/stat uses); a name that cannot be spelled is a
+        // stated refusal, not a fabricated open.
+        let Some(Ok(file_path)) = browser.selected_target_path() else {
+            report_error(&alloc::format!("could not locate {name}"));
+            return (false, false);
+        };
+        let mut source = RtBundleSource;
+        // A store that cannot be enumerated yields no candidate rather than an
+        // error the user cannot act on; the honest "no application" path below
+        // reports it.
+        let installed = source.installed_bundles().unwrap_or_default();
+        let apps = applications_for(&name, &installed);
+        if apps.is_empty() {
+            report_error(&alloc::format!("no application to open {name}"));
+            return (false, false);
+        }
+        let menu = build_open_with_menu(&apps);
+        let bundles = apps
+            .iter()
+            .map(|app| app.bundle_path().to_string())
+            .collect();
+        overlays.open_with = Some(OpenWithMenu {
+            anchor,
+            menu,
+            bundles,
+            file_path,
+            display_name: name,
+        });
+        (true, false)
+    }
+
+    /// Handle one event while the "Open With…" chooser owns the window.
+    ///
+    /// `Escape` dismisses it. A primary-button press on a candidate row hands
+    /// the file to that application through the same [`Launcher::launch_viewer`]
+    /// hand-off the default open uses (the file opened read-only in the
+    /// manager's table and wired onto the child's `STDIN`, so the application
+    /// reads it with no filesystem capability of its own); a press off the menu
+    /// simply dismisses it (fail closed, §5.4). Every other event leaves the
+    /// chooser open.
+    fn apply_open_with_event(
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> (bool, bool) {
+        match event {
+            WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
+                overlays.open_with = None;
+                (true, false)
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let Some(point) = press_point(*action, *x, *y) else {
+                    return (false, false);
+                };
+                // Take the chooser out (closing it) so a chosen application is
+                // launched from owned state; a press off a row is a dismiss.
+                let Some(chooser) = overlays.open_with.take() else {
+                    return (false, false);
+                };
+                match open_with_index_at(
+                    &chooser.menu,
+                    chooser.anchor,
+                    viewport,
+                    font,
+                    theme,
+                    point,
+                ) {
+                    Some(index) => {
+                        if let Some(bundle) = chooser.bundles.get(index) {
+                            launcher.borrow_mut().launch_viewer(
+                                bundle,
+                                &chooser.file_path,
+                                &chooser.display_name,
+                            );
+                        }
+                        (true, false)
+                    }
+                    None => (true, false),
+                }
+            }
+            _ => (false, false),
         }
     }
 
@@ -2663,6 +2849,7 @@ mod program {
             owner: None,
             delete: None,
             menu: None,
+            open_with: None,
             operation: None,
             clipboard: None,
             can_chown: tairix_rt::self_origin()

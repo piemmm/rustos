@@ -3364,6 +3364,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     for command in [
         ContextCommand::Open,
+        ContextCommand::OpenWith,
         ContextCommand::Rename,
         ContextCommand::Cut,
         ContextCommand::Copy,
@@ -3378,11 +3379,13 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
 fn the_context_menu_enables_the_item_commands_on_a_directory() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
-    // A directory descends on Open; every selection-scoped command is offered.
+    // A directory descends on Open; every selection-scoped command is offered,
+    // but Open With… is not — a directory has no application to choose.
     let browser = Browser::open_root(activation_source()).expect("root");
     assert_eq!(browser.selected_name(), Some("Docs"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -3394,12 +3397,14 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
     // A bundle is a selection like any other: Open launches it, and the
-    // selection-scoped commands apply.
+    // selection-scoped commands apply. Open With… is not offered — a bundle
+    // launches itself, so there is no application to choose for it.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(1).expect("select Editor.app");
     assert!(browser.selected_entry().expect("bundle").is_bundle());
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Properties));
 }
@@ -3413,6 +3418,8 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert_eq!(browser.selected_name(), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
+    // Open With… is offered only for a regular file, so it is enabled here.
+    assert!(menu.is_enabled(ContextCommand::OpenWith));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -3435,14 +3442,15 @@ fn context_commands_list_covers_every_variant_once() {
     use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
 
     // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
-    // exactly once, in a stable order. Open With…, Delete, and New Folder are
-    // absent — the drawn menu has no verb to invoke for them yet, so they land
-    // with the stage that first wires their behaviour, never as speculative
-    // surface.
+    // exactly once, in a stable order. Open With… now joins with its FM6b
+    // chooser verb; Delete and New Folder remain absent — the drawn menu has
+    // no verb to invoke for them yet, so they land with the stage that first
+    // wires their behaviour, never as speculative surface.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
+            ContextCommand::OpenWith,
             ContextCommand::Rename,
             ContextCommand::Cut,
             ContextCommand::Copy,
@@ -3596,6 +3604,69 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
     // A click well outside the menu resolves nothing (fail closed).
     assert_eq!(
         context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
+        None
+    );
+}
+
+#[test]
+fn build_open_with_menu_lists_each_candidate_application_by_name_in_order() {
+    use crate::render::build_open_with_menu;
+
+    // The chooser draws one enabled row per candidate, captioned by the
+    // bundle's name, in the order `applications_for` returned them.
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    let apps = applications_for("notes.txt", &bundles);
+    assert_eq!(apps.len(), 2);
+
+    let menu = build_open_with_menu(&apps);
+    assert_eq!(menu.len(), apps.len());
+    for (item, app) in menu.items().iter().zip(&apps) {
+        assert_eq!(item.label(), app.name());
+        // Every candidate is a genuine choice, so no row is disabled.
+        assert!(item.state().is_actionable());
+    }
+}
+
+#[test]
+fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
+    use crate::render::{build_open_with_menu, open_with_index_at};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 400);
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    let apps = applications_for("notes.txt", &bundles);
+    let menu = build_open_with_menu(&apps);
+    let anchor = Point::new(30, 24);
+
+    // Scanning the whole window, every index the hit-test resolves is a valid
+    // candidate index, and every candidate is reachable exactly once — so the
+    // drawn rows and the hit-test cover the same application list (§2.2).
+    let mut seen: Vec<usize> = Vec::new();
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if let Some(index) =
+                open_with_index_at(&menu, anchor, vp, font, &theme, Point::new(x, y))
+            {
+                assert!(index < apps.len(), "resolved an out-of-range index {index}");
+                if !seen.contains(&index) {
+                    seen.push(index);
+                }
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (0..apps.len()).collect::<Vec<_>>());
+
+    // A click well outside the menu resolves nothing (fail closed).
+    assert_eq!(
+        open_with_index_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
         None
     );
 }
