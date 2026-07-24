@@ -57,18 +57,39 @@ so the system never traps on a missing instruction and never panics.
    widths, and the core scheduling model are all left unused on exactly the
    §2.16 hot paths (crypto, checksums, allocator, FS/net, compositor).
 
-2. **A single multi-SoC image cannot bake in any optional extension.** The
-   `tairix-aarch64-rpi` image must boot Pi 3 (A53), Pi 4 (A72), **and** Pi 5
-   (A76). The build-time floor is therefore forced to the *common* feature
-   set of every SoC the image supports; anything above that floor is
-   reachable **only** by runtime detection + dispatch. The generic x86_64
-   ISO is the biggest loser: it must run on unknown PCs, so its floor is
-   very low, yet a booted PC may have AES-NI/AVX2/SHA-NI.
+2. **A single generic-per-arch image cannot bake in any optional
+   extension.** The product model is **one generic floor image per
+   architecture, not per-board** (decided below): a single `aarch64`
+   installation media that boots RPi 4, ClockworkPi CM4, OrangePi, and other
+   ARMv8 SBCs, and a single `x86_64` ISO that boots arbitrary PCs, each
+   working the hardware out at runtime from device-tree/ACPI discovery. The
+   build-time floor is therefore forced to the *common* feature set of every
+   SoC/PC that image must boot; anything above that floor is reachable
+   **only** by runtime detection + dispatch. A universal `aarch64` image's
+   floor is essentially baseline ARMv8.0-A (A53∩A72∩A76∩Allwinner∩… ≈
+   baseline); the generic x86_64 ISO's floor is very low too (unknown PCs),
+   yet a booted PC may have AES-NI/AVX2/SHA-NI. Runtime dispatch is what
+   recovers, per booted CPU, everything the conservative floor gives up — so
+   one image per arch loses nothing a per-board image would have gained.
 
 3. **No mechanism exists to pick the faster of two equally-correct
    routines.** Even within one feature level, method X can beat method Y on
    core A and lose on core B (the raid6/xor case). TAIRiX has no framework
    to measure and choose, so it always ships one hard-coded choice.
+
+**Scope note — the kernel binary is already universal; the *media* is the
+real open work.** "One image per arch" is two questions with the same answer
+for different reasons. The **kernel/CPU** half — one binary per arch that
+adapts to any board by reading its device tree (`plans/PI.md` §0.2/§0.3:
+boards of the same arch differ only in runtime-discovered data, never
+`cfg(board=…)`) plus the build-time floor + runtime ceiling below — is
+settled here. The **boot/firmware/DTB/media** half (a multi-board boot
+partition carrying the single kernel plus every supported board's DTB and
+each firmware family's loader, board-detect → DTB-select) is a packaging
+problem that differs board-to-board and is owned by `plans/BOOTLOADER.md`
+(and `plans/PI.md` for RPi-family specifics), **not** this plan. Per-board
+images are a rare escape hatch for a board whose boot handoff genuinely
+cannot be unified onto shared media, never the default.
 
 The fix is **layered**, and both layers are mandatory:
 
@@ -186,15 +207,28 @@ kernel/core                    the single point that builds the per-core-type
   `cross_compile_pie_elf` PIE recipe, so kernel and user-space binaries in
   the same image share one floor — §2.2). It is **not** a blanket edit to
   the shared `[target.aarch64-unknown-none]` block.
-- Choose each image's floor from *which SoCs it must boot*: the RPi image's
-  floor is the **common** feature set of Pi 3/4/5 (A53∩A72∩A76), not
-  `cortex-a72`; the generic x86_64 ISO stays low; QEMU-virt images pick a
-  documented model. Record the choice and its rationale.
-- **Open question to resolve before finalising the RPi floor (§15.7):**
-  whether the product ships *one* multi-SoC RPi image (floor = common set,
-  everything else via P1–P3 runtime dispatch) or *per-board* images (each
-  floor tuned to its core). Reconcile against `plans/UNIVERSAL.md` and
-  `plans/PI.md`. Do not guess; the answer changes only P0, not P1–P4.
+- Choose each image's floor from *which SoCs/PCs it must boot*: a universal
+  `aarch64` image's floor is baseline **ARMv8.0-A** (the common set of every
+  ARMv8 SBC it boots — A53∩A72∩A76∩Allwinner∩… ≈ baseline), **not**
+  `cortex-a72`; the generic x86_64 ISO's floor stays low (default
+  `x86-64-v1` for maximum reach, raised only if a minimum-hardware
+  requirement is published and documented); QEMU-virt images pick a
+  documented model. Record the choice and its rationale. Everything above
+  the floor is recovered per booted CPU by P1–P3 runtime dispatch, so the
+  low floor costs nothing at runtime.
+- **Product-model decision (settled — was the P0 open question).** TAIRiX
+  ships **one generic floor image per architecture, not per-board**: a
+  single `aarch64` media boots RPi 4 / CM4 / OrangePi / other ARMv8 SBCs and
+  a single `x86_64` ISO boots arbitrary PCs, hardware worked out at runtime
+  via discovery (§18.1) and CPU extensions via P1–P3 dispatch. This matches
+  the charter's discovery-first design and `plans/PI.md` §0.2/§0.3, and is
+  mandatory for x86_64 (per-board is impractical there). Per-board images
+  are reserved as a rare boot-layer escape hatch (a board whose firmware
+  handoff cannot be unified onto shared media), never the default; that
+  escape hatch and the multi-board boot partition/DTB packaging are
+  `plans/BOOTLOADER.md`'s concern, not this plan's. Reconciled against
+  `plans/UNIVERSAL.md` (universal `.app`/Wasm distribution) and
+  `plans/PI.md`.
 - Validate that any floor feature actually lowers on the freestanding
   targets (the x86_64 block already pins *soft* crypto backends to dodge
   codegen crashes; expect to validate the aarch64 path the same way and
