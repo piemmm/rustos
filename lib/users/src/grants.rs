@@ -123,6 +123,15 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   privileged network service is an administrative act, so an
 ///   administrator's ceiling may grant it to a program whose manifest
 ///   requests it. Ordinary transport use stays baseline `CAP_NET`.
+/// * `CAP_NET_RAW` — unmediated raw network access: raw frames and the
+///   ICMP/ICMPv6 echo socket the diagnostic `ping` tool opens (`netstack`
+///   gates that socket on it). Reaching below the transport layer is an
+///   administrative act — the Unix `CAP_NET_RAW`/setuid-`ping` model — so
+///   an administrator's ceiling may grant it to a program whose manifest
+///   requests it (`ping`), while ordinary transport use stays baseline
+///   `CAP_NET`. It is the network stack service's defining capability
+///   among the *service* ceilings; carrying it here widens only what an
+///   *administrator account* may be granted, never any service's identity.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -137,6 +146,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::MEM_PIN,
     CapabilityId::NET_ADMIN,
     CapabilityId::NET_BIND_PRIVILEGED,
+    CapabilityId::NET_RAW,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -265,7 +275,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 21);
+        assert_eq!(set.len(), 22);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -283,6 +293,7 @@ mod tests {
             CapabilityId::MEM_PIN,
             CapabilityId::NET_ADMIN,
             CapabilityId::NET_BIND_PRIVILEGED,
+            CapabilityId::NET_RAW,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }

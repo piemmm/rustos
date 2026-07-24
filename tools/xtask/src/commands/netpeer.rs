@@ -67,6 +67,18 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_peer)
     }
 
+    /// Bind `peer_sock` and start the **passive ICMP echo-responder** peer
+    /// thread (the N8b-2b-β `ping` vertical): it answers the guest's
+    /// neighbour resolution and every `ICMPv6` echo request the guest `ping`
+    /// tool sends over the shared IPv6 link-local wire, and reports success
+    /// once it has served at least one such request. Unlike [`Self::spawn`]
+    /// it runs **no** outbound campaign of its own — the guest is the active
+    /// pinger — so its verdict ([`Self::stop_and_join`]) is `Ok` only when
+    /// the guest actually reached it and it answered.
+    pub fn spawn_ping_responder(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_ping_responder)
+    }
+
     /// Bind `peer_sock` and start the **passive TCP echo-server** peer
     /// thread (the N5c stream vertical): it answers the guest client's
     /// neighbour resolution, accepts one connection on
@@ -208,6 +220,83 @@ fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Re
         Ok(())
     } else {
         Err("netstack peer: inbound v6 echo campaign incomplete".to_string())
+    }
+}
+
+/// The ICMP echo-responder loop (the `ping` vertical): serve the guest
+/// reactively — answer its neighbour resolution and every echo request it
+/// sends — and report whether at least one echo request was served.
+///
+/// It is the passive mirror of [`run_peer`]: it never campaigns. The guest
+/// `ping` tool is the active side; it resolves the peer's link-local, sends
+/// its echo requests, and the peer's engine auto-answers each (the reply is
+/// queued in the same [`Stack::on_frame`] output). Serving a request is the
+/// proof the guest's outbound echo crossed the two-process boundary and was
+/// answered, so the guest's own reply-receipt (its `icmp_seq=` line) and this
+/// verdict together mean neither side can pass alone.
+fn run_ping_responder(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let facts = DeviceFacts {
+        mac: MacAddress(wire::PEER_MAC),
+        mtu: 1500,
+        link: LinkState::Up,
+        offloads: NetOffloads::empty(),
+        rx_queues: 1,
+    };
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let mut stack = Stack::new(
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        now(start),
+    )
+    .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
+
+    let mut served = false;
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        // Timer-due engine output (the peer's own DAD probes, NS retransmits
+        // for any neighbour resolution it initiated while replying).
+        let out = stack.advance(now(start));
+        note_served(&out, &mut served);
+        send_frames(socket, qemu_sock, &out.frames);
+
+        // Serve whatever the guest sent: its neighbour queries for the peer's
+        // link-local, and its echo requests (answered in the same output).
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                let out = stack.on_frame(&buf[..len], now(start));
+                note_served(&out, &mut served);
+                send_frames(socket, qemu_sock, &out.frames);
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+    }
+
+    if served {
+        Ok(())
+    } else {
+        Err("netstack peer: no inbound echo request was served".to_string())
+    }
+}
+
+/// Record whether any echo request addressed to the peer was served in
+/// `out`'s events (the passive responder's success witness).
+fn note_served(out: &StackOutput, served: &mut bool) {
+    if out
+        .events
+        .iter()
+        .any(|event| matches!(event, StackEvent::EchoRequestServed { .. }))
+    {
+        *served = true;
     }
 }
 

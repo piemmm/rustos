@@ -3036,6 +3036,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-ping-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-netstack-stream-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

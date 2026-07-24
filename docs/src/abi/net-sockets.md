@@ -197,7 +197,16 @@ not surfaced through this socket, so the `ping` tool prints no `ttl=` field.
 The client links `tairix_rt::net::icmp_echo_socket` / `connect` /
 `send_echo` and drains replies with `recv_echo` (which, like `recv`, returns
 the kernel-attested sender `Origin` for fail-closed authentication). The
-user-facing tool is `userland/apps/ping`.
+user-facing tool is `userland/apps/ping`. Reaching below the transport layer
+is an administrative act (the Unix `CAP_NET_RAW`/setuid-`ping` model), so
+`CAP_NET_RAW` is part of the administrator account ceiling
+(`tairix_users::ADMINISTRATIVE_SET`); a program still receives it only if its
+own signed manifest requests it (`ping`), intersected with that ceiling.
+Ordinary transport use stays baseline `CAP_NET`. The whole echo path — open,
+neighbour resolution, request, reply demux — is proven live by the
+`netstack_ping_qemu_aarch64` two-process QEMU vertical (`plans/NETWORK.md`
+N8b-2b-β): a guest `ping` answered by a host passive ICMP echo responder over
+the shared IPv6 link-local wire.
 
 ## Delivery (`SocketDatagram` / `SocketEcho`)
 

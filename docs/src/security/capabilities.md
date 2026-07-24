@@ -121,7 +121,11 @@ administrator is an account whose grant additionally includes the
 administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_CHOWN` — the
 `chown(2)` privilege to reassign a file's owner, `CAP_FS_MOUNT`,
 `CAP_RLIMIT_RAISE`, `CAP_AUDIT_READ`, the global `CAP_SYSINFO_*` queries,
-`CAP_TIME_SET`, `CAP_TIME_HIRES`) — no uid is special, there is no admin
+`CAP_TIME_SET`, `CAP_TIME_HIRES`, `CAP_MEM_PIN`, and the
+network-administration set `CAP_NET_ADMIN`, `CAP_NET_BIND_PRIVILEGED`, and
+`CAP_NET_RAW` — running a privileged network service, or reaching below the
+transport layer to run the diagnostic `ping`, is an administrative act, the
+Unix `CAP_NET_BIND_SERVICE`/`CAP_NET_RAW` model) — no uid is special, there is no admin
 flag, and group membership conveys file reach through ACLs, never class
 capabilities. Driver-class and service-class capabilities
 (`CAP_MEM_DMA`, `CAP_SPAWN_AS_USER`, …) are never part of any account

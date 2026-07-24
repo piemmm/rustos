@@ -1277,7 +1277,7 @@ the whole is too large for one change and each leaves the tree working.
   defects. `README.md` support-matrix rows record the per-arch offload
   state.
 
-### N8 — `ping`/`ss`-class command apps + observability `[~]`
+### N8 — `ping`/`ss`-class command apps + observability `[x]`
 
 #### N8a — per-interface counters through the System Information API `[x]`
 - `lib/net::StackCounters` carries honest byte accounting (`rx_bytes`,
@@ -1335,7 +1335,7 @@ the whole is too large for one change and each leaves the tree working.
   tables. Host-tested at every layer; no new QEMU vertical (the query is
   the N8a-precedent guest-driven path; the app is host-tested + planted).
 
-#### N8b-2b — the `ping` command app `[~]`
+#### N8b-2b — the `ping` command app `[x]`
 
 ##### N8b-2b-α — the ICMP-echo socket path + the `ping` app `[x]`
 - **The ICMP-echo socket path is landed end to end** (host-tested).
@@ -1363,18 +1363,27 @@ the whole is too large for one change and each leaves the tree working.
   test. Covered by unit tests at every layer (ABI round-trip/fail-closed,
   netstack open-gate/send/deliver, engine loss/quiet/verify).
 
-##### N8b-2b-β — the live two-process QEMU vertical `[ ]`
-- Remaining: a guest `ping` answered by the host `netpeer`, since the ICMP
-  path is not exercised by the existing verticals. Concretely — a passive
-  ICMP-responder peer body in `tools/xtask/src/commands/netpeer.rs` (the
-  "serve" half of `run_peer`: `stack.on_frame` auto-answers echo requests +
-  ND; succeed on ≥1 `EchoRequestServed`), a `NetPeerMode::V6PingResponder`,
-  a net-only `FsDisk` that plants the standard app store (so the real `ping`
-  bundle is present) plus the signed virtio-net driver, and a
-  `tairix-test-netstack-ping-qemu-aarch64` crate (modelled on the stream
-  vertical's guest tail: arm on `comm=ping` audited `exit`, PASS on the shell
-  `exit`, plus the peer's served-echo verdict). The serial script types
-  `ping -c N <peer-v6-link-local>` at the root shell.
+##### N8b-2b-β — the live two-process QEMU vertical `[x]`
+- `tairix-test-netstack-ping-qemu-aarch64` boots the production aarch64
+  pipeline over the net-only-driver encrypted-root disk carrying the
+  **standard** app store (so the real `ping` bundle is present — no test
+  fixture) plus the signed virtio-net driver (`FsDisk::PingRootDisk`), with a
+  virtio-net device and the harness-side **passive ICMP echo responder**
+  (`NetPeerMode::V6PingResponder` → `netpeer::run_ping_responder`: no
+  campaign; `Stack::on_frame` answers ND + echo requests; verdict = ≥1
+  `EchoRequestServed`). The serial script unlocks, logs in `root`/`root`, and
+  runs `ping -c 3 fe80::2` (the peer's `link_local(PEER_IID)`, pinned by a
+  host test). The guest bin arms on the tool's audited `exit` (`comm=ping`)
+  and PASSes on the shell's next `exit`, typed only after an `icmp_seq=` reply
+  line — a token `ping` prints only on a genuinely received reply — so an
+  unanswered run times out fail-loud; the responder must also report a served
+  request, so neither side passes alone.
+- **`CAP_NET_RAW` joins the administrator ceiling** (`tairix_users::
+  ADMINISTRATIVE_SET`): the `ping` manifest requests it for its ICMP-echo
+  socket (netstack gates the open on it), and reaching below the transport
+  layer is an administrative act — the Unix `CAP_NET_RAW`/setuid-`ping` model,
+  the `CAP_NET_BIND_PRIVILEGED` precedent. The pinned administrator-ceiling
+  count is 21→22. Ordinary transport use stays baseline `CAP_NET`.
 
 ### N9 — interface configuration, bonding, failover `[ ]`
 - `lib/netconfig` (grammar, closed registry, fail-closed parse,

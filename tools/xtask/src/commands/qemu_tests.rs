@@ -157,6 +157,14 @@ enum NetPeerMode {
     /// back, and injects bounded frame loss so the stream survives
     /// retransmission (the role-swapped mirror of [`Self::V6TcpEcho`]).
     V6TcpConnect,
+    /// A v6-link-local-only *passive ICMP echo responder* (the N8b-2b-β
+    /// `ping` vertical): same deterministic link-local addressing as
+    /// [`Self::V6LinkLocal`], but the peer runs no campaign — it answers the
+    /// guest's neighbour resolution and every `ICMPv6` echo request the guest
+    /// `ping` tool sends over the shared IPv6 link-local wire, and its verdict
+    /// requires at least one served request (so the guest must actually have
+    /// reached it).
+    V6PingResponder,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -222,6 +230,15 @@ enum FsDisk {
     /// peer connects to it over the live two-process network. Only this disk
     /// carries the fixtures; no production image ships them.
     ListenRootDisk,
+    /// The net-only-driver encrypted-root layout carrying the **standard**
+    /// signed application store (so the real `ping` command bundle is
+    /// present — no test-only fixture) plus the signed virtio-net driver
+    /// bundle — the `ping` vertical's backing (`plans/NETWORK.md` N8b-2b-β).
+    /// `devmgr` autoloads the NIC driver into its own process and `netstack`
+    /// binds it, so the guest `ping` tool reaches the host ICMP echo
+    /// responder over the live two-process network. The console stays the
+    /// UART text console the serial script drives (no display/input driver).
+    PingRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -458,6 +475,20 @@ const TCPECHO_PASS_PREFIX: &str = "TCPECHO PASS";
 /// report marker. Pinned to the fixture's own `tairix_test_tcpserve::PASS_MARKER`
 /// by a unit test below, so the script and the program cannot drift.
 const TCPSERVE_PASS_PREFIX: &str = "TCPSERVE PASS";
+
+/// The shell command line the `ping` vertical types at the prompt: three
+/// `ICMPv6` echo requests to the host peer's link-local address (`fe80::2`,
+/// formed from `tairix_test_netstack_wire::PEER_IID`). The address literal is
+/// pinned to the shared wire constant by a unit test below, so the typed
+/// target and the peer's own address cannot drift.
+const PING_COMMAND_LINE: &str = "ping -c 3 fe80::2\n";
+
+/// Serial marker the `ping` vertical waits for before typing the shell `exit`
+/// that completes its PASS chain: the `icmp_seq=` field of a reply line, which
+/// the `ping` tool prints **only** on a genuinely received echo reply. An
+/// unanswered run never emits it, so the run times out fail-loud rather than
+/// falsely passing.
+const PING_REPLY_MARKER: &str = "icmp_seq=";
 
 /// `true` if the two byte strings are equal — the compile-time complement of
 /// [`is_line_of`] for asserting a typed line does **not** match the fixture.
@@ -3897,6 +3928,56 @@ const TESTS: &[QemuTest] = &[
             (TCPSERVE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/NETWORK.md` N8b-2b-β: the ICMP-echo (`ping`) vertical.
+    // `tairix-test-netstack-ping-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the encrypted-root disk that carries the **standard**
+    // signed store bundles (so the real `ping` command bundle is present)
+    // **plus** the signed virtio-net driver bundle (`FsDisk::PingRootDisk`),
+    // with a virtio-net device attached and the harness-side passive ICMP
+    // echo responder on its `dgram` netdev (`NetPeerMode::V6PingResponder`).
+    // It unlocks the root, authenticates `root`/`root` at the console login,
+    // and runs `ping -c 3 fe80::2` at the shell — the peer's EUI-64-free
+    // link-local formed from `tairix_test_netstack_wire::PEER_IID`. The `ping`
+    // tool opens an ICMP-echo socket (its manifest's `CAP_NET`+`CAP_NET_RAW`,
+    // enforced by the netstack socket dispatcher against the kernel-attested
+    // origin), resolves the peer over ND, and sends three echo requests over
+    // the shared IPv6 link-local wire — retrying through the boot window while
+    // the NIC driver is still autoloading. The peer answers each, so `ping`
+    // prints a `… icmp_seq=… time=… ms` reply line per reply. The serial
+    // `exit` step keys on `icmp_seq=`, which the tool prints **only** on a
+    // genuinely received reply, so an unanswered run never reaches it and
+    // times out fail-loud with the transcript. The guest audit sink arms on
+    // `ping`'s audited `exit` (`sc=exit`, `comm=ping`) and reports PASS on the
+    // next audited `exit` — the shell's, typed only after the `icmp_seq=`
+    // marker appeared — so the received reply provably reached the transcript
+    // before the run ended (the session-ceiling arm-then-exit discipline). The
+    // harness additionally requires the responder to report at least one
+    // served echo request, so neither side can pass alone (a guest that never
+    // reached the peer, or a peer that never answered, both fail). A
+    // 300-second budget covers boot + bounded PBKDF2 + the two-process net
+    // bring-up on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-ping-qemu-aarch64",
+        binary: "tairix-test-netstack-ping-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6PingResponder,
+        ramfb: false,
+        fs_disk: FsDisk::PingRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, PING_COMMAND_LINE),
+            (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
+        ],
+    },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
     // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
@@ -5142,7 +5223,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         )
     })?;
     let apps = match t.fs_disk {
-        FsDisk::EncryptedRootDisk | FsDisk::AutoloadRootDisk => {
+        FsDisk::EncryptedRootDisk | FsDisk::AutoloadRootDisk | FsDisk::PingRootDisk => {
             super::image_apps::app_store_files(ctx, arch)?
         }
         _ => EMPTY,
@@ -5164,7 +5245,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         _ => EMPTY,
     };
     let net_only_drivers = match t.fs_disk {
-        FsDisk::StreamRootDisk | FsDisk::ListenRootDisk => {
+        FsDisk::StreamRootDisk | FsDisk::ListenRootDisk | FsDisk::PingRootDisk => {
             super::image_drivers::net_driver_store_files(ctx, arch)?
         }
         _ => EMPTY,
@@ -5805,6 +5886,16 @@ fn fs_disk_image(
             "listen-root.img",
             "listen-root",
         )?),
+        // The `ping` vertical: the same net-only driver set and whole-disk
+        // author, planting the **standard** app store (which carries the real
+        // `ping` bundle) rather than a test-only fixture — one builder, no copy.
+        FsDisk::PingRootDisk => Some(net_root_image(
+            t,
+            net_only_drivers,
+            apps,
+            "ping-root.img",
+            "ping-root",
+        )?),
     })
 }
 
@@ -5866,6 +5957,9 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
             }
             NetPeerMode::V6TcpConnect => {
                 super::netpeer::NetPeer::spawn_tcp_connect(&qemu_sock, &peer_sock)
+            }
+            NetPeerMode::V6PingResponder => {
+                super::netpeer::NetPeer::spawn_ping_responder(&qemu_sock, &peer_sock)
             }
         };
         peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
@@ -6036,6 +6130,21 @@ mod tests {
     #[test]
     fn tcpserve_script_marker_matches_the_fixture_marker() {
         assert_eq!(TCPSERVE_PASS_PREFIX, tairix_test_tcpserve::PASS_MARKER);
+    }
+
+    /// The `ping` vertical types the peer's own link-local address as its
+    /// target, so the typed literal and the address the responder forms from
+    /// the shared wire identifier cannot drift.
+    #[test]
+    fn ping_command_targets_the_peer_link_local() {
+        let peer = tairix_test_netstack_wire::link_local(tairix_test_netstack_wire::PEER_IID);
+        let rendered = format!("{peer}");
+        assert!(
+            super::PING_COMMAND_LINE.contains(&rendered),
+            "ping command {:?} must target the peer link-local {rendered}",
+            super::PING_COMMAND_LINE
+        );
+        assert!(super::PING_COMMAND_LINE.ends_with('\n'));
     }
 
     #[test]
