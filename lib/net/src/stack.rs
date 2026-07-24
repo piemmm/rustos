@@ -808,6 +808,22 @@ impl Stack {
         Ok(())
     }
 
+    /// Override the interface's link MTU (the `<iface>.mtu` administrative
+    /// key in `network.conf`).
+    ///
+    /// Replaces the MTU the device reported at bring-up with the operator's
+    /// configured value, which governs both IPv4/IPv6 fragmentation and TCP
+    /// MSS selection. `mtu` is a valid link MTU: the configuration engine
+    /// bounds it at `[1280, 65535]`, so it never falls below the IPv6
+    /// minimum and the IPv6 link MTU stays valid. Any learned path MTU is
+    /// retained and re-clamped against the new link MTU on the next send,
+    /// so lowering the MTU never leaves a stale-too-large path estimate in
+    /// use (RFC 8201 §4 — the cache is a floor, the link MTU the ceiling).
+    pub fn set_mtu(&mut self, mtu: u16) {
+        self.link_mtu = usize::from(mtu);
+        self.mtu_v6 = usize::from(mtu);
+    }
+
     /// Whether IPv4 is administratively enabled (`net.ipv4.enabled`).
     #[must_use]
     pub fn ipv4_enabled(&self) -> bool {

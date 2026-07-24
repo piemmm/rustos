@@ -1745,3 +1745,20 @@ fn disabling_ipv4_at_runtime_drops_the_assignment_and_refuses_more() {
     assert_eq!(a.set_ipv4_config(V4_A, 24, None), Ok(()));
     assert_eq!(a.iface().ipv4(), Some((V4_A, 24)));
 }
+
+#[test]
+fn set_mtu_overrides_the_link_mtu_used_for_egress() {
+    // A device that reported 1500 at bring-up, with an on-link v4
+    // destination configured so the MSS query has a route.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("assign v4");
+    let v4_dest = IpAddr::V4(V4_B);
+    // Default v4 MSS = 1500 - 20 (IPv4) - 20 (TCP) = 1460.
+    assert_eq!(a.tcp_local_mss(v4_dest, t(0)), Some(1460));
+    // Lowering the MTU to 1400 lowers the MSS by the same 100 bytes.
+    a.set_mtu(1400);
+    assert_eq!(a.tcp_local_mss(v4_dest, t(0)), Some(1360));
+    // Raising it past the device value is honoured too (a jumbo link).
+    a.set_mtu(9000);
+    assert_eq!(a.tcp_local_mss(v4_dest, t(0)), Some(8960));
+}
