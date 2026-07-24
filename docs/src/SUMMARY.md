@@ -36,6 +36,7 @@
 - [The rxe loader: W^X, PIE, KASLR, CFI](./security/rxe_loader.md)
 - [Side-channel mitigations (Arch HAL)](./security/side_channels.md)
 - [Memory tagging (Arch HAL)](./security/memory_tagging.md)
+- [Network security posture](./security/network.md)
 
 # Shared libraries
 
@@ -107,6 +108,7 @@
 - [System Information service](./userland/sysinfod.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
+- [Networking tools (`ss`)](./userland/networking.md)
 - [elsh (Element Shell)](./userland/shell.md)
 - [Text login](./userland/login.md)
 - [Application bundle loader](./userland/appmgr.md)

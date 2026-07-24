@@ -583,6 +583,7 @@ mod tests {
                 "seatmgr",
                 "seq",
                 "sleep",
+                "ss",
                 "stress",
                 "sysinfo",
                 "sysinfod",

@@ -260,6 +260,18 @@ impl SysinfoQueryId {
     /// (`plans/NETWORK.md` §5: `stats:net/<iface>/{rx,tx}.{pps,bps}`).
     pub const NET_INTERFACE_RATES: Self = Self(22);
 
+    /// List every open socket the stack owns, system-wide: one
+    /// [`NetSocketRecord`](crate::net_ipc::NetSocketRecord) per socket
+    /// (protocol, state, local and peer addresses, the owning process,
+    /// and the receive/send queue depths), paged by a
+    /// [`NetInterfaceListRequest`] — the `ss`/`netstat` socket table.
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the records name
+    /// every principal's sockets and every connection's peer address, so
+    /// this is the most privileged of the `stats:net` surfaces — never
+    /// open by default (`plans/NETWORK.md` §5).
+    pub const NET_SOCKETS: Self = Self(23);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -569,6 +581,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::NET_INTERFACE_RATES,
         name: "net_interface_rates",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_SOCKETS,
+        name: "net_sockets",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
@@ -3723,6 +3741,15 @@ mod tests {
         assert_eq!(SysinfoQueryId::IRQ_LIST.as_u16(), 19);
         assert_eq!(SysinfoQueryId::CRASH_RECORD.as_u16(), 20);
         assert_eq!(SysinfoQueryId::NET_INTERFACE_COUNTERS.as_u16(), 21);
+        assert_eq!(SysinfoQueryId::NET_INTERFACE_RATES.as_u16(), 22);
+        assert_eq!(SysinfoQueryId::NET_SOCKETS.as_u16(), 23);
+        assert_eq!(
+            spec_for(SysinfoQueryId::NET_SOCKETS)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert!(spec_for(SysinfoQueryId::NET_SOCKETS).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 

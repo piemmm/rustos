@@ -189,6 +189,16 @@ pub enum NetstackRequest {
         /// The rate-averaging window the caller requests.
         window: Duration64,
     },
+    /// Page the whole system's open sockets (sysinfo broker; the
+    /// `ss`/`netstat` socket table). A system-wide diagnostic: the
+    /// records name the owning process and every connection's peer
+    /// address, gated `CAP_SYSINFO_GLOBAL` at the broker.
+    Sockets {
+        /// First socket index to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
     /// Bind a live NIC driver process's device channel to a new managed
     /// interface (admin surface).
     ///
@@ -228,6 +238,8 @@ const OP_IF_STATE: u16 = 6;
 const OP_BIND_DRIVER: u16 = 7;
 /// Wire operation discriminant of [`NetstackRequest::InterfaceRates`].
 const OP_IF_RATES: u16 = 8;
+/// Wire operation discriminant of [`NetstackRequest::Sockets`].
+const OP_SOCKETS: u16 = 9;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -297,6 +309,11 @@ impl NetstackRequest {
                 put_u32(&mut out, 8, offset);
                 put_u16(&mut out, 12, limit);
                 out[14..26].copy_from_slice(&window.to_le_bytes());
+            }
+            Self::Sockets { offset, limit } => {
+                put_u16(&mut out, 6, OP_SOCKETS);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
             }
             Self::BindDriver { endpoint_id, iface } => {
                 put_u16(&mut out, 6, OP_BIND_DRIVER);
@@ -381,11 +398,7 @@ impl NetstackRequest {
             }
             OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS => {
                 reserved_zero(bytes, 14)?;
-                let offset = read_u32(bytes, 8);
-                let limit = read_u16(bytes, 12);
-                if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
+                let (offset, limit) = paged_offset_limit(bytes)?;
                 Ok(match op {
                     OP_IF_FACTS => Self::InterfaceFacts { offset, limit },
                     OP_IF_STATE => Self::InterfaceState { offset, limit },
@@ -394,17 +407,18 @@ impl NetstackRequest {
             }
             OP_IF_RATES => {
                 reserved_zero(bytes, 26)?;
-                let offset = read_u32(bytes, 8);
-                let limit = read_u16(bytes, 12);
-                if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
+                let (offset, limit) = paged_offset_limit(bytes)?;
                 let window = Duration64::from_bytes(&bytes[14..26])?;
                 Ok(Self::InterfaceRates {
                     offset,
                     limit,
                     window,
                 })
+            }
+            OP_SOCKETS => {
+                reserved_zero(bytes, 14)?;
+                let (offset, limit) = paged_offset_limit(bytes)?;
+                Ok(Self::Sockets { offset, limit })
             }
             OP_BIND_DRIVER => {
                 reserved_zero(bytes, 32)?;
@@ -435,6 +449,22 @@ fn address(bytes: &[u8], from: usize, family: NetAddrFamily) -> Result<[u8; 16],
         return Err(Errno::BadMagic);
     }
     Ok(addr)
+}
+
+/// Read and bounds-check the paging `offset` (u32 at 8) and `limit`
+/// (u16 at 12) shared by every paged list/rates/sockets request.
+///
+/// A `limit` of zero or one above [`NETSTACK_LIST_LIMIT_MAX`] fails closed
+/// with [`Errno::LengthOutOfRange`]. The reserved-tail check differs per
+/// operation (the rates request carries a window past the limit), so it
+/// stays in each arm.
+fn paged_offset_limit(bytes: &[u8]) -> Result<(u32, u16), Errno> {
+    let offset = read_u32(bytes, 8);
+    let limit = read_u16(bytes, 12);
+    if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok((offset, limit))
 }
 
 /// Refuse a request whose reserved tail (from `from` to the end of the
@@ -928,6 +958,222 @@ impl NetInterfaceRatesRecord {
     }
 }
 
+/// The transport protocol of a listed socket, as its IANA protocol
+/// number so the wire value is a stable, well-known constant rather than
+/// a private discriminant.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetSockProto {
+    /// TCP (a [`crate::net::SocketType::Stream`] socket).
+    Tcp = 6,
+    /// UDP (a [`crate::net::SocketType::Datagram`] socket).
+    Udp = 17,
+}
+
+impl NetSockProto {
+    /// The IANA protocol number.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from its IANA protocol number, failing closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — not a protocol the socket layer lists.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            6 => Ok(Self::Tcp),
+            17 => Ok(Self::Udp),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// The observable state of a listed socket.
+///
+/// A TCP socket reports its RFC 9293 connection state; a UDP socket
+/// reports [`Unconnected`](Self::Unconnected) until a default peer is
+/// set with `connect`, then [`Established`](Self::Established) — the
+/// same `UNCONN`/`ESTAB` vocabulary `ss` uses, so one column serves both
+/// transports.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetSockState {
+    /// No connection (a closed TCP socket).
+    Closed = 0,
+    /// A passive TCP socket awaiting connections.
+    Listen = 1,
+    /// An active TCP open whose SYN is unacknowledged.
+    SynSent = 2,
+    /// A passive TCP open that has received a SYN.
+    SynReceived = 3,
+    /// An open TCP connection carrying data.
+    Established = 4,
+    /// Local close sent; awaiting the peer's ACK and FIN.
+    FinWait1 = 5,
+    /// Local close acknowledged; awaiting the peer's FIN.
+    FinWait2 = 6,
+    /// Peer close received; the local side may still send.
+    CloseWait = 7,
+    /// Simultaneous close in progress.
+    Closing = 8,
+    /// Local close after a peer close; awaiting the final ACK.
+    LastAck = 9,
+    /// Orderly close complete; holding down for stray segments.
+    TimeWait = 10,
+    /// A UDP socket with no default peer (`ss`'s `UNCONN`).
+    Unconnected = 11,
+}
+
+impl NetSockState {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from its wire discriminant, failing closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — not a recognised socket state.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Closed),
+            1 => Ok(Self::Listen),
+            2 => Ok(Self::SynSent),
+            3 => Ok(Self::SynReceived),
+            4 => Ok(Self::Established),
+            5 => Ok(Self::FinWait1),
+            6 => Ok(Self::FinWait2),
+            7 => Ok(Self::CloseWait),
+            8 => Ok(Self::Closing),
+            9 => Ok(Self::LastAck),
+            10 => Ok(Self::TimeWait),
+            11 => Ok(Self::Unconnected),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The short upper-case label `ss` prints for this state.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Closed => "CLOSED",
+            Self::Listen => "LISTEN",
+            Self::SynSent => "SYN-SENT",
+            Self::SynReceived => "SYN-RECV",
+            Self::Established => "ESTAB",
+            Self::FinWait1 => "FIN-WAIT-1",
+            Self::FinWait2 => "FIN-WAIT-2",
+            Self::CloseWait => "CLOSE-WAIT",
+            Self::Closing => "CLOSING",
+            Self::LastAck => "LAST-ACK",
+            Self::TimeWait => "TIME-WAIT",
+            Self::Unconnected => "UNCONN",
+        }
+    }
+}
+
+/// One open socket the stack owns (the response record of the
+/// [`NetstackRequest::Sockets`] page; the `ss`/`netstat` socket table,
+/// plan §5). A system-wide diagnostic exposed only under
+/// [`CapabilityId::SYSINFO_GLOBAL`](crate::CapabilityId::SYSINFO_GLOBAL):
+/// it names the owning process and the peer address of every connection,
+/// so it is never open by default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetSocketRecord {
+    /// The socket's transport protocol.
+    pub proto: NetSockProto,
+    /// The socket's observable state.
+    pub state: NetSockState,
+    /// Address family of the local (and, when connected, peer) address.
+    pub family: NetAddrFamily,
+    /// The local address; V4 uses the first four bytes, all-zero means
+    /// the unspecified "any" address.
+    pub local_addr: [u8; 16],
+    /// The bound local port; `0` means unbound.
+    pub local_port: u16,
+    /// The peer address; all-zero for an unconnected socket.
+    pub peer_addr: [u8; 16],
+    /// The peer port; `0` for an unconnected socket.
+    pub peer_port: u16,
+    /// The unforgeable process instance that owns the socket.
+    pub owner: u64,
+    /// Bytes of in-order received data buffered for the owner to read
+    /// (`ss`'s `Recv-Q`).
+    pub recv_q: u64,
+    /// Bytes queued for transmission not yet acknowledged (`ss`'s
+    /// `Send-Q`).
+    pub send_q: u64,
+}
+
+impl NetSocketRecord {
+    /// Encoded size: a fixed 64-byte record.
+    pub const WIRE_LEN: usize = 64;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.proto.as_u8();
+        out[1] = self.state.as_u8();
+        out[2] = self.family.as_u8();
+        // out[3] reserved, left zero.
+        out[4..20].copy_from_slice(&self.local_addr);
+        put_u16(&mut out, 20, self.local_port);
+        out[22..38].copy_from_slice(&self.peer_addr);
+        put_u16(&mut out, 38, self.peer_port);
+        put_u64(&mut out, 40, self.owner);
+        put_u64(&mut out, 48, self.recv_q);
+        put_u64(&mut out, 56, self.send_q);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::OutOfRange`] — an unknown protocol, state, or family.
+    /// * [`Errno::BadMagic`] — a dirty reserved byte or a V4 address
+    ///   with a non-zero tail.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[3] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let proto = NetSockProto::from_u8(bytes[0])?;
+        let state = NetSockState::from_u8(bytes[1])?;
+        let family = NetAddrFamily::from_u8(bytes[2])?;
+        let mut local_addr = [0u8; 16];
+        local_addr.copy_from_slice(&bytes[4..20]);
+        let mut peer_addr = [0u8; 16];
+        peer_addr.copy_from_slice(&bytes[22..38]);
+        if family == NetAddrFamily::V4
+            && (local_addr[4..].iter().any(|&b| b != 0) || peer_addr[4..].iter().any(|&b| b != 0))
+        {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            proto,
+            state,
+            family,
+            local_addr,
+            local_port: read_u16(bytes, 20),
+            peer_addr,
+            peer_port: read_u16(bytes, 38),
+            owner: read_u64(bytes, 40),
+            recv_q: read_u64(bytes, 48),
+            send_q: read_u64(bytes, 56),
+        })
+    }
+}
+
 /// Largest reply the [`NETSTACK_ENDPOINT`] emits: the status word, the
 /// page header, and a full page of state records (the widest reply).
 pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
@@ -1074,10 +1320,98 @@ mod tests {
                 limit: NETSTACK_LIST_LIMIT_MAX,
                 window: Duration64::from_nanos(500_000_000),
             },
+            NetstackRequest::Sockets {
+                offset: 7,
+                limit: 16,
+            },
+            NetstackRequest::Sockets {
+                offset: 0,
+                limit: NETSTACK_LIST_LIMIT_MAX,
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn sockets_bounds_and_reserved_tail_are_enforced() {
+        let good = NetstackRequest::Sockets {
+            offset: 3,
+            limit: 8,
+        }
+        .to_le_bytes();
+        let mut zero_limit = good;
+        zero_limit[12] = 0;
+        zero_limit[13] = 0;
+        assert_eq!(
+            NetstackRequest::from_bytes(&zero_limit),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut dirty_tail = good;
+        dirty_tail[14] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&dirty_tail),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn socket_record_round_trips_and_fails_closed() {
+        let record = NetSocketRecord {
+            proto: NetSockProto::Tcp,
+            state: NetSockState::Established,
+            family: NetAddrFamily::V4,
+            local_addr: v4(10, 0, 2, 15),
+            local_port: 4321,
+            peer_addr: v4(10, 0, 2, 2),
+            peer_port: 80,
+            owner: 0x0102_0304_0506_0708,
+            recv_q: 128,
+            send_q: 512,
+        };
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetSocketRecord::from_bytes(&bytes), Ok(record));
+        // A truncated record fails closed.
+        assert_eq!(
+            NetSocketRecord::from_bytes(&bytes[..NetSocketRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A dirty reserved byte fails closed.
+        let mut dirty = bytes;
+        dirty[3] = 1;
+        assert_eq!(NetSocketRecord::from_bytes(&dirty), Err(Errno::BadMagic));
+        // An unknown protocol fails closed.
+        let mut bad_proto = bytes;
+        bad_proto[0] = 99;
+        assert_eq!(
+            NetSocketRecord::from_bytes(&bad_proto),
+            Err(Errno::OutOfRange)
+        );
+        // An unknown state fails closed.
+        let mut bad_state = bytes;
+        bad_state[1] = 200;
+        assert_eq!(
+            NetSocketRecord::from_bytes(&bad_state),
+            Err(Errno::OutOfRange)
+        );
+        // A V4 address with a dirty tail fails closed.
+        let mut wide_v4 = bytes;
+        wide_v4[4 + 5] = 1;
+        assert_eq!(NetSocketRecord::from_bytes(&wide_v4), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn socket_state_labels_and_protos_are_stable() {
+        assert_eq!(NetSockState::Established.label(), "ESTAB");
+        assert_eq!(NetSockState::Listen.label(), "LISTEN");
+        assert_eq!(NetSockState::Unconnected.label(), "UNCONN");
+        assert_eq!(NetSockProto::Tcp.as_u8(), 6);
+        assert_eq!(NetSockProto::Udp.as_u8(), 17);
+        for value in 0u8..=11 {
+            assert!(NetSockState::from_u8(value).is_ok());
+        }
+        assert_eq!(NetSockState::from_u8(12), Err(Errno::OutOfRange));
     }
 
     #[test]

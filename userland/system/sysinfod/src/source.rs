@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord,
+    NetInterfaceStateRecord, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
@@ -276,6 +276,18 @@ pub trait SysinfoSource {
         caller: &Caller,
         window: Duration64,
     ) -> Result<Vec<NetInterfaceRatesRecord>, Errno>;
+
+    /// Return every open socket the stack owns, system-wide, in the
+    /// stack's stable table order (`plans/NETWORK.md` §5: the
+    /// `ss`/`netstat` socket table).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: the
+    /// records name every principal's sockets and every connection's peer
+    /// address — the most privileged of the `stats:net` surfaces. On a
+    /// running system the source forwards to the `netstack` service's
+    /// broker read; the owned list is returned whole and [`crate::serve`]
+    /// applies the `offset`/`limit` paging.
+    fn net_sockets(&self, caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

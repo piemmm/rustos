@@ -50,8 +50,8 @@ mod program {
 
     use tairix_abi::net_ipc::{
         decode_page_reply, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetstackRequest, NETSTACK_ENDPOINT,
-        NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord, NetstackRequest,
+        NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, CrashRecord,
@@ -281,6 +281,10 @@ mod program {
             page_netstack(NetstackRatesPage { window })
         }
 
+        fn net_sockets(&self, _caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno> {
+            page_netstack(NetstackSocketsPage)
+        }
+
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
@@ -401,6 +405,19 @@ mod program {
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetInterfaceRatesRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The socket-listing page.
+    struct NetstackSocketsPage;
+    impl NetstackPage for NetstackSocketsPage {
+        type Record = NetSocketRecord;
+        const RECORD_LEN: usize = NetSocketRecord::WIRE_LEN;
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::Sockets { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetSocketRecord::from_bytes(chunk)
         }
     }
 

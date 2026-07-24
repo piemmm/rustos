@@ -866,6 +866,18 @@ mod tests {
         CapabilityId::FS_MOUNT,
     ];
 
+    // The socket-listing tool `ss` (plans/NETWORK.md N8b-2): console write
+    // for its output/diagnostics, filesystem access to read its own bundle
+    // Help/ payload, and `CAP_SYSINFO_GLOBAL` for the system-wide
+    // `NET_SOCKETS` query the listing renders (the socket table names every
+    // principal's sockets, so it is privileged and audited). Not an embedded
+    // spawn-floor program, so the list lives only in this pin.
+    const SS_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SYSINFO_GLOBAL,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -917,6 +929,7 @@ mod tests {
             ("seatmgr", AppKind::Service, SEATMGR_MANIFEST),
             ("seq", AppKind::Command, PURE_TOOL_REQUEST),
             ("sleep", AppKind::Command, PURE_TOOL_REQUEST),
+            ("ss", AppKind::Command, SS_TOOL_REQUEST),
             ("stress", AppKind::Command, STRESS_MANIFEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),

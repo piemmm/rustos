@@ -14,8 +14,8 @@ use tairix_abi::net::{
 };
 use tairix_abi::net_ipc::{
     decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetstackRequest,
-    IF_NAME_LEN, NETSTACK_MAX_REPLY,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSockProto,
+    NetSockState, NetSocketRecord, NetstackRequest, IF_NAME_LEN, NETSTACK_MAX_REPLY,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -212,7 +212,17 @@ fn serve_ok(
     reply: &mut [u8],
 ) -> usize {
     let sink = RecordingSink::new();
-    serve(stack, who, &sink, &request.to_le_bytes(), reply, t(2)).expect("served")
+    let sockets = SocketService::new();
+    serve(
+        stack,
+        &sockets,
+        who,
+        &sink,
+        &request.to_le_bytes(),
+        reply,
+        t(2),
+    )
+    .expect("served")
 }
 
 // --- Engine-level end-to-end over the loopback fake -----------------
@@ -355,6 +365,7 @@ fn admin_surface_is_denied_without_net_admin() {
         assert_eq!(
             serve(
                 &mut stack,
+                &SocketService::new(),
                 &broker(),
                 &sink,
                 &request.to_le_bytes(),
@@ -395,6 +406,7 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
         assert_eq!(
             serve(
                 &mut stack,
+                &SocketService::new(),
                 &admin(),
                 &sink,
                 &request.to_le_bytes(),
@@ -420,6 +432,7 @@ fn addr_and_route_add_apply_and_are_audited() {
     };
     let len = serve(
         &mut stack,
+        &SocketService::new(),
         &admin(),
         &sink,
         &addr.to_le_bytes(),
@@ -437,6 +450,7 @@ fn addr_and_route_add_apply_and_are_audited() {
     };
     let len = serve(
         &mut stack,
+        &SocketService::new(),
         &admin(),
         &sink,
         &route.to_le_bytes(),
@@ -478,6 +492,7 @@ fn mutations_on_an_unknown_interface_are_refused_and_audited() {
     assert_eq!(
         serve(
             &mut stack,
+            &SocketService::new(),
             &admin(),
             &sink,
             &request.to_le_bytes(),
@@ -497,7 +512,15 @@ fn malformed_frames_are_refused_and_audited() {
     let mut bad = NetstackRequest::InterfaceList.to_le_bytes();
     bad[0] ^= 0xFF;
     assert_eq!(
-        serve(&mut stack, &admin(), &sink, &bad, &mut reply, t(1)),
+        serve(
+            &mut stack,
+            &SocketService::new(),
+            &admin(),
+            &sink,
+            &bad,
+            &mut reply,
+            t(1),
+        ),
         Err(Errno::BadMagic)
     );
     assert_eq!(sink.ids(), vec![16_003]);
@@ -1859,5 +1882,96 @@ fn stream_connect_and_echo_over_the_pump() {
     assert_eq!(
         echoed, b"hello over tcp",
         "the peer echoed the stream bytes"
+    );
+}
+
+#[test]
+fn socket_listing_reports_open_sockets_and_is_broker_gated() {
+    let mut ns = managed_stack();
+    ns.addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
+        .expect("addr add");
+    let mut svc = SocketService::new();
+    let who = caller(&[CapabilityId::NET]);
+    let mut entropy = || 0x2468_ACE0u32;
+    let mut response = [0u8; 64];
+
+    // Open and bind a datagram socket.
+    let reply = svc_serve(
+        &mut svc,
+        &mut ns,
+        &who,
+        &mut entropy,
+        SocketRequest::Socket {
+            family: NetAddrFamily::V4,
+            sock_type: SocketType::Datagram,
+            deliver_port: DELIVER_PORT,
+        },
+        &mut response,
+        t(2),
+    )
+    .expect("open");
+    let sid = decode_socket_reply(&response[..reply.len]).expect("socket id");
+    svc_serve(
+        &mut svc,
+        &mut ns,
+        &who,
+        &mut entropy,
+        SocketRequest::Bind {
+            socket: sid,
+            local: sockaddr_v4(V4_A, 0),
+        },
+        &mut response,
+        t(2),
+    )
+    .expect("bind");
+
+    // The snapshot names the socket, keyed to the owning pid (10).
+    let records = svc.socket_records(0, 32);
+    assert_eq!(records.len(), 1);
+    let record = records[0];
+    assert_eq!(record.proto, NetSockProto::Udp);
+    assert_eq!(record.state, NetSockState::Unconnected);
+    assert_eq!(record.family, NetAddrFamily::V4);
+    assert_ne!(record.local_port, 0, "bind assigned an ephemeral port");
+    assert_eq!(record.owner, 10, "the owning pid is reported");
+
+    // The `Sockets` dispatch is a broker read: SYSINFO_INTROSPECT succeeds,
+    // an admin capability does not.
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    let request = NetstackRequest::Sockets {
+        offset: 0,
+        limit: 32,
+    };
+    let sink = RecordingSink::new();
+    let len = serve(
+        &mut ns,
+        &svc,
+        &broker(),
+        &sink,
+        &request.to_le_bytes(),
+        &mut reply,
+        t(2),
+    )
+    .expect("broker read");
+    let (count, body) = decode_page_reply(&reply[..len], NetSocketRecord::WIRE_LEN).expect("page");
+    assert_eq!(count, 1);
+    let decoded = NetSocketRecord::from_bytes(body).expect("record");
+    assert_eq!(
+        decoded, record,
+        "the wire record round-trips through the page"
+    );
+
+    assert_eq!(
+        serve(
+            &mut ns,
+            &svc,
+            &admin(),
+            &sink,
+            &request.to_le_bytes(),
+            &mut reply,
+            t(2),
+        ),
+        Err(Errno::PermissionDenied),
+        "an admin capability does not open the socket listing"
     );
 }

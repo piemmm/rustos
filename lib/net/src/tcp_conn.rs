@@ -890,6 +890,14 @@ impl Tcb {
         self.rx.len()
     }
 
+    /// Bytes buffered for transmission not yet acknowledged (queued by the
+    /// application, whether or not yet sent). The `Send-Q` a socket-listing
+    /// diagnostic reports.
+    #[must_use]
+    pub fn send_queued(&self) -> usize {
+        self.tx.len()
+    }
+
     /// Free space in the send buffer (bytes the application may enqueue).
     #[must_use]
     pub fn send_available(&self) -> usize {

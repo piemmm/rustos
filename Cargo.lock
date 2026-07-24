@@ -1964,6 +1964,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-ss"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-procinfo",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-stress"
 version = "0.0.0"
 dependencies = [

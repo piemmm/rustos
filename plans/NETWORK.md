@@ -1312,14 +1312,38 @@ the whole is too large for one change and each leaves the tree working.
   new QEMU vertical (guest-driven, the N8a precedent). Docs: `sysinfo.md`,
   `netstack.md`, `lib/net.md`.
 
-#### N8b-2 — `ping`/`ss`-class command apps + posture docs `[ ]`
-- System command apps (`ping` — v4+v6, coreutils/iputils-familiar
-  surface per §16.7; a socket/interface inspection tool following `ss`
-  conventions) as `.app` bundles with Help/ trees; socket tables and the
-  windowed rate queries (now live, N8b-1) surfaced to the terminal.
-- Docs: user-facing `docs/src/userland/networking.md`; the security
-  posture page `docs/src/security/network.md` (threat model ↔ defence
-  table, the §19.4 event-id registry for network events).
+#### N8b-2a — the `ss` socket-listing tool + posture docs `[x]`
+- The system-wide open-socket table is exposed through the System
+  Information API: `NetSocketRecord` + `NetstackRequest::Sockets` +
+  `SysinfoQueryId::NET_SOCKETS` (id 23, `CAP_SYSINFO_GLOBAL`, audited),
+  netstack `SocketService::socket_records` (each entry carries its
+  `owner_pid`) served by the `serve_read` broker helper, forwarded by
+  `sysinfod`, and paged by the shared `tairix_procinfo::for_each_net_socket`
+  (one query client, never a second). `NET_SOCKETS` is a privileged,
+  system-wide diagnostic: netstack's sysinfo caller is `sysinfod`, so the
+  original principal is not visible to netstack — per-caller "own sockets"
+  is a *different* future mechanism, not a relaxation of this query.
+- `userland/apps/ss` renders it in the iproute2 shape
+  (`-t/-u/-a/-l/-n/-p/-4/-6/-H`, columns `Netid State Recv-Q Send-Q Local
+  Peer [Process]`, addresses via `core::net`), notes hidden listeners on
+  fd 3 (`net.listening_omitted`), and fails loud (never a partial table)
+  when the capability is refused. 13-locale `Help/` tree, README, host
+  tests; auto-discovered.
+- Docs: `docs/src/userland/networking.md`, `docs/src/security/network.md`
+  (threat model ↔ defence table + the §19.4 network event-id registry,
+  ids 16_001–16_014), plus the `abi/sysinfo.md` / `userland/netstack.md`
+  tables. Host-tested at every layer; no new QEMU vertical (the query is
+  the N8a-precedent guest-driven path; the app is host-tested + planted).
+
+#### N8b-2b — the `ping` command app `[ ]`
+- `ping` (v4+v6, coreutils/iputils-familiar surface per §16.7) as a `.app`
+  bundle with a 13-locale Help/ tree. Needs a **new ICMP-echo socket path**
+  (the socket ABI has only `Stream`/`Datagram` today): a raw/ICMP socket
+  mode through `lib/abi/src/net.rs` + the netstack `SocketService` +
+  `lib/rt::net`, gated `CAP_NET_RAW`, audited, fail-closed (the
+  `lib/net::icmp` echo codec already exists). Plus its own live two-process
+  QEMU vertical (a guest `ping` answered by the host `netpeer`), since the
+  ICMP path is not exercised by the existing verticals.
 
 ### N9 — interface configuration, bonding, failover `[ ]`
 - `lib/netconfig` (grammar, closed registry, fail-closed parse,

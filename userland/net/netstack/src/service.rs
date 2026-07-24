@@ -8,6 +8,7 @@ use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
 use crate::iface::Netstack;
+use crate::socket::SocketService;
 
 /// The authenticated principal on whose behalf a request is served.
 ///
@@ -70,8 +71,10 @@ impl Caller {
 /// * [`Errno::PermissionDenied`] — the caller lacks the operation's
 ///   required capability.
 /// * [`Errno::NotFound`] — a mutation named an unmanaged interface.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     stack: &mut Netstack,
+    sockets: &SocketService,
     caller: &Caller,
     audit: &dyn Sink,
     request: &[u8],
@@ -96,7 +99,8 @@ pub fn serve(
         NetstackRequest::InterfaceFacts { .. }
         | NetstackRequest::InterfaceState { .. }
         | NetstackRequest::InterfaceCounters { .. }
-        | NetstackRequest::InterfaceRates { .. } => CapabilityId::SYSINFO_INTROSPECT,
+        | NetstackRequest::InterfaceRates { .. }
+        | NetstackRequest::Sockets { .. } => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -136,14 +140,39 @@ pub fn serve(
             audit_mutation(audit, "route add", iface, applied)?;
             write_status(response)
         }
-        NetstackRequest::InterfaceCounters { offset, limit } => {
-            let records: alloc::vec::Vec<_> = stack
-                .counters_records(offset, limit)
-                .iter()
-                .map(tairix_abi::net_ipc::NetInterfaceCountersRecord::to_le_bytes)
-                .collect();
-            encode_page_reply(&records, response)
+        NetstackRequest::InterfaceFacts { .. }
+        | NetstackRequest::InterfaceState { .. }
+        | NetstackRequest::InterfaceCounters { .. }
+        | NetstackRequest::InterfaceRates { .. }
+        | NetstackRequest::Sockets { .. } => serve_read(stack, sockets, decoded, response, now),
+        NetstackRequest::BindDriver { .. } => {
+            // Binding a NIC driver's device channel creates and grants a
+            // shared-memory region and issues IPC to the driver — I/O the
+            // pure engine dispatcher cannot perform. The freestanding
+            // transport loop intercepts `BindDriver` and carries it out over
+            // its live syscall seams before ever reaching this dispatcher;
+            // arriving here means it was routed to a path that cannot
+            // service it, so refuse fail-closed rather than pretend.
+            Err(Errno::NotSupported)
         }
+    }
+}
+
+/// Serve one paged broker *read* (interface facts/state/counters/rates or
+/// the socket listing) into `response`.
+///
+/// Split out of [`serve`] so the dispatcher stays small: every arm here
+/// encodes its records with the one [`encode_page_reply`] page codec, and
+/// the caller has already gated the read on `CAP_SYSINFO_INTROSPECT`. A
+/// non-read request never reaches this function.
+fn serve_read(
+    stack: &mut Netstack,
+    sockets: &SocketService,
+    request: NetstackRequest,
+    response: &mut [u8],
+    now: Duration64,
+) -> Result<usize, Errno> {
+    match request {
         NetstackRequest::InterfaceFacts { offset, limit } => {
             let records: alloc::vec::Vec<_> = stack
                 .facts_records(offset, limit)
@@ -160,6 +189,14 @@ pub fn serve(
                 .collect();
             encode_page_reply(&records, response)
         }
+        NetstackRequest::InterfaceCounters { offset, limit } => {
+            let records: alloc::vec::Vec<_> = stack
+                .counters_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetInterfaceCountersRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
+        }
         NetstackRequest::InterfaceRates {
             offset,
             limit,
@@ -172,16 +209,16 @@ pub fn serve(
                 .collect();
             encode_page_reply(&records, response)
         }
-        NetstackRequest::BindDriver { .. } => {
-            // Binding a NIC driver's device channel creates and grants a
-            // shared-memory region and issues IPC to the driver — I/O the
-            // pure engine dispatcher cannot perform. The freestanding
-            // transport loop intercepts `BindDriver` and carries it out over
-            // its live syscall seams before ever reaching this dispatcher;
-            // arriving here means it was routed to a path that cannot
-            // service it, so refuse fail-closed rather than pretend.
-            Err(Errno::NotSupported)
+        NetstackRequest::Sockets { offset, limit } => {
+            let records: alloc::vec::Vec<_> = sockets
+                .socket_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetSocketRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
         }
+        // The dispatcher only routes the paged read ops here.
+        _ => Err(Errno::NotSupported),
     }
 }
 
@@ -245,6 +282,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceFacts { .. } => "interface facts",
         NetstackRequest::InterfaceState { .. } => "interface state",
         NetstackRequest::InterfaceRates { .. } => "interface rates",
+        NetstackRequest::Sockets { .. } => "sockets",
         NetstackRequest::BindDriver { .. } => "bind driver",
     };
     Field {
