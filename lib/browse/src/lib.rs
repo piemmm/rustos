@@ -144,7 +144,9 @@ pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
-pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
+pub use open_with::{
+    applications_for, association_from_appinfo, mime_for_name, AppAssociation, BundleSource,
+};
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use progress::{ProgressModel, ProgressOp};
 pub use properties::Properties;

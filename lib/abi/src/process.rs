@@ -615,6 +615,30 @@ pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX;
 /// `<Name>.app/Run` bundle path always starts with `/`.
 pub const SPAWN_SELF: &[u8] = b"@self";
 
+/// Reserved launch-argument token: "you were handed a document to view on
+/// [`STDIN`] — display it, do not prompt."
+///
+/// This is the userland side of the *inherited-document* hand-off, the
+/// TAIRiX spelling of `viewer < file`. A launcher that wants a viewer to
+/// open a specific file — the file manager activating a data file
+/// (`plans/NEW-FILEMANAGER.md` `FM6b`), the shell, or the desktop session —
+/// opens the file read-only in its **own** table, spawns the viewer with a
+/// [`SpawnAttach`] block wiring that descriptor onto the child's [`STDIN`]
+/// slot ([`FdWire::Handle`]), and passes this token as an argument. The
+/// kernel clones the read-only *open description* into the child
+/// owner-checked, so the viewer reads its document with **no filesystem
+/// capability of its own** (least privilege) and there is no post-spawn
+/// channel or ordering race.
+///
+/// A viewer checks for this token before any interactive prompt and, when
+/// present, reads its document from [`STDIN`] instead of asking the
+/// session's trusted picker. Its absence means the ordinary interactive
+/// launch (the picker). Like [`SPAWN_SELF`] the token is a fixed,
+/// reserved spelling so no launcher and no viewer invents a colliding
+/// flag; a viewer that does not understand it simply falls through to its
+/// interactive path (fail closed, never a fabricated document).
+pub const DOCUMENT_ROLE_ARG: &[u8] = b"--document";
+
 /// How one of a spawned child's standard descriptors (fd 0–3) is backed —
 /// one entry per slot in a [`SpawnAttach`] block (`plans/SPAWN.md` SP10).
 ///

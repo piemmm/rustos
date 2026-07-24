@@ -47,7 +47,9 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
-    use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_abi::{
+        Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
+    };
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
         content_lines, render_lines, render_status, visible_cols_for, visible_rows_for, ScrollView,
@@ -173,20 +175,37 @@ mod program {
     /// is fabricated, and the descriptor is closed either way.
     fn read_picked(handle: u64) -> Option<Vec<u8>> {
         let fd = u32::try_from(tairix_rt::fd_redeem(handle)).ok()?;
+        let content = read_open_fd(fd);
+        let _ = tairix_rt::fs_close(fd);
+        content
+    }
+
+    /// Read the document this viewer was handed on [`STDIN`] by its launcher
+    /// (the inherited-document hand-off, `plans/NEW-FILEMANAGER.md` FM6b):
+    /// a read-only descriptor the kernel cloned into this process at spawn,
+    /// so the viewer reads its file with **no filesystem capability of its
+    /// own**. Bounded and fail-closed to `None` exactly like [`read_picked`];
+    /// the descriptor is left for the runtime to reclaim on exit.
+    fn read_document() -> Option<Vec<u8>> {
+        read_open_fd(STDIN)
+    }
+
+    /// Read the (bounded) content of an already-open, authorised descriptor.
+    /// Shared by the delegated pick ([`read_picked`]) and the inherited
+    /// document ([`read_document`]) so the bounded read has one definition.
+    /// Fails closed to `None` on a read error; a short or empty file reads
+    /// back as `Some` of what was there, never a fabricated byte.
+    fn read_open_fd(fd: u32) -> Option<Vec<u8>> {
         let mut content = Vec::new();
         let mut chunk = [0u8; 1024];
         while content.len() < CONTENT_MAX {
             let want = chunk.len().min(CONTENT_MAX - content.len());
-            let Ok(got) = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]) else {
-                let _ = tairix_rt::fs_close(fd);
-                return None;
-            };
+            let got = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]).ok()?;
             if got == 0 {
                 break;
             }
             content.extend_from_slice(&chunk[..got]);
         }
-        let _ = tairix_rt::fs_close(fd);
         Some(content)
     }
 
@@ -353,31 +372,83 @@ mod program {
         }
 
         // --- Open the window (resizable: the viewer re-lays-out its text to
-        // each new client size), show the waiting state, and immediately ask
-        // the session's trusted picker for a file.
+        // each new client size). How the viewer starts depends on how it was
+        // launched: handed a document on STDIN (the file manager's open
+        // hand-off), it shows that file at once; launched on its own, it asks
+        // the session's trusted picker. The title names the handed-over
+        // document, else the generic app name.
+        let document_mode = tairix_rt::arg(1).is_some_and(|arg| arg == DOCUMENT_ROLE_ARG);
+        let title = if document_mode {
+            tairix_rt::arg(2)
+                .and_then(|name| core::str::from_utf8(name).ok())
+                .unwrap_or("Viewer")
+        } else {
+            "Viewer"
+        };
         let mut client = WindowClient::new(RtWindowTransport);
         let Ok((window, server)) =
-            client.create(grant, event_endpoint, FRAME_COUNT, &mode, "Viewer", true)
+            client.create(grant, event_endpoint, FRAME_COUNT, &mode, title, true)
         else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
-        if show_status(WAITING, theme, &mut client, window, &mut frames, &mode).is_err() {
-            return fail(EXIT_CHANNEL_LOST, "first present refused");
-        }
-        if client.pick_file(window).is_err() {
-            // A refused pick (another pick showing, or a session without
-            // filesystem reach) is not fatal: the viewer stays open and
-            // Enter asks again.
-            let _ = show_status(
-                "Pick refused - Enter retries",
-                theme,
-                &mut client,
-                window,
-                &mut frames,
-                &mode,
-            );
+
+        // The currently viewed file, scrolled through the shared engine. None
+        // until content arrives; a re-pick or refusal replaces it. The raw
+        // bytes are kept alongside the view so a resize can re-wrap the file
+        // to the new column count rather than losing content past the old
+        // width.
+        let mut view: Option<ScrollView> = None;
+        let mut content: Option<Vec<u8>> = None;
+
+        if document_mode {
+            // The launcher handed us the file on STDIN; display it now instead
+            // of prompting. A refused read is stated honestly, never faked.
+            match read_document() {
+                Some(bytes) => {
+                    let lines = content_lines(&bytes, MAX_LINES, visible_cols_for(mode.width_px));
+                    let scroll = ScrollView::new(lines, visible_rows_for(mode.height_px));
+                    let present =
+                        repaint_view(&scroll, theme, &mut client, window, &mut frames, &mode);
+                    view = Some(scroll);
+                    content = Some(bytes);
+                    if present.is_err() {
+                        return fail(EXIT_CHANNEL_LOST, "first present refused");
+                    }
+                }
+                None => {
+                    if show_status(
+                        "Document read refused",
+                        theme,
+                        &mut client,
+                        window,
+                        &mut frames,
+                        &mode,
+                    )
+                    .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "first present refused");
+                    }
+                }
+            }
+        } else {
+            if show_status(WAITING, theme, &mut client, window, &mut frames, &mode).is_err() {
+                return fail(EXIT_CHANNEL_LOST, "first present refused");
+            }
+            if client.pick_file(window).is_err() {
+                // A refused pick (another pick showing, or a session without
+                // filesystem reach) is not fatal: the viewer stays open and
+                // Enter asks again.
+                let _ = show_status(
+                    "Pick refused - Enter retries",
+                    theme,
+                    &mut client,
+                    window,
+                    &mut frames,
+                    &mode,
+                );
+            }
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends
@@ -387,13 +458,6 @@ mod program {
             set,
             server,
         });
-        // The currently viewed file, scrolled through the shared engine. None
-        // until a pick delivers content; a re-pick or refusal replaces it. The
-        // raw bytes are kept alongside the view so a resize can re-wrap the
-        // file to the new column count rather than losing content past the old
-        // width.
-        let mut view: Option<ScrollView> = None;
-        let mut content: Option<Vec<u8>> = None;
         loop {
             let event = match events.wait() {
                 Ok(event) => event,
