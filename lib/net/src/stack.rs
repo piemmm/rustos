@@ -1907,6 +1907,37 @@ impl Stack {
         }
     }
 
+    /// Re-announce every address this interface owns so on-link peers
+    /// relearn the path to it — a gratuitous ARP for the IPv4 address and
+    /// an unsolicited Neighbour Advertisement (to all-nodes, override set)
+    /// for each non-tentative IPv6 address.
+    ///
+    /// A bond emits this on failover (`plans/NETWORK.md` §6.3): after the
+    /// transmit path moves to a new member the bond keeps its MAC, so a
+    /// switch must be told the MAC is now reachable on the new port. It is
+    /// harmless on a plain interface (a redundant announcement) and does
+    /// nothing while the link is down.
+    pub fn announce_presence(&mut self, out: &mut StackOutput, now: Duration64) {
+        if !self.link_up {
+            return;
+        }
+        if let Some((our_v4, _)) = self.iface.ipv4() {
+            // A gratuitous ARP is a broadcast request whose sender and
+            // target protocol addresses are both our own address.
+            self.send_arp_request(out, our_v4, BROADCAST);
+        }
+        let announce: Vec<Ipv6Addr> = self
+            .iface
+            .ipv6_addresses()
+            .iter()
+            .filter(|info| !info.tentative)
+            .map(|info| info.addr)
+            .collect();
+        for addr in announce {
+            self.send_neighbor_advertisement(out, addr, ALL_NODES, false, now);
+        }
+    }
+
     /// RFC 6724 source selection over the interface's usable
     /// addresses.
     fn source_for_v6(&self, dest: Ipv6Addr) -> Option<Ipv6Addr> {

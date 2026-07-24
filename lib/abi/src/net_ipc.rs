@@ -50,15 +50,17 @@ pub const NETSTACK_LIST_LIMIT_MAX: u16 = 32;
 
 /// Largest request the [`NETSTACK_ENDPOINT`] accepts.
 ///
-/// Two distinct fixed-width framed messages arrive on the admin endpoint:
-/// the 64-byte [`NetstackRequest`] and the wider per-interface
-/// [`NetInterfaceConfigMsg`] (its rich address payload does not fit the
-/// 64-byte request enum, so it is its own self-identifying frame, decoded
-/// by the transport before [`NetstackRequest`], the `BindDriver`-interception
-/// precedent). The receive buffer is sized to the larger so neither is ever
-/// truncated.
-pub const NETSTACK_MAX_REQUEST: usize =
-    max_usize(NetstackRequest::WIRE_LEN, NetInterfaceConfigMsg::WIRE_LEN);
+/// Three distinct fixed-width framed messages arrive on the admin
+/// endpoint: the 64-byte [`NetstackRequest`], the wider per-interface
+/// [`NetInterfaceConfigMsg`], and the wider still [`NetBondConfigMsg`]
+/// (each rich payload does not fit the 64-byte request enum, so each is
+/// its own self-identifying frame, decoded by the transport before
+/// [`NetstackRequest`], the `BindDriver`-interception precedent). The
+/// receive buffer is sized to the largest so none is ever truncated.
+pub const NETSTACK_MAX_REQUEST: usize = max_usize(
+    NetstackRequest::WIRE_LEN,
+    max_usize(NetInterfaceConfigMsg::WIRE_LEN, NetBondConfigMsg::WIRE_LEN),
+);
 
 /// The larger of two sizes, as a `const fn` (there is no `const`
 /// [`Ord::max`] in a stable `const` context).
@@ -956,6 +958,244 @@ fn ipv4_same_subnet(addr: [u8; 4], gateway: [u8; 4], prefix: u8) -> bool {
     host & mask == gw & mask
 }
 
+/// Largest number of member NICs a single bond aggregates, on the wire.
+///
+/// This is the [`NetBondConfigMsg`] frame's own capacity bound. It is the
+/// single definition the `lib/net::bond` engine and the `lib/netconfig`
+/// grammar both key their own `MAX_BOND_MEMBERS` to, so the wire, the
+/// engine, and the configuration store can never disagree on the limit.
+pub const NET_BOND_MAX_MEMBERS: usize = 8;
+
+/// Magic number identifying a bond-configuration message (`"NBC1"`
+/// little-endian). Distinct from [`NETSTACK_REQUEST_MAGIC`] and
+/// [`NET_INTERFACE_CONFIG_MAGIC`] so the transport can tell all three
+/// framed messages apart on the one admin endpoint.
+pub const NET_BOND_CONFIG_MAGIC: u32 = u32::from_le_bytes(*b"NBC1");
+
+/// The `net-bond-config-v1` message version.
+pub const NET_BOND_CONFIG_VERSION_V1: u16 = 1;
+
+/// A bond's transmit policy, on the wire (`plans/NETWORK.md` §6.3). A
+/// closed set mirroring the `lib/net::bond::BondMode` engine policy and the
+/// `lib/netconfig` grammar; LACP/802.3ad is a future in-place extension.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetBondMode {
+    /// One transmitting member at a time with ordered failover.
+    ActiveBackup = 0,
+    /// Flow-hashed transmit spread across the eligible members.
+    Balance = 1,
+}
+
+impl NetBondMode {
+    /// The wire value for this mode.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a mode from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no mode (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::ActiveBackup),
+            1 => Ok(Self::Balance),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One bond (link-aggregation) interface's declarative configuration,
+/// pushed to `netstack` post-unlock by the FS-capable device manager
+/// (which reads `/System/Settings/Network/network.conf` through
+/// `lib/netconfig` — the network-parsing sandbox holds no filesystem
+/// capability). The `plans/NETWORK.md` §6.3 companion of
+/// [`NetInterfaceConfigMsg`]: it names the bond's members, transmit
+/// policy, failover monitor interval, and optional primary member. The
+/// bond's own addressing is applied separately, through a
+/// [`NetInterfaceConfigMsg`] naming the bond by its [`Self::alias`].
+///
+/// The members are named by their admin-chosen aliases (the member
+/// interfaces must already be renamed to those aliases by their own
+/// [`NetInterfaceConfigMsg`]s); the bond composes them by name, never by
+/// discovery order.
+///
+/// Like [`NetInterfaceConfigMsg`] this is a **separate** self-identifying
+/// frame (its own [`NET_BOND_CONFIG_MAGIC`]), decoded by the service
+/// transport before [`NetstackRequest`]. Every decode fails closed
+/// (unknown magic/version/mode, a bad present-flag, an out-of-range member
+/// count, an invalid alias, or a dirty reserved region); [`Self::validate`]
+/// additionally enforces the semantic invariants (at least two members, no
+/// duplicate members, a primary that is one of the members, a positive
+/// monitor interval) so the service can apply the whole message atomically.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetBondConfigMsg {
+    /// The bond interface's admin-chosen alias, NUL-padded.
+    pub alias: [u8; IF_NAME_LEN],
+    /// The transmit policy.
+    pub mode: NetBondMode,
+    /// The failover health-monitor interval (the anti-flap up-delay a
+    /// recovered member must stay up for before readmission).
+    pub monitor_interval: Duration64,
+    /// The primary member's alias that reclaims the transmit path whenever
+    /// eligible, or `None` to leave the current active in place until it
+    /// fails.
+    pub primary: Option<[u8; IF_NAME_LEN]>,
+    /// The member interfaces' admin-chosen aliases (the first
+    /// [`Self::member_count`] entries are significant, NUL-padded).
+    pub members: [[u8; IF_NAME_LEN]; NET_BOND_MAX_MEMBERS],
+    /// The number of significant entries in [`Self::members`]
+    /// (`2..=NET_BOND_MAX_MEMBERS`).
+    pub member_count: u8,
+}
+
+impl NetBondConfigMsg {
+    /// Encoded size on the wire: magic (4), version (2), mode (1),
+    /// `primary_present` (1), alias (16), `monitor_interval`
+    /// (`Duration64`), primary (16), `member_count` (1), reserved (3),
+    /// and the member-alias table.
+    pub const WIRE_LEN: usize = 56 + NET_BOND_MAX_MEMBERS * IF_NAME_LEN;
+
+    /// Byte offset of the member-alias table.
+    const MEMBERS_OFF: usize = 56;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, NET_BOND_CONFIG_MAGIC);
+        put_u16(&mut out, 4, NET_BOND_CONFIG_VERSION_V1);
+        out[6] = self.mode.as_u8();
+        if let Some(primary) = self.primary {
+            out[7] = 1;
+            out[36..52].copy_from_slice(&primary);
+        }
+        out[8..24].copy_from_slice(&self.alias);
+        out[24..36].copy_from_slice(&self.monitor_interval.to_le_bytes());
+        out[52] = self.member_count;
+        for (index, member) in self.members.iter().enumerate() {
+            let base = Self::MEMBERS_OFF + index * IF_NAME_LEN;
+            out[base..base + IF_NAME_LEN].copy_from_slice(member);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed input.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole message.
+    /// * [`Errno::BadMagic`] — wrong magic, a present-flag that is not
+    ///   `0`/`1`, a set primary behind a clear present-flag, or a dirty
+    ///   reserved region.
+    /// * [`Errno::AbiVersionUnsupported`] — not `net-bond-config-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown mode, an out-of-range member
+    ///   count, or an invalid alias/member/primary name.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != NET_BOND_CONFIG_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != NET_BOND_CONFIG_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        // Reserved region after member_count must be zero.
+        if bytes[53..56].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let mode = NetBondMode::from_u8(bytes[6])?;
+        let mut alias = [0u8; IF_NAME_LEN];
+        alias.copy_from_slice(&bytes[8..24]);
+        validate_if_name(&alias)?;
+        let monitor_interval = Duration64::from_bytes(&bytes[24..36])?;
+        let primary = match bytes[7] {
+            0 => {
+                if bytes[36..52].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                None
+            }
+            1 => {
+                let mut name = [0u8; IF_NAME_LEN];
+                name.copy_from_slice(&bytes[36..52]);
+                validate_if_name(&name)?;
+                Some(name)
+            }
+            _ => return Err(Errno::OutOfRange),
+        };
+        let member_count = bytes[52];
+        if (member_count as usize) > NET_BOND_MAX_MEMBERS {
+            return Err(Errno::OutOfRange);
+        }
+        let mut members = [[0u8; IF_NAME_LEN]; NET_BOND_MAX_MEMBERS];
+        for (index, member) in members.iter_mut().enumerate() {
+            let base = Self::MEMBERS_OFF + index * IF_NAME_LEN;
+            member.copy_from_slice(&bytes[base..base + IF_NAME_LEN]);
+            if index < member_count as usize {
+                // A significant member must be a valid alias.
+                validate_if_name(member)?;
+            } else if member.iter().any(|&b| b != 0) {
+                // An insignificant slot must be zero (fail closed).
+                return Err(Errno::BadMagic);
+            }
+        }
+        Ok(Self {
+            alias,
+            mode,
+            monitor_interval,
+            primary,
+            members,
+            member_count,
+        })
+    }
+
+    /// The significant member aliases (`&self.members[..member_count]`).
+    #[must_use]
+    pub fn members(&self) -> &[[u8; IF_NAME_LEN]] {
+        &self.members[..self.member_count as usize]
+    }
+
+    /// Enforce the semantic invariants the structural decode cannot, so the
+    /// service can apply the whole bond atomically.
+    ///
+    /// * At least two members (a one-member "bond" is not aggregation).
+    /// * No duplicate member alias.
+    /// * A declared primary is one of the members.
+    /// * A positive monitor interval (a zero anti-flap up-delay would admit
+    ///   a flapping member instantly).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] on any violated invariant (fail closed).
+    pub fn validate(&self) -> Result<(), Errno> {
+        if (self.member_count as usize) < 2 {
+            return Err(Errno::OutOfRange);
+        }
+        let members = self.members();
+        for (index, member) in members.iter().enumerate() {
+            if members[index + 1..].iter().any(|other| other == member) {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        if let Some(primary) = self.primary {
+            if !members.contains(&primary) {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        if self.monitor_interval.secs() < 0
+            || (self.monitor_interval.secs() == 0 && self.monitor_interval.subsec_nanos() == 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    }
+}
+
 /// The kind of link an interface record describes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -964,6 +1204,10 @@ pub enum NetIfKind {
     Ethernet = 0,
     /// The stack's own loopback interface.
     Loopback = 1,
+    /// A link-aggregation (bond) virtual interface composed over two or
+    /// more member NICs (`plans/NETWORK.md` §6.3). It owns the addresses,
+    /// routes, and neighbour caches; its members carry none.
+    Bond = 2,
 }
 
 impl NetIfKind {
@@ -982,6 +1226,7 @@ impl NetIfKind {
         match value {
             0 => Ok(Self::Ethernet),
             1 => Ok(Self::Loopback),
+            2 => Ok(Self::Bond),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2037,6 +2282,102 @@ mod tests {
             .validate(),
             Err(Errno::OutOfRange)
         );
+    }
+
+    /// A well-formed two-member active-backup bond with a primary.
+    fn sample_bond() -> NetBondConfigMsg {
+        let mut members = [[0u8; IF_NAME_LEN]; NET_BOND_MAX_MEMBERS];
+        members[0] = name("eth0");
+        members[1] = name("eth1");
+        NetBondConfigMsg {
+            alias: name("bond0"),
+            mode: NetBondMode::ActiveBackup,
+            monitor_interval: Duration64::new(1, 0).unwrap(),
+            primary: Some(name("eth0")),
+            members,
+            member_count: 2,
+        }
+    }
+
+    #[test]
+    fn bond_config_messages_round_trip() {
+        // The sample, plus a three-member balance bond with no primary.
+        let mut balance = sample_bond();
+        balance.mode = NetBondMode::Balance;
+        balance.primary = None;
+        balance.members[2] = name("eth2");
+        balance.member_count = 3;
+        for msg in [sample_bond(), balance] {
+            let bytes = msg.to_le_bytes();
+            assert_eq!(NetBondConfigMsg::from_bytes(&bytes), Ok(msg));
+            msg.validate().expect("the sample bonds are valid");
+        }
+    }
+
+    #[test]
+    fn bond_config_magic_is_the_ascii_tag() {
+        assert_eq!(NET_BOND_CONFIG_MAGIC, u32::from_le_bytes(*b"NBC1"));
+    }
+
+    #[test]
+    fn bond_config_fails_closed_on_malformed_framing() {
+        let good = sample_bond().to_le_bytes();
+        assert_eq!(
+            NetBondConfigMsg::from_bytes(&good[..good.len() - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Wrong magic / version.
+        let mut bad = good;
+        bad[0] ^= 0xFF;
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::BadMagic));
+        let mut bad = good;
+        bad[4] = 2;
+        assert_eq!(
+            NetBondConfigMsg::from_bytes(&bad),
+            Err(Errno::AbiVersionUnsupported)
+        );
+        // An unknown mode.
+        let mut bad = good;
+        bad[6] = 9;
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::OutOfRange));
+        // A primary-present flag that is neither 0 nor 1.
+        let mut bad = good;
+        bad[7] = 2;
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::OutOfRange));
+        // A dirty reserved byte after member_count.
+        let mut bad = good;
+        bad[53] = 1;
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::BadMagic));
+        // A member count past the capacity.
+        let mut bad = good;
+        bad[52] = u8::try_from(NET_BOND_MAX_MEMBERS + 1).expect("fits u8");
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::OutOfRange));
+        // A non-zero insignificant member slot (member_count is 2, slot 2
+        // must be zero).
+        let mut bad = good;
+        let slot2 = 56 + 2 * IF_NAME_LEN;
+        bad[slot2] = b'x';
+        assert_eq!(NetBondConfigMsg::from_bytes(&bad), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn bond_config_validate_rejects_bad_semantics() {
+        // Fewer than two members.
+        let mut one = sample_bond();
+        one.member_count = 1;
+        assert_eq!(one.validate(), Err(Errno::OutOfRange));
+        // A duplicate member.
+        let mut dup = sample_bond();
+        dup.members[1] = name("eth0");
+        assert_eq!(dup.validate(), Err(Errno::OutOfRange));
+        // A primary that is not a member.
+        let mut stray = sample_bond();
+        stray.primary = Some(name("eth9"));
+        assert_eq!(stray.validate(), Err(Errno::OutOfRange));
+        // A zero monitor interval.
+        let mut zero = sample_bond();
+        zero.monitor_interval = Duration64::new(0, 0).unwrap();
+        assert_eq!(zero.validate(), Err(Errno::OutOfRange));
     }
 
     #[test]

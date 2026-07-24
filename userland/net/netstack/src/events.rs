@@ -88,6 +88,21 @@ pub const NETWORK_SETTINGS_APPLIED: EventId = EventId(16_015);
 /// security-relevant configuration change, recorded at `Info`.
 pub const INTERFACE_CONFIG_APPLIED: EventId = EventId(16_016);
 
+/// A bond (link-aggregation) interface was composed or reconfigured over
+/// the [`NetBondConfigMsg`](tairix_abi::net_ipc::NetBondConfigMsg) admin
+/// message (members, mode, primary, monitor interval): a
+/// security-relevant configuration change, recorded at `Info`.
+pub const BOND_CONFIG_APPLIED: EventId = EventId(16_017);
+/// A bond-configuration request passed the capability check but was
+/// refused (a member is not present yet, an alias clash, or a validation
+/// failure): recorded at `Warn` so a bad configuration surfaces and the
+/// bond is left untouched (fail closed).
+pub const BOND_CONFIG_REFUSED: EventId = EventId(16_018);
+/// A bond's transmit path changed member (failover or deliberate
+/// failback): the bond re-announced its presence so peers relearn the
+/// path. Recorded at `Info` — a dead member is a visible, audited fact.
+pub const BOND_FAILOVER: EventId = EventId(16_019);
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -96,6 +111,7 @@ mod tests {
         NETWORK_SETTINGS_APPLIED, REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_ACCEPTED,
         SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
+    use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_FAILOVER};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -116,6 +132,9 @@ mod tests {
             SOCKET_ACCEPTED,
             NETWORK_SETTINGS_APPLIED,
             INTERFACE_CONFIG_APPLIED,
+            BOND_CONFIG_APPLIED,
+            BOND_CONFIG_REFUSED,
+            BOND_FAILOVER,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -140,6 +159,9 @@ mod tests {
             SOCKET_ACCEPTED.0,
             NETWORK_SETTINGS_APPLIED.0,
             INTERFACE_CONFIG_APPLIED.0,
+            BOND_CONFIG_APPLIED.0,
+            BOND_CONFIG_REFUSED.0,
+            BOND_FAILOVER.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

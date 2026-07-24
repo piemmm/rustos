@@ -49,9 +49,12 @@ use crate::timeutil::{from_nanos, nanos, NEVER};
 
 /// Largest number of member NICs a single bond aggregates.
 ///
-/// This is the engine's own capacity bound; the `network.conf` grammar
-/// (`lib/netconfig`) enforces the same limit on the configuration side.
-pub const MAX_BOND_MEMBERS: usize = 8;
+/// The single definition is the `netstack-v1` wire bound
+/// ([`tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS`]); this engine, the
+/// `network.conf` grammar (`lib/netconfig`), and the bond-configuration
+/// message all key to it, so the engine, the store, and the wire can never
+/// disagree on the limit.
+pub const MAX_BOND_MEMBERS: usize = tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS;
 
 /// The stable identity of a bond member: the member interface's name, as
 /// the composing interface table keys it. The engine treats it as an
@@ -371,6 +374,15 @@ impl Bond {
     pub fn set_primary(&mut self, primary: Option<MemberId>) -> Vec<BondEvent> {
         self.primary = primary;
         self.recompute()
+    }
+
+    /// Change the health-monitor interval at runtime (config reload). The
+    /// new interval governs future admissions (a member already awaiting
+    /// readmission keeps counting from when it came up); it changes no
+    /// committed health, so it emits no events. Re-arm the one-shot monitor
+    /// timer from [`Bond::next_deadline`] after calling this.
+    pub fn set_monitor_interval(&mut self, monitor_interval: Duration64) {
+        self.monitor_interval = nanos(monitor_interval);
     }
 
     /// Recompute the transmit selection from the committed member health

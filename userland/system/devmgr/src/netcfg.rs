@@ -21,7 +21,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN};
+use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN};
 use tairix_abi::Errno;
 use tairix_log::{log as log_event, Event, Field, FieldValue, Level, Sink};
 
@@ -146,21 +146,33 @@ pub fn deliver_network_settings(
 /// The set of per-interface configurations the device manager derives from
 /// `network.conf`, ready to deliver to the network stack.
 ///
-/// A managed non-bond interface that carries a stable `match.mac` identity
-/// yields one [`NetInterfaceConfigMsg`] in [`Self::messages`]; a managed
-/// non-bond interface with *no* `match.mac` cannot be bound to hardware by
-/// identity (its `match.node` binding is a later increment) and is recorded
-/// in [`Self::rejected`] so the operator's configuration error is surfaced
-/// loud rather than silently ignored. Bond interfaces and their members are
-/// omitted (bonding is a later increment).
+/// Plain interfaces and bond members yield an addressing/rename
+/// [`NetInterfaceConfigMsg`] in [`Self::messages`]; bonds additionally
+/// yield a [`NetBondConfigMsg`] in [`Self::bonds`]. A managed interface
+/// that cannot be bound to hardware by identity (no `match.mac`) or whose
+/// configuration is internally inconsistent is recorded in
+/// [`Self::rejected`] so the operator's error is surfaced loud rather than
+/// silently ignored.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InterfaceConfigPlan {
-    /// One message per deliverable managed interface.
+    /// One message per deliverable managed interface — a plain interface's
+    /// addressing, an address-less member's rename, and each bond's own
+    /// addressing (matched by alias).
     pub messages: Vec<NetInterfaceConfigMsg>,
-    /// The aliases of managed non-bond interfaces refused for want of a
-    /// `match.mac` identity selector (NUL-padded).
+    /// One bond-composition message per managed bond interface.
+    pub bonds: Vec<NetBondConfigMsg>,
+    /// The aliases of managed interfaces refused for a configuration error
+    /// (a non-bond, non-member interface with no `match.mac`, or a member
+    /// with no `match.mac` identity to bind it to hardware) (NUL-padded).
     pub rejected: Vec<[u8; IF_NAME_LEN]>,
 }
+
+/// Default bond failover-monitor interval when `<bond>.bond.monitor-interval`
+/// is unset: a short anti-flap up-delay that is nonetheless positive (the
+/// engine refuses a zero interval, which would readmit a flapping member
+/// instantly).
+#[cfg(feature = "program")]
+const DEFAULT_BOND_MONITOR_MS: u32 = 100;
 
 /// The device manager's read of the per-interface `network.conf`
 /// configuration (`plans/NETWORK.md` §6.1).
@@ -184,21 +196,32 @@ pub trait NetworkInterfaceConfigSource {
 /// per-interface [`InterfaceConfigPlan`] the device manager delivers.
 ///
 /// The mapping is the single definition both the service binary and its
-/// tests use (`AGENTS.md` §2.2). Only managed, non-bond, non-member
-/// interfaces are delivered: bond interfaces and any interface enrolled as
-/// a bond member are omitted (bonding is a later increment). A managed
-/// interface with no `match.mac` — or one whose static addressing is
-/// internally inconsistent — is refused into [`InterfaceConfigPlan::rejected`]
-/// rather than guessed at.
+/// tests use (`AGENTS.md` §2.2):
+///
+/// * A **bond** interface yields a [`NetBondConfigMsg`] in
+///   [`InterfaceConfigPlan::bonds`] (members, mode, primary, monitor
+///   interval) *and* a [`NetInterfaceConfigMsg`] carrying the bond's own
+///   addressing, matched by alias (a bond has no hardware MAC of its own).
+/// * A **bond member** yields an address-less [`NetInterfaceConfigMsg`]
+///   matched by MAC — it renames the bound NIC to the member alias so the
+///   bond can compose it; the member holds no addresses.
+/// * A **plain** interface yields its addressing [`NetInterfaceConfigMsg`]
+///   matched by MAC (the N9b-3-1 path).
+///
+/// A managed interface that cannot be bound to hardware by identity (a
+/// member or plain interface with no `match.mac`), or whose static
+/// addressing is internally inconsistent, is refused into
+/// [`InterfaceConfigPlan::rejected`] rather than guessed at (fail closed).
+/// `match.node` binding is a separate resolution (deferred); loopback is
+/// left to the stack.
 #[cfg(feature = "program")]
 #[must_use]
 pub fn interface_configs_from_config(
     config: &tairix_netconfig::NetworkConfig,
 ) -> InterfaceConfigPlan {
-    use tairix_netconfig::{IfaceKind, Ipv4Method, Ipv6Method};
+    use tairix_netconfig::IfaceKind;
 
-    // Every interface enrolled in a bond is owned by that bond, not
-    // configured directly — collect them so they are skipped below.
+    // Every interface enrolled in a bond is owned by that bond.
     let mut members: BTreeSet<&str> = BTreeSet::new();
     for iface in config.interfaces() {
         for member in iface.members() {
@@ -207,58 +230,143 @@ pub fn interface_configs_from_config(
     }
 
     let mut plan = InterfaceConfigPlan::default();
-    // Map each managed, non-bond, non-member interface into a message.
     for iface in config.interfaces() {
-        // Bond and loopback interfaces, and any bond member, are not
-        // directly delivered this increment.
-        if iface.kind() != IfaceKind::Ethernet || members.contains(iface.name.as_str()) {
-            continue;
-        }
         let alias = name_bytes(&iface.name);
-        let Some(mac) = iface.match_mac else {
-            plan.rejected.push(alias);
-            continue;
-        };
-        let ipv4 = match iface.ipv4_method() {
-            Ipv4Method::Disabled => tairix_abi::net_ipc::NetIpv4Config::Disabled,
-            Ipv4Method::Static => {
-                // A static method with no address is an inconsistent
-                // document; refuse it rather than guess (fail closed).
-                let Some(cidr) = iface.ipv4_address else {
+        match iface.kind() {
+            // Loopback is the stack's own; it is not a managed device.
+            IfaceKind::Loopback => {}
+            IfaceKind::Bond => {
+                // The composition message, then the bond's own addressing
+                // (matched by alias — a bond has no hardware MAC).
+                let Some(bond) = bond_config_of(iface) else {
                     plan.rejected.push(alias);
                     continue;
                 };
-                tairix_abi::net_ipc::NetIpv4Config::Static {
-                    addr: cidr.addr.octets(),
-                    prefix: cidr.prefix,
-                    gateway: iface.ipv4_gateway.map(|gw| gw.octets()),
-                }
-            }
-        };
-        let ipv6 = match iface.ipv6_method() {
-            Ipv6Method::Disabled => tairix_abi::net_ipc::NetIpv6Config::Disabled,
-            Ipv6Method::Slaac => tairix_abi::net_ipc::NetIpv6Config::Slaac,
-            Ipv6Method::Static => {
-                let Some(cidr) = iface.ipv6_address else {
+                let Some((ipv4, ipv6)) = addressing_of(iface) else {
                     plan.rejected.push(alias);
                     continue;
                 };
-                tairix_abi::net_ipc::NetIpv6Config::Static {
-                    addr: cidr.addr.octets(),
-                    prefix: cidr.prefix,
-                    gateway: iface.ipv6_gateway.map(|gw| gw.octets()),
-                }
+                plan.bonds.push(bond);
+                plan.messages.push(NetInterfaceConfigMsg {
+                    alias,
+                    match_mac: None,
+                    ipv4,
+                    ipv6,
+                    mtu: iface.mtu.unwrap_or(0),
+                });
             }
-        };
-        plan.messages.push(NetInterfaceConfigMsg {
-            alias,
-            match_mac: Some(mac.0),
-            ipv4,
-            ipv6,
-            mtu: iface.mtu.unwrap_or(0),
-        });
+            IfaceKind::Ethernet => {
+                // A member or plain interface must bind to hardware by MAC.
+                let Some(mac) = iface.match_mac else {
+                    plan.rejected.push(alias);
+                    continue;
+                };
+                if members.contains(iface.name.as_str()) {
+                    // A bond member: rename the NIC to the member alias with
+                    // no addressing (the bond owns the addresses).
+                    plan.messages.push(NetInterfaceConfigMsg {
+                        alias,
+                        match_mac: Some(mac.0),
+                        ipv4: tairix_abi::net_ipc::NetIpv4Config::Disabled,
+                        ipv6: tairix_abi::net_ipc::NetIpv6Config::Disabled,
+                        mtu: iface.mtu.unwrap_or(0),
+                    });
+                    continue;
+                }
+                let Some((ipv4, ipv6)) = addressing_of(iface) else {
+                    plan.rejected.push(alias);
+                    continue;
+                };
+                plan.messages.push(NetInterfaceConfigMsg {
+                    alias,
+                    match_mac: Some(mac.0),
+                    ipv4,
+                    ipv6,
+                    mtu: iface.mtu.unwrap_or(0),
+                });
+            }
+        }
     }
     plan
+}
+
+/// Map an interface's addressing keys onto the ABI address configs, or
+/// [`None`] when a static method carries no address (an inconsistent
+/// document the caller refuses — fail closed).
+#[cfg(feature = "program")]
+fn addressing_of(
+    iface: &tairix_netconfig::InterfaceConfig,
+) -> Option<(
+    tairix_abi::net_ipc::NetIpv4Config,
+    tairix_abi::net_ipc::NetIpv6Config,
+)> {
+    use tairix_netconfig::{Ipv4Method, Ipv6Method};
+    let ipv4 = match iface.ipv4_method() {
+        Ipv4Method::Disabled => tairix_abi::net_ipc::NetIpv4Config::Disabled,
+        Ipv4Method::Static => {
+            let cidr = iface.ipv4_address?;
+            tairix_abi::net_ipc::NetIpv4Config::Static {
+                addr: cidr.addr.octets(),
+                prefix: cidr.prefix,
+                gateway: iface.ipv4_gateway.map(|gw| gw.octets()),
+            }
+        }
+    };
+    let ipv6 = match iface.ipv6_method() {
+        Ipv6Method::Disabled => tairix_abi::net_ipc::NetIpv6Config::Disabled,
+        Ipv6Method::Slaac => tairix_abi::net_ipc::NetIpv6Config::Slaac,
+        Ipv6Method::Static => {
+            let cidr = iface.ipv6_address?;
+            tairix_abi::net_ipc::NetIpv6Config::Static {
+                addr: cidr.addr.octets(),
+                prefix: cidr.prefix,
+                gateway: iface.ipv6_gateway.map(|gw| gw.octets()),
+            }
+        }
+    };
+    Some((ipv4, ipv6))
+}
+
+/// Map a bond interface's `bond.*` keys onto a [`NetBondConfigMsg`], or
+/// [`None`] when the document is inconsistent (too few/many members, a bad
+/// primary — caught by [`NetBondConfigMsg::validate`]); the caller refuses
+/// it (fail closed). An unset monitor interval takes
+/// [`DEFAULT_BOND_MONITOR_MS`].
+#[cfg(feature = "program")]
+fn bond_config_of(iface: &tairix_netconfig::InterfaceConfig) -> Option<NetBondConfigMsg> {
+    use tairix_netconfig::BondMode as CfgMode;
+    let members = iface.members();
+    if members.len() < 2 || members.len() > tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS {
+        return None;
+    }
+    let mut table = [[0u8; IF_NAME_LEN]; tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS];
+    for (index, member) in members.iter().enumerate() {
+        table[index] = name_bytes(member);
+    }
+    let mode = match iface.bond_mode.unwrap_or(CfgMode::ActiveBackup) {
+        CfgMode::ActiveBackup => tairix_abi::net_ipc::NetBondMode::ActiveBackup,
+        CfgMode::Balance => tairix_abi::net_ipc::NetBondMode::Balance,
+    };
+    let monitor_ms = iface
+        .bond_monitor_interval_ms
+        .unwrap_or(DEFAULT_BOND_MONITOR_MS);
+    let monitor_interval = tairix_abi::Duration64::new(
+        i64::from(monitor_ms / 1000),
+        (monitor_ms % 1000) * 1_000_000,
+    )
+    .ok()?;
+    let msg = NetBondConfigMsg {
+        alias: name_bytes(&iface.name),
+        mode,
+        monitor_interval,
+        primary: iface.bond_primary.as_deref().map(name_bytes),
+        members: table,
+        // Bounded to `NET_BOND_MAX_MEMBERS` (≤ 8) above, so this fits u8.
+        member_count: u8::try_from(members.len()).ok()?,
+    };
+    // Validate up front so an inconsistent bond is refused, not delivered.
+    msg.validate().ok()?;
+    Some(msg)
 }
 
 /// Encode an interface alias name into a NUL-padded fixed field, truncating
@@ -286,6 +394,7 @@ fn name_bytes(name: &str) -> [u8; IF_NAME_LEN] {
 pub struct NetIfConfigState {
     plan: Option<InterfaceConfigPlan>,
     delivered: BTreeSet<[u8; IF_NAME_LEN]>,
+    delivered_bonds: BTreeSet<[u8; IF_NAME_LEN]>,
     rejected_logged: bool,
 }
 
@@ -378,6 +487,45 @@ pub fn deliver_interface_configs(
             }
         }
     }
+
+    // Deliver every not-yet-composed bond. A bond needs its members
+    // renamed first, so an early attempt returns `NotFound` — retried
+    // silently on the next bump, exactly like an unbound interface.
+    let pending_bonds: Vec<NetBondConfigMsg> = match &state.plan {
+        Some(plan) => plan
+            .bonds
+            .iter()
+            .filter(|msg| !state.delivered_bonds.contains(&msg.alias))
+            .copied()
+            .collect(),
+        None => Vec::new(),
+    };
+    for msg in &pending_bonds {
+        match netstack.apply_bond_config(msg) {
+            Ok(()) => {
+                state.delivered_bonds.insert(msg.alias);
+                audit_iface(
+                    sink,
+                    events::NETWORK_IFCONFIG_DELIVERED,
+                    Level::Info,
+                    "bond interface composed",
+                    &msg.alias,
+                );
+            }
+            // A declared member has not bound yet: the expected state,
+            // retried silently on the next bump.
+            Err(Errno::NotFound) => {}
+            Err(_) => {
+                audit_iface(
+                    sink,
+                    events::NETWORK_IFCONFIG_DELIVERY_FAILED,
+                    Level::Warn,
+                    "bond interface composition refused; will retry",
+                    &msg.alias,
+                );
+            }
+        }
+    }
 }
 
 /// Emit one audit record carrying the interface alias.
@@ -441,6 +589,7 @@ mod tests {
         results: RefCell<Vec<Result<(), Errno>>>,
         ifconfigs: RefCell<Vec<NetInterfaceConfigMsg>>,
         ifconfig_results: RefCell<Vec<Result<(), Errno>>>,
+        bonds: RefCell<Vec<NetBondConfigMsg>>,
     }
 
     impl RecordingNetstack {
@@ -450,6 +599,7 @@ mod tests {
                 results: RefCell::new(results),
                 ifconfigs: RefCell::new(Vec::new()),
                 ifconfig_results: RefCell::new(Vec::new()),
+                bonds: RefCell::new(Vec::new()),
             }
         }
 
@@ -478,6 +628,11 @@ mod tests {
         fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
             self.ifconfigs.borrow_mut().push(*config);
             self.ifconfig_results.borrow_mut().pop().unwrap_or(Ok(()))
+        }
+
+        fn apply_bond_config(&mut self, config: &NetBondConfigMsg) -> Result<(), Errno> {
+            self.bonds.borrow_mut().push(*config);
+            Ok(())
         }
     }
 
@@ -628,6 +783,7 @@ mod tests {
     fn an_interface_config_is_delivered_when_the_interface_binds() {
         let plan = InterfaceConfigPlan {
             messages: alloc::vec![a_config("wan", [1, 2, 3, 4, 5, 6])],
+            bonds: Vec::new(),
             rejected: Vec::new(),
         };
         // The source is read once and cached; the stack answers NotFound
@@ -667,6 +823,7 @@ mod tests {
     fn a_managed_interface_without_match_mac_is_rejected_once() {
         let plan = InterfaceConfigPlan {
             messages: Vec::new(),
+            bonds: Vec::new(),
             rejected: alloc::vec![iface_name("wan")],
         };
         let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
@@ -686,9 +843,11 @@ mod tests {
     #[cfg(feature = "program")]
     #[test]
     fn interface_configs_map_from_network_conf() {
-        // `wan` is a static-v4 managed interface with a MAC identity; `lan`
-        // is a managed interface with NO match.mac (rejected); the bond and
-        // its members are omitted.
+        // `wan` is a static-v4 managed interface; `lan` has NO match.mac
+        // (rejected); `bond0` composes `eth0`/`eth1` (both address-less
+        // members). The bond yields a composition message plus its own
+        // (alias-matched) addressing, and each member yields an
+        // address-less rename.
         let text = "\
 wan.match.mac aa:bb:cc:dd:ee:ff
 wan.ipv4.method static
@@ -697,25 +856,89 @@ wan.ipv4.gateway 10.0.0.1
 lan.ipv4.method static
 lan.ipv4.address 192.168.0.2/24
 bond0.kind bond
-bond0.match.mac 02:00:00:00:00:01
+bond0.bond.members eth0,eth1
+bond0.bond.primary eth0
+bond0.ipv4.method static
+bond0.ipv4.address 10.0.2.15/24
+eth0.match.mac 02:00:00:00:00:02
+eth1.match.mac 02:00:00:00:00:03
+";
+        let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        let plan = interface_configs_from_config(&config);
+        // `wan`, the bond's own addressing, and the two member renames.
+        assert_eq!(plan.messages.len(), 4);
+        let wan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("wan"))
+            .expect("wan");
+        assert_eq!(wan.match_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        assert!(matches!(
+            wan.ipv4,
+            tairix_abi::net_ipc::NetIpv4Config::Static { .. }
+        ));
+        // The bond's addressing is matched by alias (no hardware MAC).
+        let bond_addr = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("bond0"))
+            .expect("bond addressing");
+        assert_eq!(bond_addr.match_mac, None);
+        assert!(matches!(
+            bond_addr.ipv4,
+            tairix_abi::net_ipc::NetIpv4Config::Static { .. }
+        ));
+        // Members are renamed by MAC and hold no addresses.
+        for member in ["eth0", "eth1"] {
+            let msg = plan
+                .messages
+                .iter()
+                .find(|m| m.alias == iface_name(member))
+                .expect("member");
+            assert!(msg.match_mac.is_some());
+            assert!(matches!(
+                msg.ipv4,
+                tairix_abi::net_ipc::NetIpv4Config::Disabled
+            ));
+            assert!(matches!(
+                msg.ipv6,
+                tairix_abi::net_ipc::NetIpv6Config::Disabled
+            ));
+        }
+        // The bond composition message names its members and primary.
+        assert_eq!(plan.bonds.len(), 1);
+        let bond = &plan.bonds[0];
+        assert_eq!(bond.alias, iface_name("bond0"));
+        assert_eq!(bond.member_count, 2);
+        assert_eq!(bond.members(), &[iface_name("eth0"), iface_name("eth1")]);
+        assert_eq!(bond.primary, Some(iface_name("eth0")));
+        assert_eq!(plan.rejected, alloc::vec![iface_name("lan")]);
+    }
+
+    #[cfg(feature = "program")]
+    #[test]
+    fn a_bond_is_delivered_after_its_members() {
+        let text = "\
+bond0.kind bond
 bond0.bond.members eth0,eth1
 eth0.match.mac 02:00:00:00:00:02
 eth1.match.mac 02:00:00:00:00:03
 ";
         let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
         let plan = interface_configs_from_config(&config);
-        // Only `wan` is deliverable; `lan` is rejected for want of match.mac;
-        // the bond and its members are omitted.
-        assert_eq!(plan.messages.len(), 1, "only wan is delivered");
-        assert_eq!(plan.messages[0].alias, iface_name("wan"));
+        let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
+        let mut state = NetIfConfigState::new();
+        // Members bind (Ok), then the bond composes (Ok).
+        let mut netstack = RecordingNetstack::new(Vec::new());
+        let sink = RecordingSink::new();
+        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        // The bond's own addressing and both member renames were delivered.
         assert_eq!(
-            plan.messages[0].match_mac,
-            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+            netstack.ifconfigs.borrow().len(),
+            3,
+            "bond addressing + two member renames"
         );
-        assert!(matches!(
-            plan.messages[0].ipv4,
-            tairix_abi::net_ipc::NetIpv4Config::Static { .. }
-        ));
-        assert_eq!(plan.rejected, alloc::vec![iface_name("lan")]);
+        assert_eq!(netstack.bonds.borrow().len(), 1, "the bond composed");
+        assert_eq!(netstack.bonds.borrow()[0].alias, iface_name("bond0"));
     }
 }

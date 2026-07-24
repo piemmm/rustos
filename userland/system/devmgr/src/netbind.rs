@@ -24,7 +24,9 @@
 use alloc::collections::BTreeSet;
 
 use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
-use tairix_abi::net_ipc::{validate_if_name, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN};
+use tairix_abi::net_ipc::{
+    validate_if_name, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN,
+};
 use tairix_abi::{Errno, HwNode};
 use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
 
@@ -84,6 +86,21 @@ pub trait NetstackBind {
     /// The stack's typed refusal ([`Errno::NotFound`] when the interface is
     /// not yet bound — the caller retries silently) or a transport failure.
     fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno>;
+
+    /// Compose (or reconfigure) a bond interface in the network stack
+    /// (`plans/NETWORK.md` §6.3).
+    ///
+    /// The production implementation backs this with an `ipc_call` to the
+    /// [`NETSTACK_ENDPOINT`](tairix_abi::net_ipc::NETSTACK_ENDPOINT)
+    /// carrying the framed [`NetBondConfigMsg`]; the kernel gates it on
+    /// `CAP_NET_ADMIN`, so the seam adds no authority.
+    ///
+    /// # Errors
+    ///
+    /// The stack's typed refusal ([`Errno::NotFound`] when a declared
+    /// member is not yet bound — the caller retries silently) or a
+    /// transport failure.
+    fn apply_bond_config(&mut self, config: &NetBondConfigMsg) -> Result<(), Errno>;
 }
 
 /// The device manager's memory of which NIC channels it has already handed
@@ -277,6 +294,10 @@ mod tests {
         }
 
         fn apply_interface_config(&mut self, _config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn apply_bond_config(&mut self, _config: &NetBondConfigMsg) -> Result<(), Errno> {
             Ok(())
         }
     }

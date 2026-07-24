@@ -113,13 +113,12 @@ Each managed interface's addressing is declared in one document,
 registry, typed values, bounded fail-closed parser, and canonical render
 are the one `lib/netconfig` engine (`plans/NETWORK.md` §6.1). As with the
 stack-wide policy, `netstack` never reads it: the FS-capable device
-manager reads it post-unlock, maps each **managed, non-bond** interface
-that carries a stable `match.mac` identity into a `NetInterfaceConfigMsg`,
-and delivers it over the `CAP_NET_ADMIN` admin endpoint. A managed
-non-bond interface with no `match.mac` cannot be bound to hardware by
-identity (`match.node` binding is a later increment) and is surfaced loud
-(`devmgr` event `13_016`), never silently ignored; bond interfaces and
-their members are omitted (bonding is a later increment).
+manager reads it post-unlock, maps each managed interface that carries a
+stable `match.mac` identity into a `NetInterfaceConfigMsg`, and delivers
+it over the `CAP_NET_ADMIN` admin endpoint. A managed interface with no
+`match.mac` cannot be bound to hardware by identity (`match.node` member
+binding is a later increment) and is surfaced loud (`devmgr` event
+`13_016`), never silently ignored.
 
 `netstack` locates the interface by its **stable MAC** — it is the only
 component holding each interface's MAC, from the driver's facts — and
@@ -136,6 +135,42 @@ hardware-tree generation bump; a successful apply is recorded so it is not
 re-pushed (`devmgr` events `13_014`/`13_015`). The image ships an **empty**
 `network.conf` ("no managed interfaces beyond loopback"); the installer,
 or `configure`, writes the operator's interfaces through the same engine.
+
+## Link aggregation (bonds)
+
+A **bond** is a virtual interface `netstack` composes over two or more
+member NICs (`plans/NETWORK.md` §6.3): the bond owns the addresses,
+routes, and neighbour cache, while its members are the physical NICs that
+carry its frames but hold **no** addresses of their own (a member refuses
+a direct address/route assignment with a typed error — the bond owns
+them). Sockets and the routing table see one interface; member fan-out is
+internal to the interface table. The device manager derives from
+`network.conf` (a) an address-less rename for each member (matched by its
+`match.mac`), (b) a `NetBondConfigMsg` composing the bond over those
+members, and (c) the bond's own addressing (matched by the bond alias),
+delivering all three over the `CAP_NET_ADMIN` admin endpoint and retrying
+`NotFound` until each member has bound — so a bond composes once all its
+members are present, in any bind order.
+
+Failover is driven by the pure `tairix_net::bond` engine: the bond
+inherits its first member's MAC (kept stable for its life, so a peer's
+ARP/ND cache survives failover). A member that loses its link becomes
+ineligible **immediately**, and transmit re-targets a healthy member
+within one link-down report; a recovered member (or a declared `primary`)
+is readmitted only after one `monitor-interval` up-delay (deliberate
+failback, never flapping), driven by the tickless failover monitor folded
+into the service's wait-set deadline. On a transmit-path change the bond
+re-announces its presence with a gratuitous ARP / unsolicited Neighbour
+Advertisement out the newly-selected member so peers relearn the path, and
+the change is audited (`BOND_FAILOVER`). When no member is eligible the
+bond's aggregate link is down and transmit fails closed. Two transmit
+policies form a closed set: `active-backup` (one transmitting member,
+ordered failover, an optional reclaiming `primary`) and `balance`
+(flow-hashed spread — one flow stays on one member so a TCP stream never
+reorders across links). Runtime reload (`configure` + a redelivered
+`NetBondConfigMsg`) reconciles mode, primary, monitor interval, and
+membership in place; a released member returns to a plain, addressable
+interface.
 
 ## Sockets (the data plane)
 

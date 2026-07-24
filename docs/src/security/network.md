@@ -19,6 +19,7 @@ model, the defences, and the audit event-id registry for network events.
 | Forged caller identity | `netstack` derives every caller's identity from the kernel-attested `Origin` (`call_peer_origin`), never from a claimed field; the capability is checked before any state is touched, and the receiver does not re-check. |
 | Cross-principal socket / peer disclosure | The system-wide socket listing (`NET_SOCKETS`) and the per-interface counter/rate queries name other principals' sockets and peers, so they require `CAP_SYSINFO_GLOBAL` and are audited; there is no `/proc/net` and no unprivileged path to another principal's sockets. |
 | Silent failure hiding an attack in progress | Every refusal is a typed error and an audited event (below); the socket listing fails loud rather than returning an empty table (§24), and the defence counters surface a DoS in progress. |
+| A bond member's link silently failing (path loss going unnoticed) | Bond failover is link-state-driven and audited (`BOND_FAILOVER`); a dead member becomes ineligible immediately, the transmit path re-targets a healthy member and re-announces the bond's presence (gratuitous ARP / unsolicited NA), and per-member health/eligibility is observable. A member holds no addresses and refuses direct address assignment (the bond owns them). |
 
 ## Capabilities
 
@@ -58,6 +59,10 @@ one range test. The assigned identifiers:
 | `16_013` | `SOCKET_LISTENING` | Info | A stream socket entered the passive LISTEN state. |
 | `16_014` | `SOCKET_ACCEPTED` | Info | A passive connection was accepted onto a child stream socket. |
 | `16_015` | `NETWORK_SETTINGS_APPLIED` | Info | The stack-wide `net.*` policy (family enable, SYN-cookie mode) was applied over the `ApplyNetworkSettings` admin op. |
+| `16_016` | `INTERFACE_CONFIG_APPLIED` | Info | A per-interface `network.conf` configuration (static addressing, MTU, family enable) was applied over the `NetInterfaceConfigMsg` admin message. |
+| `16_017` | `BOND_CONFIG_APPLIED` | Info | A bond (link-aggregation) interface was composed or reconfigured over the `NetBondConfigMsg` admin message (members, mode, primary, monitor interval). |
+| `16_018` | `BOND_CONFIG_REFUSED` | Warn | A bond-configuration request passed the capability check but was refused (a member not present yet, an alias clash, or validation) — the bond is left untouched (fail closed). |
+| `16_019` | `BOND_FAILOVER` | Info | A bond's transmit path changed member (failover or deliberate failback); the bond re-announced its presence so peers relearn the path — a dead member is a visible, audited fact. |
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.tcp.syncookies`) is read from `system.conf` and delivered to

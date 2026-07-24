@@ -1545,17 +1545,49 @@ routes, or I/O.
   so no new fuzz harness (§19.6). Docs: `lib/net` lib.rs, `README.md`,
   `docs/src/lib/net.md`.
 
-#### N9b-3-2-β — bonding wiring, failover, reload, observability, QEMU vertical `[ ]`
-- `netstack`: compose bond members over the interface table (the bond owns
-  addresses/neighbour caches/routes; members carry none and refuse direct
-  address assignment); drive `lib/net::bond` from member link reports;
-  gratuitous ARP/NA on `PathChanged`; `match.node` binding (define the tree
-  node→device semantics with member resolution); runtime config reload.
-- `info:`/`state:`/`stats:` members for bonds and the remaining §5
-  counter/rate queries; `SysinfoQueryId` additions; `lib/procinfo`
-  resolver mapping.
-- Tests: bond failover QEMU vertical (kill a member mid-TCP-transfer,
-  assert the flow survives within the monitor budget), plus a live
+#### N9b-3-2-β-1 — bond wiring, failover, reload (host-gate-green) `[x]`
+The bond is composed end to end and host-tested; the live path is wired
+but its QEMU verticals are β-2.
+- **ABI** (`lib/abi/net_ipc`): `NetIfKind::Bond`; the self-identifying
+  `NetBondConfigMsg` ("NBC1") + `NetBondMode`; `NET_BOND_MAX_MEMBERS` is
+  the one member-count bound `lib/net::bond` and `lib/netconfig` both alias
+  (§2.2). Round-trip/validate/fail-closed tested; `NETSTACK_MAX_REQUEST`
+  widened. `Stack::announce_presence` (gratuitous ARP + unsolicited NA)
+  added to `lib/net`.
+- **netstack** (`iface.rs`/`run.rs`): a bond is an `Interface` owning one
+  `Stack` (single MAC from the first member, no offloads); members are
+  address-less conduits (`BondRole`) whose RX folds into the bond's stack
+  and which refuse direct addressing (`addr_add`/`route_add`/
+  `apply_interface_config` → `PermissionDenied`). `apply_bond_config`
+  composes/reconciles (mode/primary/monitor/membership — the runtime
+  reload path); `set_member_link`/`advance_bonds` drive `lib/net::bond`,
+  sync the bond's aggregate link, and emit a gratuitous announcement on
+  `PathChanged` tagged by the newly-selected member; egress is routed to
+  the flow-selected member (`egress_member`), fail-closed when no member is
+  eligible. Failover is audited (`BOND_CONFIG_APPLIED`/`BOND_CONFIG_REFUSED`
+  16_017/16_018, `BOND_FAILOVER` 16_019). Bond `active-member`/per-member
+  health are exposed (`bond_active_member`/`bond_member_health`). 9 host
+  tests (compose/up-delay/defer-until-present/facts+member-address-refusal/
+  immediate-failover+announce/last-member-down/deliberate-failback/reload-
+  primary+membership/alias-shadow).
+- **devmgr** (`netcfg`): the N9b-3-1 omission is removed —
+  `interface_configs_from_config` now emits an address-less member rename
+  per member, a `NetBondConfigMsg` per bond, and the bond's own
+  (alias-matched) addressing; `deliver_interface_configs` delivers bonds,
+  retrying `NotFound` until every member has bound. `NetstackBind` gains
+  `apply_bond_config`. Host-tested.
+- Docs: `docs/src/userland/netstack.md` (bond section), `security/network.md`
+  (threat row + event registry 16_016..16_019).
+
+#### N9b-3-2-β-2 — bond observability query + live QEMU verticals `[ ]`
+- `info:net/<bond>/members` + `state:net/<bond>/active-member` +
+  per-member health through a new `SysinfoQueryId` (net-bond-members),
+  `sysinfod` source, and `lib/procinfo` resolver (the accessors
+  `Netstack::bond_active_member`/`bond_member_health` are the surface).
+- `match.node` member binding (tree node→device resolution for a member
+  declared by `match.node` rather than `match.mac`).
+- Tests: the bond-failover QEMU vertical (kill a member mid-TCP-transfer,
+  assert the flow survives within the monitor budget) and a live
   static-addressing vertical.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface

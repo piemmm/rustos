@@ -74,7 +74,7 @@ pub const MAX_INTERFACES: usize = 32;
 
 /// Maximum number of member NICs a single bond may enrol
 /// ([`ConfigError::TooManyMembers`] otherwise).
-pub const MAX_BOND_MEMBERS: usize = 8;
+pub const MAX_BOND_MEMBERS: usize = tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS;
 
 /// Maximum length, in bytes, of an interface alias name. Matches the
 /// familiar Unix `IFNAMSIZ - 1` bound; a longer name fails closed.

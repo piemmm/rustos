@@ -1288,6 +1288,7 @@ fn net_kind_name(kind: NetIfKind) -> &'static str {
     match kind {
         NetIfKind::Ethernet => "ethernet",
         NetIfKind::Loopback => "loopback",
+        NetIfKind::Bond => "bond",
     }
 }
 

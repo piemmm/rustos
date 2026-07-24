@@ -476,6 +476,13 @@ mod tests {
         ) -> Result<(), Errno> {
             Ok(())
         }
+
+        fn apply_bond_config(
+            &mut self,
+            _config: &tairix_abi::net_ipc::NetBondConfigMsg,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
     }
 
     /// A no-op [`NetworkConfigSource`] for the loop tests: it never yields a

@@ -47,7 +47,8 @@ mod program {
     use tairix_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use tairix_abi::hwtree::HwDeviceClass;
     use tairix_abi::net_ipc::{
-        NetInterfaceConfigMsg, NetstackRequest, NetworkSettings, IF_NAME_LEN, NETSTACK_ENDPOINT,
+        NetBondConfigMsg, NetInterfaceConfigMsg, NetstackRequest, NetworkSettings, IF_NAME_LEN,
+        NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::{Errno, HwNode, HwTreeHeader, OpenFlags};
@@ -252,6 +253,14 @@ mod program {
         }
 
         fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
+            let request = config.to_le_bytes();
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len =
+                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            decode_status_reply(&reply[..len])
+        }
+
+        fn apply_bond_config(&mut self, config: &NetBondConfigMsg) -> Result<(), Errno> {
             let request = config.to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
             let len =

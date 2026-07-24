@@ -13,10 +13,11 @@ use tairix_abi::net::{
     SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
-    NetIpv6Config, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings,
-    IF_NAME_LEN, NETSTACK_MAX_REPLY,
+    decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMode, NetIfKind,
+    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetSockProto,
+    NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
+    NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -2625,4 +2626,338 @@ fn listen_config_maps_the_syncookie_policy() {
         syncookies_always: false,
     });
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
+}
+
+// --- Link aggregation (bonds) ---------------------------------------
+
+const MAC_C: MacAddress = MacAddress([0x02, 0xCC, 0, 0, 0, 0x03]);
+const IID_C: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0xC3];
+
+/// Build a bond-configuration message over the named members.
+fn bond_cfg(
+    members: &[&str],
+    mode: NetBondMode,
+    monitor_secs: i64,
+    primary: Option<&str>,
+) -> NetBondConfigMsg {
+    let mut table = [[0u8; IF_NAME_LEN]; NET_BOND_MAX_MEMBERS];
+    for (index, member) in members.iter().enumerate() {
+        table[index] = name(member);
+    }
+    NetBondConfigMsg {
+        alias: name("bond0"),
+        mode,
+        monitor_interval: Duration64::from_secs(monitor_secs),
+        primary: primary.map(name),
+        members: table,
+        member_count: u8::try_from(members.len()).expect("member count fits u8"),
+    }
+}
+
+/// A `Netstack` with `eth0`/`eth1` composed into an active-backup `bond0`
+/// (primary `eth0`, 1 s monitor), a static IPv4 address on the bond, and
+/// both members admitted past the up-delay.
+fn two_member_bond() -> Netstack {
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("eth0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            t(0),
+        )
+        .expect("eth0");
+    stack
+        .add_interface(
+            name("eth1"),
+            NetIfKind::Ethernet,
+            facts(MAC_B),
+            IID_B,
+            9,
+            t(0),
+        )
+        .expect("eth1");
+    stack
+        .apply_bond_config(
+            &bond_cfg(
+                &["eth0", "eth1"],
+                NetBondMode::ActiveBackup,
+                1,
+                Some("eth0"),
+            ),
+            t(0),
+        )
+        .expect("compose bond");
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("bond0"),
+                match_mac: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 2, 15],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+            },
+            t(0),
+        )
+        .expect("bond address");
+    // Admit both members past the anti-flap up-delay.
+    stack.advance_bonds(t(2));
+    stack
+}
+
+#[test]
+fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("eth0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            t(0),
+        )
+        .expect("eth0");
+    stack
+        .add_interface(
+            name("eth1"),
+            NetIfKind::Ethernet,
+            facts(MAC_B),
+            IID_B,
+            9,
+            t(0),
+        )
+        .expect("eth1");
+    stack
+        .apply_bond_config(
+            &bond_cfg(
+                &["eth0", "eth1"],
+                NetBondMode::ActiveBackup,
+                1,
+                Some("eth0"),
+            ),
+            t(0),
+        )
+        .expect("compose");
+    // The anti-flap up-delay keeps the bond down until a member has been
+    // continuously up for the monitor interval.
+    assert_eq!(stack.bond_active_member(name("bond0")), None);
+    assert_eq!(stack.egress_member(name("bond0"), 0), None);
+    // The monitor's deadline is armed (a member awaits admission).
+    assert!(stack.next_deadline().is_some());
+    // After the interval both are admitted; the primary carries the path.
+    stack.advance_bonds(t(2));
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth0")));
+    assert_eq!(stack.egress_member(name("bond0"), 0), Some(name("eth0")));
+}
+
+#[test]
+fn a_bond_config_defers_until_all_members_are_present() {
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("eth0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            t(0),
+        )
+        .expect("eth0");
+    // eth1 has not bound yet: the bond composition retries (NotFound).
+    assert_eq!(
+        stack.apply_bond_config(
+            &bond_cfg(&["eth0", "eth1"], NetBondMode::ActiveBackup, 1, None),
+            t(0),
+        ),
+        Err(Errno::NotFound)
+    );
+    assert!(stack.interface(name("bond0")).is_none());
+}
+
+#[test]
+fn a_bond_is_reported_as_a_bond_and_its_members_hold_no_addresses() {
+    let stack = two_member_bond();
+    let facts = stack.facts_records(0, 8);
+    assert!(facts
+        .iter()
+        .any(|f| f.name == name("bond0") && f.kind == NetIfKind::Bond));
+    let state = stack.state_records(0, 8);
+    // The bond owns the address; the members hold none.
+    let bond = state
+        .iter()
+        .find(|s| s.name == name("bond0"))
+        .expect("bond");
+    assert!(bond.link_up);
+    assert!(bond.addr_count >= 1);
+    for member in ["eth0", "eth1"] {
+        let record = state
+            .iter()
+            .find(|s| s.name == name(member))
+            .expect("member");
+        assert_eq!(record.addr_count, 0, "a member holds no addresses");
+    }
+}
+
+#[test]
+fn a_bond_member_refuses_direct_addressing() {
+    let mut stack = two_member_bond();
+    assert_eq!(
+        stack.addr_add(name("eth0"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(3)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        stack.route_add(
+            name("eth0"),
+            NetAddrFamily::V4,
+            0,
+            [0; 16],
+            Some(v4_bytes(V4_B))
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    let msg = NetInterfaceConfigMsg {
+        alias: name("eth0"),
+        match_mac: None,
+        ipv4: NetIpv4Config::Static {
+            addr: [10, 0, 0, 2],
+            prefix: 24,
+            gateway: None,
+        },
+        ipv6: NetIpv6Config::Disabled,
+        mtu: 0,
+    };
+    assert_eq!(
+        stack.apply_interface_config(&msg, t(3)),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn a_bond_fails_over_immediately_and_announces_the_new_path() {
+    let mut stack = two_member_bond();
+    // Kill the active member: the transmit path fails over at once.
+    let batch = stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
+    assert_eq!(stack.egress_member(name("bond0"), 0), Some(name("eth1")));
+    // A gratuitous announcement (the bond's own address) goes out the new
+    // member so peers relearn the path.
+    assert!(
+        batch
+            .iter()
+            .any(|(member, frames)| *member == name("eth1") && !frames.is_empty()),
+        "gratuitous announcement emitted on the new member"
+    );
+    // The failed member is no longer eligible.
+    let health = stack.bond_member_health(name("bond0")).expect("bond");
+    let eth0 = health.iter().find(|h| h.member == name("eth0")).unwrap();
+    assert!(!eth0.link_up && !eth0.eligible);
+}
+
+#[test]
+fn a_bond_loses_its_link_when_the_last_member_dies() {
+    let mut stack = two_member_bond();
+    stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    stack.set_member_link(name("eth1"), LinkState::Down, t(3));
+    // No eligible member: the bond is down and transmit fails closed.
+    assert_eq!(stack.bond_active_member(name("bond0")), None);
+    assert_eq!(stack.egress_member(name("bond0"), 0), None);
+    let state = stack.state_records(0, 8);
+    let bond = state.iter().find(|s| s.name == name("bond0")).unwrap();
+    assert!(!bond.link_up);
+}
+
+#[test]
+fn failback_to_the_primary_is_deliberate_not_flapping() {
+    let mut stack = two_member_bond();
+    stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
+    // The primary recovers but is not readmitted instantly (anti-flap);
+    // eth1 keeps the path until the up-delay elapses.
+    stack.set_member_link(name("eth0"), LinkState::Up, t(4));
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
+    // After the up-delay the primary reclaims the transmit path.
+    stack.advance_bonds(t(6));
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth0")));
+}
+
+#[test]
+fn a_bond_reload_changes_primary_and_membership() {
+    let mut stack = two_member_bond();
+    // Reload with primary eth1: the active member moves.
+    stack
+        .apply_bond_config(
+            &bond_cfg(
+                &["eth0", "eth1"],
+                NetBondMode::ActiveBackup,
+                1,
+                Some("eth1"),
+            ),
+            t(3),
+        )
+        .expect("reload primary");
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
+
+    // Reload the membership: add eth2, drop eth1.
+    stack
+        .add_interface(
+            name("eth2"),
+            NetIfKind::Ethernet,
+            facts(MAC_C),
+            IID_C,
+            11,
+            t(3),
+        )
+        .expect("eth2");
+    stack
+        .apply_bond_config(
+            &bond_cfg(
+                &["eth0", "eth2"],
+                NetBondMode::ActiveBackup,
+                1,
+                Some("eth0"),
+            ),
+            t(3),
+        )
+        .expect("reload membership");
+    // eth1 is released back to a plain interface (it may be addressed).
+    assert!(stack
+        .addr_add(name("eth1"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(3))
+        .is_ok());
+    // eth0 (still admitted) carries the path; eth2 is admitted after delay.
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth0")));
+    stack.advance_bonds(t(5));
+    let health = stack.bond_member_health(name("bond0")).expect("bond");
+    assert_eq!(health.len(), 2);
+    assert!(health
+        .iter()
+        .any(|h| h.member == name("eth2") && h.eligible));
+}
+
+#[test]
+fn a_bond_alias_cannot_shadow_a_non_bond_interface() {
+    let mut stack = Netstack::new();
+    for (alias, mac, iid) in [
+        ("bond0", MAC_A, IID_A),
+        ("eth1", MAC_B, IID_B),
+        ("eth2", MAC_C, IID_C),
+    ] {
+        stack
+            .add_interface(name(alias), NetIfKind::Ethernet, facts(mac), iid, 7, t(0))
+            .expect("iface");
+    }
+    // `bond0` already names a plain Ethernet interface.
+    assert_eq!(
+        stack.apply_bond_config(
+            &bond_cfg(&["eth1", "eth2"], NetBondMode::ActiveBackup, 1, None),
+            t(0),
+        ),
+        Err(Errno::AlreadyExists)
+    );
 }

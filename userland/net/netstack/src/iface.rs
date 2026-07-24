@@ -11,17 +11,18 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
-    validate_if_name, NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind,
-    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
-    NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMode, NetCounters,
+    NetIfAddr, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
+    NetIpv6Config, NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::iface::AddrError;
+use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
+use tairix_net::iface::{eui64_interface_id, AddrError};
 use tairix_net::internet_checksum;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{
@@ -30,6 +31,35 @@ use tairix_net::stack::{
 use tairix_net::tcp::TcpSegmentMeta;
 
 use crate::channel::FrameService;
+
+/// The internal role an interface-table entry plays in link aggregation.
+///
+/// A bond is a virtual interface that owns the addresses, routes, and
+/// neighbour cache; its members are the physical NICs that carry its
+/// frames but hold no addresses of their own. A plain interface is
+/// [`BondRole::None`].
+#[derive(Clone, Debug, Default)]
+enum BondRole {
+    /// Not part of any bond (a plain interface or the loopback).
+    #[default]
+    None,
+    /// A bond virtual interface: the [`Bond`] decision engine and the
+    /// declared member aliases (in configured order). The owning
+    /// [`Interface`]'s [`Stack`] is the bond's own stack.
+    Bond {
+        /// The link-aggregation decision engine.
+        engine: Bond,
+        /// The declared member aliases, in configured order.
+        members: Vec<[u8; IF_NAME_LEN]>,
+    },
+    /// A member NIC enrolled in the named bond. Its own [`Stack`] is
+    /// dormant (address-less); received frames fold into the bond's stack
+    /// and it refuses direct address assignment.
+    Member {
+        /// The bond alias this NIC is enrolled in.
+        bond: [u8; IF_NAME_LEN],
+    },
+}
 
 /// Frames produced for one or more interfaces, each batch tagged by the
 /// interface alias that emitted it, for the caller to queue onto that
@@ -46,6 +76,8 @@ pub struct Interface {
     stack: Stack,
     /// The tickless windowed-throughput meter (`stats:net/<iface>/…`).
     rates: RateMeter,
+    /// This entry's link-aggregation role (plain, bond, or member).
+    role: BondRole,
 }
 
 impl Interface {
@@ -150,6 +182,7 @@ impl Netstack {
             facts,
             stack,
             rates: RateMeter::new(),
+            role: BondRole::None,
         });
         Ok(())
     }
@@ -226,6 +259,20 @@ impl Netstack {
                 .ok_or(Errno::NotFound)?,
             None => self.find(msg.alias).ok_or(Errno::NotFound)?,
         };
+        // A bond member owns no addresses: the bond does. Refuse a direct
+        // address assignment (static v4/v6 or SLAAC) to an enrolled member
+        // (fail closed) — the member is a pure frame conduit. A disabled
+        // family is harmless (a member's families are already disabled).
+        if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
+            let assigns_address = matches!(msg.ipv4, NetIpv4Config::Static { .. })
+                || matches!(
+                    msg.ipv6,
+                    NetIpv6Config::Static { .. } | NetIpv6Config::Slaac
+                );
+            if assigns_address {
+                return Err(Errno::PermissionDenied);
+            }
+        }
         // Rename a MAC-matched interface to its admin-chosen alias, unless
         // the alias is already taken by a *different* interface (fail
         // closed rather than collide two aliases).
@@ -301,6 +348,8 @@ impl Netstack {
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no interface bears `name`.
+    /// * [`Errno::PermissionDenied`] — the interface is an enrolled bond
+    ///   member (it owns no addresses; the bond does).
     /// * [`Errno::OutOfRange`] — the engine refused the address
     ///   (bad prefix, gateway off-subnet, table full).
     pub fn addr_add(
@@ -312,6 +361,9 @@ impl Netstack {
         now: Duration64,
     ) -> Result<(), Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
+        if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
+            return Err(Errno::PermissionDenied);
+        }
         let stack = &mut self.interfaces[index].stack;
         match family {
             NetAddrFamily::V4 => stack
@@ -328,6 +380,8 @@ impl Netstack {
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no interface bears `name`.
+    /// * [`Errno::PermissionDenied`] — the interface is an enrolled bond
+    ///   member (it owns no routes; the bond does).
     /// * [`Errno::OutOfRange`] — the engine refused the route.
     pub fn route_add(
         &mut self,
@@ -338,6 +392,9 @@ impl Netstack {
         next_hop: Option<[u8; 16]>,
     ) -> Result<(), Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
+        if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
+            return Err(Errno::PermissionDenied);
+        }
         let stack = &mut self.interfaces[index].stack;
         match family {
             NetAddrFamily::V4 => stack
@@ -463,10 +520,20 @@ impl Netstack {
                 .send_datagram(dest, source_port, destination_port, payload, now, out)
             {
                 Ok(()) => {
-                    batches.push((iface.name, core::mem::take(&mut out.frames)));
-                    if !multicast {
-                        // One link carries a unicast datagram; stop.
-                        break;
+                    let frames = core::mem::take(&mut out.frames);
+                    // A bond tags its egress by the member the flow selects
+                    // (so the caller routes it onto a real channel); a plain
+                    // interface tags by its own alias. A bond with no
+                    // eligible member drops the frames (fail closed).
+                    let flow = flow_of(dest, source_port, destination_port);
+                    if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
+                        batches.push((tag, frames));
+                        if !multicast {
+                            // One link carries a unicast datagram; stop.
+                            break;
+                        }
+                    } else {
+                        deferred = deferred.or(Some(Errno::NetworkUnreachable));
                     }
                 }
                 Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
@@ -513,7 +580,14 @@ impl Netstack {
                 .stack
                 .send_echo_request(dest, identifier, sequence, payload, now, out)
             {
-                Ok(()) => return Ok(alloc::vec![(iface.name, core::mem::take(&mut out.frames))]),
+                Ok(()) => {
+                    let frames = core::mem::take(&mut out.frames);
+                    let flow = flow_of(dest, identifier, sequence);
+                    if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
+                        return Ok(alloc::vec![(tag, frames)]);
+                    }
+                    deferred = deferred.or(Some(Errno::NetworkUnreachable));
+                }
                 Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
                 Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
                 // No route / no source / link down on this interface: try
@@ -640,11 +714,18 @@ impl Netstack {
             interfaces, out, ..
         } = self;
         for iface in interfaces.iter_mut() {
+            // A member owns no membership; the bond does. Skip members.
+            if matches!(iface.role, BondRole::Member { .. }) {
+                continue;
+            }
             match iface.stack.join_multicast(group, now) {
                 // A fresh join emits a membership report to announce it.
                 Ok(true) => {
                     iface.stack.advance(now, out);
-                    batches.push((iface.name, core::mem::take(&mut out.frames)));
+                    let frames = core::mem::take(&mut out.frames);
+                    if let Some(tag) = egress_tag(&iface.role, iface.name, 0) {
+                        batches.push((tag, frames));
+                    }
                 }
                 // Already a member (a prior reference): no new report.
                 Ok(false) => {}
@@ -666,9 +747,15 @@ impl Netstack {
             interfaces, out, ..
         } = self;
         for iface in interfaces.iter_mut() {
+            if matches!(iface.role, BondRole::Member { .. }) {
+                continue;
+            }
             if iface.stack.leave_multicast(group, now) {
                 iface.stack.advance(now, out);
-                batches.push((iface.name, core::mem::take(&mut out.frames)));
+                let frames = core::mem::take(&mut out.frames);
+                if let Some(tag) = egress_tag(&iface.role, iface.name, 0) {
+                    batches.push((tag, frames));
+                }
             }
         }
         batches
@@ -732,9 +819,15 @@ impl Netstack {
                     };
                     count += 1;
                 }
+                // A bond's link is up when any member is eligible; a plain
+                // interface's link is its device's reported link.
+                let link_up = match &i.role {
+                    BondRole::Bond { engine, .. } => engine.is_up(),
+                    _ => i.facts.link == LinkState::Up,
+                };
                 NetInterfaceStateRecord {
                     name: i.name,
-                    link_up: i.facts.link == LinkState::Up,
+                    link_up,
                     addr_count: count,
                     addrs,
                 }
@@ -769,7 +862,13 @@ impl Netstack {
         fs: &mut F,
         now: Duration64,
     ) -> Result<Vec<StackEvent>, Errno> {
-        let index = self.find(name).ok_or(Errno::NotFound)?;
+        let channel_index = self.find(name).ok_or(Errno::NotFound)?;
+        // A member NIC has no stack of its own: its frames flow through the
+        // bond's stack (the bond owns the addresses/routes). Its replies
+        // are queued back onto this member's ring, which is correct for the
+        // transmit member — the member a peer reaches the bond on. A plain
+        // interface targets its own stack.
+        let index = self.stack_target_index(channel_index);
         let geometry = fs.geometry();
         let class = fs.class();
         // Size the reusable scratch to the receive slot capacity once (the
@@ -841,16 +940,413 @@ impl Netstack {
     }
 
     /// The earliest engine deadline across every interface, if any —
-    /// the one-shot timer the event loop arms.
+    /// the one-shot timer the event loop arms. Folds each interface's
+    /// protocol-engine deadline and, for a bond, its failover health
+    /// monitor's next admission deadline (tickless: `None` when no member
+    /// is awaiting readmission).
     #[must_use]
     pub fn next_deadline(&self) -> Option<Duration64> {
         self.interfaces
             .iter()
-            .filter_map(|i| i.stack.next_deadline())
+            .flat_map(|i| {
+                let bond = match &i.role {
+                    BondRole::Bond { engine, .. } => engine.next_deadline(),
+                    _ => None,
+                };
+                [i.stack.next_deadline(), bond]
+            })
+            .flatten()
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
     }
 }
 
+/// One member's live health, for the `state:net/<bond>/…` observability
+/// read: the member alias, whether its link is up, and whether it is
+/// currently eligible to carry traffic (admitted past the anti-flap
+/// up-delay).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BondMemberHealth {
+    /// The member interface's admin-chosen alias, NUL-padded.
+    pub member: [u8; IF_NAME_LEN],
+    /// Whether the member's link is currently up.
+    pub link_up: bool,
+    /// Whether the member is eligible to carry traffic now.
+    pub eligible: bool,
+}
+
+// --- Link aggregation (bond) composition --------------------------------
+impl Netstack {
+    /// Map the pumped channel's interface index onto the stack that
+    /// processes its frames: a member's frames flow through its bond's
+    /// stack; every other interface uses its own.
+    fn stack_target_index(&self, channel_index: usize) -> usize {
+        if let BondRole::Member { bond } = self.interfaces[channel_index].role {
+            if let Some(bond_index) = self.find(bond) {
+                return bond_index;
+            }
+        }
+        channel_index
+    }
+
+    /// Map the wire bond mode onto the engine policy.
+    fn engine_mode(mode: NetBondMode) -> BondMode {
+        match mode {
+            NetBondMode::ActiveBackup => BondMode::ActiveBackup,
+            NetBondMode::Balance => BondMode::Balance,
+        }
+    }
+
+    /// Compose (or reconfigure) a bond interface from a
+    /// [`NetBondConfigMsg`] (`plans/NETWORK.md` §6.3), delivered by the
+    /// device manager over the admin endpoint.
+    ///
+    /// A bond is a virtual interface that owns the addresses, routes, and
+    /// neighbour cache (applied separately by a [`NetInterfaceConfigMsg`]
+    /// naming the bond); its members are the physical NICs that carry its
+    /// frames but hold no addresses. The bond inherits the first declared
+    /// member's device identity (MAC/MTU) — Linux's default bond-MAC
+    /// policy — kept stable for the bond's life so a peer's ARP/ND cache
+    /// survives failover.
+    ///
+    /// Every declared member must already be present (its driver bound and
+    /// the interface renamed to the member alias); an absent member yields
+    /// [`Errno::NotFound`] so the caller retries when the driver binds
+    /// (the [`Self::apply_interface_config`] contract). Re-applying is
+    /// idempotent and reconciles the running bond (mode, primary, monitor
+    /// interval, and membership) in place — the runtime-reload path.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — the message failed validation or the
+    ///   engine refused the bond's device facts.
+    /// * [`Errno::NotFound`] — a declared member is not present yet.
+    /// * [`Errno::AlreadyExists`] — the bond alias names a non-bond
+    ///   interface, or a declared member is a bond or already enrolled in
+    ///   a *different* bond.
+    pub fn apply_bond_config(
+        &mut self,
+        msg: &NetBondConfigMsg,
+        now: Duration64,
+    ) -> Result<(), Errno> {
+        msg.validate()?;
+        // Every declared member must be present and free to enrol. Checked
+        // up front so the composition below is atomic (fail closed).
+        for member in msg.members() {
+            let idx = self.find(*member).ok_or(Errno::NotFound)?;
+            if matches!(self.interfaces[idx].kind, NetIfKind::Bond) {
+                return Err(Errno::AlreadyExists);
+            }
+            match self.interfaces[idx].role {
+                BondRole::None => {}
+                BondRole::Member { bond } if bond == msg.alias => {}
+                // Enrolled in another bond, or itself a bond: refuse.
+                _ => return Err(Errno::AlreadyExists),
+            }
+        }
+        let mode = Self::engine_mode(msg.mode);
+        let primary = msg.primary.map(member_id);
+
+        let bond_index = if let Some(idx) = self.find(msg.alias) {
+            if !matches!(self.interfaces[idx].role, BondRole::Bond { .. }) {
+                // The alias is taken by a non-bond interface.
+                return Err(Errno::AlreadyExists);
+            }
+            idx
+        } else {
+            let first = self.find(msg.members()[0]).ok_or(Errno::NotFound)?;
+            self.create_bond_interface(msg.alias, mode, msg.monitor_interval, primary, first, now)?;
+            self.find(msg.alias).ok_or(Errno::NotFound)?
+        };
+        self.reconcile_bond(
+            bond_index,
+            mode,
+            msg.monitor_interval,
+            primary,
+            msg.members(),
+            now,
+        );
+        Ok(())
+    }
+
+    /// Create the bond virtual interface, its own [`Stack`] built from the
+    /// first member's device identity (MAC/MTU) with **no** offloads (the
+    /// bond negotiates none of its own — a member's offloads are the
+    /// member's), and an empty [`Bond`] engine seeded with the policy.
+    fn create_bond_interface(
+        &mut self,
+        alias: [u8; IF_NAME_LEN],
+        mode: BondMode,
+        monitor_interval: Duration64,
+        primary: Option<MemberId>,
+        first_member_index: usize,
+        now: Duration64,
+    ) -> Result<(), Errno> {
+        let mut facts = self.interfaces[first_member_index].facts;
+        // The virtual bond negotiates no offloads of its own; frames it
+        // hands a member are plain (the member checksums/segments in its
+        // own right where its config negotiated it).
+        facts.offloads = NetOffloads::empty();
+        let interface_id = eui64_interface_id(*facts.mac.as_octets());
+        let octets = *facts.mac.as_octets();
+        let ipv4_ident_seed = u16::from_le_bytes([octets[4], octets[5]]);
+        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
+        config.ipv4_enabled = self.settings.ipv4_enabled;
+        config.iface.ipv6_enabled = self.settings.ipv6_enabled;
+        let mut stack = Stack::new(&config, now).map_err(|_| Errno::OutOfRange)?;
+        // The bond has no admitted member yet, so its aggregate link is
+        // down until the failover monitor admits one.
+        stack.set_link(LinkState::Down);
+        let engine = Bond::new(&BondConfig {
+            mode,
+            monitor_interval,
+            primary,
+        });
+        self.interfaces.push(Interface {
+            name: alias,
+            kind: NetIfKind::Bond,
+            facts,
+            stack,
+            rates: RateMeter::new(),
+            role: BondRole::Bond {
+                engine,
+                members: Vec::new(),
+            },
+        });
+        Ok(())
+    }
+
+    /// Reconcile a bond's engine policy and membership to the declared set
+    /// (the create path starts from an empty membership; the reload path
+    /// diffs the running one). Enrols newly-declared members (disabling
+    /// their own stacks so they hold no addresses) and releases members no
+    /// longer declared (restoring them to plain interfaces).
+    fn reconcile_bond(
+        &mut self,
+        bond_index: usize,
+        mode: BondMode,
+        monitor_interval: Duration64,
+        primary: Option<MemberId>,
+        declared: &[[u8; IF_NAME_LEN]],
+        now: Duration64,
+    ) {
+        // Snapshot the currently-enrolled members to diff against.
+        let current: Vec<[u8; IF_NAME_LEN]> = match &self.interfaces[bond_index].role {
+            BondRole::Bond { members, .. } => members.clone(),
+            _ => return,
+        };
+        let bond_alias = self.interfaces[bond_index].name;
+
+        // Release members no longer declared: leave the engine and become
+        // plain interfaces again (re-adopting the stack-wide family policy).
+        for member in &current {
+            if !declared.contains(member) {
+                if let BondRole::Bond { engine, .. } = &mut self.interfaces[bond_index].role {
+                    let _ = engine.remove_member(member_id(*member));
+                }
+                if let Some(idx) = self.find(*member) {
+                    self.interfaces[idx].role = BondRole::None;
+                    self.reenable_member_stack(idx, now);
+                }
+            }
+        }
+
+        // Reassert the engine policy (idempotent).
+        if let BondRole::Bond { engine, .. } = &mut self.interfaces[bond_index].role {
+            engine.set_mode(mode);
+            engine.set_monitor_interval(monitor_interval);
+            engine.set_primary(primary);
+        }
+
+        // Enrol newly-declared members: disable the member's own stack (it
+        // owns no addresses) and add it to the engine with its link state.
+        for member in declared {
+            if !current.contains(member) {
+                let Some(idx) = self.find(*member) else {
+                    continue;
+                };
+                self.disable_member_stack(idx, now);
+                self.interfaces[idx].role = BondRole::Member { bond: bond_alias };
+                let link = self.interfaces[idx].facts.link;
+                if let BondRole::Bond { engine, .. } = &mut self.interfaces[bond_index].role {
+                    if engine.add_member(member_id(*member)).is_ok() {
+                        let _ = engine.set_member_link(member_id(*member), link, now);
+                    }
+                }
+            }
+        }
+
+        // Record the declared membership (in configured order) and sync the
+        // bond stack's link to the engine's aggregate up-state.
+        if let BondRole::Bond { members, .. } = &mut self.interfaces[bond_index].role {
+            *members = declared.to_vec();
+        }
+        self.sync_bond_link(bond_index);
+    }
+
+    /// Disable a member interface's own protocol stack so it forms and
+    /// holds no addresses — a member is a pure frame conduit for its bond.
+    fn disable_member_stack(&mut self, index: usize, now: Duration64) {
+        let stack = &mut self.interfaces[index].stack;
+        stack.set_ipv4_enabled(false);
+        stack.set_ipv6_enabled(false, now);
+    }
+
+    /// Restore a released member to a plain interface: re-adopt the
+    /// stack-wide family policy so it can once again form its own
+    /// addresses.
+    fn reenable_member_stack(&mut self, index: usize, now: Duration64) {
+        let settings = self.settings;
+        let stack = &mut self.interfaces[index].stack;
+        stack.set_ipv4_enabled(settings.ipv4_enabled);
+        stack.set_ipv6_enabled(settings.ipv6_enabled, now);
+    }
+
+    /// Report a member NIC's link-state change to its bond and act on the
+    /// resulting transmit-path events, returning any gratuitous
+    /// ARP/unsolicited-NA frames tagged by the newly-selected member (for
+    /// the caller to transmit). A link report for a NIC that is not an
+    /// enrolled member is ignored (no change).
+    pub fn set_member_link(
+        &mut self,
+        member: [u8; IF_NAME_LEN],
+        link: LinkState,
+        now: Duration64,
+    ) -> FrameBatch {
+        let Some(member_index) = self.find(member) else {
+            return FrameBatch::new();
+        };
+        let BondRole::Member { bond } = self.interfaces[member_index].role else {
+            return FrameBatch::new();
+        };
+        // Track the member's own link for observability.
+        self.interfaces[member_index].facts.link = link;
+        let Some(bond_index) = self.find(bond) else {
+            return FrameBatch::new();
+        };
+        let events = match &mut self.interfaces[bond_index].role {
+            BondRole::Bond { engine, .. } => engine.set_member_link(member_id(member), link, now),
+            _ => Vec::new(),
+        };
+        self.apply_bond_events(bond_index, &events, now)
+    }
+
+    /// Advance every bond's failover health monitor (admitting members
+    /// past their anti-flap up-delay), returning any gratuitous
+    /// announcements the resulting path changes require, tagged by the
+    /// member each must go out. Folded into the service's timer sweep.
+    pub fn advance_bonds(&mut self, now: Duration64) -> FrameBatch {
+        let mut batch = FrameBatch::new();
+        let bonds: Vec<usize> = (0..self.interfaces.len())
+            .filter(|&i| matches!(self.interfaces[i].role, BondRole::Bond { .. }))
+            .collect();
+        for bond_index in bonds {
+            let events = match &mut self.interfaces[bond_index].role {
+                BondRole::Bond { engine, .. } => engine.advance(now),
+                _ => Vec::new(),
+            };
+            batch.append(&mut self.apply_bond_events(bond_index, &events, now));
+        }
+        batch
+    }
+
+    /// Sync a bond's own stack link to the engine's aggregate up-state.
+    fn sync_bond_link(&mut self, bond_index: usize) {
+        let up = match &self.interfaces[bond_index].role {
+            BondRole::Bond { engine, .. } => engine.is_up(),
+            _ => return,
+        };
+        self.interfaces[bond_index].stack.set_link(if up {
+            LinkState::Up
+        } else {
+            LinkState::Down
+        });
+    }
+
+    /// Act on a bond's transmit-path events: keep the bond stack's link in
+    /// sync, and on a [`BondEvent::PathChanged`] re-announce the bond's
+    /// presence (gratuitous ARP / unsolicited NA) so peers relearn the
+    /// path, returning those frames tagged by the newly-selected member.
+    fn apply_bond_events(
+        &mut self,
+        bond_index: usize,
+        events: &[BondEvent],
+        now: Duration64,
+    ) -> FrameBatch {
+        let mut batch = FrameBatch::new();
+        self.sync_bond_link(bond_index);
+        let path_changed = events.iter().any(|e| matches!(e, BondEvent::PathChanged));
+        if !path_changed {
+            return batch;
+        }
+        // Emit the presence announcement on the member the flow-agnostic
+        // selection now points at (the active member in active-backup).
+        let member = match &self.interfaces[bond_index].role {
+            BondRole::Bond { engine, .. } => engine.transmit_member(0),
+            _ => None,
+        };
+        let Some(member) = member else {
+            return batch;
+        };
+        let Self {
+            interfaces, out, ..
+        } = self;
+        interfaces[bond_index].stack.announce_presence(out, now);
+        let frames = core::mem::take(&mut out.frames);
+        if !frames.is_empty() {
+            batch.push((member, frames));
+        }
+        batch
+    }
+
+    /// Resolve the physical channel alias a logical interface transmits on
+    /// for the given flow: a bond selects its member (active member in
+    /// active-backup; flow-hashed in balance), a plain interface is itself,
+    /// and a member — never addressed directly — resolves to nothing.
+    /// `None` when the interface is unknown or the bond has no eligible
+    /// member (fail closed).
+    #[must_use]
+    pub fn egress_member(&self, name: [u8; IF_NAME_LEN], flow: u32) -> Option<[u8; IF_NAME_LEN]> {
+        let index = self.find(name)?;
+        egress_tag(&self.interfaces[index].role, name, flow)
+    }
+
+    /// The live per-member health of the bond named `bond`
+    /// (`state:net/<bond>/…`), in configured order, or `None` if `bond` is
+    /// not a bond interface.
+    #[must_use]
+    pub fn bond_member_health(&self, bond: [u8; IF_NAME_LEN]) -> Option<Vec<BondMemberHealth>> {
+        let index = self.find(bond)?;
+        match &self.interfaces[index].role {
+            BondRole::Bond { engine, members } => Some(
+                members
+                    .iter()
+                    .map(|member| BondMemberHealth {
+                        member: *member,
+                        link_up: engine
+                            .is_member_link_up(member_id(*member))
+                            .unwrap_or(false),
+                        eligible: engine
+                            .is_member_eligible(member_id(*member))
+                            .unwrap_or(false),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// The bond's currently-active member (`state:net/<bond>/active-member`)
+    /// in active-backup, or `None` in balance mode / when the bond is down /
+    /// when `bond` is not a bond.
+    #[must_use]
+    pub fn bond_active_member(&self, bond: [u8; IF_NAME_LEN]) -> Option<[u8; IF_NAME_LEN]> {
+        let index = self.find(bond)?;
+        match &self.interfaces[index].role {
+            BondRole::Bond { engine, .. } => engine.active_member(),
+            _ => None,
+        }
+    }
+}
 /// Map the engine's monotonic stack counters onto the four accumulators
 /// the [`RateMeter`] takes throughput rates over.
 fn rate_counters_of(stack: &Stack) -> RateCounters {
@@ -989,6 +1485,37 @@ pub fn queue_tx<F: FrameService>(fs: &mut F, frames: &[TxFrame]) -> Result<(), E
 
 fn v4_of(bytes: [u8; 16]) -> Ipv4Addr {
     Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
+/// An interface alias as a bond [`MemberId`]. The two are the same
+/// fixed-width name; this names the intent (a member is keyed in the bond
+/// engine by its interface alias).
+fn member_id(name: [u8; IF_NAME_LEN]) -> MemberId {
+    name
+}
+
+/// Resolve the physical channel alias a logical interface transmits on for
+/// the given flow: a bond selects its member (the active member in
+/// active-backup, flow-hashed in balance), a plain interface is itself,
+/// and a member — never addressed directly — resolves to nothing. `None`
+/// when a bond has no eligible member (fail closed).
+fn egress_tag(role: &BondRole, name: [u8; IF_NAME_LEN], flow: u32) -> Option<[u8; IF_NAME_LEN]> {
+    match role {
+        BondRole::Bond { engine, .. } => engine.transmit_member(flow),
+        BondRole::Member { .. } => None,
+        BondRole::None => Some(name),
+    }
+}
+
+/// A deterministic transmit flow hash over a destination and its transport
+/// ports, for bond balance-mode member selection (`plans/NETWORK.md`
+/// §6.3). The source address is left empty — a destination plus ports keys
+/// a flow to one member for its life, and active-backup ignores the hash.
+fn flow_of(dest: IpAddr, port_a: u16, port_b: u16) -> u32 {
+    match dest {
+        IpAddr::V4(v4) => flow_hash(&[], &v4.octets(), port_a, port_b),
+        IpAddr::V6(v6) => flow_hash(&[], &v6.octets(), port_a, port_b),
+    }
 }
 
 fn v4_bytes(addr: Ipv4Addr) -> [u8; 16] {

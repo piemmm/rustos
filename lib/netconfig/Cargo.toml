@@ -12,6 +12,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The single definition of the bond member-count bound lives with the
+# `netstack-v1` wire message; this grammar keys its own limit to it so the
+# store, the engine, and the wire can never disagree (§2.2).
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

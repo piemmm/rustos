@@ -51,8 +51,8 @@ mod program {
     use tairix_abi::driver::BufferClass;
     use tairix_abi::net::{SocketRequest, NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY};
     use tairix_abi::net_ipc::{
-        NetIfKind, NetInterfaceConfigMsg, NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT,
-        NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
+        NetBondConfigMsg, NetIfKind, NetInterfaceConfigMsg, NetstackRequest, IF_NAME_LEN,
+        NETSTACK_ENDPOINT, NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
     };
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -381,6 +381,14 @@ mod program {
             let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
             return;
         }
+        // The bond configuration is a third self-identifying framed message
+        // (its own magic), decoded before the request enum like the two
+        // above. It composes/reconfigures a bond over member interfaces.
+        if let Ok(msg) = NetBondConfigMsg::from_bytes(&request[..request_len]) {
+            let result = serve_bond_config(stack, &caller, &msg);
+            let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
+            return;
+        }
         match serve(
             stack,
             sockets,
@@ -477,6 +485,46 @@ mod program {
                     events::ADMIN_REFUSED,
                     Level::Warn,
                     "netstack interface config refused (interface left untouched)",
+                    err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Capability-check and compose (or reconfigure) a bond: gate on
+    /// `CAP_NET_ADMIN` against the caller's attested origin (fail closed,
+    /// audited) **before any state is touched**, then apply the whole bond
+    /// atomically ([`Netstack::apply_bond_config`]). A refusal (a member
+    /// not present yet, an alias clash, validation) leaves the bond
+    /// untouched and is reported to the caller.
+    fn serve_bond_config(
+        stack: &mut Netstack,
+        caller: &Caller,
+        msg: &NetBondConfigMsg,
+    ) -> Result<(), Errno> {
+        if !caller.capabilities().holds(CapabilityId::NET_ADMIN) {
+            audit(
+                events::REQUEST_DENIED,
+                Level::Warn,
+                "netstack bond config denied: caller lacks CAP_NET_ADMIN",
+            );
+            return Err(Errno::PermissionDenied);
+        }
+        match stack.apply_bond_config(msg, now()) {
+            Ok(()) => {
+                audit(
+                    events::BOND_CONFIG_APPLIED,
+                    Level::Info,
+                    "netstack: bond interface composed/reconfigured",
+                );
+                Ok(())
+            }
+            Err(err) => {
+                audit_errno(
+                    events::BOND_CONFIG_REFUSED,
+                    Level::Warn,
+                    "netstack bond config refused (bond left untouched)",
                     err,
                 );
                 Err(err)
@@ -754,7 +802,12 @@ mod program {
         batch: &FrameBatch,
     ) {
         for (name, frames) in batch {
-            let Some(channel) = channels.iter_mut().flatten().find(|c| c.iface == *name) else {
+            // Resolve the frame's target channel: a bond tag becomes its
+            // selected member; a member/plain tag is itself. A batch for an
+            // interface with no bound channel (or a bond with no eligible
+            // member) is dropped — its link is gone.
+            let target = stack.egress_member(*name, 0).unwrap_or(*name);
+            let Some(channel) = channels.iter_mut().flatten().find(|c| c.iface == target) else {
                 continue;
             };
             let _ = queue_tx(&mut channel.client, frames);
@@ -830,7 +883,12 @@ mod program {
                         );
                         emit_deliveries(&io.deliveries);
                         for (name, frames) in &io.tx {
-                            if *name == channel.iface && !frames.is_empty() {
+                            // A connection's frames are tagged by its logical
+                            // interface; resolve a bond to its active member
+                            // so a reply staged here lands on the member this
+                            // pump drives.
+                            let target = stack.egress_member(*name, 0).unwrap_or(*name);
+                            if target == channel.iface && !frames.is_empty() {
                                 let _ = queue_tx(&mut channel.client, frames);
                                 staged = true;
                             }
@@ -859,6 +917,18 @@ mod program {
     ) {
         let io = sockets.advance_streams(stack, now);
         distribute(stack, sockets, channels, secret, &io);
+        // Advance every bond's failover health monitor (admitting recovered
+        // members past their up-delay) and transmit any gratuitous
+        // announcements a resulting path change produced, then audit it.
+        let announcements = stack.advance_bonds(now);
+        if !announcements.is_empty() {
+            audit(
+                events::BOND_FAILOVER,
+                Level::Info,
+                "netstack: bond transmit path changed (presence re-announced)",
+            );
+            transmit_batch(stack, sockets, channels, secret, &announcements);
+        }
         for channel in channels.iter_mut().flatten() {
             pump_channel(stack, sockets, channel, secret, now);
         }
