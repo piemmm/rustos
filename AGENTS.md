@@ -1696,6 +1696,7 @@ You are not exempt from any rule above. In addition:
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
+    | CPU feature detection + self-optimising routine selection: build-time target-cpu/feature floor, the `cpufeatures` Arch-HAL slice, the `lib/cpuops` ops-table dispatch/benchmark framework | `plans/FIX-HARDWARE-FEATURES.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
