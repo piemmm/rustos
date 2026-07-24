@@ -52,6 +52,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_INTERFACE_COUNTERS`| `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_INTERFACE_RATES`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_SOCKETS`           | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_BOND_MEMBERS`      | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
@@ -147,6 +148,16 @@ interface's history is younger, and is `0` over a zero window when there
 is no usable baseline yet. The rates are the surface a traffic flood
 becomes visible on; the `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`
 selectors resolve through it (`plans/NETWORK.md` §5).
+
+`NET_BOND_MEMBERS` shares the same boundary — `CAP_SYSINFO_GLOBAL` and
+audited — because link aggregation is system-wide topology and its live
+failover state. It pages one `NetBondMemberRecord` per (bond, member)
+pair, flattened in interface-table then configured-member order: the
+owning bond alias, the member alias, whether the member is the bond's
+currently-active transmitting member (active-backup only), and its
+link/eligibility health. The `info:net/<bond>/members`,
+`state:net/<bond>/active-member`, and `state:net/<bond>/member-health`
+selectors resolve through it (`plans/NETWORK.md` §5, §6.3).
 
 ## Wire framing
 

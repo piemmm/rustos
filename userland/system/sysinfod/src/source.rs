@@ -13,8 +13,8 @@
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetSocketRecord,
+    NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
@@ -288,6 +288,20 @@ pub trait SysinfoSource {
     /// broker read; the owned list is returned whole and [`crate::serve`]
     /// applies the `offset`/`limit` paging.
     fn net_sockets(&self, caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno>;
+
+    /// Return every bond interface's members and their live health, one
+    /// record per (bond, member) pair, in the stack's stable table order
+    /// (`plans/NETWORK.md` §5, §6.3: `info:net/<bond>/members`,
+    /// `state:net/<bond>/active-member`, per-member health).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: the
+    /// link-aggregation topology and its live failover state are
+    /// system-wide network state — the same boundary as
+    /// [`net_interface_state`](Self::net_interface_state). On a running
+    /// system the source forwards to the `netstack` service's broker read;
+    /// the owned list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging.
+    fn net_bond_members(&self, caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

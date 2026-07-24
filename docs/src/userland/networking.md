@@ -87,6 +87,24 @@ These resolve through `tairix_procinfo`'s `info:`/`stats:` resolver onto
 the `NET_INTERFACE_COUNTERS` and `NET_INTERFACE_RATES` queries; like the
 socket table they require `CAP_SYSINFO_GLOBAL` and are audited.
 
+## Observing bonds (link aggregation)
+
+A bond interface's members and their live failover state are addressable
+the same way (`plans/NETWORK.md` §5, §6.3):
+
+- `info:net/<bond>/members` — the member interface aliases, in configured
+  order.
+- `state:net/<bond>/active-member` — the currently-transmitting member in
+  active-backup mode (`none` in balance mode or while the bond is down).
+- `state:net/<bond>/member-health` — each member rendered as
+  `member=up,eligible[,active]` (a failed member renders `member=down`),
+  so a silently-failed link is a visible fact.
+
+These resolve through the same resolver onto the `NET_BOND_MEMBERS` query,
+which the `sysinfod` broker forwards to `netstack`'s capability-gated
+broker read (the `NetstackRequest::BondMembers` operation); they require
+`CAP_SYSINFO_GLOBAL` and are audited, and a non-bond alias fails closed.
+
 ## Configuring interfaces (`network.conf`)
 
 Per-interface addressing is declarative, not imperative: it lives in one

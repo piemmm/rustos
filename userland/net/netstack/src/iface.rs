@@ -14,10 +14,11 @@ use alloc::vec::Vec;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
-    validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMode, NetCounters,
-    NetIfAddr, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
-    NetIpv6Config, NetworkSettings, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
+    NetBondMode, NetCounters, NetIfAddr, NetIfKind, NetInterfaceConfigMsg,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetworkSettings, IF_NAME_LEN,
+    NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -1345,6 +1346,51 @@ impl Netstack {
             BondRole::Bond { engine, .. } => engine.active_member(),
             _ => None,
         }
+    }
+
+    /// Every bond's members and their live health, one record per (bond,
+    /// member) pair, flattened in interface-table order then configured
+    /// member order, from the `offset`th pair and at most `limit` records
+    /// (the [`NetstackRequest::BondMembers`](tairix_abi::net_ipc::NetstackRequest::BondMembers)
+    /// page backing `info:net/<bond>/members`,
+    /// `state:net/<bond>/active-member`, and per-member health).
+    ///
+    /// Only bond interfaces contribute; a plain interface or an enrolled
+    /// member emits nothing. Each record marks whether the member is the
+    /// bond's currently-active transmitting member (active-backup only) and
+    /// carries its link/eligibility health from the engine.
+    #[must_use]
+    pub fn bond_member_records(&self, offset: u32, limit: u16) -> Vec<NetBondMemberRecord> {
+        let mut records = Vec::new();
+        let mut index: u32 = 0;
+        for iface in &self.interfaces {
+            let BondRole::Bond { engine, members } = &iface.role else {
+                continue;
+            };
+            let active = engine.active_member();
+            for member in members {
+                if index < offset {
+                    index += 1;
+                    continue;
+                }
+                if records.len() >= limit as usize {
+                    return records;
+                }
+                records.push(NetBondMemberRecord {
+                    bond: iface.name,
+                    member: *member,
+                    active: active == Some(*member),
+                    link_up: engine
+                        .is_member_link_up(member_id(*member))
+                        .unwrap_or(false),
+                    eligible: engine
+                        .is_member_eligible(member_id(*member))
+                        .unwrap_or(false),
+                });
+                index += 1;
+            }
+        }
+        records
     }
 }
 /// Map the engine's monotonic stack counters onto the four accumulators

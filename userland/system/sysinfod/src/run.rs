@@ -49,9 +49,9 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::net_ipc::{
-        decode_page_reply, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord, NetstackRequest,
-        NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        decode_page_reply, NetBondMemberRecord, NetInterfaceCountersRecord,
+        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
+        NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, CrashRecord,
@@ -285,6 +285,10 @@ mod program {
             page_netstack(NetstackSocketsPage)
         }
 
+        fn net_bond_members(&self, _caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno> {
+            page_netstack(NetstackBondMembersPage)
+        }
+
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
@@ -418,6 +422,19 @@ mod program {
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetSocketRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The bond-members page.
+    struct NetstackBondMembersPage;
+    impl NetstackPage for NetstackBondMembersPage {
+        type Record = NetBondMemberRecord;
+        const RECORD_LEN: usize = NetBondMemberRecord::WIRE_LEN;
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::BondMembers { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetBondMemberRecord::from_bytes(chunk)
         }
     }
 

@@ -214,6 +214,16 @@ summed across every managed interface. The counter reads are gated on
 state; the engine keeps one honest `dropped` bucket per direction rather
 than a fabricated errors/dropped split.
 
+A bond's live topology and failover state resolve the same way:
+`info:net/<bond>/members` (the member aliases in configured order),
+`state:net/<bond>/active-member` (the currently-transmitting member in
+active-backup, `none` in balance mode or while the bond is down), and
+`state:net/<bond>/member-health` (each member `up`/`down` with its
+`eligible`/`active` flags) resolve through the `NET_BOND_MEMBERS` sysinfo
+query, gated `CAP_SYSINFO_GLOBAL` and audited like the interface state
+(link aggregation is system-wide topology and its live failover state,
+`plans/NETWORK.md` §5, §6.3). A non-bond alias fails closed.
+
 ## Capabilities
 
 The bundle requests `CAP_NET_RAW` (the NIC frame rings, and to call a

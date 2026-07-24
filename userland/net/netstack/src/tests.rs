@@ -13,8 +13,8 @@ use tairix_abi::net::{
     SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMode, NetIfKind,
-    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode,
+    NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetSockProto,
     NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
     NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
@@ -2858,6 +2858,78 @@ fn a_bond_fails_over_immediately_and_announces_the_new_path() {
     let health = stack.bond_member_health(name("bond0")).expect("bond");
     let eth0 = health.iter().find(|h| h.member == name("eth0")).unwrap();
     assert!(!eth0.link_up && !eth0.eligible);
+}
+
+#[test]
+fn bond_members_are_listed_with_health_and_are_broker_gated() {
+    let mut stack = two_member_bond();
+    // The producer emits one record per member, tagged to the bond, with
+    // eth0 (the primary) active and both members eligible after the delay.
+    let records = stack.bond_member_records(0, 8);
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r.bond == name("bond0")));
+    let eth0 = records.iter().find(|r| r.member == name("eth0")).unwrap();
+    assert!(eth0.active && eth0.link_up && eth0.eligible);
+    let eth1 = records.iter().find(|r| r.member == name("eth1")).unwrap();
+    assert!(!eth1.active && eth1.link_up && eth1.eligible);
+
+    // Failover moves the active flag and drops the failed member's health.
+    stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    let records = stack.bond_member_records(0, 8);
+    assert!(
+        records
+            .iter()
+            .find(|r| r.member == name("eth1"))
+            .unwrap()
+            .active
+    );
+    let eth0 = records.iter().find(|r| r.member == name("eth0")).unwrap();
+    assert!(!eth0.active && !eth0.link_up && !eth0.eligible);
+
+    // Paging: offset skips, limit truncates, past-end is empty.
+    assert_eq!(stack.bond_member_records(1, 8).len(), 1);
+    assert_eq!(stack.bond_member_records(0, 1).len(), 1);
+    assert!(stack.bond_member_records(2, 8).is_empty());
+
+    // The `BondMembers` dispatch is a broker read: SYSINFO_INTROSPECT
+    // succeeds, an admin capability does not.
+    let svc = SocketService::new();
+    let sink = RecordingSink::new();
+    let request = NetstackRequest::BondMembers {
+        offset: 0,
+        limit: 8,
+    };
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    let len = serve(
+        &mut stack,
+        &svc,
+        &broker(),
+        &sink,
+        &request.to_le_bytes(),
+        &mut reply,
+        t(3),
+    )
+    .expect("broker read");
+    let (count, body) =
+        decode_page_reply(&reply[..len], NetBondMemberRecord::WIRE_LEN).expect("page");
+    assert_eq!(count, 2);
+    assert_eq!(
+        NetBondMemberRecord::from_bytes(body).expect("record").bond,
+        name("bond0")
+    );
+    assert_eq!(
+        serve(
+            &mut stack,
+            &svc,
+            &admin(),
+            &sink,
+            &request.to_le_bytes(),
+            &mut reply,
+            t(3),
+        ),
+        Err(Errno::PermissionDenied),
+        "an admin capability does not open the bond-members listing"
+    );
 }
 
 #[test]

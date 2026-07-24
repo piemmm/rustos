@@ -264,6 +264,19 @@ pub enum NetstackRequest {
         /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
         limit: u16,
     },
+    /// Page every bond interface's members and their live health (sysinfo
+    /// broker; `info:net/<bond>/members`, `state:net/<bond>/active-member`,
+    /// and per-member health). One [`NetBondMemberRecord`] per (bond,
+    /// member) pair, flattened in interface-table order then configured
+    /// member order. A system-wide topology-and-state view, gated
+    /// `CAP_SYSINFO_GLOBAL` at the broker like the other `state:net`
+    /// surfaces.
+    BondMembers {
+        /// First (bond, member) pair to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
     /// Bind a live NIC driver process's device channel to a new managed
     /// interface (admin surface).
     ///
@@ -312,6 +325,8 @@ const OP_IF_RATES: u16 = 8;
 const OP_SOCKETS: u16 = 9;
 /// Wire operation discriminant of [`NetstackRequest::ApplyNetworkSettings`].
 const OP_APPLY_NET_SETTINGS: u16 = 10;
+/// Wire operation discriminant of [`NetstackRequest::BondMembers`].
+const OP_BOND_MEMBERS: u16 = 11;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -384,6 +399,11 @@ impl NetstackRequest {
             }
             Self::Sockets { offset, limit } => {
                 put_u16(&mut out, 6, OP_SOCKETS);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
+            }
+            Self::BondMembers { offset, limit } => {
+                put_u16(&mut out, 6, OP_BOND_MEMBERS);
                 put_u32(&mut out, 8, offset);
                 put_u16(&mut out, 12, limit);
             }
@@ -497,6 +517,11 @@ impl NetstackRequest {
                 reserved_zero(bytes, 14)?;
                 let (offset, limit) = paged_offset_limit(bytes)?;
                 Ok(Self::Sockets { offset, limit })
+            }
+            OP_BOND_MEMBERS => {
+                reserved_zero(bytes, 14)?;
+                let (offset, limit) = paged_offset_limit(bytes)?;
+                Ok(Self::BondMembers { offset, limit })
             }
             OP_BIND_DRIVER => {
                 reserved_zero(bytes, 32)?;
@@ -1902,6 +1927,78 @@ impl NetSocketRecord {
     }
 }
 
+/// One bond member and its live health (the response record of the
+/// [`NetstackRequest::BondMembers`] page; `plans/NETWORK.md` §5, §6.3).
+///
+/// One record is emitted per (bond, member) pair. It carries the owning
+/// bond's alias, the member's own alias, whether the member is the bond's
+/// currently-active transmitting member (active-backup; never set in
+/// balance mode), and the member's link and eligibility health. The
+/// interface aliases are surface topology, so — like the other `state:net`
+/// reads — the query is gated `CAP_SYSINFO_GLOBAL` at the broker.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetBondMemberRecord {
+    /// The owning bond interface's admin-chosen alias, NUL-padded.
+    pub bond: [u8; IF_NAME_LEN],
+    /// The member interface's admin-chosen alias, NUL-padded.
+    pub member: [u8; IF_NAME_LEN],
+    /// Whether this member is the bond's currently-active transmitting
+    /// member (active-backup only; always `false` in balance mode, where
+    /// every eligible member carries flows).
+    pub active: bool,
+    /// Whether the member's link is currently up.
+    pub link_up: bool,
+    /// Whether the member is currently eligible to carry traffic (admitted
+    /// past the anti-flap up-delay).
+    pub eligible: bool,
+}
+
+impl NetBondMemberRecord {
+    /// Encoded size: a fixed 40-byte record (two 16-byte aliases, three
+    /// boolean flags, and a reserved tail that must be zero).
+    pub const WIRE_LEN: usize = 40;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..16].copy_from_slice(&self.bond);
+        out[16..32].copy_from_slice(&self.member);
+        out[32] = u8::from(self.active);
+        out[33] = u8::from(self.link_up);
+        out[34] = u8::from(self.eligible);
+        // out[35..40] reserved, left zero.
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::OutOfRange`] — a flag byte is not exactly `0` or `1`.
+    /// * [`Errno::BadMagic`] — a dirty reserved tail.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[35..40].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let mut bond = [0u8; IF_NAME_LEN];
+        bond.copy_from_slice(&bytes[0..16]);
+        let mut member = [0u8; IF_NAME_LEN];
+        member.copy_from_slice(&bytes[16..32]);
+        Ok(Self {
+            bond,
+            member,
+            active: decode_bool(bytes[32])?,
+            link_up: decode_bool(bytes[33])?,
+            eligible: decode_bool(bytes[34])?,
+        })
+    }
+}
+
 /// Largest reply the [`NETSTACK_ENDPOINT`] emits: the status word, the
 /// page header, and a full page of state records (the widest reply).
 pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
@@ -2053,6 +2150,14 @@ mod tests {
                 limit: 16,
             },
             NetstackRequest::Sockets {
+                offset: 0,
+                limit: NETSTACK_LIST_LIMIT_MAX,
+            },
+            NetstackRequest::BondMembers {
+                offset: 4,
+                limit: 9,
+            },
+            NetstackRequest::BondMembers {
                 offset: 0,
                 limit: NETSTACK_LIST_LIMIT_MAX,
             },
@@ -2471,6 +2576,62 @@ mod tests {
         let mut wide_v4 = bytes;
         wide_v4[4 + 5] = 1;
         assert_eq!(NetSocketRecord::from_bytes(&wide_v4), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn bond_member_record_round_trips_and_fails_closed() {
+        let record = NetBondMemberRecord {
+            bond: name("bond0"),
+            member: name("eth1"),
+            active: true,
+            link_up: true,
+            eligible: false,
+        };
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetBondMemberRecord::from_bytes(&bytes), Ok(record));
+        // A truncated record fails closed.
+        assert_eq!(
+            NetBondMemberRecord::from_bytes(&bytes[..NetBondMemberRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A non-boolean flag fails closed.
+        let mut bad_flag = bytes;
+        bad_flag[32] = 2;
+        assert_eq!(
+            NetBondMemberRecord::from_bytes(&bad_flag),
+            Err(Errno::OutOfRange)
+        );
+        // A dirty reserved tail fails closed.
+        let mut dirty = bytes;
+        dirty[35] = 1;
+        assert_eq!(
+            NetBondMemberRecord::from_bytes(&dirty),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn bond_members_bounds_and_reserved_tail_are_enforced() {
+        let good = NetstackRequest::BondMembers {
+            offset: 0,
+            limit: 4,
+        }
+        .to_le_bytes();
+        // A zero limit is refused.
+        let mut zero_limit = good;
+        zero_limit[12] = 0;
+        zero_limit[13] = 0;
+        assert_eq!(
+            NetstackRequest::from_bytes(&zero_limit),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A dirty reserved tail is refused.
+        let mut dirty_tail = good;
+        dirty_tail[14] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&dirty_tail),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

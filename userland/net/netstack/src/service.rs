@@ -100,7 +100,8 @@ pub fn serve(
         | NetstackRequest::InterfaceState { .. }
         | NetstackRequest::InterfaceCounters { .. }
         | NetstackRequest::InterfaceRates { .. }
-        | NetstackRequest::Sockets { .. } => CapabilityId::SYSINFO_INTROSPECT,
+        | NetstackRequest::Sockets { .. }
+        | NetstackRequest::BondMembers { .. } => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -144,7 +145,8 @@ pub fn serve(
         | NetstackRequest::InterfaceState { .. }
         | NetstackRequest::InterfaceCounters { .. }
         | NetstackRequest::InterfaceRates { .. }
-        | NetstackRequest::Sockets { .. } => serve_read(stack, sockets, decoded, response, now),
+        | NetstackRequest::Sockets { .. }
+        | NetstackRequest::BondMembers { .. } => serve_read(stack, sockets, decoded, response, now),
         NetstackRequest::ApplyNetworkSettings(settings) => {
             // Pure state mutation (no I/O), so unlike `BindDriver` it is
             // served here: store the policy and re-apply the family
@@ -232,6 +234,14 @@ fn serve_read(
                 .collect();
             encode_page_reply(&records, response)
         }
+        NetstackRequest::BondMembers { offset, limit } => {
+            let records: alloc::vec::Vec<_> = stack
+                .bond_member_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetBondMemberRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
+        }
         // The dispatcher only routes the paged read ops here.
         _ => Err(Errno::NotSupported),
     }
@@ -298,6 +308,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceState { .. } => "interface state",
         NetstackRequest::InterfaceRates { .. } => "interface rates",
         NetstackRequest::Sockets { .. } => "sockets",
+        NetstackRequest::BondMembers { .. } => "bond members",
         NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
     };

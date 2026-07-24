@@ -34,8 +34,9 @@ use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, IF_NAME_LEN,
+    NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuLoadRecord, IrqRecord, KernelMemoryStats, MemoryPressureStats,
@@ -139,6 +140,46 @@ fn resolve_state(
             }
             if rendered.is_empty() {
                 rendered.push_str("none");
+            }
+            (
+                InfoValue::new_str(Sensitivity::Public, &rendered),
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+            )
+        }
+        // A bond's currently-active transmitting member (active-backup),
+        // or `none` in balance mode / while the bond is down. Served by
+        // the `netstack` broker's `CAP_SYSINFO_GLOBAL`-gated bond-members
+        // page; a non-bond alias fails closed inside the helper.
+        ["net", bond, "active-member"] => {
+            let members = net_bond_members_for(transport, bond)?;
+            let rendered = match members.iter().find(|m| m.active) {
+                Some(member) => if_name_string(&member.member),
+                None => String::from("none"),
+            };
+            (
+                InfoValue::new_str(Sensitivity::Public, &rendered),
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+            )
+        }
+        // Every bond member's live health, `member=up,eligible[,active]`
+        // (a down member renders `member=down`), in configured order.
+        // Same broker page and gate as `active-member`.
+        ["net", bond, "member-health"] => {
+            let members = net_bond_members_for(transport, bond)?;
+            let mut rendered = String::new();
+            for member in &members {
+                if !rendered.is_empty() {
+                    rendered.push_str(", ");
+                }
+                rendered.push_str(&if_name_string(&member.member));
+                rendered.push('=');
+                rendered.push_str(if member.link_up { "up" } else { "down" });
+                if member.eligible {
+                    rendered.push_str(",eligible");
+                }
+                if member.active {
+                    rendered.push_str(",active");
+                }
             }
             (
                 InfoValue::new_str(Sensitivity::Public, &rendered),
@@ -298,6 +339,12 @@ fn resolve_info_value(
             };
             (value, Authorization::Capability(CapabilityId::SYSINFO_HW))
         }
+        // A bond's member interfaces, in configured order. Served by the
+        // `netstack` broker's `CAP_SYSINFO_GLOBAL`-gated bond-members page
+        // (link-aggregation topology is system-wide state, not a
+        // self-scoped fact); a denial surfaces below, and a non-bond alias
+        // fails closed as an unknown selector inside the helper.
+        ["net", bond, "members"] => bond_members_info(transport, bond)?,
         // The driver task that owns one interrupt line, from the kernel IRQ
         // table. The ownership view is cross-principal surface topology (it
         // names which task each device's line belongs to), gated on
@@ -950,6 +997,79 @@ fn net_state_for(
     )
 }
 
+/// Page [`SysinfoQueryId::NET_BOND_MEMBERS`] and collect every member
+/// record whose owning bond alias is `bond`, in the stack's configured
+/// order. An empty result — `bond` names no bond, or no interface — fails
+/// closed as an unknown selector rather than reporting an empty bond.
+fn net_bond_members_for(
+    transport: &dyn Transport,
+    bond: &str,
+) -> Result<Vec<NetBondMemberRecord>, ResolveInfoError> {
+    let record_len = NetBondMemberRecord::WIRE_LEN;
+    let mut members = Vec::new();
+    let mut offset: u32 = 0;
+    loop {
+        let request = NetInterfaceListRequest {
+            offset,
+            limit: NET_PAGE_LIMIT,
+            flags: 0,
+        };
+        let reply = call(
+            transport,
+            SysinfoQueryId::NET_BOND_MEMBERS,
+            &request.to_le_bytes(),
+        )
+        .map_err(map_call_error)?;
+        if reply.len() % record_len != 0 {
+            return Err(ResolveInfoError::Malformed);
+        }
+        let count = reply.len() / record_len;
+        for chunk in reply.chunks_exact(record_len) {
+            let record =
+                NetBondMemberRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?;
+            if if_name_matches(&record.bond, bond) {
+                members.push(record);
+            }
+        }
+        if count < NET_PAGE_LIMIT as usize {
+            break;
+        }
+        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
+    }
+    if members.is_empty() {
+        return Err(ResolveInfoError::UnknownSelector);
+    }
+    Ok(members)
+}
+
+/// The NUL-padded interface-alias field as an owned display string.
+fn if_name_string(name: &[u8; IF_NAME_LEN]) -> String {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+    field_lossy(&name[..len])
+}
+
+/// Resolve `info:net/<bond>/members`: the bond's member aliases in
+/// configured order, GLOBAL-gated; a non-bond alias fails closed inside
+/// [`net_bond_members_for`].
+#[allow(clippy::type_complexity)]
+fn bond_members_info(
+    transport: &dyn Transport,
+    bond: &str,
+) -> Result<(Result<InfoValue, Errno>, Authorization), ResolveInfoError> {
+    let members = net_bond_members_for(transport, bond)?;
+    let mut rendered = String::new();
+    for member in &members {
+        if !rendered.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&if_name_string(&member.member));
+    }
+    Ok((
+        InfoValue::new_str(Sensitivity::Public, &rendered),
+        Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+    ))
+}
+
 /// Resolve a `stats:net/…` reference: the stack-wide defence aggregates
 /// (`stats:net/stack/<leaf>`) or one interface's counters
 /// (`stats:net/<iface>/<leaf>`). `stack` is matched first, so it is a
@@ -1561,9 +1681,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::net_ipc::{
-        NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
-        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, IF_NAME_LEN,
-        NET_IF_MAX_ADDRS,
+        NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
+        NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+        NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
@@ -1868,6 +1988,15 @@ mod tests {
                     // Echo the requested window back so a test can prove it
                     // threaded through.
                     let records = alloc::vec![fixture_net_rates(req.window)];
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_BOND_MEMBERS => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let records = fixture_bond_members();
                     let encoders: Vec<_> = records
                         .iter()
                         .map(|record| move || record.to_le_bytes())
@@ -2666,6 +2795,96 @@ mod tests {
             tx_pps: 800,
             tx_bps: 9_600_000,
         }
+    }
+
+    /// A two-member `bond0` the fixture serves: `eth0` is the active
+    /// (primary) member, `eth1` a healthy backup.
+    fn fixture_bond_members() -> Vec<NetBondMemberRecord> {
+        let mut bond = [0u8; IF_NAME_LEN];
+        bond[..5].copy_from_slice(b"bond0");
+        let mut eth0 = [0u8; IF_NAME_LEN];
+        eth0[..4].copy_from_slice(b"eth0");
+        let mut eth1 = [0u8; IF_NAME_LEN];
+        eth1[..4].copy_from_slice(b"eth1");
+        alloc::vec![
+            NetBondMemberRecord {
+                bond,
+                member: eth0,
+                active: true,
+                link_up: true,
+                eligible: true,
+            },
+            NetBondMemberRecord {
+                bond,
+                member: eth1,
+                active: false,
+                link_up: true,
+                eligible: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn bond_members_info_and_state_render_and_are_global_gated() {
+        let fixture = Fixture::new();
+        // info:net/<bond>/members lists the members, GLOBAL-gated.
+        let members = resolve_str("info:net/bond0/members", &fixture).expect("ok");
+        assert_eq!(
+            members.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+        );
+        match members.payload {
+            ResponsePayload::Info(v) => {
+                assert_eq!(v.value(), "eth0, eth1");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            _ => panic!("expected info value"),
+        }
+        // state:net/<bond>/active-member names the primary.
+        let active = resolve_str("state:net/bond0/active-member", &fixture).expect("ok");
+        assert_eq!(
+            active.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+        );
+        match active.payload {
+            ResponsePayload::State(v) => assert_eq!(v.value(), "eth0"),
+            _ => panic!("expected state value"),
+        }
+        // state:net/<bond>/member-health renders each member's health.
+        let health = resolve_str("state:net/bond0/member-health", &fixture).expect("ok");
+        match health.payload {
+            ResponsePayload::State(v) => {
+                assert_eq!(v.value(), "eth0=up,eligible,active, eth1=up,eligible");
+            }
+            _ => panic!("expected state value"),
+        }
+        // A non-bond alias fails closed on every bond selector.
+        assert_eq!(
+            resolve_str("info:net/wan/members", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/wan/active-member", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/wan/member-health", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+    }
+
+    #[test]
+    fn bond_members_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_BOND_MEMBERS);
+        assert_eq!(
+            resolve_str("info:net/bond0/members", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+        assert_eq!(
+            resolve_str("state:net/bond0/active-member", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
     }
 
     #[test]

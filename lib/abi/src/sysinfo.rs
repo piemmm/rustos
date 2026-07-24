@@ -272,6 +272,20 @@ impl SysinfoQueryId {
     /// open by default (`plans/NETWORK.md` §5).
     pub const NET_SOCKETS: Self = Self(23);
 
+    /// List every bond interface's members and their live health: one
+    /// [`NetBondMemberRecord`](crate::net_ipc::NetBondMemberRecord) per
+    /// (bond, member) pair (the owning bond, the member alias, whether the
+    /// member is the bond's currently-active transmitting member, and its
+    /// link/eligibility health), paged by a [`NetInterfaceListRequest`].
+    /// The surface `info:net/<bond>/members`,
+    /// `state:net/<bond>/active-member`, and per-member health read.
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: it exposes the
+    /// system-wide link-aggregation topology and its live failover state —
+    /// the same cross-principal state class as [`Self::NET_INTERFACE_STATE`]
+    /// (`plans/NETWORK.md` §5, §6.3).
+    pub const NET_BOND_MEMBERS: Self = Self(24);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -587,6 +601,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::NET_SOCKETS,
         name: "net_sockets",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_BOND_MEMBERS,
+        name: "net_bond_members",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
@@ -3761,6 +3781,14 @@ mod tests {
             Some(CapabilityId::SYSINFO_GLOBAL)
         );
         assert!(spec_for(SysinfoQueryId::NET_SOCKETS).unwrap().audit);
+        assert_eq!(SysinfoQueryId::NET_BOND_MEMBERS.as_u16(), 24);
+        assert_eq!(
+            spec_for(SysinfoQueryId::NET_BOND_MEMBERS)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert!(spec_for(SysinfoQueryId::NET_BOND_MEMBERS).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 

@@ -17,7 +17,7 @@ model, the defences, and the audit event-id registry for network events.
 | ICMP error storms / amplification | ICMP/ICMPv6 error emission is rate-limited; suppressed errors are counted (`stats:net/stack/icmp-suppressed`) so the throttling is visible. |
 | Unprivileged origination of raw/spoofed traffic | Sockets are capabilities, not ambient authority: a socket is a kernel-brokered IPC channel obtained through the versioned socket ABI and gated per operation — outbound transport under `CAP_NET`, binding a privileged (well-known) port under `CAP_NET_BIND_PRIVILEGED`, raw access under `CAP_NET_RAW`. |
 | Forged caller identity | `netstack` derives every caller's identity from the kernel-attested `Origin` (`call_peer_origin`), never from a claimed field; the capability is checked before any state is touched, and the receiver does not re-check. |
-| Cross-principal socket / peer disclosure | The system-wide socket listing (`NET_SOCKETS`) and the per-interface counter/rate queries name other principals' sockets and peers, so they require `CAP_SYSINFO_GLOBAL` and are audited; there is no `/proc/net` and no unprivileged path to another principal's sockets. |
+| Cross-principal socket / peer disclosure | The system-wide socket listing (`NET_SOCKETS`), the per-interface counter/rate queries, and the bond-topology listing (`NET_BOND_MEMBERS`) name other principals' sockets, peers, and the link-aggregation layout, so they require `CAP_SYSINFO_GLOBAL` and are audited; there is no `/proc/net` and no unprivileged path to another principal's sockets. |
 | Silent failure hiding an attack in progress | Every refusal is a typed error and an audited event (below); the socket listing fails loud rather than returning an empty table (§24), and the defence counters surface a DoS in progress. |
 | A bond member's link silently failing (path loss going unnoticed) | Bond failover is link-state-driven and audited (`BOND_FAILOVER`); a dead member becomes ineligible immediately, the transmit path re-targets a healthy member and re-announces the bond's presence (gratuitous ARP / unsolicited NA), and per-member health/eligibility is observable. A member holds no addresses and refuses direct address assignment (the bond owns them). |
 
@@ -33,7 +33,8 @@ The network capabilities are deliberately coarse and few (§5.2):
 - `CAP_NET_ADMIN` — the interface admin surface (address/route add, NIC
   channel bind).
 - `CAP_SYSINFO_GLOBAL` — the system-wide, cross-principal introspection
-  queries (`NET_SOCKETS`, per-interface counters and rates), audited.
+  queries (`NET_SOCKETS`, per-interface counters and rates, and the bond
+  member/health listing `NET_BOND_MEMBERS`), audited.
 
 ## Audit event-id registry (§19.4)
 
@@ -74,11 +75,11 @@ unreachable — retried, fail-soft). `netstack` holds no filesystem
 capability, so this split (devmgr reads, netstack enforces) keeps the
 parser sandbox filesystem-free (`plans/NETWORK.md` §0, N9b-2).
 
-The socket-listing and counter/rate queries are additionally audited by
-the `sysinfod` broker under their `sysinfo-v1` query names
-(`net_sockets`, `net_interface_stats`, `net_interface_rates`), so a
-privileged read of another principal's network state always leaves a
-record.
+The socket-listing, counter/rate, and bond-member queries are
+additionally audited by the `sysinfod` broker under their `sysinfo-v1`
+query names (`net_sockets`, `net_interface_stats`, `net_interface_rates`,
+`net_bond_members`), so a privileged read of another principal's network
+state always leaves a record.
 
 ## Out of scope
 

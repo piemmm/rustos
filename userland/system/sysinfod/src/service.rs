@@ -3,8 +3,8 @@
 
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetSocketRecord,
+    NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashRecord,
@@ -186,6 +186,8 @@ fn dispatch(
         net_rates_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_SOCKETS {
         net_sockets_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_BOND_MEMBERS {
+        net_bond_members_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
@@ -411,6 +413,26 @@ fn net_sockets_list(
     )
 }
 
+/// Decode the [`NetInterfaceListRequest`] and page the bond-member
+/// records into `response`.
+fn net_bond_members_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceListRequest::from_bytes(payload)?;
+    let records = source.net_bond_members(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetBondMemberRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`ReclaimListRequest`], apply paging, and pack the selected
 /// [`ReclaimClassRecord`]s into `response`.
 fn reclaim_list(
@@ -620,8 +642,9 @@ mod tests {
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
-        NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-        NetInterfaceStateRecord, NetSockProto, NetSockState, NetSocketRecord,
+        NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSockProto, NetSockState,
+        NetSocketRecord,
     };
     use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket,
@@ -986,6 +1009,12 @@ mod tests {
         }
         fn net_sockets(&self, _caller: &Caller) -> Result<alloc::vec::Vec<NetSocketRecord>, Errno> {
             Ok(alloc::vec![fixture_net_socket()])
+        }
+        fn net_bond_members(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetBondMemberRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_bond_member()])
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
             Ok(alloc::vec![
@@ -1592,6 +1621,58 @@ mod tests {
             recv_q: 0,
             send_q: 128,
         }
+    }
+
+    /// The bond-member record the fixture serves.
+    fn fixture_net_bond_member() -> NetBondMemberRecord {
+        let mut bond = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+        bond[..5].copy_from_slice(b"bond0");
+        let mut member = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+        member[..4].copy_from_slice(b"eth1");
+        NetBondMemberRecord {
+            bond,
+            member,
+            active: true,
+            link_up: true,
+            eligible: true,
+        }
+    }
+
+    #[test]
+    fn net_bond_members_is_gated_audited_and_round_trips() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_BOND_MEMBERS, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, NetBondMemberRecord::WIRE_LEN);
+        let record = NetBondMemberRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record, fixture_net_bond_member());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
     }
 
     #[test]

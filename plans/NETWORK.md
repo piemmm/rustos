@@ -1579,11 +1579,31 @@ but its QEMU verticals are β-2.
 - Docs: `docs/src/userland/netstack.md` (bond section), `security/network.md`
   (threat row + event registry 16_016..16_019).
 
-#### N9b-3-2-β-2 — bond observability query + live QEMU verticals `[ ]`
-- `info:net/<bond>/members` + `state:net/<bond>/active-member` +
-  per-member health through a new `SysinfoQueryId` (net-bond-members),
-  `sysinfod` source, and `lib/procinfo` resolver (the accessors
-  `Netstack::bond_active_member`/`bond_member_health` are the surface).
+#### N9b-3-2-β-2-i — bond observability query `[x]`
+Bond members and live failover state are observable end to end through
+the one System Information API path (never a `/proc` shape), host-tested
+at every layer.
+- **ABI** (`lib/abi`): `SysinfoQueryId::NET_BOND_MEMBERS` (id 24,
+  `CAP_SYSINFO_GLOBAL`, audited) + registry row/frozen-id test; the paged
+  `NetstackRequest::BondMembers{offset,limit}` op (11); and the
+  `NetBondMemberRecord` (bond alias + member alias + `active`/`link_up`/
+  `eligible` flags, WIRE_LEN 40) with round-trip/fail-closed tests. C
+  header regenerated (`cargo xtask c-header --write`).
+- **netstack**: `Netstack::bond_member_records(offset,limit)` flattens
+  every bond's members (interface-table then configured-member order) over
+  the ready `bond_active_member`/`bond_member_health` accessors; `serve`
+  gates `BondMembers` on `CAP_SYSINFO_INTROSPECT` and routes it through
+  `serve_read`. Host test (producer + broker-gate + failover-moves-active).
+- **sysinfod**: `SysinfoSource::net_bond_members` + `net_bond_members_list`
+  dispatch + `NetstackBondMembersPage` forwarder + gated/audited test.
+- **`lib/procinfo`**: `net_bond_members_for` pages the query and filters by
+  bond; `info:net/<bond>/members`, `state:net/<bond>/active-member`, and
+  `state:net/<bond>/member-health` resolve through it (all
+  `CAP_SYSINFO_GLOBAL`, fail-closed on a non-bond alias). Tests at every
+  layer. Docs: `abi/sysinfo.md`, `userland/{netstack,networking}.md`,
+  `security/network.md`.
+
+#### N9b-3-2-β-2-ii — `match.node` binding + live QEMU verticals `[ ]`
 - `match.node` member binding (tree node→device resolution for a member
   declared by `match.node` rather than `match.mac`).
 - Tests: the bond-failover QEMU vertical (kill a member mid-TCP-transfer,
