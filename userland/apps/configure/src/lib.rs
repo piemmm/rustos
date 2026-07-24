@@ -375,7 +375,15 @@ mod tests {
         let store = MemStore::new(None);
         let output = MemOutput::default();
         run(Command::List, None, &store, &NoHelp, &output).expect("lists");
-        assert_eq!(output.text(), "os.loginType text\n");
+        assert_eq!(
+            output.text(),
+            "os.loginType text\n\
+             cache.all on\n\
+             cache.filesystem auto\n\
+             cache.block auto\n\
+             cache.transform auto\n\
+             cache.semantic auto\n",
+        );
     }
 
     #[test]

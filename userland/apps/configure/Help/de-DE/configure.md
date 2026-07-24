@@ -17,7 +17,9 @@ wird die Einstellung geändert.
 Der Speicher liegt auf dem verschlüsselten Root-Datenträger und wird
 von seinen Verbrauchern nach dem Entsperren des Root-Dateisystems
 gelesen; eine Änderung wirkt daher beim nächsten Start ihres
-Verbrauchers (`os.loginType`: die Anmeldung des nächsten Systemstarts).
+Verbrauchers (`os.loginType`: die Anmeldung des nächsten
+Systemstarts; die `cache.*`-Schalter: das Entsperren des nächsten
+Systemstarts).
 
 Die Schlüsselmenge ist geschlossen: ein unbekannter Schlüssel oder ein
 Wert außerhalb der Menge eines Schlüssels wird mit Angabe der gültigen
@@ -32,6 +34,22 @@ Einstellungen lesen, aber nicht ändern.
   weiterhin bei Bedarf mit dem Befehl `desktop` starten; `graphical`
   startet nach der Authentifizierung direkt die Desktop-Sitzung, sofern
   ein Desktop installiert ist, und fällt andernfalls auf Text zurück.
+- `cache.all` — `on` oder `off`: der Haupt-Caching-Schalter. `on` (die
+  Vorgabe) lässt jede Cache-Klasse unten ihrer eigenen Einstellung
+  folgen; `off` ist eine Obergrenze, die jeden Speicher-Cache
+  unabhängig von den Einstellungen je Klasse deaktiviert.
+- `cache.filesystem`, `cache.block`, `cache.transform`,
+  `cache.semantic` — `auto` oder `off`: die Schalter je Klasse für die
+  vier rückgewinnbaren Speicher-Caches (Dateisystem-, Vollplatten-
+  Block-, entpackte-Cluster- und Anwendungsstart-Cache). `auto` (die
+  Vorgabe) lässt den Speicherdruck-Manager die Klasse steuern; `off`
+  deaktiviert sie ganz. Es gibt kein `on` je Klasse: eine Klasse kann
+  nicht gezwungen werden, Speicherdruck zu ignorieren. Eine Klasse ist
+  praktisch `off`, sobald `cache.all` auf `off` steht.
+
+Jeder Cache ist ein rückgewinnbarer Beschleuniger, niemals die Quelle
+der Wahrheit; das Abschalten eines oder aller macht die betroffene
+Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
 
 ## OPTIONS
 
@@ -43,6 +61,10 @@ Einstellungen lesen, aber nicht ändern.
 - `configure os.loginType` — den vorgegebenen Sitzungstyp anzeigen.
 - `configure os.loginType graphical` — in die grafische Anmeldung
   starten.
+- `configure cache.all off` — jeden Speicher-Cache systemweit
+  deaktivieren.
+- `configure cache.filesystem off` — nur den Dateisystem-Cache
+  deaktivieren.
 
 ## EXIT STATUS
 

@@ -14,7 +14,8 @@ configure — 读取并设置启动时的系统配置
 给出键和值时，更改该设置。
 
 该存储位于加密的根卷上，其使用方在根文件系统解锁后才读取它；因此
-更改会在其使用方下次启动时生效（`os.loginType`：下次启动的登录）。
+更改会在其使用方下次启动时生效（`os.loginType`：下次启动的登录；
+`cache.*` 开关：下次启动的解锁）。
 
 键的集合是封闭的：未知的键，或超出某键取值集合的值，会在指明有效
 选项后被拒绝，且不做任何更改。更改设置会以规范形式重写存储，并需要
@@ -24,6 +25,18 @@ configure — 读取并设置启动时的系统配置
   会话类型。`text`（默认）启动账户的 shell——仍可用 `desktop` 命令
   按需启动桌面；`graphical` 在认证后直接启动桌面会话（已安装桌面
   时），无桌面时退回文本。
+- `cache.all` — `on` 或 `off`：缓存的总开关。`on`（默认）让下面每
+  个缓存类别遵循各自的设置；`off` 是一个上限，无论各类别的
+  设置如何，都禁用所有内存缓存。
+- `cache.filesystem`、`cache.block`、`cache.transform`、
+  `cache.semantic` — `auto` 或 `off`：针对四个可回收内存缓存
+  （文件系统、整盘块、解压后的簇以及应用启动缓存）的分
+  类开关。`auto`（默认）让内存压力管理器控制该类别；`off`
+  完全禁用它。没有分类的 `on`：无法强制某个类别忽略内存
+  压力。只要 `cache.all` 为 `off`，该类别实际上就是 `off`。
+
+每个缓存都是可回收的加速器，绝不是真实来源，因此关闭其中
+任何一个或全部，只会使受影响的工作变慢——绝不会改变结果。
 
 ## OPTIONS
 
@@ -34,6 +47,8 @@ configure — 读取并设置启动时的系统配置
 - `configure` — 列出全部设置。
 - `configure os.loginType` — 显示默认会话类型。
 - `configure os.loginType graphical` — 启动到图形登录。
+- `configure cache.all off` — 禁用全系统的所有内存缓存。
+- `configure cache.filesystem off` — 仅禁用文件系统缓存。
 
 ## EXIT STATUS
 

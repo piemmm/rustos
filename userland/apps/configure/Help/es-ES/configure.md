@@ -16,7 +16,8 @@ valor; con una clave y un valor se cambia el ajuste.
 El almacén reside en el volumen raíz cifrado y sus consumidores lo leen
 tras desbloquear el sistema de archivos raíz; un cambio surte efecto la
 próxima vez que arranque su consumidor (`os.loginType`: el inicio de
-sesión del próximo arranque).
+sesión del próximo arranque; los conmutadores `cache.*`: el desbloqueo
+del próximo arranque).
 
 El conjunto de claves es cerrado: una clave desconocida, o un valor
 fuera del conjunto de una clave, se rechaza indicando las opciones
@@ -30,6 +31,23 @@ cuenta ordinaria puede leer los ajustes pero no cambiarlos.
   iniciarse bajo demanda con el comando `desktop`; `graphical` inicia
   directamente la sesión de escritorio tras la autenticación cuando hay
   un escritorio instalado, y recurre al texto cuando no lo hay.
+- `cache.all` — `on` u `off`: el conmutador maestro de caché. `on` (el
+  valor por defecto) deja que cada clase de caché de abajo siga su
+  propio ajuste; `off` es un techo que desactiva toda caché en memoria
+  sin importar los ajustes por clase.
+- `cache.filesystem`, `cache.block`, `cache.transform`,
+  `cache.semantic` — `auto` u `off`: los conmutadores por clase para
+  las cuatro cachés de memoria recuperables (las cachés del sistema de
+  archivos, del bloque de disco completo, del clúster descomprimido y
+  del arranque de aplicaciones). `auto` (el valor por defecto) deja que
+  el gestor de presión de memoria gobierne la clase; `off` la desactiva
+  por completo. No hay un `on` por clase: no se puede forzar a una clase
+  a ignorar la presión de memoria. Una clase está efectivamente `off`
+  siempre que `cache.all` esté en `off`.
+
+Cada caché es un acelerador recuperable, nunca la fuente de la verdad,
+así que apagar cualquiera o todas ellas solo hace más lento el trabajo
+afectado — nunca cambia un resultado.
 
 ## OPTIONS
 
@@ -41,6 +59,10 @@ cuenta ordinaria puede leer los ajustes pero no cambiarlos.
 - `configure os.loginType` — mostrar el tipo de sesión por defecto.
 - `configure os.loginType graphical` — arrancar en el inicio de sesión
   gráfico.
+- `configure cache.all off` — desactivar toda caché en memoria en todo
+  el sistema.
+- `configure cache.filesystem off` — desactivar solo la caché del
+  sistema de archivos.
 
 ## EXIT STATUS
 

@@ -17,7 +17,8 @@ valeur, le paramètre est modifié.
 Le magasin réside sur le volume racine chiffré et n'est lu par ses
 consommateurs qu'après le déverrouillage du système de fichiers
 racine ; une modification prend donc effet au prochain démarrage de son
-consommateur (`os.loginType` : la connexion du prochain démarrage).
+consommateur (`os.loginType` : la connexion du prochain démarrage ;
+les commutateurs `cache.*` : le déverrouillage du prochain démarrage).
 
 L'ensemble des clés est fermé : une clé inconnue, ou une valeur hors de
 l'ensemble d'une clé, est refusée avec l'énoncé des choix valides et ne
@@ -32,6 +33,23 @@ compte ordinaire peut lire les paramètres mais pas les changer.
   `graphical` lance directement la session de bureau après
   l'authentification quand un bureau est installé, et se replie sur le
   texte sinon.
+- `cache.all` — `on` ou `off` : le commutateur de cache principal. `on`
+  (la valeur par défaut) laisse chaque classe de cache ci-dessous
+  suivre son propre réglage ; `off` est un plafond qui désactive tout
+  cache en mémoire quels que soient les réglages par classe.
+- `cache.filesystem`, `cache.block`, `cache.transform`,
+  `cache.semantic` — `auto` ou `off` : les commutateurs par classe pour
+  les quatre caches mémoire récupérables (les caches du système de
+  fichiers, du bloc disque entier, du cluster décompressé et du
+  lancement d'applications). `auto` (la valeur par défaut) laisse le
+  gestionnaire de pression mémoire gouverner la classe ; `off` la
+  désactive entièrement. Il n'y a pas de `on` par classe : une classe
+  ne peut pas être forcée à ignorer la pression mémoire. Une classe est
+  effectivement `off` dès que `cache.all` est à `off`.
+
+Chaque cache est un accélérateur récupérable, jamais la source de
+vérité ; désactiver l'un d'eux ou tous ne fait donc que ralentir le
+travail concerné — cela ne change jamais un résultat.
 
 ## OPTIONS
 
@@ -43,6 +61,10 @@ compte ordinaire peut lire les paramètres mais pas les changer.
 - `configure os.loginType` — afficher le type de session par défaut.
 - `configure os.loginType graphical` — démarrer sur la connexion
   graphique.
+- `configure cache.all off` — désactiver tout cache en mémoire sur tout
+  le système.
+- `configure cache.filesystem off` — désactiver uniquement le cache du
+  système de fichiers.
 
 ## EXIT STATUS
 
