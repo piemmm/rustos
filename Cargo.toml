@@ -200,6 +200,7 @@ members = [
     "userland/apps/vim",
     "userland/apps/wc",
     "userland/apps/whoami",
+    "userland/apps/widgets",
     "userland/apps/yes",
     "userland/gui/wm",
     "userland/gui/taskbar",

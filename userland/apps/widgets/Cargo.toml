@@ -1,0 +1,55 @@
+[package]
+name = "tairix-widgets"
+description = "TAIRiX Reactive Alloy widget gallery: a first-class demo desktop app that showcases every lib/controls control family on its own tab, each with several state/role variations (plans/GUI-CONTROLS-DESIGN.md). The host-tested gallery model is the crate's [lib]; the freestanding `Run` binary is the on-disk widgets.app bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The host-testable gallery composition model. It is the crate's shared
+# home for everything with behaviour worth testing (which tab is shown,
+# how a panel of demo widgets lays out, and how a routed pointer/key event
+# reacts a widget's own typed state back into it), exactly as the file
+# manager keeps its logic in a host-tested engine and only *composes* it in
+# the `Run` binary. It is `no_std` + `alloc` so it links unchanged into the
+# freestanding `Run` binary and runs under the host test harness (§2.2, §7).
+[lib]
+name = "tairix_widgets"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `widgets.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-widgets-run"
+path = "src/run.rs"
+
+# The shared Reactive Alloy control behaviour, the coordinate/scale types,
+# the theme tokens, the text rasteriser, the desktop input vocabulary, the
+# software raster surface, and the built-in icon glyphs the gallery
+# composes. All are `no_std` `lib/*` crates that build for both the host
+# test harness and the bare-metal targets, so they are ordinary
+# dependencies of the gallery `[lib]` (and, transitively, the `Run` bin).
+[dependencies]
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+
+# The freestanding `Run` binary additionally speaks the window-channel wire
+# protocol (`tairix-abi`), drives its client half (`tairix-window`), and
+# links the pure-Rust userland runtime (`tairix-rt` — `_start`, the
+# allocator, the syscall wrappers). These are bare-metal only; on the host
+# the binary is an inert stub with no dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[lints]
+workspace = true

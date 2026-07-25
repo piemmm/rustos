@@ -4342,6 +4342,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-widgets"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-icon",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-window"
 version = "0.0.0"
 dependencies = [

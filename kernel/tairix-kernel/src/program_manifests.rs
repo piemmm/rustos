@@ -898,6 +898,15 @@ mod tests {
         CapabilityId::NET_RAW,
     ];
 
+    // The `widgets` gallery (plans/GUI-CONTROLS-DESIGN.md): console write for
+    // its fail-loud stderr diagnostics, and `CAP_SHM` for the zero-copy window
+    // frame region it creates and grants to the desktop session. It reads no
+    // filesystem and spawns nothing (every widget commits its action back into
+    // the demo itself, never a privileged service). Not an embedded spawn-floor
+    // program, so the list lives only in this pin.
+    const WIDGETS_GALLERY_REQUEST: &[CapabilityId] =
+        &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -967,6 +976,7 @@ mod tests {
             ("vim", AppKind::Command, FILE_TOOL_REQUEST),
             ("wc", AppKind::Command, FILE_TOOL_REQUEST),
             ("whoami", AppKind::Command, PURE_TOOL_REQUEST),
+            ("widgets", AppKind::Command, WIDGETS_GALLERY_REQUEST),
             ("yes", AppKind::Command, PURE_TOOL_REQUEST),
         ];
 

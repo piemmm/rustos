@@ -668,6 +668,7 @@ mod tests {
                 "vim",
                 "wc",
                 "whoami",
+                "widgets",
                 "yes"
             ]
         );

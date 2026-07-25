@@ -84,10 +84,12 @@ pub const BOOT_PART_SECTORS: u32 = 131_072;
 /// design-B pre-unlock signed-driver store (`plans/PI.md`).
 pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
 
-/// Sectors in the read-only `ARXFS` `/System` partition: 64 MiB — the
-/// skeleton plus headroom for the signed driver bundles that land
-/// here in the later design-B increments.
-pub const SYSTEM_PART_SECTORS: u32 = 131_072;
+/// Sectors in the read-only `ARXFS` `/System` partition: 128 MiB — the
+/// skeleton plus the signed driver bundles and the discovered command-app
+/// / service store (`/System/Apps`, `/System/Services`), each app a
+/// self-contained `Run` rxe beside its `Help/` tree, with headroom for the
+/// store to keep growing as apps are added.
+pub const SYSTEM_PART_SECTORS: u32 = 262_144;
 
 /// First sector of the encrypted `ARXFS` data-root partition (contiguous
 /// with the `/System` partition, which already ends 1 MiB-aligned).
