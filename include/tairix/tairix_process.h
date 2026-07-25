@@ -36,7 +36,7 @@
 #define TAIRIX_SPAWN_UID_INHERIT ((uint32_t)0xffffffffu)
 
 /* Packed little-endian wire size of a startup-vector header, in bytes. */
-#define TAIRIX_PROCESS_START_HEADER_WIRE_LEN 32u
+#define TAIRIX_PROCESS_START_HEADER_WIRE_LEN 40u
 /* Packed little-endian wire size of one string slot, in bytes. */
 #define TAIRIX_STRING_SLOT_WIRE_LEN 8u
 
@@ -54,6 +54,7 @@ typedef struct tairix_process_start_header {
     uint32_t env_count;
     uint64_t total_len;
     uint64_t canary;
+    uint64_t cpu_features;
 } tairix_process_start_header_t;
 
 #endif /* TAIRIX_PROCESS_H */

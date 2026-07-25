@@ -60,6 +60,7 @@ for filesystems, the feature section below.
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
+| Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |

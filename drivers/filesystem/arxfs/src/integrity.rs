@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! [ ciphertext content ][ crypto trailer ][ logical hash ][ physical checksum ]
-//!   <-- data_capacity -->  <-- nonce+tag -->  <-- 32 B  -->   <-- 8 B  -->
+//!   <-- data_capacity -->  <-- nonce+tag -->  <-- 32 B  -->   <-- 4 B  -->
 //! ```
 //!
 //! - The **logical content hash** ([`logical_hash`]) names the block's
@@ -34,18 +34,23 @@
 //!   non-cryptographic checksum over the at-rest representation (ciphertext +
 //!   crypto trailer + logical hash). It detects media / transport corruption
 //!   cheaply and is verified *first* on read, so bit rot in the stored block
-//!   is caught by the fast check before the AEAD runs. A checksum is not a
-//!   cryptographic primitive, so does not bar a first-party
-//!   implementation; the keyed authenticity of the block still rests on the
-//!   AEAD and the metadata MAC.
+//!   is caught by the fast check before the AEAD runs. It is **CRC-32C**
+//!   (Castagnoli), through the shared `lib/crc32c` — the same error-detecting
+//!   checksum ext4 metadata and btrfs use, with guaranteed Hamming-distance
+//!   properties an ad-hoc hash lacks and a one-instruction hardware path on
+//!   the cores that have it (selected once, self-verified against the portable
+//!   reference). A checksum is not a cryptographic primitive, so a first-party
+//!   implementation is permitted; the keyed authenticity of the block still
+//!   rests on the AEAD and the metadata MAC.
 
 use tairix_crypto::sha256;
 
 /// Length, in bytes, of a data block's logical content hash (SHA-256).
 pub const LOGICAL_HASH_LEN: usize = tairix_crypto::SHA256_OUTPUT_LEN;
 
-/// Length, in bytes, of a data block's fast physical checksum.
-pub const PHYS_CHECKSUM_LEN: usize = 8;
+/// Length, in bytes, of a data block's fast physical checksum (CRC-32C is a
+/// 32-bit checksum).
+pub const PHYS_CHECKSUM_LEN: usize = 4;
 
 /// Bytes of per-data-block integrity trailer appended after the crypto
 /// trailer: the [`LOGICAL_HASH_LEN`]-byte logical content hash followed by the
@@ -152,17 +157,21 @@ pub fn logical_hash(plaintext: &[u8]) -> [u8; LOGICAL_HASH_LEN] {
 }
 
 /// A fast, non-cryptographic checksum over the at-rest `bytes` of a data
-/// block (FNV-1a, 64-bit). Cheap to verify on every read; detects bit rot,
-/// torn writes, and misdirected reads in the stored representation.
+/// block: **CRC-32C** (Castagnoli), little-endian. Cheap to verify on every
+/// read; detects bit rot, torn writes, and misdirected reads in the stored
+/// representation.
+///
+/// Routed through the shared `lib/crc32c`, so on a core with the `crc32c*`
+/// (aarch64) / SSE4.2 `crc32` (x86_64) instruction it runs in one
+/// general-purpose-register instruction per word; on every other core it is
+/// the portable table baseline. Which one is used is selected once at driver
+/// bring-up (`tairix_crc32c::resolve`); until then, and on any core without
+/// the instruction, it is the baseline — always the same value (the hardware
+/// path is self-verified bit-identical to the reference before it can be
+/// selected).
 #[must_use]
 pub fn physical_checksum(bytes: &[u8]) -> [u8; PHYS_CHECKSUM_LEN] {
-    // FNV-1a, 64-bit (offset basis and prime per the reference parameters).
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash.to_le_bytes()
+    tairix_crc32c::checksum(bytes).to_le_bytes()
 }
 
 #[cfg(test)]
@@ -215,10 +224,12 @@ mod tests {
 
     #[test]
     fn empty_input_hashes_and_checksums_deterministically() {
-        // FNV-1a offset basis with no bytes mixed in.
+        // CRC-32C of the empty string is zero (init ^ final-XOR cancel).
+        assert_eq!(physical_checksum(&[]), 0u32.to_le_bytes());
+        // The canonical CRC-32C check value pins the algorithm end to end.
         assert_eq!(
-            physical_checksum(&[]),
-            0xcbf2_9ce4_8422_2325u64.to_le_bytes()
+            physical_checksum(b"123456789"),
+            0xE306_9283u32.to_le_bytes()
         );
         assert_eq!(logical_hash(&[]), logical_hash(&[]));
     }

@@ -561,6 +561,11 @@ where
         request.args,
         request.env,
         request.canary,
+        // The migration-safe common CPU-feature set the boot path aggregated,
+        // so the child's runtime resolves its accelerated routines against
+        // instructions legal on every core it may run on (empty until the set
+        // is finalised — the child then uses the portable baseline).
+        crate::cpuops::system_features().bits(),
         alloc_frame,
     )
     .map_err(|error| {

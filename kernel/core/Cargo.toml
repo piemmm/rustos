@@ -138,6 +138,16 @@ tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # `KernelState` composes a `tairix_rng::OutputReserve` and the `random_get`
 # syscall serves bytes from it.
 tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
+# The self-optimising CRC-32C dispatch (`plans/FIX-HARDWARE-FEATURES.md` P2):
+# `kernel_main` resolves it once against the finalised common CPU-feature set
+# (`src/cpuops.rs`) so the in-kernel ARXFS physical-integrity checksum uses the
+# `crc32c*`/SSE4.2 hardware path where present, self-verified against the
+# portable baseline (never hand-rolled per op — one shared definition, §2.2).
+tairix-crc32c = { path = "../../lib/crc32c", version = "=0.0.0" }
+# The generic self-optimising dispatch framework: `src/cpuops.rs` names its
+# `Decision`/`DecisionReason` to record which accelerated routine won through
+# the audit log (`plans/FIX-HARDWARE-FEATURES.md` P2, `AGENTS.md` §19.4).
+tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0" }
 # Audited volatile-wipe for the kernel staging buffer `random_get` copies
 # CSPRNG output through on its way to user memory (`AGENTS.md` §22 — zeroed
 # on consumption; §2.12 — never hand-roll the wipe).

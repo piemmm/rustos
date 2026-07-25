@@ -669,6 +669,18 @@ tairix/
 │   │                    #   closed to a portable baseline. Crypto is availability
 │   │                    #   only, never benchmarked (§19.1/§2.12). no_std+alloc,
 │   │                    #   no cfg, no board/SoC name (§2.16/§2.20/§2.21/§27).
+│   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum
+│   │                    #   (plans/FIX-HARDWARE-FEATURES.md P2): the one first-
+│   │                    #   party definition of TAIRiX's fast, non-cryptographic
+│   │                    #   media-integrity checksum — a portable table baseline
+│   │                    #   plus per-arch hardware candidates (aarch64 crc32c*,
+│   │                    #   x86_64 SSE4.2 crc32; GPR-only, build.rs-emitted cfg
+│   │                    #   the lib/abi-trap way, no cfg(target_arch)) selected
+│   │                    #   once and self-verified against the baseline through
+│   │                    #   lib/cpuops, fail-closed to the baseline. Consumed by
+│   │                    #   ARXFS's physical_checksum; not the crypto carve-out —
+│   │                    #   an error-detecting checksum, so first-party is
+│   │                    #   permitted (§2.12/§2.16/§2.20). no_std, fuzzed (§19.6).
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.

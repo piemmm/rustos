@@ -435,6 +435,16 @@ pub enum AuditEvent {
     /// and emits [`SystemConfigApplied`](Self::SystemConfigApplied) with
     /// `source: default`. Carries a `cause` naming the refusal.
     SystemConfigRejected,
+    /// A self-optimising accelerated-routine family selected its
+    /// implementation for this boot (`crate::cpuops` / `lib/cpuops`).
+    ///
+    /// Emitted once per family after the common CPU-feature set is
+    /// finalised: it records which implementation won (`chosen`) and why
+    /// (`reason` — `priority`/`benchmark`/`baseline`/`pinned`), so the
+    /// routine selection is observable and pinnable for reproducible-build
+    /// validation. Operational, not a security decision, but recorded with a
+    /// stable event id like every other boot-time choice.
+    CpuOpsRoutineSelected,
 }
 
 impl AuditEvent {
@@ -486,6 +496,7 @@ impl AuditEvent {
             Self::FsMutationDenied => 4101,
             Self::SystemConfigApplied => 4110,
             Self::SystemConfigRejected => 4111,
+            Self::CpuOpsRoutineSelected => 4120,
         })
     }
 
@@ -539,6 +550,7 @@ impl AuditEvent {
             Self::FsMutationDenied => "filesystem mutation denied",
             Self::SystemConfigApplied => "system configuration applied",
             Self::SystemConfigRejected => "system configuration rejected",
+            Self::CpuOpsRoutineSelected => "cpu accelerated routine selected",
         }
     }
 }
@@ -606,6 +618,7 @@ mod tests {
             AuditEvent::FsMutationDenied,
             AuditEvent::SystemConfigApplied,
             AuditEvent::SystemConfigRejected,
+            AuditEvent::CpuOpsRoutineSelected,
         ] {
             let id = ev.id().0;
             assert!(
@@ -661,6 +674,7 @@ mod tests {
             AuditEvent::FsMutationDenied.id().0,
             AuditEvent::SystemConfigApplied.id().0,
             AuditEvent::SystemConfigRejected.id().0,
+            AuditEvent::CpuOpsRoutineSelected.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

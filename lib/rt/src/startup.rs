@@ -68,6 +68,25 @@ pub fn arg_count() -> u32 {
     view().map_or(0, ProcessStart::arg_count)
 }
 
+/// The migration-safe common CPU-feature set the kernel delivered to this
+/// process — the intersection of the ISA extensions present on every core it
+/// may run on.
+///
+/// A program resolves its self-optimising accelerated routines against this
+/// (for example `tairix_crc32c::resolve(tairix_rt::cpu_features())` once at
+/// start-up): because it is the intersection over all cores, any instruction
+/// it advertises is legal on every core the scheduler may migrate the task to.
+/// It is the empty set when no validated startup vector is available, or before
+/// the kernel finalised the set — a program then uses the portable baseline
+/// everywhere, which is always correct (fail closed).
+#[must_use]
+pub fn cpu_features() -> tairix_abi::cpufeatures::CpuFeatureSet {
+    view().map_or(
+        tairix_abi::cpufeatures::CpuFeatureSet::EMPTY,
+        ProcessStart::cpu_features,
+    )
+}
+
 /// The argument at `index`, or `None` when out of range or when no
 /// validated startup vector is available (fail closed).
 ///
@@ -163,9 +182,15 @@ mod tests {
         let envs: [&[u8]; 3] = [b"PATH=/Users/root/tools", b"LANG=fr-FR", b"noequals"];
         let len = tairix_abi::process_start_encoded_len(&args, &envs).expect("sized");
         let buf: &'static mut [u8] = alloc_block(len);
-        tairix_abi::process_start_write_into(buf, &args, &envs, 7).expect("encoded");
+        // aarch64 CRC32 (bit 0) + SHA2 (bit 4) as a representative delivered set.
+        let features = 0x0000_0000_0000_0011u64;
+        tairix_abi::process_start_write_into(buf, &args, &envs, 7, features).expect("encoded");
         let view = ProcessStart::parse(buf).expect("valid block");
         install(view);
+
+        // Before install the accessor fails closed to the empty set; after
+        // install it reports exactly the delivered bits.
+        assert_eq!(cpu_features().bits(), features);
 
         assert_eq!(arg_count(), 2);
         assert_eq!(arg(0), Some(&b"drvstub"[..]));

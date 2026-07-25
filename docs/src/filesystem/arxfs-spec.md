@@ -210,7 +210,7 @@ large sequential target:     256 KiB
 small-file storage:          inline or packed fragments
 logical hash:                SHA-256 through lib/crypto (see note)
 metadata authenticator:      lib/crypto keyed hash/MAC (HMAC-SHA256)
-physical checksum:           FNV-1a 64-bit (fast, first-party)
+physical checksum:           CRC-32C (Castagnoli, fast, first-party via lib/crc32c)
 critical metadata copies:    2 minimum
 root history:                retained for rollback and safe discard
 ```
@@ -402,9 +402,13 @@ inode/range details for health, scrub, and check.
 
 > **Stage 5 implementation.** Of the data-record fields above, the **plaintext
 > logical hash** (SHA-256 of the block's plaintext content) and the
-> **physical checksum** (FNV-1a over the at-rest block) land in Stage 5,
-> stored in a fixed 40-byte trailer appended to every file-data block after
-> the Stage-4 crypto trailer (`drivers/filesystem/arxfs/src/integrity.rs`).
+> **physical checksum** (CRC-32C over the at-rest block, through the shared
+> `lib/crc32c` — a first-party error-detecting checksum with a portable
+> baseline and a hardware `crc32c*` / SSE4.2 path selected once at boot and
+> self-verified against the baseline) land in Stage 5, stored in a fixed
+> 36-byte trailer (32-byte SHA-256 logical hash + 4-byte CRC-32C) appended to
+> every file-data block after the Stage-4 crypto trailer
+> (`drivers/filesystem/arxfs/src/integrity.rs`).
 > The read path verifies the physical checksum first (media corruption is
 > caught before the AEAD), authenticates-and-decrypts, then verifies the
 > logical hash over the recovered plaintext; each layer fails closed and is

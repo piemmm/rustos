@@ -239,6 +239,18 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // `Copy`, so this is a copy of the reference, not a move.
     let init_spawn = boot.init;
 
+    // Fold the boot CPU's own detected CPU-feature set into the migration-safe
+    // common set delivered to every spawned process, and declare how many
+    // cores will contribute (each secondary folds its own set in
+    // `run_secondary`, since a core can only read its own ID registers). A
+    // port without the CPU-feature HAL slice contributes nothing, so the
+    // delivered set stays empty and every process resolves its accelerated
+    // routines to the portable baseline (fail closed, never a trap).
+    if let Some(cpu_features) = boot.arch.cpu_features() {
+        crate::cpuops::expect_contributions(cpu_count);
+        crate::cpuops::contribute(cpu_features.detect(boot_cpu));
+    }
+
     // `BootStarted` / `BootCompleted` / `PhaseFailed` are audit
     // lifecycle events (security-relevant
     // decisions). They route through `audit_sink`. `PhaseStarted` /
@@ -317,6 +329,14 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // `crate::run_secondary`; until PID 1 spawns work it parks on its
     // idle instruction, woken by the scheduler's placement IPI.
     start_secondaries(state, boot_cpu, cpu_count);
+
+    // Every core has now folded its CPU-feature set into the migration-safe
+    // common set (`crate::cpuops`), so it is finalised: select the
+    // self-optimising accelerated-routine implementations against it (CRC-32C
+    // for the in-kernel ARXFS physical-integrity checksum) and audit each
+    // choice. A core without the feature HAL slice leaves the set empty, so
+    // the portable baseline is chosen everywhere (fail closed).
+    crate::cpuops::resolve_accelerated_ops(audit_sink);
 
     // Spawn PID 1 (`init`) into user mode when the arch port installed a
     // spawn seam (`plans/PI.md` P6c-3). On success the seam diverges into
@@ -527,6 +547,12 @@ impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryD
 
     fn audit_sink(&self) -> &'static (dyn Sink + Sync) {
         self.state.audit_sink
+    }
+
+    fn contribute_cpu_features(&self, cpu: CpuId) {
+        if let Some(cpu_features) = self.state.arch.cpu_features() {
+            crate::cpuops::contribute(cpu_features.detect(cpu));
+        }
     }
 
     fn mark_online(&self, cpu: CpuId) {

@@ -20,6 +20,7 @@
 - [Kernel IPC subsystem](./architecture/ipc.md)
 - [Kernel syscall subsystem](./architecture/syscalls.md)
 - [Resource limits and scalability](./architecture/resource-limits.md)
+- [CPU feature detection and self-optimising dispatch](./architecture/cpu-feature-dispatch.md)
 - [Modularity contracts and enforcement](./architecture/modularity.md)
 
 # Security

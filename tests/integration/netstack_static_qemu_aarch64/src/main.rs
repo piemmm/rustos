@@ -17,7 +17,7 @@
 //!   from the matched hardware-tree node — never MAC or discovery order),
 //!   and `netstack` assigns the config's **static IPv6 address**.
 //! * The host peer therefore addresses the guest by its *static* address
-//!   ([`wire::GUEST_STATIC_V6`]), never the link-local the guest also forms.
+//!   (`GUEST_STATIC_V6`), never the link-local the guest also forms.
 //!   A `match.node` mis-bind (the alias never applied, the static address
 //!   never assigned) leaves the peer's campaign unanswered, so the run times
 //!   out fail-loud rather than passing on the link-local — a real

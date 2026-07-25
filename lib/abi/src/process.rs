@@ -5,8 +5,11 @@
 //! created process it materialises a single contiguous *startup-vector block*
 //! in the new address space and hands the program's entry trampoline (crt0,
 //! `plans/CCOMPAT.md` CC3) a pointer to it. The block carries the program's
-//! command-line arguments, its environment, and a per-process random seed for
-//! the stack canary. This module is the one definition both sides share: the kernel *builds* the block and crt0 *parses* it.
+//! command-line arguments, its environment, a per-process random seed for
+//! the stack canary, and the migration-safe common CPU-feature set the
+//! program's runtime resolves its accelerated routines against. This module is
+//! the one definition both sides share: the kernel *builds* the block and
+//! crt0 *parses* it.
 //!
 //! The block is **position-independent** — every string is referenced by an
 //! offset relative to the block base, never an absolute pointer — so it works
@@ -135,11 +138,25 @@ pub struct ProcessStartHeader {
     /// validated here — any value is structurally acceptable — but the kernel
     /// must supply real entropy.
     pub canary: u64,
+    /// The CPU-feature bits ([`crate::cpufeatures::CpuFeatureSet`]) common to
+    /// every core this process may run on — the migration-safe intersection
+    /// the kernel computed at boot.
+    ///
+    /// A program's runtime resolves its self-optimising accelerated routines
+    /// (`lib/cpuops` / `lib/crc32c`) against this set: because it is the
+    /// intersection over all cores, any instruction it advertises is legal on
+    /// every core the scheduler may migrate the task to, so a dispatched
+    /// routine can never trap after a migration. It is a non-secret
+    /// capability fact (a program may only read its own image), so delivering
+    /// it grants no authority. The kernel supplies `0` (the empty set → the
+    /// portable baseline everywhere) before the common set is finalised, so a
+    /// program always fails closed to a correct routine.
+    pub cpu_features: u64,
 }
 
 impl ProcessStartHeader {
     /// Encoded size of a [`ProcessStartHeader`] on the wire.
-    pub const WIRE_LEN: usize = 32;
+    pub const WIRE_LEN: usize = 40;
 
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
@@ -183,6 +200,15 @@ impl ProcessStartHeader {
         out[29] = canary[5];
         out[30] = canary[6];
         out[31] = canary[7];
+        let cpu_features = self.cpu_features.to_le_bytes();
+        out[32] = cpu_features[0];
+        out[33] = cpu_features[1];
+        out[34] = cpu_features[2];
+        out[35] = cpu_features[3];
+        out[36] = cpu_features[4];
+        out[37] = cpu_features[5];
+        out[38] = cpu_features[6];
+        out[39] = cpu_features[7];
         out
     }
 
@@ -216,6 +242,7 @@ impl ProcessStartHeader {
             env_count: read_u32(bytes, 12),
             total_len: read_u64(bytes, 16),
             canary: read_u64(bytes, 24),
+            cpu_features: read_u64(bytes, 32),
         })
     }
 }
@@ -334,6 +361,18 @@ impl<'a> ProcessStart<'a> {
     #[must_use]
     pub const fn canary(&self) -> u64 {
         self.header.canary
+    }
+
+    /// The migration-safe common CPU-feature set the kernel delivered (the
+    /// intersection over every core this process may run on).
+    ///
+    /// A program's runtime resolves its accelerated routines against this;
+    /// it is `0` (the empty set → portable baseline) until the kernel has
+    /// finalised the set, so a program always fails closed to a correct
+    /// routine.
+    #[must_use]
+    pub const fn cpu_features(&self) -> crate::cpufeatures::CpuFeatureSet {
+        crate::cpufeatures::CpuFeatureSet::from_bits(self.header.cpu_features)
     }
 
     /// The argument string at index `index`, or `None` if out of range.
@@ -458,6 +497,7 @@ pub fn write_into(
     args: &[&[u8]],
     env: &[&[u8]],
     canary: u64,
+    cpu_features: u64,
 ) -> Result<usize, Errno> {
     let total_len = encoded_len(args, env)?;
     if buf.len() < total_len {
@@ -479,6 +519,7 @@ pub fn write_into(
         env_count: u32::try_from(env.len()).map_err(|_| Errno::LengthOutOfRange)?,
         total_len: total_len as u64,
         canary,
+        cpu_features,
     };
     buf[..ProcessStartHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
 
@@ -1771,20 +1812,25 @@ mod tests {
     }
 
     fn build_with_canary(args: &[&[u8]], env: &[&[u8]], canary: u64) -> Vec<u8> {
+        build_full(args, env, canary, 0)
+    }
+
+    fn build_full(args: &[&[u8]], env: &[&[u8]], canary: u64, cpu_features: u64) -> Vec<u8> {
         // The tests drive the very same production builder the kernel loader
         // uses (one definition), proving the writer and the
         // parser agree end-to-end rather than re-implementing the layout.
         let total_len = super::encoded_len(args, env).expect("within abi-v1 limits");
         let mut block = alloc::vec![0u8; total_len];
-        let written = super::write_into(&mut block, args, env, canary).expect("fits the buffer");
+        let written = super::write_into(&mut block, args, env, canary, cpu_features)
+            .expect("fits the buffer");
         assert_eq!(written, total_len);
         block
     }
 
     #[test]
     fn wire_sizes_are_frozen() {
-        assert_eq!(ProcessStartHeader::WIRE_LEN, 32);
-        assert_eq!(core::mem::size_of::<ProcessStartHeader>(), 32);
+        assert_eq!(ProcessStartHeader::WIRE_LEN, 40);
+        assert_eq!(core::mem::size_of::<ProcessStartHeader>(), 40);
         assert_eq!(core::mem::align_of::<ProcessStartHeader>(), 8);
         assert_eq!(StringSlot::WIRE_LEN, 8);
         assert_eq!(core::mem::size_of::<StringSlot>(), 8);
@@ -1800,6 +1846,7 @@ mod tests {
             env_count: 2,
             total_len: 1234,
             canary: 0x0123_4567_89AB_CDEF,
+            cpu_features: 0x0000_0000_0004_0001,
         };
         let decoded = ProcessStartHeader::from_bytes(&header.to_le_bytes()).expect("valid");
         assert_eq!(decoded, header);
@@ -1854,6 +1901,24 @@ mod tests {
         let block = build_with_canary(&[b"x"], &[], 0xFEED_FACE_DEAD_C0DE);
         let view = ProcessStart::parse(&block).expect("valid");
         assert_eq!(view.canary(), 0xFEED_FACE_DEAD_C0DE);
+    }
+
+    #[test]
+    fn preserves_the_cpu_features() {
+        // A representative bitset: aarch64 CRC32 (bit 0) + SHA2 (bit 4).
+        let bits = 0x0000_0000_0000_0011u64;
+        let block = build_full(&[b"x"], &[], 0, bits);
+        let view = ProcessStart::parse(&block).expect("valid");
+        assert_eq!(view.cpu_features().bits(), bits);
+        // Absent (zero) is the empty set — the fail-closed default.
+        let empty = build_full(&[b"x"], &[], 0, 0);
+        assert_eq!(
+            ProcessStart::parse(&empty)
+                .expect("valid")
+                .cpu_features()
+                .bits(),
+            0
+        );
     }
 
     #[test]
@@ -1955,8 +2020,8 @@ mod tests {
         let len = super::encoded_len(args, env).expect("within limits");
         let block = build(args, env);
         assert_eq!(block.len(), len);
-        // Header(32) + 3 slots(24) + strings("prog"+"--flag"+"PATH=/Apps").
-        assert_eq!(len, 32 + 3 * 8 + 4 + 6 + 10);
+        // Header(40) + 3 slots(24) + strings("prog"+"--flag"+"PATH=/Apps").
+        assert_eq!(len, 40 + 3 * 8 + 4 + 6 + 10);
     }
 
     #[test]
@@ -1965,7 +2030,8 @@ mod tests {
         let env: &[&[u8]] = &[b"K=v"];
         let len = super::encoded_len(args, env).expect("len");
         let mut buf = alloc::vec![0u8; len];
-        let written = super::write_into(&mut buf, args, env, 0x1122_3344_5566_7788).expect("write");
+        let written =
+            super::write_into(&mut buf, args, env, 0x1122_3344_5566_7788, 0).expect("write");
         assert_eq!(written, len);
         let view = ProcessStart::parse(&buf).expect("round-trips");
         assert_eq!(view.arg_count(), 3);
@@ -1981,7 +2047,7 @@ mod tests {
         let len = super::encoded_len(args, &[]).expect("len");
         let mut buf = alloc::vec![0u8; len - 1];
         assert_eq!(
-            super::write_into(&mut buf, args, &[], 0),
+            super::write_into(&mut buf, args, &[], 0, 0),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -1991,7 +2057,7 @@ mod tests {
         let args: &[&[u8]] = &[b"a\0b"];
         let mut buf = alloc::vec![0u8; 64];
         assert_eq!(
-            super::write_into(&mut buf, args, &[], 0),
+            super::write_into(&mut buf, args, &[], 0, 0),
             Err(Errno::OutOfRange)
         );
     }

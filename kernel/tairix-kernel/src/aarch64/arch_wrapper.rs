@@ -296,6 +296,16 @@ impl KernelArch for Aarch64BinArch {
         crate::aarch64::gic_irq::arm_preemption(self.arch.cpu_count());
     }
 
+    fn cpu_features(&self) -> Option<&dyn tairix_arch_api::CpuFeatures> {
+        // The aarch64 `ID_AA64ISAR0_EL1` / `ID_AA64PFR0_EL1` detector; each
+        // core folds its own detected set into the migration-safe common set
+        // delivered to every process (`kernel/core::cpuops`). The detector is a
+        // stateless `const` value, so a `'static` reference to it is sound.
+        const DETECT: tairix_arch_aarch64::cpufeatures::CpuFeatureDetect =
+            tairix_arch_aarch64::cpufeatures::CpuFeatureDetect;
+        Some(&DETECT)
+    }
+
     fn secondary_bringup(&self) -> Option<&dyn SecondaryBringup> {
         // The arch handle is the bring-up surface (`SecondaryBringup`):
         // PSCI `CPU_ON` or the Devicetree spin-table release, whichever

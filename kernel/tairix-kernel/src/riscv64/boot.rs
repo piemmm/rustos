@@ -238,6 +238,16 @@ impl KernelArch for RiscvBinArch {
         Some(tairix_abi::Arch::Riscv64)
     }
 
+    fn cpu_features(&self) -> Option<&dyn tairix_arch_api::CpuFeatures> {
+        // The riscv64 `misa` + device-tree `riscv,isa` detector; each hart
+        // folds its own detected set into the migration-safe common set
+        // delivered to every process (`kernel/core::cpuops`). The detector is a
+        // stateless `const` value, so a `'static` reference to it is sound.
+        const DETECT: tairix_arch_riscv64::cpufeatures::CpuFeatureDetect =
+            tairix_arch_riscv64::cpufeatures::CpuFeatureDetect::new();
+        Some(&DETECT)
+    }
+
     fn cpu_name(&self) -> Option<tairix_abi::CpuName> {
         // Captured from the device tree at construction; an unlisted or
         // generic (`riscv`) compatible stays an honest `None` (the boot

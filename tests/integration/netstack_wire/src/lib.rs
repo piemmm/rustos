@@ -216,7 +216,7 @@ pub const PEER_STATIC_V6: Ipv6Addr = Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 0x0
 /// [`GUEST_NIC_NODE_LOCATION_AARCH64`] (`0x0a003c00`), disables IPv4, and
 /// assigns the static IPv6 [`GUEST_STATIC_V6`]`/`[`STATIC_PREFIX_LEN`]. The
 /// literals here are cross-checked against those constants by
-/// [`static_network_conf_matches_the_wire_constants`], so the config and the
+/// the `static_network_conf_matches_the_wire_constants` unit test, so the config and the
 /// addresses the peer uses can never drift (one source of truth).
 pub const STATIC_NETWORK_CONF: &str = "\
 # TAIRiX static-addressing (match.node) QEMU vertical network.conf.

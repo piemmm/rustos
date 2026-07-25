@@ -596,12 +596,16 @@ fn exercise_process_builder(bytes: &[u8]) {
     let take = core::cmp::min(8, bytes.len());
     seed[..take].copy_from_slice(&bytes[..take]);
     let canary = u64::from_le_bytes(seed);
+    // A distinct value in the cpu-features field, to prove it round-trips
+    // independently of the canary.
+    let cpu_features = canary.rotate_left(17) ^ 0x0F0F_0F0F_0F0F_0F0F;
 
     let Ok(len) = tairix_abi::process::encoded_len(args, env) else {
         return;
     };
     let mut buf = vec![0u8; len];
-    let Ok(written) = tairix_abi::process::write_into(&mut buf, args, env, canary) else {
+    let Ok(written) = tairix_abi::process::write_into(&mut buf, args, env, canary, cpu_features)
+    else {
         // A rejected build (an embedded NUL, say) is a fail-closed outcome.
         return;
     };
@@ -610,6 +614,7 @@ fn exercise_process_builder(bytes: &[u8]) {
     assert_eq!(view.arg_count() as usize, args.len());
     assert_eq!(view.env_count() as usize, env.len());
     assert_eq!(view.canary(), canary);
+    assert_eq!(view.cpu_features().bits(), cpu_features);
     let mut idx: u32 = 0;
     for a in args {
         assert_eq!(view.arg(idx), Some(*a));

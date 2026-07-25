@@ -24,7 +24,7 @@
 
 use alloc::sync::Arc;
 
-use tairix_arch_api::{ContextSwitch, PlatformEntropy, SecondaryBringup};
+use tairix_arch_api::{ContextSwitch, CpuFeatures, PlatformEntropy, SecondaryBringup};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use tairix_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
@@ -159,6 +159,22 @@ pub trait KernelArch: SchedulerArch {
     /// lockup loudly, and the recovery attempt is honestly recorded as
     /// `unsupported` (fail closed, never a silent no-op).
     fn watchdog_recovery(&self) -> Option<&'static (dyn tairix_arch_api::WatchdogArch + Sync)> {
+        None
+    }
+
+    /// The port's CPU-feature detector (the Arch HAL `cpufeatures` slice),
+    /// when it can read its ISA-extension capability from the silicon.
+    ///
+    /// [`crate::kernel_main`] uses it to fold each core's detected feature set
+    /// into the migration-safe common set delivered to every process
+    /// ([`crate::cpuops`]); `detect` reads the *calling* CPU's ID registers,
+    /// so the boot CPU folds its own set here and each secondary folds its own
+    /// in [`crate::run_secondary`].
+    ///
+    /// The default is `None` — a port without the slice (the host test arch)
+    /// simply contributes nothing, so the delivered common set stays empty and
+    /// every process falls closed to the portable baseline (never a trap).
+    fn cpu_features(&self) -> Option<&dyn CpuFeatures> {
         None
     }
 

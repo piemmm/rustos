@@ -18,6 +18,12 @@ tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
 # "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
 # `lib/crypto`, never a hand-rolled primitive.
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The fast, non-cryptographic block-integrity checksum (CRC-32C): the one
+# first-party definition, with a portable baseline and hardware-accelerated
+# candidates selected/self-verified through lib/cpuops. Not the crypto
+# carve-out — an error-detecting checksum, so first-party is permitted
+# (`docs/src/filesystem/arxfs-spec.md` §6; `plans/FIX-HARDWARE-FEATURES.md`).
+tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
 # The first-party LZ codec every file-data record is compressed with before
 # encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10). It is first-party,
 # not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the

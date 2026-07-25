@@ -161,6 +161,11 @@ pub const TARGETS: &[Target] = &[
         description: "first-party LZ decode (untrusted compressed-record bytes)",
     },
     Target {
+        package: "tairix-crc32c",
+        test: "fuzz_crc32c",
+        description: "CRC-32C accelerated candidates vs the portable reference (bit-identity)",
+    },
+    Target {
         package: "tairix-svg",
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",

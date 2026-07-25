@@ -379,6 +379,16 @@ impl KernelArch for BinArch {
         arch_halt()
     }
 
+    fn cpu_features(&self) -> Option<&dyn tairix_arch_api::CpuFeatures> {
+        // The x86_64 `CPUID` leaf 1 / leaf 7 detector; each core folds its own
+        // detected set into the migration-safe common set delivered to every
+        // process (`kernel/core::cpuops`). The detector is a stateless `const`
+        // value, so a `'static` reference to it is sound.
+        const DETECT: tairix_arch_x86_64::cpufeatures::CpuFeatureDetect =
+            tairix_arch_x86_64::cpufeatures::CpuFeatureDetect;
+        Some(&DETECT)
+    }
+
     fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
         // x86_64 seeds the kernel CSPRNG reserve from RDSEED/RDRAND. The
         // handle is zero-sized, so a `'static` instance suffices; whether

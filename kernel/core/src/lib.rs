@@ -79,6 +79,7 @@ pub mod cache_control;
 pub mod callreg;
 pub mod console;
 mod cpu_state;
+pub mod cpuops;
 pub mod crash;
 pub mod devres;
 pub mod dispatch_slot;

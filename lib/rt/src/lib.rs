@@ -75,7 +75,7 @@ pub mod io;
 
 pub mod net;
 
-pub use startup::{arg, arg_count, args, env, env_count, env_var};
+pub use startup::{arg, arg_count, args, cpu_features, env, env_count, env_var};
 
 // The `mem_map`-backed global allocator. Compiled for the native targets that
 // register it as the `#[global_allocator]`, and for host unit tests of its pure
@@ -1134,9 +1134,10 @@ pub fn spawn_with(
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
-    // The canary field is the kernel's to mint for the child; the encoder
-    // requires a value, so carry zero and the kernel ignores it.
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0) {
+    // The canary and cpu-features fields are the kernel's to mint for the
+    // child (the migration-safe common set, from the boot-time detection); the
+    // encoder requires values, so carry zero and the kernel ignores them.
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0, 0) {
         return -i64::from(err.as_i32());
     }
     spawn_raw(path, console, target_uid, &block)
@@ -1167,9 +1168,10 @@ pub fn spawn_attached(
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
-    // The canary field is the kernel's to mint for the child; the encoder
-    // requires a value, so carry zero and the kernel ignores it.
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0) {
+    // The canary and cpu-features fields are the kernel's to mint for the
+    // child (the migration-safe common set, from the boot-time detection); the
+    // encoder requires values, so carry zero and the kernel ignores them.
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0, 0) {
         return -i64::from(err.as_i32());
     }
     spawn_encoded(path, &attach.to_le_bytes(), &block)

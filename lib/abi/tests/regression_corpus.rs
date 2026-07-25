@@ -103,7 +103,7 @@ fn startup_vector() -> Vec<u8> {
     let env: &[&[u8]] = &[];
     let len = tairix_abi::process::encoded_len(args, env).expect("within abi-v1 limits");
     let mut buf = vec![0u8; len];
-    let written = tairix_abi::process::write_into(&mut buf, args, env, CANARY).expect("fits");
+    let written = tairix_abi::process::write_into(&mut buf, args, env, CANARY, 0).expect("fits");
     assert_eq!(written, len);
     buf
 }

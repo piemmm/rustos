@@ -274,7 +274,9 @@ where
 /// Maps and fills every segment of `image` (relocated by `bias`), maps a
 /// zeroed user stack described by `stack`, and writes the
 /// [`tairix_abi::process`] startup-vector block for `args` / `env` (carrying
-/// the `canary` seed) at `start_block_base`. `image_bytes` is the whole `rxe`
+/// the `canary` seed and the migration-safe common `cpu_features` set the
+/// process resolves its accelerated routines against) at `start_block_base`.
+/// `image_bytes` is the whole `rxe`
 /// file the segments' `file_offset`s index into; `physmap` is the kernel's
 /// direct physical map (so the builder can reach freshly allocated frames);
 /// `alloc_frame` yields one frame per mapped page.
@@ -305,6 +307,7 @@ pub fn build_process_image<P, A>(
     args: &[&[u8]],
     env: &[&[u8]],
     canary: u64,
+    cpu_features: u64,
     mut alloc_frame: A,
 ) -> Result<ProcessImage, SpawnError>
 where
@@ -365,7 +368,8 @@ where
     // 3. Startup-vector block: serialise then map+write into U|R|W pages.
     let block_len = process::encoded_len(args, env).map_err(SpawnError::StartBlock)?;
     let mut block = alloc::vec![0u8; block_len];
-    process::write_into(&mut block, args, env, canary).map_err(SpawnError::StartBlock)?;
+    process::write_into(&mut block, args, env, canary, cpu_features)
+        .map_err(SpawnError::StartBlock)?;
     let block_pages = (block_len as u64).div_ceil(page);
     let block_flags = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
     map_and_fill(
@@ -531,6 +535,7 @@ mod tests {
             &[b"prog", b"--x"],
             &[b"K=v"],
             0x0123_4567_89AB_CDEF,
+            0,
             frame_source(),
         )
         .expect("build");
@@ -617,6 +622,7 @@ mod tests {
             &[],
             &[],
             7,
+            0,
             frame_source(),
         )
         .expect("build");
@@ -653,6 +659,7 @@ mod tests {
             &[],
             &[],
             0,
+            0,
             frame_source(),
         )
         .unwrap_err();
@@ -686,6 +693,7 @@ mod tests {
             0x20_0001,
             &[],
             &[],
+            0,
             0,
             frame_source(),
         )
@@ -723,6 +731,7 @@ mod tests {
             &[],
             &[],
             0,
+            0,
             frame_source(),
         )
         .unwrap_err();
@@ -756,6 +765,7 @@ mod tests {
             0x20_0000,
             &[],
             &[],
+            0,
             0,
             || None,
         )

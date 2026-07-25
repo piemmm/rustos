@@ -43,6 +43,17 @@ pub(crate) trait SecondaryDispatch: Sync {
     /// The audit sink the arrival record is emitted through.
     fn audit_sink(&self) -> &'static (dyn Sink + Sync);
 
+    /// Fold the calling secondary CPU's own detected CPU-feature set into
+    /// the migration-safe common set delivered to every process
+    /// ([`crate::cpuops`]).
+    ///
+    /// A core can only read its own ID registers, so each secondary
+    /// contributes its own set here (the boot CPU folds its own in
+    /// [`crate::kernel_main`]). A port without the CPU-feature HAL slice
+    /// contributes nothing — the common set stays empty and every process
+    /// uses the portable baseline (fail closed).
+    fn contribute_cpu_features(&self, cpu: CpuId);
+
     /// Record that dense id `cpu` has completed its per-CPU bring-up and
     /// is about to join the dispatch loop.
     ///
@@ -137,6 +148,10 @@ pub fn run_secondary(cpu: CpuId) -> SecondaryExit {
             value: FieldValue::Str(format_usize(cpu as usize, &mut cpu_buf)),
         }],
     );
+    // Fold this core's own detected CPU-feature set into the migration-safe
+    // common set *before* the arrival acknowledgement, so the set only ever
+    // finalises once every core has genuinely contributed.
+    handle.contribute_cpu_features(cpu);
     // Acknowledge arrival *before* entering the (never-returning) dispatch
     // loop, so the boot CPU's bring-up barrier can observe that this core
     // is fully live and release the next secondary / proceed to spawn PID
@@ -170,6 +185,10 @@ mod tests {
         }
         fn audit_sink(&self) -> &'static (dyn Sink + Sync) {
             self.sink
+        }
+        fn contribute_cpu_features(&self, _cpu: CpuId) {
+            // The fake has no arch handle; the real contribution is exercised
+            // by the `kernel/core` cpuops unit tests.
         }
         fn mark_online(&self, cpu: CpuId) {
             self.online.store(cpu, Ordering::SeqCst);

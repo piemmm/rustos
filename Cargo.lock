@@ -770,6 +770,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-crc32c"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-cpuops",
+ "tairix-fuzzseed",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-crt0"
 version = "0.0.0"
 dependencies = [
@@ -1004,6 +1014,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-compress",
+ "tairix-crc32c",
  "tairix-crypto",
  "tairix-fsmeta",
  "tairix-fsprobe",
@@ -1477,6 +1488,8 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-api",
  "tairix-caps",
+ "tairix-cpuops",
+ "tairix-crc32c",
  "tairix-crypto",
  "tairix-fsmeta",
  "tairix-itest-harness",

@@ -112,24 +112,53 @@ fn happy_path_runs_documented_init_order_and_halts() {
         "kernel_main must call halt exactly once"
     );
 
-    // Audit-channel events: BootStarted then BootCompleted, with no
-    // intervening PhaseFailed. Sink routing is documented in
-    // `kernel/core/src/audit.rs`.
+    // Audit-channel events: BootStarted first; BootCompleted present with no
+    // intervening PhaseFailed; and, after control passes to the scheduler and
+    // the CPUs are online, the self-optimising accelerated-routine selection
+    // (`CpuOpsRoutineSelected`) is recorded last. Sink routing is documented
+    // in `kernel/core/src/audit.rs`.
     let audit_ids: Vec<u32> = audit_sink.event_ids();
     assert_eq!(
         audit_ids.first().copied(),
         Some(AuditEvent::BootStarted.id().0),
     );
+    let boot_completed_at = audit_ids
+        .iter()
+        .position(|&id| id == AuditEvent::BootCompleted.id().0)
+        .expect("BootCompleted must be emitted on the audit sink");
     assert_eq!(
         audit_ids.last().copied(),
-        Some(AuditEvent::BootCompleted.id().0),
-        "boot audit trail: {:#?}",
+        Some(AuditEvent::CpuOpsRoutineSelected.id().0),
+        "accelerated-routine selection is the final boot audit record: {:#?}",
         audit_sink.snapshot(),
+    );
+    assert!(
+        boot_completed_at < audit_ids.len() - 1,
+        "CpuOpsRoutineSelected follows BootCompleted",
     );
     assert!(
         !audit_ids.contains(&AuditEvent::PhaseFailed.id().0),
         "happy path must not emit PhaseFailed on the audit sink",
     );
+
+    // The selection record names the family, the chosen implementation, and
+    // the reason. On the host TestArch (no CPU-feature HAL slice) the common
+    // set is empty, so CRC-32C falls closed to the portable baseline.
+    let selection = audit_sink
+        .snapshot()
+        .into_iter()
+        .find(|e| e.id == AuditEvent::CpuOpsRoutineSelected.id())
+        .expect("selection recorded");
+    let field = |key: &str| {
+        selection
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(field("family").as_deref(), Some("crc32c"));
+    assert_eq!(field("chosen").as_deref(), Some("crc32c-portable"));
+    assert_eq!(field("reason").as_deref(), Some("baseline"));
 
     // Log-channel events: every PhaseStarted in the documented order,
     // each followed by exactly one PhaseReady, and no audit-class

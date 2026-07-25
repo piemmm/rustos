@@ -309,10 +309,27 @@ against the portable reference → choose by declared priority or a bounded
 median `BenchHarness` over an injected `CycleCounter` → fail closed to the
 portable baseline), per-core-type `OpsTables`, operator pins (which still
 self-verify), and the typed `Decision`/`DecisionSink` audit seam. Crypto is
-availability-only, never benchmarked. Remaining P2/P3 work: wiring per-core-type
-ops tables in `kernel/core` at bring-up and routing the first consumers (CRC32,
-crypto-backend availability, then the `ByBenchmark` memcpy/blit/checksum
-families).
+availability-only, never benchmarked.
+
+The first P2 consumer has landed: `lib/crc32c` — the one first-party CRC-32C
+(Castagnoli) block-integrity checksum, a portable table baseline plus per-arch
+hardware candidates (aarch64 `crc32c*`, x86_64 SSE4.2 `crc32`; GPR-only, gated
+by a `build.rs`-emitted per-arch cfg the `lib/abi-trap` way so no
+`cfg(target_arch)` leaks, host-fuzzed against the reference), selected once and
+self-verified through `lib/cpuops`, fail-closed to the baseline. It is delivered
+to consumers through the **process's common CPU-feature set**: the kernel folds
+each core's detected `CpuFeatureSet` (via the `KernelArch::cpu_features` HAL
+handle) into the migration-safe intersection (`kernel/core::cpuops`), stamps it
+into every process's startup vector (`ProcessStart::cpu_features`, exposed by
+`lib/rt::cpu_features`), and resolves the in-kernel families against it after
+SMP bring-up (auditing each choice, `AuditEvent::CpuOpsRoutineSelected`). ARXFS
+routes its fast `physical_checksum` through `lib/crc32c` (replacing the former
+FNV-1a; on-disk physical-integrity trailer 8→4 bytes, pre-release format change,
+`docs/src/filesystem/arxfs-spec.md`). Remaining P3/P4 work: the `ByBenchmark`
+consumers (memcpy/page-zero, blit, RFC-1071 checksum, XOR/parity), the
+`lib/crypto` hardware/software backend-availability seam (capability-gated,
+never benchmarked), the per-arch QEMU verticals, and the P0 build-time floor
+raise if a minimum requirement is documented.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

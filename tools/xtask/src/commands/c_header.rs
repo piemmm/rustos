@@ -1321,6 +1321,7 @@ fn generate_process() -> String {
          \x20   uint32_t env_count;\n\
          \x20   uint64_t total_len;\n\
          \x20   uint64_t canary;\n\
+         \x20   uint64_t cpu_features;\n\
          } tairix_process_start_header_t;\n\n",
     );
 
@@ -3999,7 +4000,7 @@ mod tests {
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
             ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 340, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
-            ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 32, align_of::<ProcessStartHeader>(), 8),
+            ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("tairix_sysinfo.h", "} tairix_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),

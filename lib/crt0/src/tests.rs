@@ -39,6 +39,7 @@ fn build_block(args: &[&[u8]], env: &[&[u8]], canary: u64) -> Vec<u8> {
         env_count: u32::try_from(env.len()).expect("envc fits"),
         total_len: u64::try_from(total_len).expect("total fits"),
         canary,
+        cpu_features: 0,
     };
 
     let mut block = Vec::new();

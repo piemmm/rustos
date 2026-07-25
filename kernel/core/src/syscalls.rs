@@ -14008,7 +14008,7 @@ mod tests {
         let env: [&[u8]; 1] = [b"LANG=fr-FR"];
         let block_len = tairix_abi::process_start_encoded_len(&args, &env).expect("sized");
         let mut block = alloc::vec![0u8; block_len];
-        tairix_abi::process_start_write_into(&mut block, &args, &env, 0).expect("encoded");
+        tairix_abi::process_start_write_into(&mut block, &args, &env, 0, 0).expect("encoded");
         let mut payload = SPAWN_PATH.to_vec();
         payload.extend_from_slice(&block);
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
@@ -14125,7 +14125,7 @@ mod tests {
         let env_in: [&[u8]; 1] = [b"LANG=fr-FR"];
         let len = tairix_abi::process_start_encoded_len(&args_in, &env_in).expect("sized");
         let mut block = alloc::vec![0u8; len];
-        tairix_abi::process_start_write_into(&mut block, &args_in, &env_in, 0).expect("encoded");
+        tairix_abi::process_start_write_into(&mut block, &args_in, &env_in, 0, 0).expect("encoded");
         let defaults: [&[u8]; 1] = [b"registry-default"];
         let (args, env) = resolve_spawn_args(Some(&block), Some(&defaults), Some("ps"))
             .expect("a canonical block parses");

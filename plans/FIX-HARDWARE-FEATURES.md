@@ -1,10 +1,18 @@
 # FIX-HARDWARE-FEATURES — Boot-time CPU feature detection and self-optimising routine selection
 
 Status: **in progress** — P0 (build-time floor), P1 (the `cpufeatures`
-/`cpucycles` Arch HAL slices), and the P2 **framework crate** (`lib/cpuops`,
-foundational-complete) done; the P2 **consumer wiring** (per-core-type ops
-tables in `kernel/core`, CRC32 + crypto-availability consumers) and P3/P4
-remain (design fixed below).
+/`cpucycles` Arch HAL slices), the P2 **framework crate** (`lib/cpuops`,
+foundational-complete), and the P2 **first consumer + delivery** done: the
+`lib/crc32c` CRC-32C family (portable baseline + per-arch `crc32c*`/SSE4.2
+candidates, `lib/cpuops`-selected + self-verified + host-fuzzed), the
+migration-safe common-`CpuFeatureSet` delivery (kernel folds each core's set
+into an intersection, stamps it into every `ProcessStart`, exposes it via
+`lib/rt::cpu_features`), the `kernel/core` bring-up resolve+audit
+(`AuditEvent::CpuOpsRoutineSelected`), and the ARXFS `physical_checksum`
+consumer (FNV-1a → CRC-32C, on-disk trailer 8→4). Remaining: the
+crypto-availability consumer (needs the `lib/crypto` backend-selection seam),
+P3 (the `ByBenchmark` memcpy/blit/checksum/XOR families + per-arch QEMU
+verticals), and P4 (matrix + burn-down). Design fixed below.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
