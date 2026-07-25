@@ -217,6 +217,13 @@ mod tests {
                     self.last_unload = Some(handle);
                     encode_unload_reply(reply)
                 }
+                // This double models the driver-catalogue client only; the
+                // config read is a separate freestanding path
+                // (`run.rs::read_store_config`). A config request against
+                // this double carries no file, so it answers the same
+                // fail-closed `NotFound` the real server sends for an absent
+                // file.
+                StoreRequest::ReadConfig { .. } => encode_error_reply(reply, Errno::NotFound),
             }
         }
     }

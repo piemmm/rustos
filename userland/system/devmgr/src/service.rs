@@ -415,6 +415,14 @@ mod tests {
                     self.unloads.borrow_mut().push(handle);
                     encode_unload_reply(reply)
                 }
+                // The reactive-loop tests drive the catalogue/load/unload
+                // path only; a config request against this double carries no
+                // file, so it answers the fail-closed `NotFound` the real
+                // server sends for an absent file (the loop tests use no-op
+                // config sources, so this is never reached in practice).
+                StoreRequest::ReadConfig { .. } => {
+                    tairix_abi::driver_store::encode_error_reply(reply, Errno::NotFound)
+                }
             }
         }
     }

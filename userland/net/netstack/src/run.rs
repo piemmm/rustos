@@ -283,16 +283,29 @@ mod program {
                 continue;
             }
             match token {
-                ENDPOINT_TOKEN => serve_admin(
-                    &mut stack,
-                    &sockets,
-                    &mut channels,
-                    pid,
-                    set,
-                    &mut request,
-                    &mut origin_buf,
-                    &mut reply,
-                ),
+                ENDPOINT_TOKEN => {
+                    serve_admin(
+                        &mut stack,
+                        &sockets,
+                        &mut channels,
+                        pid,
+                        set,
+                        &mut request,
+                        &mut origin_buf,
+                        &mut reply,
+                    );
+                    // An admin mutation (a bind, a per-interface or bond
+                    // configuration) can queue engine output that must reach
+                    // the wire now, not at some unrelated later event: a
+                    // freshly-assigned address's duplicate-address-detection
+                    // probe and multicast-listener report, a bond's presence
+                    // re-announcement. Flush every channel once so that
+                    // output is transmitted immediately — the admin request
+                    // is the event that produced it (event-driven, never a
+                    // poll). A read-only query queues nothing, so this is a
+                    // cheap no-op for it.
+                    pump_all(&mut stack, &mut sockets, &mut channels, &secret, now());
+                }
                 SOCKET_TOKEN => serve_socket(
                     &mut stack,
                     &mut sockets,
@@ -389,7 +402,7 @@ mod program {
         // the request decode. It is a pure state mutation, but decoding it
         // needs the wider frame, so the interception lives in the transport.
         if let Ok(msg) = NetInterfaceConfigMsg::from_bytes(&request[..request_len]) {
-            let result = serve_interface_config(stack, &caller, &msg);
+            let result = serve_interface_config(stack, channels, &caller, &msg);
             let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
             return;
         }
@@ -484,6 +497,7 @@ mod program {
     /// interface untouched and is reported to the caller.
     fn serve_interface_config(
         stack: &mut Netstack,
+        channels: &mut [Option<Channel>],
         caller: &Caller,
         msg: &NetInterfaceConfigMsg,
     ) -> Result<(), Errno> {
@@ -496,7 +510,18 @@ mod program {
             return Err(Errno::PermissionDenied);
         }
         match stack.apply_interface_config(msg, now()) {
-            Ok(()) => {
+            Ok(renamed) => {
+                // A driver channel is bound to an interface by *name*
+                // (`service_interface` looks it up by name each pump). When
+                // the apply renamed the interface to its admin alias, the
+                // bound channel still holds the pre-rename name, so retarget
+                // it here — otherwise the renamed interface can never be
+                // pumped again (no DAD, no RX, no replies): it goes dark.
+                if let Some((old, new)) = renamed {
+                    if let Some(channel) = channels.iter_mut().flatten().find(|c| c.iface == old) {
+                        channel.iface = new;
+                    }
+                }
                 audit(
                     events::INTERFACE_CONFIG_APPLIED,
                     Level::Info,

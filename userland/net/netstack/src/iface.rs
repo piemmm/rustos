@@ -68,6 +68,12 @@ enum BondRole {
 /// ([`Netstack::originate`], the multicast join/leave paths) returns.
 pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<TxFrame>)>;
 
+/// The rename [`Netstack::apply_interface_config`] performed:
+/// `Some((old_name, new_name))` when the matched interface was renamed to
+/// its admin alias, else `None`. The service layer uses it to retarget the
+/// interface's bound driver channel (keyed by name).
+pub type IfaceRename = Option<([u8; IF_NAME_LEN], [u8; IF_NAME_LEN])>;
+
 /// One managed interface: its admin-chosen alias, link kind, and the
 /// per-interface dual-stack protocol engine.
 pub struct Interface {
@@ -262,11 +268,19 @@ impl Netstack {
     /// * [`Errno::NotFound`] — no interface matched the selector.
     /// * [`Errno::AlreadyExists`] — the alias is bound to another
     ///   interface.
+    ///
+    /// On success returns the rename it performed, if any:
+    /// `Some((old_name, new_name))` when the matched interface was renamed
+    /// to its admin alias, else `None`. The caller (the service layer) uses
+    /// it to retarget the interface's bound driver channel, whose stored
+    /// name would otherwise still be the pre-rename one — leaving the
+    /// renamed interface unpumpable (`service_interface` looks an interface
+    /// up by name).
     pub fn apply_interface_config(
         &mut self,
         msg: &NetInterfaceConfigMsg,
         now: Duration64,
-    ) -> Result<(), Errno> {
+    ) -> Result<IfaceRename, Errno> {
         // Validate the whole message up front so the mutation below is
         // atomic: after this every engine call can only fail on a resource
         // limit the fresh config never reaches, so a partial apply is not
@@ -307,14 +321,19 @@ impl Netstack {
         }
         // Rename a MAC-matched interface to its admin-chosen alias, unless
         // the alias is already taken by a *different* interface (fail
-        // closed rather than collide two aliases).
+        // closed rather than collide two aliases). Report the rename so the
+        // caller can retarget the interface's bound driver channel (whose
+        // stored name is the pre-rename one).
+        let mut renamed = None;
         if self.interfaces[index].name != msg.alias {
             if let Some(other) = self.find(msg.alias) {
                 if other != index {
                     return Err(Errno::AlreadyExists);
                 }
             }
+            let old = self.interfaces[index].name;
             self.interfaces[index].name = msg.alias;
+            renamed = Some((old, msg.alias));
         }
         let stack = &mut self.interfaces[index].stack;
         if msg.mtu != 0 {
@@ -355,7 +374,7 @@ impl Netstack {
                 }
             }
         }
-        Ok(())
+        Ok(renamed)
     }
 
     /// Borrow a managed interface by alias.

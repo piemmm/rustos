@@ -46,6 +46,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::Errno;
 use tairix_drvhost::ImageSource;
 use tairix_kernel_core::{enumerate_driver_store, DriverImageError, DriverImageReader, VfsError};
@@ -109,6 +110,49 @@ where
     #[must_use]
     pub fn list_store(&self, audit: &dyn Sink) -> Vec<String> {
         enumerate_driver_store(&mut **self.fs.borrow_mut(), self.store_root, audit)
+    }
+
+    /// Read one whitelisted `/System/Settings/` configuration file off the
+    /// mounted volume, **appending** its bytes to `buf`.
+    ///
+    /// The device manager needs `network.conf` / `system.conf` before the
+    /// encrypted root is unlocked — while the general VFS path is not yet
+    /// mounted — but this always-mounted read-only `/System` service can
+    /// reach them. `settings_root` is the settings tree's path relative to
+    /// the volume's root ([`tairix_kernel_core::SYSTEM_VOLUME_SETTINGS_PATH`]
+    /// on a `/System` volume); the read is confined strictly below it and
+    /// runs under the same bootstrap identity and fail-closed
+    /// [`DriverImageReader`] delegation as a bundle read — no new authority.
+    ///
+    /// The file set is closed ([`SystemConfigFile`]): the ABI path is mapped
+    /// onto this volume's settings root, so only those two files are ever
+    /// reachable and never an arbitrary caller-named path.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when the file is absent (the benign "no
+    /// configuration" case) or the path does not lie under the settings
+    /// tree; otherwise the [`Errno`] the fail-closed read refused with.
+    pub fn read_system_config(
+        &self,
+        settings_root: &str,
+        which: SystemConfigFile,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), Errno> {
+        // Map the ABI's absolute path (`/System/Settings/…`) onto this
+        // volume's own root (`/Settings/…`), so the read is confined below
+        // `settings_root`. A path that is not under `/System/Settings` is
+        // not a settings file — fail closed rather than read elsewhere.
+        let sub = which
+            .path()
+            .strip_prefix("/System/Settings")
+            .ok_or(Errno::NotFound)?;
+        let mut full = String::from(settings_root);
+        full.push_str(sub);
+        let mut fs = self.fs.borrow_mut();
+        self.reader
+            .read_image(&mut **fs, settings_root, &full, buf)
+            .map_err(DriverImageError::to_errno)
     }
 }
 
@@ -233,6 +277,52 @@ mod tests {
         assert_eq!(
             service.read("/System/Security/Users", &mut buf),
             Err(Errno::PermissionDenied)
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn read_system_config_reads_a_whitelisted_settings_file() {
+        // On a whole-root fixture the settings tree is at the absolute
+        // `/System/Settings`; the closed file set maps onto it.
+        let mut fs = MockRootFs::new();
+        fs.add_file(
+            "/System/Settings/Network/network.conf",
+            b"wan.kind ethernet\n",
+        );
+        fs.add_file(
+            "/System/Settings/Configuration/system.conf",
+            b"os.loginType graphical\n",
+        );
+        let service =
+            SystemFileService::open(&mut fs, "/System/Drivers").expect("root mount builds");
+
+        let mut buf = Vec::new();
+        service
+            .read_system_config("/System/Settings", SystemConfigFile::Network, &mut buf)
+            .expect("the network config reads");
+        assert_eq!(buf, b"wan.kind ethernet\n");
+
+        buf.clear();
+        service
+            .read_system_config("/System/Settings", SystemConfigFile::System, &mut buf)
+            .expect("the system config reads");
+        assert_eq!(buf, b"os.loginType graphical\n");
+    }
+
+    #[test]
+    fn read_system_config_of_an_absent_file_is_not_found() {
+        // An unprovisioned system simply has no config file: a benign
+        // fail-closed `NotFound` the device manager reads as "no
+        // configuration", never a fabricated default.
+        let mut fs = MockRootFs::new();
+        let service =
+            SystemFileService::open(&mut fs, "/System/Drivers").expect("root mount builds");
+
+        let mut buf = Vec::new();
+        assert_eq!(
+            service.read_system_config("/System/Settings", SystemConfigFile::Network, &mut buf),
+            Err(Errno::NotFound)
         );
         assert!(buf.is_empty());
     }

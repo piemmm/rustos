@@ -226,6 +226,7 @@ pub fn bind_new_channels(
                     Level::Info,
                     "netchan device channel bound to network stack",
                     &iface,
+                    node_location,
                 );
             }
             Err(_) => {
@@ -235,6 +236,7 @@ pub fn bind_new_channels(
                     Level::Warn,
                     "netchan device-channel bind to network stack failed; will retry",
                     &iface,
+                    node_location,
                 );
             }
         }
@@ -270,13 +272,21 @@ fn iface_name(n: u32) -> [u8; IF_NAME_LEN] {
     name
 }
 
-/// Emit one audit record carrying the interface alias.
+/// Emit one audit record carrying the interface alias and the NIC's stable
+/// bus location.
+///
+/// The `node` field is the register-window base of the driver's matched
+/// hardware-tree node — the value a `network.conf` `<iface>.match.node`
+/// selector names. Recording it beside the alias lets an operator (and the
+/// live-boot verticals) correlate an admin alias to the physical device it
+/// was bound to; `0` means no location was resolvable.
 fn audit(
     sink: &dyn Sink,
     id: EventId,
     level: Level,
     message: &'static str,
     iface: &[u8; IF_NAME_LEN],
+    node_location: u64,
 ) {
     let len = iface.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
     let name = core::str::from_utf8(&iface[..len]).unwrap_or("?");
@@ -286,10 +296,16 @@ fn audit(
             level,
             id,
             message,
-            fields: &[Field {
-                key: "iface",
-                value: FieldValue::Str(name),
-            }],
+            fields: &[
+                Field {
+                    key: "iface",
+                    value: FieldValue::Str(name),
+                },
+                Field {
+                    key: "node",
+                    value: FieldValue::UnsignedInt(node_location),
+                },
+            ],
         },
     );
 }

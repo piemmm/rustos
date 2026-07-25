@@ -13,3 +13,10 @@ workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+# Host-only: the static-addressing vertical's planted `network.conf` is
+# cross-checked against the wire address/location constants through the real
+# parser `devmgr` runs, so the two can never drift (one source of truth). A
+# dev-dependency only — the shared constants themselves stay `no_std`.
+tairix-netconfig = { path = "../../../lib/netconfig" }

@@ -45,7 +45,7 @@ use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::DriverLoader;
 use tairix_drvhost::store::{scan_store, DriverStore};
-use tairix_kernel_core::{CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
+use tairix_kernel_core::{CooperativeYield, SYSTEM_VOLUME_SETTINGS_PATH, SYSTEM_VOLUME_STORE_PATH};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::Sink;
@@ -238,6 +238,7 @@ where
             load_reply(buf, service, ctx, store, bundle_id, node_id, audit)
         }
         Ok(StoreRequest::Unload { handle }) => unload_reply(buf, ctx, handle),
+        Ok(StoreRequest::ReadConfig { which }) => config_reply(buf, service, which),
     };
     result.unwrap_or_else(|err| {
         // The chosen reply did not fit `DRIVER_STORE_MAX_REPLY`; report the
@@ -265,6 +266,34 @@ fn catalogue_reply(buf: &mut [u8], store: &DriverStore) -> Result<usize, Errno> 
         entries.push((bundle_id, driver.bind_keys()));
     }
     driver_store::encode_catalogue_reply(buf, &entries)
+}
+
+/// Read one whitelisted `/System/Settings/` configuration file off the
+/// mounted `/System` volume and frame its bytes.
+///
+/// The device manager reads `network.conf` / `system.conf` here — over the
+/// always-mounted read-only store endpoint — because the general VFS path
+/// is not mounted until the encrypted root unlocks, yet it must configure
+/// interfaces on the same read-only volume the drivers autoload from. The
+/// read is confined strictly below [`SYSTEM_VOLUME_SETTINGS_PATH`] to the
+/// closed [`tairix_abi::driver_store::SystemConfigFile`] set, under the same
+/// bootstrap identity as a bundle read, and adds no authority; an absent
+/// file is a benign in-band
+/// [`Errno::NotFound`] (the device manager reads it as "no configuration"),
+/// never an empty success.
+fn config_reply<F>(
+    buf: &mut [u8],
+    service: &SystemFileService<'_, F>,
+    which: tairix_abi::driver_store::SystemConfigFile,
+) -> Result<usize, Errno>
+where
+    F: FilesystemRead + FilesystemSecurity + ?Sized,
+{
+    let mut bytes = Vec::new();
+    match service.read_system_config(SYSTEM_VOLUME_SETTINGS_PATH, which, &mut bytes) {
+        Ok(()) => driver_store::encode_config_reply(buf, &bytes),
+        Err(err) => driver_store::encode_error_reply(buf, err),
+    }
 }
 
 /// Resolve `bundle_id` and `node_id`, run the signed load gate, spawn the

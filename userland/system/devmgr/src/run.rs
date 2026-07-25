@@ -44,14 +44,17 @@
 // it never builds this module (nor pulls in `tairix-rt`).
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use tairix_abi::driver_store::DRIVER_STORE_ENDPOINT;
+    use tairix_abi::driver_store::{
+        decode_config_reply, StoreRequest, SystemConfigFile, DRIVER_STORE_ENDPOINT,
+        READ_CONFIG_REQUEST_LEN,
+    };
     use tairix_abi::hwtree::HwDeviceClass;
     use tairix_abi::net_ipc::{
         NetBondConfigMsg, NetInterfaceConfigMsg, NetstackRequest, NetworkSettings, IF_NAME_LEN,
         NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
-    use tairix_abi::{Errno, HwNode, HwTreeHeader, OpenFlags};
+    use tairix_abi::{Errno, HwNode, HwTreeHeader};
     use tairix_devmgr::netcfg::{interface_configs_from_config, settings_from_config};
     use tairix_devmgr::{
         events, DriverStoreCall, HwTreeService, InterfaceConfigPlan, NetstackBind,
@@ -271,36 +274,70 @@ mod program {
         }
     }
 
+    /// The ipc_call reply buffer a config read frames into: the reply header
+    /// plus the larger of the two config engines' document ceilings, so
+    /// either whitelisted file fits in one bounded read. A document longer
+    /// than its engine's ceiling could never parse anyway, so the buffer is
+    /// sized to that ceiling, never a scalable capacity.
+    const STORE_CONFIG_REPLY_LEN: usize =
+        8 + if tairix_sysconfig::MAX_CONFIG_LEN > tairix_netconfig::MAX_CONFIG_LEN {
+            tairix_sysconfig::MAX_CONFIG_LEN
+        } else {
+            tairix_netconfig::MAX_CONFIG_LEN
+        };
+
+    /// Read one whitelisted `/System/Settings/` config file over the
+    /// always-mounted read-only `/System` **store** endpoint, copying its
+    /// bytes into `out` and returning their length.
+    ///
+    /// The device manager configures interfaces on the same read-only
+    /// `/System` volume the drivers autoload from, and must do so *before*
+    /// the encrypted root is unlocked — while the general VFS path
+    /// (`fs_open`) is not yet mounted. The store service already owns that
+    /// volume, so the config is read through it (`StoreRequest::ReadConfig`)
+    /// rather than the VFS, over the same `CAP_DRV_LOAD`-gated endpoint the
+    /// catalogue uses; the kernel re-checks the capability, so this adds no
+    /// authority. [`None`] on any failure (an absent file is a benign
+    /// in-band `NotFound`, an oversized or corrupt frame, a transport
+    /// error), so a caller keeps its safe defaults and retries on the next
+    /// generation bump, never guessing (fail closed).
+    fn read_store_config(which: SystemConfigFile, out: &mut [u8]) -> Option<usize> {
+        let mut request = [0u8; READ_CONFIG_REQUEST_LEN];
+        let n = StoreRequest::ReadConfig { which }
+            .encode(&mut request)
+            .ok()?;
+        let mut reply = [0u8; STORE_CONFIG_REPLY_LEN];
+        let len = tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, &request[..n], &mut reply).ok()?;
+        let bytes = decode_config_reply(&reply[..len]).ok()?;
+        if bytes.len() > out.len() {
+            return None;
+        }
+        out[..bytes.len()].copy_from_slice(bytes);
+        Some(bytes.len())
+    }
+
     /// The production [`NetworkConfigSource`] backing: reads the stack-wide
-    /// `net.*` policy from `/System/Settings/Configuration/system.conf` and
+    /// `net.*` policy from `/System/Settings/Configuration/system.conf` over
+    /// the read-only `/System` store endpoint ([`read_store_config`]) and
     /// maps it through the one shared `lib/sysconfig` engine
     /// ([`settings_from_config`]).
     ///
-    /// Reading the world-readable machine-wide store needs `CAP_FS_ACCESS`
-    /// (the bundle requests it); the kernel re-checks it on `fs_open`, so
-    /// this seam adds no authority. It returns [`None`] on any failure — the
-    /// store not yet mounted (before the root unlock), an unreadable or
-    /// oversized document, or one the engine cannot parse — so delivery keeps
-    /// the network stack on its safe defaults and retries on the next
-    /// generation bump, never guessing at a policy (fail closed).
+    /// The read is over the store endpoint (not the VFS) so it works before
+    /// the root unlock, and is `CAP_DRV_LOAD`-gated by the kernel; this seam
+    /// adds no authority. It returns [`None`] on any failure — the store not
+    /// yet reachable, an absent (`NotFound`), unreadable, or oversized
+    /// document, or one the engine cannot parse — so delivery keeps the
+    /// network stack on its safe defaults and retries on the next generation
+    /// bump, never guessing at a policy (fail closed).
     struct RtNetworkConfig;
 
     impl NetworkConfigSource for RtNetworkConfig {
         fn load(&mut self) -> Option<NetworkSettings> {
-            let fd = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
-            if fd < 0 {
-                return None;
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            // `fd >= 0` checked above; descriptors are small kernel indices.
-            let fd = fd as u32;
             // One bounded read suffices: the engine refuses any document
             // longer than its own ceiling, so a store that does not fit this
             // buffer could never parse anyway.
             let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
-            let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
-            let _ = tairix_rt::fs_close(fd);
-            let len = outcome.ok()?;
+            let len = read_store_config(SystemConfigFile::System, &mut buf)?;
             let text = core::str::from_utf8(&buf[..len]).ok()?;
             let config = tairix_sysconfig::SystemConfig::parse(text).ok()?;
             Some(settings_from_config(&config))
@@ -309,32 +346,26 @@ mod program {
 
     /// The production [`NetworkInterfaceConfigSource`] backing: reads the
     /// per-interface configuration from
-    /// `/System/Settings/Network/network.conf` and maps it through the one
+    /// `/System/Settings/Network/network.conf` over the read-only `/System`
+    /// store endpoint ([`read_store_config`]) and maps it through the one
     /// shared `lib/netconfig` engine
     /// ([`interface_configs_from_config`](tairix_devmgr::netcfg::interface_configs_from_config)).
     ///
-    /// Reading the machine-wide store needs `CAP_FS_ACCESS` (the bundle
-    /// requests it); the kernel re-checks it on `fs_open`, so this seam adds
-    /// no authority. It returns [`None`] on any failure — the store not yet
-    /// mounted (before the root unlock), an unreadable or oversized document,
-    /// or one the engine cannot parse or validate — so delivery leaves the
-    /// interfaces unconfigured and retries on the next generation bump, never
-    /// guessing at a partial configuration (fail closed).
+    /// The read is over the store endpoint (not the VFS) so it works before
+    /// the root unlock — the device manager binds interfaces on the same
+    /// read-only volume the drivers autoload from — and is `CAP_DRV_LOAD`-
+    /// gated by the kernel; this seam adds no authority. It returns [`None`]
+    /// on any failure — the store not yet reachable, an absent (`NotFound`),
+    /// unreadable, or oversized document, or one the engine cannot parse or
+    /// validate — so delivery leaves the interfaces unconfigured and retries
+    /// on the next generation bump, never guessing at a partial configuration
+    /// (fail closed).
     struct RtNetworkInterfaceConfig;
 
     impl NetworkInterfaceConfigSource for RtNetworkInterfaceConfig {
         fn load(&mut self) -> Option<InterfaceConfigPlan> {
-            let fd = tairix_rt::fs_open(tairix_netconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
-            if fd < 0 {
-                return None;
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            // `fd >= 0` checked above; descriptors are small kernel indices.
-            let fd = fd as u32;
             let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
-            let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
-            let _ = tairix_rt::fs_close(fd);
-            let len = outcome.ok()?;
+            let len = read_store_config(SystemConfigFile::Network, &mut buf)?;
             let text = core::str::from_utf8(&buf[..len]).ok()?;
             // `parse` validates the whole document (including the bond and
             // static-addressing invariants), so a semantically inconsistent

@@ -81,6 +81,18 @@ pub const DRIVER_STORE_PATH: &str = "/System/Drivers";
 /// when it scans the pre-unlock `/System` volume.
 pub const SYSTEM_VOLUME_STORE_PATH: &str = "/Drivers";
 
+/// Path of the machine-wide settings tree **relative to the root of a
+/// dedicated read-only `/System` volume** (design B, `plans/PI.md`).
+///
+/// On the design-B layout `/System` is its own volume, so the
+/// `/System/Settings/` tree sits at the volume-relative `/Settings`. The
+/// read-only `/System` store service confines its config reads (the device
+/// manager's pre-unlock `network.conf` / `system.conf` reads, served over
+/// the store endpoint because the general VFS is not mounted until unlock)
+/// strictly below this root — the settings analogue of
+/// [`SYSTEM_VOLUME_STORE_PATH`].
+pub const SYSTEM_VOLUME_SETTINGS_PATH: &str = "/Settings";
+
 /// Maximum directory depth the walk descends *below* [`DRIVER_STORE_PATH`].
 ///
 /// The store tree is `<class>[/<vendor>]/<driver>`, at most a

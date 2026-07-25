@@ -241,6 +241,45 @@ pub fn tcpserve_store_files(
     )
 }
 
+/// The composed store files the static-addressing vertical's disk plants:
+/// the shared [`app_store_files`] set (so the `netstack`/`devmgr` service
+/// bundles are on disk exactly as a real image ships them) **plus** the
+/// planted `/System/Settings/Network/network.conf`
+/// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF`]) that binds the NIC
+/// by `match.node` and assigns it a static IPv6 address (`plans/NETWORK.md`
+/// N9b-3-2-β-2-ii-b). No test-only *bundle* is added — the config file is
+/// the only extra — so this is not a [`fixture_store_files`] consumer;
+/// memoised per arch like the shared set.
+///
+/// # Errors
+///
+/// As [`app_store_files`].
+pub fn static_net_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| {
+            let mut files = app_store_files(ctx, arch)?.to_vec();
+            files.push(AppStoreFile {
+                components: vec![
+                    b"Settings".to_vec(),
+                    b"Network".to_vec(),
+                    b"network.conf".to_vec(),
+                ],
+                bytes: tairix_test_netstack_wire::STATIC_NETWORK_CONF
+                    .as_bytes()
+                    .to_vec(),
+            });
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// Run `body` over the borrowed `(components, bytes)` view of `files` —
 /// the planting shape `tools/mkimage` and the QEMU fixture accept. The
 /// borrow gymnastics live here once instead of at every call site.

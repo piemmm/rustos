@@ -54,6 +54,64 @@ const OP_CATALOGUE: u8 = 1;
 const OP_LOAD: u8 = 2;
 /// Request opcode: unload the driver instance named by `handle`.
 const OP_UNLOAD: u8 = 3;
+/// Request opcode: read one whitelisted `/System/Settings/` configuration
+/// file (a [`SystemConfigFile`]) off the read-only `/System` volume.
+const OP_READ_CONFIG: u8 = 4;
+
+/// Encoded length of a [`StoreRequest::ReadConfig`]: opcode + `which` (u8).
+pub const READ_CONFIG_REQUEST_LEN: usize = 1 + 1;
+
+/// One of the closed set of `/System/Settings/` configuration files the
+/// read-only `/System` store service will read on the device manager's
+/// behalf.
+///
+/// The device manager needs these *before the encrypted root is unlocked*,
+/// so it cannot reach them through the general VFS (which is not mounted
+/// until unlock); the store service already owns the `/System` volume and
+/// serves them from there. The set is **closed and whitelisted** — the
+/// service reads exactly these two files and nothing else, so the endpoint
+/// never becomes a general `/System` file-read primitive (fail closed, no
+/// arbitrary path).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SystemConfigFile {
+    /// `/System/Settings/Configuration/system.conf` — the machine-wide
+    /// system configuration (the stack-wide `net.*` policy the device
+    /// manager delivers to the network stack).
+    System = 0,
+    /// `/System/Settings/Network/network.conf` — the per-interface network
+    /// configuration (`match.*` binding, static addressing, bonds).
+    Network = 1,
+}
+
+impl SystemConfigFile {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire discriminant, or `None` for an unknown value
+    /// (fail closed — an unrecognised file is never guessed).
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::System),
+            1 => Some(Self::Network),
+            _ => None,
+        }
+    }
+
+    /// The file's canonical absolute path (the single source both the
+    /// service and any VFS consumer agree on).
+    #[must_use]
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::System => "/System/Settings/Configuration/system.conf",
+            Self::Network => "/System/Settings/Network/network.conf",
+        }
+    }
+}
 
 /// Encoded length of a [`StoreRequest::Load`]: opcode + `bundle_id` (u32) +
 /// `node_id` (u32).
@@ -67,10 +125,17 @@ pub const UNLOAD_REQUEST_LEN: usize = 1 + 8;
 /// [`StoreRequest::Load`] is [`LOAD_REQUEST_LEN`]; a [`StoreRequest::Unload`]
 /// is [`UNLOAD_REQUEST_LEN`]). Derived from the protocol bounds so the
 /// server's request cap can never drift from what a valid request encodes.
-pub const MAX_REQUEST_LEN: usize = if LOAD_REQUEST_LEN > UNLOAD_REQUEST_LEN {
-    LOAD_REQUEST_LEN
-} else {
-    UNLOAD_REQUEST_LEN
+pub const MAX_REQUEST_LEN: usize = {
+    let a = if LOAD_REQUEST_LEN > UNLOAD_REQUEST_LEN {
+        LOAD_REQUEST_LEN
+    } else {
+        UNLOAD_REQUEST_LEN
+    };
+    if a > READ_CONFIG_REQUEST_LEN {
+        a
+    } else {
+        READ_CONFIG_REQUEST_LEN
+    }
 };
 
 // The endpoint sizes its request cap from `MAX_REQUEST_LEN`; statically prove
@@ -78,6 +143,7 @@ pub const MAX_REQUEST_LEN: usize = if LOAD_REQUEST_LEN > UNLOAD_REQUEST_LEN {
 // request a client legitimately encodes.
 const _: () = assert!(MAX_REQUEST_LEN >= LOAD_REQUEST_LEN);
 const _: () = assert!(MAX_REQUEST_LEN >= UNLOAD_REQUEST_LEN);
+const _: () = assert!(MAX_REQUEST_LEN >= READ_CONFIG_REQUEST_LEN);
 
 /// A request posted to the driver-store endpoint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -110,6 +176,21 @@ pub enum StoreRequest {
         /// The driver instance to tear down — the value a prior
         /// [`StoreRequest::Load`] reply carried ([`decode_load_reply`]).
         handle: u64,
+    },
+    /// Read one whitelisted `/System/Settings/` configuration file off the
+    /// read-only `/System` volume the store service owns.
+    ///
+    /// The device manager needs the network configuration before the
+    /// encrypted root is unlocked (so it can bring interfaces up on the
+    /// same read-only volume the drivers autoload from), but the general
+    /// VFS path is not mounted until unlock. The store service already
+    /// holds the `/System` volume, so it reads the file and returns its
+    /// bytes. The reply is capability-gated exactly as every other request
+    /// (`CAP_DRV_LOAD`); the file set is closed ([`SystemConfigFile`]), so
+    /// this never becomes a general file-read primitive.
+    ReadConfig {
+        /// Which whitelisted configuration file to read.
+        which: SystemConfigFile,
     },
 }
 
@@ -145,6 +226,14 @@ impl StoreRequest {
                 put_u64(buf, 1, handle);
                 Ok(UNLOAD_REQUEST_LEN)
             }
+            StoreRequest::ReadConfig { which } => {
+                if buf.len() < READ_CONFIG_REQUEST_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                buf[0] = OP_READ_CONFIG;
+                buf[1] = which.as_u8();
+                Ok(READ_CONFIG_REQUEST_LEN)
+            }
         }
     }
 
@@ -177,6 +266,13 @@ impl StoreRequest {
                 Ok(StoreRequest::Unload {
                     handle: read_u64(bytes, 1),
                 })
+            }
+            OP_READ_CONFIG => {
+                if bytes.len() < READ_CONFIG_REQUEST_LEN {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                let which = SystemConfigFile::from_u8(bytes[1]).ok_or(Errno::OutOfRange)?;
+                Ok(StoreRequest::ReadConfig { which })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -447,6 +543,64 @@ pub fn decode_unload_reply(reply: &[u8]) -> Result<(), Errno> {
     reply_status(reply)
 }
 
+/// Reply prefix of a successful [`StoreRequest::ReadConfig`]: the status
+/// word plus a `u32` byte count, before the config file's raw bytes.
+const CONFIG_REPLY_HEADER_LEN: usize = REPLY_STATUS_LEN + 4;
+
+/// Encode a successful [`StoreRequest::ReadConfig`] reply carrying the
+/// config file's `bytes`, returning the number of bytes written. The frame
+/// is `status(0) || len || bytes`.
+///
+/// A read that found no such file is *not* framed here — the server sends an
+/// [`encode_error_reply`] with [`Errno::NotFound`] instead, so an absent
+/// config reads as a benign "no configuration" (fail closed), never an empty
+/// success the caller might mistake for a valid empty store.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] if `buf` cannot hold the framed reply — the
+///   config is never truncated; the caller grows its buffer.
+/// * [`Errno::LengthOutOfRange`] if `bytes` is longer than `u32`.
+pub fn encode_config_reply(buf: &mut [u8], bytes: &[u8]) -> Result<usize, Errno> {
+    let total = CONFIG_REPLY_HEADER_LEN
+        .checked_add(bytes.len())
+        .ok_or(Errno::LengthOutOfRange)?;
+    if buf.len() < total {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_i32(buf, 0, 0);
+    put_u32(
+        buf,
+        REPLY_STATUS_LEN,
+        u32::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?,
+    );
+    buf[CONFIG_REPLY_HEADER_LEN..total].copy_from_slice(bytes);
+    Ok(total)
+}
+
+/// Recover the config bytes a successful [`StoreRequest::ReadConfig`] reply
+/// carries, borrowing them from `reply`.
+///
+/// # Errors
+///
+/// The carried [`Errno`] for an error frame (notably [`Errno::NotFound`]
+/// when the file is absent), or [`Errno::BadMagic`] if a success frame is
+/// truncated or its length runs past the frame (fail closed).
+pub fn decode_config_reply(reply: &[u8]) -> Result<&[u8], Errno> {
+    reply_status(reply)?;
+    if reply.len() < CONFIG_REPLY_HEADER_LEN {
+        return Err(Errno::BadMagic);
+    }
+    let len = usize::try_from(read_u32(reply, REPLY_STATUS_LEN)).map_err(|_| Errno::BadMagic)?;
+    let end = CONFIG_REPLY_HEADER_LEN
+        .checked_add(len)
+        .ok_or(Errno::BadMagic)?;
+    if reply.len() < end {
+        return Err(Errno::BadMagic);
+    }
+    Ok(&reply[CONFIG_REPLY_HEADER_LEN..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +787,99 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = encode_error_reply(&mut buf, Errno::NotFound).expect("encodes");
         assert_eq!(decode_unload_reply(&buf[..n]), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn read_config_request_round_trips_each_file() {
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            let req = StoreRequest::ReadConfig { which };
+            let mut buf = [0u8; READ_CONFIG_REQUEST_LEN];
+            let n = req.encode(&mut buf).expect("encodes");
+            assert_eq!(n, READ_CONFIG_REQUEST_LEN);
+            assert_eq!(StoreRequest::decode(&buf[..n]), Ok(req));
+        }
+    }
+
+    #[test]
+    fn read_config_request_rejects_unknown_file_and_truncation() {
+        // An unknown `which` discriminant is refused, never guessed.
+        assert_eq!(
+            StoreRequest::decode(&[OP_READ_CONFIG, 0xFF]),
+            Err(Errno::OutOfRange)
+        );
+        // A `ReadConfig` opcode with no `which` byte is rejected.
+        assert_eq!(
+            StoreRequest::decode(&[OP_READ_CONFIG]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut empty: [u8; 0] = [];
+        assert_eq!(
+            StoreRequest::ReadConfig {
+                which: SystemConfigFile::Network
+            }
+            .encode(&mut empty),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn system_config_file_discriminants_and_paths_are_stable() {
+        assert_eq!(SystemConfigFile::System.as_u8(), 0);
+        assert_eq!(SystemConfigFile::Network.as_u8(), 1);
+        assert_eq!(SystemConfigFile::from_u8(0), Some(SystemConfigFile::System));
+        assert_eq!(
+            SystemConfigFile::from_u8(1),
+            Some(SystemConfigFile::Network)
+        );
+        assert_eq!(SystemConfigFile::from_u8(2), None);
+        assert_eq!(
+            SystemConfigFile::System.path(),
+            "/System/Settings/Configuration/system.conf"
+        );
+        assert_eq!(
+            SystemConfigFile::Network.path(),
+            "/System/Settings/Network/network.conf"
+        );
+    }
+
+    #[test]
+    fn config_reply_round_trips_bytes() {
+        let payload = b"wan.kind ethernet\nwan.ipv6.method static\n";
+        let mut buf = [0u8; 128];
+        let n = encode_config_reply(&mut buf, payload).expect("encodes");
+        assert_eq!(decode_config_reply(&buf[..n]), Ok(&payload[..]));
+    }
+
+    #[test]
+    fn empty_config_reply_round_trips() {
+        // A zero-length (but present, empty) config file is a valid success
+        // frame distinct from the `NotFound` error frame.
+        let mut buf = [0u8; 16];
+        let n = encode_config_reply(&mut buf, &[]).expect("encodes");
+        assert_eq!(decode_config_reply(&buf[..n]), Ok(&[][..]));
+    }
+
+    #[test]
+    fn config_reply_surfaces_not_found_fail_closed() {
+        // An absent config is an in-band `NotFound`, never an empty success.
+        let mut buf = [0u8; 16];
+        let n = encode_error_reply(&mut buf, Errno::NotFound).expect("encodes");
+        assert_eq!(decode_config_reply(&buf[..n]), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn config_reply_fails_closed_on_small_buffer_and_truncation() {
+        // The config is never truncated into a too-small buffer.
+        let mut small = [0u8; CONFIG_REPLY_HEADER_LEN + 2];
+        assert_eq!(
+            encode_config_reply(&mut small, b"four"),
+            Err(Errno::BufferTooSmall)
+        );
+        // A success frame whose declared length runs past the frame is
+        // rejected rather than read out of bounds.
+        let mut buf = [0u8; CONFIG_REPLY_HEADER_LEN + 2];
+        put_i32(&mut buf, 0, 0);
+        put_u32(&mut buf, REPLY_STATUS_LEN, 100);
+        assert_eq!(decode_config_reply(&buf), Err(Errno::BadMagic));
     }
 }

@@ -165,6 +165,17 @@ enum NetPeerMode {
     /// requires at least one served request (so the guest must actually have
     /// reached it).
     V6PingResponder,
+    /// A **static-addressing** ICMP-campaign peer (the N9b-3-2-β-2-ii-b
+    /// `match.node` vertical): the peer takes its own static address in the
+    /// shared on-link `/64` ([`tairix_test_netstack_wire::PEER_STATIC_V6`])
+    /// and campaigns over the guest's **static** address
+    /// ([`tairix_test_netstack_wire::GUEST_STATIC_V6`]) — the address the
+    /// guest holds only if its planted `network.conf` bound the NIC by
+    /// `match.node` and assigned the static address. Unlike
+    /// [`Self::V6LinkLocal`] the peer never pings the EUI-64 link-local, so a
+    /// `match.node` mis-bind (the static address never assigned) leaves the
+    /// campaign incomplete and fails the run loud.
+    V6StaticEcho,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -239,6 +250,22 @@ enum FsDisk {
     /// responder over the live two-process network. The console stays the
     /// UART text console the serial script drives (no display/input driver).
     PingRootDisk,
+    /// The net-only-driver encrypted-root layout carrying the **standard**
+    /// signed application store (the `netstack`/`devmgr` service bundles, no
+    /// test-only fixture) **plus** a planted
+    /// `/System/Settings/Network/network.conf`
+    /// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF`]) — the
+    /// static-addressing (`match.node`) vertical's backing
+    /// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b). `devmgr` autoloads the NIC
+    /// driver into its own process, reads the planted config from the
+    /// read-only `/System` volume, and binds the NIC to the `wan` alias by
+    /// its stable bus location, assigning it the config's static IPv6
+    /// address — all pre-unlock, so the guest needs no console dialogue. The
+    /// host peer addresses the guest's *static* address, so a `match.node`
+    /// mis-bind fails the run loud rather than falling back to the link-local
+    /// the guest always forms. The console stays the UART text console (no
+    /// display/input driver).
+    StaticNetRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -4024,6 +4051,50 @@ const TESTS: &[QemuTest] = &[
             (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the static-addressing
+    // (`match.node`) live-boot vertical.
+    // `tairix-test-netstack-static-qemu-aarch64` boots the *production*
+    // aarch64 pipeline with the `static-net-root` disk: the net-only signed
+    // driver set **plus** a planted `/System/Settings/Network/network.conf`
+    // that binds the NIC to the `wan` alias by its stable bus location
+    // (`<iface>.match.node` = the QEMU-virt virtio-net register base) and
+    // assigns it a static IPv6 address (`FsDisk::StaticNetRootDisk`), with a
+    // `virtio-net-device` attached and the harness-side static-addressing
+    // peer on its `dgram` netdev (`NetPeerMode::V6StaticEcho`). Everything
+    // runs **before** any root unlock — the `/System` store and its
+    // `Settings/` config are on the read-only volume mounted before the
+    // passphrase — so the guest needs no console dialogue (headless, no
+    // serial script), exactly like the riscv64 autoload sibling. `devmgr`
+    // autoloads the virtio-net driver into its own process (it publishes a
+    // `netchan` node), reads the planted config, and binds the NIC to `wan`
+    // by its resolved bus location; `netstack` assigns the config's static
+    // IPv6 address and answers the peer's campaign to that static address.
+    // PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`,
+    // `netstack`'s `INTERFACE_CONFIG_APPLIED`, and `netstack`'s
+    // `INBOUND_ECHO_SERVED` — the last gating exit so the guest stays alive
+    // until a frame addressed to its *static* address has been answered; the
+    // peer's own campaign verdict (a reply at the static address, never the
+    // link-local the guest also forms) is required too, so neither side can
+    // pass alone and a `match.node` mis-bind cannot pass. A 240-second budget
+    // covers boot + autoload + service bring-up + the bind + the config apply
+    // + the paced static-address echo campaign on QEMU TCG; single CPU like
+    // the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-static-qemu-aarch64",
+        binary: "tairix-test-netstack-static-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6StaticEcho,
+        ramfb: false,
+        fs_disk: FsDisk::StaticNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
     // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
@@ -5308,6 +5379,9 @@ pub(crate) struct StoreSet {
     /// virtio-net driver alone (no display/input driver, to keep the UART
     /// console the serial script drives).
     net_only_drivers: &'static [AppStoreFile],
+    /// The application/service bundles the static-addressing vertical plants:
+    /// the shared set plus the planted `network.conf` (no test-only bundle).
+    static_net_apps: &'static [AppStoreFile],
 }
 
 /// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
@@ -5350,9 +5424,14 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         _ => EMPTY,
     };
     let net_only_drivers = match t.fs_disk {
-        FsDisk::StreamRootDisk | FsDisk::ListenRootDisk | FsDisk::PingRootDisk => {
-            super::image_drivers::net_driver_store_files(ctx, arch)?
-        }
+        FsDisk::StreamRootDisk
+        | FsDisk::ListenRootDisk
+        | FsDisk::PingRootDisk
+        | FsDisk::StaticNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    let static_net_apps = match t.fs_disk {
+        FsDisk::StaticNetRootDisk => super::image_apps::static_net_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     Ok(StoreSet {
@@ -5362,6 +5441,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_tcpecho,
         apps_with_tcpserve,
         net_only_drivers,
+        static_net_apps,
     })
 }
 
@@ -5406,15 +5486,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // Attach the shared filesystem volume as the backing image, when the
     // enrolment names one. Only the non-zero sectors are planted; the
     // planter zero-fills the rest, matching a freshly-formatted volume.
-    if let Some(fs) = fs_disk_image(
-        t,
-        stores.apps,
-        stores.apps_with_memsoak,
-        stores.autoload_drivers,
-        stores.apps_with_tcpecho,
-        stores.apps_with_tcpserve,
-        stores.net_only_drivers,
-    )? {
+    if let Some(fs) = fs_disk_image(t, stores)? {
         let image = kernel.with_extension(fs.extension);
         let sector_bytes = tairix_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs
@@ -6348,15 +6420,19 @@ fn image_total_sectors(bytes: &[u8]) -> u64 {
 /// the planted on-disk layout and the guest's expectations cannot drift:
 /// the FAT32 fixture is hand-built; the arxfs fixture is authored by the
 /// real arxfs driver itself (format + plant).
-fn fs_disk_image(
-    t: &QemuTest,
-    apps: &[super::image_apps::AppStoreFile],
-    apps_with_memsoak: &[super::image_apps::AppStoreFile],
-    autoload_drivers: &[super::image_apps::AppStoreFile],
-    apps_with_tcpecho: &[super::image_apps::AppStoreFile],
-    apps_with_tcpserve: &[super::image_apps::AppStoreFile],
-    net_only_drivers: &[super::image_apps::AppStoreFile],
-) -> Result<Option<FsImage>, String> {
+fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, String> {
+    // The per-vertical store sets, resolved for this target arch. Destructured
+    // once so each arm names the set it plants directly (the bundle
+    // composition already happened in `stores_for`).
+    let StoreSet {
+        apps,
+        apps_with_memsoak,
+        autoload_drivers,
+        apps_with_tcpecho,
+        apps_with_tcpserve,
+        net_only_drivers,
+        static_net_apps,
+    } = stores;
     Ok(match t.fs_disk {
         FsDisk::None => None,
         FsDisk::Fat32 => Some(FsImage {
@@ -6386,36 +6462,17 @@ fn fs_disk_image(
                 total_sectors,
             })
         }
-        FsDisk::AutoloadRootDisk => {
-            // The whole-disk encrypted-root image with the autoload driver
-            // bundles planted in its read-only `/System/Drivers/` store
-            // alongside the app/service bundles. The driver bundles are the
-            // ones the `image_drivers` pipeline cross-compiled and signed
-            // (`autoload_driver_store_files`), each paired with its store
-            // path; the generic encrypted-root fixture plants both stores
-            // (`AGENTS.md` §2.2 — one whole-disk author, no per-fixture copy).
-            let bytes = super::image_apps::with_plant_refs(autoload_drivers, |driver_files| {
-                super::image_apps::with_plant_refs(apps, |app_files| {
-                    tairix_test_encrypted_root_image::build_image_with_contents(
-                        driver_files,
-                        app_files,
-                        tairix_test_encrypted_root_image::PASSPHRASE,
-                    )
-                })
-            })
-            .map_err(|e| {
-                format!(
-                    "test --qemu ({}): build autoload-root image: {e:?}",
-                    t.package
-                )
-            })?;
-            let total_sectors = image_total_sectors(&bytes);
-            Some(FsImage {
-                extension: "autoload-root.img",
-                bytes,
-                total_sectors,
-            })
-        }
+        // The whole-disk encrypted-root image with the autoload driver
+        // bundles planted in its read-only `/System/Drivers/` store alongside
+        // the app/service bundles — one whole-disk author, no per-fixture copy
+        // (`AGENTS.md` §2.2).
+        FsDisk::AutoloadRootDisk => Some(net_root_image(
+            t,
+            autoload_drivers,
+            apps,
+            "autoload-root.img",
+            "autoload-root",
+        )?),
         // The encrypted-root layout with the memsoak-augmented bundle set:
         // the same builder, planting the same store plus the one test-only
         // fixture bundle.
@@ -6455,15 +6512,28 @@ fn fs_disk_image(
             "ping-root.img",
             "ping-root",
         )?),
+        // The static-addressing (`match.node`) vertical: the same net-only
+        // driver set and whole-disk author, planting the standard app store
+        // **plus** the `network.conf` (carried in `static_net_apps`) — one
+        // builder, no copy.
+        FsDisk::StaticNetRootDisk => Some(net_root_image(
+            t,
+            net_only_drivers,
+            static_net_apps,
+            "static-net-root.img",
+            "static-net-root",
+        )?),
     })
 }
 
-/// Build the whole-disk encrypted-root image a two-process TCP vertical
-/// plants: the shared net-only driver set in `/System/Drivers/` plus the
-/// vertical's own app set (the `tcpecho` client or the `tcpserve` server).
-/// The one builder both TCP verticals use, never a per-vertical copy;
-/// `extension` names the
-/// backing file and `label` names the vertical in a build error.
+/// Build a whole-disk encrypted-root image planting a driver set in
+/// `/System/Drivers/` plus an app/service set — the one builder every
+/// driver-store vertical (autoload, the two TCP verticals, `ping`, the
+/// static-addressing vertical) shares, never a per-vertical copy (`AGENTS.md`
+/// §2.2). `drivers` is the vertical's signed driver set and `apps` its
+/// app/service set (which may additionally carry a planted `network.conf`);
+/// `extension` names the backing file and `label` names the vertical in a
+/// build error.
 fn net_root_image(
     t: &QemuTest,
     drivers: &[super::image_apps::AppStoreFile],
@@ -6489,6 +6559,30 @@ fn net_root_image(
     })
 }
 
+/// Spawn the harness-side `netpeer` link peer for `mode` on the bound
+/// `peer_sock`, ready before QEMU launches so no early guest frame is lost.
+/// The one place each [`NetPeerMode`] maps to its peer role, kept out of
+/// [`finish_run`] so that function stays within the line budget.
+fn spawn_net_peer(
+    mode: NetPeerMode,
+    qemu_sock: &Path,
+    peer_sock: &Path,
+) -> Result<super::netpeer::NetPeer, String> {
+    match mode {
+        // Filtered out before this call; a peer is only spawned when attached.
+        NetPeerMode::None => unreachable!("peer mode None is filtered above"),
+        NetPeerMode::V6LinkLocal => super::netpeer::NetPeer::spawn(qemu_sock, peer_sock),
+        NetPeerMode::V6TcpEcho => super::netpeer::NetPeer::spawn_tcp_echo(qemu_sock, peer_sock),
+        NetPeerMode::V6TcpConnect => {
+            super::netpeer::NetPeer::spawn_tcp_connect(qemu_sock, peer_sock)
+        }
+        NetPeerMode::V6PingResponder => {
+            super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
+        }
+        NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
+    }
+}
+
 /// Attach `t`'s remaining devices (network capture, display, input, the
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
@@ -6507,20 +6601,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
         let sock_base = std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
         let qemu_sock = sock_base.with_extension("qemu.sock");
         let peer_sock = sock_base.with_extension("peer.sock");
-        let started = match t.netstack_peer {
-            // Handled by the guard above; unreachable here.
-            NetPeerMode::None => unreachable!("peer mode None is filtered above"),
-            NetPeerMode::V6LinkLocal => super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock),
-            NetPeerMode::V6TcpEcho => {
-                super::netpeer::NetPeer::spawn_tcp_echo(&qemu_sock, &peer_sock)
-            }
-            NetPeerMode::V6TcpConnect => {
-                super::netpeer::NetPeer::spawn_tcp_connect(&qemu_sock, &peer_sock)
-            }
-            NetPeerMode::V6PingResponder => {
-                super::netpeer::NetPeer::spawn_ping_responder(&qemu_sock, &peer_sock)
-            }
-        };
+        let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock);
         peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
         // The guest derives its link-local from the device MAC, so the MAC
         // is pinned to the wire constant both sides agree on.

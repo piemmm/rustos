@@ -2490,6 +2490,41 @@ fn interface_config_assigns_a_static_ipv6_address() {
 }
 
 #[test]
+fn interface_config_reports_the_rename_it_performs() {
+    // A driver channel is bound to an interface by name, so the service
+    // layer must learn of a rename to retarget it — otherwise the renamed
+    // interface can never be pumped again. The engine reports the rename;
+    // this is the regression guard for that contract.
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("net0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Disabled,
+        mtu: 0,
+    };
+    // The first apply renames the MAC-matched `net0` to its admin alias.
+    let renamed = stack.apply_interface_config(&msg, t(2)).expect("applied");
+    assert_eq!(renamed, Some((name("net0"), name("wan"))));
+    // Re-applying the same config (the interface already bears `wan`) is a
+    // no-op rename, so the service layer retargets nothing.
+    let again = stack.apply_interface_config(&msg, t(3)).expect("applied");
+    assert_eq!(again, None);
+}
+
+#[test]
 fn interface_config_disables_both_families() {
     let mut stack = managed_stack();
     // Start with a v4 assignment so disabling actually removes something.

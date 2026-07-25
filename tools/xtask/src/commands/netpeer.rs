@@ -103,6 +103,17 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_tcp_connect_peer)
     }
 
+    /// Bind `peer_sock` and start the **static-addressing** ICMP-campaign
+    /// peer thread (the N9b-3-2-β-2-ii-b `match.node` vertical): the peer
+    /// takes its own static address in the shared on-link `/64` and pings the
+    /// guest's *static* address (the one the guest holds only if its planted
+    /// `network.conf` bound the NIC by `match.node` and assigned it). Its
+    /// verdict ([`Self::stop_and_join`]) is `Ok` only once the guest replied
+    /// at that static address, so a mis-bind cannot pass.
+    pub fn spawn_static(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_static_peer)
+    }
+
     /// Shared socket bring-up + thread spawn for both peer roles: remove any
     /// stale socket files, bind the peer's datagram socket, and run `body`
     /// on a host thread until [`Self::stop_and_join`] signals it. Factored so
@@ -147,10 +158,54 @@ impl NetPeer {
     }
 }
 
-/// The peer's event loop: serve the guest reactively, campaign
-/// proactively, and report whether the campaign's required replies
-/// arrived.
+/// The peer's event loop for the link-local ICMP campaign (the two-process
+/// autoload vertical): serve the guest reactively, campaign proactively, and
+/// report whether the campaign's required replies arrived.
+///
+/// The guest has no admin-assigned IPv4 and forms its link-local from the
+/// *device* MAC (`GUEST_MAC`, modified EUI-64): the peer pings only that
+/// link-local (from its own `PEER_IID` link-local — no extra static address)
+/// and requires only its reply.
 fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Result<(), String> {
+    let guest_v6 = wire::link_local(eui64_interface_id(wire::GUEST_MAC));
+    run_v6_campaign(socket, qemu_sock, stop, None, guest_v6)
+}
+
+/// The peer's event loop for the **static-addressing** vertical
+/// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b): give the peer its own static
+/// address in the shared on-link `/64` ([`wire::PEER_STATIC_V6`]) and ping
+/// the guest's **static** address ([`wire::GUEST_STATIC_V6`]) — the address
+/// the guest only holds if its planted `network.conf` bound the NIC by
+/// `match.node` and assigned the static address. Requiring the guest's
+/// static address (never the link-local it always forms) is what makes a
+/// `match.node` mis-bind fail the campaign loud rather than pass anyway.
+fn run_static_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    run_v6_campaign(
+        socket,
+        qemu_sock,
+        stop,
+        Some((wire::PEER_STATIC_V6, wire::STATIC_PREFIX_LEN)),
+        wire::GUEST_STATIC_V6,
+    )
+}
+
+/// Shared IPv6 ICMP-campaign event loop: serve the guest reactively and ping
+/// `guest_v6` until its echo reply arrives. When `peer_static` is `Some`, the
+/// peer additionally assigns itself that static address (DAD runs first),
+/// which the engine then prefers as the source for an on-link destination in
+/// the same prefix. The one definition both campaign roles share (§2.2), so
+/// the link-local and static verticals cannot drift in their choreography.
+fn run_v6_campaign(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    peer_static: Option<(core::net::Ipv6Addr, u8)>,
+    guest_v6: core::net::Ipv6Addr,
+) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
         mtu: 1500,
@@ -168,11 +223,13 @@ fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Re
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
 
-    // The guest (the two-process autoload vertical) has no admin-assigned
-    // IPv4 and forms its link-local from the *device* MAC (`GUEST_MAC`,
-    // modified EUI-64): the peer pings only that link-local and requires
-    // only its reply.
-    let guest_v6 = wire::link_local(eui64_interface_id(wire::GUEST_MAC));
+    // The static-addressing vertical gives the peer an address in the same
+    // on-link `/64` as the guest's static address, so it reaches it directly.
+    if let Some((addr, prefix)) = peer_static {
+        stack
+            .add_ipv6_static(addr, prefix, now(start))
+            .map_err(|e| format!("netstack peer: static address assignment: {e:?}"))?;
+    }
 
     let mut reply_v6 = false;
     let mut sequence: u16 = 0;

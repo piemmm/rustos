@@ -40,8 +40,8 @@ pub trait NetworkConfigSource {
     ///
     /// Returns [`Some`] when the store was read and parsed (the real policy,
     /// ready to deliver), and [`None`] when it could not be read — the store
-    /// is not mounted yet (before the root unlock) or the read failed. A
-    /// [`None`] is not an error: the caller keeps the network stack on its
+    /// service is not reachable yet, the file is absent, or the read failed.
+    /// A [`None`] is not an error: the caller keeps the network stack on its
     /// safe defaults and retries on the next generation bump.
     fn load(&mut self) -> Option<NetworkSettings>;
 }
@@ -70,8 +70,8 @@ pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkS
 /// The device manager's memory of whether it has delivered the stack-wide
 /// `net.*` policy to the network stack.
 ///
-/// Delivery happens exactly once: the configuration store is static after the
-/// root unlock (runtime reload is a later increment), so once the policy has
+/// Delivery happens exactly once: the read-only `/System` configuration store
+/// is static (runtime reload is a later increment), so once the policy has
 /// been read and the stack accepted it, no further read or push is made.
 #[derive(Default)]
 pub struct NetConfigState {
@@ -110,10 +110,10 @@ pub fn deliver_network_settings(
         return;
     }
     let Some(settings) = source.load() else {
-        // The store is not readable yet (pre-unlock, or a failed read): the
-        // stack keeps its safe defaults and this is retried on the next
-        // generation bump. Not logged — an absent store before the unlock is
-        // the expected early-boot state, not an anomaly.
+        // The store is not readable yet (the store service not reachable yet,
+        // or an absent/failed read): the stack keeps its safe defaults and
+        // this is retried on the next generation bump. Not logged — an absent
+        // store early in boot is the expected state, not an anomaly.
         return;
     };
     match netstack.apply_settings(settings) {
@@ -186,8 +186,8 @@ pub trait NetworkInterfaceConfigSource {
     /// Load the current per-interface configuration plan.
     ///
     /// Returns [`Some`] when the store was read and parsed, and [`None`]
-    /// when it could not be read — the store is not mounted yet (before the
-    /// root unlock), the read failed, or the document did not parse. A
+    /// when it could not be read — the store service is not reachable yet,
+    /// the file is absent, the read failed, or the document did not parse. A
     /// [`None`] is not an error: the caller retries on the next generation
     /// bump (fail closed — never a half-applied guess).
     fn load(&mut self) -> Option<InterfaceConfigPlan>;
@@ -420,8 +420,8 @@ impl NetIfConfigState {
 /// Deliver each managed interface's `network.conf` configuration to the
 /// network stack, retrying until each interface has accepted it.
 ///
-/// The plan is read once through `source` and cached (the store is static
-/// after the root unlock); until it is readable this is a no-op that
+/// The plan is read once through `source` and cached (the read-only
+/// `/System` store is static); until it is readable this is a no-op that
 /// retries on the next bump. Any config-error rejects (a managed non-bond
 /// interface with no `match.mac`) are surfaced loud, once. Each not-yet-
 /// delivered interface's configuration is then pushed: an [`Errno::NotFound`]
@@ -436,9 +436,9 @@ pub fn deliver_interface_configs(
 ) {
     if state.plan.is_none() {
         let Some(plan) = source.load() else {
-            // Not readable yet (pre-unlock, or a failed/unparseable read):
-            // retried on the next bump. Not logged — an absent store before
-            // the unlock is the expected early-boot state.
+            // Not readable yet (the store service not reachable yet, or an
+            // absent/failed/unparseable read): retried on the next bump. Not
+            // logged — an absent store early in boot is the expected state.
             return;
         };
         state.plan = Some(plan);

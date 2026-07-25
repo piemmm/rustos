@@ -1634,12 +1634,43 @@ order-independent (retried like `match.mac` until the interface appears).
 - Docs: `lib/netconfig.md`, `userland/netstack.md`, code rustdoc; `devmgr`
   event `13_016` doc broadened.
 
-#### N9b-3-2-β-2-ii-b — live QEMU verticals `[ ]`
-- The bond-failover QEMU vertical (kill a member mid-TCP-transfer, assert
-  the flow survives within the monitor budget) and a live static-addressing
-  vertical (plant a `network.conf` binding an interface by `match.node`,
-  prove it comes up on-wire under the admin alias). Heed the "always times
-  out = stuck-state bug, diagnose it" reminder.
+#### N9b-3-2-β-2-ii-b-static — the live static-addressing vertical (gate-green) `[x]`
+`tairix-test-netstack-static-qemu-aarch64` boots the production aarch64
+pipeline against a `static-net-root` disk (net-only driver bundle + a planted
+`/System/Settings/Network/network.conf` binding the NIC to the `wan` alias by
+`match.node` = the QEMU-virt virtio-net register base `0x0a00_3c00`, static
+IPv6 `fd00::2/64`). `devmgr` autoloads the NIC, reads the config, binds `wan`
+by bus location, and `netstack` assigns the static address — all pre-unlock,
+headless. The host `V6StaticEcho` peer addresses the guest's *static* address
+(never the link-local it always forms), so a `match.node` mis-bind fails loud;
+PASS keys on `NETSTACK_BOUND` + `INTERFACE_CONFIG_APPLIED` + `INBOUND_ECHO_SERVED`.
+Bringing it up surfaced and fixed **two latent defects the config path had never
+exercised live**:
+- **Live config delivery was broken.** `devmgr` read `network.conf` via
+  `fs_open`, which returns `NotImplemented` before the root unlock (the VFS is
+  not mounted) and is never retried afterward. Fixed by serving the closed
+  set of `/System/Settings/` config files (`SystemConfigFile{System,Network}`)
+  over the always-mounted read-only `/System` **store endpoint**
+  (`StoreRequest::ReadConfig` in `lib/abi/driver_store`, served by the kernel
+  `driver_store_server` via `SystemFileService::read_system_config` confined to
+  `SYSTEM_VOLUME_SETTINGS_PATH`, read by `devmgr`'s config sources). `devmgr`
+  also logs the resolved NIC bus location on `NETSTACK_BOUND` (`node` field).
+- **Rename detached the interface pump.** `apply_interface_config` renamed the
+  bound interface (`net0`→`wan`) but the driver `Channel` still held the old
+  name, so `service_interface` could no longer find it and the interface went
+  dark (no DAD, no RX, no replies). Fixed: the engine reports the rename
+  (`IfaceRename`) and the service retargets the channel; netstack also flushes
+  each channel after an admin mutation so a freshly-assigned address's DAD/MLD
+  reaches the wire immediately. Regression tests at every layer.
+
+#### N9b-3-2-β-2-ii-b-bond — the live bond-failover vertical `[ ]`
+Remaining: kill a bond member mid-TCP-transfer and assert the flow survives
+within the monitor budget. Needs the shared QEMU harness extended to **two**
+virtio-net NICs, a mid-run monitor hot-unplug (`device_del`/`netdev_del`), and
+a bond-aware host peer serving both wires, plus a bond `network.conf` fixture
+and guest crate. The bond-member rename is already covered by the ii-b-static
+rename fix (members are renamed through `apply_interface_config`). Heed the
+"always times out = stuck-state bug, diagnose it" reminder.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
