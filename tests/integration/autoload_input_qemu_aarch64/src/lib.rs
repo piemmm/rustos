@@ -218,3 +218,30 @@ pub const FM9B_PICKER_OPEN_MARKER: &str = "FM9B trusted picker open";
 /// the `SyscallInvoked` `comm` field value the test sink matches to attribute
 /// the picker directory-read to the session and nothing else.
 pub const SESSION_COMM: &str = "desktop";
+
+// --- FM9-c: delete with confirm through the right-click context menu
+// (`plans/NEW-FILEMANAGER.md` FM9-c), appended after FM9-b. The files window
+// still shows `/Users/root`, which now holds the FM9-a folder and the planted
+// document; a secondary-button press on the folder row raises+focuses the
+// files window (over the frontmost Viewer) and opens the context menu on it, a
+// primary click on the drawn **Delete** row opens the confirmation dialog, and
+// a primary click on the dialog's Delete button hands the removal to the app's
+// operation runner — a real permission-checked `rmdir` under the user's own
+// identity (the guest PASS's `FsNodeMutated op=rmdir` witness).
+//
+// The whole burst is gated on [`FM9C_DELETE_GATE_MARKER`] (the Viewer's
+// `fd_redeem`, the last FM9-b serial event), so it runs strictly after the CU6
+// delegation. It does not use the app-ward delivery counter: the Viewer window
+// that FM9-b launches delivers its own focus event(s), so the counter's value
+// after FM9-b is not statically known — the `fd_redeem` serial marker is the
+// robust ordering point. Within the burst the guest applies the queued pointer
+// events strictly in order and each overlay (menu, then dialog) is handled
+// synchronously on its press, so no finer gate is needed.
+
+/// Serial marker the whole FM9-c delete click-through is gated on: the
+/// `SyscallInvoked` (`sc=fd_redeem`) trace line the Viewer emits when it
+/// redeems the FM9-b one-shot delegation — the last serial event of FM9-b, and
+/// (per the FM9-b witness) the only `fd_redeem` in the image, so its first
+/// occurrence sequences FM9-c strictly after the delegation. Rendered by the
+/// same `sc=<name>` syscall trace the input-arming and frame-map gates key on.
+pub const FM9C_DELETE_GATE_MARKER: &str = "sc=fd_redeem";

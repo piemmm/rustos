@@ -777,11 +777,27 @@ dedicated aarch64 vertical
 (`tairix-test-pointer-button-virtio-mmio-qemu-aarch64`) proves it: it attaches
 a `virtio-mouse-device`, injects a secondary press+release, and asserts the
 driver decodes `BTN_RIGHT` (`0x111`), never the middle button (`0x112`) — it
-times out with the old mask and passes with the fix. The one FM9-c increment
-still staged is wiring the full right-click → Delete → confirm click-through
-into the intricate `autoload_input` sequence; it now has a working right-button
-injection to build on, and the delete verb, confirm dialog, and recursive
-`DeleteWalk` are already host-proven in `lib/browse` and `files.app`.
+times out with the old mask and passes with the fix.
+
+The full right-click → Delete → confirm click-through is now wired into the
+aarch64 `autoload_input` vertical end to end. Appended after the FM9-b Viewer
+open-a-file, it is gated on the Viewer's `sc=fd_redeem` serial line (the last
+FM9-b event, and the image's only `fd_redeem`), so it runs strictly after the
+CU6 delegation without depending on the app-ward delivery counter (the FM9-b
+Viewer window delivers its own focus event, leaving that count statically
+unknown). The runner right-clicks the FM9-a folder row (the secondary press
+raises+focuses the files window over the frontmost Viewer and opens the context
+menu on the folder), clicks the drawn **Delete** row, and clicks the
+confirmation dialog's Delete button — every point reconstructed from the app's
+own layout code (`render::selection_rect`, `render::context_menu_command_rect`
+over the menu built exactly as the app builds it, and `render::delete_dialog_rect`
+with the dialog's own `action_rects`), never a hand-copied coordinate
+(`AGENTS.md` §2.2). A tenth guest PASS witness latches from the kernel's
+`FsNodeMutated op=rmdir` audit record, gated on the FM9-b delegation being
+redeemed so no earlier removal can satisfy it (fail closed — a refusal logs
+`FsMutationDenied`, a different id) — so the manager's right-click delete is
+kernel-attested under the logged-in user's own identity, non-flaky across
+repeated runs.
 
 ### The properties model
 

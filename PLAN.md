@@ -3393,10 +3393,9 @@ transfer, landed in increments:
   test-kernel picker-open marker (the session's first post-rename
   `comm=desktop sc=fs_open`, the picker's home read) since the session-internal
   picker delivers no `MessageDelivered` and the user-authority session cannot
-  `log_emit`; non-flaky across repeated runs. **FM9-c (delete with confirm):
-  the product side is landed and host-tested; the QEMU right-button injection
-  it depends on is now fixed and proven; only the full delete click-through
-  remains, staged.** A clickable **Delete** now joins the context menu
+  `log_emit`; non-flaky across repeated runs. **FM9-c (delete with confirm) is
+  fully landed**, completing FM9 and the whole `plans/NEW-FILEMANAGER.md` plan.
+  A clickable **Delete** now joins the context menu
   (`ContextCommand::Delete`, its `begin_delete` action already existed, §2.4),
   routed to the same confirm-and-remove verb the `Delete` key drives. Reaching
   it fixed a real defect that makes the *whole* context menu usable in the
@@ -3415,11 +3414,17 @@ transfer, landed in increments:
   button. `MouseButton::mask_bit` now sends `0x2`, and the dedicated
   `tairix-test-pointer-button-virtio-mmio-qemu-aarch64` vertical proves a real
   right-click reaches the guest as `BTN_RIGHT` `0x111` (it times out with the
-  old mask, passes with the fix — the fails-before/passes-after guard). The one
-  remaining FM9-c increment is wiring the full right-click→Delete→confirm
-  click-through into the intricate `autoload_input` sequence, which now has a
-  working right-button injection to build on; the delete verb, confirm dialog,
-  and `DeleteWalk` are host-proven in `lib/browse` and `files.app`.
+  old mask, passes with the fix — the fails-before/passes-after guard). The full
+  right-click→Delete→confirm click-through is now wired into the aarch64
+  `autoload_input` vertical: appended after FM9-b and gated on the Viewer's
+  `sc=fd_redeem` (the last FM9-b serial event), the runner right-clicks the
+  FM9-a folder row to open the context menu, clicks the drawn **Delete** row,
+  and clicks the confirmation dialog's Delete button — every point reconstructed
+  through the shared `render::selection_rect` / `context_menu_command_rect` /
+  `delete_dialog_rect` + `Dialog::action_rects` geometry (§2.2). A tenth guest
+  PASS witness latches from `FsNodeMutated op=rmdir`, gated after the FM9-b
+  delegation is redeemed so no earlier removal can satisfy it (fail closed);
+  non-flaky across repeated runs.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

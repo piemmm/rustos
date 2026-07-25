@@ -409,6 +409,11 @@ const FM9B_VIEWER_LAUNCH: u32 =
 /// read the user's home (composited and ready) — the gate for the pick-click.
 const FM9B_PICKER_OPEN: &str = tairix_test_autoload_input_qemu_aarch64::FM9B_PICKER_OPEN_MARKER;
 
+/// FM9-c: serial marker the whole delete click-through is gated on (the
+/// Viewer's `sc=fd_redeem` trace, the last FM9-b serial event), aliased from
+/// the shared contract so the script and the guest PASS gate cannot drift.
+const FM9C_DELETE_GATE: &str = tairix_test_autoload_input_qemu_aarch64::FM9C_DELETE_GATE_MARKER;
+
 /// Serial marker after which the autoload vertical types the login +
 /// desktop-command dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
@@ -4294,8 +4299,9 @@ const TESTS: &[QemuTest] = &[
     // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
     // ~1 s login typing + session bring-up + the paced click script +
     // both app spawns + the typed command + the FM9-a file-manager
-    // New-Folder + inline-rename click-through and the FM9-b Viewer launch +
-    // trusted-picker open-a-file, on QEMU TCG.
+    // New-Folder + inline-rename click-through, the FM9-b Viewer launch +
+    // trusted-picker open-a-file, and the FM9-c right-click delete, on QEMU
+    // TCG.
     QemuTest {
         package: "tairix-test-autoload-input-qemu-aarch64",
         binary: "tairix-test-autoload-input-qemu-aarch64",
@@ -5910,6 +5916,99 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         let local = centre(rect, "picker document row")?;
         Point::new(PICKER_ORIGIN.x + local.x, PICKER_ORIGIN.y + local.y)
     };
+    // --- FM9-c: delete the FM9-a folder through the right-click context menu
+    // (`plans/NEW-FILEMANAGER.md` FM9-c). The files window still shows
+    // `/Users/root`, which now holds the FM9-a folder (`New Folder` + the
+    // rename suffix) and the fixture's planted document. Three window-local
+    // points, each reconstructed from the app's own layout code so the click
+    // lands on exactly what the guest draws (`AGENTS.md` §2.2): the secondary-
+    // press point on the folder row (which raises+focuses files over the
+    // frontmost Viewer and opens the context menu, anchored at that point), the
+    // drawn Delete menu row, and the confirmation dialog's Delete button. The
+    // menu and dialog are built exactly as the app builds them — the folder row
+    // selected, no clipboard held — so their geometry matches the guest's.
+    let (delete_secondary, delete_menu_click, delete_confirm_click) = {
+        let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
+            .map_err(|_| "desktop pointer script: home document name is not utf-8".to_string())?;
+        let folder = format!(
+            "{}{}",
+            tairix_browse::mkdir::NEW_FOLDER_BASE,
+            FM9_RENAME_SUFFIX.trim_end()
+        );
+        let mut browser = tairix_browse::Browser::open_root(FixedListing(vec![
+            tairix_browse::Entry::directory(folder.clone()),
+            tairix_browse::Entry::file(doc),
+        ]))
+        .map_err(|e| format!("desktop pointer script: build delete browser: {e:?}"))?;
+        let index = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == folder)
+            .ok_or_else(|| "desktop pointer script: delete folder row absent".to_string())?;
+        browser
+            .select(index)
+            .map_err(|e| format!("desktop pointer script: select delete folder: {e:?}"))?;
+        // The window-local row rect: the secondary press both selects this row
+        // and anchors the context menu at the press point.
+        let rect =
+            tairix_browse::render::selection_rect(&browser, files_font, files_theme, files_vp)
+                .ok_or_else(|| {
+                    "desktop pointer script: delete folder row has no rect".to_string()
+                })?;
+        if rect.is_empty() {
+            return Err("desktop pointer script: delete folder row region is empty".to_string());
+        }
+        // Left-biased inside the row (as the FM9-a first click is), so the
+        // press lands on the files window's exposed strip, clear of the
+        // cascaded Viewer/terminal windows, and routes to files to raise it.
+        #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+        let anchor_local = Point::new(
+            rect.left() + files_font.advance().min(rect.width) as i32 / 2,
+            rect.top() + (rect.height / 2) as i32,
+        );
+        let secondary = Point::new(
+            files_client_origin.x + anchor_local.x,
+            files_client_origin.y + anchor_local.y,
+        );
+        // The drawn context menu's Delete row, located through the same forward
+        // geometry the app hit-tests with (menu built as the app builds it).
+        let model = tairix_browse::chrome::ContextMenuModel::for_browser(&browser, false);
+        let menu = tairix_browse::render::build_context_menu(model);
+        let delete_row = tairix_browse::render::context_menu_command_rect(
+            &menu,
+            anchor_local,
+            files_vp,
+            files_font,
+            files_theme,
+            tairix_browse::chrome::ContextCommand::Delete,
+        )
+        .ok_or_else(|| "desktop pointer script: context menu Delete row has no rect".to_string())?;
+        let menu_local = centre(delete_row, "context menu Delete row")?;
+        let menu_click = Point::new(
+            files_client_origin.x + menu_local.x,
+            files_client_origin.y + menu_local.y,
+        );
+        // The confirmation dialog's Delete button (index `DELETE_CONFIRM_INDEX`
+        // of the dialog's own action rects, over the shared dialog placement).
+        let plan = browser
+            .plan_delete()
+            .ok_or_else(|| "desktop pointer script: delete plan is empty".to_string())?;
+        let dialog = tairix_browse::render::build_delete_dialog(&plan);
+        let dialog_bounds =
+            tairix_browse::render::delete_dialog_rect(files_vp, files_font, files_theme);
+        let confirm = *dialog
+            .action_rects(dialog_bounds, Scale::ONE, files_theme, files_font)
+            .get(tairix_browse::render::DELETE_CONFIRM_INDEX)
+            .ok_or_else(|| {
+                "desktop pointer script: delete dialog confirm button absent".to_string()
+            })?;
+        let confirm_local = centre(confirm, "delete dialog confirm button")?;
+        let confirm_click = Point::new(
+            files_client_origin.x + confirm_local.x,
+            files_client_origin.y + confirm_local.y,
+        );
+        (secondary, menu_click, confirm_click)
+    };
     // The reserved window endpoint's first reply on serial: the create
     // round-trip completed, so the served window exists in the compositor
     // (and the wake that created it presented the frame carrying it).
@@ -5940,6 +6039,10 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     };
     let press = PointerAction::Press(MouseButton::Primary);
     let release = PointerAction::Release(MouseButton::Primary);
+    // FM9-c opens the context menu with the secondary (right) button; the
+    // `tools/qemu` mask fix delivers this to the guest as `BTN_RIGHT`.
+    let secondary_press = PointerAction::Press(MouseButton::Secondary);
+    let secondary_release = PointerAction::Release(MouseButton::Secondary);
     let step = |marker: &str, occurrences: u32, action: PointerAction| PointerStep {
         ready_marker: marker.to_owned(),
         ready_occurrences: occurrences,
@@ -6171,6 +6274,40 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(FM9B_PICKER_OPEN, 1, move_by(viewer_row, welcome_pick)),
         step(FM9B_PICKER_OPEN, 1, press),
         step(FM9B_PICKER_OPEN, 1, release),
+        // --- FM9-c: delete the FM9-a folder via the right-click context menu
+        // (`plans/NEW-FILEMANAGER.md` FM9-c). Gated on the Viewer's `fd_redeem`
+        // (the last FM9-b serial event), so the delete runs strictly after the
+        // CU6 delegation; the app-ward delivery counter is not used here because
+        // the FM9-b Viewer window delivers its own focus event(s), leaving the
+        // counter's value after FM9-b statically unknown. The guest applies the
+        // queued events in order and each overlay is handled synchronously on
+        // its press, so the whole burst shares this one gate.
+        //
+        // Secondary press on the folder row: raises+focuses the files window
+        // over the frontmost Viewer and opens the context menu on the folder
+        // (the release is a no-op the open menu ignores).
+        step(FM9C_DELETE_GATE, 1, move_by(welcome_pick, delete_secondary)),
+        step(FM9C_DELETE_GATE, 1, secondary_press),
+        step(FM9C_DELETE_GATE, 1, secondary_release),
+        // Primary click on the drawn Delete row: dispatches the Delete verb,
+        // which opens the confirmation dialog (the release is a no-op).
+        step(
+            FM9C_DELETE_GATE,
+            1,
+            move_by(delete_secondary, delete_menu_click),
+        ),
+        step(FM9C_DELETE_GATE, 1, press),
+        step(FM9C_DELETE_GATE, 1, release),
+        // Primary click on the dialog's Delete button: confirms the removal,
+        // which the app's operation runner carries out as a real permission-
+        // checked `rmdir` — the guest PASS's `FsNodeMutated op=rmdir` witness.
+        step(
+            FM9C_DELETE_GATE,
+            1,
+            move_by(delete_menu_click, delete_confirm_click),
+        ),
+        step(FM9C_DELETE_GATE, 1, press),
+        step(FM9C_DELETE_GATE, 1, release),
     ])
 }
 

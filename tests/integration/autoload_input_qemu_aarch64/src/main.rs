@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on nine witnesses
+//! ## Why the PASS keys on ten witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -132,6 +132,17 @@
 //!    filesystem capability of its own. The CU6 delegation, end to end and
 //!    kernel-attested; the pick-click is gated on the test kernel's
 //!    picker-open marker so it lands only once the picker is composited.
+//! 10. `AuditEvent::FsNodeMutated` with `op=rmdir` (after witness 9): the
+//!     file-manager stage (`plans/NEW-FILEMANAGER.md` FM9-c) right-clicked
+//!     the FM9-a folder to open the context menu, clicked its **Delete** row
+//!     to open the confirmation dialog, and clicked the dialog's Delete
+//!     button — so the manager carried out a real permission-checked
+//!     directory removal (`fs_unlink` with the directory-only flag) under the
+//!     logged-in user's own identity. It is gated on the FM9-b delegation
+//!     (witness 9), so it fires strictly after the whole FM9-a/-b sequence
+//!     and no earlier removal can satisfy it; the right-click reaches the app
+//!     through the fixed `tools/qemu` secondary-button mask and the
+//!     compositor's secondary-press routing.
 //!
 //! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
@@ -147,7 +158,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all nine witnesses, so the harness times out — the documented
+//! reaches all ten witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -207,7 +218,7 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all nine witnesses have appeared: the per-kind
+    /// to QEMU once all ten witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
@@ -222,10 +233,13 @@ mod kernel {
     /// FM9-a file-manager mutations (`FsNodeMutated op=mkdir` then
     /// `op=rename`, both after the terminal round trip — the manager
     /// created and named a folder in `/Users/root` under the user's own
-    /// identity), and the FM9-b CU6 delegation (`fd_grant` then `fd_redeem` —
-    /// the session handing the user's chosen file to the Viewer). The guest
-    /// exits only after the host has everything it needs (`plans/APPWIN.md`
-    /// AW3 + AW4, `plans/NEW-FILEMANAGER.md` FM9-a/-b).
+    /// identity), the FM9-b CU6 delegation (`fd_grant` then `fd_redeem` —
+    /// the session handing the user's chosen file to the Viewer), and the
+    /// FM9-c delete (`FsNodeMutated op=rmdir` after the delegation — the
+    /// manager removing the FM9-a folder through its right-click context
+    /// menu and confirmation dialog). The guest exits only after the host
+    /// has everything it needs (`plans/APPWIN.md` AW3 + AW4,
+    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/-c).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
@@ -237,6 +251,7 @@ mod kernel {
         fs_folder_renamed: AtomicBool,
         fd_delegation_granted: AtomicBool,
         fd_delegation_redeemed: AtomicBool,
+        fs_node_deleted: AtomicBool,
         picker_open_marked: AtomicBool,
     }
 
@@ -253,6 +268,7 @@ mod kernel {
                 fs_folder_renamed: AtomicBool::new(false),
                 fd_delegation_granted: AtomicBool::new(false),
                 fd_delegation_redeemed: AtomicBool::new(false),
+                fs_node_deleted: AtomicBool::new(false),
                 picker_open_marked: AtomicBool::new(false),
             }
         }
@@ -278,15 +294,16 @@ mod kernel {
         }
 
         /// Latch the file-manager mutation witnesses from a `FsNodeMutated`
-        /// record's `op` field: `mkdir` then, once it has, `rename`. Only
-        /// mutations that occur *after* the AW4 terminal round trip are
-        /// counted (the delivery counter is at or past
-        /// [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many boot- and
-        /// login-time directory creations — all strictly before the desktop
-        /// click-through — can never latch these. `rename` requires `mkdir`
-        /// first, so a stray rename cannot satisfy PASS on its own, and the
-        /// refusal event (`FsMutationDenied`) is a different id that never
-        /// reaches here (fail closed).
+        /// record's `op` field: `mkdir`, then `rename` (FM9-a), then a
+        /// `rmdir`/`unlink` delete (FM9-c). Only mutations that occur *after*
+        /// the AW4 terminal round trip are counted (the delivery counter is at
+        /// or past [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many
+        /// boot- and login-time directory creations — all strictly before the
+        /// desktop click-through — can never latch these. `rename` requires
+        /// `mkdir` first and the delete requires the FM9-b delegation redeemed,
+        /// so a stray mutation cannot satisfy PASS on its own, and the refusal
+        /// event (`FsMutationDenied`) is a different id that never reaches here
+        /// (fail closed).
         fn note_fs_mutation(&self, event: &Event<'_>) {
             if self.window_events_delivered.load(Ordering::Acquire)
                 < tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
@@ -305,6 +322,21 @@ mod kernel {
                         if self.fs_folder_created.load(Ordering::Acquire) =>
                     {
                         self.fs_folder_renamed.store(true, Ordering::Release);
+                    }
+                    // The FM9-c delete witness (`plans/NEW-FILEMANAGER.md`
+                    // FM9-c): the file manager removed the FM9-a folder via
+                    // the right-click context menu → confirm dialog, a real
+                    // permission-checked `rmdir` (an empty directory; a file
+                    // would be `unlink`) under the user's own identity. It is
+                    // gated on the FM9-b delegation having been redeemed, so it
+                    // fires strictly after the whole FM9-a/-b sequence and no
+                    // earlier boot/login removal can satisfy it (fail closed —
+                    // `FsMutationDenied` is a different id that never reaches
+                    // here).
+                    tairix_log::FieldValue::Str("rmdir" | "unlink")
+                        if self.fd_delegation_redeemed.load(Ordering::Acquire) =>
+                    {
+                        self.fs_node_deleted.store(true, Ordering::Release);
                     }
                     _ => {}
                 }
@@ -429,6 +461,7 @@ mod kernel {
                 && self.fs_folder_renamed.load(Ordering::Acquire)
                 && self.fd_delegation_granted.load(Ordering::Acquire)
                 && self.fd_delegation_redeemed.load(Ordering::Acquire)
+                && self.fs_node_deleted.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }
