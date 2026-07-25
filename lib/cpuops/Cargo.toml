@@ -11,6 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `alloc` gates the heap-backed `OpsTables` (the per-core-type resolved-ops
+# table) — the crate's only allocation. The selection algorithm allocates
+# nothing, so an allocator-free consumer that only *selects* a routine
+# (`lib/crc32c`, `lib/crypto`) depends on this crate with
+# `default-features = false` and needs no global allocator, while a consumer
+# that builds an `OpsTables` (the `kernel/core` per-core-type bring-up) keeps
+# the default. On by default so the crate's own tests and doc build cover it.
+default = ["alloc"]
+alloc = []
+
 [dependencies]
 # The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) is
 # defined once in the dependency-free ABI crate and shared with the Arch HAL,

@@ -7,17 +7,26 @@
 //! baseline. It reads capability from `tairix_abi::cpufeatures` (never
 //! benchmarks it) and decides performance with an optional bounded benchmark.
 //!
-//! The crate is `no_std` + `alloc`, contains no `unsafe`, and names no
-//! architecture, board, or `SoC` (§2.20/§2.21): concrete routines live in their
-//! owning crates and are gated on the discovered feature bits this framework
-//! matches against.
+//! The crate is `no_std`, contains no `unsafe`, and names no architecture,
+//! board, or `SoC` (§2.20/§2.21): concrete routines live in their owning crates
+//! and are gated on the discovered feature bits this framework matches against.
+//! The selection algorithm allocates nothing; only the optional [`OpsTables`]
+//! uses the heap, behind the default-on `alloc` feature, so an allocator-free
+//! consumer depends on this crate with `default-features = false`.
 
 #![no_std]
 
+// `alloc` backs only the optional [`OpsTables`]; the selection algorithm itself
+// allocates nothing. Gating it behind the (default-on) `alloc` feature lets a
+// consumer that only *selects* a routine (`lib/crc32c`, `lib/crypto`) depend on
+// this crate with `default-features = false` and stay free of any global
+// allocator, while a consumer that builds an `OpsTables` enables it.
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 pub mod bench;
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 pub use bench::{BenchHarness, CycleCounter};
@@ -165,21 +174,51 @@ pub trait DecisionSink {
     fn record(&self, decision: &Decision);
 }
 
+/// The maximum number of accelerated candidates the [`Selector`] considers for
+/// one family.
+///
+/// A family's candidate list is a tiny, compile-time-fixed `&'static` slice (a
+/// handful of implementations of one op), so this is a validation bound on a
+/// fixed set (§24.4), never a machine-scaling capacity — and it lets selection
+/// run on a bounded stack buffer with no heap allocation, so a consumer that
+/// only selects (never builds an [`OpsTables`]) needs no global allocator.
+const MAX_CANDIDATES: usize = 16;
+
+/// The maximum number of operator pins a [`Selector`] holds.
+///
+/// Pins name at most one candidate per family and the set of pinnable families
+/// is tiny and compile-time-fixed, so this is likewise a validation bound on a
+/// fixed set (§24.4), not a scaling capacity — and it lets a `Selector` hold
+/// its pins on the stack, so the selection path allocates nothing.
+const MAX_PINS: usize = 16;
+
 /// The selection algorithm plus any operator pins.
 ///
 /// Construct it once, optionally [`pin`](Self::pin) families for determinism,
 /// and call [`select`](Self::select) per family per core type. The algorithm
-/// is pure and host-testable; it holds no architecture and reads no register.
-#[derive(Clone, Default)]
+/// is pure and host-testable; it holds no architecture, reads no register, and
+/// allocates nothing — so a `no_std` consumer can resolve a routine without a
+/// global allocator (the heap-backed [`OpsTables`] is a separate, opt-in type).
+#[derive(Clone)]
 pub struct Selector {
-    pins: Vec<(FamilyId, &'static str)>,
+    pins: [Option<(FamilyId, &'static str)>; MAX_PINS],
+    pin_count: usize,
+}
+
+impl Default for Selector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Selector {
     /// A selector with no pins.
     #[must_use]
     pub const fn new() -> Self {
-        Self { pins: Vec::new() }
+        Self {
+            pins: [None; MAX_PINS],
+            pin_count: 0,
+        }
     }
 
     /// Pin `family` to the candidate named `candidate` (a boot parameter
@@ -187,20 +226,31 @@ impl Selector {
     /// defeat correctness, so a pinned buggy candidate falls to the baseline.
     /// A later pin for the same family replaces an earlier one.
     pub fn pin(&mut self, family: FamilyId, candidate: &'static str) {
-        if let Some(slot) = self.pins.iter_mut().find(|(id, _)| *id == family) {
-            slot.1 = candidate;
-        } else {
-            self.pins.push((family, candidate));
+        for (id, name) in self.pins[..self.pin_count].iter_mut().flatten() {
+            if *id == family {
+                *name = candidate;
+                return;
+            }
+        }
+        // A new pin is recorded while the bounded buffer has room. The set of
+        // pinnable families is tiny and fixed, so this is never reached in
+        // practice; an over-full buffer drops the extra pin (fail-safe: the
+        // correct default selection still runs) rather than allocating.
+        if self.pin_count < MAX_PINS {
+            self.pins[self.pin_count] = Some((family, candidate));
+            self.pin_count += 1;
         }
     }
 
     /// The pinned candidate name for `family`, if any.
     #[must_use]
     pub fn pinned(&self, family: FamilyId) -> Option<&'static str> {
-        self.pins
-            .iter()
-            .find(|(id, _)| *id == family)
-            .map(|(_, name)| *name)
+        for (id, name) in self.pins[..self.pin_count].iter().flatten() {
+            if *id == family {
+                return Some(*name);
+            }
+        }
+        None
     }
 
     /// Select the implementation of `family` to use on a core with the given
@@ -243,14 +293,24 @@ impl Selector {
             // selection rather than deny a correct default.
         }
 
-        // Verified, feature-legal survivors in declared priority order.
-        let survivors: Vec<&Candidate<T>> = family
-            .candidates
-            .iter()
-            .filter(|c| legal_and_verified(family, c, features))
-            .collect();
+        // Verified, feature-legal survivor indices in declared priority order,
+        // gathered into a bounded stack buffer so selection allocates nothing.
+        let mut survivors = [0usize; MAX_CANDIDATES];
+        let mut count = 0usize;
+        for (index, candidate) in family.candidates.iter().enumerate() {
+            if count == MAX_CANDIDATES {
+                // A family declaring more than `MAX_CANDIDATES` candidates has
+                // the surplus ignored fail-safe (the highest-priority
+                // survivors already are), never a panic.
+                break;
+            }
+            if legal_and_verified(family, candidate, features) {
+                survivors[count] = index;
+                count += 1;
+            }
+        }
 
-        if survivors.is_empty() {
+        if count == 0 {
             // Nothing above baseline survived. The baseline is the reference by
             // construction, but self-verify it too so a broken baseline is
             // flagged rather than silently trusted.
@@ -269,15 +329,10 @@ impl Selector {
             );
         }
 
-        let (index, reason) = choose(family, &survivors, bench);
-        build(
-            survivors[index].impl_,
-            family.id,
-            survivors[index].name,
-            core,
-            features,
-            reason,
-        )
+        let survivors = &survivors[..count];
+        let (position, reason) = choose(family, survivors, bench);
+        let winner = &family.candidates[survivors[position]];
+        build(winner.impl_, family.id, winner.name, core, features, reason)
     }
 }
 
@@ -302,12 +357,13 @@ fn build<T: Copy>(
     }
 }
 
-/// Choose the index (into `survivors`) and the reason to record, given the
-/// family's policy and the optional benchmark harness. `survivors` is
-/// non-empty and in declared-priority order.
+/// Choose the position (into `survivors`) and the reason to record, given the
+/// family's policy and the optional benchmark harness. `survivors` is a
+/// non-empty list of indices into `family.candidates`, in declared-priority
+/// order.
 fn choose<T, In, Out>(
     family: &Family<'_, T, In, Out>,
-    survivors: &[&Candidate<T>],
+    survivors: &[usize],
     bench: Option<&BenchHarness<'_>>,
 ) -> (usize, DecisionReason)
 where
@@ -322,9 +378,15 @@ where
             match (survivors.len(), bench, family.vectors.last()) {
                 (0..=1, _, _) | (_, None, _) | (_, _, None) => (0, DecisionReason::Priority),
                 (_, Some(harness), Some(warm)) => {
-                    let impls: Vec<T> = survivors.iter().map(|c| c.impl_).collect();
+                    // Gather the survivor implementation handles onto a bounded
+                    // stack buffer (seeded with the first survivor's handle,
+                    // then filled) so benchmarking allocates nothing.
+                    let mut impls = [family.candidates[survivors[0]].impl_; MAX_CANDIDATES];
+                    for (position, &candidate_index) in survivors.iter().enumerate() {
+                        impls[position] = family.candidates[candidate_index].impl_;
+                    }
                     (
-                        harness.fastest(&impls, family.run, warm),
+                        harness.fastest(&impls[..survivors.len()], family.run, warm),
                         DecisionReason::Benchmark,
                     )
                 }
@@ -385,10 +447,16 @@ where
 /// on demand as each distinct [`CoreKey`] comes up (`big.LITTLE`, Intel
 /// hybrid); the number of core types is tiny, so a linear scan is the right
 /// structure, and it is a *growable capacity*, never a fixed ceiling (§24.1).
+///
+/// Behind the default-on `alloc` feature: it is the crate's only heap user, so
+/// an allocator-free consumer that never builds one (`lib/crc32c`,
+/// `lib/crypto`) can turn the feature off.
+#[cfg(feature = "alloc")]
 pub struct OpsTables<Ops> {
     entries: Vec<(CoreKey, Ops)>,
 }
 
+#[cfg(feature = "alloc")]
 impl<Ops> OpsTables<Ops> {
     /// An empty table.
     #[must_use]
@@ -433,6 +501,7 @@ impl<Ops> OpsTables<Ops> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<Ops> Default for OpsTables<Ops> {
     fn default() -> Self {
         Self::new()
@@ -736,6 +805,7 @@ mod tests {
     }
 
     // ---- OpsTables: per-core-type resolution and growth. ----------------
+    #[cfg(feature = "alloc")]
     #[test]
     fn ops_tables_resolve_once_per_core_type_and_grow() {
         let mut tables: OpsTables<&'static str> = OpsTables::new();

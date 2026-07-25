@@ -83,18 +83,47 @@ pub fn system_features() -> CpuFeatureSet {
 }
 
 /// Select the self-optimising accelerated-routine implementations for this
-/// boot against the finalised common feature set, and record each choice on
-/// the audit log.
+/// boot against the finalised common feature set, record each choice on the
+/// audit log, and run the boot-time cryptographic power-on self-test.
 ///
 /// Called once from [`crate::kernel_main`] after every core has contributed
-/// (so [`system_features`] is final). CRC-32C is the first family: ARXFS's
-/// fast physical-integrity checksum runs through it in-kernel, so on a core
-/// with the `crc32c*` / SSE4.2 instruction the checksum uses the hardware
-/// path (self-verified bit-identical to the portable baseline before it can
-/// be selected). Selection never fails: it falls closed to the baseline.
-pub fn resolve_accelerated_ops(audit: &dyn Sink) {
+/// (so [`system_features`] is final). Two families resolve here:
+///
+/// - **CRC-32C**: ARXFS's fast physical-integrity checksum runs through it
+///   in-kernel, so on a core with the `crc32c*` / SSE4.2 instruction the
+///   checksum uses the hardware path (self-verified bit-identical to the
+///   portable baseline before it can be selected).
+/// - **Crypto (SHA-256) backend availability**: an availability-only decision
+///   whose self-verify is a FIPS known-answer self-test of the live SHA-256
+///   path (`tairix_crypto::backend`). Never benchmarked (a benchmark must not
+///   choose a key-timing-leaky crypto variant).
+///
+/// Routine selection never fails: it falls closed to the portable baseline.
+/// The crypto self-test *can* fail if the audited primitive computes a wrong
+/// answer — a fatal, unrecoverable boot condition (running with broken
+/// cryptography is never acceptable), so this returns `false` in that case and
+/// [`crate::kernel_main`] halts. Every other outcome returns `true`.
+#[must_use = "the kernel must halt when the crypto power-on self-test fails"]
+pub fn resolve_accelerated_ops(audit: &dyn Sink) -> bool {
     let features = system_features();
     record(audit, &tairix_crc32c::resolve(features));
+
+    let crypto = tairix_crypto::backend::resolve(features);
+    record(audit, &crypto);
+    if tairix_crypto::backend::self_test_passed(&crypto) {
+        true
+    } else {
+        emit(
+            audit,
+            Level::Error,
+            AuditEvent::CryptoSelfTestFailed,
+            &[Field {
+                key: "family",
+                value: FieldValue::Str(crypto.family.0),
+            }],
+        );
+        false
+    }
 }
 
 /// Emit one [`AuditEvent::CpuOpsRoutineSelected`] record for `decision`.

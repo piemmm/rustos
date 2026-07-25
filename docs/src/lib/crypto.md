@@ -53,6 +53,49 @@ stored-hash comparison cannot leak through timing (`AGENTS.md` §19.1). The
 consumer is `lib/users`, which owns the salt, the accepted cost range, and
 the stored-record encoding.
 
+## Backend availability and the boot-time self-test (`backend`)
+
+`backend` is TAIRiX's authoritative crypto backend-availability decision and
+its cryptographic power-on self-test (POST). It exists because a generic
+per-architecture image is compiled against a conservative baseline (no
+`+aes`/`+sha2` build-time floor), so any hardware acceleration a booted CPU
+offers must be recovered at runtime — and crypto acceleration must be recovered
+*safely*.
+
+- **Availability only, never benchmarked.** The decision routes through the
+  generic `lib/cpuops` dispatch framework as a `ByPriority` family. Crypto is
+  never put on the framework's benchmark axis: choosing the "fastest" AES/SHA
+  would happily select a table-driven variant that leaks keys through cache
+  timing. Selection is a deterministic capability decision from TAIRiX's single
+  authoritative CPU-feature detector, not each upstream crate's private
+  detection (which, on a bare-metal `aarch64`, silently reports nothing because
+  it depends on an operating system's `HWCAP`).
+- **The self-verify is a power-on self-test.** Before the availability decision
+  is trusted, the framework runs the live SHA-256 path over the FIPS 180-4 §A.1
+  known-answer vectors and compares to their published digests. A crypto core
+  that fails is not reported as working: the kernel emits a fatal audit record
+  (`CryptoSelfTestFailed`) and halts, mirroring the FIPS discipline that a
+  failed POST renders the module inoperable rather than letting the system run
+  on broken cryptography.
+- **It does not fork the computation.** Both the hardware and software SHA-256
+  paths are the same audited `sha2` crate, which owns backend selection
+  internally. TAIRiX does not transcribe the SHA-256 round function over
+  intrinsics — that would be hand-rolling the primitive, which the charter
+  forbids. What `backend` owns is the availability decision, the self-test, and
+  the audit record.
+- **Per-target reach.** On `x86_64` the audited crate selects its SHA-NI path
+  from `CPUID`, which needs no operating system and is therefore correct on the
+  freestanding kernel target, so the hardware-availability candidate is offered
+  and recorded there. On `aarch64`/`riscv64`/`wasm32` no runtime-selected
+  hardware SHA-256 path exists yet, so `backend` records the honest software
+  answer. Recovering hardware SHA-256 on `aarch64` awaits a vetted, driveable
+  audited backend (a supply-chain decision); it is deliberately not faked with
+  a candidate that would not run.
+
+The kernel resolves this once at boot alongside the CRC-32C family
+(`kernel/core::cpuops`); the chosen backend is on the audit log via
+`CpuOpsRoutineSelected`.
+
 ## Pinning
 
 Versions are pinned exactly (`= x.y.z`). Bumping a pin is a deliberate

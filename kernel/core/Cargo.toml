@@ -147,7 +147,14 @@ tairix-crc32c = { path = "../../lib/crc32c", version = "=0.0.0" }
 # The generic self-optimising dispatch framework: `src/cpuops.rs` names its
 # `Decision`/`DecisionReason` to record which accelerated routine won through
 # the audit log (`plans/FIX-HARDWARE-FEATURES.md` P2, `AGENTS.md` §19.4).
-tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0" }
+# `default-features = false` drops the framework's optional heap-backed
+# `OpsTables`, which the bring-up does not build yet (it records selection
+# decisions only): this keeps the freestanding multi-bin build's shared
+# `tairix-cpuops` free of `alloc`, so a minimal allocator-free integration-test
+# kernel linked in the same cargo invocation is not forced to define a global
+# allocator by feature unification (§2.16). The P3 per-core-type `OpsTables`
+# wiring re-enables it here (`features = ["alloc"]`).
+tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0", default-features = false }
 # Audited volatile-wipe for the kernel staging buffer `random_get` copies
 # CSPRNG output through on its way to user memory (`AGENTS.md` §22 — zeroed
 # on consumption; §2.12 — never hand-roll the wipe).

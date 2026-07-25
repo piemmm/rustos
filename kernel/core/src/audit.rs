@@ -445,6 +445,19 @@ pub enum AuditEvent {
     /// validation. Operational, not a security decision, but recorded with a
     /// stable event id like every other boot-time choice.
     CpuOpsRoutineSelected,
+    /// The boot-time cryptographic power-on self-test failed: the live
+    /// SHA-256 path did not reproduce its published known-answer vectors
+    /// (`tairix_crypto::backend`), so even the audited software baseline is
+    /// computing wrong answers.
+    ///
+    /// Emitted once, immediately before the kernel halts. Running with a
+    /// crypto core that fails its known-answer test is not a recoverable
+    /// condition — every capability signature, manifest hash, and
+    /// encrypted-swap tag would rest on broken cryptography — so this is a
+    /// fatal, security-critical boot fault (the FIPS power-on-self-test
+    /// discipline: a failed POST renders the module inoperable). Carries the
+    /// `family` whose self-test failed.
+    CryptoSelfTestFailed,
 }
 
 impl AuditEvent {
@@ -497,6 +510,7 @@ impl AuditEvent {
             Self::SystemConfigApplied => 4110,
             Self::SystemConfigRejected => 4111,
             Self::CpuOpsRoutineSelected => 4120,
+            Self::CryptoSelfTestFailed => 4121,
         })
     }
 
@@ -551,6 +565,7 @@ impl AuditEvent {
             Self::SystemConfigApplied => "system configuration applied",
             Self::SystemConfigRejected => "system configuration rejected",
             Self::CpuOpsRoutineSelected => "cpu accelerated routine selected",
+            Self::CryptoSelfTestFailed => "crypto power-on self-test failed",
         }
     }
 }
@@ -619,6 +634,7 @@ mod tests {
             AuditEvent::SystemConfigApplied,
             AuditEvent::SystemConfigRejected,
             AuditEvent::CpuOpsRoutineSelected,
+            AuditEvent::CryptoSelfTestFailed,
         ] {
             let id = ev.id().0;
             assert!(
@@ -675,6 +691,7 @@ mod tests {
             AuditEvent::SystemConfigApplied.id().0,
             AuditEvent::SystemConfigRejected.id().0,
             AuditEvent::CpuOpsRoutineSelected.id().0,
+            AuditEvent::CryptoSelfTestFailed.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

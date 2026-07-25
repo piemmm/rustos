@@ -34,14 +34,18 @@ crate recovers, per booted core, everything the conservative floor gives up.
   median-of-rounds microbenchmark. No busy-wait, no "loop until a threshold".
 - `OpsTables<Ops>` — the resolved, per-core-type table the hot path consumes,
   grown on demand as each distinct core type comes up (`big.LITTLE`, Intel
-  hybrid), never a fixed ceiling.
+  hybrid), never a fixed ceiling. Behind the default-on `alloc` feature (the
+  crate's only heap use), so an allocator-free consumer that only selects a
+  routine depends on the crate with `default-features = false`.
 - `Decision` / `DecisionSink` — a typed record of every choice for the audit
   log. The crate performs no I/O; the caller (`kernel/core`) logs it.
 
 ## Rules this crate keeps
 
-- `no_std` + `alloc`, no `unsafe`, no `cfg`, no board/SoC/arch name — the
-  routines are generic and gated on discovered bits (§2.20/§2.21).
+- `no_std`, no `unsafe`, no `cfg`, no board/SoC/arch name — the routines are
+  generic and gated on discovered bits (§2.20/§2.21). The selection algorithm
+  allocates nothing; only the optional `OpsTables` uses the heap, behind the
+  default-on `alloc` feature, so a select-only consumer needs no allocator.
 - Crypto is never benchmarked: a crypto family is `ByPriority` on *availability*
   only, so a benchmark can never pick a key-leaking table-driven variant
   (§19.1/§2.12). The `ByBenchmark` axis is only for secret-free, bit-identical

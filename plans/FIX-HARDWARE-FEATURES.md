@@ -9,10 +9,23 @@ migration-safe common-`CpuFeatureSet` delivery (kernel folds each core's set
 into an intersection, stamps it into every `ProcessStart`, exposes it via
 `lib/rt::cpu_features`), the `kernel/core` bring-up resolve+audit
 (`AuditEvent::CpuOpsRoutineSelected`), and the ARXFS `physical_checksum`
-consumer (FNV-1a → CRC-32C, on-disk trailer 8→4). Remaining: the
-crypto-availability consumer (needs the `lib/crypto` backend-selection seam),
-P3 (the `ByBenchmark` memcpy/blit/checksum/XOR families + per-arch QEMU
-verticals), and P4 (matrix + burn-down). Design fixed below.
+consumer (FNV-1a → CRC-32C, on-disk trailer 8→4). The P2 **crypto-availability
+consumer** is also done: `lib/crypto::backend` is the authoritative SHA-256
+backend-availability decision routed through `lib/cpuops` as an
+availability-only (`ByPriority`, never benchmarked) family, whose mandatory
+self-verify is a boot-time FIPS-180-4 known-answer self-test (POST) of the live
+SHA-256 path; `kernel/core` records the decision and **halts** on a POST failure
+(`AuditEvent::CryptoSelfTestFailed`), the FIPS discipline. It does not fork the
+crypto computation (§2.12 forbids hand-rolling; the audited `sha2` crate owns
+backend selection): on `x86_64` the crate's own no-OS-safe `CPUID` detection
+selects SHA-NI, so the hardware-availability candidate is offered/recorded
+there; on `aarch64`/`riscv64`/`wasm32` there is no runtime-selected hardware
+SHA-256 path, so the honest software answer is recorded. Recovering hardware
+SHA-256 on `aarch64` (whose `sha2` HWCAP gate is inert on `target_os="none"`)
+awaits a **vetted, driveable audited backend** — a supply-chain decision,
+deliberately not faked. Remaining: that aarch64 hardware-crypto backend, P3 (the
+`ByBenchmark` memcpy/blit/checksum/XOR families + per-arch QEMU verticals), and
+P4 (matrix + burn-down). Design fixed below.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
@@ -449,18 +462,20 @@ the fastest over a deterministic fake counter (+ no-harness priority fallback,
 tie-to-earliest, median outlier rejection), `OpsTables` grow-once-per-core-type,
 and the `DecisionSink`.
 
-**Remaining P2 work (not yet landed):** the `kernel/core` bring-up wiring that
-builds the per-core-type `OpsTables` from each port's `CpuFeatures` handle and
-records each `Decision` through a `lib/log`-backed `DecisionSink`, and the first
-two consumers below. These need runtime feature detection threaded to the
-consumer; the CRC32 consumer additionally raises an open design question —
-ARXFS is a *user-space* driver that cannot reach kernel CPU detection or
-`kernel/arch/*` intrinsic bodies, so exposing the selected op to a user-space
-driver (via the ABI / an ops-table the driver's runtime resolves) is a design
-decision to settle before wiring it (candidate: resolve the driver's ops table
-in its `drvrt` host from a feature set the kernel hands it at spawn). Likewise
-`lib/crypto` today has no explicit hardware/software backend-selection surface,
-so the crypto-availability consumer needs that seam added first.
+**P2 done.** The `kernel/core` bring-up wiring finalises the migration-safe
+common `CpuFeatureSet` (each core folds its own detected set into an
+intersection) and, once final, resolves both P2 consumers and records each
+`Decision` on the `lib/log` audit sink (`AuditEvent::CpuOpsRoutineSelected`):
+the CRC-32C family (consumed by the in-kernel ARXFS `physical_checksum`) and the
+crypto SHA-256 backend-availability family (`lib/crypto::backend`). The crypto
+family additionally drives a fatal boot halt on a failed known-answer self-test
+(`AuditEvent::CryptoSelfTestFailed`). The one thing P2 could not deliver — a
+TAIRiX-fn-pointer-*routed* hardware crypto backend on `aarch64` — is blocked by
+§2.12 (hand-rolling forbidden) plus the pinned audited crates (`sha2`'s aarch64
+HWCAP gate is inert on `target_os="none"` and exposes no driveable override), so
+it is deferred to a **vetted, driveable audited backend** (a supply-chain
+decision), and the honest software answer is recorded there in the meantime —
+never a candidate that would not run (§2.19).
 
 **Scope in one line:** a new `no_std` `lib/cpuops` crate holding the whole
 selection abstraction (registry, self-verify, both policies, per-core-type
@@ -523,12 +538,20 @@ the crypto-availability decision as its first two consumers.
   fast non-crypto checksum, explicitly *not* a crypto primitive) is the first
   real caller — route it through the ops table.
 - **Crypto backend availability decision (capability-gated only — invariant
-  8).** *No benchmark.* A `ByPriority` family whose candidates are the
-  audited `lib/crypto` hardware backend (requires AES/PMULL/SHA present) and
-  the audited constant-time software backend (baseline). Selection is
-  *availability*, never speed; the chosen backend still comes from
-  `lib/crypto` (§2.12). This proves the framework models the crypto carve-out
-  without ever letting a benchmark near a secret.
+  8).** *No benchmark.* `lib/crypto::backend` is a `ByPriority` SHA-256 family:
+  a hardware-availability candidate (offered only where the audited crate
+  genuinely uses a hardware path selectable without an OS — today `x86_64`, via
+  the `crypto_hw_sha256` build cfg, requiring the `ShaNi`/`Sse42`/`Ssse3`/`Sse2`
+  bits `sha2` gates its SHA-NI path on) and the audited constant-time software
+  baseline. Selection is *availability*, never speed, and the chosen backend
+  still comes from the audited `lib/crypto` (§2.12) — the module does **not**
+  fork the computation (the audited crate owns backend selection internally;
+  transcribing SHA rounds over intrinsics would be hand-rolling, forbidden).
+  Its mandatory self-verify is a **boot-time FIPS-180-4 known-answer self-test
+  (POST)** of the live SHA-256 path; `kernel/core` halts on failure
+  (`CryptoSelfTestFailed`). This proves the framework models the crypto
+  carve-out — availability + self-test + audit, no benchmark near a secret —
+  and honestly records `Software` on targets with no driveable hardware path.
 
 **Deliverables — bring-up wiring (`kernel/core`):** the single point (§17.1
 selection-point precedent) that, as each CPU comes up, reads the port's

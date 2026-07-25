@@ -333,10 +333,16 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // Every core has now folded its CPU-feature set into the migration-safe
     // common set (`crate::cpuops`), so it is finalised: select the
     // self-optimising accelerated-routine implementations against it (CRC-32C
-    // for the in-kernel ARXFS physical-integrity checksum) and audit each
-    // choice. A core without the feature HAL slice leaves the set empty, so
-    // the portable baseline is chosen everywhere (fail closed).
-    crate::cpuops::resolve_accelerated_ops(audit_sink);
+    // for the in-kernel ARXFS physical-integrity checksum, and the crypto
+    // SHA-256 backend-availability decision) and audit each choice. A core
+    // without the feature HAL slice leaves the set empty, so the portable
+    // baseline is chosen everywhere (fail closed). The crypto family's
+    // self-verify is a boot-time known-answer self-test: if the audited
+    // primitive fails it (broken cryptography), the kernel must not proceed —
+    // it has already emitted the fatal audit record, so halt now.
+    if !crate::cpuops::resolve_accelerated_ops(audit_sink) {
+        arch_for_halt.halt();
+    }
 
     // Spawn PID 1 (`init`) into user mode when the arch port installed a
     // spawn seam (`plans/PI.md` P6c-3). On success the seam diverges into

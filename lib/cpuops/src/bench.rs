@@ -17,8 +17,6 @@
 //! verified-correct candidate wins; an operator pin makes even that
 //! deterministic.
 
-use alloc::vec::Vec;
-
 /// A per-core cycle counter the benchmark measures over.
 ///
 /// This is the generic seam the harness consumes; the architecture-specific
@@ -74,15 +72,16 @@ impl<'c> BenchHarness<'c> {
 
     /// Construct a harness with an explicit budget.
     ///
-    /// `iters` and `rounds` are clamped to at least 1 so the measurement is
-    /// always well-defined (a zero budget would measure nothing); the budget
-    /// stays bounded and one-shot regardless of the values passed.
+    /// `iters` is clamped to at least 1 and `rounds` to `1..=MAX_ROUNDS` so the
+    /// measurement is always well-defined (a zero budget would measure nothing)
+    /// and every round's sample lives on a fixed stack buffer; the budget stays
+    /// bounded and one-shot regardless of the values passed.
     #[must_use]
     pub fn with_budget(cycles: &'c dyn CycleCounter, iters: u32, rounds: u32) -> Self {
         Self {
             cycles,
             iters: iters.max(1),
-            rounds: rounds.max(1),
+            rounds: rounds.clamp(1, MAX_ROUNDS),
         }
     }
 
@@ -133,19 +132,30 @@ impl<'c> BenchHarness<'c> {
     where
         T: Copy,
     {
-        let mut samples: Vec<u64> = Vec::with_capacity(self.rounds as usize);
-        for _ in 0..self.rounds {
+        // `rounds` is clamped to `MAX_ROUNDS` at construction, so a fixed stack
+        // buffer holds every sample and the measurement allocates nothing.
+        let mut samples = [0u64; MAX_ROUNDS as usize];
+        let rounds = self.rounds.min(MAX_ROUNDS) as usize;
+        for sample in samples.iter_mut().take(rounds) {
             let start = self.cycles.cycles();
             for _ in 0..self.iters {
                 let out = run(impl_, warm);
                 core::hint::black_box(out);
             }
             let end = self.cycles.cycles();
-            samples.push(end.wrapping_sub(start));
+            *sample = end.wrapping_sub(start);
         }
-        median(&mut samples)
+        median(&mut samples[..rounds])
     }
 }
+
+/// The maximum number of independent measurement rounds.
+///
+/// The `rounds` budget is clamped to this at construction so a round's samples
+/// live on a fixed stack buffer and the microbenchmark allocates nothing — a
+/// bounded, one-shot measurement, never a heap-backed growing series. Well
+/// above the default round count; a larger request is clamped, not honoured.
+const MAX_ROUNDS: u32 = 64;
 
 /// The median of `samples`, sorting in place. Returns `0` for an empty slice
 /// (the safe default; callers never measure an empty budget).

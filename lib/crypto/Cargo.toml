@@ -36,6 +36,18 @@ chacha20poly1305 = { version = "=0.10.1", default-features = false }
 # so it is *not* a direct dependency here — adding one would violate
 # `AGENTS.md` §2.3.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# The generic self-optimising dispatch framework: the capability gate,
+# mandatory self-verify, and fail-closed baseline selection are written once
+# there and reused for the crypto backend-availability decision (§2.2), never
+# re-implemented here.
+# `default-features = false` drops the framework's optional heap-backed
+# `OpsTables`, which the crypto backend decision does not use — so this
+# foundational crate stays allocation-free and never forces a global allocator
+# onto an allocator-free consumer that links it (§2.16).
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
+# The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) the
+# crypto backend-availability candidate's required-feature gate is expressed in.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # `hex` is intentionally not depended on: doc/unit tests construct fixtures

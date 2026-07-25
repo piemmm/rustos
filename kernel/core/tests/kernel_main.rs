@@ -160,6 +160,39 @@ fn happy_path_runs_documented_init_order_and_halts() {
     assert_eq!(field("chosen").as_deref(), Some("crc32c-portable"));
     assert_eq!(field("reason").as_deref(), Some("baseline"));
 
+    // Two families resolve at boot: CRC-32C (asserted above) and the crypto
+    // SHA-256 backend-availability decision, recorded in that order. On the
+    // host TestArch the common set is empty, so the crypto family resolves to
+    // the audited software baseline — and its self-verify (the FIPS
+    // known-answer power-on self-test) passed, so no fatal
+    // `CryptoSelfTestFailed` is emitted and the kernel did not halt early.
+    let selections: Vec<_> = audit_sink
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.id == AuditEvent::CpuOpsRoutineSelected.id())
+        .collect();
+    assert_eq!(
+        selections.len(),
+        2,
+        "CRC-32C and crypto-sha256 families both record a selection: {:#?}",
+        audit_sink.snapshot(),
+    );
+    let crypto = &selections[1];
+    let crypto_field = |key: &str| {
+        crypto
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(crypto_field("family").as_deref(), Some("crypto-sha256"));
+    assert_eq!(crypto_field("chosen").as_deref(), Some("sha256-soft"));
+    assert_eq!(crypto_field("reason").as_deref(), Some("baseline"));
+    assert!(
+        !audit_ids.contains(&AuditEvent::CryptoSelfTestFailed.id().0),
+        "the crypto power-on self-test must pass on the happy path",
+    );
+
     // Log-channel events: every PhaseStarted in the documented order,
     // each followed by exactly one PhaseReady, and no audit-class
     // lifecycle events leaking onto the diagnostic channel.

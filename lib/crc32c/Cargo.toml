@@ -15,7 +15,10 @@ workspace = true
 # The self-optimising dispatch framework: the registry, capability gate,
 # mandatory self-verify, and fail-closed baseline selection are written once
 # there and reused here (§2.2), never re-implemented per accelerated op.
-tairix-cpuops = { path = "../cpuops", version = "=0.0.0" }
+# `default-features = false` drops the framework's optional heap-backed
+# `OpsTables` (unused here — this crate only *selects*), so the checksum stays
+# allocation-free and never forces a global allocator onto a consumer (§2.16).
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
 # The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) a
 # candidate's required-feature gate is expressed in.
 tairix-abi = { path = "../abi", version = "=0.0.0" }

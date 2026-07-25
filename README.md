@@ -61,6 +61,7 @@ for filesystems, the feature section below.
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
+| Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |

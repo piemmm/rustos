@@ -16,6 +16,7 @@
 #![deny(missing_docs)]
 
 pub mod aead;
+pub mod backend;
 pub mod constant_time;
 pub mod hash;
 pub mod kdf;
@@ -25,6 +26,7 @@ pub mod sign;
 pub use aead::{
     open, seal, AeadError, AeadKey, AeadNonce, AeadTag, AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN,
 };
+pub use backend::{self_test_passed, CryptoBackend};
 pub use constant_time::ct_eq;
 pub use hash::{sha256, Sha256Digest, Sha256Stream, SHA256_OUTPUT_LEN};
 pub use kdf::{
