@@ -45,6 +45,7 @@ members = [
     "lib/complete",
     "lib/compress",
     "lib/controls",
+    "lib/cpuops",
     "lib/crt0",
     "lib/crypto",
     "lib/curses",

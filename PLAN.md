@@ -295,7 +295,24 @@ slice for the self-optimising routine-selection framework
 `ID_AA64ISAR0_EL1`+`ID_AA64PFR0_EL1` / `misa`+`riscv,isa` string / honest
 wasm32 host query) and the `CpuCycles` cycle-counter trait (`rdtsc` /
 `CNTVCT_EL0` / `time` CSR / `performance.now()`), each with a
-`kernel/arch/api` conformance vertical every port passes.
+`kernel/arch/api` conformance vertical every port passes. The arch-neutral
+capability vocabulary (`CpuFeature`/`CpuFeatureSet`) it produces lives in
+`tairix_abi::cpufeatures` (the dependency-free ABI crate, mirroring
+`tairix_abi::hwtree`) so the HAL and the generic dispatch framework share one
+definition without the framework taking a forbidden `kernel/*` edge (§17.4).
+
+The generic dispatch framework itself is `lib/cpuops`
+(`plans/FIX-HARDWARE-FEATURES.md` P2, framework landed): a `no_std`+alloc,
+platform-neutral crate holding the whole selection abstraction — `Candidate`/
+`Family`, the `Selector` (filter on the capability gate → mandatory self-verify
+against the portable reference → choose by declared priority or a bounded
+median `BenchHarness` over an injected `CycleCounter` → fail closed to the
+portable baseline), per-core-type `OpsTables`, operator pins (which still
+self-verify), and the typed `Decision`/`DecisionSink` audit seam. Crypto is
+availability-only, never benchmarked. Remaining P2/P3 work: wiring per-core-type
+ops tables in `kernel/core` at bring-up and routing the first consumers (CRC32,
+crypto-backend availability, then the `ByBenchmark` memcpy/blit/checksum
+families).
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

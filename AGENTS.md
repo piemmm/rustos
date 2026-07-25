@@ -654,6 +654,21 @@ tairix/
 │   │                    #   module switchboard: WindowFrame/TitleBar/Tabs/
 │   │                    #   ListRow/Card/Panel/Button/ScrollBar from typed view
 │   │                    #   models, typed SwitchboardAction) are complete.
+│   ├── cpuops/          # Self-optimising CPU-dispatch framework
+│   │                    #   (plans/FIX-HARDWARE-FEATURES.md P2/P3): the one
+│   │                    #   generic, platform-neutral registry that selects, per
+│   │                    #   boot per distinct core type, the fastest *correct*,
+│   │                    #   feature-legal implementation of an accelerated op
+│   │                    #   (CRC32, checksum, memcpy/zero, blit, XOR, and the
+│   │                    #   crypto-backend availability decision) from a set of
+│   │                    #   candidates — a deterministic capability gate over
+│   │                    #   the shared lib/abi CpuFeatureSet, a mandatory self-
+│   │                    #   verify against a portable reference, and either
+│   │                    #   declared priority or a bounded median microbenchmark
+│   │                    #   over an injected CycleCounter — always falling
+│   │                    #   closed to a portable baseline. Crypto is availability
+│   │                    #   only, never benchmarked (§19.1/§2.12). no_std+alloc,
+│   │                    #   no cfg, no board/SoC name (§2.16/§2.20/§2.21/§27).
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.

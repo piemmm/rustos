@@ -1,7 +1,10 @@
 # FIX-HARDWARE-FEATURES — Boot-time CPU feature detection and self-optimising routine selection
 
-Status: **in progress** — P0 (build-time floor) and P1 (the `cpufeatures`
-/`cpucycles` Arch HAL slices) done; P2–P4 planned (design fixed below).
+Status: **in progress** — P0 (build-time floor), P1 (the `cpufeatures`
+/`cpucycles` Arch HAL slices), and the P2 **framework crate** (`lib/cpuops`,
+foundational-complete) done; the P2 **consumer wiring** (per-core-type ops
+tables in `kernel/core`, CRC32 + crypto-availability consumers) and P3/P4
+remain (design fixed below).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
@@ -407,6 +410,49 @@ four ports; no `cfg(target_arch)` appears above the HAL (`cargo xtask
 cfg-check` green); the HAL conformance vertical runs the new slice.
 
 ### P2 — The generic `lib/cpuops` framework (registry + `ByPriority` + self-verify + fail-closed baseline)
+
+**Framework landed (design as built).** The `lib/cpuops` crate is complete and
+foundational (§27), with these decisions refining the sketch below:
+
+- The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) lives in
+  `tairix_abi::cpufeatures`, not in the HAL, so a `lib/*` crate can consume it
+  without a forbidden `kernel/*` edge (§17.4); the HAL re-exports it. This is
+  the one place both the ID-register *producer* (HAL) and the *consumer*
+  (`lib/cpuops`) share the definition (§2.2), mirroring `tairix_abi::hwtree`.
+- `FamilyId(&'static str)` is a stable string label, **not** a closed enum: the
+  framework is generic over which families exist (a consumer declares its own),
+  so a family enum would be speculative surface the framework does not own
+  (§2.3/§2.4).
+- The per-core-type key is `CoreKey(u64)` (the HAL `CoreType::raw_id`), so the
+  framework needs neither `CoreType` nor `CoreClass` and stays `kernel/*`-free.
+- `OpsTable` is `OpsTables<Ops>`, generic over the consumer's own struct of
+  resolved fn pointers (the framework cannot name a consumer's op set), grown on
+  demand per `CoreKey` (§24.1, not a fixed ceiling).
+- The benchmark harness (P3) is included now — the crate is foundational-
+  complete with **both** policies real — over a crate-local `CycleCounter` seam
+  (`kernel/core` adapts the HAL `CpuCycles` to it) so the crate names no arch.
+- Every `unwrap`/`expect`/`panic!` is kept out of the production path; the
+  selector fails closed to the baseline (§2.9/§5.4).
+
+Full host tests cover: feature-gate filtering, self-verify rejection,
+fail-closed baseline (incl. no-vectors → `BaselineUnverified`), pin /
+pin-rejected-illegal / pin-rejected-buggy / unknown-pin, `ByBenchmark` picking
+the fastest over a deterministic fake counter (+ no-harness priority fallback,
+tie-to-earliest, median outlier rejection), `OpsTables` grow-once-per-core-type,
+and the `DecisionSink`.
+
+**Remaining P2 work (not yet landed):** the `kernel/core` bring-up wiring that
+builds the per-core-type `OpsTables` from each port's `CpuFeatures` handle and
+records each `Decision` through a `lib/log`-backed `DecisionSink`, and the first
+two consumers below. These need runtime feature detection threaded to the
+consumer; the CRC32 consumer additionally raises an open design question —
+ARXFS is a *user-space* driver that cannot reach kernel CPU detection or
+`kernel/arch/*` intrinsic bodies, so exposing the selected op to a user-space
+driver (via the ABI / an ops-table the driver's runtime resolves) is a design
+decision to settle before wiring it (candidate: resolve the driver's ops table
+in its `drvrt` host from a feature set the kernel hands it at spawn). Likewise
+`lib/crypto` today has no explicit hardware/software backend-selection surface,
+so the crypto-availability consumer needs that seam added first.
 
 **Scope in one line:** a new `no_std` `lib/cpuops` crate holding the whole
 selection abstraction (registry, self-verify, both policies, per-core-type

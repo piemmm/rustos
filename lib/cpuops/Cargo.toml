@@ -1,0 +1,19 @@
+[package]
+name = "tairix-cpuops"
+description = "TAIRiX self-optimising CPU-dispatch framework: the one generic, platform-neutral registry that selects, per boot per distinct core type, the fastest *correct* feature-legal implementation of an accelerated operation (CRC32, checksums, memcpy/zero, blit, XOR, and the crypto-backend availability decision) from a set of candidates — via a deterministic capability gate over `tairix_abi::cpufeatures`, a mandatory self-verify against a portable reference, and either declared priority or a bounded microbenchmark, always falling closed to a portable baseline. no_std + alloc, no `cfg`, no board/SoC name (AGENTS.md §2.16/§2.20/§2.21/§27; plans/FIX-HARDWARE-FEATURES.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) is
+# defined once in the dependency-free ABI crate and shared with the Arch HAL,
+# so the framework gates candidates on the *same* bits the ports produce
+# without acquiring a forbidden edge to `kernel/*` (§17.4, §2.2).
+tairix-abi = { path = "../abi", version = "=0.0.0" }

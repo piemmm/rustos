@@ -763,6 +763,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-cpuops"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+]
+
+[[package]]
 name = "tairix-crt0"
 version = "0.0.0"
 dependencies = [

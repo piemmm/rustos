@@ -20,6 +20,7 @@ pub mod appinfo;
 pub mod blkio;
 pub mod boot;
 pub mod capability;
+pub mod cpufeatures;
 pub mod display_ipc;
 pub mod driver;
 pub mod driver_store;
