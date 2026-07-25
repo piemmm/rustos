@@ -294,7 +294,7 @@ pub fn ms_to_ns(ms: f64) -> u64 {
 
 /// Read the host monotonic clock in fractional milliseconds.
 #[cfg(target_arch = "wasm32")]
-fn read_now_ms() -> f64 {
+pub(crate) fn read_now_ms() -> f64 {
     crate::bindings::host_now_ms()
 }
 
@@ -303,7 +303,7 @@ fn read_now_ms() -> f64 {
 /// clock. Never linked into a wasm image (the wasm build uses the
 /// `crate::bindings` reading above).
 #[cfg(not(target_arch = "wasm32"))]
-fn read_now_ms() -> f64 {
+pub(crate) fn read_now_ms() -> f64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ticks = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
     // Each host tick advances the synthetic clock by one millisecond.

@@ -17,11 +17,13 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use tairix_arch_api::conformance;
 use tairix_arch_api::context::{self, ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::cpufeatures::{CpuFeatures, FeatureProfile, FeatureSupport};
 use tairix_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
 use tairix_arch_api::percpu;
 use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
 use tairix_arch_api::timer::{self, TickFn, Timer};
+use tairix_arch_api::{CoreType, CpuFeatureSet};
 use tairix_arch_api::{CpuId, PerCpu, SchedulerArch};
 
 #[derive(Default)]
@@ -82,6 +84,23 @@ impl PerCpu for DoublePerCpu {
     }
 }
 
+struct DoubleCpuFeatures;
+
+impl CpuFeatures for DoubleCpuFeatures {
+    fn detect(&self, _cpu: CpuId) -> CpuFeatureSet {
+        CpuFeatureSet::EMPTY
+    }
+    fn core_type(&self, _cpu: CpuId) -> CoreType {
+        CoreType::UNKNOWN
+    }
+    fn profile(&self) -> FeatureProfile {
+        FeatureProfile {
+            isa_features: FeatureSupport::Supported,
+            core_identity: FeatureSupport::Supported,
+        }
+    }
+}
+
 struct DoubleMemTags;
 
 impl MemoryTagging for DoubleMemTags {
@@ -108,6 +127,7 @@ fn arch_hal_conformance_suite_runs() {
         &DoubleMemTags,
         &DoubleDiscovery,
         &DoublePerCpu::default(),
+        &DoubleCpuFeatures,
     );
 }
 

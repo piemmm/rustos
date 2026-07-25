@@ -83,6 +83,19 @@
 //! stays in its current owning crate, and the move is tracked, not
 //! silently duplicated.
 //!
+//! It also hosts the **CPU-feature-detection** slice: the [`CpuFeatures`]
+//! trait that turns each target's CPU-ID source (`CPUID`,
+//! `ID_AA64ISAR0_EL1`/`ID_AA64PFR0_EL1`, `misa` + the device-tree ISA
+//! string, the wasm32 host query) into one arch-neutral [`CpuFeatureSet`]
+//! and [`CoreType`] key — the deterministic capability layer the
+//! `lib/cpuops` self-optimising dispatch framework
+//! (`plans/FIX-HARDWARE-FEATURES.md`) gates on — plus its
+//! [`cpufeatures::conformance`] vertical, and the **CPU cycle-counter**
+//! slice: the [`CpuCycles`] trait that reads the per-core cycle count
+//! (`rdtsc` / `PMCCNTR_EL0` / `CNTVCT_EL0` / `rdcycle` /
+//! `performance.now()`) the `lib/cpuops` microbenchmark measures over,
+//! plus its [`cpucycles::conformance`] vertical.
+//!
 //! # Why `no_std` and dependency-light
 //!
 //! the charter permits `kernel/arch/api` to depend on `lib/*` only. The crate
@@ -101,6 +114,8 @@
 pub mod backtrace;
 pub mod conformance;
 pub mod context;
+pub mod cpucycles;
+pub mod cpufeatures;
 pub mod entropy;
 pub mod frames;
 pub mod irq;
@@ -128,6 +143,13 @@ pub use sidechannel::{
     conformance as sidechannel_conformance, Mitigation, MitigationEntry, MitigationProfile,
     ProfileError, SideChannelMitigation,
 };
+
+pub use cpufeatures::{
+    conformance as cpufeatures_conformance, CoreType, CpuFeature, CpuFeatureSet, CpuFeatures,
+    FeatureEntry, FeatureProfile, FeatureSupport,
+};
+
+pub use cpucycles::{conformance as cpucycles_conformance, CpuCycles};
 
 pub use entropy::{
     conformance as entropy_conformance, EntropyEntry, EntropyProfile, EntropySupport,

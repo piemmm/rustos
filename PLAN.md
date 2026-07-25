@@ -288,6 +288,15 @@ all four ports pass the conformance suite. Summary of what landed:
 - [x] W17 — trimmed aarch64 `virt` DTB embed; device verticals parse the full
       tree at runtime via `tairix_fdt::Fdt`.
 
+Beyond the W-series burn-down, the HAL gained the CPU-feature-detection
+slice for the self-optimising routine-selection framework
+(`plans/FIX-HARDWARE-FEATURES.md` P1): the closed `CpuFeatures` trait
+(deterministic `CpuFeatureSet` + `CoreType` from CPUID /
+`ID_AA64ISAR0_EL1`+`ID_AA64PFR0_EL1` / `misa`+`riscv,isa` string / honest
+wasm32 host query) and the `CpuCycles` cycle-counter trait (`rdtsc` /
+`CNTVCT_EL0` / `time` CSR / `performance.now()`), each with a
+`kernel/arch/api` conformance vertical every port passes.
+
 Each sub-stage delivers one architecture. They share the same checklist:
 
 - Boot stub (minimal assembly, justified per `AGENTS.md` §1).

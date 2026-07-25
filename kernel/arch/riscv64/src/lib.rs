@@ -111,6 +111,13 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// riscv64 implementation of the Arch HAL CPU-feature-detection and
+/// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
+/// [`tairix_arch_api::CpuCycles`]): the `misa` vector-extension bit, the
+/// device-tree `riscv,isa`-string multi-letter extension decode, and the
+/// `time`-CSR cycle counter the `lib/cpuops` dispatch framework gates and
+/// benchmarks on.
+pub mod cpufeatures;
 /// Boot-CPU model-name discovery: the device-tree cpu `compatible` →
 /// marketing-name mapping (`SiFive U74-MC`, …) the boot facts report.
 pub mod cpuname;

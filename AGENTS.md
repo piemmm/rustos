@@ -2251,8 +2251,14 @@ as non-negotiable as §2.
   storage, side-channel mitigation (§19.1), memory tagging (§19.10), user
   entry, SMP secondary bring-up, early-boot platform discovery (which
   normalises each target's native source — ACPI / FDT / host query — into
-  the `lib/abi` hardware tree, §18.1/§18.2), and the lockup-watchdog
-  non-maskable liveness sample + cross-CPU recovery (`plans/WATCHDOG.md`).
+  the `lib/abi` hardware tree, §18.1/§18.2), CPU feature detection (the
+  deterministic `CpuFeatures` capability read — CPUID / `ID_AA64ISAR0_EL1`
+  / `misa` + ISA string / host query — into the arch-neutral
+  `CpuFeatureSet` the `lib/cpuops` self-optimising dispatch framework
+  gates on, `plans/FIX-HARDWARE-FEATURES.md`), the `CpuCycles` per-core
+  cycle counter that framework's microbenchmark measures over, and the
+  lockup-watchdog non-maskable liveness sample + cross-CPU recovery
+  (`plans/WATCHDOG.md`).
   Each slice carries a
   conformance vertical in `kernel/arch/api`. Adding to this surface
   requires a PLAN.md entry and updates this section; per-slice migration

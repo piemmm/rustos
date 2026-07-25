@@ -87,6 +87,16 @@ pub mod context;
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
+/// x86_64 implementation of the Arch HAL CPU-feature-detection and
+/// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
+/// [`tairix_arch_api::CpuCycles`]): the `CPUID` extension decode and the
+/// `RDTSC` cycle counter the `lib/cpuops` dispatch framework gates and
+/// benchmarks on.
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `tairix-arch-api` dependency this module's traits live in.
+#[cfg(feature = "sched-arch")]
+pub mod cpufeatures;
 /// Boot-CPU model-name discovery: the CPUID processor brand string
 /// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.
 pub mod cpuname;

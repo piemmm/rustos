@@ -119,7 +119,10 @@ fn passes_arch_hal_conformance_suite() {
         &crate::memtag::MemoryTags::new(),
         &discovery,
         &crate::percpu_hal::PerCpuStorage::new(),
+        &crate::cpufeatures::CpuFeatureDetect::new(),
     );
+    // The cycle-counter slice has its own vertical.
+    tairix_arch_api::cpucycles::conformance::run_all(&crate::cpufeatures::CpuCycleCounter::new());
 }
 
 /// / W6: the port passes the cross-CPU TLB-shootdown conformance

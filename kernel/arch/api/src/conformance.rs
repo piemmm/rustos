@@ -42,8 +42,8 @@
 //! two handles in its own suite.
 
 use crate::{
-    memtag, percpu, platform, sidechannel, CpuId, MemoryTagging, PerCpu, PlatformDiscovery,
-    SchedulerArch, SideChannelMitigation,
+    cpufeatures, memtag, percpu, platform, sidechannel, CpuFeatures, CpuId, MemoryTagging, PerCpu,
+    PlatformDiscovery, SchedulerArch, SideChannelMitigation,
 };
 
 /// Run the [`SchedulerArch`] contract suite against `arch`.
@@ -69,36 +69,40 @@ pub fn run_scheduler_arch<A: SchedulerArch + ?Sized>(arch: &A) {
 ///
 /// Combines the [`SchedulerArch`] contract ([`run_scheduler_arch`]) with
 /// the side-channel vertical, the memory-tagging vertical,
-/// the early-boot platform-discovery vertical, and the per-CPU
-/// storage round-trip vertical already defined in this crate, each over
-/// the matching port handle.
+/// the early-boot platform-discovery vertical, the per-CPU
+/// storage round-trip vertical, and the CPU-feature-detection vertical
+/// already defined in this crate, each over the matching port handle.
 ///
 /// # Panics
 ///
-/// Panics (failing the test) if any of the five slices fails its
+/// Panics (failing the test) if any of the six slices fails its
 /// contract; see [`run_scheduler_arch`],
 /// [`sidechannel::conformance::run_all`],
 /// [`memtag::conformance::run_all`],
-/// [`platform::conformance::run`], and
-/// [`percpu::conformance::run_all`].
-pub fn run_all<A, S, M, P, C>(
+/// [`platform::conformance::run`],
+/// [`percpu::conformance::run_all`], and
+/// [`cpufeatures::conformance::run_all`].
+pub fn run_all<A, S, M, P, C, F>(
     arch: &A,
     side_channel: &S,
     memory_tagging: &M,
     platform_discovery: &P,
     per_cpu: &C,
+    cpu_features: &F,
 ) where
     A: SchedulerArch + ?Sized,
     S: SideChannelMitigation + ?Sized,
     M: MemoryTagging + ?Sized,
     P: PlatformDiscovery + ?Sized,
     C: PerCpu + ?Sized,
+    F: CpuFeatures + ?Sized,
 {
     run_scheduler_arch(arch);
     sidechannel::conformance::run_all(side_channel);
     memtag::conformance::run_all(memory_tagging);
     platform::conformance::run(platform_discovery);
     percpu::conformance::run_all(per_cpu);
+    cpufeatures::conformance::run_all(cpu_features);
 }
 
 /// `current_cpu` is stable for the duration of a call: repeated reads from one execution context agree.
@@ -159,10 +163,11 @@ fn core_class_is_total<A: SchedulerArch + ?Sized>(arch: &A) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpufeatures::{CpuFeatures, FeatureProfile, FeatureSupport};
     use crate::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
     use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use crate::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
-    use crate::{CoreClass, PerCpu};
+    use crate::{CoreClass, CoreType, CpuFeatureSet, PerCpu};
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 
@@ -227,6 +232,23 @@ mod tests {
         }
     }
 
+    struct StubCpuFeatures;
+
+    impl CpuFeatures for StubCpuFeatures {
+        fn detect(&self, _cpu: CpuId) -> CpuFeatureSet {
+            CpuFeatureSet::EMPTY
+        }
+        fn core_type(&self, _cpu: CpuId) -> CoreType {
+            CoreType::UNKNOWN
+        }
+        fn profile(&self) -> FeatureProfile {
+            FeatureProfile {
+                isa_features: FeatureSupport::Supported,
+                core_identity: FeatureSupport::Supported,
+            }
+        }
+    }
+
     struct StubMemTags;
 
     impl MemoryTagging for StubMemTags {
@@ -265,6 +287,7 @@ mod tests {
             &StubMemTags,
             &StubDiscovery,
             &StubPerCpu::default(),
+            &StubCpuFeatures,
         );
     }
 

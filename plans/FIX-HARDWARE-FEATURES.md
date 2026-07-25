@@ -1,7 +1,7 @@
 # FIX-HARDWARE-FEATURES — Boot-time CPU feature detection and self-optimising routine selection
 
-Status: **in progress** — P0 (build-time floor) done; P1–P4 planned (design
-fixed below).
+Status: **in progress** — P0 (build-time floor) and P1 (the `cpufeatures`
+/`cpucycles` Arch HAL slices) done; P2–P4 planned (design fixed below).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
@@ -273,12 +273,47 @@ per-board; hardware worked out at runtime via discovery (§18.1) and CPU
 extensions via P1–P3 dispatch. Per-board images are a rare boot-layer escape
 hatch owned by `plans/BOOTLOADER.md`, never the default.
 
-### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer)
+### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer) — **done**
 
-**Scope in one line:** add a new closed HAL slice that turns each target's
-CPU-ID source into one arch-neutral `CpuFeatureSet`, plus a HAL cycle
-counter for the P3 harness — modelled slot-for-slot on the existing
-`memtag`/`sidechannel` slices.
+**Delivered.** Two closed HAL slices landed, modelled slot-for-slot on the
+`memtag`/`sidechannel` slices, each with a `kernel/arch/api` conformance
+vertical every port passes:
+
+- `kernel/arch/api/src/cpufeatures.rs`: the `CpuFeatures` trait
+  (`detect → CpuFeatureSet`, `core_type → CoreType`, `profile →
+  FeatureProfile`), the closed `CpuFeature` enum (aarch64
+  CRC32/AES/PMULL/SHA1/SHA2/SHA3/LSE/ASIMD/DIT, x86_64
+  SSE2/SSSE3/SSE4.2/AVX/AVX2/AES-NI/PCLMULQDQ/SHA-NI/RDRAND/RDSEED,
+  riscv64 Zbb/Zbc/Zbkc/V) with stable per-bit discriminants, the
+  `CpuFeatureSet` bitset (`contains`/`contains_all`/`with`/`bits`), the
+  `CoreType` per-core-type key (`raw_id` is the discriminator; `model`
+  best-effort, `class` the homogeneous default), and the honest
+  `FeatureProfile`/`FeatureSupport` (`Supported`/`Unsupported`/`Pending`)
+  vocabulary — the last also being the reporting type a *probed* platform
+  capability (e.g. the D13 watchdog's FIQ deliverability) uses.
+- `kernel/arch/api/src/cpucycles.rs`: the `CpuCycles` trait
+  (`cpu_cycles`, `cycles_monotonic_hint`) — its own slice, not grafted
+  onto `timer.rs`.
+
+Per-port impls (each the sole reader of its ID source; pure decoders
+host-tested, register reads gated to `target_os = "none"`, host builds
+report empty/unknown):
+
+- x86_64 `cpufeatures.rs`: `CPUID` leaf 1 + leaf 7 decode, vendor +
+  leaf-1 signature `CoreType`, `RDTSC` cycles (invariant-TSC hint).
+- aarch64 `cpufeatures.rs`: `ID_AA64ISAR0_EL1`/`ID_AA64PFR0_EL1` decode,
+  `MIDR_EL1` `CoreType`, `CNTVCT_EL0` cycles (chosen over `PMCCNTR_EL0`
+  to avoid PMU-enable boot wiring).
+- riscv64 `cpufeatures.rs`: `misa` V bit + pure `riscv,isa`-string
+  multi-letter (`Zbb`/`Zbc`/`Zbkc`) parser, `time`-CSR cycles (reuses the
+  one `read_time()` the clock uses).
+- wasm32 `cpufeatures.rs`: honest `Unsupported` (a guest sees no native
+  ISA), empty detection, `performance.now()` cycles.
+
+Wired into `conformance::run_all` (new `cpu_features` handle) and every
+port's `passes_arch_hal_conformance_suite`; recorded in the §17.2 HAL
+enumeration and `PLAN.md`. The design that was fixed below is kept for
+reference by P2/P3.
 
 **Deliverables — the HAL trait (`kernel/arch/api/src/cpufeatures.rs`):**
 

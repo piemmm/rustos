@@ -100,6 +100,13 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// aarch64 implementation of the Arch HAL CPU-feature-detection and
+/// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
+/// [`tairix_arch_api::CpuCycles`]): the `ID_AA64ISAR0_EL1`/
+/// `ID_AA64PFR0_EL1` extension decode and the `CNTVCT_EL0` generic-timer
+/// cycle counter the `lib/cpuops` dispatch framework gates and
+/// benchmarks on.
+pub mod cpufeatures;
 /// Boot-CPU model-name discovery: the `MIDR_EL1` implementer/part decode
 /// (`ARM Cortex-A72`, …) the boot facts report.
 pub mod cpuname;

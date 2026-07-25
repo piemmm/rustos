@@ -68,6 +68,13 @@ extern crate std;
 /// ([`tairix_arch_api::PlatformEntropy`]): the host CSPRNG, honestly
 /// `Pending` on the host entropy import (see the module docs).
 pub mod backtrace;
+/// wasm32 implementation of the Arch HAL CPU-feature-detection and
+/// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
+/// [`tairix_arch_api::CpuCycles`]): a WebAssembly guest sees no native
+/// ISA extensions, so detection is honestly empty and `lib/cpuops`
+/// always selects the portable baseline; the cycle counter is the host
+/// `performance.now()` clock.
+pub mod cpufeatures;
 pub mod entropy;
 pub mod isolation;
 pub mod kernel_arch;

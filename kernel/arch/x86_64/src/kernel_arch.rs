@@ -739,6 +739,12 @@ mod tests {
             &crate::memtag::MemoryTags::new(),
             &discovery,
             &crate::percpu_hal::PerCpuStorage::new(),
+            &crate::cpufeatures::CpuFeatureDetect::new(),
+        );
+        // The cycle-counter slice has its own vertical (it takes no
+        // scheduler/discovery handle).
+        tairix_arch_api::cpucycles::conformance::run_all(
+            &crate::cpufeatures::CpuCycleCounter::new(),
         );
     }
 
