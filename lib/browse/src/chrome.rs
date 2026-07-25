@@ -229,14 +229,35 @@ pub enum ManagerTool {
     /// ([`create_directory`](Browser::create_directory)), which the file
     /// manager then opens the inline rename on.
     NewFolder,
+    /// Go to the user's Trash — the navigable Trash location
+    /// (`plans/NEW-FILEMANAGER.md` `FM11`). The file manager navigates the
+    /// [`Browser`] to the `Library/Trash` subtree
+    /// ([`navigate_to`](Browser::navigate_to)); it is a manager-only tool (not
+    /// the picker's) because a trusted read-only pick has no business managing
+    /// the Trash. Always offered — a Trash that cannot be reached is reported
+    /// as a refusal, not hidden (§2.24).
+    Trash,
+    /// Empty the user's Trash — permanently remove its contents
+    /// ([`empty_trash_plan`](crate::trash::empty_trash_plan) driven by the
+    /// shared [`DeleteWalk`](crate::delete::DeleteWalk)). Offered only when the
+    /// current directory *is* the user's Trash and it is non-empty (the
+    /// [`ManagerToolModel`] the file manager builds); it renders disabled
+    /// elsewhere, never hidden, so the toolbar's shape is stable.
+    EmptyTrash,
 }
 
 /// The complete set of manager-only write tools, in their left-to-right toolbar
 /// order (drawn after the shared read-only [`TOOLBAR_COMMANDS`]).
 ///
 /// The file manager hands this to the renderer; the read-only picker hands an
-/// empty slice, so it never draws or dispatches a write tool.
-pub const MANAGER_TOOLS: &[ManagerTool] = &[ManagerTool::NewFolder];
+/// empty slice, so it never draws or dispatches a write tool. New Folder first,
+/// then the Trash location and the Empty Trash verb — grouped so the
+/// Trash-related tools read together.
+pub const MANAGER_TOOLS: &[ManagerTool] = &[
+    ManagerTool::NewFolder,
+    ManagerTool::Trash,
+    ManagerTool::EmptyTrash,
+];
 
 impl ManagerTool {
     /// The built-in glyph the drawn toolbar paints for this tool (one
@@ -245,6 +266,62 @@ impl ManagerTool {
     pub const fn icon(self) -> IconKind {
         match self {
             Self::NewFolder => IconKind::NewFolder,
+            Self::Trash => IconKind::Trash,
+            Self::EmptyTrash => IconKind::EmptyTrash,
+        }
+    }
+}
+
+/// The enable state of the manager-only write tools, since some depend on
+/// context the [`Browser`] alone does not carry.
+///
+/// [`NewFolder`](ManagerTool::NewFolder) and [`Trash`](ManagerTool::Trash) are
+/// always actionable, but [`EmptyTrash`](ManagerTool::EmptyTrash) is offered
+/// only when the current directory *is* the user's Trash and it is non-empty —
+/// a fact the file manager computes from the user's `HOME` (which the engine
+/// does not know), so it is threaded in here rather than derived from the
+/// browser. A disabled tool renders muted, never hidden, and a click on it
+/// resolves to nothing (fail closed, §5.4).
+///
+/// The trusted read-only picker draws no write tools at all, so it uses
+/// [`none`](Self::none); the model then never enables anything.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ManagerToolModel {
+    can_empty_trash: bool,
+}
+
+impl ManagerToolModel {
+    /// Build the model for a file manager whose current directory is (or is
+    /// not) the user's non-empty Trash.
+    ///
+    /// `can_empty_trash` is the file manager's own computed answer to "is the
+    /// current directory the user's Trash, and does it hold anything?" — the
+    /// one gate on offering [`ManagerTool::EmptyTrash`].
+    #[must_use]
+    pub const fn new(can_empty_trash: bool) -> Self {
+        Self { can_empty_trash }
+    }
+
+    /// The model for a consumer that draws no write tools (the trusted
+    /// read-only picker): nothing is enabled because nothing is drawn.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            can_empty_trash: false,
+        }
+    }
+
+    /// Whether `tool` is currently actionable and should render enabled.
+    ///
+    /// [`NewFolder`](ManagerTool::NewFolder) and [`Trash`](ManagerTool::Trash)
+    /// are always available; [`EmptyTrash`](ManagerTool::EmptyTrash) is enabled
+    /// only when the model was built for a non-empty Trash (the `can_empty_trash`
+    /// argument to [`new`](Self::new)).
+    #[must_use]
+    pub const fn is_enabled(&self, tool: ManagerTool) -> bool {
+        match tool {
+            ManagerTool::NewFolder | ManagerTool::Trash => true,
+            ManagerTool::EmptyTrash => self.can_empty_trash,
         }
     }
 }

@@ -752,6 +752,39 @@ impl<S: DirectorySource> Browser<S> {
         Ok(true)
     }
 
+    /// Navigate to the directory named by root-first `components`, listing it
+    /// and recording the move on the back history like any other navigation —
+    /// the jump-to-an-arbitrary-location primitive (the file manager's "go to
+    /// Trash" location uses it to reach `Library/Trash` from wherever the user
+    /// is).
+    ///
+    /// Unlike [`navigate_to_depth`](Self::navigate_to_depth) (which only climbs
+    /// to an *ancestor* of the current directory) and [`open_index`](Self::open_index)
+    /// (which only *descends* into a listed child), this reaches any location
+    /// the source can list, so a caller that knows a path it wants to show —
+    /// not necessarily on the current directory's spine — can go straight
+    /// there without a second navigation model (§2.2). It records history and
+    /// clears the forward stack exactly as a fresh navigation does.
+    ///
+    /// Returns `Ok(true)` after moving and `Ok(false)` when `components`
+    /// already names the current directory — a no-op, not an error.
+    ///
+    /// Transactional and fail closed: the target is listed *before* any state
+    /// or history changes, so an unlistable location (missing, unreadable, or
+    /// its capability refused) leaves the browser — and its history — exactly
+    /// where they were.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::Source`] if `components` cannot be listed.
+    pub fn navigate_to(&mut self, components: Vec<String>) -> Result<bool, BrowseError> {
+        if components == self.components {
+            return Ok(false);
+        }
+        self.navigate_recording(components)?;
+        Ok(true)
+    }
+
     /// Whether there is a previous directory [`go_back`](Self::go_back) can
     /// return to — the enable state of a Back toolbar control.
     #[must_use]

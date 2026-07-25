@@ -311,6 +311,7 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 200, 120),
         &[],
+        crate::ManagerToolModel::none(),
     )
     .expect("surface");
     assert_eq!(surface.width(), 200);
@@ -331,6 +332,7 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
         font,
         Rect::new(0, 0, 200, header + row_height * 3),
         &[],
+        crate::ManagerToolModel::none(),
     )
     .expect("surface");
 
@@ -377,6 +379,7 @@ fn render_into_a_tiny_viewport_does_not_panic() {
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 4, 3),
         &[],
+        crate::ManagerToolModel::none(),
     )
     .expect("surface");
     assert_eq!(surface.width(), 4);
@@ -1120,7 +1123,15 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     let header = crate::render::chrome_height(font, &theme);
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
-    let surface = crate::render(&browser, &theme, font, vp, &[]).expect("grid surface");
+    let surface = crate::render(
+        &browser,
+        &theme,
+        font,
+        vp,
+        &[],
+        crate::ManagerToolModel::none(),
+    )
+    .expect("grid surface");
     assert_eq!(surface.width(), 400);
 
     // A click just inside the first tile (past the header) resolves to entry 0.
@@ -4012,9 +4023,13 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
 
 #[test]
 fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_commands() {
-    use crate::chrome::{ManagerTool, MANAGER_TOOLS};
+    use crate::chrome::{ManagerTool, ManagerToolModel, MANAGER_TOOLS};
     use crate::render::{manager_tool_at, toolbar_command_at, toolbar_height};
     use tairix_geometry::Point;
+
+    // Every manager tool enabled, so the scan sees the full write-tool set
+    // (the Empty Trash tool's own enable state is exercised separately).
+    let tool_model = ManagerToolModel::new(true);
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
@@ -4029,7 +4044,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
         let command = toolbar_command_at(&browser, &theme, vp, point);
-        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS);
+        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, tool_model);
         assert!(
             !(command.is_some() && tool.is_some()),
             "a pixel resolved to both a command and a write tool"
@@ -4047,7 +4062,10 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     // the type separation keeps a write action out of the picker entirely.
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
-        assert_eq!(manager_tool_at(&browser, &theme, vp, point, &[]), None);
+        assert_eq!(
+            manager_tool_at(&browser, &theme, vp, point, &[], tool_model),
+            None
+        );
     }
 
     // A click below the toolbar strip is never a write tool either.
@@ -4058,6 +4076,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
             vp,
             Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap()),
             MANAGER_TOOLS,
+            tool_model,
         ),
         None
     );
@@ -4065,9 +4084,11 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
 
 #[test]
 fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
-    use crate::chrome::{ManagerTool, MANAGER_TOOLS};
+    use crate::chrome::{ManagerTool, ManagerToolModel, MANAGER_TOOLS};
     use crate::render::{manager_tool_at, manager_tool_rect};
     use tairix_geometry::Point;
+
+    let tool_model = ManagerToolModel::new(true);
 
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 200);
@@ -4083,7 +4104,7 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
         rect.top() + i32::try_from(rect.height).unwrap() / 2,
     );
     assert_eq!(
-        manager_tool_at(&browser, &theme, vp, centre, MANAGER_TOOLS),
+        manager_tool_at(&browser, &theme, vp, centre, MANAGER_TOOLS, tool_model),
         Some(ManagerTool::NewFolder),
     );
 
@@ -4092,6 +4113,103 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
         manager_tool_rect(&browser, &theme, vp, &[], ManagerTool::NewFolder),
         None,
     );
+}
+
+#[test]
+fn render_manager_tool_at_gates_empty_trash_on_the_model() {
+    use crate::chrome::{ManagerTool, ManagerToolModel, MANAGER_TOOLS};
+    use crate::render::{manager_tool_at, toolbar_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, 200);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+
+    // With the model reporting the current directory is *not* a populated
+    // Trash, the Empty Trash tool is drawn (its rect exists) but renders
+    // disabled, so a click on it resolves to nothing — fail closed. The
+    // always-enabled New Folder tool still resolves.
+    let disabled = ManagerToolModel::new(false);
+    let mut saw_new_folder = false;
+    for x in 0..vp.width {
+        let point = Point::new(i32::try_from(x).unwrap(), y);
+        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, disabled);
+        assert_ne!(
+            tool,
+            Some(ManagerTool::EmptyTrash),
+            "a disabled Empty Trash tool must never resolve to an action"
+        );
+        if tool == Some(ManagerTool::NewFolder) {
+            saw_new_folder = true;
+        }
+    }
+    assert!(saw_new_folder, "New Folder stays actionable");
+
+    // With the model reporting a populated Trash, the same pixels resolve the
+    // Empty Trash tool — it is enabled in exactly the same place it was drawn.
+    let enabled = ManagerToolModel::new(true);
+    let mut saw_empty_trash = false;
+    for x in 0..vp.width {
+        let point = Point::new(i32::try_from(x).unwrap(), y);
+        if manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, enabled)
+            == Some(ManagerTool::EmptyTrash)
+        {
+            saw_empty_trash = true;
+        }
+    }
+    assert!(
+        saw_empty_trash,
+        "an enabled Empty Trash tool is hit-testable"
+    );
+}
+
+#[test]
+fn browser_navigate_to_jumps_to_an_off_spine_location_and_records_history() {
+    // Start at `/System`; `/Users` is neither an ancestor nor a child of it,
+    // so only the jump-to-arbitrary-location primitive can reach it.
+    let start = crate::vfs::components_from_absolute_path("/System").expect("valid path");
+    let mut browser = Browser::open_at(MockFs::fixture(), start).expect("System lists");
+    assert_eq!(browser.path(), "/System");
+    assert!(!browser.can_go_back());
+
+    let moved = browser
+        .navigate_to(vec!["Users".to_string()])
+        .expect("Users lists");
+    assert!(moved);
+    assert_eq!(browser.path(), "/Users");
+    assert_eq!(names(&browser), ["alice"]);
+    // History records the move like any navigation, so Back returns to where
+    // the jump started.
+    assert!(browser.can_go_back());
+    assert!(browser.go_back().expect("back to System"));
+    assert_eq!(browser.path(), "/System");
+}
+
+#[test]
+fn browser_navigate_to_the_current_directory_is_a_no_op() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Navigating to the directory already shown changes nothing and records no
+    // history — a no-op, not an error.
+    let moved = browser.navigate_to(Vec::new()).expect("no-op");
+    assert!(!moved);
+    assert!(!browser.can_go_back());
+    assert_eq!(browser.path(), "/");
+}
+
+#[test]
+fn browser_navigate_to_an_unlistable_location_fails_closed() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // `/System/Security` exists but is capability-denied; the jump is refused
+    // and the browser stays exactly where it was, with no history recorded.
+    let target = crate::vfs::components_from_absolute_path("/System/Security").expect("valid");
+    let result = browser.navigate_to(target);
+    assert_eq!(
+        result.err(),
+        Some(BrowseError::Source(Errno::PermissionDenied))
+    );
+    assert_eq!(browser.path(), "/");
+    assert!(!browser.can_go_back());
 }
 
 #[test]

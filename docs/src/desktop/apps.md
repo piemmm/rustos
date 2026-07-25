@@ -216,17 +216,23 @@ click can never diverge (`AGENTS.md` §2.2). The view toggle and sort are
 toolbar (pointer) commands; a conventional single-key accelerator for them
 awaits the later toolbar keyboard-focus pass.
 
-**New Folder is a manager-only write tool.** The read-only picker composes the
+**The manager-only write tools.** The read-only picker composes the
 exact same toolbar (`render`, `apply_command`), so a *write* action can never
 live in the shared `ToolbarCommand` / `apply_command` surface — that would hand
-the picker write authority. New Folder is therefore a distinct
-`chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`, `ManagerTool::icon()`) that
+the picker write authority. The manager tools are therefore a distinct
+`chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`, `ManagerTool::icon()`) —
+New Folder, the **Go to Trash** location, and **Empty Trash**
+(`plans/NEW-FILEMANAGER.md` FM11b) — that
 **only a write-capable consumer hands to `render`**: the file manager passes
-`MANAGER_TOOLS`, the picker passes an empty slice, so the picker cannot draw or
-resolve a write tool (the separation is by type, not a runtime flag). `render`
-draws the write tools in their own toolbar group after the read-only commands,
-and `render::manager_tool_at` is their mirror hit-test (a read-only command's
-position is unchanged whether or not write tools follow). The `files.app` `Run`
+`MANAGER_TOOLS` (with a `chrome::ManagerToolModel` enable snapshot), the picker
+passes an empty slice and `ManagerToolModel::none()`, so the picker cannot draw
+or resolve a write tool (the separation is by type, not a runtime flag).
+`render` draws the write tools in their own toolbar group after the read-only
+commands — each muted (never hidden) when the model reports it inactive, so
+Empty Trash reads disabled outside a non-empty Trash — and
+`render::manager_tool_at` is their mirror hit-test, resolving **only an enabled
+tool** (a read-only command's position is unchanged whether or not write tools
+follow). The `files.app` `Run`
 binary routes a click on the tool — and the **Ctrl+Shift+N** keyboard
 equivalent — to a new folder: `mkdir::suggest_new_dir_name` names a
 non-clashing placeholder, `Browser::create_directory` creates it through the
@@ -742,9 +748,27 @@ fail closed: a root Trash directory (`RootTrash`) or an invalid child leaf
 silently skip an item (`AGENTS.md` §5.4). Like the move, it touches no
 filesystem and holds no authority — the app drives the plan with its own
 `fs_readdir`/`fs_unlink` under the launching user's identity — so composing it
-grants nothing and the read-only picker never builds one. The drawn empty-Trash
-verb and a dedicated Trash view are a later increment (FM11b), not built ahead of
-this model.
+grants nothing and the read-only picker never builds one.
+
+The **empty-Trash verb and the Trash view** (`plans/NEW-FILEMANAGER.md` FM11b)
+are wired into the `files.app` `Run` binary through two manager-only toolbar
+tools (see the frame model above), which the file manager hands to `render` and
+the read-only picker never draws. **Go to Trash** (`ManagerTool::Trash`) is the
+navigable Trash location: it resolves the user's home from `HOME`, ensures the
+`Library/Trash` subtree exists (the shared `trash::trash_dir`, one definition,
+`AGENTS.md` §2.2), and navigates the browser there with `Browser::navigate_to`
+so the Trash's contents are shown like any other directory. **Empty Trash**
+(`ManagerTool::EmptyTrash`) renders disabled — muted, never hidden — unless the
+current directory *is* the user's Trash and it is non-empty (a `ManagerToolModel`
+the app computes from `HOME`, since the engine does not know it); when it is
+enabled, clicking it re-reads the Trash, builds `trash::empty_trash_plan`,
+confirms it with the `DeleteDisposition::Permanent` dialog, and — on confirm —
+drives the plan's `DeleteWalk` through the same interleaved progress/cancel
+runner an ordinary delete uses (`ProgressOp::Delete`), under the launching
+user's own `fs_readdir`/`fs_unlink` (no new capability). A stale click recomputes
+the Trash location and refuses to empty anything else (fail closed, `AGENTS.md`
+§5.4). The end-to-end click-through on the autoload QEMU vertical is staged as a
+follow-on increment (FM11c).
 
 For the file manager to find the user's Trash, the desktop session hands its
 launched apps the **user environment** login exported. Plain `spawn` gives a

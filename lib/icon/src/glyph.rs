@@ -68,6 +68,12 @@ pub enum IconKind {
     Sort,
     /// A folder with a plus badge, for the file manager's New Folder command.
     NewFolder,
+    /// A waste bin, for the file manager's Trash location (the "go to Trash"
+    /// command that navigates to the user's Trash directory).
+    Trash,
+    /// An open, tipped-out waste bin, for the file manager's Empty Trash
+    /// command (the permanent removal of the Trash's contents).
+    EmptyTrash,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -98,6 +104,8 @@ impl IconKind {
             "view-toggle" => Self::ViewToggle,
             "sort" => Self::Sort,
             "new-folder" => Self::NewFolder,
+            "trash" => Self::Trash,
+            "empty-trash" => Self::EmptyTrash,
             _ => Self::Generic,
         }
     }
@@ -132,6 +140,8 @@ impl IconKind {
             Self::Sort => 17,
             Self::NewFolder => 18,
             Self::Generic => 19,
+            Self::Trash => 20,
+            Self::EmptyTrash => 21,
         }
     }
 
@@ -165,6 +175,8 @@ impl IconKind {
             Self::Sort => "sort",
             Self::NewFolder => "new-folder",
             Self::Generic => "generic",
+            Self::Trash => "trash",
+            Self::EmptyTrash => "empty-trash",
         }
     }
 }
@@ -195,6 +207,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
         IconKind::NewFolder => new_folder(color),
+        IconKind::Trash => trash(color),
+        IconKind::EmptyTrash => empty_trash(color),
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -425,6 +439,36 @@ fn new_folder(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, BODY),
         IconLayer::from_points(color, PLUS_V),
         IconLayer::from_points(color, PLUS_H),
+    ]
+}
+
+/// A waste bin, for the Trash location: a handled lid bar over a tapering
+/// bin body ribbed with two vertical staves, so the bin reads even in one
+/// tint.
+fn trash(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const HANDLE: &[(i32, i32)] = &[(9, 3), (15, 3), (15, 5), (9, 5)];
+    const LID: &[(i32, i32)] = &[(4, 5), (20, 5), (20, 8), (4, 8)];
+    const BODY: &[(i32, i32)] = &[(6, 8), (18, 8), (16, 21), (8, 21)];
+    const RIB_LEFT: &[(i32, i32)] = &[(10, 10), (11, 10), (11, 19), (10, 19)];
+    const RIB_RIGHT: &[(i32, i32)] = &[(13, 10), (14, 10), (14, 19), (13, 19)];
+    vec![
+        IconLayer::from_points(color, HANDLE),
+        IconLayer::from_points(color, LID),
+        IconLayer::from_points(color, BODY),
+        IconLayer::from_points(color, RIB_LEFT),
+        IconLayer::from_points(color, RIB_RIGHT),
+    ]
+}
+
+/// An emptied waste bin, for Empty Trash: the same tapering bin body with its
+/// lid tipped off to one side (a slanted bar clear of the mouth), so it reads
+/// as "tipped out" and distinct from the closed [`trash`] bin.
+fn empty_trash(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LID: &[(i32, i32)] = &[(14, 2), (22, 5), (21, 8), (13, 5)];
+    const BODY: &[(i32, i32)] = &[(5, 9), (17, 9), (15, 21), (7, 21)];
+    vec![
+        IconLayer::from_points(color, LID),
+        IconLayer::from_points(color, BODY),
     ]
 }
 

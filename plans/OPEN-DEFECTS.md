@@ -98,6 +98,24 @@ The open items, in priority order:
   `kernel/core` observer → `CpuState::lock_sites`, rendered
   `k_lock=<file>:<line>` on `id=4085`) so the next reproduction names the
   culprit spinlock. The structural fix is OPEN, blocked on that evidence.
+- **D14 — `sysmon-qemu-aarch64` load-dependent 120 s timeout under
+  concurrent `cargo xtask ci` — OPEN (to root-cause).** The single-CPU,
+  full-boot `sysmon` acceptance vertical (unlock + PBKDF2 + interactive
+  monitor session, 120 s budget) intermittently times out **only** when
+  `cargo xtask ci` runs it alongside its ~dozen other QEMU guests: the
+  run's concurrency budget (host logical CPUs) lets that many single-CPU
+  TCG guests overlap, starving each of TCG throughput so this
+  work-heavy guest misses 120 s. It **passes in isolation**
+  (`cargo xtask test --qemu --only sysmon`) and passed a preceding full
+  `ci` run, so it is not a code regression — it is the load-dependent
+  QEMU-TCG timeout §7 names. Per §7/§2.17 the fix is **structural**
+  (bound the QEMU concurrency so single-CPU TCG guests do not
+  oversubscribe, or size the budget to the actual work), **not** a
+  retry and **not** a bare timeout bump; and, exactly as D5/D11 turned
+  out, a "load flake" here is to be *root-caused*, never waved through.
+  Discovered during `plans/NEW-FILEMANAGER.md` FM11b; recorded here
+  rather than fixed inline because it is a shared-tooling concurrency
+  concern unrelated to that feature.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL

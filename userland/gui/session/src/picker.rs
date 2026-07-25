@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
+use tairix_browse::ManagerToolModel;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_font::BitmapFont;
 use tairix_theme::Theme;
@@ -382,14 +383,17 @@ fn render_surface<S: DirectorySource>(
 ) -> Option<tairix_wm::Surface> {
     let theme = shell.session().active_theme();
     // The picker is strictly read-only: it hands the renderer no manager write
-    // tools, so it never draws or resolves one (a New Folder tool is the file
-    // manager's alone, never the trusted picker's — no write authority here).
+    // tools, so it never draws or resolves one (New Folder, the Trash location,
+    // and Empty Trash are the file manager's alone, never the trusted picker's
+    // — no write authority here). With no tools drawn, the enable model is the
+    // empty `ManagerToolModel::none()`.
     render(
         browser,
         theme,
         picker_font(theme),
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
         &[],
+        ManagerToolModel::none(),
     )
 }
 

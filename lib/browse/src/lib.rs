@@ -36,7 +36,8 @@
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
 //!   enable state, the [`breadcrumbs`] path bar
 //!   (`plans/NEW-FILEMANAGER.md` `FM4b`), and the manager-only [`ManagerTool`]
-//!   write-tool vocabulary the read-only picker never composes.
+//!   write-tool vocabulary (with the [`ManagerToolModel`] enable state) the
+//!   read-only picker never composes.
 //! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
 //!   right-anchored crumb layout the painter and the pointer hit-test share.
 //! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
@@ -58,9 +59,10 @@
 //!   model ([`applications_for`]) over the injected [`BundleSource`] seam.
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
 //! * [`trash`](mod@trash) — the recoverable-delete model: the
-//!   [`trash_strategy`] same-volume move-vs-unlink decision and the
+//!   [`trash_strategy`] same-volume move-vs-unlink decision, the
 //!   collision-safe [`trash_dest_path`] destination naming
-//!   (`plans/NEW-FILEMANAGER.md` `FM10`).
+//!   (`plans/NEW-FILEMANAGER.md` `FM10`), and the [`empty_trash_plan`]
+//!   permanent empty-Trash model (`FM11`).
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
 //! * [`browser`] — the [`Browser`] navigation model.
@@ -132,7 +134,8 @@ pub use activate::Activation;
 pub use browser::Browser;
 pub use chrome::{
     apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ManagerTool,
-    ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
+    ManagerToolModel, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS,
+    TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use delete::{
@@ -161,8 +164,8 @@ pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;
 pub use trash::{
-    trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError, TrashStrategy,
-    MAX_TRASH_NAME_ATTEMPTS,
+    empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
+    TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
 };
 pub use vfs::VfsDirectorySource;
 

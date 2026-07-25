@@ -27,8 +27,22 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — FM1–FM10 are all landed, and **FM11a (the pure empty-Trash
-model) now lands too.** `lib/browse::trash::empty_trash_plan` turns the Trash
+`in progress` — FM1–FM11b are all landed; only **FM11c (the empty-Trash QEMU
+witness) remains**, staged below. **FM11b now lands the app-side Empty Trash
+verb + the navigable Trash view.** Two manager-only toolbar tools join the
+`chrome::ManagerTool` set (drawn only for the write-capable file manager): **Go
+to Trash** (`ManagerTool::Trash`) navigates the browser to the user's
+`Library/Trash` via the new `Browser::navigate_to` jump-to-arbitrary-location
+primitive, and **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only in a
+non-empty Trash via the new `chrome::ManagerToolModel` threaded through
+`render`/`manager_tool_at` — builds `empty_trash_plan`, confirms with the
+`DeleteDisposition::Permanent` dialog, and drives the plan's `DeleteWalk`
+through the same interleaved progress/cancel runner a delete uses
+(`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
+(`IconKind::Trash` / `IconKind::EmptyTrash`). Host-tested in `lib/browse`
+(`navigate_to` off-spine/no-op/fail-closed; the Empty Trash enable-gate
+hit-test) and `lib/icon`; the freestanding files app builds + lints clean.
+**FM11a (the pure empty-Trash model) is complete.** `lib/browse::trash::empty_trash_plan` turns the Trash
 directory's `fs_readdir` listing into a `delete::DeletePlan` over its *contents*
 (never the Trash directory itself, so emptying leaves the now-empty folder in
 place), carried out by the same recursive `DeleteWalk` a permanent delete uses
@@ -43,8 +57,9 @@ identity), so composing it grants nothing and the read-only picker never builds
 one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
 root-trash refusal, invalid-child refusal). Now justified rather than
 speculative: the move that fills the Trash (FM10) has landed, so the way back to
-a permanent removal is real surface (§2.4). The drawn empty-Trash verb + a Trash
-view + its QEMU witness are FM11b, staged below. **FM10 (recoverable delete:
+a permanent removal is real surface (§2.4). The end-to-end empty-Trash
+click-through on the aarch64 `autoload_input` QEMU vertical (a new
+post-`fd_redeem` `FsNodeMutated` witness) is FM11c, staged below. **FM10 (recoverable delete:
 move to Trash) is complete.** FM10a landed the pure `lib/browse::trash` model
 (`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
 **FM10b now lands the app-side Trash verb and its QEMU witness.** On a confirmed
@@ -1416,17 +1431,46 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   removal preserving listing order and directory-backed flags, empty=no-op
   `None`, root-trash refusal, invalid-child refusal across `""`/`.`/`..`/`a/b`/
   `a:b`). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-- **FM11b — the app-side empty-Trash verb, a Trash view, and the QEMU witness.**
-  Wire the drawn verb into the `files.app` `Run` binary: an **Empty Trash**
-  action (reachable when the current directory is the user's Trash and it is
-  non-empty) that stats/reads the Trash directory, builds the `empty_trash_plan`,
-  confirms with the `DeleteDisposition::Permanent` dialog, and drives the plan's
-  `DeleteWalk` through the same interleaved progress/cancel runner as a delete
-  (`ProgressOp::Delete`), fail closed and fail loud. A dedicated Trash view (a
-  navigable location showing the Trash contents) rides the same increment. Prove
-  it on the aarch64 `autoload_input` QEMU vertical with a new post-`fd_redeem`
-  witness. (Not built here — it is the app/compositor half, staged after this
-  pure model, §2.19.)
+- **FM11b — the app-side empty-Trash verb + the navigable Trash view `[x]`
+  (done).** Two manager-only toolbar tools join the `chrome::ManagerTool`
+  vocabulary (drawn only for the write-capable file manager, never the read-only
+  picker), each carrying a new `lib/icon` built-in glyph (`IconKind::Trash` /
+  `IconKind::EmptyTrash`, host-tested as the FM3 file-type glyphs were):
+  - **Go to Trash** (`ManagerTool::Trash`) — the navigable Trash view. The
+    `files.app` `Run` binary resolves the user's home from `HOME`, ensures the
+    fixed `Library/Trash` subtree (shared `trash::trash_dir`, §16.3), and
+    navigates there with the new `Browser::navigate_to(components)` — the
+    jump-to-an-arbitrary-location primitive (neither an ancestor nor a listed
+    child), transactional and fail closed like every other navigation, so the
+    Trash's contents show like any directory. Always offered; an absent home or
+    unreachable Trash is stated on `stderr`, not hidden (§2.24).
+  - **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only when the current
+    directory *is* the user's Trash and it is non-empty (a new
+    `chrome::ManagerToolModel` the app computes from `HOME`, since the engine
+    does not know it; threaded through `render`/`manager_tool_at` so a disabled
+    tool renders muted and a click on it resolves to nothing, §5.4). Clicking it
+    re-reads the Trash (recomputing the location so a stale click can never
+    empty the wrong directory), builds `empty_trash_plan`, confirms with the
+    `DeleteDisposition::Permanent` dialog, and drives the plan's `DeleteWalk`
+    through the same interleaved progress/cancel runner a delete uses
+    (`ProgressOp::Delete`), under the user's own `fs_readdir`/`fs_unlink` (no new
+    capability). An already-empty Trash is a silent no-op; a refusal is stated
+    fail-loud on `stderr`.
+
+  Host-tested in `lib/browse` (`navigate_to` off-spine/no-op/fail-closed; the
+  Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding
+  files app builds and lints clean. Docs: `docs/src/desktop/apps.md`,
+  `lib/browse/README.md`, `lib/icon/README.md` + rustdoc.
+- **FM11c — the QEMU witness for the empty-Trash click-through.** Prove the
+  Empty Trash verb end-to-end on the aarch64 `autoload_input` QEMU vertical
+  with a new post-`fd_redeem` witness: after FM10b's move-to-Trash `op=rename`,
+  navigate to the Trash view, click Empty Trash, confirm the Permanent dialog,
+  and latch a further `FsNodeMutated` witness for the permanent removal of the
+  trashed item under `Library/Trash` (gated after the move so no earlier
+  mutation can satisfy it — fail closed). Split out from FM11b (§2.19): the
+  app-side verb + Trash view land host-tested and gated above; the
+  timing-sensitive freestanding guest click-through + host runner is its own
+  increment, not shipped half-done "for now".
 
 ## 2. Sequencing and dependencies
 
@@ -1443,10 +1487,10 @@ selection/menu. FM8 is split the same way: FM8a models the properties view
 (host-proven); FM8b paints it and adds permission editing. FM9 closes out the
 core with the autoload QEMU vertical. FM10 makes delete recoverable (move to
 Trash), and FM11 gives the way back — emptying the Trash (FM11a the pure model,
-FM11b the app verb + Trash view), each split the same way and depending on the
-FM7 delete walk it reuses (§2.2). Each lands fully gated; a stage that turns out
-larger than one clean increment is split and staged here, never shipped
-half-done "for now" (§2.19).
+FM11b the app verb + navigable Trash view, FM11c the QEMU witness), each split
+the same way and depending on the FM7 delete walk it reuses (§2.2). Each lands
+fully gated; a stage that turns out larger than one clean increment is split and
+staged here, never shipped half-done "for now" (§2.19).
 
 ## 3. What this explicitly refuses to become
 

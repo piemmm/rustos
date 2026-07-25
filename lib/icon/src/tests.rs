@@ -42,6 +42,8 @@ fn for_asset_maps_known_ids() {
     assert_eq!(IconKind::for_asset("view-toggle"), IconKind::ViewToggle);
     assert_eq!(IconKind::for_asset("sort"), IconKind::Sort);
     assert_eq!(IconKind::for_asset("new-folder"), IconKind::NewFolder);
+    assert_eq!(IconKind::for_asset("trash"), IconKind::Trash);
+    assert_eq!(IconKind::for_asset("empty-trash"), IconKind::EmptyTrash);
 }
 
 #[test]

@@ -40,13 +40,16 @@ can never diverge in navigation semantics, listing policy, or look.
 - **Navigation history and breadcrumbs** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar
-  controls) and `navigate_to_depth`, the breadcrumb-click primitive that
+  controls), `navigate_to_depth`, the breadcrumb-click primitive that
   jumps to an ancestor by path depth (`0` is the root, `components().len()`
-  is the current directory — a no-op). Every one of these is the same
-  transactional, fail-closed navigation as descend / climb: the target is
-  listed before any state or history changes, a fresh navigation clears the
-  forward branch, and the history is a bounded ring that drops the oldest
-  location rather than growing without bound.
+  is the current directory — a no-op), and `navigate_to(components)`, the
+  jump-to-an-arbitrary-location primitive (neither an ancestor nor a listed
+  child — the file manager's "go to Trash" location uses it to reach
+  `Library/Trash`). Every one of these is the same transactional, fail-closed
+  navigation as descend / climb: the target is listed before any state or
+  history changes, a fresh navigation clears the forward branch, and the
+  history is a bounded ring that drops the oldest location rather than growing
+  without bound.
 - **Frame model** (`chrome`, `plans/NEW-FILEMANAGER.md` FM4b): the pure
   model behind the drawn toolbar and breadcrumb path bar, host-proven ahead
   of the chrome it drives. `ToolbarModel::for_browser` snapshots which
@@ -269,6 +272,12 @@ can never diverge in navigation semantics, listing policy, or look.
   dir (`RootTrash`) or an invalid child leaf (`InvalidName`) refuses the whole
   empty rather than remove outside Trash or silently skip an item. It touches
   no filesystem and holds no authority, so the read-only picker never builds one.
+  The file manager wires both verbs through the manager-only toolbar tools
+  (FM11b): `ManagerTool::Trash` navigates (`navigate_to`) to the user's Trash —
+  the navigable Trash location — and `ManagerTool::EmptyTrash`, enabled only in
+  a non-empty Trash (`ManagerToolModel`), builds the `empty_trash_plan`,
+  confirms it with the `DeleteDisposition::Permanent` dialog, and drives its
+  `DeleteWalk` through the same interleaved progress/cancel runner a delete uses.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`
@@ -412,11 +421,17 @@ can never diverge in navigation semantics, listing policy, or look.
   only an *enabled* command (fail closed). Because a *write* action must never
   reach the read-only picker that shares this toolbar, the manager-only write
   tools live in a separate `chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`,
-  `ManagerTool::icon`): a write-capable consumer hands `render` its tools (the
-  file manager passes `MANAGER_TOOLS`, the picker `&[]`), which draw in their
-  own toolbar group after the read-only commands, and `manager_tool_at` is
-  their mirror hit-test — so the picker can neither draw nor resolve a write
-  tool. `chrome_height` (the toolbar strip
+  `ManagerTool::icon`): New Folder, the Trash location (go to the user's Trash),
+  and Empty Trash (permanently remove the Trash's contents). A write-capable
+  consumer hands `render` its tools *and* a `chrome::ManagerToolModel` enable
+  snapshot (the file manager passes `MANAGER_TOOLS` and a live model, the picker
+  `&[]` and `ManagerToolModel::none()`); the tools draw in their own toolbar
+  group after the read-only commands, each rendered disabled (muted, never
+  hidden) when the model reports it inactive — Empty Trash is offered only when
+  the current directory is the user's non-empty Trash, a fact the file manager
+  computes from `HOME` and threads in. `manager_tool_at` is their mirror
+  hit-test, resolving only an *enabled* tool (fail closed), so the picker can
+  neither draw nor resolve a write tool. `chrome_height` (the toolbar strip
   plus the path bar) is the one header offset the item views, the scrollbar
   gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so

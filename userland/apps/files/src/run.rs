@@ -80,13 +80,14 @@ mod program {
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_appinfo, paste_strategy, plan_paste,
+        applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
         suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
         Activation, AppAssociation, Browser, BundleSource, Clipboard, ClipboardOp, ContextCommand,
         ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeleteDisposition,
-        DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem,
-        PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError, ToolbarCommand,
-        TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, ManagerToolModel,
+        OwnerChange, PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
+        ToolbarCommand, TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -708,8 +709,15 @@ mod program {
         // window is not DPI-scaled today, so the logical size is the physical
         // size), rather than a size hard-coded here.
         let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
-        let mut surface =
-            render(browser, theme, font, viewport, MANAGER_TOOLS).ok_or(Errno::LengthOutOfRange)?;
+        let mut surface = render(
+            browser,
+            theme,
+            font,
+            viewport,
+            MANAGER_TOOLS,
+            manager_tool_model(browser),
+        )
+        .ok_or(Errno::LengthOutOfRange)?;
         // In rename mode, overlay the inline editor exactly over the selected
         // item's row through the shared selection geometry, so the field sits
         // on the item the user is renaming (§2.2).
@@ -899,23 +907,24 @@ mod program {
                 if let Some(point) = secondary_press_point(*action, *x, *y) {
                     return open_context_menu(browser, overlays, font, theme, viewport, point);
                 }
-                // A primary click on a manager write tool (New Folder) is
-                // dispatched here because the write path needs the rename
-                // state; all read-only pointer routing (toolbar commands,
-                // path-bar crumbs, item selection) stays in `apply_pointer`,
-                // the same read-only router the trusted picker uses.
+                // A primary click on a manager write tool (New Folder, the
+                // Trash location, or Empty Trash) is dispatched here because
+                // the write path needs the overlay state; all read-only
+                // pointer routing (toolbar commands, path-bar crumbs, item
+                // selection) stays in `apply_pointer`, the same read-only
+                // router the trusted picker uses. The tool's enable state
+                // gates the hit-test, so a click on a disabled Empty Trash
+                // resolves to nothing (fail closed).
                 if let Some(point) = press_point(*action, *x, *y) {
-                    if let Some(tool) =
-                        manager_tool_at(browser, theme, viewport, point, MANAGER_TOOLS)
-                    {
-                        return apply_manager_tool(
-                            browser,
-                            &mut overlays.rename,
-                            font,
-                            theme,
-                            viewport,
-                            tool,
-                        );
+                    if let Some(tool) = manager_tool_at(
+                        browser,
+                        theme,
+                        viewport,
+                        point,
+                        MANAGER_TOOLS,
+                        manager_tool_model(browser),
+                    ) {
+                        return apply_manager_tool(browser, overlays, font, theme, viewport, tool);
                     }
                 }
                 apply_pointer(browser, font, theme, viewport, *x, *y, *action)
@@ -2523,18 +2532,147 @@ mod program {
         }
     }
 
-    /// Dispatch a manager write `tool` (a toolbar click or its keyboard
-    /// equivalent). New Folder is the only write tool today.
+    /// Dispatch a manager write `tool` (a toolbar click). New Folder creates
+    /// and inline-renames a folder; the Trash tool navigates to the user's
+    /// Trash location; Empty Trash opens the permanent-removal confirmation
+    /// (`plans/NEW-FILEMANAGER.md` `FM11`).
     fn apply_manager_tool<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
+        overlays: &mut Overlays,
         font: BitmapFont,
         theme: &Theme,
         viewport: Rect,
         tool: ManagerTool,
     ) -> (bool, bool) {
         match tool {
-            ManagerTool::NewFolder => begin_new_folder(browser, rename, font, theme, viewport),
+            ManagerTool::NewFolder => {
+                begin_new_folder(browser, &mut overlays.rename, font, theme, viewport)
+            }
+            ManagerTool::Trash => go_to_trash(browser, font, theme, viewport),
+            ManagerTool::EmptyTrash => begin_empty_trash(browser, &mut overlays.delete),
+        }
+    }
+
+    /// The manager write-tools' enable state for `browser`: the Empty Trash
+    /// verb ([`ManagerTool::EmptyTrash`]) is offered only when the current
+    /// directory *is* the user's Trash and it is non-empty. Computed here
+    /// rather than in the shared engine because it depends on the user's
+    /// `HOME`, which the engine does not know (`plans/NEW-FILEMANAGER.md`
+    /// `FM11`).
+    fn manager_tool_model<S: DirectorySource>(browser: &Browser<S>) -> ManagerToolModel {
+        ManagerToolModel::new(current_is_populated_trash(browser))
+    }
+
+    /// Whether the current directory is the user's Trash *and* it holds at
+    /// least one item — the one gate on offering the Empty Trash verb. Fail
+    /// closed: an absent/root `HOME`, or a current directory that is not the
+    /// `Library/Trash` subtree, is not the Trash, so the verb is not offered.
+    fn current_is_populated_trash<S: DirectorySource>(browser: &Browser<S>) -> bool {
+        if browser.entries().is_empty() {
+            return false;
+        }
+        let Some(home) = home_components() else {
+            return false;
+        };
+        if home.is_empty() {
+            return false;
+        }
+        browser.components() == trash_dir(&home).as_slice()
+    }
+
+    /// Navigate the browser to the user's Trash — the navigable Trash location
+    /// (`plans/NEW-FILEMANAGER.md` `FM11`). Resolves the user's home from the
+    /// exported `HOME`, ensures the fixed `Library/Trash` subtree exists (the
+    /// user's own idempotent `fs_mkdir`), and lists it. Going to the Trash is
+    /// an incidental, refusable action: an absent home or an unavailable Trash
+    /// is stated on `stderr` and changes nothing (§2.24, §5.4) — never a crash
+    /// or a fabricated view.
+    fn go_to_trash<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> (bool, bool) {
+        let Some(home) = home_components() else {
+            let _ = tairix_rt::stderr(b"files: no home directory, so no Trash\n");
+            return (false, false);
+        };
+        if home.is_empty() {
+            let _ = tairix_rt::stderr(b"files: no home directory, so no Trash\n");
+            return (false, false);
+        }
+        let trash = trash_dir(&home);
+        if !ensure_trash_dir(&trash) {
+            let _ = tairix_rt::stderr(b"files: the Trash folder is unavailable\n");
+            return (false, false);
+        }
+        match browser.navigate_to(trash) {
+            Ok(true) => {
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                (true, false)
+            }
+            // Already in the Trash, or (fail closed) it could not be listed.
+            Ok(false) => (false, false),
+            Err(_) => {
+                let _ = tairix_rt::stderr(b"files: the Trash folder could not be opened\n");
+                (false, false)
+            }
+        }
+    }
+
+    /// Open the confirmation to **empty** the user's Trash — permanently remove
+    /// its contents (`plans/NEW-FILEMANAGER.md` `FM11`).
+    ///
+    /// Recomputes the Trash location and re-reads its contents now, so a stale
+    /// click can never empty the wrong directory (fail closed, §5.4): if the
+    /// current directory is not the user's Trash, or its listing cannot be
+    /// read, or it is already empty, the verb is simply not offered (a silent
+    /// no-op or a stated refusal, never a crash). Emptying is always permanent
+    /// (there is no trash-of-the-trash), so the plan is confirmed with the
+    /// [`DeleteDisposition::Permanent`] wording and carried out — on confirm —
+    /// by the same interleaved [`DeleteWalk`] runner an ordinary permanent
+    /// delete uses (§2.2), under the user's own `fs_readdir`/`fs_unlink` (no
+    /// new capability, no ambient authority).
+    fn begin_empty_trash<S: DirectorySource>(
+        browser: &Browser<S>,
+        delete: &mut Option<DeleteConfirm>,
+    ) -> (bool, bool) {
+        let Some(home) = home_components() else {
+            return (false, false);
+        };
+        if home.is_empty() {
+            return (false, false);
+        }
+        let trash = trash_dir(&home);
+        // Only the Trash may be emptied; a click anywhere else is a no-op.
+        if browser.components() != trash.as_slice() {
+            return (false, false);
+        }
+        let Ok(children) = read_children(&trash) else {
+            let _ = tairix_rt::stderr(b"files: could not read the Trash folder\n");
+            return (false, false);
+        };
+        match empty_trash_plan(&trash, &children) {
+            // The plan removes the Trash's *contents* (never the Trash folder
+            // itself), always permanently, so it is confirmed as irreversible.
+            Ok(Some(plan)) => {
+                let dialog = build_delete_dialog(&plan, DeleteDisposition::Permanent);
+                *delete = Some(DeleteConfirm {
+                    dialog,
+                    plan,
+                    trash_moves: None,
+                });
+                (true, false)
+            }
+            // An already-empty Trash: nothing to empty, so the verb just does
+            // nothing (never an error).
+            Ok(None) => (false, false),
+            Err(err) => {
+                let _ = tairix_rt::stderr(b"files: ");
+                let _ = tairix_rt::stderr(err.message().as_bytes());
+                let _ = tairix_rt::stderr(b"\n");
+                (false, false)
+            }
         }
     }
 

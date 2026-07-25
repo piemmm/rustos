@@ -45,7 +45,8 @@ use tairix_theme::{Palette, Theme};
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
 use crate::chrome::{
-    self, ContextCommand, ContextMenuModel, ManagerTool, ToolbarCommand, ToolbarModel,
+    self, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
+    ToolbarModel,
 };
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
@@ -79,7 +80,10 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// them, the trusted read-only picker passes an empty slice so it never draws a
 /// write tool. The read-only commands keep their positions regardless (the
 /// toolbar left-packs fixed-width buttons), so a click on a read-only command
-/// resolves identically for both consumers.
+/// resolves identically for both consumers. `tool_model` supplies each write
+/// tool's enable state (the file manager's [`ManagerToolModel`]; the picker's
+/// [`ManagerToolModel::none`], since it draws none): a disabled tool renders
+/// muted, never hidden.
 ///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
@@ -92,13 +96,22 @@ pub fn render<S: DirectorySource>(
     font: BitmapFont,
     viewport: Rect,
     tools: &[ManagerTool],
+    tool_model: ManagerToolModel,
 ) -> Option<Surface> {
     let row_height = row_height(font);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    draw_toolbar(&mut surface, theme, font, browser, viewport, tools);
+    draw_toolbar(
+        &mut surface,
+        theme,
+        font,
+        browser,
+        viewport,
+        tools,
+        tool_model,
+    );
     draw_path_bar(
         &mut surface,
         font,
@@ -448,7 +461,11 @@ const MANAGER_TOOL_GROUP: u16 = 3;
 /// manager-only write `tools` follow the read-only commands (a picker passes an
 /// empty slice), so their [`Toolbar`] indices are
 /// `chrome::TOOLBAR_COMMANDS.len() + i`.
-fn build_toolbar(model: ToolbarModel, tools: &[ManagerTool]) -> Toolbar {
+fn build_toolbar(
+    model: ToolbarModel,
+    tools: &[ManagerTool],
+    tool_model: ManagerToolModel,
+) -> Toolbar {
     let mut toolbar = Toolbar::new();
     for &command in chrome::TOOLBAR_COMMANDS {
         let mut button = IconButton::new(command.icon(), ControlRole::Navigation);
@@ -458,7 +475,10 @@ fn build_toolbar(model: ToolbarModel, tools: &[ManagerTool]) -> Toolbar {
         toolbar = toolbar.with_icon(button, toolbar_group(command));
     }
     for &tool in tools {
-        let button = IconButton::new(tool.icon(), ControlRole::Neutral);
+        let mut button = IconButton::new(tool.icon(), ControlRole::Neutral);
+        if !tool_model.is_enabled(tool) {
+            button.set_state(ControlState::disabled());
+        }
         toolbar = toolbar.with_icon(button, MANAGER_TOOL_GROUP);
     }
     toolbar
@@ -476,8 +496,9 @@ fn draw_toolbar<S: DirectorySource>(
     browser: &Browser<S>,
     viewport: Rect,
     tools: &[ManagerTool],
+    tool_model: ManagerToolModel,
 ) {
-    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     toolbar.render(surface, bounds, Scale::ONE, theme, font);
 }
@@ -497,7 +518,7 @@ pub fn toolbar_command_at<S: DirectorySource>(
     point: Point,
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
-    let toolbar = build_toolbar(model, &[]);
+    let toolbar = build_toolbar(model, &[], ManagerToolModel::none());
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
@@ -511,7 +532,9 @@ pub fn toolbar_command_at<S: DirectorySource>(
 /// rebuilt so the write tools sit at exactly the positions [`render`] painted
 /// them (§2.2); a hit resolves only in the write-tool index range, so a click
 /// on a read-only command returns `None` here (it is handled by
-/// [`toolbar_command_at`]).
+/// [`toolbar_command_at`]). `tool_model` is the same enable state handed to
+/// [`render`]: a click on a tool the model has disabled resolves to `None`
+/// (fail closed — a disabled tool does not act, §5.4).
 #[must_use]
 pub fn manager_tool_at<S: DirectorySource>(
     browser: &Browser<S>,
@@ -519,12 +542,14 @@ pub fn manager_tool_at<S: DirectorySource>(
     viewport: Rect,
     point: Point,
     tools: &[ManagerTool],
+    tool_model: ManagerToolModel,
 ) -> Option<ManagerTool> {
-    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
     let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
-    tools.get(tool_index).copied()
+    let tool = tools.get(tool_index).copied()?;
+    tool_model.is_enabled(tool).then_some(tool)
 }
 
 /// The window-local [`Rect`] the manager write `tool` occupies, or `None`
@@ -534,6 +559,12 @@ pub fn manager_tool_at<S: DirectorySource>(
 /// integration harness that clicks New Folder — reads the exact geometry
 /// [`render`] paints and [`manager_tool_at`] hit-tests, never a hand-copied
 /// position (§2.2). Fails closed: an out-of-range or unlisted tool is `None`.
+///
+/// The toolbar left-packs fixed-width buttons and a disabled tool renders in
+/// place (muted, never hidden), so a tool's rectangle is independent of its
+/// enable state; the geometry is built with every tool enabled
+/// ([`ManagerToolModel::new(true)`](ManagerToolModel::new)) and a caller that
+/// must only *act* on an enabled tool gates that through [`manager_tool_at`].
 #[must_use]
 pub fn manager_tool_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -543,7 +574,11 @@ pub fn manager_tool_rect<S: DirectorySource>(
     tool: ManagerTool,
 ) -> Option<Rect> {
     let position = tools.iter().position(|&t| t == tool)?;
-    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
+    let toolbar = build_toolbar(
+        ToolbarModel::for_browser(browser),
+        tools,
+        ManagerToolModel::new(true),
+    );
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
     toolbar.tool_rect(index, bounds, Scale::ONE, theme)
