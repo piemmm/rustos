@@ -1365,6 +1365,27 @@ fn kernel_build_profile(
     }
 }
 
+/// The extra `cargo` arguments that turn the lockup-watchdog debug
+/// diagnostics (`watchdog-diagnostics`, `plans/WATCHDOG.md`) on for the
+/// **non-shippable** `debug` image and leave them fully compiled out of the
+/// shippable `installer` image.
+///
+/// This is the single selection point for the gate, paired with
+/// [`kernel_build_profile`] so the diagnostics track the same image profile
+/// the console UART routing already keys on: the `debug` image (a
+/// `debug_assertions`-on kernel that diverts the log stream to the UART)
+/// also compiles in the address-bearing developer aids, and the `installer`
+/// image (optimised, screen console) pays nothing for them — no hot-path
+/// breadcrumb atomics on the syscall/dispatch/fault paths, no stack-walk
+/// code, no address strings. The gate is a feature, not `debug_assertions`,
+/// so CI can build and test both states deterministically.
+fn kernel_diag_feature_args(profile: tairix_mkimage::ImageProfile) -> &'static [&'static str] {
+    match profile {
+        tairix_mkimage::ImageProfile::Debug => &["--features", "watchdog-diagnostics"],
+        tairix_mkimage::ImageProfile::Installer => &[],
+    }
+}
+
 fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let parsed = parse_image_args(args)?;
     build_platform_image(ctx, parsed).map(|_| ())
@@ -1460,6 +1481,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     cmd.arg("build").arg("--locked");
     cmd.args(build_profile_args);
     cmd.args(["-p", "tairix-kernel", "--target", "aarch64-unknown-none"]);
+    cmd.args(kernel_diag_feature_args(profile));
     ctx.run(
         &format!("image: kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
@@ -1615,6 +1637,7 @@ fn build_virt_run_kernel(
         "--target-dir",
     ]);
     cmd.arg(&target_dir);
+    cmd.args(kernel_diag_feature_args(profile));
     cmd.env("TAIRIX_KERNEL_BOARD", "virt");
     ctx.run(
         &format!("run: virt kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
@@ -1718,9 +1741,9 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile, parse_run_args,
-        parse_test_options, Command, RunBudget, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
-        TEST_SOAK_SECS,
+        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile,
+        kernel_diag_feature_args, parse_run_args, parse_test_options, Command, RunBudget,
+        DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -1865,6 +1888,24 @@ mod tests {
             "the installer image must build the kernel optimised"
         );
         assert_eq!(installer_dir, "release");
+    }
+
+    /// The lockup-watchdog debug diagnostics are gated to the non-shippable
+    /// `debug` image: its kernel build gets `--features
+    /// watchdog-diagnostics`, and the shippable `installer` build gets
+    /// nothing, so the address-bearing developer aids and their hot-path
+    /// recording are compiled entirely out of any shippable kernel.
+    #[test]
+    fn watchdog_diagnostics_are_gated_to_the_debug_image() {
+        assert_eq!(
+            kernel_diag_feature_args(tairix_mkimage::ImageProfile::Debug),
+            &["--features", "watchdog-diagnostics"],
+            "the debug image must compile in the lockup-watchdog diagnostics"
+        );
+        assert!(
+            kernel_diag_feature_args(tairix_mkimage::ImageProfile::Installer).is_empty(),
+            "the shippable installer image must compile the diagnostics out entirely"
+        );
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {

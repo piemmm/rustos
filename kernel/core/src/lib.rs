@@ -271,3 +271,12 @@ pub use watchdog::{
     set_activity as set_watchdog_activity, WatchdogActivity, DEFAULT_HARD_LOCKUP_THRESHOLD_NS,
     DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
 };
+// The pre-silence backtrace surface and the kernel-image-base seam are part
+// of the debug-diagnostics facility (`plans/WATCHDOG.md`): the port fills
+// the backtrace and registers its image base only in a `watchdog-diagnostics`
+// build, so a shippable image never links either.
+#[cfg(feature = "watchdog-diagnostics")]
+pub use watchdog::{
+    install_lock_diagnostics, note_watchdog_backtrace, set_kernel_image_base,
+    WATCHDOG_BACKTRACE_MAX,
+};

@@ -20,3 +20,18 @@ selection guidance.
 consumed across the kernel and test trees. It is `no_std` and depends
 only on `core` (and `loom` under the opt-in `--cfg loom` model-check
 build).
+
+## Features
+
+- `lock-diagnostics` (off by default) — debug-only lock-site observation
+  for the lockup watchdog (`plans/WATCHDOG.md`). When on, the spinning
+  locks (`SpinLock`, which `IrqSafeSpinLock` wraps) become
+  `#[track_caller]` and report their acquire/hold/release lifecycle,
+  tagged with the acquiring call's source `file:line`, to an observer
+  installed through the `lockwatch` module; the kernel records it per CPU
+  so a wedged core's lockup report names the exact spinlock it is stuck
+  on. A `tairix-kernel-core` `watchdog-diagnostics` (non-shippable
+  `debug`-image) build turns it on. With the feature off the whole
+  facility — the `track_caller` shim, the notes, and the `lockwatch`
+  module — is compiled out, so a production lock is a bare
+  compare-and-swap.

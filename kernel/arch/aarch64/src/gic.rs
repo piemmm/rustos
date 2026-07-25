@@ -458,15 +458,26 @@ impl<M: GicMmio> Gicv2<M> {
     }
 
     /// Read `GICC_IAR` to acknowledge the highest-priority pending
-    /// interrupt, returning its INTID (which may be [`SPURIOUS_INTID`]).
+    /// interrupt, returning the **full** IAR value — the INTID in bits
+    /// `[9:0]` (mask with [`IAR_INTID_MASK`]) **and**, for a
+    /// software-generated interrupt, the source CPU in bits `[12:10]`. The
+    /// caller must preserve the whole value and hand it back to
+    /// [`Gicv2::end_of_interrupt`]: the GICv2 spec requires that the EOIR
+    /// write for an SGI carry the same source-CPU field read here, or the
+    /// SGI is never deactivated (the CPU-interface running priority stays
+    /// raised and every further interrupt on that CPU is blocked). A
+    /// spurious read is the whole value `SPURIOUS_INTID` (source CPU 0).
     #[must_use]
     pub fn acknowledge(&self) -> u32 {
-        self.mmio.gicc_read(GICC_IAR) & IAR_INTID_MASK
+        self.mmio.gicc_read(GICC_IAR)
     }
 
-    /// Write `GICC_EOIR` to deactivate `intid`.
-    pub fn end_of_interrupt(&self, intid: u32) {
-        self.mmio.gicc_write(GICC_EOIR, intid);
+    /// Write `GICC_EOIR` to deactivate the interrupt whose acknowledge
+    /// value was `iar`. Pass the **exact** value [`Gicv2::acknowledge`]
+    /// returned, unmasked: for an SGI the source-CPU field in bits
+    /// `[12:10]` must be written back or the deactivate is ignored.
+    pub fn end_of_interrupt(&self, iar: u32) {
+        self.mmio.gicc_write(GICC_EOIR, iar);
     }
 
     /// The lowest shared-peripheral interrupt (SPI) currently stuck in the
@@ -566,15 +577,25 @@ impl<M: GicMmio + Send + Sync> tairix_arch_api::InterruptEntry for GicController
     /// Acknowledge the active interrupt, mapping the GICv2
     /// [`SPURIOUS_INTID`] ("nothing pending") to [`None`].
     fn claim(&self) -> Option<u32> {
-        match self.gic.acknowledge() {
-            SPURIOUS_INTID => None,
-            intid => Some(intid),
+        let iar = self.gic.acknowledge();
+        if iar & IAR_INTID_MASK == SPURIOUS_INTID {
+            None
+        } else {
+            // Return the full IAR value (INTID + SGI source-CPU field) as
+            // the completion cookie, so `complete` can deactivate an SGI
+            // correctly (the claim/complete contract is a round-trip: the
+            // value handed to `complete` is the value `claim` returned).
+            Some(iar)
         }
     }
 
-    /// End-of-interrupt for `line`.
-    fn complete(&self, line: u32) {
-        self.gic.end_of_interrupt(line);
+    /// End-of-interrupt for the interrupt whose `claim` cookie was
+    /// `iar_cookie` — the exact value
+    /// [`claim`](tairix_arch_api::InterruptEntry::claim) returned, written
+    /// back to `GICC_EOIR` unmasked so an SGI's source-CPU field
+    /// deactivates it.
+    fn complete(&self, iar_cookie: u32) {
+        self.gic.end_of_interrupt(iar_cookie);
     }
 }
 
@@ -682,8 +703,13 @@ pub unsafe fn route_spi(intid: u32, cpu_targets: u8) {
 }
 
 /// Read `GICC_IAR` to acknowledge and activate the highest-priority
-/// pending interrupt, returning its INTID (which may be
-/// [`SPURIOUS_INTID`]).
+/// pending interrupt, returning the **full** IAR value: the INTID in bits
+/// `[9:0]` (mask with [`IAR_INTID_MASK`]) and, for an SGI, the source CPU
+/// in bits `[12:10]`. Hand the whole value back to [`end_of_interrupt`]
+/// unmasked — the GICv2 spec requires the EOIR write for an SGI to carry
+/// the same source-CPU field, or the SGI is never deactivated and the
+/// CPU-interface running priority stays raised. A spurious read is the
+/// whole value [`SPURIOUS_INTID`].
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn acknowledge() -> u32 {
@@ -691,12 +717,13 @@ pub fn acknowledge() -> u32 {
     unsafe { volatile_gic() }.acknowledge()
 }
 
-/// Write `GICC_EOIR` to deactivate the interrupt `intid` previously
-/// returned by [`acknowledge`].
+/// Write `GICC_EOIR` to deactivate the interrupt whose acknowledge value
+/// was `iar` — the exact value [`acknowledge`] returned, unmasked, so an
+/// SGI's source-CPU field deactivates it.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub fn end_of_interrupt(intid: u32) {
+pub fn end_of_interrupt(iar: u32) {
     // SAFETY: the fixed windows are mapped and owned by the kernel.
-    unsafe { volatile_gic() }.end_of_interrupt(intid);
+    unsafe { volatile_gic() }.end_of_interrupt(iar);
 }
 
 /// Raise software-generated interrupt INTID 0 on `target`.
@@ -907,12 +934,53 @@ mod tests {
     }
 
     #[test]
-    fn acknowledge_masks_off_the_source_cpu_bits() {
+    fn acknowledge_returns_the_full_iar_including_the_sgi_source_cpu() {
         let gic = Gicv2::new(MockGicMmio::new());
-        // A real IAR carries the source CPU in the upper bits for an SGI;
-        // `acknowledge` returns only the INTID field.
-        gic.mmio.gicc_write(GICC_IAR, (0b101 << 10) | 0x2A);
-        assert_eq!(gic.acknowledge(), 0x2A);
+        // A real IAR carries the source CPU in bits [12:10] for an SGI.
+        // `acknowledge` must return the *whole* value: the INTID field is
+        // recovered with `IAR_INTID_MASK`, but the source-CPU bits are
+        // preserved so the matching EOIR deactivates the SGI.
+        let iar = (0b101 << 10) | 0x2A;
+        gic.mmio.gicc_write(GICC_IAR, iar);
+        assert_eq!(gic.acknowledge(), iar);
+        assert_eq!(gic.acknowledge() & IAR_INTID_MASK, 0x2A);
+    }
+
+    #[test]
+    fn end_of_interrupt_writes_the_source_cpu_field_back_for_an_sgi() {
+        // Regression: an SGI (reschedule IPI) sent from a non-zero CPU
+        // must be deactivated by writing the *full* IAR back to EOIR,
+        // source-CPU field included. Writing only the masked INTID left
+        // the SGI active on the target's CPU interface, wedging every
+        // further interrupt (timer/watchdog) and hanging that core under
+        // IPI-heavy load. Prove the whole value round-trips to EOIR.
+        let gic = Gicv2::new(MockGicMmio::new());
+        let iar = 0b010 << 10; // SGI 0 (INTID field 0) from source CPU 2.
+        gic.mmio.gicc_write(GICC_IAR, iar);
+        let claimed = gic.acknowledge();
+        gic.end_of_interrupt(claimed);
+        assert_eq!(gic.mmio.gicc_read(GICC_EOIR), iar);
+        assert_ne!(
+            gic.mmio.gicc_read(GICC_EOIR) & !IAR_INTID_MASK,
+            0,
+            "the source-CPU field must survive to EOIR"
+        );
+    }
+
+    #[test]
+    fn claim_returns_the_full_iar_cookie_and_maps_spurious_to_none() {
+        use tairix_arch_api::InterruptEntry;
+        let c = GicController::new(Gicv2::new(MockGicMmio::new()), 1019);
+        // A real SGI from source CPU 3: claim yields the full cookie, and
+        // completing it writes that cookie (source CPU included) to EOIR.
+        let iar = 0b011 << 10; // SGI 0 (INTID field 0) from source CPU 3.
+        c.gic.mmio.gicc_write(GICC_IAR, iar);
+        assert_eq!(c.claim(), Some(iar));
+        c.complete(iar);
+        assert_eq!(c.gic.mmio.gicc_read(GICC_EOIR), iar);
+        // A spurious acknowledge (INTID field == SPURIOUS) claims nothing.
+        c.gic.mmio.gicc_write(GICC_IAR, SPURIOUS_INTID);
+        assert_eq!(c.claim(), None);
     }
 
     #[test]

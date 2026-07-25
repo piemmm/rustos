@@ -79,28 +79,258 @@ static WATCHDOG_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 /// the detector simply keeps sampling harmlessly (fail-safe).
 static WATCHDOG_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
+/// The signature of the watchdog cadence callback: the sampled CPU's
+/// [`CpuId`] and a pointer to the saved exception-register `frame` the trap
+/// trampoline built (`x0`..`x30` at indices `0..=30`, plus `ELR`/`SPSR`/
+/// `SP_EL0`). The frame lets the callback unwind the *interrupted* context
+/// (its `x29`/`ELR`), which the live registers no longer hold once the
+/// handler is running — the source of the pre-silence backtrace a
+/// hard-lockup report renders.
+pub type WatchdogCallbackFn = extern "C" fn(CpuId, *const u64);
+
 /// Install the watchdog cadence callback.
 ///
 /// Invoked from the watchdog IRQ path on every cadence sample with the
-/// CPU's [`CpuId`]. Storing a `fn` (not a closure) keeps it safe to call
-/// from interrupt context: there is no captured environment to drop
-/// mid-flight.
-pub fn set_watchdog_callback(cb: extern "C" fn(CpuId)) {
+/// CPU's [`CpuId`] and the interrupted register `frame`. Storing a `fn`
+/// (not a closure) keeps it safe to call from interrupt context: there is
+/// no captured environment to drop mid-flight.
+pub fn set_watchdog_callback(cb: WatchdogCallbackFn) {
     WATCHDOG_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
 }
 
 /// Read the currently-installed watchdog callback, if any. Test/diagnostic.
 #[must_use]
-pub fn watchdog_callback() -> Option<extern "C" fn(CpuId)> {
+pub fn watchdog_callback() -> Option<WatchdogCallbackFn> {
     let raw = WATCHDOG_CALLBACK_FN.load(Ordering::Relaxed);
     if raw == 0 {
         None
     } else {
         // SAFETY: every store into `WATCHDOG_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` pointer through
+        // valid `WatchdogCallbackFn` pointer through
         // `set_watchdog_callback`.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+        Some(unsafe { core::mem::transmute::<usize, WatchdogCallbackFn>(raw) })
     }
+}
+
+/// Maximum frame-pointer links [`capture_sample_backtrace`] follows past
+/// the interrupted PC before giving up, independent of the caller's buffer:
+/// a hard bound so a corrupt chain can never spin the handler.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+const MAX_BACKTRACE_WALK: usize = 64;
+
+/// Return `true` iff `addr` currently translates as an EL1 stage-1
+/// **readable** address.
+///
+/// Uses the `AT S1E1R` address-translation instruction and `PAR_EL1.F`
+/// (bit 0: `0` = translation succeeded, `1` = fault) to prove a stack link
+/// is mapped *before* [`capture_sample_backtrace`] dereferences it, so the
+/// frame-pointer walk can never fault inside the watchdog interrupt handler
+/// even when the interrupted context left a non-zero, aligned, yet unmapped
+/// `x29` (early-boot assembly, a task entry trampoline, a corrupt stack).
+/// `AT` only *translates* `addr`; it never reads the memory and cannot
+/// fault. `PAR_EL1` is saved and restored so a translation the interrupted
+/// context had in flight is never clobbered by the sample. Fail-closed: any
+/// translation fault reports not-readable and the walk stops.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+unsafe fn el1_readable(addr: u64) -> bool {
+    let par: u64;
+    // SAFETY: `AT S1E1R` performs a stage-1 EL1 read translation of `addr`
+    // and records the outcome in PAR_EL1; it does not access the memory at
+    // `addr` and cannot fault. The `ISB` is the context-synchronization
+    // event the architecture requires before the AT result is guaranteed
+    // visible to the following `MRS PAR_EL1`. We snapshot PAR_EL1 first and
+    // restore it last, so this probe leaves the register as the interrupted
+    // context left it.
+    unsafe {
+        core::arch::asm!(
+            "mrs {saved}, par_el1",
+            "at s1e1r, {addr}",
+            "isb",
+            "mrs {par}, par_el1",
+            "msr par_el1, {saved}",
+            saved = out(reg) _,
+            addr = in(reg) addr,
+            par = out(reg) par,
+            options(nostack, preserves_flags),
+        );
+    }
+    (par & 1) == 0
+}
+
+/// The pure frame-pointer walk shared by [`capture_sample_backtrace`] and
+/// its host tests. `pc` is recorded verbatim as `out[0]` (the interrupted
+/// return PC is always authoritative); each caller's return address is then
+/// followed through the AAPCS64 `x29` chain and recorded **only if it
+/// passes every validity check**, so a bogus or stale frame record yields a
+/// short honest chain rather than a plausible-looking garbage one.
+///
+/// All access to the interrupted stack is injected so this core is
+/// host-testable with a fake stack and carries no `asm!`/linker dependency:
+/// `readable(fp)` proves the 16-byte record at `fp` is safe to read;
+/// `read_pair(fp)` returns `([fp], [fp+8])` = `(saved_fp, return_addr)`;
+/// `in_text(ret)` proves `ret` lands in the kernel's executable text, which
+/// is what rejects a stack data word misread as a return address.
+///
+/// Fail closed, never looping: the walk stops at a frame pointer that is
+/// not strictly above `stack_floor` (the exception frame sits at the lowest
+/// live stack address; every real caller is higher), a misaligned pointer,
+/// an unmapped record, a null or non-text return address, a
+/// non-strictly-increasing saved frame pointer, a full `out`, or
+/// [`MAX_BACKTRACE_WALK`] links, whichever comes first.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+fn walk_frames(
+    pc: u64,
+    mut fp: u64,
+    stack_floor: u64,
+    out: &mut [u64],
+    mut readable: impl FnMut(u64) -> bool,
+    mut read_pair: impl FnMut(u64) -> (u64, u64),
+    in_text: impl Fn(u64) -> bool,
+) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    out[0] = pc;
+    let mut n = 1;
+    let mut steps = 0;
+    while n < out.len() && steps < MAX_BACKTRACE_WALK {
+        steps += 1;
+        // A genuine frame record sits strictly above the exception frame on
+        // the same downward-growing kernel stack and is 16-byte aligned;
+        // anything else is a leaf/mid-prologue `x29` or corruption.
+        if fp <= stack_floor || (fp & 0xf) != 0 {
+            break;
+        }
+        if !readable(fp) {
+            break;
+        }
+        let (next_fp, ret) = read_pair(fp);
+        // A real return address is non-zero and lands in kernel text.
+        // Rejecting a non-text word is what stops the walk emitting a stack
+        // data slot as if it were a caller — the cause of the old
+        // interleaved, untrustworthy chains.
+        if ret == 0 || !in_text(ret) {
+            break;
+        }
+        out[n] = ret;
+        n += 1;
+        // Callers sit at higher addresses; a non-increasing link is corrupt
+        // or the stack base.
+        if next_fp <= fp {
+            break;
+        }
+        fp = next_fp;
+    }
+    n
+}
+
+// The kernel's executable-text bounds, from the linker-provided
+// `__text_start`/`__text_end` symbols the aarch64 linker scripts bracket
+// `.text` with. A watchdog backtrace accepts a return address only inside
+// this range (see `in_kernel_text`).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+extern "C" {
+    static __text_start: u8;
+    static __text_end: u8;
+}
+
+/// Return `true` iff `addr` lies within the kernel's executable text.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+fn in_kernel_text(addr: u64) -> bool {
+    // SAFETY: taking the address of a linker-defined symbol is always
+    // sound; `__text_start`/`__text_end` bracket the `.text` the linker
+    // script emitted. They are never dereferenced.
+    let start = core::ptr::addr_of!(__text_start) as u64;
+    let end = core::ptr::addr_of!(__text_end) as u64;
+    addr >= start && addr < end
+}
+
+/// Unwind the AAPCS64 frame-pointer chain of the context the saved `frame`
+/// interrupted into `out` (innermost first: the interrupted PC, then each
+/// validated caller's return address), returning how many entries were
+/// written.
+///
+/// Runs on the sampled CPU itself, over the kernel stack the interrupted
+/// context was executing on. The interrupted PC (`ELR_EL1`) is recorded
+/// verbatim; each caller frame is followed and validated by [`walk_frames`]
+/// — mapped (`AT S1E1R`, [`el1_readable`]), aligned, strictly above the
+/// exception frame and strictly increasing, with a return address inside
+/// the kernel's executable text ([`in_kernel_text`]) — so the walk is
+/// **fail-closed and bounded**, never faults inside the interrupt handler,
+/// and never emits a stack data word as if it were a caller.
+///
+/// # Safety
+///
+/// `frame` must be the live `[u64; …]` saved register frame `vectors.s`
+/// built for this exception (so [`crate::exceptions::ELR_FRAME_INDEX`] and
+/// [`crate::exceptions::FP_FRAME_INDEX`] are in range), and the caller must
+/// only pass a frame whose interrupted context ran on *this* CPU's stack.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn capture_sample_backtrace(frame: *const u64, out: &mut [u64]) -> usize {
+    if out.is_empty() || frame.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller guarantees `frame` is the live saved register
+    // frame, so these indices are in range.
+    let (pc, fp) = unsafe {
+        (
+            *frame.add(crate::exceptions::ELR_FRAME_INDEX),
+            *frame.add(crate::exceptions::FP_FRAME_INDEX),
+        )
+    };
+    // The saved exception frame sits at the lowest in-use address of this
+    // CPU's kernel stack; every genuine caller frame is above it (the stack
+    // grows down), so `frame` is the walk's stack floor.
+    let stack_floor = frame as u64;
+    walk_frames(
+        pc,
+        fp,
+        stack_floor,
+        out,
+        // SAFETY: `el1_readable` only translates `addr` (`AT S1E1R`); it
+        // never reads the memory and cannot fault.
+        |addr| unsafe { el1_readable(addr) },
+        // SAFETY: `walk_frames` calls this only after the `readable` seam
+        // above proved `addr` mapped and readable at EL1, and `addr` is
+        // 16-aligned, so `[addr]`/`[addr+8]` lie within its page and cannot
+        // fault. AAPCS64 stores the caller's saved `x29` at `[addr]` and
+        // the return address at `[addr+8]`.
+        |addr| unsafe {
+            let p = addr as *const u64;
+            (*p, *p.add(1))
+        },
+        in_kernel_text,
+    )
 }
 
 /// The recorded cadence interval in counter ticks (`0` if unset).
@@ -210,16 +440,17 @@ pub unsafe fn init_local_watchdog(interval_ticks: u64) {
 /// the cadence continues even if the callback path is heavy. An absent
 /// callback re-arms and returns (fail-safe).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub(crate) fn on_watchdog_interrupt(cpu: CpuId) {
+pub(crate) fn on_watchdog_interrupt(cpu: CpuId, frame: *const u64) {
     arm(WATCHDOG_INTERVAL_TICKS.load(Ordering::Relaxed));
     let raw = WATCHDOG_CALLBACK_FN.load(Ordering::Relaxed);
     if raw != 0 {
         // SAFETY: every store into `WATCHDOG_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` through `set_watchdog_callback`; the
-        // callback carries no captured environment.
-        let cb: extern "C" fn(CpuId) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
-        cb(cpu);
+        // valid `WatchdogCallbackFn` through `set_watchdog_callback`; the
+        // callback carries no captured environment. `frame` is forwarded
+        // from the trap handler's live saved register frame.
+        let cb: WatchdogCallbackFn =
+            unsafe { core::mem::transmute::<usize, WatchdogCallbackFn>(raw) };
+        cb(cpu, frame);
     }
 }
 
@@ -310,7 +541,7 @@ mod tests {
 
     #[test]
     fn callback_round_trips_through_the_slot() {
-        extern "C" fn cb(_cpu: CpuId) {}
+        extern "C" fn cb(_cpu: CpuId, _frame: *const u64) {}
         set_watchdog_callback(cb);
         let got = watchdog_callback().expect("callback installed");
         assert_eq!(got as usize, cb as *const () as usize);
@@ -345,5 +576,215 @@ mod tests {
         // on the host the handle honestly reports no stuck line rather than
         // fabricating one, exactly as the recovery SGI compiles out.
         assert_eq!(AARCH64_WATCHDOG.stuck_interrupt(), None);
+    }
+
+    // --- `walk_frames` (the pure backtrace core) --------------------------
+
+    /// A fake kernel-text window for the tests: return addresses inside it
+    /// are accepted, those outside (stack data words) are rejected.
+    const TEXT_LO: u64 = 0x0040_0000;
+    const TEXT_HI: u64 = 0x0050_0000;
+
+    /// Build the `readable`/`read_pair` seams over a fake stack described as
+    /// `(frame_addr, saved_fp, return_addr)` records. A frame pointer is
+    /// "mapped" iff it names a record; reading it yields that record's
+    /// `(saved_fp, return_addr)`.
+    fn fake_stack(
+        records: &[(u64, u64, u64)],
+    ) -> (impl Fn(u64) -> bool + '_, impl Fn(u64) -> (u64, u64) + '_) {
+        let readable = move |fp: u64| records.iter().any(|&(a, _, _)| a == fp);
+        let read_pair = move |fp: u64| {
+            records
+                .iter()
+                .find(|&&(a, _, _)| a == fp)
+                .map_or((0, 0), |&(_, nf, ret)| (nf, ret))
+        };
+        (readable, read_pair)
+    }
+
+    #[test]
+    fn walk_frames_records_pc_then_follows_a_valid_chain() {
+        let records = [
+            (0x1040_u64, 0x1080_u64, 0x0040_0100_u64),
+            (0x1080, 0x10c0, 0x0040_0200),
+            // Terminal frame: saved_fp == 0 stops the walk after its return
+            // address is recorded.
+            (0x10c0, 0x0, 0x0040_0300),
+        ];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1040,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 4);
+        assert_eq!(
+            &out[..n],
+            &[0x0040_0050, 0x0040_0100, 0x0040_0200, 0x0040_0300]
+        );
+    }
+
+    #[test]
+    fn walk_frames_rejects_a_non_text_return_address() {
+        // The heart of the reliability fix: a mapped frame record whose
+        // `[fp+8]` is a stack data word (not a code address) is *not*
+        // emitted as a caller — the walk stops at the interrupted PC.
+        let records = [(0x1040_u64, 0x1080_u64, 0x0000_2000_u64)];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1040,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(&out[..n], &[0x0040_0050]);
+    }
+
+    #[test]
+    fn walk_frames_stops_at_or_below_the_stack_floor() {
+        // A frame pointer that is not strictly above the exception frame is
+        // impossible on a downward-growing stack (a leaf/mid-prologue x29):
+        // only the PC is recorded.
+        let records = [(0x1000_u64, 0x1080_u64, 0x0040_0100_u64)];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1000,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn walk_frames_stops_at_a_misaligned_frame_pointer() {
+        let records = [(0x1044_u64, 0x1080_u64, 0x0040_0100_u64)];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1044,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn walk_frames_stops_at_an_unmapped_record() {
+        // No records: the first frame pointer is unmapped, so the walk
+        // stops rather than dereferencing it (fail closed).
+        let (readable, read_pair) = fake_stack(&[]);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1040,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn walk_frames_records_one_frame_then_stops_on_a_non_increasing_link() {
+        // A self-referential saved_fp cannot loop: the return address is
+        // recorded once, then the non-increasing link stops the walk.
+        let records = [(0x1080_u64, 0x1080_u64, 0x0040_0100_u64)];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 8];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1080,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&out[..n], &[0x0040_0050, 0x0040_0100]);
+    }
+
+    #[test]
+    fn walk_frames_is_bounded_by_the_output_buffer() {
+        let records = [
+            (0x1040_u64, 0x1080_u64, 0x0040_0100_u64),
+            (0x1080, 0x10c0, 0x0040_0200),
+            (0x10c0, 0x0, 0x0040_0300),
+        ];
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; 2];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1040,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&out[..n], &[0x0040_0050, 0x0040_0100]);
+    }
+
+    #[test]
+    fn walk_frames_empty_output_returns_zero() {
+        let (readable, read_pair) = fake_stack(&[]);
+        let mut out: [u64; 0] = [];
+        let n = walk_frames(
+            0x0040_0050,
+            0x1040,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |_| true,
+        );
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn walk_frames_is_hard_bounded_against_a_long_chain() {
+        // A chain longer than `MAX_BACKTRACE_WALK` with strictly-increasing,
+        // in-text frames is capped by the step bound (never spins), so the
+        // buffer never overflows regardless of how deep the stack claims to
+        // be.
+        let mut records = [(0u64, 0u64, 0u64); MAX_BACKTRACE_WALK + 8];
+        for (i, rec) in records.iter_mut().enumerate() {
+            let addr = 0x1000 + 16 * (i as u64 + 1);
+            *rec = (addr, addr + 16, TEXT_LO + 16 * i as u64);
+        }
+        let (readable, read_pair) = fake_stack(&records);
+        let mut out = [0u64; MAX_BACKTRACE_WALK + 16];
+        let n = walk_frames(
+            0x0040_0050,
+            records[0].0,
+            0x1000,
+            &mut out,
+            readable,
+            read_pair,
+            |a| (TEXT_LO..TEXT_HI).contains(&a),
+        );
+        assert_eq!(n, MAX_BACKTRACE_WALK + 1);
     }
 }

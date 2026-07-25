@@ -11,6 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Lockup-watchdog debug diagnostics: gates this port's pre-silence
+# call-stack capture (`capture_sample_backtrace` and its fault-proof
+# `AT S1E1R` mapping probe). Off by default so a shippable kernel never
+# compiles the stack walk in; `tools/xtask` enables it (through the
+# `tairix-kernel` feature of the same name) for the non-shippable `debug`
+# image only. The always-on sample (`pc`/`pstate`) and the D12 GICv2
+# completion fix are independent of this and never gated. See
+# `plans/WATCHDOG.md`.
+watchdog-diagnostics = []
+
 [lib]
 path = "src/lib.rs"
 

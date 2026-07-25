@@ -44,6 +44,11 @@ mod loom_compat;
 
 pub mod epoch;
 pub mod irq;
+/// Debug-only lock-site observation for the lockup watchdog. Present only
+/// with the `lock-diagnostics` feature (a `watchdog-diagnostics` kernel
+/// build); a shippable build compiles it out entirely.
+#[cfg(feature = "lock-diagnostics")]
+pub mod lockwatch;
 pub mod mcs;
 pub mod once;
 pub mod rwlock;

@@ -643,6 +643,43 @@ this section is the cross-cutting summary of what must be green overall.
 - Fuzz (§19.6) each routine vs reference; crashes → corpus + unit test.
 - The whole-project validation gate (§7) is green before any phase is done.
 
+## Related capability — non-secure FIQ deliverability (scheduled; consumer: the D13 watchdog)
+
+The lockup-watchdog work (`plans/WATCHDOG.md`, `plans/OPEN-DEFECTS.md` D13) is
+**building** an aarch64 **non-maskable (FIQ) watchdog self-sample** to observe a
+core wedged in a `DAIF.I`-masked section — the only tool that can name the D13
+`stress --cpu N` wedge (an untracked IRQ-masked busy-spin the maskable IRQ
+cadence cannot see). Whether Group 0 / FIQ is actually delivered to the
+non-secure kernel is **platform/firmware-owned** — on the Raspberry Pi 4B
+(BCM2711 / GIC-400) it depends on the armstub's `SCR_EL3.FIQ` routing and
+`GICD_IGROUPR` group assignment, outside the non-secure kernel's control.
+
+That "is Group 0 / FIQ deliverable to non-secure EL1?" question is a
+**boot-time hardware/firmware capability**, so it belongs on *this* framework's
+deterministic **capability** axis (probe/read once, never benchmarked —
+invariants 1/8), with a fail-closed fallback to the existing buddy detection
+when the capability is absent (never a broken channel). The split:
+
+- **Detection is this plan's concern (P1).** The capability is reported through
+  the P1 `cpufeatures` slice's honesty vocabulary
+  (`FeatureSupport::Supported`/`Unsupported(reason)`/`Pending(note)`). The
+  watchdog is a *consumer* that chooses the FIQ cadence vs buddy from it.
+- **Mechanism stays in `kernel/arch/aarch64` (`plans/WATCHDOG.md`).** FIQ
+  vectoring, Group-0 routing, the FIQ dispatcher arm, and the `DAIF.F`-clear
+  execution discipline the self-sample requires are the port's concern, not
+  this plan's.
+- **Nuance (reconcile in P1):** unlike an ISA feature bit read from
+  `ID_AA64ISAR0_EL1`, FIQ-deliverability is **empirically probed** (arm Group
+  0/FIQ, mask `DAIF.I`, observe whether an FIQ is taken). P1 must therefore
+  accommodate a *probed platform capability* reported through the same
+  `FeatureSupport` type — a distinct capability, not a `CpuFeatureSet` ISA bit.
+
+**Dependency:** the watchdog's FIQ self-sample now depends on P1 (unbuilt) as
+the charter-correct home for this capability (§2.2/§2.20 forbid an ad-hoc
+one-off probe). Either P1 lands first, or a minimal P1 subset sufficient to
+host a probed platform capability lands with it; the full staged watchdog plan
+(B0–B4, with B0 = this P1 dependency) is in `.junie/fix-details.md`.
+
 ## Explicit non-goals / guardrails
 
 - **No crypto benchmarking, ever** (invariant 8). Crypto selection is

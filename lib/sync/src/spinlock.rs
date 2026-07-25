@@ -99,10 +99,12 @@ impl<T> SpinLock<T> {
 }
 
 impl<T: ?Sized> SpinLock<T> {
-    /// Try to acquire the lock without spinning.
-    ///
-    /// Returns `Some(guard)` on success, `None` if the lock was contended.
-    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+    /// The uninstrumented compare-and-swap acquire, shared by the public
+    /// [`Self::try_lock`] and [`Self::lock`] so the lock-diagnostics site
+    /// note is emitted exactly once per acquisition (never doubled by
+    /// `lock` delegating to `try_lock`).
+    #[inline]
+    fn raw_try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Acquire on success establishes the happens-before edge with the
         // previous holder's Release. Relaxed on failure: we observed
         // contention but do not synchronise.
@@ -117,10 +119,37 @@ impl<T: ?Sized> SpinLock<T> {
         }
     }
 
+    /// Try to acquire the lock without spinning.
+    ///
+    /// Returns `Some(guard)` on success, `None` if the lock was contended.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        let guard = self.raw_try_lock()?;
+        // Record the successful non-spinning acquire against the caller's
+        // source site so a wedge while holding this lock names it.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(
+            crate::lockwatch::LockEvent::TryAcquired,
+            core::panic::Location::caller(),
+        );
+        Some(guard)
+    }
+
     /// Acquire the lock, spinning until it is free.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
+        // Publish the acquiring site *before* spinning, so a CPU that
+        // wedges spinning for a never-released lock has its report name the
+        // contended lock (marked `acquiring`); the successful-acquire note
+        // below then promotes it to `held`.
+        #[cfg(feature = "lock-diagnostics")]
+        let site = core::panic::Location::caller();
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(crate::lockwatch::LockEvent::Acquiring, site);
         loop {
-            if let Some(guard) = self.try_lock() {
+            if let Some(guard) = self.raw_try_lock() {
+                #[cfg(feature = "lock-diagnostics")]
+                crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
                 return guard;
             }
             // Test-and-test-and-set: spin reading until the lock looks
@@ -198,6 +227,11 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
         // Release pairs with the next Acquire CAS, publishing every
         // write performed in the critical section.
         self.lock.locked.store(false, Ordering::Release);
+        // Drop the lock-diagnostics record this guard's acquisition pushed.
+        // Every `SpinLockGuard` corresponds to exactly one acquire note
+        // (`try_lock`/`lock`), so the release note balances it one-to-one.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note_release();
     }
 }
 
@@ -261,6 +295,11 @@ impl<T, I: InterruptControl> IrqSafeSpinLock<T, I> {
     ///
     /// Interrupts are disabled on success and re-enabled when the guard
     /// is dropped. On failure the interrupt state is unchanged.
+    ///
+    /// `#[track_caller]` (lock-diagnostics builds only) so the inner
+    /// [`SpinLock`]'s site note records *this* caller's source location,
+    /// not a fixed line inside this wrapper.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn try_lock(&self) -> Option<IrqSafeSpinLockGuard<'_, T, I>> {
         let state = I::disable();
         if let Some(inner) = self.inner.try_lock() {
@@ -278,6 +317,13 @@ impl<T, I: InterruptControl> IrqSafeSpinLock<T, I> {
 
     /// Acquire the lock, spinning until it is free. Disables interrupts
     /// for the duration of the critical section.
+    ///
+    /// `#[track_caller]` (lock-diagnostics builds only) so the inner
+    /// [`SpinLock`]'s site note records *this* caller's source location.
+    /// This is the IRQ-masking spinlock whose held/contended section a
+    /// GICv2 hard lockup wedges in, so naming it is the point of the
+    /// facility.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn lock(&self) -> IrqSafeSpinLockGuard<'_, T, I> {
         let state = I::disable();
         let inner = self.inner.lock();

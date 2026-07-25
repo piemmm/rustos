@@ -379,8 +379,16 @@ unsafe fn user_register_frame(frame: *const u64) -> tairix_arch_api::backtrace::
 /// completion. Only a tick taken from EL0 preempts immediately, and only
 /// when the need-resched latch the preempt callback consults is set.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn handle_irq(from_el0: bool) {
-    let intid = crate::gic::acknowledge();
+fn handle_irq(from_el0: bool, frame: *const u64) {
+    // Keep the *full* IAR value: for a software-generated interrupt it
+    // carries the source CPU in bits [12:10], and the matching EOIR write
+    // must carry those bits back or the GICv2 never deactivates the SGI
+    // (the CPU-interface running priority stays raised and every further
+    // interrupt on this CPU — timer, watchdog, device — is blocked, hanging
+    // the core under IPI-heavy load). Dispatch decisions use only the INTID
+    // field; the end-of-interrupt handshake writes the whole value.
+    let iar = crate::gic::acknowledge();
+    let intid = iar & crate::gic::IAR_INTID_MASK;
     if intid == crate::gic::SPURIOUS_INTID {
         // Spurious read: nothing pending, and the GIC requires no EOI.
         return;
@@ -396,8 +404,9 @@ fn handle_irq(from_el0: bool) {
         // one-shot and run the installed detector callback (which stamps
         // this CPU's liveness heartbeat and scans the other CPUs). Taken
         // from EL0 or EL1 alike — it never preempts, so it is not gated on
-        // `from_el0`.
-        crate::watchdog::on_watchdog_interrupt(cpu);
+        // `from_el0`. The saved `frame` is forwarded so the sample can
+        // unwind the interrupted context for the pre-silence backtrace.
+        crate::watchdog::on_watchdog_interrupt(cpu, frame);
     } else if intid < crate::gic::MIN_SPI_INTID {
         // INTIDs 0..32 are SGIs/PPIs; INTID 0..16 are the inter-processor
         // SGIs. A delivered directed IPI (`crate::kernel_arch` `send_ipi`
@@ -411,8 +420,10 @@ fn handle_irq(from_el0: bool) {
         dispatch_device_irq(intid);
     }
     // Complete every acknowledged interrupt (timer, SGI/IPI, or device)
-    // so the CPU interface does not wedge with an active priority.
-    crate::gic::end_of_interrupt(intid);
+    // so the CPU interface does not wedge with an active priority. The
+    // **full** IAR value is written back (source-CPU field included) so an
+    // SGI from any CPU is actually deactivated.
+    crate::gic::end_of_interrupt(iar);
 
     // Check for a pending reschedule on the way back to user mode, for
     // **any** interrupt — a timer quantum expiry, a cross-CPU reschedule
@@ -466,7 +477,7 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // `LOWER_IRQ` is the only IRQ entry whose interrupted context was
         // EL0 user mode; `CUR_SP0_IRQ`/`CUR_SPX_IRQ` interrupted EL1
         // kernel code, which is never preempted (see [`handle_irq`]).
-        handle_irq(kind == kind::LOWER_IRQ);
+        handle_irq(kind == kind::LOWER_IRQ, frame);
         return;
     }
 

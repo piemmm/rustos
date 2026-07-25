@@ -3,6 +3,11 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+// `AtomicU32` backs only the debug-diagnostics pre-silence-backtrace length,
+// and `AtomicUsize` the debug-diagnostics per-CPU lock-site stack, so both
+// are imported only when that facility is compiled in.
+#[cfg(feature = "watchdog-diagnostics")]
+use core::sync::atomic::{AtomicU32, AtomicUsize};
 
 use tairix_kernel_mem::LiveUserSpace;
 use tairix_kernel_sched_api::TaskAction;
@@ -18,6 +23,31 @@ pub(crate) struct ResumeHandle {
 /// Published live user-space pointer for the task currently running on a CPU.
 #[derive(Copy, Clone)]
 pub(crate) struct LiveSpacePtr(pub(crate) *mut (dyn LiveUserSpace + Send));
+
+/// Maximum stack frames the watchdog records per liveness sample.
+///
+/// A fixed diagnostic depth (a *bound*, not a scaling capacity), like the
+/// random output reserve: deep enough to bridge the interrupted context
+/// into the caller nest that names a wedge, shallow enough that capturing
+/// it on every ~1 Hz sample and rendering it in one log line stays cheap.
+///
+/// Part of the debug-diagnostics facility, so it is compiled in only with
+/// the `watchdog-diagnostics` feature (the shippable image has no
+/// pre-silence backtrace at all).
+#[cfg(feature = "watchdog-diagnostics")]
+pub(crate) const WD_BT_MAX: usize = 12;
+
+/// Maximum nested lock records the debug-diagnostics lock-site stack keeps
+/// per CPU.
+///
+/// A fixed diagnostic *bound*, not a scaling capacity: kernel lock nesting
+/// is shallow by design (holding a spinlock across another lock is rare and
+/// discouraged), so this is ample. A deeper nesting simply stops recording
+/// past the cap and still balances on release (fail-safe) — it never grows,
+/// allocates, or faults. Compiled in only with the `watchdog-diagnostics`
+/// feature; a shippable image records no lock sites at all.
+#[cfg(feature = "watchdog-diagnostics")]
+pub(crate) const LOCK_STACK_MAX: usize = 8;
 
 // SAFETY: the kthread publication protocol makes the pointee exclusive to
 // the CPU whose slot contains it; consumers borrow it only while that task is
@@ -87,6 +117,84 @@ pub(crate) struct CpuState {
     /// cadence that is already firing on the CPU. Distinct from
     /// [`Self::preempt_pending`], which is gated on a runnable competitor.
     pub(crate) force_yield: AtomicBool,
+    /// Watchdog **kernel-activity breadcrumb** — the site tag of the last
+    /// in-kernel region this CPU *itself* entered (a
+    /// [`crate::watchdog::KernelBreadcrumb`] encoded as `u8`), published by
+    /// the CPU as it runs rather than by the watchdog sample. This is the
+    /// one diagnosis a hard-locked CPU can still give: on a GICv2
+    /// non-secure board there is no non-maskable channel, so a CPU wedged
+    /// with maskable interrupts off cannot be sampled by its own watchdog
+    /// IRQ or interrupted by a buddy's IPI — its [`Self::wd_ctx_pc`] goes
+    /// stale (`sampled=pre_silence`). The breadcrumb, written just before
+    /// the CPU entered the region it is now stuck in, is fresh, so the buddy
+    /// observer's report names the real in-kernel activity (a syscall, a
+    /// user-fault resolver phase, or the scheduler) instead of the innocent
+    /// pre-silence PC.
+    ///
+    /// Part of the debug-diagnostics facility (`watchdog-diagnostics`): a
+    /// shippable image compiles this field, its siblings below, and every
+    /// write to them out entirely, so the syscall/dispatch/fault hot paths
+    /// pay nothing for a breadcrumb they can never emit.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) kbc_site: AtomicU8,
+    /// The datum accompanying [`Self::kbc_site`] — the syscall number for a
+    /// syscall breadcrumb, the faulting virtual address for a fault-resolver
+    /// breadcrumb, `0` otherwise. Written before the sequence bump so a
+    /// reader that observes a fresh [`Self::kbc_seq`] sees a matching datum.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) kbc_detail: AtomicU64,
+    /// Monotonic breadcrumb sequence, bumped (release) on every breadcrumb
+    /// write after the site and detail are stored. A reader loads it
+    /// (acquire) first so it sees a consistent site+detail; a human reading
+    /// two successive reports can also tell a frozen breadcrumb (the CPU is
+    /// stuck in exactly this region) from an advancing one.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) kbc_seq: AtomicU64,
+    /// Watchdog **pre-silence backtrace** — the frame-pointer-unwound
+    /// return-address chain of the context this CPU's last non-maskable
+    /// watchdog sample interrupted (innermost first, starting at the
+    /// interrupted PC). The port captures it from the saved exception
+    /// frame on every cadence sample, so on a hard lockup — where the
+    /// sampled PC is a stale `pre_silence` single word — the observer's
+    /// report can still name the whole call nest the CPU was in ~1 s
+    /// before it went silent, not one ambiguous address. Only the first
+    /// [`Self::wd_bt_len`] entries are valid.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) wd_bt: [AtomicU64; WD_BT_MAX],
+    /// Number of valid frames in [`Self::wd_bt`] (`0` when the port
+    /// captured none — the field is then omitted from the report, never
+    /// fabricated). Written (release) *after* the frames, so a reader that
+    /// loads it (acquire) first sees a consistent set.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) wd_bt_len: AtomicU32,
+    /// Watchdog **lock-site stack** — the `&'static Location` (as a
+    /// `usize`, `0` = empty) of each spinlock this CPU is currently
+    /// holding, innermost at index `lock_depth - 1`, recorded by the
+    /// `tairix_sync` lock-diagnostics observer as the CPU acquires and
+    /// releases IRQ-masking spinlocks. On a GICv2 hard lockup the maskable
+    /// liveness sample can no longer observe a CPU wedged with interrupts
+    /// off inside a spinlock section, so this self-published record is what
+    /// names the exact lock: the report renders the innermost entry as
+    /// `k_lock=<file>:<line>`. The stored value is a source `Location`
+    /// pointer to `'static` rodata whose `file`/`line` are rendered — never
+    /// a runtime code address, so it discloses no KASLR base.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) lock_sites: [AtomicUsize; LOCK_STACK_MAX],
+    /// Current lock-nesting depth (number of valid [`Self::lock_sites`]
+    /// entries, saturating at [`LOCK_STACK_MAX`] for recording while still
+    /// counting true depth so release stays balanced). Written last
+    /// (release) after the site, so a reader loading it (acquire) first
+    /// sees a consistent (site, depth) pair.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) lock_depth: AtomicUsize,
+    /// Whether the innermost record is still *spinning to acquire* (`true`)
+    /// rather than *held* (`false`). Only the top entry can be acquiring —
+    /// a deeper lock is only taken from inside an already-held section — so
+    /// one flag suffices. Renders the `k_lock` state as `acquiring`
+    /// (contended/deadlocked on that lock) vs `held` (wedged inside its
+    /// critical section).
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) lock_top_acquiring: AtomicBool,
 }
 
 impl CpuState {
@@ -106,6 +214,22 @@ impl CpuState {
             wd_ctx_aux: AtomicU64::new(0),
             wd_ctx_in_kernel: AtomicBool::new(false),
             force_yield: AtomicBool::new(false),
+            #[cfg(feature = "watchdog-diagnostics")]
+            kbc_site: AtomicU8::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            kbc_detail: AtomicU64::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            kbc_seq: AtomicU64::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            wd_bt: [const { AtomicU64::new(0) }; WD_BT_MAX],
+            #[cfg(feature = "watchdog-diagnostics")]
+            wd_bt_len: AtomicU32::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_sites: [const { AtomicUsize::new(0) }; LOCK_STACK_MAX],
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_depth: AtomicUsize::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_top_acquiring: AtomicBool::new(false),
         }
     }
 }

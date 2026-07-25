@@ -799,7 +799,21 @@ impl AddressSpaceRegistry {
         let had_stack_span = self.stack_spans.remove(&task).is_some();
         let had_load_base = self.load_bases.remove(&task).is_some();
         let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
-        self.tasks.remove(&task).is_some()
+        let had_task = self.tasks.remove(&task).is_some();
+        // Reclaim post-condition (debug-only tripwire): every per-task map
+        // has just had `task` removed, so no map may still hold it. A
+        // residual entry means either a per-task map was added without a
+        // matching removal above — the precursor to a reused id inheriting
+        // a dead task's state — or a `remove` did not take effect, i.e. the
+        // map is corrupt. Faulting here names the reclaim site deterministically
+        // rather than letting the debris surface as a wedge a second later.
+        // Compiled out of shippable images (`debug_assertions` off).
+        debug_assert!(
+            self.stale_task_entry(task).is_none(),
+            "aspace: withdraw left task {task:?} in the {:?} map (reused-id debris or map corruption)",
+            self.stale_task_entry(task)
+        );
+        had_task
             || had_pin
             || had_streams
             || had_limits
@@ -813,6 +827,61 @@ impl AddressSpaceRegistry {
             || had_stack_span
             || had_load_base
             || had_fd_delegations
+    }
+
+    /// The name of the first per-task map that still holds `task`, or `None`
+    /// when no per-task state references it — the check
+    /// [`withdraw`](Self::withdraw) asserts as its reclaim post-condition.
+    ///
+    /// Every field enumerated here is one [`withdraw`](Self::withdraw)
+    /// clears; the two lists must stay in lockstep, so a per-task map added
+    /// to the registry is added to *both*. Pure and host-tested; the caller
+    /// asserts on it only in the `debug_assertions` (non-shippable) build.
+    #[must_use]
+    pub fn stale_task_entry(&self, task: TaskId) -> Option<&'static str> {
+        if self.tasks.contains_key(&task) {
+            return Some("tasks");
+        }
+        if self.pinned.contains(&task) {
+            return Some("pinned");
+        }
+        if self.streams.contains_key(&task) {
+            return Some("streams");
+        }
+        if self.limits.contains_key(&task) {
+            return Some("limits");
+        }
+        if self.grants.contains_key(&task) {
+            return Some("grants");
+        }
+        if self.loaded_nodes.contains_key(&task) {
+            return Some("loaded_nodes");
+        }
+        if self.open_files.contains_key(&task) {
+            return Some("open_files");
+        }
+        if self.mapped_aspace_bytes.contains_key(&task) {
+            return Some("mapped_aspace_bytes");
+        }
+        if self.cwds.contains_key(&task) {
+            return Some("cwds");
+        }
+        if self.file_regions.contains_key(&task) {
+            return Some("file_regions");
+        }
+        if self.anon_regions.contains_key(&task) {
+            return Some("anon_regions");
+        }
+        if self.stack_spans.contains_key(&task) {
+            return Some("stack_spans");
+        }
+        if self.load_bases.contains_key(&task) {
+            return Some("load_bases");
+        }
+        if self.fd_delegations.contains_key(&task) {
+            return Some("fd_delegations");
+        }
+        None
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -1939,6 +2008,32 @@ mod tests {
         // reports the slot was present and clears the table.
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn stale_task_entry_is_none_for_a_fresh_id() {
+        let reg = AddressSpaceRegistry::new();
+        assert_eq!(reg.stale_task_entry(TaskId(1)), None);
+    }
+
+    #[test]
+    fn stale_task_entry_names_a_populated_map_then_withdraw_clears_it() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_streams(TaskId(8), DescriptorTable::standard());
+        assert_eq!(reg.stale_task_entry(TaskId(8)), Some("streams"));
+        // Reclaim must leave nothing behind: this is exactly the
+        // post-condition `withdraw` asserts, exercised explicitly.
+        assert!(reg.withdraw(TaskId(8)));
+        assert_eq!(reg.stale_task_entry(TaskId(8)), None);
+    }
+
+    #[test]
+    fn stale_task_entry_reports_a_registered_address_space() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(TaskId(3), user_space(1, 1), sim()).unwrap();
+        assert_eq!(reg.stale_task_entry(TaskId(3)), Some("tasks"));
+        assert!(reg.withdraw(TaskId(3)));
+        assert_eq!(reg.stale_task_entry(TaskId(3)), None);
     }
 
     #[test]

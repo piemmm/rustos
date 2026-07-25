@@ -29,6 +29,23 @@ scheduler-cfq = ["dep:tairix-kernel-sched-cfq"]
 scheduler-eevdf = ["dep:tairix-kernel-sched-eevdf"]
 scheduler-mlfq = ["dep:tairix-kernel-sched-mlfq"]
 
+# Lockup-watchdog debug diagnostics: the address-bearing developer aids the
+# hard/soft-lockup report can carry — the per-CPU kernel-activity breadcrumb
+# (`k_site`/`k_detail`/`k_seq`), the pre-silence call-stack backtrace
+# (`k_bt`), and the sampled `pc`/`pstate` — plus their per-CPU storage and
+# recording. Deliberately NOT in `default`: a shippable image compiles the
+# whole facility out (no hot-path atomics on the syscall/dispatch/fault
+# paths, no address disclosure, no strings), exactly as a `CONFIG_*`-gated
+# kernel-debug option does. `tools/xtask` turns it on for the non-shippable
+# `debug` image only, matching the console UART routing. Even when on, kernel
+# addresses are rendered image-base-relative, never absolute, and the
+# address-bearing detail goes to the diagnostic stream, never the persistent
+# audit log. It also turns on `tairix-sync/lock-diagnostics` so a wedged
+# core's report names the exact spinlock it is stuck on (`k_lock`), recorded
+# per CPU from the acquiring call's `#[track_caller]` source `file:line` — a
+# source string, never a runtime address. See `plans/WATCHDOG.md`.
+watchdog-diagnostics = ["tairix-sync/lock-diagnostics"]
+
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # host-side init-order and panic-behaviour tests. It is intentionally
 # not in the default feature set so production (`no_std`) builds never

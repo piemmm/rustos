@@ -173,7 +173,7 @@ extern "C" {
 }
 
 /// Address of the linker-provided `__kernel_start` symbol.
-fn kernel_start_addr() -> u64 {
+pub(crate) fn kernel_start_addr() -> u64 {
     // `addr_of!` reads the marker's address without forming a reference to
     // the zero-sized, never-dereferenced symbol.
     core::ptr::addr_of!(__kernel_start) as u64

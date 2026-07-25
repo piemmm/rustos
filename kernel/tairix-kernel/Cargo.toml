@@ -47,6 +47,21 @@ path = "src/lib.rs"
 name = "tairix-kernel"
 path = "src/main.rs"
 
+[features]
+# Lockup-watchdog debug diagnostics (`plans/WATCHDOG.md`): propagates the
+# compile-time gate to the crates that hold the facility — the
+# architecture-neutral recording/storage/render (`tairix-kernel-core`) and
+# the aarch64 pre-silence stack capture (`tairix-arch-aarch64`). Off by
+# default so the shippable `installer` kernel compiles the whole facility
+# out; `tools/xtask` enables it for the non-shippable `debug` image only,
+# alongside the console UART routing. The `tairix-arch-aarch64` entry is a
+# platform-specific dependency, so the reference is inert when the kernel is
+# built for a non-aarch64 target.
+watchdog-diagnostics = [
+    "tairix-kernel-core/watchdog-diagnostics",
+    "tairix-arch-aarch64/watchdog-diagnostics",
+]
+
 [dependencies]
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # The boot-heap bump allocator lives in `lib/kalloc` so the

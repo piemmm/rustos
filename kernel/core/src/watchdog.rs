@@ -72,6 +72,10 @@
 //! never panics (fail closed).
 
 use core::sync::atomic::{AtomicBool, Ordering};
+// `AtomicU64` backs only the debug-diagnostics kernel-image-base seam, so
+// it is imported only when that facility is compiled in.
+#[cfg(feature = "watchdog-diagnostics")]
+use core::sync::atomic::AtomicU64;
 
 use tairix_arch_api::{
     CpuId, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind, WatchdogSample,
@@ -161,6 +165,26 @@ static REPORT_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
 /// it (a build with no pseudo-NMI channel never installs one).
 static RECOVERY: OnceCell<&'static (dyn WatchdogArch + Sync)> = OnceCell::new();
 
+/// The installed **diagnostic** sink the debug-only lockup detail is
+/// emitted through, or `None` before the boot path wires it. Distinct from
+/// [`REPORT_SINK`]: the always-on lockup *summary* goes to the report sink
+/// (the persistent hash-chained audit log), while the address-bearing
+/// *detail* goes here, to the diagnostic (log/UART) stream — so no kernel
+/// address ever lands on the tamper-evident audit trail. Compiled in only
+/// with the debug-diagnostics facility.
+#[cfg(feature = "watchdog-diagnostics")]
+static DIAG_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
+
+/// The kernel image's runtime base address, registered once by the port
+/// ([`set_kernel_image_base`]) from its linker `__kernel_start` symbol.
+/// Kernel program counters in the debug detail are rendered *relative* to
+/// this (`pc - base`), never absolute, so a capture resolves against the
+/// debug kernel ELF without disclosing the runtime (KASLR-relocatable) load
+/// base. `0` means "not yet registered": the detail then omits every
+/// kernel-address field rather than emit a raw one (fail closed).
+#[cfg(feature = "watchdog-diagnostics")]
+static KERNEL_IMAGE_BASE: AtomicU64 = AtomicU64::new(0);
+
 /// Resolves a stuck controller line to the task that owns its IRQ binding.
 ///
 /// The watchdog reads a raw interrupt id from the shared controller when it
@@ -205,6 +229,146 @@ fn recovery() -> Option<&'static (dyn WatchdogArch + Sync)> {
     RECOVERY.get().ok().flatten().copied()
 }
 
+/// Install the **diagnostic** sink the debug-only lockup detail is emitted
+/// through — the log/UART stream, kept separate from the persistent audit
+/// [`REPORT_SINK`] so no kernel address ever lands on the tamper-evident
+/// audit trail. Idempotent; the boot path installs exactly one. Present
+/// only in a debug-diagnostics build.
+#[cfg(feature = "watchdog-diagnostics")]
+pub(crate) fn install_diagnostic_sink(sink: &'static (dyn Sink + Sync)) {
+    let _ = DIAG_SINK.set(sink);
+}
+
+/// The diagnostic sink the debug detail currently emits through, if any.
+#[cfg(feature = "watchdog-diagnostics")]
+fn diag_sink() -> Option<&'static (dyn Sink + Sync)> {
+    DIAG_SINK.get().ok().flatten().copied()
+}
+
+/// Register the kernel image's runtime base address (the port's linker
+/// `__kernel_start`) so the debug detail can render kernel program counters
+/// *relative* to it (`pc - base`) rather than absolute — the `%pK`-style
+/// discipline that keeps the runtime (KASLR-relocatable) load base secret
+/// while a capture still resolves against the debug kernel ELF. Idempotent
+/// in effect (the base does not change for a boot). Present only in a
+/// debug-diagnostics build; a shippable image never links it.
+#[cfg(feature = "watchdog-diagnostics")]
+pub fn set_kernel_image_base(base: u64) {
+    KERNEL_IMAGE_BASE.store(base, Ordering::Relaxed);
+}
+
+/// The offset of `addr` from the registered kernel image base, or `None`
+/// when the base is unregistered (`0`) or `addr` lies *below* it (not a
+/// kernel-image address). Fail closed: the caller omits the field rather
+/// than emit a raw absolute address that would disclose the load base.
+#[cfg(feature = "watchdog-diagnostics")]
+fn image_relative(addr: u64) -> Option<u64> {
+    let base = KERNEL_IMAGE_BASE.load(Ordering::Relaxed);
+    if base != 0 && addr >= base {
+        Some(addr - base)
+    } else {
+        None
+    }
+}
+
+// --- Debug-only lock-site observation -------------------------------
+
+/// The installed current-CPU resolver for the lock-diagnostics observer, as
+/// a thin `fn() -> Option<CpuId>` stored as a `usize` (`0` = none). The port
+/// installs it ([`install_lock_diagnostics`]) with a lock-free register read
+/// of the running CPU's dense id; the observer needs it because a
+/// `tairix_sync` lock has no CPU argument.
+#[cfg(feature = "watchdog-diagnostics")]
+static LOCK_DIAG_CPU_FN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Install the debug-only lock-site diagnostics: register `current_cpu` (a
+/// lock-free resolver of the running CPU's dense id) and wire the
+/// `tairix_sync` lock observer so each CPU's current spinlock is recorded
+/// into its per-CPU [`crate::cpu_state`] slot. After this a hard-lockup
+/// report names the exact spinlock a wedged core is stuck on (`k_lock`) —
+/// the one culprit the maskable liveness sample cannot observe when the
+/// core wedges with interrupts off inside the critical section.
+///
+/// Called once per boot by the port, after the per-CPU state table exists.
+/// Present only in a debug-diagnostics build; a shippable image never links
+/// it and every lock stays a bare compare-and-swap.
+#[cfg(feature = "watchdog-diagnostics")]
+pub fn install_lock_diagnostics(current_cpu: fn() -> Option<CpuId>) {
+    LOCK_DIAG_CPU_FN.store(current_cpu as usize, Ordering::Relaxed);
+    tairix_sync::lockwatch::install(lock_observer);
+}
+
+/// Resolve the running CPU's dense id through the installed resolver, or
+/// `None` before one is installed (fail-safe: record nothing).
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_diag_current_cpu() -> Option<CpuId> {
+    let raw = LOCK_DIAG_CPU_FN.load(Ordering::Relaxed);
+    if raw == 0 {
+        return None;
+    }
+    // SAFETY: `install_lock_diagnostics` only ever stores a value produced
+    // by `(fn() -> Option<CpuId>) as usize`; a non-zero slot is therefore a
+    // valid such function pointer with no captured environment.
+    let f: fn() -> Option<CpuId> =
+        unsafe { core::mem::transmute::<usize, fn() -> Option<CpuId>>(raw) };
+    f()
+}
+
+/// The `tairix_sync` lock observer: record `event` for the running CPU's
+/// current spinlock into its per-CPU lock-site stack.
+///
+/// Lock-free and allocation-free — it runs *inside* the lock primitives, so
+/// it must never take a lock. It only resolves the CPU id (a register read)
+/// and stores into per-CPU atomics. A context with no resolvable CPU or no
+/// per-CPU slot (pre-init, or a stray id) records nothing (fail-safe).
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize) {
+    use tairix_sync::lockwatch::LockEvent;
+    let Some(cpu) = lock_diag_current_cpu() else {
+        return;
+    };
+    let Some(state) = cpu_state::get(cpu) else {
+        return;
+    };
+    match event {
+        LockEvent::Acquiring => lock_push(state, site_ptr, true),
+        LockEvent::TryAcquired => lock_push(state, site_ptr, false),
+        // Promote the innermost record from acquiring to held; its site was
+        // pushed by the preceding `Acquiring` for the same lock.
+        LockEvent::Acquired => state.lock_top_acquiring.store(false, Ordering::Relaxed),
+        LockEvent::Released => lock_pop(state),
+    }
+}
+
+/// Push a lock record for `state`: store `site_ptr` at the current depth
+/// (when within [`cpu_state::LOCK_STACK_MAX`]) and mark whether the top is
+/// still acquiring. The depth is bumped last (release) so a reader that
+/// loads it (acquire) first sees the matching site. Depth counts true
+/// nesting (saturating) so [`lock_pop`] stays balanced even past the cap.
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_push(state: &CpuState, site_ptr: usize, acquiring: bool) {
+    let depth = state.lock_depth.load(Ordering::Relaxed);
+    if depth < cpu_state::LOCK_STACK_MAX {
+        state.lock_sites[depth].store(site_ptr, Ordering::Relaxed);
+    }
+    state.lock_top_acquiring.store(acquiring, Ordering::Relaxed);
+    state
+        .lock_depth
+        .store(depth.saturating_add(1), Ordering::Release);
+}
+
+/// Pop the innermost lock record for `state`. The new top (if any) is a
+/// held lock by construction — a deeper lock is only taken from inside an
+/// already-held section — so the acquiring flag clears.
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_pop(state: &CpuState) {
+    let depth = state.lock_depth.load(Ordering::Relaxed);
+    if depth > 0 {
+        state.lock_depth.store(depth - 1, Ordering::Release);
+    }
+    state.lock_top_acquiring.store(false, Ordering::Relaxed);
+}
+
 /// Install the resolver that attributes a stuck controller line to the task
 /// that owns its IRQ binding (see [`StuckOwnerResolver`]). Idempotent; a
 /// build that never installs one simply omits the `stuck_owner` field.
@@ -215,6 +379,210 @@ pub fn install_irq_owner(resolver: &'static (dyn StuckOwnerResolver + Sync)) {
 /// The installed stuck-line owner resolver, if any.
 fn irq_owner() -> Option<&'static (dyn StuckOwnerResolver + Sync)> {
     IRQ_OWNER.get().ok().flatten().copied()
+}
+
+/// A coarse tag for the in-kernel region a CPU last entered, published by
+/// the CPU *itself* (through [`note_kernel_breadcrumb`]) as it runs.
+///
+/// This is the diagnosis a hard-locked CPU can still give on a board with
+/// no non-maskable interrupt channel (the Raspberry Pi 4's GICv2 in the
+/// non-secure world): a CPU wedged with maskable interrupts off cannot be
+/// sampled by its own watchdog IRQ, nor interrupted by a buddy's IPI, so
+/// its last watchdog-sampled context (`wd_ctx_pc`) is stale — the innocent
+/// syscall-entry PC it last returned to (`sampled=pre_silence`). The
+/// breadcrumb, in contrast, is written by the CPU on the way *into* the
+/// region it is now stuck in, so the buddy observer's report names the real
+/// activity: which syscall, which user-fault resolver phase, or the
+/// scheduler dispatch loop. Ordered before the more expensive locking work
+/// of each region, so a wedge inside that work is attributed to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KernelBreadcrumb {
+    /// No region recorded yet (the boot default, and the value a slot
+    /// carries before its CPU has run any instrumented kernel region).
+    None = 0,
+    /// The scheduler dispatch loop between task runs (detail: unused, `0`).
+    Dispatch = 1,
+    /// A syscall handler body (detail: the raw syscall number).
+    Syscall = 2,
+    /// The user-fault resolver, before any phase decided (detail: the
+    /// faulting virtual address).
+    FaultEntry = 3,
+    /// The foreground direct-reclaim step of the fault resolver (detail:
+    /// the faulting virtual address).
+    FaultReclaim = 4,
+    /// The stack-growth phase of the fault resolver (detail: the faulting
+    /// virtual address).
+    FaultStack = 5,
+    /// The compressed-memory (`ramzip`) restore phase (detail: the faulting
+    /// virtual address).
+    FaultRamzip = 6,
+    /// The demand-paged anonymous-memory phase (detail: the faulting
+    /// virtual address).
+    FaultAnon = 7,
+    /// The demand-paged file-backing phase (detail: the faulting virtual
+    /// address).
+    FaultFile = 8,
+    /// The fatal (task-kill) phase of the fault resolver (detail: the
+    /// faulting virtual address).
+    FaultFatal = 9,
+    /// The task-body shim ([`crate::kthread`] `dispatch_step`) the CFQ
+    /// dispatch handed control to, *before* the context switch into the
+    /// task — the `pending_upgrade` install and, for a user kthread, the
+    /// address-space reactivation (`pre_resume`) and resume/live-space
+    /// publication (detail: the dispatched task id). Distinguishes a wedge
+    /// in the hand-off/address-space-activation prologue from one in the
+    /// scheduler's own pick/steal machinery (which stays [`Self::Dispatch`],
+    /// set before the body closure runs).
+    TaskBody = 10,
+    /// The context switch into the task ([`crate::kthread`] `dispatch_step`,
+    /// immediately before `ContextSwitch::switch`) and the task's execution
+    /// up to its first syscall/fault (which re-stamps the breadcrumb).
+    /// Distinguishes a wedge in the arch switch / early user-entry from one
+    /// in the shim prologue ([`Self::TaskBody`]) (detail: unused, `0` — the
+    /// task id is carried by the preceding [`Self::TaskBody`] crumb).
+    UserSwitch = 11,
+    /// The CFQ post-run accounting tail that runs after the task body
+    /// returned to the shim ([`crate::kthread`] `dispatch_step` returned):
+    /// run-accounting, vruntime charge, and re-enqueue/retire — the section
+    /// that runs with device interrupts still masked (inherited from the
+    /// suspending task's exception entry) until the dispatch loop restores
+    /// them. Distinguishes a wedge in that accounting from one inside the
+    /// task body ([`Self::UserSwitch`]) (detail: the dispatched task id).
+    DispatchTail = 12,
+}
+
+// These decode/render helpers are consumed only by the debug-diagnostics
+// snapshot and render, so they compile in only with the facility; the enum
+// itself stays defined unconditionally so the breadcrumb call sites on the
+// syscall/dispatch/fault paths need no `cfg` and stay one clean seam.
+#[cfg(feature = "watchdog-diagnostics")]
+impl KernelBreadcrumb {
+    /// Decode a stored `u8` tag, treating any unknown value as
+    /// [`KernelBreadcrumb::None`] (fail closed — a corrupt slot never
+    /// fabricates a region).
+    #[must_use]
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Dispatch,
+            2 => Self::Syscall,
+            3 => Self::FaultEntry,
+            4 => Self::FaultReclaim,
+            5 => Self::FaultStack,
+            6 => Self::FaultRamzip,
+            7 => Self::FaultAnon,
+            8 => Self::FaultFile,
+            9 => Self::FaultFatal,
+            10 => Self::TaskBody,
+            11 => Self::UserSwitch,
+            12 => Self::DispatchTail,
+            _ => Self::None,
+        }
+    }
+
+    /// A short, stable tag for the lockup record's `k_site` field.
+    #[must_use]
+    fn tag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Dispatch => "dispatch",
+            Self::Syscall => "syscall",
+            Self::FaultEntry => "fault_entry",
+            Self::FaultReclaim => "fault_reclaim",
+            Self::FaultStack => "fault_stack",
+            Self::FaultRamzip => "fault_ramzip",
+            Self::FaultAnon => "fault_anon",
+            Self::FaultFile => "fault_file",
+            Self::FaultFatal => "fault_fatal",
+            Self::TaskBody => "task_body",
+            Self::UserSwitch => "user_switch",
+            Self::DispatchTail => "dispatch_tail",
+        }
+    }
+}
+
+/// Publish `cpu`'s kernel-activity breadcrumb: the region it is entering
+/// (`site`) and its datum (`detail` — a syscall number or faulting
+/// address). Written by the CPU itself so a later hard-lockup report can
+/// name the region even when the CPU can no longer be sampled.
+///
+/// Three relaxed stores plus one release bump — the same order of cost as
+/// the progress/liveness heartbeats already on these paths, and the price
+/// of a diagnosable hard lockup on a board without a non-maskable channel.
+/// The `detail` and `site` are stored *before* the release bump of the
+/// sequence, so a reader that observes a fresh sequence (acquire) sees a
+/// matching site and detail. An out-of-range `cpu` is a no-op (fail
+/// closed).
+///
+/// `detail` is restricted by construction to non-secret diagnostic data:
+/// the callers pass only a raw syscall number, a faulting virtual address,
+/// or a task id — never a syscall *argument value*, buffer contents, key,
+/// credential, or capability token, and the type cannot carry one.
+///
+/// This is part of the debug-diagnostics facility. In a shippable image the
+/// `watchdog-diagnostics` feature is off, the body below is compiled out,
+/// and the ~12 breadcrumb call sites on the syscall / scheduler-dispatch /
+/// user-fault hot paths inline to nothing — no atomics, no branch, no
+/// stored region — so the release kernel pays exactly zero for a breadcrumb
+/// it can never emit. The signature stays so those call sites need no `cfg`.
+#[cfg(feature = "watchdog-diagnostics")]
+pub fn note_kernel_breadcrumb(cpu: CpuId, site: KernelBreadcrumb, detail: u64) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state.kbc_detail.store(detail, Ordering::Relaxed);
+        state.kbc_site.store(site as u8, Ordering::Relaxed);
+        state.kbc_seq.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Compiled-out no-op form of [`note_kernel_breadcrumb`] for a shippable
+/// image (the `watchdog-diagnostics` feature off): it records nothing and
+/// inlines away, so the syscall / dispatch / fault call sites cost nothing.
+#[cfg(not(feature = "watchdog-diagnostics"))]
+#[inline(always)]
+pub fn note_kernel_breadcrumb(_cpu: CpuId, _site: KernelBreadcrumb, _detail: u64) {}
+
+/// The maximum number of pre-silence backtrace frames the watchdog keeps
+/// per CPU — the fixed buffer a port fills through [`note_watchdog_backtrace`]
+/// and the report renders. Re-exported so the port sizes its capture buffer
+/// to exactly what will be stored (never a private second copy).
+///
+/// Part of the debug-diagnostics facility: it and [`note_watchdog_backtrace`]
+/// exist only with the `watchdog-diagnostics` feature, so a shippable image
+/// compiles the whole pre-silence backtrace path — capture, storage, and
+/// render — out entirely.
+#[cfg(feature = "watchdog-diagnostics")]
+pub const WATCHDOG_BACKTRACE_MAX: usize = cpu_state::WD_BT_MAX;
+
+/// Record `cpu`'s **pre-silence backtrace**: the return-address chain
+/// (`frames`, innermost first, starting at the interrupted PC) the port
+/// unwound from the context this CPU's latest non-maskable watchdog sample
+/// interrupted.
+///
+/// The port captures this on every cadence sample, so on a hard lockup —
+/// where the CPU can no longer be sampled and its `pc` is a stale
+/// `pre_silence` single word — the observer's report can still render the
+/// whole call nest the CPU was in ~1 s before it went silent, which a lone
+/// address cannot give. At most [`WATCHDOG_BACKTRACE_MAX`] frames are kept;
+/// the length is stored (release) *after* the frames so a reader that loads
+/// it (acquire) first sees a consistent set. An empty `frames` clears the
+/// record (the report then omits it, never fabricating one); an
+/// out-of-range `cpu` is a no-op (fail closed).
+#[cfg(feature = "watchdog-diagnostics")]
+pub fn note_watchdog_backtrace(cpu: CpuId, frames: &[u64]) {
+    let Some(state) = cpu_state::get(cpu) else {
+        return;
+    };
+    let len = frames.len().min(cpu_state::WD_BT_MAX);
+    for (slot, &pc) in state.wd_bt.iter().zip(frames.iter()).take(len) {
+        slot.store(pc, Ordering::Relaxed);
+    }
+    // Publish the length last (release) so a consumer that reads it first
+    // (acquire) observes the frames stored above. `len` is bounded by
+    // `WD_BT_MAX` (a small const), so the conversion never truncates; the
+    // saturating fallback keeps the store total without an `unwrap`.
+    state
+        .wd_bt_len
+        .store(u32::try_from(len).unwrap_or(u32::MAX), Ordering::Release);
 }
 
 /// The outcome of one heartbeat evaluation on a CPU.
@@ -629,7 +997,11 @@ struct Diag {
     pc: u64,
     /// Last-known running task id ([`WatchdogSample::NO_TASK`] = none).
     task: u64,
-    /// Last-known port-defined processor-state word (`0` = none).
+    /// Last-known port-defined processor-state word (`0` = none). An
+    /// architecture register (aarch64 `SPSR_EL1`), not a kernel address,
+    /// but a raw internal-state value nonetheless, so it is confined to the
+    /// debug-only detail record and never the always-on summary.
+    #[cfg(feature = "watchdog-diagnostics")]
     aux: u64,
     /// Whether the last-known context was **kernel** code (`true`) or a
     /// **user** task (`false`). Rendered as the `context` field so a report
@@ -661,6 +1033,54 @@ struct Diag {
     /// resolver installed) renders nothing, so a record never claims an
     /// attribution it does not have.
     stuck_owner: StuckOwner,
+    /// The self-published kernel-activity breadcrumb the target CPU last
+    /// recorded ([`KernelBreadcrumb`]). Unlike [`Self::pc`] this stays fresh
+    /// through a hard lockup — the CPU wrote it on the way into the region
+    /// it is now wedged in — so it names the real in-kernel activity even
+    /// when the sampled context is `pre_silence`. Rendered as
+    /// `k_site=<tag>`; [`KernelBreadcrumb::None`] renders nothing.
+    ///
+    /// The breadcrumb / backtrace fields below are part of the
+    /// debug-diagnostics facility and exist only with the
+    /// `watchdog-diagnostics` feature; they are rendered into the debug-only
+    /// detail record, never the always-on summary.
+    #[cfg(feature = "watchdog-diagnostics")]
+    breadcrumb: KernelBreadcrumb,
+    /// The datum for [`Self::breadcrumb`] (a syscall number or faulting
+    /// address). Rendered as `k_detail=<hex>` for any site that carries
+    /// one.
+    #[cfg(feature = "watchdog-diagnostics")]
+    breadcrumb_detail: u64,
+    /// The breadcrumb sequence at snapshot time. Rendered as `k_seq=<n>`
+    /// so two successive reports distinguish a frozen breadcrumb (the CPU
+    /// is stuck in exactly this region) from an advancing one.
+    #[cfg(feature = "watchdog-diagnostics")]
+    breadcrumb_seq: u64,
+    /// The pre-silence backtrace the port unwound from the last watchdog
+    /// sample's interrupted context (innermost first). Only the first
+    /// [`Self::bt_len`] entries are valid. Rendered as a single
+    /// `k_bt=<pc0>,<pc1>,…` field so a hard lockup names the whole call
+    /// nest the CPU was in ~1 s before it went silent, which the lone
+    /// `pre_silence` `pc` cannot; a zero length renders nothing.
+    #[cfg(feature = "watchdog-diagnostics")]
+    bt: [u64; cpu_state::WD_BT_MAX],
+    /// Number of valid frames in [`Self::bt`] (`0` = none captured).
+    #[cfg(feature = "watchdog-diagnostics")]
+    bt_len: usize,
+    /// The innermost spinlock this CPU was holding or spinning to acquire
+    /// when sampled, as a `&'static Location` (`usize`, `0` = none). On a
+    /// GICv2 hard lockup the maskable liveness sample cannot observe a CPU
+    /// wedged with interrupts off inside a spinlock section, so this
+    /// self-published record names the exact lock — rendered
+    /// `k_lock=<file>:<line>` from the acquiring call's source location,
+    /// never a runtime address.
+    #[cfg(feature = "watchdog-diagnostics")]
+    lock_site: usize,
+    /// Whether [`Self::lock_site`] was still being *acquired* (spinning,
+    /// contended/deadlocked) rather than *held* (wedged inside its critical
+    /// section). Rendered as the `k_lock_state` tag.
+    #[cfg(feature = "watchdog-diagnostics")]
+    lock_acquiring: bool,
 }
 
 /// Attribution of a stuck controller line to the task that owns its IRQ
@@ -684,11 +1104,26 @@ impl Diag {
     const EMPTY: Self = Self {
         pc: 0,
         task: WatchdogSample::NO_TASK,
+        #[cfg(feature = "watchdog-diagnostics")]
         aux: 0,
         in_kernel: false,
         sample_stale: false,
         stuck: None,
         stuck_owner: StuckOwner::Unknown,
+        #[cfg(feature = "watchdog-diagnostics")]
+        breadcrumb: KernelBreadcrumb::None,
+        #[cfg(feature = "watchdog-diagnostics")]
+        breadcrumb_detail: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
+        breadcrumb_seq: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
+        bt: [0; cpu_state::WD_BT_MAX],
+        #[cfg(feature = "watchdog-diagnostics")]
+        bt_len: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
+        lock_site: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
+        lock_acquiring: false,
     };
 
     /// Whether this diagnosis carries a real captured sample (as opposed to
@@ -698,18 +1133,82 @@ impl Diag {
         self.pc != 0 || self.task != WatchdogSample::NO_TASK
     }
 
+    /// Read the innermost recorded lock site for `state` (the debug-only
+    /// per-CPU lock-site stack), as `(site_ptr, acquiring)`. `(0, false)`
+    /// when the CPU holds no recorded lock. The depth is loaded first
+    /// (acquire) so the site read after it is the one the observer stored
+    /// before its release bump; an index past the recorded cap is clamped
+    /// to the deepest stored entry (a nesting that deep is pathological and
+    /// the outer entries still name a real held lock).
+    #[cfg(feature = "watchdog-diagnostics")]
+    fn lock_snapshot(state: &CpuState) -> (usize, bool) {
+        let depth = state.lock_depth.load(Ordering::Acquire);
+        if depth == 0 {
+            return (0, false);
+        }
+        let top = depth - 1;
+        let idx = top.min(cpu_state::LOCK_STACK_MAX - 1);
+        let site = state.lock_sites[idx].load(Ordering::Relaxed);
+        // The acquiring flag names the true top; if that top is past the
+        // recorded cap it was never stored, so the clamped entry we render
+        // is an outer *held* lock, not the (unknown) acquiring one.
+        let acquiring =
+            top < cpu_state::LOCK_STACK_MAX && state.lock_top_acquiring.load(Ordering::Relaxed);
+        (site, acquiring)
+    }
+
     /// Read a CPU's recorded last-known context. The observer-supplied
     /// `sample_stale` / `stuck` / `stuck_owner` fields default off; the
     /// hard-lockup path sets them after the snapshot.
     fn snapshot(state: &CpuState) -> Self {
+        // The breadcrumb + pre-silence backtrace are read only when the
+        // debug-diagnostics facility is compiled in; a shippable build has
+        // no such per-CPU storage to read.
+        #[cfg(feature = "watchdog-diagnostics")]
+        let (breadcrumb, breadcrumb_detail, breadcrumb_seq, bt, bt_len) = {
+            // Read the breadcrumb sequence first (acquire) so the site and
+            // detail loaded after it are the ones the writer stored before
+            // its release bump — a consistent (site, detail, seq) triple.
+            let breadcrumb_seq = state.kbc_seq.load(Ordering::Acquire);
+            let breadcrumb = KernelBreadcrumb::from_u8(state.kbc_site.load(Ordering::Relaxed));
+            let breadcrumb_detail = state.kbc_detail.load(Ordering::Relaxed);
+            // Read the backtrace length first (acquire) so the frames loaded
+            // after it are the ones the port stored before its release store
+            // — a consistent set, never a torn mix of a new length with old
+            // frames. A length past the array is clamped (fail closed).
+            let bt_len =
+                (state.wd_bt_len.load(Ordering::Acquire) as usize).min(cpu_state::WD_BT_MAX);
+            let mut bt = [0u64; cpu_state::WD_BT_MAX];
+            for (out, slot) in bt.iter_mut().zip(state.wd_bt.iter()).take(bt_len) {
+                *out = slot.load(Ordering::Relaxed);
+            }
+            (breadcrumb, breadcrumb_detail, breadcrumb_seq, bt, bt_len)
+        };
+        #[cfg(feature = "watchdog-diagnostics")]
+        let (lock_site, lock_acquiring) = Self::lock_snapshot(state);
         Self {
             pc: state.wd_ctx_pc.load(Ordering::Acquire),
             task: state.wd_ctx_task.load(Ordering::Acquire),
+            #[cfg(feature = "watchdog-diagnostics")]
             aux: state.wd_ctx_aux.load(Ordering::Acquire),
             in_kernel: state.wd_ctx_in_kernel.load(Ordering::Acquire),
             sample_stale: false,
             stuck: None,
             stuck_owner: StuckOwner::Unknown,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb_detail,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb_seq,
+            #[cfg(feature = "watchdog-diagnostics")]
+            bt,
+            #[cfg(feature = "watchdog-diagnostics")]
+            bt_len,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_site,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_acquiring,
         }
     }
 }
@@ -767,15 +1266,25 @@ fn hex0x(value: u64, buf: &mut [u8; 18]) -> &str {
     core::str::from_utf8(&buf[..2 + bytes.len()]).unwrap_or("0x")
 }
 
-/// Emit one lockup record through the installed sink, if any.
+/// Emit one lockup record.
 ///
-/// Allocation-free (stack buffers only) and lock-free, so it is safe on
-/// the non-maskable sample path and the dispatch hot path alike. `observer`
-/// names the CPU that caught a cross-CPU lockup (a hard lockup, or a
-/// buddy-observed soft one); `None` for a same-CPU detection or a
-/// recovery/clear record. `diag` carries the last-known context for the
-/// "why"; a zero PC / no-task field is omitted so a record only ever
-/// carries context it actually has.
+/// Splits into two independent records, each allocation-free (stack buffers
+/// only) and lock-free — safe on the non-maskable sample path and the
+/// dispatch hot path alike:
+///
+/// * The **always-on summary** goes to the persistent audit [`report_sink`]
+///   and carries only non-disclosing state (`cpu`, `observer`,
+///   `stalled_ms`, `task`, `context`, `sampled`, `stuck_*`) — never a
+///   kernel address, so the tamper-evident audit trail records *that* a
+///   lockup happened and roughly where, with zero disclosure.
+/// * The **debug-only detail** (a `watchdog-diagnostics` build only) goes to
+///   the separate diagnostic `diag_sink` and carries the address-bearing
+///   developer aids (`pc`/`pstate`/`k_site`/`k_detail`/`k_seq`/`k_bt`), with
+///   every kernel address rendered image-base-relative (`+0x…`), never
+///   absolute — the `%pK`-style discipline.
+///
+/// `observer` names the CPU that caught a cross-CPU lockup; `None` for a
+/// same-CPU detection or a recovery/clear record.
 fn report_lockup(
     event: AuditEvent,
     level: Level,
@@ -785,14 +1294,18 @@ fn report_lockup(
     diag: &Diag,
 ) {
     if let Some(sink) = report_sink() {
-        report_to(sink, event, level, cpu, observer, elapsed_ns, diag);
+        report_summary_to(sink, event, level, cpu, observer, elapsed_ns, diag);
     }
+    #[cfg(feature = "watchdog-diagnostics")]
+    report_diagnostic_detail(level, cpu, observer, diag);
 }
 
-/// Render one lockup record through `sink`. Split from [`report_lockup`]
-/// so host tests can drive the full render against a recording sink
-/// without touching the process-wide install seam.
-fn report_to(
+/// Render the always-on, non-disclosing lockup **summary** through `sink`.
+/// Split out so host tests can drive it against a recording sink without
+/// touching the process-wide install seam. Carries no kernel address: the
+/// address-bearing detail is a separate diagnostic record
+/// (`report_detail_to`, debug builds only).
+fn report_summary_to(
     sink: &dyn Sink,
     event: AuditEvent,
     level: Level,
@@ -801,16 +1314,14 @@ fn report_to(
     elapsed_ns: u64,
     diag: &Diag,
 ) {
-    let mut pc_buf = [0u8; 18];
-    let mut aux_buf = [0u8; 18];
     let mut owner_buf = [0u8; 18];
 
     // Build the field list on the stack. The order is stable so a reader
     // and a parser see the same shape every time.
-    let mut fields: [tairix_log::Field<'_>; 11] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 9] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 11];
+    }; 9];
     let mut n = 1;
     if let Some(obs) = observer {
         fields[n] = tairix_log::Field {
@@ -824,13 +1335,8 @@ fn report_to(
         value: tairix_log::FieldValue::UnsignedInt(elapsed_ns / NS_PER_MS),
     };
     n += 1;
-    if diag.pc != 0 {
-        fields[n] = tairix_log::Field {
-            key: "pc",
-            value: tairix_log::FieldValue::Str(hex0x(diag.pc, &mut pc_buf)),
-        };
-        n += 1;
-    }
+    // The running-task id (not an address) names the culprit task where one
+    // was captured.
     if diag.task != WatchdogSample::NO_TASK {
         fields[n] = tairix_log::Field {
             key: "task",
@@ -838,13 +1344,9 @@ fn report_to(
         };
         n += 1;
     }
-    if diag.aux != 0 {
-        fields[n] = tairix_log::Field {
-            key: "pstate",
-            value: tairix_log::FieldValue::Str(hex0x(diag.aux, &mut aux_buf)),
-        };
-        n += 1;
-    }
+    // The kernel/user distinction is the single most decisive non-disclosing
+    // clue for the "why", distilled from the sampled processor state (never
+    // the raw state word, which is the debug detail's job).
     if diag.has_sample() {
         fields[n] = tairix_log::Field {
             key: "context",
@@ -867,7 +1369,8 @@ fn report_to(
     // live by the observer — the "why" the stale sample cannot give. Only
     // a line that can still reach a CPU is reported, so `stuck_state` just
     // says whether it is a live storm (`active`) or an enabled line
-    // asserted but not yet taken (`pending`).
+    // asserted but not yet taken (`pending`). The id and its owning task id
+    // are diagnostic identifiers, not addresses.
     if let Some(stuck) = diag.stuck {
         fields[n] = tairix_log::Field {
             key: "stuck_irq",
@@ -904,6 +1407,212 @@ fn report_to(
     emit(sink, level, event, &fields[..n]);
 }
 
+// --- Debug-only address-bearing detail ------------------------------
+
+/// Emit the debug-only lockup **detail** record through the diagnostic
+/// sink, if there is anything address-bearing to say and a diagnostic sink
+/// is installed. A recovery/clear record (empty diag) has no detail and is
+/// skipped, so the diagnostic stream carries a detail line only for an
+/// actual detection. Compiled in only with the debug-diagnostics facility.
+#[cfg(feature = "watchdog-diagnostics")]
+fn report_diagnostic_detail(level: Level, cpu: CpuId, observer: Option<CpuId>, diag: &Diag) {
+    let has_detail = diag.pc != 0
+        || diag.breadcrumb != KernelBreadcrumb::None
+        || diag.bt_len != 0
+        || diag.lock_site != 0;
+    if !has_detail {
+        return;
+    }
+    if let Some(sink) = diag_sink() {
+        report_detail_to(sink, level, cpu, observer, diag);
+    }
+}
+
+/// Render `offset` into `buf` as the image-relative marker `+0x`-prefixed
+/// 16-nibble lowercase hex. The leading `+` makes unmistakable that the
+/// value is an offset from the kernel image base, never an absolute
+/// runtime address, so a reader can never confuse the two.
+#[cfg(feature = "watchdog-diagnostics")]
+fn hex_off(offset: u64, buf: &mut [u8; 19]) -> &str {
+    buf[0] = b'+';
+    buf[1] = b'0';
+    buf[2] = b'x';
+    let mut hex = [0u8; 16];
+    let rendered = format_hex_u64(offset, &mut hex);
+    let bytes = rendered.as_bytes();
+    buf[3..3 + bytes.len()].copy_from_slice(bytes);
+    core::str::from_utf8(&buf[..3 + bytes.len()]).unwrap_or("+0x")
+}
+
+/// Render the debug-only lockup **detail** through `sink`: the
+/// address-bearing developer aids the always-on summary deliberately
+/// omits. Every kernel address is rendered image-base-relative (`+0x…`)
+/// via [`image_relative`] — never absolute — and a kernel-address field is
+/// omitted entirely when the base is unregistered (fail closed, never a
+/// raw disclosure). Split out so host tests drive it against a recording
+/// sink without the install seam.
+#[cfg(feature = "watchdog-diagnostics")]
+fn report_detail_to(
+    sink: &dyn Sink,
+    level: Level,
+    cpu: CpuId,
+    observer: Option<CpuId>,
+    diag: &Diag,
+) {
+    let mut pc_buf = [0u8; 19];
+    let mut aux_buf = [0u8; 18];
+    let mut kdetail_buf = [0u8; 18];
+    let mut bt_buf = [0u8; BT_RENDER_BYTES];
+
+    let mut fields: [tairix_log::Field<'_>; 12] = [tairix_log::Field {
+        key: "cpu",
+        value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
+    }; 12];
+    let mut n = 1;
+    // `observer` correlates this detail line with its summary line on the
+    // audit trail (both carry the same `cpu`/`observer`).
+    if let Some(obs) = observer {
+        fields[n] = tairix_log::Field {
+            key: "observer",
+            value: tairix_log::FieldValue::UnsignedInt(u64::from(obs)),
+        };
+        n += 1;
+    }
+    // The sampled program counter, image-relative — omitted when the base
+    // is unregistered or the pc is not a kernel-image address (fail closed,
+    // never a raw absolute).
+    if let Some(off) = image_relative(diag.pc) {
+        fields[n] = tairix_log::Field {
+            key: "pc",
+            value: tairix_log::FieldValue::Str(hex_off(off, &mut pc_buf)),
+        };
+        n += 1;
+    }
+    // The raw processor-state word (aarch64 `SPSR_EL1`): a register value,
+    // not an address, so it is rendered verbatim.
+    if diag.aux != 0 {
+        fields[n] = tairix_log::Field {
+            key: "pstate",
+            value: tairix_log::FieldValue::Str(hex0x(diag.aux, &mut aux_buf)),
+        };
+        n += 1;
+    }
+    // The self-published kernel-activity breadcrumb — the region the CPU
+    // last entered, fresh through a hard lockup where the sampled `pc` is
+    // `pre_silence`. `k_detail` is a syscall number, a faulting virtual
+    // address, or a task id — never a kernel-image address, so it is
+    // rendered verbatim (not rebased).
+    if diag.breadcrumb != KernelBreadcrumb::None {
+        fields[n] = tairix_log::Field {
+            key: "k_site",
+            value: tairix_log::FieldValue::Str(diag.breadcrumb.tag()),
+        };
+        n += 1;
+        fields[n] = tairix_log::Field {
+            key: "k_detail",
+            value: tairix_log::FieldValue::Str(hex0x(diag.breadcrumb_detail, &mut kdetail_buf)),
+        };
+        n += 1;
+        fields[n] = tairix_log::Field {
+            key: "k_seq",
+            value: tairix_log::FieldValue::UnsignedInt(diag.breadcrumb_seq),
+        };
+        n += 1;
+    }
+    // The exact spinlock the CPU was on when sampled — recorded by the
+    // lock observer as the acquiring call's source `file:line`. A source
+    // string, never a runtime address, so it discloses no load base. On a
+    // GICv2 hard lockup this names the IRQ-masked culprit lock the maskable
+    // liveness sample cannot observe: `acquiring` = still spinning to take
+    // it (contended/deadlocked), `held` = wedged inside its section.
+    if diag.lock_site != 0 {
+        // SAFETY: a non-zero `lock_site` is the `&'static Location` the
+        // `tairix_sync` lock observer stored from `Location::caller()`; the
+        // pointee is `'static` rodata, valid for the whole run, so forming
+        // the reference and reading `file`/`line` is sound.
+        let loc: &'static core::panic::Location<'static> =
+            unsafe { &*(diag.lock_site as *const core::panic::Location<'static>) };
+        fields[n] = tairix_log::Field {
+            key: "k_lock",
+            value: tairix_log::FieldValue::Str(loc.file()),
+        };
+        n += 1;
+        fields[n] = tairix_log::Field {
+            key: "k_lock_line",
+            value: tairix_log::FieldValue::UnsignedInt(u64::from(loc.line())),
+        };
+        n += 1;
+        fields[n] = tairix_log::Field {
+            key: "k_lock_state",
+            value: tairix_log::FieldValue::Str(if diag.lock_acquiring {
+                "acquiring"
+            } else {
+                "held"
+            }),
+        };
+        n += 1;
+    }
+    // The pre-silence backtrace, image-relative frames — the whole call nest
+    // the CPU was in ~1 s before it went silent, which the lone `pre_silence`
+    // `pc` cannot give.
+    let n = push_backtrace_field(&mut fields, n, diag, &mut bt_buf);
+    emit(sink, level, AuditEvent::CpuLockupDiagnostic, &fields[..n]);
+}
+
+/// Bytes needed to render the deepest backtrace as `+0x<16>,+0x<16>,…`:
+/// each of [`cpu_state::WD_BT_MAX`] frames is `+0x` + 16 nibbles (19) plus a
+/// separating comma (20), and the trailing comma is simply not written.
+#[cfg(feature = "watchdog-diagnostics")]
+const BT_RENDER_BYTES: usize = cpu_state::WD_BT_MAX * 20;
+
+/// Append the `k_bt=+<off0>,+<off1>,…` pre-silence-backtrace field to
+/// `fields` at index `n`, returning the new length. Each frame is rendered
+/// image-relative (`+0x…`, [`image_relative`]); a frame that does not
+/// resolve against the kernel image base is skipped rather than disclosed
+/// raw. A backtrace that ends up with no renderable frame (none captured,
+/// or the base is unregistered) adds nothing, so a record never fabricates
+/// a stack and never leaks an absolute address. `buf` backs the rendered
+/// joined string, so it must outlive the returned fields.
+#[cfg(feature = "watchdog-diagnostics")]
+fn push_backtrace_field<'a>(
+    fields: &mut [tairix_log::Field<'a>],
+    n: usize,
+    diag: &Diag,
+    buf: &'a mut [u8; BT_RENDER_BYTES],
+) -> usize {
+    if diag.bt_len == 0 {
+        return n;
+    }
+    let mut used = 0;
+    let mut rendered_any = false;
+    for &pc in diag.bt.iter().take(diag.bt_len) {
+        let Some(off) = image_relative(pc) else {
+            continue;
+        };
+        if rendered_any {
+            buf[used] = b',';
+            used += 1;
+        }
+        let mut one = [0u8; 19];
+        let text = hex_off(off, &mut one);
+        let bytes = text.as_bytes();
+        buf[used..used + bytes.len()].copy_from_slice(bytes);
+        used += bytes.len();
+        rendered_any = true;
+    }
+    if !rendered_any {
+        return n;
+    }
+    let text = core::str::from_utf8(&buf[..used]).unwrap_or("");
+    let mut n = n;
+    fields[n] = tairix_log::Field {
+        key: "k_bt",
+        value: tairix_log::FieldValue::Str(text),
+    };
+    n += 1;
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,6 +1635,21 @@ mod tests {
         state.wd_ctx_task.store(u64::MAX, Ordering::Relaxed);
         state.wd_ctx_aux.store(0, Ordering::Relaxed);
         state.wd_ctx_in_kernel.store(false, Ordering::Relaxed);
+        #[cfg(feature = "watchdog-diagnostics")]
+        {
+            state.kbc_site.store(0, Ordering::Relaxed);
+            state.kbc_detail.store(0, Ordering::Relaxed);
+            state.kbc_seq.store(0, Ordering::Relaxed);
+            state.wd_bt_len.store(0, Ordering::Relaxed);
+            for slot in &state.wd_bt {
+                slot.store(0, Ordering::Relaxed);
+            }
+            state.lock_depth.store(0, Ordering::Relaxed);
+            state.lock_top_acquiring.store(false, Ordering::Relaxed);
+            for slot in &state.lock_sites {
+                slot.store(0, Ordering::Relaxed);
+            }
+        }
         state
     }
 
@@ -934,6 +1658,52 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Build a [`Diag`] for a render test from the always-on fields; the
+    /// debug-only breadcrumb / backtrace / `aux` fields are defaulted here
+    /// (a test that exercises them constructs a full literal under the
+    /// feature). This lets the always-on summary tests build a `Diag` in
+    /// both feature configurations without listing fields that do not exist
+    /// in a shippable build.
+    fn diag(
+        pc: u64,
+        task: u64,
+        in_kernel: bool,
+        sample_stale: bool,
+        stuck: Option<StuckInterrupt>,
+        stuck_owner: StuckOwner,
+    ) -> Diag {
+        Diag {
+            pc,
+            task,
+            in_kernel,
+            sample_stale,
+            stuck,
+            stuck_owner,
+            #[cfg(feature = "watchdog-diagnostics")]
+            aux: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb: KernelBreadcrumb::None,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb_detail: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            breadcrumb_seq: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            bt: [0; cpu_state::WD_BT_MAX],
+            #[cfg(feature = "watchdog-diagnostics")]
+            bt_len: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_site: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_acquiring: false,
+        }
+    }
+
+    /// True iff no rendered field value contains `needle` — a regression
+    /// guard that a raw absolute address never leaks into a record.
+    fn no_field_contains(ev: &crate::test_sink::CapturedEvent, needle: &str) -> bool {
+        ev.fields.iter().all(|(_, v)| !v.contains(needle))
     }
 
     // --- The pure heartbeat evaluator -------------------------------
@@ -1296,28 +2066,33 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_lockup_record_carries_the_full_diagnosis() {
+    fn the_always_on_summary_carries_state_but_never_a_kernel_address() {
+        // The always-on summary (audit trail) records *that* a hard lockup
+        // happened and roughly where, with zero address disclosure: a bare
+        // pc, the raw processor state, and every `k_*` breadcrumb/backtrace
+        // field are the debug-only detail's job and never appear here, so
+        // the persistent hash-chained log never carries a KASLR-defeating
+        // raw kernel pointer.
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let diag = Diag {
-            pc: 0xffff_0000_1234_5678,
-            task: 12,
-            aux: 0x3c5,
-            in_kernel: true,
-            sample_stale: true,
-            stuck: Some(StuckInterrupt {
+        let d = diag(
+            0xffff_0000_1234_5678,
+            12,
+            true,
+            true,
+            Some(StuckInterrupt {
                 intid: 37,
                 active: true,
             }),
-            stuck_owner: StuckOwner::Task(13),
-        };
-        report_to(
+            StuckOwner::Task(13),
+        );
+        report_summary_to(
             sink,
             AuditEvent::CpuHardLockupDetected,
             Level::Error,
             2,
             Some(0),
             7_000_000_000,
-            &diag,
+            &d,
         );
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
@@ -1327,47 +2102,279 @@ mod tests {
         assert_eq!(field(ev, "cpu"), Some("2"));
         assert_eq!(field(ev, "observer"), Some("0"));
         assert_eq!(field(ev, "stalled_ms"), Some("7000"));
-        assert_eq!(field(ev, "pc"), Some("0xffff000012345678"));
+        // A task id (not an address) and the kernel/user context — the
+        // decisive non-disclosing clues.
         assert_eq!(field(ev, "task"), Some("12"));
-        assert_eq!(field(ev, "pstate"), Some("0x00000000000003c5"));
-        // The kernel/user context distinguishes an in-kernel wedge from a
-        // spinning user task — the most decisive clue for the "why".
         assert_eq!(field(ev, "context"), Some("kernel"));
-        // The recorded pc/pstate are the last sample *before* the CPU went
-        // silent, and the observer read the live stuck controller line.
         assert_eq!(field(ev, "sampled"), Some("pre_silence"));
         assert_eq!(field(ev, "stuck_irq"), Some("37"));
-        // The state pins whether the line is a live storm (`active`) or an
-        // enabled-but-not-yet-taken line (`pending`).
         assert_eq!(field(ev, "stuck_state"), Some("active"));
-        // A bound line names the driver that owns it, so a reader knows
-        // whose device is asserting it rather than a bare interrupt id.
         assert_eq!(field(ev, "stuck_owner"), Some("0x000000000000000d"));
+        // No kernel address, ever, on the always-on record.
+        assert_eq!(field(ev, "pc"), None);
+        assert_eq!(field(ev, "pstate"), None);
+        assert_eq!(field(ev, "k_site"), None);
+        assert_eq!(field(ev, "k_detail"), None);
+        assert_eq!(field(ev, "k_seq"), None);
+        assert_eq!(field(ev, "k_bt"), None);
+        // Regression guard: the raw sampled pc never appears in *any*
+        // rendered field of the summary record.
+        assert!(no_field_contains(ev, "ffff000012345678"));
     }
 
+    /// The kernel image base the debug-detail tests rebase against. All such
+    /// tests set this same value, so the process-global base store never
+    /// races to a *different* value between parallel test threads.
+    #[cfg(feature = "watchdog-diagnostics")]
+    const TEST_IMAGE_BASE: u64 = 0xffff_0000_0000_0000;
+
+    #[cfg(feature = "watchdog-diagnostics")]
     #[test]
-    fn a_hard_lockup_without_a_stuck_line_omits_it() {
-        // No SPI is stuck (the wedge is a pure in-kernel spin with IRQs
-        // masked, not a storm), so the observer reports no line rather than
-        // a fabricated one — but still marks the sample pre-silence.
+    fn the_debug_detail_renders_addresses_image_relative_never_absolute() {
+        // With the facility on and the image base registered, the debug
+        // detail record carries the developer aids the summary omits — but
+        // every kernel address is an image-relative offset (`+0x…`), never
+        // the absolute runtime pc, so a capture resolves against the debug
+        // ELF without disclosing the (KASLR-relocatable) load base.
+        set_kernel_image_base(TEST_IMAGE_BASE);
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let diag = Diag {
-            pc: 0x0021_d42c,
-            task: WatchdogSample::NO_TASK,
-            aux: 0x345,
+        let mut bt = [0u64; cpu_state::WD_BT_MAX];
+        bt[0] = TEST_IMAGE_BASE + 0x0021_d42c;
+        bt[1] = TEST_IMAGE_BASE + 0x0021_e100;
+        bt[2] = TEST_IMAGE_BASE + 0x0022_0f00;
+        let d = Diag {
+            pc: TEST_IMAGE_BASE + 0x1234_5678,
+            task: 12,
+            aux: 0x3c5,
             in_kernel: true,
             sample_stale: true,
             stuck: None,
             stuck_owner: StuckOwner::Unknown,
+            breadcrumb: KernelBreadcrumb::FaultAnon,
+            breadcrumb_detail: 0x1_0000_2000,
+            breadcrumb_seq: 42,
+            bt,
+            bt_len: 3,
+            lock_site: 0,
+            lock_acquiring: false,
         };
-        report_to(
+        report_detail_to(sink, Level::Error, 2, Some(0), &d);
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::CpuLockupDiagnostic.id());
+        assert_eq!(field(ev, "cpu"), Some("2"));
+        assert_eq!(field(ev, "observer"), Some("0"));
+        // The pc renders as an image-relative offset with the unmistakable
+        // `+` marker — never the absolute runtime address.
+        assert_eq!(field(ev, "pc"), Some("+0x0000000012345678"));
+        assert_eq!(field(ev, "pstate"), Some("0x00000000000003c5"));
+        assert_eq!(field(ev, "k_site"), Some("fault_anon"));
+        // `k_detail` is a faulting VA (not a kernel-image address), rendered
+        // verbatim.
+        assert_eq!(field(ev, "k_detail"), Some("0x0000000100002000"));
+        assert_eq!(field(ev, "k_seq"), Some("42"));
+        // Each backtrace frame is likewise image-relative.
+        assert_eq!(
+            field(ev, "k_bt"),
+            Some("+0x000000000021d42c,+0x000000000021e100,+0x0000000000220f00"),
+        );
+        // The decisive guarantee: the absolute runtime pc / frame addresses
+        // never appear in the record, only their offsets.
+        assert!(no_field_contains(ev, "ffff00001234"));
+        assert!(no_field_contains(ev, "ffff0000002"));
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_debug_detail_omits_kernel_addresses_that_do_not_rebase() {
+        // Fail closed: a pc / backtrace frame that does not resolve against
+        // the registered image base (here, below it) is omitted rather than
+        // disclosed raw — but the non-address breadcrumb still renders, so
+        // the record stays useful.
+        set_kernel_image_base(TEST_IMAGE_BASE);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let mut bt = [0u64; cpu_state::WD_BT_MAX];
+        bt[0] = 0x0021_d42c; // below the image base — not rebasable
+        let d = Diag {
+            pc: 0x1234, // below the image base — not rebasable
+            task: WatchdogSample::NO_TASK,
+            aux: 0,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: None,
+            stuck_owner: StuckOwner::Unknown,
+            breadcrumb: KernelBreadcrumb::FaultReclaim,
+            breadcrumb_detail: 0x0021_d000,
+            breadcrumb_seq: 5,
+            bt,
+            bt_len: 1,
+            lock_site: 0,
+            lock_acquiring: false,
+        };
+        report_detail_to(sink, Level::Error, 1, None, &d);
+        let ev = &sink.snapshot()[0];
+        // The un-rebasable pc and backtrace are omitted (never raw).
+        assert_eq!(field(ev, "pc"), None);
+        assert_eq!(field(ev, "k_bt"), None);
+        // The breadcrumb (no kernel-image address) still renders.
+        assert_eq!(field(ev, "k_site"), Some("fault_reclaim"));
+        assert_eq!(field(ev, "k_seq"), Some("5"));
+        // And no raw address slipped through.
+        assert!(no_field_contains(ev, "21d42c"));
+        assert!(no_field_contains(ev, "1234"));
+    }
+
+    /// The per-CPU lock-site stack tracks the *innermost* lock and stays
+    /// balanced across nesting and release, and the acquiring→held
+    /// promotion is reflected. The stored value is opaque to the stack
+    /// logic (a `Location` pointer), so fake distinct non-zero ids stand in
+    /// (the render path is what dereferences it — tested separately).
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_lock_site_stack_tracks_the_innermost_lock() {
+        const OUTER: usize = 0x1000;
+        const INNER: usize = 0x2000;
+        let state = reset(60);
+        // No lock held → nothing recorded.
+        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        // Spin-acquire the outer lock: recorded as acquiring, then promoted
+        // to held once the CAS wins.
+        lock_push(state, OUTER, true);
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, true));
+        state.lock_top_acquiring.store(false, Ordering::Relaxed);
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, false));
+        // A nested (held) inner lock becomes the innermost record.
+        lock_push(state, INNER, false);
+        assert_eq!(Diag::lock_snapshot(state), (INNER, false));
+        // Releasing the inner lock restores the outer (held) as innermost.
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, false));
+        // Releasing the outer lock leaves nothing recorded.
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        // A stray extra release underflows safely (fail-safe: no panic, no
+        // wraparound into a bogus depth).
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (0, false));
+    }
+
+    /// Nesting past the recorded cap still balances on release (depth counts
+    /// true nesting), and once it drops back within the cap the innermost
+    /// recorded site is named again — the deep excess is simply not stored.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_lock_site_stack_survives_nesting_past_the_cap() {
+        let state = reset(61);
+        // Push one more than the cap can record.
+        for i in 0..=cpu_state::LOCK_STACK_MAX {
+            lock_push(state, 0x1000 + i, false);
+        }
+        // Pop back down to a single held lock (the outermost, id 0x1000).
+        for _ in 0..cpu_state::LOCK_STACK_MAX {
+            lock_pop(state);
+        }
+        assert_eq!(Diag::lock_snapshot(state), (0x1000, false));
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (0, false));
+    }
+
+    /// The debug detail names the stuck spinlock as `k_lock=<file>` +
+    /// `k_lock_line` + a state tag, from the acquiring call's source
+    /// `Location` — a source string, never a runtime address (no image base
+    /// is even consulted). This is the field that pins an IRQ-masked hard
+    /// lockup's culprit lock, which the maskable liveness sample cannot see.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_debug_detail_names_the_stuck_lock() {
+        let site = core::panic::Location::caller();
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = Diag {
+            pc: 0,
+            task: WatchdogSample::NO_TASK,
+            aux: 0,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: None,
+            stuck_owner: StuckOwner::Unknown,
+            breadcrumb: KernelBreadcrumb::None,
+            breadcrumb_detail: 0,
+            breadcrumb_seq: 0,
+            bt: [0; cpu_state::WD_BT_MAX],
+            bt_len: 0,
+            lock_site: site as *const core::panic::Location<'static> as usize,
+            lock_acquiring: true,
+        };
+        report_detail_to(sink, Level::Error, 3, Some(0), &d);
+        let ev = &sink.snapshot()[0];
+        assert_eq!(ev.id, AuditEvent::CpuLockupDiagnostic.id());
+        assert_eq!(field(ev, "k_lock"), Some(site.file()));
+        assert_eq!(field(ev, "k_lock_state"), Some("acquiring"));
+        // The state tag flips to `held` for a lock the CPU had taken.
+        let sink2: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let held = Diag {
+            lock_acquiring: false,
+            ..d
+        };
+        report_detail_to(sink2, Level::Error, 3, Some(0), &held);
+        assert_eq!(field(&sink2.snapshot()[0], "k_lock_state"), Some("held"));
+    }
+
+    /// A lock site is address-safe: the recorded value is a source
+    /// `file:line`, so a hex runtime address never appears in the rendered
+    /// record even though `lock_site` is a pointer internally.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_lock_site_field_discloses_no_runtime_address() {
+        let site = core::panic::Location::caller();
+        let ptr = site as *const core::panic::Location<'static> as usize;
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = Diag {
+            pc: 0,
+            task: WatchdogSample::NO_TASK,
+            aux: 0,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: None,
+            stuck_owner: StuckOwner::Unknown,
+            breadcrumb: KernelBreadcrumb::None,
+            breadcrumb_detail: 0,
+            breadcrumb_seq: 0,
+            bt: [0; cpu_state::WD_BT_MAX],
+            bt_len: 0,
+            lock_site: ptr,
+            lock_acquiring: false,
+        };
+        report_detail_to(sink, Level::Error, 3, None, &d);
+        let ev = &sink.snapshot()[0];
+        // The raw pointer value never appears as text in any field.
+        let mut hex = [0u8; 16];
+        let ptr_hex = format_hex_u64(ptr as u64, &mut hex);
+        assert!(no_field_contains(ev, ptr_hex));
+    }
+
+    #[test]
+    fn a_summary_without_a_stuck_line_omits_it() {
+        // No SPI is stuck (the wedge is a pure in-kernel spin with IRQs
+        // masked, not a storm), so the observer reports no line rather than
+        // a fabricated one — but still marks the sample pre-silence.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = diag(
+            0x0021_d42c,
+            WatchdogSample::NO_TASK,
+            true,
+            true,
+            None,
+            StuckOwner::Unknown,
+        );
+        report_summary_to(
             sink,
             AuditEvent::CpuHardLockupDetected,
             Level::Error,
             1,
             Some(0),
             10_000_000_000,
-            &diag,
+            &d,
         );
         let ev = &sink.snapshot()[0];
         assert_eq!(field(ev, "context"), Some("kernel"));
@@ -1393,26 +2400,25 @@ mod tests {
         // masked, undeliverable line the observer used to blame is never
         // reported at all now.
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let diag = Diag {
-            pc: 0x0021_d524,
-            task: WatchdogSample::NO_TASK,
-            aux: 0x345,
-            in_kernel: true,
-            sample_stale: true,
-            stuck: Some(StuckInterrupt {
+        let d = diag(
+            0x0021_d524,
+            WatchdogSample::NO_TASK,
+            true,
+            true,
+            Some(StuckInterrupt {
                 intid: 50,
                 active: false,
             }),
-            stuck_owner: StuckOwner::Unbound,
-        };
-        report_to(
+            StuckOwner::Unbound,
+        );
+        report_summary_to(
             sink,
             AuditEvent::CpuHardLockupDetected,
             Level::Error,
             1,
             Some(0),
             10_000_000_000,
-            &diag,
+            &d,
         );
         let ev = &sink.snapshot()[0];
         assert_eq!(field(ev, "stuck_irq"), Some("50"));
@@ -1423,23 +2429,15 @@ mod tests {
     #[test]
     fn a_user_context_record_says_user() {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let diag = Diag {
-            pc: 0x4000_0000,
-            task: 15,
-            aux: 0x6000_0000,
-            in_kernel: false,
-            sample_stale: false,
-            stuck: None,
-            stuck_owner: StuckOwner::Unknown,
-        };
-        report_to(
+        let d = diag(0x4000_0000, 15, false, false, None, StuckOwner::Unknown);
+        report_summary_to(
             sink,
             AuditEvent::CpuStallDetected,
             Level::Error,
             1,
             None,
             10_000_000_000,
-            &diag,
+            &d,
         );
         let ev = &sink.snapshot()[0];
         assert_eq!(field(ev, "context"), Some("user"));
@@ -1453,7 +2451,7 @@ mod tests {
     #[test]
     fn a_record_omits_context_it_does_not_have() {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        report_to(
+        report_summary_to(
             sink,
             AuditEvent::CpuStallCleared,
             Level::Warn,
@@ -1530,5 +2528,121 @@ mod tests {
         assert_eq!(field(ev, "cpu"), Some("3"));
         assert_eq!(field(ev, "kind"), Some("hard"));
         assert_eq!(field(ev, "outcome"), Some("attention"));
+    }
+
+    // --- Kernel-activity breadcrumb ---------------------------------
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn breadcrumb_tag_round_trips_and_unknown_decodes_to_none() {
+        // Every named site round-trips through its `u8` encoding.
+        for site in [
+            KernelBreadcrumb::None,
+            KernelBreadcrumb::Dispatch,
+            KernelBreadcrumb::Syscall,
+            KernelBreadcrumb::FaultEntry,
+            KernelBreadcrumb::FaultReclaim,
+            KernelBreadcrumb::FaultStack,
+            KernelBreadcrumb::FaultRamzip,
+            KernelBreadcrumb::FaultAnon,
+            KernelBreadcrumb::FaultFile,
+            KernelBreadcrumb::FaultFatal,
+            KernelBreadcrumb::TaskBody,
+            KernelBreadcrumb::UserSwitch,
+            KernelBreadcrumb::DispatchTail,
+        ] {
+            assert_eq!(KernelBreadcrumb::from_u8(site as u8), site);
+            // Every named site has a distinct, non-empty tag (no accidental
+            // aliasing of the finer dispatch sub-sites onto an existing one).
+            assert!(!site.tag().is_empty());
+        }
+        // The finer dispatch sub-sites render distinct `k_site` tags.
+        assert_eq!(KernelBreadcrumb::TaskBody.tag(), "task_body");
+        assert_eq!(KernelBreadcrumb::UserSwitch.tag(), "user_switch");
+        assert_eq!(KernelBreadcrumb::DispatchTail.tag(), "dispatch_tail");
+        // A corrupt/unknown tag decodes to `None` rather than fabricating a
+        // region (fail closed).
+        assert_eq!(KernelBreadcrumb::from_u8(200), KernelBreadcrumb::None);
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn note_kernel_breadcrumb_publishes_a_snapshot_readable_by_a_buddy() {
+        let state = reset(44);
+        // A fresh slot has no breadcrumb; a snapshot renders none.
+        let before = Diag::snapshot(state);
+        assert_eq!(before.breadcrumb, KernelBreadcrumb::None);
+        assert_eq!(before.breadcrumb_seq, 0);
+
+        // The CPU publishes the region it enters; the buddy observer's
+        // snapshot reads a consistent (site, detail, seq) triple.
+        note_kernel_breadcrumb(44, KernelBreadcrumb::Syscall, 0x2a);
+        let first = Diag::snapshot(state);
+        assert_eq!(first.breadcrumb, KernelBreadcrumb::Syscall);
+        assert_eq!(first.breadcrumb_detail, 0x2a);
+        assert_eq!(first.breadcrumb_seq, 1);
+
+        // Each write advances the sequence, so two successive reports tell a
+        // frozen breadcrumb (stuck here) from an advancing one.
+        note_kernel_breadcrumb(44, KernelBreadcrumb::FaultAnon, 0x1000);
+        let second = Diag::snapshot(state);
+        assert_eq!(second.breadcrumb, KernelBreadcrumb::FaultAnon);
+        assert_eq!(second.breadcrumb_detail, 0x1000);
+        assert_eq!(second.breadcrumb_seq, 2);
+    }
+
+    #[test]
+    fn note_kernel_breadcrumb_is_a_fail_closed_no_op_for_an_out_of_range_cpu() {
+        // A stray id never panics and never touches a slot it does not own.
+        let count = u32::try_from(cpu_state::TEST_CPUS).expect("test CPU count fits u32");
+        note_kernel_breadcrumb(count, KernelBreadcrumb::Syscall, 1);
+    }
+
+    // --- Pre-silence backtrace --------------------------------------
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn note_watchdog_backtrace_publishes_a_snapshot_readable_by_a_buddy() {
+        let state = reset(45);
+        // A fresh slot has no backtrace; a snapshot reads none.
+        assert_eq!(Diag::snapshot(state).bt_len, 0);
+
+        // The port publishes the interrupted-context frame chain; the buddy
+        // observer's snapshot reads a consistent set (length + frames).
+        note_watchdog_backtrace(45, &[0x1111, 0x2222, 0x3333]);
+        let snap = Diag::snapshot(state);
+        assert_eq!(snap.bt_len, 3);
+        assert_eq!(&snap.bt[..3], &[0x1111, 0x2222, 0x3333]);
+
+        // A later, shorter capture replaces the previous one wholesale (the
+        // published length bounds what a reader trusts).
+        note_watchdog_backtrace(45, &[0xaaaa]);
+        let snap = Diag::snapshot(state);
+        assert_eq!(snap.bt_len, 1);
+        assert_eq!(snap.bt[0], 0xaaaa);
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn note_watchdog_backtrace_caps_depth_and_is_a_fail_closed_no_op_out_of_range() {
+        let state = reset(46);
+        // More frames than the fixed diagnostic depth are truncated, never
+        // overrunning the fixed per-CPU buffer.
+        let deep: [u64; cpu_state::WD_BT_MAX + 4] = core::array::from_fn(|i| i as u64 + 1);
+        note_watchdog_backtrace(46, &deep);
+        let snap = Diag::snapshot(state);
+        assert_eq!(snap.bt_len, cpu_state::WD_BT_MAX);
+        assert_eq!(
+            snap.bt[cpu_state::WD_BT_MAX - 1],
+            cpu_state::WD_BT_MAX as u64
+        );
+
+        // An empty capture clears the record (the report then omits it).
+        note_watchdog_backtrace(46, &[]);
+        assert_eq!(Diag::snapshot(state).bt_len, 0);
+
+        // A stray id never panics and never touches a slot it does not own.
+        let count = u32::try_from(cpu_state::TEST_CPUS).expect("test CPU count fits u32");
+        note_watchdog_backtrace(count, &[0x1234]);
     }
 }

@@ -1063,7 +1063,31 @@ where
         if crate::procsignal::task_is_stopped(step.task_id) {
             return TaskAction::Park;
         }
-        dispatch_step(&mut control, step.cpu)
+        // Kernel-activity breadcrumb: the CFQ dispatch handed control to
+        // this task's body shim (still inside `Scheduler::dispatch`, so the
+        // watchdog otherwise reports only the coarse `dispatch` region). A
+        // wedge in the shim prologue (`pending_upgrade` install, a user
+        // kthread's `pre_resume` address-space reactivation, resume/live
+        // publication) is attributed to `task_body` with the task id, versus
+        // the scheduler's own pick/steal machinery, which keeps the
+        // `dispatch` crumb set before this closure runs (`crate::watchdog`).
+        crate::watchdog::note_kernel_breadcrumb(
+            step.cpu,
+            crate::watchdog::KernelBreadcrumb::TaskBody,
+            step.task_id,
+        );
+        let action = dispatch_step(&mut control, step.cpu);
+        // The task body returned; the CFQ post-run accounting tail
+        // (`Scheduler::dispatch` after the body call) runs next, with device
+        // interrupts still masked from the suspending task's exception entry
+        // until the dispatch loop restores them — a wedge there is attributed
+        // to `dispatch_tail` rather than to the body it already left.
+        crate::watchdog::note_kernel_breadcrumb(
+            step.cpu,
+            crate::watchdog::KernelBreadcrumb::DispatchTail,
+            step.task_id,
+        );
+        action
     };
     // A `parked` admission is born suspended: the caller installs the
     // task's per-task kernel state (capabilities, address space, streams,
@@ -1171,6 +1195,16 @@ where
         // starving the dispatch loop — the whole system then hangs.
         publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
     }
+
+    // Kernel-activity breadcrumb: the shim prologue is done and we are
+    // about to context-switch into the task (and, for a user kthread, run
+    // it at EL0 up to its first syscall/fault, which re-stamps the crumb). A
+    // wedge in the arch switch itself or in early task execution before the
+    // first trap is attributed to `user_switch`, versus the shim prologue
+    // (`task_body`) above it (`crate::watchdog`). The dispatched task id is
+    // carried by the `task_body` crumb this closure stamped, so the datum
+    // here is unused (`0`).
+    crate::watchdog::note_kernel_breadcrumb(cpu, crate::watchdog::KernelBreadcrumb::UserSwitch, 0);
 
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
@@ -1591,6 +1625,31 @@ mod tests {
         let _ = dispatch_step(&mut control, CPU);
 
         assert!(crate::preempt::take_preempt_pending(CPU));
+    }
+
+    /// `dispatch_step` stamps the `user_switch` kernel-activity breadcrumb
+    /// on the way into the context switch, so a CPU wedged in the arch
+    /// switch or early task execution (before its first trap re-stamps the
+    /// crumb) is diagnosed as `user_switch` rather than the coarse
+    /// scheduler `dispatch` region.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn dispatch_step_stamps_the_user_switch_breadcrumb() {
+        // A CPU index no other host test writes a breadcrumb for (the
+        // per-CPU breadcrumb slots are one process-wide array), so parallel
+        // test threads never observe each other through it.
+        const CPU: CpuId = 48;
+        let rec = recorder();
+        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+
+        let _ = dispatch_step(&mut control, CPU);
+
+        let state = cpu_state::get(CPU).expect("test CPU index is in range");
+        assert_eq!(
+            state.kbc_site.load(Ordering::SeqCst),
+            crate::watchdog::KernelBreadcrumb::UserSwitch as u8,
+            "the crumb into the context switch is user_switch",
+        );
     }
 
     #[test]

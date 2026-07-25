@@ -9424,6 +9424,17 @@ where
         // scheduler's per-CPU current-task slot is the only sanctioned
         // source; no caller-supplied identity is accepted.
         let cpu = SchedulerArch::current_cpu(self.arch);
+        // Kernel-activity breadcrumb: record which syscall this CPU is
+        // entering *before* any handler work, so a CPU that wedges inside a
+        // syscall body reports `k_site=syscall k_detail=<number>` even though
+        // its watchdog sample can no longer be taken (it runs with FIQ, and
+        // on a stall IRQ, masked). The stale `pre_silence` PC only ever names
+        // the syscall-entry trampoline; this names the actual syscall.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::Syscall,
+            u64::from(raw_number),
+        );
         let Some(sched_task_id) = self.sched.current_task(cpu) else {
             self.audit_no_caller_context(cpu, "no_current_task");
             return DispatchOutcome::NoCallerContext;
@@ -9536,6 +9547,18 @@ where
             return UserFaultOutcome::Unhandled;
         };
         let task = SecTaskId(sched_task_id);
+        // Kernel-activity breadcrumb: the fault resolver runs in the
+        // data-abort exception handler with IRQ masked (only the `svc`
+        // syscall path re-enables IRQ), so a CPU that wedges here can be
+        // sampled by neither its own watchdog IRQ nor a buddy IPI — its
+        // watchdog context goes stale (`pre_silence`). Stamping the phase as
+        // the resolver advances leaves a fresh breadcrumb naming exactly
+        // which phase the CPU is stuck in (`k_site=fault_* k_detail=<va>`).
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultEntry,
+            fault_va,
+        );
         // Foreground direct reclaim: before this fault commits another
         // frame, compress a bounded batch of the faulting task's own cold
         // anonymous pages out into the `ramzip` tier if memory pressure
@@ -9543,12 +9566,22 @@ where
         // A no-op costing at most one pressure sample at shallow pressure,
         // for a pinned/real-time task, on a port with no referenced bit, or
         // before boot wires the tier — never a spin.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultReclaim,
+            fault_va,
+        );
         self.handlers.ramzip_direct_reclaim(task);
         // Stack growth is offered first, for reads and writes alike (a
         // stack push is a write), so the write-fatal file rule below can
         // never kill a legitimate growth fault. The resolver itself bounds
         // growth by the recorded span and the task's `StackBytes` soft
         // limit (fail closed).
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultStack,
+            fault_va,
+        );
         if self.handlers.resolve_stack_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
@@ -9560,6 +9593,11 @@ where
         // decode failure, already audited) is fatal to the task, exactly
         // as a wild access is; no entry (or no installed tier) falls
         // through to the anonymous handler.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultRamzip,
+            fault_va,
+        );
         match self.handlers.resolve_ramzip_fault(task, fault_va) {
             RamzipFaultOutcome::Handled => return UserFaultOutcome::Resolved,
             RamzipFaultOutcome::Fatal(_) => {
@@ -9574,6 +9612,11 @@ where
         // write-fatal file rule below never kills a legitimate first-touch
         // of a reserved anonymous page. The resolver backs only a page
         // inside a region the task reserved (fail closed otherwise).
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultAnon,
+            fault_va,
+        );
         if self.handlers.resolve_anon_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
@@ -9581,6 +9624,11 @@ where
         // read-only, so mapping the page would retry the store forever
         // against a resident page. It is fatal to the task below — the one
         // shared policy every port's write gate feeds.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultFile,
+            fault_va,
+        );
         if !write && self.handlers.resolve_file_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
@@ -9590,6 +9638,11 @@ where
         // audit log gets its stable fault-kill record), reclaim exactly
         // what a clean exit or a signal kill reclaims, and hand the port
         // the CPU to suspend the task on.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultFatal,
+            fault_va,
+        );
         self.handlers.record_fault_exit(task, fault_va, write, regs);
         UserFaultOutcome::Terminated { cpu }
     }

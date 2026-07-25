@@ -362,6 +362,24 @@ pub enum AuditEvent {
     /// (`rescheduled`/`attention`/`unrecoverable`/`unsupported`), so the
     /// recovery attempt and its result are on the audit trail.
     CpuLockupRecovery,
+    /// The address-bearing developer detail of a lockup report — the
+    /// sampled program counter (`pc`) and processor state (`pstate`), the
+    /// self-published kernel-activity breadcrumb (`k_site`/`k_detail`/
+    /// `k_seq`), and the pre-silence call-stack backtrace (`k_bt`).
+    ///
+    /// Emitted **only** by a `watchdog-diagnostics` (non-shippable `debug`
+    /// image) build, alongside the always-on lockup summary
+    /// ([`CpuHardLockupDetected`](Self::CpuHardLockupDetected) /
+    /// [`CpuStallDetected`](Self::CpuStallDetected)) but through the
+    /// **diagnostic** (log/UART) sink, never the persistent hash-chained
+    /// audit trail — so the audit log carries no kernel address. Every
+    /// kernel-address field is rendered image-base-relative (`pc=+0x…`),
+    /// never the absolute runtime address, so it resolves against the
+    /// debug kernel ELF without disclosing the runtime load base. A
+    /// shippable image never emits it and compiles the whole facility out;
+    /// the id is reserved so the catalogue stays stable
+    /// (`plans/WATCHDOG.md`).
+    CpuLockupDiagnostic,
     /// A bound IRQ line fired past its rate budget and was **quarantined**
     /// by the runaway-interrupt safety net (`kernel/irq`): the kernel kept
     /// it masked and stopped delivering it, so a never-quiesced or hostile
@@ -462,6 +480,7 @@ impl AuditEvent {
             Self::CpuHardLockupDetected => 4082,
             Self::CpuHardLockupCleared => 4083,
             Self::CpuLockupRecovery => 4084,
+            Self::CpuLockupDiagnostic => 4085,
             Self::IrqLineQuarantined => 4090,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
@@ -514,6 +533,7 @@ impl AuditEvent {
             Self::CpuHardLockupDetected => "cpu hard lockup detected",
             Self::CpuHardLockupCleared => "cpu hard lockup cleared",
             Self::CpuLockupRecovery => "cpu lockup recovery requested",
+            Self::CpuLockupDiagnostic => "cpu lockup diagnostic detail",
             Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
@@ -580,6 +600,7 @@ mod tests {
             AuditEvent::CpuHardLockupDetected,
             AuditEvent::CpuHardLockupCleared,
             AuditEvent::CpuLockupRecovery,
+            AuditEvent::CpuLockupDiagnostic,
             AuditEvent::IrqLineQuarantined,
             AuditEvent::FsNodeMutated,
             AuditEvent::FsMutationDenied,
@@ -634,6 +655,7 @@ mod tests {
             AuditEvent::CpuHardLockupDetected.id().0,
             AuditEvent::CpuHardLockupCleared.id().0,
             AuditEvent::CpuLockupRecovery.id().0,
+            AuditEvent::CpuLockupDiagnostic.id().0,
             AuditEvent::IrqLineQuarantined.id().0,
             AuditEvent::FsNodeMutated.id().0,
             AuditEvent::FsMutationDenied.id().0,

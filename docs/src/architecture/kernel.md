@@ -321,6 +321,117 @@ IRQ-masked in-kernel spin), and a soft lockup — whose sample is live —
 carries none of them. Every episode is reported **once**, never once per
 tick, and self-closes on recovery.
 
+One class of hard wedge is *invisible* to `stuck_irq` by construction: a
+software-generated interrupt (an SGI — the cross-CPU reschedule IPI) that is
+never completed leaves the CPU-interface running priority raised, blocking
+every further interrupt on that core, yet SGI/PPI state is banked per CPU
+and so cannot be read by the observing CPU (`stuck_irq` scans only the
+globally-visible SPI range). This was a real defect: `gic::acknowledge`
+returned only the `GICC_IAR` INTID field, dropping the SGI source-CPU bits
+`[12:10]`, so `handle_irq` wrote a `GICC_EOIR` value the GICv2 spec does not
+accept as the completion of an SGI raised by a non-zero source CPU — that
+IPI never deactivated and the receiving core wedged under IPI-heavy load.
+The acknowledge/end-of-interrupt handshake now carries the **full** IAR
+value end to end (dispatch masks it to the INTID only for the handler
+decision), so an SGI from any CPU is completed correctly.
+
+The breadcrumb, backtrace, and sampled `pc`/`pstate` described next are a
+**debug-only** facility, compiled in only under the `watchdog-diagnostics`
+Cargo feature that `tools/xtask` enables for the non-shippable `debug` image
+and leaves fully out of the shippable `installer` image — so a released
+kernel pays nothing for them on the hot paths and discloses no kernel
+address. The lockup **summary** (`CpuHardLockupDetected` /
+`CpuStallDetected`) is always-on and goes to the persistent audit log, but
+carries only non-disclosing state — `cpu`, `observer`, `stalled_ms`, the
+`task` id, `context` (`kernel`/`user`), `sampled`, and `stuck_*` — never a
+kernel address. The address-bearing **detail** below is a separate
+`CpuLockupDiagnostic` record emitted to the diagnostic (log/UART) stream,
+never the tamper-evident audit trail, and every kernel address in it is
+rendered **image-base-relative** (`pc=+0x…`, `k_bt=+0x…`), never the
+absolute runtime address — the `%pK`/`kptr_restrict` discipline, so a
+capture resolves against the debug kernel ELF without revealing the
+KASLR-relocatable load base.
+
+Because a hard lockup's sampled `pc` is `pre_silence` — and on a board with
+no non-maskable channel (the Raspberry Pi 4's GICv2 in the non-secure
+world) a CPU wedged with interrupts masked can be reached by neither its own
+watchdog sample nor a buddy's IPI — the debug detail also carries a **kernel
+breadcrumb** the target CPU publishes *itself* as it runs, through
+`watchdog::note_kernel_breadcrumb`. It is stamped on the way *into* each
+in-kernel region so it stays fresh through a wedge and names the region the
+CPU is actually stuck in, where the stale sampled `pc` cannot. The
+`dispatch` macro-region is partitioned finely, because a scheduler-time
+wedge otherwise reports only the coarse `dispatch`: the scheduler's own
+pick/steal machinery keeps `dispatch`; the task-body shim hand-off (a user
+kthread's `pre_resume` address-space reactivation, resume/live publication)
+is `task_body`; the arch context switch and the task's execution up to its
+first trap is `user_switch`; and the post-run accounting tail (which runs
+with device interrupts still masked, inherited from the suspending task's
+exception entry) is `dispatch_tail`. The full `k_site` set is `dispatch` /
+`task_body` / `user_switch` / `dispatch_tail` / `syscall` (before any
+handler work) / `fault_entry` / `fault_reclaim` / `fault_stack` /
+`fault_ramzip` / `fault_anon` / `fault_file` / `fault_fatal`; `k_detail` is
+the syscall number, the faulting virtual address for a fault phase, or the
+dispatched task id for `task_body` / `dispatch_tail` (`0` for `user_switch`,
+whose task id is carried by the preceding `task_body` crumb); and `k_seq` is
+a per-CPU sequence, so two successive reports tell a frozen breadcrumb —
+stuck in exactly this region — from an advancing one. The breadcrumb is
+three relaxed stores plus one release bump, the same order of cost as the
+progress/liveness heartbeats already on those paths, and carries no secret;
+`k_*` is omitted when the CPU has recorded no region (a lone user task).
+
+The record also carries the **pre-silence backtrace** `k_bt` — the
+frame-pointer-unwound return-address chain (`k_bt=<pc0>,<pc1>,…`, innermost
+first, starting at the interrupted PC) of the context the CPU's *last*
+watchdog sample interrupted. Where the lone stale `pc` names only one
+ambiguous address, `k_bt` names the whole call nest the CPU was in ~1 s
+before it went silent. Each port captures it on every cadence sample by
+unwinding the interrupted register frame; the aarch64 port
+(`watchdog::capture_sample_backtrace`) walks the AAPCS64 `x29` chain of the
+CPU's stack, **bounded and fail-closed** (it stops at a null or misaligned
+frame pointer, a frame pointer not strictly above the exception frame (the
+stack floor) or not strictly increasing, a zero return address, **a return
+address outside the kernel's executable text**, a full buffer, or a hard
+step cap). The text-range check (`in_kernel_text`, over the
+`__text_start`/`__text_end` linker bounds) is what makes the chain
+*trustworthy* — it rejects a stack **data** word misread as a caller, so the
+walk no longer emits plausible-looking but bogus frames. The pure
+`walk_frames` core is host-tested with an injected fake stack; the arch
+wrapper supplies the real map-probe, frame read, and text-range predicate.
+It also proves each frame-pointer link is mapped with an `AT S1E1R`
+read-translation check *before* dereferencing it, so it never faults on
+**any** stack — not even one whose interrupted context left a stale or
+garbage `x29`, e.g. early-boot assembly or a task entry trampoline — and
+never loops. It is captured only for a sample that
+interrupted **kernel** code
+(a hard lockup is always an in-kernel wedge; confining the walk to the
+kernel stack keeps it off an untrusted user stack), stored per-CPU through
+`watchdog::note_watchdog_backtrace` (length published last, release), and
+rendered by the buddy observer with each frame image-base-relative (`+0x…`,
+via `image_relative`). `k_bt` is omitted when the port captured no frames,
+and any frame that does not resolve against the registered image base is
+skipped rather than disclosed raw (fail closed — never a fabricated stack,
+never an absolute address).
+
+The record also names the **stuck spinlock** `k_lock`. A GICv2 hard lockup
+is, by construction, a core spinning on or holding an `IrqSafeSpinLock` with
+interrupts masked — the one thing the maskable liveness sample cannot observe
+from *inside*. So in a diagnostics build the spinning lock family
+(`SpinLock::{lock,try_lock}`, which `IrqSafeSpinLock` wraps) is
+`#[track_caller]` and reports its acquire/hold/release lifecycle — with the
+acquiring call's **source `file:line`** — through the `lib/sync` `lockwatch`
+seam to an observer `kernel/core` installs, which records each core's current
+lock into a per-CPU bounded stack (`CpuState::lock_sites`). The buddy's report
+renders the innermost entry as `k_lock=<file>` + `k_lock_line` + `k_lock_state`
+(`acquiring` = still spinning/contended; `held` = wedged inside the section).
+The recorded value is a source string, so no runtime (KASLR-relocatable)
+address is disclosed even though it is a pointer internally; `k_lock` is
+omitted when the core holds no recorded lock. A shippable build compiles the
+whole facility out (the `lock-diagnostics` feature, off), so a production lock
+is a bare compare-and-swap. `RwLock`/`McsLock` are not instrumented: they do
+not mask interrupts, so a wedge there is a soft lockup the live `pc`/`k_bt`
+already localise.
+
 `CPU_LOCKUP_RECOVERY` (a `Warn`) records the best-effort recovery the
 watchdog asked the architecture port for after a detection
 (`WatchdogArch::request_recovery`): fields `cpu`, `kind` (`soft`/`hard`),

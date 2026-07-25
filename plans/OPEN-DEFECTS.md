@@ -65,6 +65,39 @@ The open items, in priority order:
   completion-interrupt/RTO cadence. Fixed by multi-in-flight TX pipelining (a
   fixed `TxStaging` pool sized to the transmit ring: reap-all + stage-all per
   `service`, head-keyed completion reclaim), with two host regression tests.
+- **D12 — aarch64 GICv2 SGI end-of-interrupt dropped the source-CPU field
+  — DONE.** Under IPI-heavy load (`stress --cpu 12`, and the earlier
+  `--vm` reproductions) every CPU hard-locked with IRQ *unmasked* yet no
+  interrupt delivered and a merely-*pending* stuck line. Root cause:
+  `gic::acknowledge` masked the `GICC_IAR` value with `IAR_INTID_MASK`
+  before `handle_irq` passed it to `GICC_EOIR`, discarding the SGI
+  source-CPU field (bits [12:10]). The GICv2 spec requires an SGI's EOIR
+  write to carry the same source-CPU bits read from IAR, so a reschedule
+  IPI (SGI 0) sent from any CPU other than 0 was **never deactivated**:
+  the CPU-interface running priority stayed raised and every further
+  interrupt on that core (preemption timer, watchdog, devices) was
+  blocked, wedging it. It presented as an undiagnosable "hard lockup" only
+  because the never-EOI'd interrupt is a *banked* SGI, invisible to the
+  observer's SPI-only `stuck_spi` scan. Fixed by carrying the full IAR
+  value through acknowledge → dispatch (masking only for the INTID
+  comparison) → EOI, so the source-CPU field survives to the completion
+  write; host regression tests lock the full-IAR return and the
+  source-CPU-preserving EOIR write in.
+- **D13 — a distinct secondary-CPU hard lockup under `stress --cpu 20`;
+  diagnostic enabler landed, root-cause fix OPEN.** On the (D12-fixed)
+  debug image `stress --cpu 20` still wedges a secondary core (`id=4082
+  cpu=3 context=kernel sampled=pre_silence k_site=task_body`, `k_bt` in
+  the secondary idle/dispatch path). D12's interrupt path is confirmed
+  correct, so this is a *separate* IRQ-masked spinlock deadlock/long-hold
+  in the task-shim / address-space-activation path under heavy multi-core
+  load — the maskable liveness sample cannot observe inside the section,
+  so the report is a bare hard lockup. Because the exact lock cannot be
+  pinned from static reading and guessing an SMP-deadlock fix is a hack
+  (§2.1), the landed step is the **`k_lock` diagnostic enabler**: a
+  debug-only per-CPU lock-site record (`lib/sync` `lock-diagnostics` →
+  `kernel/core` observer → `CpuState::lock_sites`, rendered
+  `k_lock=<file>:<line>` on `id=4085`) so the next reproduction names the
+  culprit spinlock. The structural fix is OPEN, blocked on that evidence.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -624,6 +657,81 @@ connection, bursts several segments, fires the RTO to rewind `snd_nxt`, then
 delivers a cumulative ACK up to `snd_max` and asserts `snd_una` advances and
 the RTO disarms (it froze before the fix). Arch-neutral — every port shares
 `lib/net`.
+
+## D13 — secondary-CPU hard lockup under `stress --cpu 20` (enabler landed, fix OPEN)
+
+**State:** the `stress --cpu 20 --timeout 120s --background` wedge on the
+debug image is a *distinct* defect from D12 (whose interrupt-completion path
+is confirmed correct). The report is a bare hard lockup on a secondary core
+(`cpu=3 context=kernel sampled=pre_silence k_site=task_body`, `k_bt` in
+`_start_secondary → production_secondary_entry → smp::run_secondary →
+init::run_dispatch_loop → exceptions::enable_irq`). Because the watchdog
+liveness sample is a *maskable* virtual-timer IRQ (GICv2 non-secure has no
+NMI), a hard lockup means the core entered an **IRQ-masked EL1 critical
+section and never left it** — an `IrqSafeSpinLock` deadlock or long hold in
+the task-shim / address-space-activation path under heavy multi-core
+spawn/preempt load. The exact lock cannot be identified from static reading,
+and fabricating an SMP-deadlock fix is a hack (§2.1).
+
+**Landed (diagnostic enablers, all debug-only):**
+
+- `k_lock` stuck-lock record — a per-CPU lock-site stack (`lib/sync`
+  `lock-diagnostics` feature → `kernel/core` observer →
+  `CpuState::{lock_sites,lock_depth,lock_top_acquiring}`, rendered
+  `k_lock=<file>:<line>` + `k_lock_state` on the `id=4085` detail).
+  `SpinLock::{lock,try_lock}` (which `IrqSafeSpinLock` wraps) are
+  `#[track_caller]` under the feature and report through the `lockwatch`
+  seam; a shippable image compiles it all out (bare CAS).
+- **Trustworthy pre-silence backtrace** — the aarch64 `k_bt` frame-pointer
+  walk (`kernel/arch/aarch64` `capture_sample_backtrace`) now validates each
+  caller: a return address is accepted only if it lands in kernel
+  executable text (new `__text_start`/`__text_end` linker bounds,
+  `in_kernel_text`) and each frame pointer must sit strictly above the
+  exception frame (stack floor) and strictly increase. This stops the walk
+  emitting a stack **data** word as a caller — the cause of the earlier
+  chains that interleaved unrelated `BTreeMap` instantiations and could not
+  be trusted to justify a fix. The pure `walk_frames` core is host-tested
+  (incl. the non-text-return-address rejection); the `AT S1E1R` map-probe
+  fail-closed guarantee is unchanged.
+- **Reclaim corruption tripwire** — `AddressSpaceRegistry::withdraw` now
+  asserts (`debug_assertions`, i.e. debug image only) its post-condition via
+  the pure `stale_task_entry`: after a task is removed from every per-task
+  map, no map may still hold it. A violation faults **at the reclaim site**
+  and means either a per-task map escaped withdraw (the "reused id inherits
+  a dead task's state" precursor) or a `BTreeMap::remove` did not take —
+  i.e. the map is corrupt, the leading D13 hypothesis. Host-tested; compiled
+  out of shippable images.
+
+**Latest evidence (trustworthy tools):** a fresh `--cpu` repro
+(`cpu=2 stalled_ms=10218 k_site=task_body k_lock=cfq/scheduler.rs:753 held
+k_detail=0x15`) decodes with the now-trustworthy unwinder to a *clean,
+consistent* chain — but it is the stale `pre_silence` **idle dispatch-loop
+park** (`run_dispatch_loop → monotonic_ns → enable_irq`), not the wedge. The
+breadcrumb stays `753`-`held` (not another lock `acquiring`), so cpu 2 is
+wedged inside running task 21's body holding that task's body lock in an
+**untracked `DAIF.I`-masked busy-spin/deadlock**. The reclaim tripwire did
+**not** fire (not reclaim/id-reuse corruption) and aarch64 TLB shootdown is a
+hardware inner-shareable broadcast (no IPI busy-wait) — both ruled out. So
+`pre_silence` sampling is exhausted: the defect lives in exactly the
+IRQ-masked section no maskable sample can see.
+
+**Decision (build the masked-section sampler):** the non-maskable **FIQ
+self-sample** is the tool this evidence calls for and is being built, staged
+B1–B4 (full design + the decisive `DAIF.F` constraint in
+`.junie/fix-details.md`). The blocking constraint: aarch64 already masks
+`DAIF.F` in *every* section the wedge lives in (exception entry masks F in
+hardware; `enable_irq` clears I-only; `IrqSafeSpinLock`'s `DaifIrqControl`
+masks I+F), so an effective FIQ sample needs a cross-cutting, feature-gated
+`DAIF.F`-clear execution discipline plus GICv2 Group-0 routing whose
+acknowledge semantics differ QEMU-`virt` vs the Pi-4 GIC-400 — landed
+incrementally with an empirical, fail-closed delivery probe, never guessed
+(§2.1/§2.16/§2.19). The Pi-4B armstub FIQ-routing dependency remains a
+hardware-capability concern for `plans/FIX-HARDWARE-FEATURES.md`.
+**Done when:** the FIQ sampler names the wedge, the root cause is fixed with
+evidence and a regression test, and `stress --cpu 20` no longer wedges on
+metal + the QEMU stress vertical.
+
+---
 
 ## Non-goals / do not do
 

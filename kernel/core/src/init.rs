@@ -1100,6 +1100,15 @@ fn run_dispatch_loop<A: KernelArch>(
         // and the switch to user mode, leaving a CPU-bound task with no
         // armed timer and no pending reschedule.
         crate::preempt::clear_preempt_pending(cpu);
+        // Kernel-activity breadcrumb: this CPU is entering the scheduler
+        // step (task pick + context switch). A CPU that wedges here reports
+        // `k_site=dispatch`, distinguishing a scheduler/run-queue stall from
+        // one inside a syscall or fault resolver (`crate::watchdog`).
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::Dispatch,
+            0,
+        );
         let outcome = scheduler.step(cpu);
         // A user task can suspend back to this dispatcher directly from a
         // timer exception. Native exception entry masks device interrupts,
@@ -1956,6 +1965,16 @@ fn run_phases<A: KernelArch>(
     // (fail-safe); the wait-queue hook installed just above supplies the
     // monotonic clock its tick-driven check reads.
     crate::watchdog::install_report_sink(audit_sink);
+
+    // In a debug-diagnostics build, give the watchdog its separate
+    // diagnostic channel: the address-bearing lockup detail
+    // (image-relative pc/backtrace, the kernel-activity breadcrumb) goes to
+    // the `log_sink` (the diagnostic/UART stream), never the persistent
+    // hash-chained audit trail above — so no kernel address ever lands on
+    // the tamper-evident log. A shippable image compiles this out (there is
+    // no such detail to route) and pays nothing.
+    #[cfg(feature = "watchdog-diagnostics")]
+    crate::watchdog::install_diagnostic_sink(log_sink);
 
     // Give the watchdog its best-effort recovery channel, when the port has
     // one: a detected lockup is met with a cross-CPU reschedule (soft) or a

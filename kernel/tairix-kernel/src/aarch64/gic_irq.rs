@@ -943,11 +943,12 @@ extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
 /// `eret`. Before the monotonic clock hook is installed the sample is
 /// skipped (fail-safe).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId) {
+extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId, frame: *const u64) {
     let Some(now_ns) = tairix_kernel_core::wait_now_ns() else {
         return;
     };
     let spsr = tairix_arch_aarch64::watchdog::read_spsr_el1();
+    let in_kernel = tairix_arch_aarch64::watchdog::spsr_in_kernel(spsr);
     let sample = tairix_arch_api::WatchdogSample {
         pc: tairix_arch_aarch64::watchdog::read_elr_el1(),
         // The kernel-side running-task id is not exposed to the arch layer;
@@ -955,9 +956,31 @@ extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId) {
         // load-bearing "why", and the detector names the CPU.
         task: tairix_arch_api::WatchdogSample::NO_TASK,
         aux: spsr,
-        in_kernel: tairix_arch_aarch64::watchdog::spsr_in_kernel(spsr),
+        in_kernel,
     };
     tairix_kernel_core::on_watchdog_tick(cpu, now_ns, &sample);
+    // Capture the pre-silence backtrace: unwind the interrupted context from
+    // the saved frame so a later hard-lockup report names the whole call
+    // nest this CPU was in, not just the stale `pre_silence` PC. Only for a
+    // sample that interrupted **kernel** code — a hard lockup is always an
+    // in-kernel wedge (a user task is preemptible), and confining the walk
+    // to the kernel stack the CPU is running on keeps it off an untrusted
+    // user stack. The walk is bounded and fail-closed.
+    //
+    // This is a debug-diagnostics facility: a shippable image compiles the
+    // stack walk out entirely (the `frame` is then unused), so the ~1 Hz
+    // sample costs only the always-on liveness heartbeat above.
+    #[cfg(feature = "watchdog-diagnostics")]
+    if in_kernel {
+        let mut bt = [0u64; tairix_kernel_core::WATCHDOG_BACKTRACE_MAX];
+        // SAFETY: `frame` is the live saved register frame the trap handler
+        // forwarded, and this sample ran on the interrupted kernel context's
+        // own CPU, so the walk reads this CPU's live, mapped kernel stack.
+        let n = unsafe { tairix_arch_aarch64::watchdog::capture_sample_backtrace(frame, &mut bt) };
+        tairix_kernel_core::note_watchdog_backtrace(cpu, &bt[..n]);
+    }
+    #[cfg(not(feature = "watchdog-diagnostics"))]
+    let _ = frame;
 }
 
 /// Set up tickless timer-driven preemption on the boot CPU: register the
@@ -1038,6 +1061,25 @@ pub fn arm_preemption(cpu_count: u32) {
         // virtual-timer, so the first sample already feeds the detector.
         tairix_arch_aarch64::watchdog::set_watchdog_callback(production_watchdog_dispatch);
 
+        // Register the kernel image's runtime base so a debug-diagnostics
+        // build renders lockup-report program counters image-relative
+        // (`+0x…`) rather than absolute — the `%pK`-style discipline that
+        // keeps the (KASLR-relocatable) load base secret. A shippable image
+        // compiles this out along with the whole address-bearing detail.
+        #[cfg(feature = "watchdog-diagnostics")]
+        tairix_kernel_core::set_kernel_image_base(crate::aarch64::boot::kernel_start_addr());
+
+        // Wire the lock-site diagnostics once, on the boot CPU: the
+        // `tairix_sync` lock observer is process-global (the resolver reads
+        // each core's own banked dense id), so a single install covers every
+        // core. After this a hard-lockup report names the exact spinlock a
+        // wedged core is stuck on (`k_lock`) — the culprit the maskable
+        // watchdog sample cannot observe when the core wedges with
+        // interrupts off inside the critical section. A shippable image
+        // compiles this out along with the whole facility.
+        #[cfg(feature = "watchdog-diagnostics")]
+        tairix_kernel_core::install_lock_diagnostics(lock_diagnostics_current_cpu);
+
         // Derive the tick interval from the discovered counter frequency
         // (never a board constant). A zero reading is a
         // fail-safe skip.
@@ -1115,6 +1157,18 @@ pub fn init_secondary_preemption(cpu: tairix_arch_api::CpuId) {
     {
         let _ = cpu;
     }
+}
+
+/// The lock-diagnostics current-CPU resolver: the running core's dense id,
+/// read from its banked `TPIDR_EL1` per-CPU word (`current_cpu_index`) — a
+/// lock-free register read, so it is safe to call from *inside* the lock
+/// primitives (the observer must never take a lock). Always `Some`; a core
+/// that has not yet published its dense id reads the boot default `0`, and
+/// the observer's per-CPU-slot lookup fails closed on any out-of-range id.
+/// Present only in a debug-diagnostics freestanding build.
+#[cfg(all(feature = "watchdog-diagnostics", freestanding, kernel_isa = "aarch64"))]
+fn lock_diagnostics_current_cpu() -> Option<tairix_arch_api::CpuId> {
+    Some(tairix_arch_aarch64::smp::current_cpu_index())
 }
 
 #[cfg(test)]

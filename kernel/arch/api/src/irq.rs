@@ -107,21 +107,28 @@ pub trait IrqController: Send + Sync {
 ///
 /// Implementations must be [`Send`] + [`Sync`].
 pub trait InterruptEntry: Send + Sync {
-    /// Claim the highest-priority pending interrupt, returning its line,
-    /// or [`None`] when nothing is pending (a spurious read).
+    /// Claim the highest-priority pending interrupt, returning an opaque
+    /// **completion token** for it, or [`None`] when nothing is pending (a
+    /// spurious read).
     ///
     /// Claiming an interrupt activates it at the controller; the caller
-    /// must subsequently [`Self::complete`] the same line. Repeated
-    /// calls with nothing pending return [`None`] (they never wedge or
-    /// invent a line).
+    /// must subsequently pass the **same token** to [`Self::complete`].
+    /// The token identifies the claimed interrupt but is not necessarily a
+    /// bare line number: some controllers must round-trip extra state
+    /// through it (the GICv2 encodes the software-generated-interrupt
+    /// source CPU alongside the INTID, which the completion write must
+    /// carry back or the interrupt is never deactivated). Treat it as
+    /// opaque and hand it back unmodified. Repeated calls with nothing
+    /// pending return [`None`] (they never wedge or invent a token).
     fn claim(&self) -> Option<u32>;
 
-    /// Signal completion of `line`, deactivating it at the controller.
+    /// Signal completion of the interrupt whose completion `token` was
+    /// returned by [`Self::claim`], deactivating it at the controller.
     ///
-    /// Called with a line previously returned by [`Self::claim`]. A
-    /// completion for a line that was not active is dropped
-    /// best-effort, never a panic.
-    fn complete(&self, line: u32);
+    /// Called with the exact token a previous [`Self::claim`] returned,
+    /// unmodified. A completion for an interrupt that was not active is
+    /// dropped best-effort, never a panic.
+    fn complete(&self, token: u32);
 }
 
 /// The interrupt-controller / interrupt-entry conformance

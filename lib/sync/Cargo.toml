@@ -11,6 +11,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Debug-only lock-site observation for the lockup watchdog
+# (`plans/WATCHDOG.md`). Off by default: a shippable build compiles the
+# whole facility out, so a production lock is a bare CAS with no
+# `#[track_caller]` shim, no observer call, and no per-acquire cost. A
+# `watchdog-diagnostics` kernel build (the non-shippable `debug` image)
+# turns it on through `tairix-kernel-core`, so a wedged core's lockup
+# report names the exact spinlock it is stuck on. The recorded site is the
+# acquiring call's source `file:line` (`#[track_caller]`) — never a runtime
+# address — so it discloses no KASLR base.
+lock-diagnostics = []
+
 [dependencies]
 
 # Loom is only pulled in when the consumer explicitly opts in with
