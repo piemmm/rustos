@@ -3072,6 +3072,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-bond-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
 name = "tairix-test-netstack-listener-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3104,6 +3115,18 @@ dependencies = [
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
+name = "tairix-test-netstack-static-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kernel",
  "tairix-log",
  "tairix-netstack",
 ]

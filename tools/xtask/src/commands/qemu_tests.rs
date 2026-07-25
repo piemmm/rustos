@@ -266,7 +266,7 @@ enum FsDisk {
     /// signed application store (the `netstack`/`devmgr` service bundles, no
     /// test-only fixture) **plus** a planted
     /// `/System/Settings/Network/network.conf`
-    /// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF`]) — the
+    /// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64`]) — the
     /// static-addressing (`match.node`) vertical's backing
     /// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b). `devmgr` autoloads the NIC
     /// driver into its own process, reads the planted config from the
@@ -4157,6 +4157,85 @@ const TESTS: &[QemuTest] = &[
         package: "tairix-test-netstack-bond-qemu-aarch64",
         binary: "tairix-test-netstack-bond-qemu-aarch64",
         target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::Bond,
+        ramfb: false,
+        fs_disk: FsDisk::BondNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the x86_64 static-addressing
+    // (`match.node`) live-config vertical — the virtio-**PCI** analogue of
+    // `tairix-test-netstack-static-qemu-aarch64`. It boots the *production*
+    // x86_64 pipeline with the `static-net-root` disk (`FsDisk::StaticNetRootDisk`),
+    // whose planted `network.conf` is the x86_64 variant
+    // (`STATIC_NETWORK_CONF_X86_64`): it binds the NIC to the `wan` alias by
+    // its stable bus location (`<iface>.match.node` = the virtio-PCI
+    // config-window BAR base the kernel enumerator assigns, not the aarch64
+    // mmio slot) and assigns it a static IPv6 address. A `virtio-net-pci`
+    // device is attached and the harness-side static-addressing peer
+    // (`NetPeerMode::V6StaticEcho`) campaigns to the guest's *static* address.
+    // Everything runs **before** any root unlock — the `/System` store and its
+    // `Settings/` config are on the always-readable volume — so the guest
+    // needs no console dialogue (headless, no serial script). `devmgr`
+    // autoloads the virtio-net driver into its own process (it publishes a
+    // `netchan` node), reads the planted config, and binds the NIC to `wan` by
+    // its resolved BAR base; `netstack` assigns the static address and answers
+    // the peer's campaign. PASS once the log sink has seen `devmgr`'s
+    // `NETSTACK_BOUND`, `netstack`'s `INTERFACE_CONFIG_APPLIED`, and
+    // `netstack`'s `INBOUND_ECHO_SERVED` — the last gating exit so the guest
+    // stays alive until a frame addressed to its *static* address has been
+    // answered; the peer's own campaign verdict (a reply at the static
+    // address, never the link-local the guest also forms) is required too, so
+    // a `match.node` mis-bind cannot pass. Single CPU and the same 240-second
+    // budget as its siblings.
+    QemuTest {
+        package: "tairix-test-netstack-static-qemu-x86-64",
+        binary: "tairix-test-netstack-static-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6StaticEcho,
+        ramfb: false,
+        fs_disk: FsDisk::StaticNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the x86_64 bond-failover
+    // live-config vertical — the virtio-**PCI** analogue of
+    // `tairix-test-netstack-bond-qemu-aarch64`. It boots the *production*
+    // x86_64 pipeline with the `bond-net-root` disk (`FsDisk::BondNetRootDisk`),
+    // whose planted `network.conf` (`BOND_NETWORK_CONF`, arch-neutral because
+    // the members bind by `match.mac`) composes two NICs as an active-backup
+    // bond (`wan`) carrying a static IPv6 address. **Two** `virtio-net-pci`
+    // devices are attached and the harness-side bond peer serves both wires
+    // (`NetPeerMode::Bond`). Everything runs **before** any root unlock
+    // (headless, no serial script). `devmgr` autoloads the NIC driver into a
+    // process per NIC; `netstack` composes the bond and assigns the static
+    // address, answering the peer over the primary member. Once the flow is
+    // established (the guest's first served echo), the runner drops the primary
+    // member's carrier over the QEMU monitor (`set_link net0 off`); the
+    // driver's virtio config-change interrupt fails the bond over to the backup
+    // member, and the guest keeps answering over the second wire. PASS once the
+    // log sink has seen `netstack`'s `BOND_CONFIG_APPLIED`, `BOND_FAILOVER`,
+    // and an `INBOUND_ECHO_SERVED` observed **after** the failover — the last
+    // gating exit so the guest stays alive until a frame has been served
+    // post-failover; the peer's own campaign verdict is required too, so
+    // neither side can pass without the flow surviving the member drop. Single
+    // CPU and the same 240-second budget as its siblings.
+    QemuTest {
+        package: "tairix-test-netstack-bond-qemu-x86-64",
+        binary: "tairix-test-netstack-bond-qemu-x86-64",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(240),
         disk_sectors: None,

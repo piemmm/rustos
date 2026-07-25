@@ -245,7 +245,7 @@ pub fn tcpserve_store_files(
 /// the shared [`app_store_files`] set (so the `netstack`/`devmgr` service
 /// bundles are on disk exactly as a real image ships them) **plus** the
 /// planted `/System/Settings/Network/network.conf`
-/// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF`]) that binds the NIC
+/// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64`]) that binds the NIC
 /// by `match.node` and assigns it a static IPv6 address (`plans/NETWORK.md`
 /// N9b-3-2-β-2-ii-b). No test-only *bundle* is added — the config file is
 /// the only extra — so this is not a [`fixture_store_files`] consumer;
@@ -263,15 +263,25 @@ pub fn static_net_store_files(
     FILES[arch.index()]
         .get_or_init(|| {
             let mut files = app_store_files(ctx, arch)?.to_vec();
+            // The static vertical binds the NIC by its stable bus location
+            // (`<iface>.match.node`), which differs per bus: the aarch64/riscv64
+            // virtio-mmio slot base vs. the x86_64 virtio-PCI config-window BAR
+            // base. Plant the config whose `match.node` names the NIC location
+            // this target's kernel actually resolves, so the same fixture cannot
+            // silently mis-bind on the wrong arch.
+            let conf = match arch {
+                PieArch::X86_64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_X86_64,
+                PieArch::Aarch64 | PieArch::Riscv64 => {
+                    tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64
+                }
+            };
             files.push(AppStoreFile {
                 components: vec![
                     b"Settings".to_vec(),
                     b"Network".to_vec(),
                     b"network.conf".to_vec(),
                 ],
-                bytes: tairix_test_netstack_wire::STATIC_NETWORK_CONF
-                    .as_bytes()
-                    .to_vec(),
+                bytes: conf.as_bytes().to_vec(),
             });
             Ok(files)
         })

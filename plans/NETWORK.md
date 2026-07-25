@@ -1663,6 +1663,15 @@ exercised live**:
   each channel after an admin mutation so a freshly-assigned address's DAD/MLD
   reaches the wire immediately. Regression tests at every layer.
 
+`tairix-test-netstack-static-qemu-x86-64` is the virtio-**PCI** sibling: the
+same production x86_64 pipeline, `static-net-root` disk, and `V6StaticEcho`
+peer, differing only in the planted `network.conf`'s `match.node` value —
+`STATIC_NETWORK_CONF_X86_64` names the NIC's lowest config-window BAR base
+(`0xfe00_4000`, the deterministic address the kernel PCI enumerator assigns)
+rather than the aarch64 mmio slot. `static_net_store_files` plants the arch's
+conf by `PieArch`; everything else (runner, peer, fixture, sinks) is reused
+unchanged. No production code changed.
+
 #### N9b-3-2-β-2-ii-b-bond — the live bond-failover vertical (gate-green) `[x]`
 `tairix-test-netstack-bond-qemu-aarch64` boots the production aarch64 pipeline
 against a `bond-net-root` disk: the net-only signed driver bundle **plus** a
@@ -1702,6 +1711,15 @@ Harness additions (all reusable): `tools/qemu` gained a generic marker-gated
 `MonitorCommand` injection (used for `set_link`); a second attached NIC needs
 no new builder (two `with_virtio_net_dgram_mac` calls); the bond peer
 (`NetPeer::spawn_bond`/`run_bond_peer`) serves two wires from one engine.
+
+`tairix-test-netstack-bond-qemu-x86-64` is the virtio-**PCI** sibling: the same
+production x86_64 pipeline, `bond-net-root` disk, `Bond` peer, and mid-flow
+`set_link net0 off` failover trigger. The bond binds its members by
+`match.mac`, so `BOND_NETWORK_CONF` is arch-neutral and reused verbatim; the
+two members and the failover simply live on the PCI bus. No production code
+changed — the two dual-NIC verticals differ only in the emitted device model
+(`virtio-net-pci` vs `virtio-net-device`), which the shared `Spec` builder
+already selects per arch.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

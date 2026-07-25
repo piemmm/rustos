@@ -188,6 +188,21 @@ pub fn verify_chunk(offset: usize, chunk: &[u8]) -> Result<(), usize> {
 /// rather than silently mis-binding.
 pub const GUEST_NIC_NODE_LOCATION_AARCH64: u64 = 0x0A00_3C00;
 
+/// The register-window base the x86_64 kernel's bootstrap-floor virtio-PCI
+/// enumerator assigns the (single) `virtio-net-pci` function on the QEMU
+/// `q35`/`pc` machine: the lowest of the NIC's four role-tagged config-window
+/// BARs, mapped into the kernel's PCI MMIO window. Unlike the aarch64 mmio
+/// slot this is not a board layout constant — it is the deterministic base
+/// the kernel's own `assign_and_map_bar` places the NIC's modern-BAR at when
+/// the PCI topology is the vertical's fixed `virtio-blk-pci` + one
+/// `virtio-net-pci` (no other functions). It is the x86_64 `<iface>.match.node`
+/// hardware location the static-addressing vertical's `network.conf` names;
+/// `devmgr` resolves the same value from the matched node's lowest
+/// register-window base and threads it to `netstack` (its `NETSTACK_BOUND`
+/// audit record's `node` field), so a BAR-assignment change fails the run loud
+/// rather than silently mis-binding.
+pub const GUEST_NIC_NODE_LOCATION_X86_64: u64 = 0xFE00_4000;
+
 /// The admin alias the static-addressing vertical's `network.conf` binds the
 /// NIC to (a stable, admin-chosen name, never a discovery-order one).
 pub const STATIC_IFACE_ALIAS: &str = "wan";
@@ -218,13 +233,38 @@ pub const PEER_STATIC_V6: Ipv6Addr = Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 0x0
 /// literals here are cross-checked against those constants by
 /// the `static_network_conf_matches_the_wire_constants` unit test, so the config and the
 /// addresses the peer uses can never drift (one source of truth).
-pub const STATIC_NETWORK_CONF: &str = "\
+pub const STATIC_NETWORK_CONF_AARCH64: &str = "\
 # TAIRiX static-addressing (match.node) QEMU vertical network.conf.
 # Binds the `wan` alias to the NIC by its stable bus location and assigns a
 # static IPv6 address, so the vertical proves match.node + static addressing
 # end to end.
 wan.kind ethernet
 wan.match.node 0xa003c00
+wan.ipv4.method disabled
+wan.ipv6.method static
+wan.ipv6.address fd00::2/64
+";
+
+/// The `/System/Settings/Network/network.conf` the **x86_64** static-addressing
+/// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
+/// of [`STATIC_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on x86_64 is the NIC's lowest config-window BAR base
+/// [`GUEST_NIC_NODE_LOCATION_X86_64`] (`0xfe004000`) rather than the aarch64
+/// mmio slot. It binds the alias [`STATIC_IFACE_ALIAS`] to that NIC, disables
+/// IPv4, and assigns the same static IPv6 [`GUEST_STATIC_V6`]`/`[`STATIC_PREFIX_LEN`]
+/// the aarch64 vertical uses (the peer's on-link `/64` is shared). The literals
+/// are cross-checked against the constants by the
+/// `x86_64_static_network_conf_matches_the_wire_constants` unit test, so the
+/// config and the addresses the peer uses can never drift.
+pub const STATIC_NETWORK_CONF_X86_64: &str = "\
+# TAIRiX static-addressing (match.node) QEMU vertical network.conf (x86_64).
+# Binds the `wan` alias to the virtio-net-pci NIC by its stable bus location
+# (the lowest config-window BAR base) and assigns a static IPv6 address, so
+# the vertical proves match.node + static addressing end to end over PCI.
+wan.kind ethernet
+wan.match.node 0xfe004000
 wan.ipv4.method disabled
 wan.ipv6.method static
 wan.ipv6.address fd00::2/64
@@ -415,7 +455,7 @@ mod tests {
     /// reaches a fixture.
     #[test]
     fn static_network_conf_matches_the_wire_constants() {
-        let config = tairix_netconfig::NetworkConfig::parse(STATIC_NETWORK_CONF)
+        let config = tairix_netconfig::NetworkConfig::parse(STATIC_NETWORK_CONF_AARCH64)
             .expect("the planted network.conf parses and validates");
         let iface = config
             .interface(STATIC_IFACE_ALIAS)
@@ -432,6 +472,38 @@ mod tests {
         let v6 = iface.ipv6_address.expect("a static IPv6 address is set");
         assert_eq!(v6.addr, GUEST_STATIC_V6);
         assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+    }
+
+    /// The x86_64 static `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the x86_64 NIC's config-window
+    /// BAR base while carrying the identical alias, IPv4/IPv6 methods, and static
+    /// address the shared peer reaches. Drift fails here, long before a QEMU boot.
+    #[test]
+    fn x86_64_static_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(STATIC_NETWORK_CONF_X86_64)
+            .expect("the planted x86_64 network.conf parses and validates");
+        let iface = config
+            .interface(STATIC_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_X86_64),
+            "the config's match.node names the x86_64 virtio-PCI NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Static);
+        let v6 = iface.ipv6_address.expect("a static IPv6 address is set");
+        assert_eq!(v6.addr, GUEST_STATIC_V6);
+        assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+        // The two arch confs differ *only* in the bus location: the x86_64
+        // conf is the aarch64 conf with its match.node line rewritten.
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_X86_64, GUEST_NIC_NODE_LOCATION_AARCH64,
+            "the two arch NIC locations are distinct"
+        );
     }
 
     /// The planted bond `network.conf` and the wire MAC/address/alias
