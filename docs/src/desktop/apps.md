@@ -767,8 +767,24 @@ drives the plan's `DeleteWalk` through the same interleaved progress/cancel
 runner an ordinary delete uses (`ProgressOp::Delete`), under the launching
 user's own `fs_readdir`/`fs_unlink` (no new capability). A stale click recomputes
 the Trash location and refuses to empty anything else (fail closed, `AGENTS.md`
-§5.4). The end-to-end click-through on the autoload QEMU vertical is staged as a
-follow-on increment (FM11c).
+§5.4).
+
+The whole empty-Trash flow is proven end to end on the production desktop by
+the autoload QEMU vertical (`plans/NEW-FILEMANAGER.md` FM11c, appended after
+FM10's move-to-Trash delete): the runner clicks **Go to Trash** to navigate the
+front files window into `Library/Trash` (now holding the trashed folder),
+clicks **Empty Trash** to open the *Delete Permanently* confirmation, and
+clicks its Delete button — every point reconstructed from the app's own layout
+code (`render::manager_tool_rect` for the tools; `trash::empty_trash_plan` →
+`render::build_delete_dialog` with `DeleteDisposition::Permanent` →
+`Dialog::action_rects` for the confirm button, the same code the guest paints
+and hit-tests with, `AGENTS.md` §2.2). The guest's PASS gate latches on the
+kernel's own `FsNodeMutated op=rmdir` audit record whose target is under
+`Library/Trash`, observed only after the FM10 move has latched, so no earlier
+removal can satisfy it (fail closed). The empty burst is held behind a one-shot
+serial marker the test kernel emits the first time it observes the move latch,
+so the clicks land only once the folder is provably in the Trash and Empty
+Trash is enabled.
 
 For the file manager to find the user's Trash, the desktop session hands its
 launched apps the **user environment** login exported. Plain `spawn` gives a

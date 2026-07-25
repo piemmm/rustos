@@ -441,6 +441,13 @@ const FM9B_PICKER_OPEN: &str = tairix_test_autoload_input_qemu_aarch64::FM9B_PIC
 /// the shared contract so the script and the guest PASS gate cannot drift.
 const FM9C_DELETE_GATE: &str = tairix_test_autoload_input_qemu_aarch64::FM9C_DELETE_GATE_MARKER;
 
+/// FM11: serial marker the whole empty-Trash click-through is gated on (the
+/// test kernel's one-shot mark on the FM10 move latch), aliased from the shared
+/// contract so the script and the guest PASS gate cannot drift. Gating the
+/// empty clicks on it holds them until the trashed folder is provably in the
+/// Trash, so the Empty Trash tool is enabled and has something to remove.
+const FM11_TRASH_FILLED: &str = tairix_test_autoload_input_qemu_aarch64::FM11_TRASH_FILLED_MARKER;
+
 /// Serial marker after which the autoload vertical types the login +
 /// desktop-command dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
@@ -4371,8 +4378,10 @@ const TESTS: &[QemuTest] = &[
     // ~1 s login typing + session bring-up + the paced click script +
     // both app spawns + the typed command + the FM9-a file-manager
     // New-Folder + inline-rename click-through, the FM9-b Viewer launch +
-    // trusted-picker open-a-file, and the FM9-c right-click delete, on QEMU
-    // TCG.
+    // trusted-picker open-a-file, the FM9-c right-click delete (which, the
+    // folder being on the user's Trash volume, is the FM10 recoverable move
+    // to Trash), and the FM11 empty-Trash click-through (Go to Trash → Empty
+    // Trash → confirm Delete Permanently), on QEMU TCG.
     QemuTest {
         package: "tairix-test-autoload-input-qemu-aarch64",
         binary: "tairix-test-autoload-input-qemu-aarch64",
@@ -6089,6 +6098,74 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         );
         (secondary, menu_click, confirm_click)
     };
+    // --- FM11: empty the Trash (`plans/NEW-FILEMANAGER.md` FM11). After FM10
+    // moved the FM9-a folder into `<home>/Library/Trash`, the manager navigates
+    // to the Trash (the Go-to-Trash tool), clicks Empty Trash, and confirms the
+    // *Delete Permanently* dialog. Three window-local points, each rebuilt from
+    // the app's own layout code so each click lands on exactly what the guest
+    // draws (`AGENTS.md` §2.2): the two manager write-tool rects (fixed-width,
+    // left-packed after the read-only commands, so independent of the current
+    // listing) and the permanent-confirm button.
+    let (go_to_trash_click, empty_trash_click, empty_confirm_click) = {
+        // The toolbar tool rects: measured over an empty browser because the
+        // toolbar's fixed-width buttons are laid out independently of the
+        // listing, exactly as the New Folder rect above is.
+        let browser = tairix_browse::Browser::open_root(FixedListing(Vec::new()))
+            .map_err(|e| format!("desktop pointer script: build empty-trash browser: {e:?}"))?;
+        let tool_point = |tool: tairix_browse::ManagerTool, what: &str| -> Result<Point, String> {
+            let rect = tairix_browse::render::manager_tool_rect(
+                &browser,
+                files_theme,
+                files_vp,
+                tairix_browse::MANAGER_TOOLS,
+                tool,
+            )
+            .ok_or_else(|| format!("desktop pointer script: {what} tool has no rect"))?;
+            let local = centre(rect, what)?;
+            Ok(Point::new(
+                files_client_origin.x + local.x,
+                files_client_origin.y + local.y,
+            ))
+        };
+        let go_to_trash = tool_point(tairix_browse::ManagerTool::Trash, "Go to Trash")?;
+        let empty_trash = tool_point(tairix_browse::ManagerTool::EmptyTrash, "Empty Trash")?;
+        // The permanent-confirm button. Emptying removes the Trash's contents —
+        // here the one FM10-trashed folder — and is always permanent, so the
+        // app builds the `DeleteDisposition::Permanent` dialog over the plan
+        // `empty_trash_plan` yields for that single child. Rebuild the same
+        // plan and dialog so the confirm button's rect matches the guest's
+        // (§2.2). The trashed folder keeps its FM9-a name (`New Folder` + the
+        // rename suffix); the Trash was empty before FM10, so no collision
+        // renamed it.
+        let folder = format!(
+            "{}{}",
+            tairix_browse::mkdir::NEW_FOLDER_BASE,
+            FM9_RENAME_SUFFIX.trim_end()
+        );
+        let trash = tairix_browse::trash::trash_dir(&[String::from("Users"), String::from("root")]);
+        let children = vec![(folder, true)];
+        let plan = tairix_browse::trash::empty_trash_plan(&trash, &children)
+            .map_err(|e| format!("desktop pointer script: build empty-trash plan: {e:?}"))?
+            .ok_or_else(|| "desktop pointer script: empty-trash plan is empty".to_string())?;
+        let dialog = tairix_browse::render::build_delete_dialog(
+            &plan,
+            tairix_browse::DeleteDisposition::Permanent,
+        );
+        let dialog_bounds =
+            tairix_browse::render::delete_dialog_rect(files_vp, files_font, files_theme);
+        let confirm = *dialog
+            .action_rects(dialog_bounds, Scale::ONE, files_theme, files_font)
+            .get(tairix_browse::render::DELETE_CONFIRM_INDEX)
+            .ok_or_else(|| {
+                "desktop pointer script: empty-trash dialog confirm button absent".to_string()
+            })?;
+        let confirm_local = centre(confirm, "empty-trash dialog confirm button")?;
+        let confirm_click = Point::new(
+            files_client_origin.x + confirm_local.x,
+            files_client_origin.y + confirm_local.y,
+        );
+        (go_to_trash, empty_trash, confirm_click)
+    };
     // The reserved window endpoint's first reply on serial: the create
     // round-trip completed, so the served window exists in the compositor
     // (and the wake that created it presented the frame carrying it).
@@ -6392,6 +6469,48 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ),
         step(FM9C_DELETE_GATE, 1, press),
         step(FM9C_DELETE_GATE, 1, release),
+        // --- FM11: empty the Trash (`plans/NEW-FILEMANAGER.md` FM11). Gated on
+        // `FM11_TRASH_FILLED` (the test kernel's one-shot mark on the FM10 move
+        // latch), so the whole burst runs strictly after the trashed folder is
+        // in the Trash — never before, when the Trash would be empty and Empty
+        // Trash disabled. Like FM9-c, it does not use the app-ward delivery
+        // counter (the Viewer window's own focus events leave it statically
+        // unknown); the guest applies the queued events in order and each
+        // overlay (the navigated Trash view, then the confirm dialog) is
+        // handled synchronously, so this one gate suffices.
+        //
+        // Click the Go-to-Trash tool: the files window is frontmost and focused
+        // (FM9-c raised it), so this toolbar click navigates it into the user's
+        // `Library/Trash`, which now holds the FM10-trashed folder.
+        step(
+            FM11_TRASH_FILLED,
+            1,
+            move_by(delete_confirm_click, go_to_trash_click),
+        ),
+        step(FM11_TRASH_FILLED, 1, press),
+        step(FM11_TRASH_FILLED, 1, release),
+        // Click the Empty Trash tool: enabled now the current directory is the
+        // populated Trash, it opens the *Delete Permanently* confirmation over
+        // the plan that removes the Trash's contents.
+        step(
+            FM11_TRASH_FILLED,
+            1,
+            move_by(go_to_trash_click, empty_trash_click),
+        ),
+        step(FM11_TRASH_FILLED, 1, press),
+        step(FM11_TRASH_FILLED, 1, release),
+        // Click the dialog's Delete Permanently button: confirms the empty, so
+        // the app's operation runner drives the plan's `DeleteWalk` — one real
+        // permission-checked `rmdir` of the trashed (empty) folder under
+        // `<home>/Library/Trash/` — the guest PASS's `FsNodeMutated op=rmdir`
+        // (target under `Library/Trash`) witness.
+        step(
+            FM11_TRASH_FILLED,
+            1,
+            move_by(empty_trash_click, empty_confirm_click),
+        ),
+        step(FM11_TRASH_FILLED, 1, press),
+        step(FM11_TRASH_FILLED, 1, release),
     ])
 }
 

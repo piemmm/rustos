@@ -245,3 +245,27 @@ pub const SESSION_COMM: &str = "desktop";
 /// occurrence sequences FM9-c strictly after the delegation. Rendered by the
 /// same `sc=<name>` syscall trace the input-arming and frame-map gates key on.
 pub const FM9C_DELETE_GATE_MARKER: &str = "sc=fd_redeem";
+
+// --- FM11: empty the Trash (`plans/NEW-FILEMANAGER.md` FM11), appended after
+// FM10's move-to-Trash delete. FM10 removed the FM9-a folder by moving it into
+// the user's `Library/Trash`; FM11 navigates into the Trash (the **Go to
+// Trash** toolbar tool), clicks **Empty Trash**, and confirms the *Delete
+// Permanently* dialog, so the trashed folder is permanently removed (the
+// guest PASS's `FsNodeMutated op=rmdir` under `Library/Trash` witness).
+//
+// Like FM9-c, these clicks do not use the app-ward delivery counter — after
+// FM9-b the Viewer window has delivered its own focus event(s), so the
+// counter's value is not statically known. They are gated on the serial
+// marker below, which the test kernel emits exactly once, when it first
+// observes the FM10 move latch, so the empty clicks are processed in a *later*
+// wake — strictly after the trashed folder is in the Trash, never before it
+// arrives (fail closed).
+
+/// Serial marker the whole FM11 empty-Trash click-through is gated on: the test
+/// kernel emits it once, the first time it observes the FM10 move-to-Trash
+/// mutation latch (`FsNodeMutated op=rename` into `Library/Trash`). Emitting it
+/// off the move — rather than reusing a natural syscall trace — guarantees the
+/// empty clicks land only after the trashed folder is provably in the Trash, so
+/// the Empty Trash tool is enabled and has something to remove. This is a
+/// test-only observation (`src/main.rs`), never a production log line.
+pub const FM11_TRASH_FILLED_MARKER: &str = "FM11 trash filled";

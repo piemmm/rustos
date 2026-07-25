@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on ten witnesses
+//! ## Why the PASS keys on eleven witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -132,17 +132,32 @@
 //!    filesystem capability of its own. The CU6 delegation, end to end and
 //!    kernel-attested; the pick-click is gated on the test kernel's
 //!    picker-open marker so it lands only once the picker is composited.
-//! 10. `AuditEvent::FsNodeMutated` with `op=rmdir` (after witness 9): the
-//!     file-manager stage (`plans/NEW-FILEMANAGER.md` FM9-c) right-clicked
-//!     the FM9-a folder to open the context menu, clicked its **Delete** row
-//!     to open the confirmation dialog, and clicked the dialog's Delete
-//!     button — so the manager carried out a real permission-checked
-//!     directory removal (`fs_unlink` with the directory-only flag) under the
-//!     logged-in user's own identity. It is gated on the FM9-b delegation
-//!     (witness 9), so it fires strictly after the whole FM9-a/-b sequence
-//!     and no earlier removal can satisfy it; the right-click reaches the app
-//!     through the fixed `tools/qemu` secondary-button mask and the
-//!     compositor's secondary-press routing.
+//! 10. `AuditEvent::FsNodeMutated` with `op=rename` whose `to` is under
+//!     `<home>/Library/Trash/` (after witness 9): the file-manager stage
+//!     (`plans/NEW-FILEMANAGER.md` FM9-c/FM10) right-clicked the FM9-a folder
+//!     to open the context menu, clicked its **Delete** row to open the
+//!     confirmation dialog, and clicked the dialog's Delete button — and
+//!     because the folder is in the user's home, on the same volume as the
+//!     user's Trash, the confirmed delete is a recoverable **move to Trash**
+//!     (one real permission-checked `fs_rename` into `<home>/Library/Trash/`)
+//!     under the logged-in user's own identity. It is gated on the FM9-b
+//!     delegation (witness 9) **and** a `Library/Trash` destination, so it
+//!     fires strictly after the whole FM9-a/-b sequence and no earlier
+//!     mutation can satisfy it; the right-click reaches the app through the
+//!     fixed `tools/qemu` secondary-button mask and the compositor's
+//!     secondary-press routing.
+//! 11. `AuditEvent::FsNodeMutated` with `op=rmdir` whose `path` is under
+//!     `<home>/Library/Trash/` (after witness 10): the file-manager stage
+//!     (`plans/NEW-FILEMANAGER.md` FM11) clicked the **Go to Trash** tool to
+//!     navigate into the user's Trash (now holding the FM10-trashed folder),
+//!     clicked the **Empty Trash** tool, and confirmed the *Delete
+//!     Permanently* dialog — so the manager permanently removed the trashed
+//!     folder (`fs_unlink` with the directory-only flag) under the user's own
+//!     identity. It is gated on the FM10 move having latched (witness 10), so
+//!     no earlier removal — of the folder before it reached Trash, or any
+//!     boot/login rmdir — can satisfy it (fail closed). The empty clicks are
+//!     held behind the `FM11_TRASH_FILLED_MARKER` the test kernel emits once
+//!     the move latches, so they land only after the folder is in the Trash.
 //!
 //! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
@@ -158,7 +173,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all ten witnesses, so the harness times out — the documented
+//! reaches all eleven witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -226,7 +241,7 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all ten witnesses have appeared: the per-kind
+    /// to QEMU once all eleven witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
@@ -248,9 +263,13 @@ mod kernel {
     /// FM9-a folder through its right-click context menu and confirmation
     /// dialog, which, the folder being on the same volume as the user's Trash,
     /// is carried out as a recoverable move to Trash rather than an
-    /// irreversible unlink). The guest exits only after the host has everything
-    /// it needs (`plans/APPWIN.md` AW3 + AW4, `plans/NEW-FILEMANAGER.md`
-    /// FM9-a/-b/FM10).
+    /// irreversible unlink), and the FM11 empty-Trash removal
+    /// (`FsNodeMutated op=rmdir` under `<home>/Library/Trash/` after the move —
+    /// the manager navigating to the Trash via the Go-to-Trash tool, clicking
+    /// Empty Trash, and confirming the *Delete Permanently* dialog, so the
+    /// trashed folder is permanently removed). The guest exits only after the
+    /// host has everything it needs (`plans/APPWIN.md` AW3 + AW4,
+    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/FM10/FM11).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
@@ -263,6 +282,7 @@ mod kernel {
         fd_delegation_granted: AtomicBool,
         fd_delegation_redeemed: AtomicBool,
         fs_node_deleted: AtomicBool,
+        fs_trash_emptied: AtomicBool,
         picker_open_marked: AtomicBool,
     }
 
@@ -280,6 +300,7 @@ mod kernel {
                 fd_delegation_granted: AtomicBool::new(false),
                 fd_delegation_redeemed: AtomicBool::new(false),
                 fs_node_deleted: AtomicBool::new(false),
+                fs_trash_emptied: AtomicBool::new(false),
                 picker_open_marked: AtomicBool::new(false),
             }
         }
@@ -305,9 +326,11 @@ mod kernel {
         }
 
         /// Latch the file-manager mutation witnesses from a `FsNodeMutated`
-        /// record's `op` (and, for a rename, `to`) fields: `mkdir`, then
-        /// `rename` (FM9-a), then the FM9-c/FM10 recoverable delete — a
-        /// `rename` whose destination is under the user's `Library/Trash`.
+        /// record's `op` (and, for a rename, `to`; for a removal, `path`)
+        /// fields: `mkdir`, then `rename` (FM9-a), then the FM9-c/FM10
+        /// recoverable delete — a `rename` whose destination is under the
+        /// user's `Library/Trash` — then the FM11 empty-Trash removal (an
+        /// `rmdir`/`unlink` whose target is under `Library/Trash`).
         /// Only mutations that occur *after* the AW4 terminal round trip are
         /// counted (the delivery counter is at or past
         /// [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many boot- and
@@ -316,21 +339,25 @@ mod kernel {
         /// `mkdir` first; the FM10 move-to-Trash requires the FM9-b delegation
         /// redeemed **and** a `Library/Trash` destination, so neither the
         /// FM9-a naming rename (its destination is the home folder, not Trash)
-        /// nor any earlier mutation can satisfy it, and the refusal event
-        /// (`FsMutationDenied`) is a different id that never reaches here (fail
-        /// closed).
+        /// nor any earlier mutation can satisfy it; the FM11 empty requires the
+        /// FM10 move to have latched first, so no earlier removal can satisfy
+        /// it. The refusal event (`FsMutationDenied`) is a different id that
+        /// never reaches here (fail closed).
         fn note_fs_mutation(&self, event: &Event<'_>) {
             if self.window_events_delivered.load(Ordering::Acquire)
                 < tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
             {
                 return;
             }
-            // Read the `op` and (for a rename) `to` destination once.
+            // Read the `op`, the removal target `path`, and (for a rename) the
+            // `to` destination once.
             let mut op = "";
+            let mut path = "";
             let mut to = "";
             for field in event.fields {
                 match (field.key, field.value) {
                     ("op", tairix_log::FieldValue::Str(value)) => op = value,
+                    ("path", tairix_log::FieldValue::Str(value)) => path = value,
                     ("to", tairix_log::FieldValue::Str(value)) => to = value,
                     _ => {}
                 }
@@ -356,12 +383,37 @@ mod kernel {
                     // can satisfy it (fail closed — `FsMutationDenied` is a
                     // different id that never reaches here). The app spells the
                     // destination from `lib/browse`'s `trash_dir`
-                    // (`<home>/Library/Trash`), so this marker matches it.
+                    // (`<home>/Library/Trash`), so this marker matches it. On
+                    // the *first* time the move latches, emit the deterministic
+                    // marker the runner gates its FM11 empty-Trash clicks on,
+                    // so those clicks land in a later wake — strictly after the
+                    // trashed folder is in the Trash, never before.
                     if self.fd_delegation_redeemed.load(Ordering::Acquire)
                         && to.contains(TRASH_PATH_MARKER)
+                        && !self.fs_node_deleted.swap(true, Ordering::AcqRel)
                     {
-                        self.fs_node_deleted.store(true, Ordering::Release);
+                        SerialSink::new().write_event(&Event {
+                            level: tairix_log::Level::Info,
+                            id: tairix_log::EventId(0),
+                            message:
+                                tairix_test_autoload_input_qemu_aarch64::FM11_TRASH_FILLED_MARKER,
+                            fields: &[],
+                        });
                     }
+                }
+                // The FM11 empty-Trash witness (`plans/NEW-FILEMANAGER.md`
+                // FM11): the file manager navigated to the Trash and emptied
+                // it, permanently removing the FM10-trashed folder — an
+                // `fs_unlink` with the directory flag, so `op=rmdir`, whose
+                // `path` is the trashed item under `<home>/Library/Trash/`.
+                // Gated on the FM10 move having latched first, so no earlier
+                // removal (of the folder before it reached Trash, or any
+                // boot/login rmdir) can satisfy it (fail closed).
+                "rmdir" | "unlink"
+                    if self.fs_node_deleted.load(Ordering::Acquire)
+                        && path.contains(TRASH_PATH_MARKER) =>
+                {
+                    self.fs_trash_emptied.store(true, Ordering::Release);
                 }
                 _ => {}
             }
@@ -486,6 +538,7 @@ mod kernel {
                 && self.fd_delegation_granted.load(Ordering::Acquire)
                 && self.fd_delegation_redeemed.load(Ordering::Acquire)
                 && self.fs_node_deleted.load(Ordering::Acquire)
+                && self.fs_trash_emptied.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

@@ -27,8 +27,14 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — FM1–FM11b are all landed; only **FM11c (the empty-Trash QEMU
-witness) remains**, staged below. **FM11b now lands the app-side Empty Trash
+`done` — FM1–FM11 are all landed, including **FM11c (the empty-Trash QEMU
+witness)**: the aarch64 `autoload_input` vertical now proves the empty-Trash
+click-through end to end (after FM10's move-to-Trash `op=rename`, the runner
+clicks Go to Trash → Empty Trash → confirm *Delete Permanently*, and the guest
+PASS latches an eleventh witness — `FsNodeMutated op=rmdir` whose `path` is
+under `Library/Trash`, gated on the move having latched via the one-shot
+`FM11_TRASH_FILLED_MARKER`, so no earlier removal can satisfy it — fail
+closed). **FM11b lands the app-side Empty Trash
 verb + the navigable Trash view.** Two manager-only toolbar tools join the
 `chrome::ManagerTool` set (drawn only for the write-capable file manager): **Go
 to Trash** (`ManagerTool::Trash`) navigates the browser to the user's
@@ -57,9 +63,11 @@ identity), so composing it grants nothing and the read-only picker never builds
 one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
 root-trash refusal, invalid-child refusal). Now justified rather than
 speculative: the move that fills the Trash (FM10) has landed, so the way back to
-a permanent removal is real surface (§2.4). The end-to-end empty-Trash
-click-through on the aarch64 `autoload_input` QEMU vertical (a new
-post-`fd_redeem` `FsNodeMutated` witness) is FM11c, staged below. **FM10 (recoverable delete:
+a permanent removal is real surface (§2.4). **FM11c is complete**: the
+end-to-end empty-Trash click-through on the aarch64 `autoload_input` QEMU
+vertical latches a new eleventh witness (`FsNodeMutated op=rmdir` under
+`Library/Trash`, gated after the FM10 move via the one-shot
+`FM11_TRASH_FILLED_MARKER`). **FM10 (recoverable delete:
 move to Trash) is complete.** FM10a landed the pure `lib/browse::trash` model
 (`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
 **FM10b now lands the app-side Trash verb and its QEMU witness.** On a confirmed
@@ -1461,16 +1469,23 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding
   files app builds and lints clean. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`, `lib/icon/README.md` + rustdoc.
-- **FM11c — the QEMU witness for the empty-Trash click-through.** Prove the
-  Empty Trash verb end-to-end on the aarch64 `autoload_input` QEMU vertical
-  with a new post-`fd_redeem` witness: after FM10b's move-to-Trash `op=rename`,
-  navigate to the Trash view, click Empty Trash, confirm the Permanent dialog,
-  and latch a further `FsNodeMutated` witness for the permanent removal of the
-  trashed item under `Library/Trash` (gated after the move so no earlier
-  mutation can satisfy it — fail closed). Split out from FM11b (§2.19): the
-  app-side verb + Trash view land host-tested and gated above; the
-  timing-sensitive freestanding guest click-through + host runner is its own
-  increment, not shipped half-done "for now".
+- **FM11c — the QEMU witness for the empty-Trash click-through `[x]` (done).**
+  Proves the Empty Trash verb end-to-end on the aarch64 `autoload_input` QEMU
+  vertical with a new eleventh witness. After FM10b's move-to-Trash `op=rename`,
+  the host runner clicks the **Go to Trash** tool (navigating the front files
+  window into `Library/Trash`, now holding the trashed folder), the **Empty
+  Trash** tool (opening the *Delete Permanently* confirmation), and the dialog's
+  Delete button — each point reconstructed from the app's own layout
+  (`render::manager_tool_rect` for the tools, `empty_trash_plan` →
+  `build_delete_dialog(Permanent)` → `Dialog::action_rects` for the confirm
+  button, §2.2). The guest PASS latches a further `FsNodeMutated op=rmdir`
+  whose `path` is under `Library/Trash`, gated on the FM10 move having latched.
+  The whole empty burst is gated on the one-shot `FM11_TRASH_FILLED_MARKER` the
+  test kernel emits the first time it observes the move latch, so the clicks
+  land only after the folder is provably in the Trash (Empty Trash enabled) and
+  no earlier removal can satisfy the witness — fail closed. Contract markers
+  live beside the guest PASS gate (`FM11_TRASH_FILLED_MARKER` in the vertical
+  crate's `lib.rs`), so the script and its observer cannot drift (§2.2).
 
 ## 2. Sequencing and dependencies
 
