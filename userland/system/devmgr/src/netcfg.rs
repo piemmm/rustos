@@ -149,10 +149,10 @@ pub fn deliver_network_settings(
 /// Plain interfaces and bond members yield an addressing/rename
 /// [`NetInterfaceConfigMsg`] in [`Self::messages`]; bonds additionally
 /// yield a [`NetBondConfigMsg`] in [`Self::bonds`]. A managed interface
-/// that cannot be bound to hardware by identity (no `match.mac`) or whose
-/// configuration is internally inconsistent is recorded in
-/// [`Self::rejected`] so the operator's error is surfaced loud rather than
-/// silently ignored.
+/// that cannot be bound to hardware by identity (neither `match.mac` nor
+/// `match.node`) or whose configuration is internally inconsistent is
+/// recorded in [`Self::rejected`] so the operator's error is surfaced loud
+/// rather than silently ignored.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InterfaceConfigPlan {
     /// One message per deliverable managed interface — a plain interface's
@@ -162,8 +162,9 @@ pub struct InterfaceConfigPlan {
     /// One bond-composition message per managed bond interface.
     pub bonds: Vec<NetBondConfigMsg>,
     /// The aliases of managed interfaces refused for a configuration error
-    /// (a non-bond, non-member interface with no `match.mac`, or a member
-    /// with no `match.mac` identity to bind it to hardware) (NUL-padded).
+    /// (an ethernet interface — member or plain — carrying neither
+    /// `match.mac` nor `match.node` to bind it to hardware, or an
+    /// inconsistent bond) (NUL-padded).
     pub rejected: Vec<[u8; IF_NAME_LEN]>,
 }
 
@@ -203,17 +204,17 @@ pub trait NetworkInterfaceConfigSource {
 ///   interval) *and* a [`NetInterfaceConfigMsg`] carrying the bond's own
 ///   addressing, matched by alias (a bond has no hardware MAC of its own).
 /// * A **bond member** yields an address-less [`NetInterfaceConfigMsg`]
-///   matched by MAC — it renames the bound NIC to the member alias so the
-///   bond can compose it; the member holds no addresses.
+///   matched by its hardware identity (`match.mac` or `match.node`) — it
+///   renames the bound NIC to the member alias so the bond can compose it;
+///   the member holds no addresses.
 /// * A **plain** interface yields its addressing [`NetInterfaceConfigMsg`]
-///   matched by MAC (the N9b-3-1 path).
+///   matched by its hardware identity (`match.mac` or `match.node`).
 ///
 /// A managed interface that cannot be bound to hardware by identity (a
-/// member or plain interface with no `match.mac`), or whose static
-/// addressing is internally inconsistent, is refused into
-/// [`InterfaceConfigPlan::rejected`] rather than guessed at (fail closed).
-/// `match.node` binding is a separate resolution (deferred); loopback is
-/// left to the stack.
+/// member or plain interface carrying neither `match.mac` nor
+/// `match.node`), or whose static addressing is internally inconsistent, is
+/// refused into [`InterfaceConfigPlan::rejected`] rather than guessed at
+/// (fail closed). Loopback is left to the stack.
 #[cfg(feature = "program")]
 #[must_use]
 pub fn interface_configs_from_config(
@@ -250,23 +251,32 @@ pub fn interface_configs_from_config(
                 plan.messages.push(NetInterfaceConfigMsg {
                     alias,
                     match_mac: None,
+                    match_node: None,
                     ipv4,
                     ipv6,
                     mtu: iface.mtu.unwrap_or(0),
                 });
             }
             IfaceKind::Ethernet => {
-                // A member or plain interface must bind to hardware by MAC.
-                let Some(mac) = iface.match_mac else {
+                // A member or plain interface binds to hardware by *identity*:
+                // either its stable MAC or its hardware-node location (the
+                // register-window base of its device node). `netconfig`
+                // validation guarantees at most one is set; with neither, the
+                // interface cannot be bound to any device, so it is refused
+                // loud rather than guessed at (fail closed).
+                let match_mac = iface.match_mac.map(|mac| mac.0);
+                let match_node = iface.match_node;
+                if match_mac.is_none() && match_node.is_none() {
                     plan.rejected.push(alias);
                     continue;
-                };
+                }
                 if members.contains(iface.name.as_str()) {
                     // A bond member: rename the NIC to the member alias with
                     // no addressing (the bond owns the addresses).
                     plan.messages.push(NetInterfaceConfigMsg {
                         alias,
-                        match_mac: Some(mac.0),
+                        match_mac,
+                        match_node,
                         ipv4: tairix_abi::net_ipc::NetIpv4Config::Disabled,
                         ipv6: tairix_abi::net_ipc::NetIpv6Config::Disabled,
                         mtu: iface.mtu.unwrap_or(0),
@@ -279,7 +289,8 @@ pub fn interface_configs_from_config(
                 };
                 plan.messages.push(NetInterfaceConfigMsg {
                     alias,
-                    match_mac: Some(mac.0),
+                    match_mac,
+                    match_node,
                     ipv4,
                     ipv6,
                     mtu: iface.mtu.unwrap_or(0),
@@ -441,7 +452,7 @@ pub fn deliver_interface_configs(
                     sink,
                     events::NETWORK_IFCONFIG_REJECTED,
                     Level::Warn,
-                    "network.conf interface has no match.mac identity; skipped",
+                    "network.conf interface has no match.mac/match.node identity; skipped",
                     name,
                 );
             }
@@ -616,7 +627,12 @@ mod tests {
     }
 
     impl NetstackBind for RecordingNetstack {
-        fn bind_driver(&mut self, _e: u64, _i: &[u8; IF_NAME_LEN]) -> Result<(), Errno> {
+        fn bind_driver(
+            &mut self,
+            _e: u64,
+            _i: &[u8; IF_NAME_LEN],
+            _node_location: u64,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -762,6 +778,7 @@ mod tests {
         NetInterfaceConfigMsg {
             alias: iface_name(alias),
             match_mac: Some(mac),
+            match_node: None,
             ipv4: tairix_abi::net_ipc::NetIpv4Config::Disabled,
             ipv6: tairix_abi::net_ipc::NetIpv6Config::Slaac,
             mtu: 0,
@@ -913,6 +930,50 @@ eth1.match.mac 02:00:00:00:00:03
         assert_eq!(bond.members(), &[iface_name("eth0"), iface_name("eth1")]);
         assert_eq!(bond.primary, Some(iface_name("eth0")));
         assert_eq!(plan.rejected, alloc::vec![iface_name("lan")]);
+    }
+
+    #[cfg(feature = "program")]
+    #[test]
+    fn a_match_node_interface_maps_to_a_node_keyed_message_not_a_reject() {
+        // `wan` is bound by hardware node (its register-window base), not
+        // MAC; `lan` is a node-bound bond member. Both must yield a
+        // node-keyed message — never a reject — and carry no MAC selector.
+        let text = "\
+wan.match.node 0xa003e00
+wan.ipv4.method static
+wan.ipv4.address 10.0.0.2/24
+bond0.kind bond
+bond0.bond.members lan,eth1
+bond0.ipv4.method static
+bond0.ipv4.address 10.0.2.15/24
+lan.match.node 0xa003a00
+eth1.match.mac 02:00:00:00:00:03
+";
+        let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        let plan = interface_configs_from_config(&config);
+        assert!(
+            plan.rejected.is_empty(),
+            "a node-bound iface is not rejected"
+        );
+        let wan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("wan"))
+            .expect("wan");
+        assert_eq!(wan.match_mac, None);
+        assert_eq!(wan.match_node, Some(0x0a00_3e00));
+        // The node-bound member is renamed by node and holds no addresses.
+        let lan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("lan"))
+            .expect("lan member");
+        assert_eq!(lan.match_mac, None);
+        assert_eq!(lan.match_node, Some(0x0a00_3a00));
+        assert!(matches!(
+            lan.ipv4,
+            tairix_abi::net_ipc::NetIpv4Config::Disabled
+        ));
     }
 
     #[cfg(feature = "program")]

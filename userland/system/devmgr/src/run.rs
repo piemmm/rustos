@@ -232,10 +232,12 @@ mod program {
             &mut self,
             endpoint_id: u64,
             iface: &[u8; IF_NAME_LEN],
+            node_location: u64,
         ) -> Result<(), Errno> {
             let request = NetstackRequest::BindDriver {
                 endpoint_id,
                 iface: *iface,
+                node_location,
             }
             .to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];

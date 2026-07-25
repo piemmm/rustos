@@ -364,10 +364,22 @@ mod program {
         let Some(caller) = attest(NETSTACK_ENDPOINT, ticket, origin_buf) else {
             return;
         };
-        if let Ok(NetstackRequest::BindDriver { endpoint_id, iface }) =
-            NetstackRequest::from_bytes(&request[..request_len])
+        if let Ok(NetstackRequest::BindDriver {
+            endpoint_id,
+            iface,
+            node_location,
+        }) = NetstackRequest::from_bytes(&request[..request_len])
         {
-            let result = serve_bind_driver(stack, channels, &caller, pid, set, endpoint_id, iface);
+            let result = serve_bind_driver(
+                stack,
+                channels,
+                &caller,
+                pid,
+                set,
+                endpoint_id,
+                iface,
+                node_location,
+            );
             let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
             return;
         }
@@ -409,6 +421,10 @@ mod program {
     /// `CAP_NET_ADMIN` against the caller's attested origin (fail closed,
     /// audited), then provision the channel. The interface stays unbound on
     /// any refusal.
+    // The bind carries the whole channel context (stack, channel table,
+    // caller, ids, endpoint, alias, hardware location) as flat arguments;
+    // a struct would only obscure the one call site.
+    #[allow(clippy::too_many_arguments)]
     fn serve_bind_driver(
         stack: &mut Netstack,
         channels: &mut [Option<Channel>],
@@ -417,6 +433,7 @@ mod program {
         set: u64,
         endpoint_id: u64,
         iface: [u8; IF_NAME_LEN],
+        node_location: u64,
     ) -> Result<(), Errno> {
         if !caller.capabilities().holds(CapabilityId::NET_ADMIN) {
             audit(
@@ -426,7 +443,16 @@ mod program {
             );
             return Err(Errno::PermissionDenied);
         }
-        match bind_driver(stack, channels, pid, set, endpoint_id, iface, now()) {
+        match bind_driver(
+            stack,
+            channels,
+            pid,
+            set,
+            endpoint_id,
+            iface,
+            node_location,
+            now(),
+        ) {
             Ok(()) => {
                 audit(
                     events::DRIVER_BOUND,
@@ -656,6 +682,10 @@ mod program {
     /// The driver is the channel *server* (it owns the device); the stack
     /// is the *client* that owns the frame region — so any NIC driver
     /// serves any stack build.
+    // Each argument is an independent provisioning input (stack, channel
+    // table, ids, endpoint, alias, hardware location, clock); bundling them
+    // would only obscure the single call site.
+    #[allow(clippy::too_many_arguments)]
     fn bind_driver(
         stack: &mut Netstack,
         channels: &mut [Option<Channel>],
@@ -663,6 +693,7 @@ mod program {
         set: u64,
         endpoint_id: u64,
         iface: [u8; IF_NAME_LEN],
+        node_location: u64,
         now: Duration64,
     ) -> Result<(), Errno> {
         // A free slot in the bounded channel table (its width is the
@@ -758,6 +789,7 @@ mod program {
             facts,
             interface_id,
             ipv4_ident_seed,
+            node_location,
             now,
         ) {
             let _ =

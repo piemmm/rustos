@@ -49,13 +49,22 @@ pub const NETCHAN_COMPATIBLE: &[u8] = b"tairix,netchan";
 /// host-testable against a recording double.
 pub trait NetstackBind {
     /// Ask the network stack to bind the NIC driver's device-channel
-    /// `endpoint_id` as the managed interface `iface`.
+    /// `endpoint_id` as the managed interface `iface`, recording the NIC's
+    /// stable hardware location `node_location` (the register-window base of
+    /// the device manager's matched hardware-tree node, or `0` when none was
+    /// resolvable) so a `network.conf` `<iface>.match.node` binding can name
+    /// this physical device by where it sits on the bus.
     ///
     /// # Errors
     ///
     /// The stack's typed refusal, or a transport failure — treated
     /// fail-soft by the caller (retried on the next generation bump).
-    fn bind_driver(&mut self, endpoint_id: u64, iface: &[u8; IF_NAME_LEN]) -> Result<(), Errno>;
+    fn bind_driver(
+        &mut self,
+        endpoint_id: u64,
+        iface: &[u8; IF_NAME_LEN],
+        node_location: u64,
+    ) -> Result<(), Errno>;
 
     /// Deliver the stack-wide `net.*` policy to the network stack
     /// (`plans/NETWORK.md` N9b-2).
@@ -150,6 +159,32 @@ pub fn netchan_endpoint(node: &HwNode) -> Option<u64> {
         .map(tairix_abi::HwResource::base)
 }
 
+/// The stable hardware location of the NIC that emitted the `netchan`
+/// `node`: the lowest register-window base of its **parent** device node in
+/// `nodes` (the driver's matched node — a `netchan` is emitted as a child of
+/// it), or `0` when the parent is absent or exposes no register window.
+///
+/// The register-window base is the device's fixed position on the bus (an
+/// MMIO aperture base, a PCI BAR base), so it is a discovery-order-
+/// independent identity a `network.conf` `<iface>.match.node` key can name.
+/// The *lowest* window is chosen so a multi-window PCI function yields one
+/// deterministic value regardless of the order its windows were emitted.
+#[must_use]
+fn netchan_node_location(netchan: &HwNode, nodes: &[HwNode]) -> u64 {
+    let parent = netchan.parent();
+    nodes
+        .iter()
+        .find(|candidate| candidate.id() == parent)
+        .and_then(|device| {
+            device
+                .resources()
+                .iter()
+                .filter_map(tairix_abi::HwResource::register_window_base)
+                .min()
+        })
+        .unwrap_or(0)
+}
+
 /// Hand every not-yet-bound NIC device channel in `nodes` to the network
 /// stack through `netstack`, recording each success in `state`.
 ///
@@ -176,7 +211,12 @@ pub fn bind_new_channels(
         if validate_if_name(&iface).is_err() {
             continue;
         }
-        match netstack.bind_driver(endpoint, &iface) {
+        // The NIC's stable hardware location: the register-window base of
+        // the *parent* device node this `netchan` was emitted under (the
+        // driver's matched node). The stack records it so a `match.node`
+        // configuration can bind an admin alias to this physical device.
+        let node_location = netchan_node_location(node, nodes);
+        match netstack.bind_driver(endpoint, &iface, node_location) {
             Ok(()) => {
                 state.bound.insert(endpoint);
                 state.next_index = state.next_index.saturating_add(1);
@@ -266,7 +306,7 @@ mod tests {
     /// A recording [`NetstackBind`] double: captures each bind call and
     /// answers each with a scripted result.
     struct RecordingBind {
-        calls: RefCell<Vec<(u64, [u8; IF_NAME_LEN])>>,
+        calls: RefCell<Vec<(u64, [u8; IF_NAME_LEN], u64)>>,
         results: RefCell<Vec<Result<(), Errno>>>,
     }
 
@@ -284,8 +324,11 @@ mod tests {
             &mut self,
             endpoint_id: u64,
             iface: &[u8; IF_NAME_LEN],
+            node_location: u64,
         ) -> Result<(), Errno> {
-            self.calls.borrow_mut().push((endpoint_id, *iface));
+            self.calls
+                .borrow_mut()
+                .push((endpoint_id, *iface, node_location));
             self.results.borrow_mut().pop().unwrap_or(Ok(()))
         }
 
@@ -358,10 +401,11 @@ mod tests {
         let mut state = NetBindState::new();
         let mut bind = RecordingBind::new(alloc::vec![Ok(()), Ok(())]);
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
-        // First pass binds both, names net0/net1.
+        // First pass binds both, names net0/net1. No parent device node is
+        // present, so each reports no hardware location (`0`).
         assert_eq!(
             *bind.calls.borrow(),
-            alloc::vec![(100, name("net0")), (200, name("net1"))]
+            alloc::vec![(100, name("net0"), 0), (200, name("net1"), 0)]
         );
         // A second pass over the same (persistent) nodes binds nothing.
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
@@ -382,7 +426,32 @@ mod tests {
         // Both attempts used net0 — a refusal never consumed the index.
         assert_eq!(
             *bind.calls.borrow(),
-            alloc::vec![(100, name("net0")), (100, name("net0"))]
+            alloc::vec![(100, name("net0"), 0), (100, name("net0"), 0)]
+        );
+    }
+
+    #[test]
+    fn a_netchan_reports_its_parent_device_register_base_as_the_location() {
+        // A discovered NIC device node with an MMIO register window at
+        // 0x0a00_0000, and the `netchan` its driver emitted as a child.
+        let mut device = HwNode::new(7, HW_NODE_ROOT, HwDeviceClass::Network);
+        device
+            .push_match_key(HwMatchKey::virtio(1))
+            .expect("push key");
+        device
+            .push_resource(HwResource::mmio(0x0a00_0000, 0x200))
+            .expect("push mmio");
+        let mut channel = netchan_node(8, 100);
+        channel.set_identity(8, 7);
+        let nodes = alloc::vec![device, channel];
+        let mut state = NetBindState::new();
+        let mut bind = RecordingBind::new(alloc::vec![Ok(())]);
+        bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
+        // The interface is bound carrying the parent's register-window base
+        // as its stable hardware location.
+        assert_eq!(
+            *bind.calls.borrow(),
+            alloc::vec![(100, name("net0"), 0x0a00_0000)]
         );
     }
 }

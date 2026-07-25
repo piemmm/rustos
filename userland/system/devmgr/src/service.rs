@@ -459,6 +459,7 @@ mod tests {
             &mut self,
             _endpoint_id: u64,
             _iface: &[u8; tairix_abi::net_ipc::IF_NAME_LEN],
+            _node_location: u64,
         ) -> Result<(), Errno> {
             Ok(())
         }

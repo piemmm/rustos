@@ -79,6 +79,12 @@ pub struct Interface {
     rates: RateMeter,
     /// This entry's link-aggregation role (plain, bond, or member).
     role: BondRole,
+    /// The NIC's stable hardware location — the register-window base of
+    /// the device manager's matched hardware-tree node — or `0` when none
+    /// was resolved (a software bond, or a device with no register window).
+    /// A `network.conf` `<iface>.match.node` binding selects this interface
+    /// by it, independent of MAC or discovery order.
+    node_location: u64,
 }
 
 impl Interface {
@@ -157,6 +163,12 @@ impl Netstack {
     /// * [`Errno::OutOfRange`] — an invalid alias or device facts the
     ///   engine refuses.
     /// * [`Errno::AlreadyExists`] — the alias is already bound.
+    // Each parameter is an independent, caller-drawn fact about the new
+    // interface (name, kind, device facts, the two engine seeds, the
+    // hardware location, and the clock); bundling them into a throwaway
+    // struct would only obscure the call sites, so the argument list is
+    // deliberately flat.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_interface(
         &mut self,
         name: [u8; IF_NAME_LEN],
@@ -164,6 +176,7 @@ impl Netstack {
         facts: DeviceFacts,
         interface_id: [u8; 8],
         ipv4_ident_seed: u16,
+        node_location: u64,
         now: Duration64,
     ) -> Result<(), Errno> {
         validate_if_name(&name)?;
@@ -184,6 +197,7 @@ impl Netstack {
             stack,
             rates: RateMeter::new(),
             role: BondRole::None,
+            node_location,
         });
         Ok(())
     }
@@ -220,14 +234,20 @@ impl Netstack {
     /// (`network.conf`, `plans/NETWORK.md` N9b-3-1), delivered by the
     /// device manager over the [`NetInterfaceConfigMsg`] admin message.
     ///
-    /// The interface is located by its **stable hardware identity**: when
-    /// `msg` carries a MAC selector the interface whose device MAC matches
-    /// is found and *renamed* to the admin-chosen alias (netstack is the
-    /// only holder of each interface's MAC, from the driver's facts); a
-    /// message with no selector matches an interface already bearing the
-    /// alias. An interface not yet present is [`Errno::NotFound`] — the
-    /// caller retries when the driver binds — and an alias already taken by
-    /// a *different* interface is [`Errno::AlreadyExists`].
+    /// The interface is located by its **stable hardware identity**, in
+    /// precedence order: a MAC selector matches the interface whose device
+    /// MAC matches (netstack is the only holder of each interface's MAC,
+    /// from the driver's facts); else a hardware-node selector
+    /// ([`NetInterfaceConfigMsg::match_node`]) matches the interface whose
+    /// recorded hardware location — the register-window base of the device
+    /// manager's matched hardware-tree node — equals it (the
+    /// `<iface>.match.node` binding, independent of MAC and discovery
+    /// order); else the message matches an interface
+    /// already bearing the alias. A matched interface is *renamed* to the
+    /// admin-chosen alias. An interface not yet present is
+    /// [`Errno::NotFound`] — the caller retries when the driver binds — and
+    /// an alias already taken by a *different* interface is
+    /// [`Errno::AlreadyExists`].
     ///
     /// The whole message is validated ([`NetInterfaceConfigMsg::validate`])
     /// **before** any state is touched, so a refusal leaves the interface
@@ -252,13 +272,24 @@ impl Netstack {
         // limit the fresh config never reaches, so a partial apply is not
         // possible (fail closed, leave the interface untouched).
         msg.validate()?;
-        let index = match msg.match_mac {
-            Some(mac) => self
-                .interfaces
+        // Locate the interface by its stable hardware identity, in
+        // precedence order: an explicit MAC selector, else an explicit
+        // hardware-node location (the register-window base the driver bind
+        // recorded), else the alias itself. A node selector never matches
+        // an interface with no resolved location (a `0` `node_location`),
+        // and `msg.match_node` is always non-zero (the config rejects `0`).
+        let index = if let Some(mac) = msg.match_mac {
+            self.interfaces
                 .iter()
                 .position(|i| i.facts.mac.as_octets() == &mac)
-                .ok_or(Errno::NotFound)?,
-            None => self.find(msg.alias).ok_or(Errno::NotFound)?,
+                .ok_or(Errno::NotFound)?
+        } else if let Some(node) = msg.match_node {
+            self.interfaces
+                .iter()
+                .position(|i| i.node_location != 0 && i.node_location == node)
+                .ok_or(Errno::NotFound)?
+        } else {
+            self.find(msg.alias).ok_or(Errno::NotFound)?
         };
         // A bond member owns no addresses: the bond does. Refuse a direct
         // address assignment (static v4/v6 or SLAAC) to an enrolled member
@@ -1112,6 +1143,9 @@ impl Netstack {
                 engine,
                 members: Vec::new(),
             },
+            // A bond is composed in software; it has no hardware location,
+            // so it can never be selected by a `match.node` binding.
+            node_location: 0,
         });
         Ok(())
     }

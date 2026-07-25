@@ -34,8 +34,11 @@ admin reload.
 
 An interface is named by a stable, admin-chosen **alias** (`wan`, `lan0`),
 never a discovery-order name, and bound to hardware by identity —
-`<iface>.match.mac` or `<iface>.match.node` — so a NIC keeps its
-configuration across reboots and reprobes regardless of enumeration order.
+`<iface>.match.mac` (the NIC's MAC) or `<iface>.match.node` (the NIC's
+stable location on the bus, written as the hex register-window base of its
+hardware-tree node) — so a NIC keeps its configuration across reboots and
+reprobes regardless of enumeration order. An interface carries at most one
+of the two selectors; the two are mutually exclusive.
 
 ## The registry
 
@@ -46,7 +49,7 @@ Every key is `<iface>.<suffix>` where the suffix is drawn from the closed
 |-------------------------|------------------------------------------|---------|
 | `kind`                  | `ethernet` \| `bond` \| `loopback`       | the link kind (default `ethernet`) |
 | `match.mac`             | `aa:bb:cc:dd:ee:ff`                       | bind the alias to this NIC by MAC |
-| `match.node`            | node-identity string                     | bind the alias to this hardware-tree node |
+| `match.node`            | hex register base, e.g. `0xa003e00`      | bind the alias to the NIC at this bus location |
 | `ipv4.method`           | `static` \| `disabled`                   | IPv4 addressing (default `disabled`) |
 | `ipv4.address`          | `a.b.c.d/prefix`                         | the static IPv4 address (`static` only) |
 | `ipv4.gateway`          | `a.b.c.d`                                | the IPv4 default gateway (`static` only) |

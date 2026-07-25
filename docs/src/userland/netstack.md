@@ -114,15 +114,17 @@ registry, typed values, bounded fail-closed parser, and canonical render
 are the one `lib/netconfig` engine (`plans/NETWORK.md` §6.1). As with the
 stack-wide policy, `netstack` never reads it: the FS-capable device
 manager reads it post-unlock, maps each managed interface that carries a
-stable `match.mac` identity into a `NetInterfaceConfigMsg`, and delivers
-it over the `CAP_NET_ADMIN` admin endpoint. A managed interface with no
-`match.mac` cannot be bound to hardware by identity (`match.node` member
-binding is a later increment) and is surfaced loud (`devmgr` event
-`13_016`), never silently ignored.
+stable hardware identity — its `match.mac` (MAC) or `match.node` (bus
+location) — into a `NetInterfaceConfigMsg`, and delivers it over the
+`CAP_NET_ADMIN` admin endpoint. A managed interface carrying neither
+selector cannot be bound to hardware by identity and is surfaced loud
+(`devmgr` event `13_016`), never silently ignored.
 
-`netstack` locates the interface by its **stable MAC** — it is the only
-component holding each interface's MAC, from the driver's facts — and
-renames that interface to the admin-chosen alias, so an interface first
+`netstack` locates the interface by its **stable hardware identity** — the
+device MAC it holds from the driver's facts, or the hardware location the
+device manager recorded at bind time (the register-window base of the
+matched node, which a `match.node` selector names) — and renames that
+interface to the admin-chosen alias, so an interface first
 brought up under a derived `netN` alias becomes `wan`/`lan0` once its
 configuration is applied. The apply is **atomic per interface**: the whole
 message is validated (unicast addresses, an on-subnet IPv4 gateway, a
@@ -146,7 +148,8 @@ a direct address/route assignment with a typed error — the bond owns
 them). Sockets and the routing table see one interface; member fan-out is
 internal to the interface table. The device manager derives from
 `network.conf` (a) an address-less rename for each member (matched by its
-`match.mac`), (b) a `NetBondConfigMsg` composing the bond over those
+hardware identity, `match.mac` or `match.node`), (b) a `NetBondConfigMsg`
+composing the bond over those
 members, and (c) the bond's own addressing (matched by the bond alias),
 delivering all three over the `CAP_NET_ADMIN` admin endpoint and retrying
 `NotFound` until each member has bound — so a bond composes once all its

@@ -297,6 +297,15 @@ pub enum NetstackRequest {
         endpoint_id: u64,
         /// The interface's admin-chosen alias, NUL-padded.
         iface: [u8; IF_NAME_LEN],
+        /// The stable hardware location of the NIC — the register-window
+        /// base of the device manager's matched hardware-tree node — or
+        /// `0` when none was resolved. The stack records it so a
+        /// [`NetInterfaceConfigMsg`] may bind an admin alias to *this*
+        /// physical device by [`NetInterfaceConfigMsg::match_node`],
+        /// independent of MAC or discovery order (the `<iface>.match.node`
+        /// key). Purely an identity the stack matches against; it is never
+        /// treated as an address the stack may touch.
+        node_location: u64,
     },
     /// Apply the stack-wide `net.*` policy (admin surface). Pushed once
     /// after the root unlock by an FS-capable component; the pure state
@@ -407,10 +416,15 @@ impl NetstackRequest {
                 put_u32(&mut out, 8, offset);
                 put_u16(&mut out, 12, limit);
             }
-            Self::BindDriver { endpoint_id, iface } => {
+            Self::BindDriver {
+                endpoint_id,
+                iface,
+                node_location,
+            } => {
                 put_u16(&mut out, 6, OP_BIND_DRIVER);
                 put_u64(&mut out, 8, endpoint_id);
                 out[16..32].copy_from_slice(&iface);
+                put_u64(&mut out, 32, node_location);
             }
             Self::ApplyNetworkSettings(settings) => {
                 put_u16(&mut out, 6, OP_APPLY_NET_SETTINGS);
@@ -523,14 +537,7 @@ impl NetstackRequest {
                 let (offset, limit) = paged_offset_limit(bytes)?;
                 Ok(Self::BondMembers { offset, limit })
             }
-            OP_BIND_DRIVER => {
-                reserved_zero(bytes, 32)?;
-                let endpoint_id = read_u64(bytes, 8);
-                let mut iface = [0u8; IF_NAME_LEN];
-                iface.copy_from_slice(&bytes[16..32]);
-                validate_if_name(&iface)?;
-                Ok(Self::BindDriver { endpoint_id, iface })
-            }
+            OP_BIND_DRIVER => decode_bind_driver(bytes),
             OP_APPLY_NET_SETTINGS => Ok(Self::ApplyNetworkSettings(decode_settings(bytes)?)),
             _ => Err(Errno::OutOfRange),
         }
@@ -569,6 +576,23 @@ fn paged_offset_limit(bytes: &[u8]) -> Result<(u32, u16), Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     Ok((offset, limit))
+}
+
+/// Decode the [`NetstackRequest::BindDriver`] operation block: the
+/// endpoint id (bytes 8..16), the interface name (16..32), and the NIC's
+/// hardware location (32..40), with a zero reserved tail past it.
+fn decode_bind_driver(bytes: &[u8]) -> Result<NetstackRequest, Errno> {
+    reserved_zero(bytes, 40)?;
+    let endpoint_id = read_u64(bytes, 8);
+    let mut iface = [0u8; IF_NAME_LEN];
+    iface.copy_from_slice(&bytes[16..32]);
+    validate_if_name(&iface)?;
+    let node_location = read_u64(bytes, 32);
+    Ok(NetstackRequest::BindDriver {
+        endpoint_id,
+        iface,
+        node_location,
+    })
 }
 
 /// Decode the [`NetworkSettings`] operation block (three wire booleans at
@@ -697,6 +721,14 @@ pub struct NetInterfaceConfigMsg {
     pub alias: [u8; IF_NAME_LEN],
     /// The stable MAC identity to match, or `None` to match by `alias`.
     pub match_mac: Option<[u8; 6]>,
+    /// The stable hardware-node location to match (a NIC's register-window
+    /// base, the [`NetstackRequest::BindDriver::node_location`] the stack
+    /// recorded), or `None` to match by [`Self::match_mac`]/`alias`. This
+    /// is the `<iface>.match.node` binding: it names *which physical device*
+    /// the alias belongs to by where it sits on the bus, independent of MAC
+    /// or discovery order. Purely an identity to match; never an address
+    /// the stack touches.
+    pub match_node: Option<u64>,
     /// The requested IPv4 addressing.
     pub ipv4: NetIpv4Config,
     /// The requested IPv6 addressing.
@@ -709,8 +741,9 @@ impl NetInterfaceConfigMsg {
     /// Encoded size on the wire: magic (4), version (2), `mac_present`
     /// (1), reserved (1), alias (16), mac (6), ipv4 {method (1), prefix
     /// (1), addr (4), `gw_present` (1), gw (4)}, ipv6 {method (1), prefix
-    /// (1), addr (16), `gw_present` (1), gw (16)}, mtu (2), and a zero
-    /// reserved tail.
+    /// (1), addr (16), `gw_present` (1), gw (16)}, mtu (2), `node_present`
+    /// (1, byte 78), reserved (1, byte 79), `match_node` (8, bytes 80..88),
+    /// and a zero reserved tail.
     pub const WIRE_LEN: usize = 96;
 
     /// Encode `self` little-endian.
@@ -758,6 +791,10 @@ impl NetInterfaceConfigMsg {
             }
         }
         put_u16(&mut out, 76, self.mtu);
+        if let Some(node) = self.match_node {
+            out[78] = 1;
+            put_u64(&mut out, 80, node);
+        }
         out
     }
 
@@ -782,9 +819,21 @@ impl NetInterfaceConfigMsg {
         if read_u16(bytes, 4) != NET_INTERFACE_CONFIG_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if bytes[7] != 0 || bytes[76 + 2..Self::WIRE_LEN].iter().any(|&b| b != 0) {
+        // Reserved bytes: the mac-present padding (7), the node-present
+        // padding (79), and the final tail (88..96) must all be zero.
+        if bytes[7] != 0 || bytes[79] != 0 || bytes[88..Self::WIRE_LEN].iter().any(|&b| b != 0) {
             return Err(Errno::BadMagic);
         }
+        let match_node = match bytes[78] {
+            0 => {
+                if bytes[80..88].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                None
+            }
+            1 => Some(read_u64(bytes, 80)),
+            _ => return Err(Errno::OutOfRange),
+        };
         let match_mac = match bytes[6] {
             0 => {
                 if bytes[24..30].iter().any(|&b| b != 0) {
@@ -808,6 +857,7 @@ impl NetInterfaceConfigMsg {
         Ok(Self {
             alias,
             match_mac,
+            match_node,
             ipv4,
             ipv6,
             mtu,
@@ -2171,10 +2221,38 @@ mod tests {
                 ipv6_enabled: true,
                 syncookies_always: false,
             }),
+            // Bind with no resolved hardware location.
+            NetstackRequest::BindDriver {
+                endpoint_id: 0x4E43_4841_4E00,
+                iface: name("net0"),
+                node_location: 0,
+            },
+            // Bind carrying a full-width hardware location (a >32-bit
+            // register base exercises the u64 field).
+            NetstackRequest::BindDriver {
+                endpoint_id: 0x4E43_4841_4E01,
+                iface: name("wan"),
+                node_location: 0x1_0a00_0000,
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn bind_driver_fails_closed_on_a_dirty_reserved_tail() {
+        let good = NetstackRequest::BindDriver {
+            endpoint_id: 7,
+            iface: name("net0"),
+            node_location: 0x0a00_0000,
+        }
+        .to_le_bytes();
+        assert_eq!(NetstackRequest::from_bytes(&good).map(|_| ()), Ok(()));
+        // A dirty byte in the reserved tail past the node location.
+        let mut bad = good;
+        bad[40] = 1;
+        assert_eq!(NetstackRequest::from_bytes(&bad), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -2184,6 +2262,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [10, 0, 2, 15],
                     prefix: 24,
@@ -2200,6 +2279,9 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("lan0"),
                 match_mac: None,
+                // Bound by hardware node, not MAC — a >32-bit register base
+                // exercises the full u64 width.
+                match_node: Some(0x1_0000_0000),
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
@@ -2208,6 +2290,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("eth9"),
                 match_mac: Some([0; 6]),
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [192, 168, 1, 5],
                     prefix: 32,
@@ -2233,6 +2316,7 @@ mod tests {
         let good = NetInterfaceConfigMsg {
             alias: name("wan"),
             match_mac: Some([1, 2, 3, 4, 5, 6]),
+            match_node: None,
             ipv4: NetIpv4Config::Static {
                 addr: [10, 0, 0, 1],
                 prefix: 24,
@@ -2318,6 +2402,27 @@ mod tests {
             NetInterfaceConfigMsg::from_bytes(&bad),
             Err(Errno::BadMagic)
         );
+        // A node-present flag that is neither 0 nor 1.
+        let mut bad = good;
+        bad[78] = 2;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        // A node location set behind a clear present-flag.
+        let mut bad = good;
+        bad[80] = 1;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A dirty node-present padding byte (offset 79).
+        let mut bad = good;
+        bad[79] = 1;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -2327,6 +2432,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [224, 0, 0, 1],
                     prefix: 24,
@@ -2343,6 +2449,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [10, 0, 0, 1],
                     prefix: 24,
@@ -2359,6 +2466,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 500,
@@ -2371,6 +2479,7 @@ mod tests {
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Static {
                     addr: {

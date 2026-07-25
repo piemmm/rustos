@@ -70,7 +70,7 @@ fn routed_stack() -> Netstack {
     let mut stack = Netstack::new();
     let now = Duration64::from_secs(0);
     stack
-        .add_interface(if_name(), NetIfKind::Ethernet, facts(), [0; 8], 7, now)
+        .add_interface(if_name(), NetIfKind::Ethernet, facts(), [0; 8], 7, 0, now)
         .expect("add interface");
     let mut addr = [0u8; 16];
     addr[..4].copy_from_slice(&[10, 0, 2, 15]);

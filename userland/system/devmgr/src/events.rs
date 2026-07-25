@@ -86,11 +86,11 @@ pub const NETWORK_IFCONFIG_DELIVERED: EventId = EventId(13_014);
 /// expected retry state). Retried on the next generation bump — never an
 /// error (fail-soft). Recorded at `Warn`.
 pub const NETWORK_IFCONFIG_DELIVERY_FAILED: EventId = EventId(13_015);
-/// A managed non-bond interface in `network.conf` declares no `match.mac`
-/// identity selector, so the device manager cannot bind it to hardware by
-/// stable identity (`match.node` binding is a later increment). The
-/// interface is skipped and the operator's configuration error is surfaced
-/// loud, once. Recorded at `Warn`.
+/// A managed ethernet interface in `network.conf` declares neither a
+/// `match.mac` nor a `match.node` identity selector, so the device manager
+/// cannot bind it to hardware by stable identity. The interface is skipped
+/// and the operator's configuration error is surfaced loud, once. Recorded
+/// at `Warn`.
 pub const NETWORK_IFCONFIG_REJECTED: EventId = EventId(13_016);
 
 #[cfg(test)]

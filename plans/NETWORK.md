@@ -1603,12 +1603,43 @@ at every layer.
   layer. Docs: `abi/sysinfo.md`, `userland/{netstack,networking}.md`,
   `security/network.md`.
 
-#### N9b-3-2-β-2-ii — `match.node` binding + live QEMU verticals `[ ]`
-- `match.node` member binding (tree node→device resolution for a member
-  declared by `match.node` rather than `match.mac`).
-- Tests: the bond-failover QEMU vertical (kill a member mid-TCP-transfer,
-  assert the flow survives within the monitor budget) and a live
-  static-addressing vertical.
+#### N9b-3-2-β-2-ii-a — `match.node` interface binding (host-gate-green) `[x]`
+An interface (plain or bond member) can be bound to hardware by its stable
+**bus location** — `<iface>.match.node`, the register-window base of its
+hardware-tree node — as an alternative to `match.mac`, independent of MAC
+and discovery order. The identity is resolved where it is known, symmetric
+with the MAC path, so `netstack` stays free of node ids and the binding is
+order-independent (retried like `match.mac` until the interface appears).
+- **`lib/netconfig`**: `match_node` is a typed `Option<u64>` parsed from a
+  mandatory-`0x` hex, non-zero (a hardware *location*; `0` is the "no
+  location" sentinel), round-tripping to canonical lowercase hex.
+  `validate_interface` forbids it on a non-ethernet kind and forbids it
+  together with `match.mac` (one identity, never two). The dead
+  `MAX_NODE_MATCH_LEN` was removed.
+- **ABI** (`lib/abi/net_ipc`): `NetstackRequest::BindDriver` gains
+  `node_location: u64` (the location devmgr resolved for the bound NIC);
+  `NetInterfaceConfigMsg` gains an optional `match_node: u64` selector
+  (present-flag + u64 in the reserved tail). Encode/decode/validate +
+  round-trip/fail-closed tests extended (dirty node tail/padding, bad
+  present-flag, full u64 width). Not in the C-ABI surface.
+- **devmgr**: `netbind::netchan_node_location` resolves a `netchan`'s
+  **parent** NIC node's lowest register-window base and threads it into
+  `bind_driver`; `netcfg::interface_configs_from_config` accepts a MAC *or*
+  node identity (emitting `match_node`, no longer rejecting a node-bound
+  interface). Host tests at both layers.
+- **netstack**: `Interface` records the `node_location` from `BindDriver`;
+  `apply_interface_config` locates the interface MAC → node-location →
+  alias (a node selector never matches an unresolved `0` location). Host
+  test added.
+- Docs: `lib/netconfig.md`, `userland/netstack.md`, code rustdoc; `devmgr`
+  event `13_016` doc broadened.
+
+#### N9b-3-2-β-2-ii-b — live QEMU verticals `[ ]`
+- The bond-failover QEMU vertical (kill a member mid-TCP-transfer, assert
+  the flow survives within the monitor budget) and a live static-addressing
+  vertical (plant a `network.conf` binding an interface by `match.node`,
+  prove it comes up on-wire under the admin alias). Heed the "always times
+  out = stuck-state bug, diagnose it" reminder.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

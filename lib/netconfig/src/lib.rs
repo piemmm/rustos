@@ -80,9 +80,6 @@ pub const MAX_BOND_MEMBERS: usize = tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS;
 /// familiar Unix `IFNAMSIZ - 1` bound; a longer name fails closed.
 pub const MAX_IFACE_NAME_LEN: usize = 15;
 
-/// Maximum length, in bytes, of a `<iface>.match.node` node-identity value.
-pub const MAX_NODE_MATCH_LEN: usize = 128;
-
 /// Smallest MTU the store accepts: the IPv6 minimum link MTU (RFC 8200).
 /// A dual-stack interface must carry IPv6, so no smaller MTU is meaningful.
 pub const MIN_MTU: u16 = 1280;
@@ -404,8 +401,8 @@ pub enum IfaceKey {
     Kind,
     /// `match.mac` — bind this alias to the NIC with this MAC.
     MatchMac,
-    /// `match.node` — bind this alias to the hardware-tree node of this
-    /// stable identity.
+    /// `match.node` — bind this alias to the NIC at this stable hardware
+    /// location (its register-window base, in hex).
     MatchNode,
     /// `ipv4.method` — how the interface obtains its IPv4 address.
     Ipv4Method,
@@ -591,8 +588,12 @@ pub struct InterfaceConfig {
     pub kind: Option<IfaceKind>,
     /// `<iface>.match.mac`.
     pub match_mac: Option<MacAddr>,
-    /// `<iface>.match.node`.
-    pub match_node: Option<String>,
+    /// `<iface>.match.node` — the stable **hardware location** the alias
+    /// binds to: a NIC's register-window base (the device's fixed position
+    /// on the bus), independent of MAC or discovery order. Written in hex
+    /// (`0x…`); `netstack` matches it against the location the device
+    /// manager resolved from the matched hardware-tree node.
+    pub match_node: Option<u64>,
     /// `<iface>.ipv4.method` (default [`Ipv4Method::Disabled`]).
     pub ipv4_method: Option<Ipv4Method>,
     /// `<iface>.ipv4.address`.
@@ -680,7 +681,7 @@ impl InterfaceConfig {
         Some(match key {
             IfaceKey::Kind => String::from(self.kind?.as_str()),
             IfaceKey::MatchMac => self.match_mac?.render(),
-            IfaceKey::MatchNode => self.match_node.clone()?,
+            IfaceKey::MatchNode => render_node_match(self.match_node?),
             IfaceKey::Ipv4Method => String::from(self.ipv4_method?.as_str()),
             IfaceKey::Ipv4Address => self.ipv4_address?.render(),
             IfaceKey::Ipv4Gateway => render_display(&self.ipv4_gateway?),
@@ -713,10 +714,7 @@ impl InterfaceConfig {
                 self.match_mac = Some(MacAddr::parse(value).ok_or(ConfigError::InvalidValue)?);
             }
             IfaceKey::MatchNode => {
-                if value.is_empty() || value.len() > MAX_NODE_MATCH_LEN {
-                    return Err(ConfigError::InvalidValue);
-                }
-                self.match_node = Some(String::from(value));
+                self.match_node = Some(parse_node_match(value)?);
             }
             IfaceKey::Ipv4Method => {
                 self.ipv4_method =
@@ -806,6 +804,38 @@ fn parse_bounded_u32(text: &str, min: u32, max: u32) -> Result<u32, ConfigError>
         return Err(ConfigError::InvalidValue);
     }
     Ok(value)
+}
+
+/// Parse a `<iface>.match.node` value: a NIC's stable register-window base
+/// written in hex with a mandatory `0x`/`0X` prefix and 1..=16 hex digits.
+///
+/// The value is a hardware *location*, so `0` is not a valid identity (it is
+/// the [`NetstackRequest::BindDriver`](tairix_abi::net_ipc::NetstackRequest::BindDriver)
+/// "no location resolved" sentinel) and is refused. Fail closed on a missing
+/// prefix, an empty or over-long digit run, or a non-hex digit — never a
+/// silent truncation or a decimal guess.
+fn parse_node_match(value: &str) -> Result<u64, ConfigError> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .ok_or(ConfigError::InvalidValue)?;
+    if digits.is_empty() || digits.len() > 16 {
+        return Err(ConfigError::InvalidValue);
+    }
+    let base = u64::from_str_radix(digits, 16).map_err(|_| ConfigError::InvalidValue)?;
+    if base == 0 {
+        return Err(ConfigError::InvalidValue);
+    }
+    Ok(base)
+}
+
+/// Render a `<iface>.match.node` value canonically: lowercase hex with a
+/// `0x` prefix (the exact form [`parse_node_match`] round-trips).
+fn render_node_match(base: u64) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    let _ = write!(out, "0x{base:x}");
+    out
 }
 
 /// Parse a `,`-separated bond member list into validated, distinct names.
@@ -959,6 +989,18 @@ impl NetworkConfig {
         let is_bond = iface.kind() == IfaceKind::Bond;
 
         if iface.has_bond_key() && !is_bond {
+            return Err(ConfigError::InconsistentInterface);
+        }
+        // An interface's hardware identity is exactly one thing: match by
+        // MAC or by hardware node, never both (an ambiguous identity is
+        // refused, not silently disambiguated).
+        if iface.match_mac.is_some() && iface.match_node.is_some() {
+            return Err(ConfigError::InconsistentInterface);
+        }
+        // Only a physical NIC has a hardware location. A bond is composed
+        // in software and the loopback is the stack's own, so neither may
+        // be bound by node.
+        if iface.match_node.is_some() && iface.kind() != IfaceKind::Ethernet {
             return Err(ConfigError::InconsistentInterface);
         }
         if is_bond {
@@ -1135,12 +1177,55 @@ wan.mtu 9000
 
     #[test]
     fn defaults_apply_to_unset_keys() {
-        let config = NetworkConfig::parse("lan.match.node virtio-net@0\n").expect("parses");
+        let config = NetworkConfig::parse("lan.match.node 0xa000000\n").expect("parses");
         let lan = config.interface("lan").expect("lan");
         assert_eq!(lan.kind(), IfaceKind::Ethernet);
         assert_eq!(lan.ipv4_method(), Ipv4Method::Disabled);
         assert_eq!(lan.ipv6_method(), Ipv6Method::Slaac);
-        assert_eq!(lan.match_node.as_deref(), Some("virtio-net@0"));
+        assert_eq!(lan.match_node, Some(0x0a00_0000));
+    }
+
+    #[test]
+    fn match_node_parses_hex_and_round_trips_and_fails_closed() {
+        // A managed interface bound by its hardware location renders back
+        // to the canonical lowercase-hex form (round-trip exact).
+        let text = "wan.match.node 0xA000000\n";
+        let config = NetworkConfig::parse(text).expect("parses");
+        assert_eq!(
+            config.interface("wan").unwrap().match_node,
+            Some(0xa00_0000)
+        );
+        assert_eq!(
+            NetworkConfig::parse(&config.render()).unwrap().render(),
+            config.render()
+        );
+        assert!(config.render().contains("wan.match.node 0xa000000"));
+        // Fail closed: missing prefix, empty/over-long digits, non-hex, or
+        // the zero sentinel.
+        assert_eq!(err("wan.match.node a000000\n"), ConfigError::InvalidValue);
+        assert_eq!(err("wan.match.node 0x\n"), ConfigError::InvalidValue);
+        assert_eq!(
+            err("wan.match.node 0x10000000000000000\n"),
+            ConfigError::InvalidValue
+        );
+        assert_eq!(err("wan.match.node 0xgg\n"), ConfigError::InvalidValue);
+        assert_eq!(err("wan.match.node 0x0\n"), ConfigError::InvalidValue);
+    }
+
+    #[test]
+    fn match_node_is_rejected_on_a_non_ethernet_or_alongside_a_mac() {
+        // A bond has no hardware of its own, so it cannot be bound by node.
+        assert_eq!(
+            err("bond0.kind bond\nbond0.bond.members eth0,eth1\n\
+                 bond0.match.node 0xa000000\neth0.match.mac 52:54:00:00:00:01\n\
+                 eth1.match.mac 52:54:00:00:00:02\n"),
+            ConfigError::InconsistentInterface
+        );
+        // An interface's identity is one thing: MAC or node, never both.
+        assert_eq!(
+            err("wan.match.mac 52:54:00:12:34:56\nwan.match.node 0xa000000\n"),
+            ConfigError::InconsistentInterface
+        );
     }
 
     #[test]

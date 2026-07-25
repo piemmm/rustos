@@ -203,6 +203,7 @@ fn managed_stack() -> Netstack {
             facts(MAC_A),
             IID_A,
             7,
+            0,
             t(0),
         )
         .expect("add interface");
@@ -549,6 +550,7 @@ fn interface_list_names_the_managed_interfaces() {
             facts(MAC_B),
             IID_B,
             9,
+            0,
             t(0),
         )
         .expect("second interface");
@@ -638,6 +640,7 @@ fn duplicate_interface_aliases_are_refused() {
             facts(MAC_B),
             IID_B,
             9,
+            0,
             t(0)
         ),
         Err(Errno::AlreadyExists)
@@ -2364,6 +2367,7 @@ fn interface_config_matches_by_mac_and_renames() {
     let msg = NetInterfaceConfigMsg {
         alias: name("lan0"),
         match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
         ipv4: NetIpv4Config::Static {
             addr: [10, 0, 2, 15],
             prefix: 24,
@@ -2383,11 +2387,64 @@ fn interface_config_matches_by_mac_and_renames() {
 }
 
 #[test]
+fn interface_config_matches_by_hardware_node_and_renames() {
+    // An interface bound at a known hardware location (its register-window
+    // base), auto-named `net0` at bind, is renamed by a `match.node`
+    // configuration that names that same location — independent of MAC.
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("net0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            0x0a00_3e00,
+            t(0),
+        )
+        .expect("net0");
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        match_node: Some(0x0a00_3e00),
+        ipv4: NetIpv4Config::Static {
+            addr: [10, 0, 2, 15],
+            prefix: 24,
+            gateway: None,
+        },
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    stack.apply_interface_config(&msg, t(1)).expect("applied");
+    assert!(stack.interface(name("net0")).is_none());
+    let iface = stack.interface(name("wan")).expect("renamed to wan");
+    assert_eq!(
+        iface.stack().iface().ipv4(),
+        Some((Ipv4Addr::new(10, 0, 2, 15), 24))
+    );
+    // A configuration naming an unresolved hardware location matches no
+    // interface (fail closed) rather than falling back to the alias.
+    let miss = NetInterfaceConfigMsg {
+        alias: name("lan"),
+        match_mac: None,
+        match_node: Some(0xdead_beef),
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    assert_eq!(
+        stack.apply_interface_config(&miss, t(1)),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
 fn interface_config_applies_by_alias_and_overrides_mtu() {
     let mut stack = managed_stack();
     let msg = NetInterfaceConfigMsg {
         alias: name("wan"),
         match_mac: None,
+        match_node: None,
         ipv4: NetIpv4Config::Static {
             addr: [192, 168, 1, 10],
             prefix: 24,
@@ -2411,6 +2468,7 @@ fn interface_config_assigns_a_static_ipv6_address() {
     let msg = NetInterfaceConfigMsg {
         alias: name("wan"),
         match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Static {
             addr: addr.octets(),
@@ -2440,6 +2498,7 @@ fn interface_config_disables_both_families() {
             &NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [10, 0, 0, 2],
                     prefix: 24,
@@ -2456,6 +2515,7 @@ fn interface_config_disables_both_families() {
             &NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 0,
@@ -2474,6 +2534,7 @@ fn interface_config_not_found_for_an_unknown_mac() {
     let msg = NetInterfaceConfigMsg {
         alias: name("wan"),
         match_mac: Some([0xde, 0xad, 0xbe, 0xef, 0, 0]),
+        match_node: None,
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
@@ -2493,6 +2554,7 @@ fn interface_config_leaves_state_untouched_on_a_refusal() {
             &NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [10, 0, 2, 15],
                     prefix: 24,
@@ -2509,6 +2571,7 @@ fn interface_config_leaves_state_untouched_on_a_refusal() {
     let bad = NetInterfaceConfigMsg {
         alias: name("wan"),
         match_mac: None,
+        match_node: None,
         ipv4: NetIpv4Config::Static {
             addr: [10, 0, 2, 20],
             prefix: 24,
@@ -2540,6 +2603,7 @@ fn interface_config_is_idempotent() {
     let msg = NetInterfaceConfigMsg {
         alias: name("wan"),
         match_mac: None,
+        match_node: None,
         ipv4: NetIpv4Config::Static {
             addr: [10, 0, 2, 15],
             prefix: 24,
@@ -2578,6 +2642,7 @@ fn interface_config_rejects_an_alias_already_taken() {
             facts(MAC_A),
             IID_A,
             7,
+            0,
             t(0),
         )
         .expect("wan");
@@ -2588,6 +2653,7 @@ fn interface_config_rejects_an_alias_already_taken() {
             facts(MAC_B),
             IID_B,
             9,
+            0,
             t(0),
         )
         .expect("eth1");
@@ -2595,6 +2661,7 @@ fn interface_config_rejects_an_alias_already_taken() {
     let msg = NetInterfaceConfigMsg {
         alias: name("eth1"),
         match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
@@ -2666,6 +2733,7 @@ fn two_member_bond() -> Netstack {
             facts(MAC_A),
             IID_A,
             7,
+            0,
             t(0),
         )
         .expect("eth0");
@@ -2676,6 +2744,7 @@ fn two_member_bond() -> Netstack {
             facts(MAC_B),
             IID_B,
             9,
+            0,
             t(0),
         )
         .expect("eth1");
@@ -2695,6 +2764,7 @@ fn two_member_bond() -> Netstack {
             &NetInterfaceConfigMsg {
                 alias: name("bond0"),
                 match_mac: None,
+                match_node: None,
                 ipv4: NetIpv4Config::Static {
                     addr: [10, 0, 2, 15],
                     prefix: 24,
@@ -2721,6 +2791,7 @@ fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
             facts(MAC_A),
             IID_A,
             7,
+            0,
             t(0),
         )
         .expect("eth0");
@@ -2731,6 +2802,7 @@ fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
             facts(MAC_B),
             IID_B,
             9,
+            0,
             t(0),
         )
         .expect("eth1");
@@ -2767,6 +2839,7 @@ fn a_bond_config_defers_until_all_members_are_present() {
             facts(MAC_A),
             IID_A,
             7,
+            0,
             t(0),
         )
         .expect("eth0");
@@ -2825,6 +2898,7 @@ fn a_bond_member_refuses_direct_addressing() {
     let msg = NetInterfaceConfigMsg {
         alias: name("eth0"),
         match_mac: None,
+        match_node: None,
         ipv4: NetIpv4Config::Static {
             addr: [10, 0, 0, 2],
             prefix: 24,
@@ -2984,6 +3058,7 @@ fn a_bond_reload_changes_primary_and_membership() {
             facts(MAC_C),
             IID_C,
             11,
+            0,
             t(3),
         )
         .expect("eth2");
@@ -3021,7 +3096,15 @@ fn a_bond_alias_cannot_shadow_a_non_bond_interface() {
         ("eth2", MAC_C, IID_C),
     ] {
         stack
-            .add_interface(name(alias), NetIfKind::Ethernet, facts(mac), iid, 7, t(0))
+            .add_interface(
+                name(alias),
+                NetIfKind::Ethernet,
+                facts(mac),
+                iid,
+                7,
+                0,
+                t(0),
+            )
             .expect("iface");
     }
     // `bond0` already names a plain Ethernet interface.
