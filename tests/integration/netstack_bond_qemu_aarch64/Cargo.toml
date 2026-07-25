@@ -1,0 +1,42 @@
+[package]
+name = "tairix-test-netstack-bond-qemu-aarch64"
+description = "plans/NETWORK.md N9b-3-2-β-2-ii-b-bond QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board against the bond-net-root disk (whose read-only /System store carries the kernel-signed virtio-net driver bundle and a planted /System/Settings/Network/network.conf that binds two NICs by match.mac as the members of one active-backup bond carrying a static IPv6 address) with two virtio-net-devices attached and the harness-side bond peer serving both wires on the QEMU dgram netdevs. Proves live link-aggregation failover end to end: devmgr autoloads the NIC driver into a process per NIC, reads the planted network.conf, and netstack composes the active-backup bond over the two members and assigns it the static IPv6 address; the harness drops the primary member's carrier over the QEMU monitor (set_link net0 off), the driver's virtio config-change interrupt makes netstack fail the bond over to the surviving member, and the guest keeps answering the peer's echo campaign over the second wire. PASS once the log sink has seen netstack BOND_CONFIG_APPLIED, netstack BOND_FAILOVER, and a netstack INBOUND_ECHO_SERVED observed AFTER the failover — the last gating exit so the guest stays alive until a frame has been served post-failover; the peer's own campaign verdict (a reply at the bond's static address) is required too, so neither side can pass alone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-netstack-bond-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline against the
+# bond-net-root disk carrying the signed virtio-net driver bundle and a
+# planted bond network.conf, and prove the live link-aggregation failover
+# path end to end" integration test. It reuses the entire production aarch64
+# boot pipeline through `tairix-kernel`'s library half (`boot_aarch64::boot`)
+# and only swaps the log sink to report PASS on the bond witnesses
+# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md` §5.4 —
+# fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The netstack audit vocabulary: the `BOND_CONFIG_APPLIED`, `BOND_FAILOVER`,
+# and `INBOUND_ECHO_SERVED` event ids the witnesses key on — the shared
+# definitions, never magic numbers (`AGENTS.md` §2.2). netstack is pulled
+# `default-features = false` so its `program` feature (the `tairix-rt`
+# freestanding runtime) never enters this bin's graph.
+tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

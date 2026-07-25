@@ -230,6 +230,84 @@ wan.ipv6.method static
 wan.ipv6.address fd00::2/64
 ";
 
+// --- Bond-failover vertical (N9b-3-2-β-2-ii-b-bond) --------------------
+//
+// The bond vertical proves live link-aggregation failover end to end: the
+// guest binds *two* virtio-net NICs as the members of one active-backup
+// bond (`wan`), assigns the bond a static IPv6 address, and answers the
+// host peer's echo campaign over whichever member is active. Mid-flow the
+// harness drops the active member's carrier over the QEMU monitor
+// (`set_link net0 off`); the driver's virtio config-change interrupt makes
+// `netstack` fail the bond over to the surviving member, and the guest keeps
+// answering — now over the second wire. The peer serves *both* wires (it
+// replies on whichever a frame arrived on and campaigns on both), so it
+// follows the active member across the failover without knowing which is
+// live.
+
+/// The second NIC's pinned MAC (the first is [`GUEST_MAC`]). The bond's
+/// two members are bound to the two NICs by these MACs
+/// (`<member>.match.mac`), so the config selects each member's hardware by
+/// stable identity, never discovery order.
+pub const GUEST_MAC_2: [u8; 6] = [0x52, 0x54, 0x00, 0x00, 0x00, 0x16];
+
+/// [`GUEST_MAC_2`] rendered as the QEMU `mac=` device-string value.
+pub const GUEST_MAC_2_STR: &str = "52:54:00:00:00:16";
+
+/// The admin alias of the bond interface the bond vertical's `network.conf`
+/// composes over its two members.
+pub const BOND_IFACE_ALIAS: &str = "wan";
+
+/// The alias of the bond's **primary** member — the member bound to
+/// [`GUEST_MAC`], attached as the QEMU netdev `net0`, so the harness knows
+/// which member to fail over by dropping `net0`'s carrier.
+pub const BOND_PRIMARY_MEMBER_ALIAS: &str = "m0";
+
+/// The alias of the bond's backup member — bound to [`GUEST_MAC_2`],
+/// attached as the QEMU netdev `net1`.
+pub const BOND_BACKUP_MEMBER_ALIAS: &str = "m1";
+
+/// The QEMU netdev id of the bond's **primary** member, the one the harness
+/// drops mid-flow to force failover (`set_link net0 off`). `net{i}` is the
+/// runner's id for net device `i`; the primary member ([`GUEST_MAC`]) is
+/// attached first, so it is `net0`.
+pub const BOND_PRIMARY_NETDEV_ID: &str = "net0";
+
+/// The bond member-health monitor interval (`bond.monitor-interval`), in
+/// milliseconds: the anti-flap up-delay a recovered member waits before
+/// readmission. Short so the vertical does not linger, but the vertical
+/// never depends on readmission — it kills the primary and stays failed
+/// over — so the exact value only bounds how long a (never-exercised)
+/// recovery would take.
+pub const BOND_MONITOR_INTERVAL_MS: u32 = 200;
+
+/// The `/System/Settings/Network/network.conf` the bond-failover vertical
+/// plants on its read-only `/System` volume.
+///
+/// It declares the two members ([`BOND_PRIMARY_MEMBER_ALIAS`],
+/// [`BOND_BACKUP_MEMBER_ALIAS`]) bound to the two NICs by MAC, composes the
+/// active-backup bond [`BOND_IFACE_ALIAS`] over them with the primary member
+/// preferred, and gives the bond the static IPv6 [`GUEST_STATIC_V6`] (the
+/// same `fd00::/64` the static vertical uses, so the peer reaches it without
+/// a router). The literals are cross-checked against the constants by
+/// `bond_network_conf_matches_the_wire_constants`, so the config and the
+/// addresses/MACs the peer and guest use can never drift.
+pub const BOND_NETWORK_CONF: &str = "\
+# TAIRiX bond-failover QEMU vertical network.conf.
+# Two NICs bound by MAC as the members of one active-backup bond, which
+# carries a static IPv6 address; the vertical drops the primary member's
+# carrier mid-flow and proves the flow survives on the backup.
+m0.match.mac 52:54:00:00:00:15
+m1.match.mac 52:54:00:00:00:16
+wan.kind bond
+wan.bond.members m0,m1
+wan.bond.mode active-backup
+wan.bond.primary m0
+wan.bond.monitor-interval 200
+wan.ipv4.method disabled
+wan.ipv6.method static
+wan.ipv6.address fd00::2/64
+";
+
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
@@ -352,6 +430,69 @@ mod tests {
         assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
         assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Static);
         let v6 = iface.ipv6_address.expect("a static IPv6 address is set");
+        assert_eq!(v6.addr, GUEST_STATIC_V6);
+        assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+    }
+
+    /// The planted bond `network.conf` and the wire MAC/address/alias
+    /// constants the host peer and guest use are one source of truth: parse
+    /// the config through the real `lib/netconfig` engine (the same parser
+    /// `devmgr` runs) and confirm the two members bind the two NIC MACs, the
+    /// bond composes them active-backup with the primary member preferred,
+    /// and the bond carries the shared static IPv6 address. Drift fails here,
+    /// long before a QEMU boot, and a config the engine would reject never
+    /// reaches a fixture.
+    #[test]
+    fn bond_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(BOND_NETWORK_CONF)
+            .expect("the planted bond network.conf parses and validates");
+
+        // The two members bind the two NICs by MAC (never discovery order).
+        let m0 = config
+            .interface(BOND_PRIMARY_MEMBER_ALIAS)
+            .expect("the config declares the primary member");
+        assert_eq!(m0.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            m0.match_mac.expect("primary member bound by MAC").0,
+            GUEST_MAC,
+            "the primary member binds the first NIC's MAC"
+        );
+        let m1 = config
+            .interface(BOND_BACKUP_MEMBER_ALIAS)
+            .expect("the config declares the backup member");
+        assert_eq!(
+            m1.match_mac.expect("backup member bound by MAC").0,
+            GUEST_MAC_2,
+            "the backup member binds the second NIC's MAC"
+        );
+
+        // The bond composes them active-backup, primary preferred, with the
+        // shared static IPv6 address the peer reaches it at.
+        let bond = config
+            .interface(BOND_IFACE_ALIAS)
+            .expect("the config declares the bond interface");
+        assert_eq!(bond.kind(), tairix_netconfig::IfaceKind::Bond);
+        let members = bond.members();
+        assert_eq!(members.len(), 2, "the bond enrols exactly two members");
+        assert_eq!(members[0].as_str(), BOND_PRIMARY_MEMBER_ALIAS);
+        assert_eq!(members[1].as_str(), BOND_BACKUP_MEMBER_ALIAS);
+        assert_eq!(
+            bond.bond_mode,
+            Some(tairix_netconfig::BondMode::ActiveBackup)
+        );
+        assert_eq!(
+            bond.bond_primary.as_deref(),
+            Some(BOND_PRIMARY_MEMBER_ALIAS)
+        );
+        assert_eq!(
+            bond.bond_monitor_interval_ms,
+            Some(BOND_MONITOR_INTERVAL_MS)
+        );
+        assert_eq!(bond.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(bond.ipv6_method(), tairix_netconfig::Ipv6Method::Static);
+        let v6 = bond
+            .ipv6_address
+            .expect("the bond carries a static IPv6 address");
         assert_eq!(v6.addr, GUEST_STATIC_V6);
         assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
     }

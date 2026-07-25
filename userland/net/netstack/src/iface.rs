@@ -74,6 +74,23 @@ pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<TxFrame>)>;
 /// interface's bound driver channel (keyed by name).
 pub type IfaceRename = Option<([u8; IF_NAME_LEN], [u8; IF_NAME_LEN])>;
 
+/// What one [`Netstack::service_interface`] pump produced.
+///
+/// The engine events the pump routes to the socket layer, plus the
+/// interface's live link state **if it changed** since the last pump.
+/// The driver reports its link on every doorbell (a virtio config-change
+/// interrupt woke the stack for exactly this), and a change is the sole
+/// live source of a bond failover: the service layer feeds it to
+/// [`Netstack::on_member_link_change`], which drives the bond and returns
+/// the presence re-announcement to transmit.
+pub struct ServiceOutcome {
+    /// The typed engine events the pump reported.
+    pub events: Vec<StackEvent>,
+    /// The interface's new link state, `Some` only when it differs from
+    /// the state recorded before this pump.
+    pub link_change: Option<LinkState>,
+}
+
 /// One managed interface: its admin-chosen alias, link kind, and the
 /// per-interface dual-stack protocol engine.
 pub struct Interface {
@@ -900,7 +917,9 @@ impl Netstack {
     /// never touched across a doorbell, so the call boundary is the whole
     /// synchronisation.
     ///
-    /// Returns the typed [`StackEvent`]s the engine reported.
+    /// Returns the pump's [`ServiceOutcome`]: the typed [`StackEvent`]s the
+    /// engine reported, plus the interface's live link state if the driver's
+    /// service report showed it changed since the last pump.
     ///
     /// # Errors
     ///
@@ -912,7 +931,7 @@ impl Netstack {
         name: [u8; IF_NAME_LEN],
         fs: &mut F,
         now: Duration64,
-    ) -> Result<Vec<StackEvent>, Errno> {
+    ) -> Result<ServiceOutcome, Errno> {
         let channel_index = self.find(name).ok_or(Errno::NotFound)?;
         // A member NIC has no stack of its own: its frames flow through the
         // bond's stack (the bond owns the addresses/routes). Its replies
@@ -950,7 +969,9 @@ impl Netstack {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             queue_frames(&mut rings, &out.frames);
         }
-        fs.service()?;
+        // The driver stamps its live link on every service report; keep the
+        // latest across both doorbells of this pump.
+        let mut reported_link = fs.service()?.link;
 
         // Feed delivered frames through the engine; its replies join
         // the TX ring. Bounded by the ring's slot count per pass — a
@@ -981,13 +1002,22 @@ impl Netstack {
             }
         }
         if replied {
-            fs.service()?;
+            reported_link = fs.service()?.link;
         }
         // Snapshot the post-pump counters for the throughput meter. Cheap
         // and self-throttling: the meter drops a sample taken within its
         // sampling gap of the last.
         iface.rates.record(now, rate_counters_of(&iface.stack));
-        Ok(events)
+        // A link change on the serviced NIC (channel) — not the stack-
+        // target — is what a bond failover keys on; compare against the
+        // last recorded state. `iface`'s borrow has ended (its last use is
+        // above), so re-indexing the serviced channel entry is sound.
+        let link_change =
+            (reported_link != interfaces[channel_index].facts.link).then_some(reported_link);
+        Ok(ServiceOutcome {
+            events,
+            link_change,
+        })
     }
 
     /// The earliest engine deadline across every interface, if any —
@@ -1282,6 +1312,41 @@ impl Netstack {
             _ => Vec::new(),
         };
         self.apply_bond_events(bond_index, &events, now)
+    }
+
+    /// Apply a live link-state change the service pump observed on a NIC's
+    /// driver report (a virtio config-change interrupt: a member unplugged,
+    /// a carrier lost or regained), returning any gratuitous presence
+    /// announcement the resulting bond path change requires (tagged by the
+    /// newly-selected member) for the caller to transmit.
+    ///
+    /// For a bond **member** this is the sole live source of a failover: it
+    /// reports the member's new link to the bond engine (via
+    /// [`set_member_link`](Self::set_member_link)), which fails the transmit
+    /// path over immediately on a down link and readmits a recovered member
+    /// after its anti-flap up-delay. For a **plain** interface it records
+    /// the link on the interface's own stack so egress selection stops
+    /// choosing a down link (no announcement to transmit). An unknown
+    /// interface is ignored.
+    pub fn on_member_link_change(
+        &mut self,
+        name: [u8; IF_NAME_LEN],
+        link: LinkState,
+        now: Duration64,
+    ) -> FrameBatch {
+        let Some(index) = self.find(name) else {
+            return FrameBatch::new();
+        };
+        if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
+            // `set_member_link` records the member's link and drives the
+            // bond's failover, returning the announcement frames.
+            return self.set_member_link(name, link, now);
+        }
+        // A plain interface: record the link on its facts and its own stack
+        // so a down link is no longer chosen for egress.
+        self.interfaces[index].facts.link = link;
+        self.interfaces[index].stack.set_link(link);
+        FrameBatch::new()
     }
 
     /// Advance every bond's failover health monitor (admitting members

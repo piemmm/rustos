@@ -422,8 +422,8 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
 // --- ServiceReport wire codec (the Service reply payload) ---------------
 
 /// Wire length of a [`ServiceReport`] payload: transmitted (4) + received
-/// (4) + `rx_ring_full` flag (1).
-const SERVICE_PAYLOAD_LEN: usize = 4 + 4 + 1;
+/// (4) + `rx_ring_full` flag (1) + link (1).
+const SERVICE_PAYLOAD_LEN: usize = 4 + 4 + 1 + 1;
 
 /// Wire length of the Service reply: a status word then the payload (zeroed
 /// on refusal).
@@ -456,6 +456,10 @@ pub fn encode_service_reply(
             put_u32(body, 0, report.transmitted);
             put_u32(body, 4, report.received);
             body[8] = u8::from(report.rx_ring_full);
+            body[9] = match report.link {
+                LinkState::Up => LINK_UP,
+                LinkState::Down => LINK_DOWN,
+            };
         }
         Err(err) => {
             let status = (-err.as_i32()).to_le_bytes();
@@ -495,10 +499,16 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
         1 => true,
         _ => return Err(Errno::OutOfRange),
     };
+    let link = match body[9] {
+        LINK_UP => LinkState::Up,
+        LINK_DOWN => LinkState::Down,
+        _ => return Err(Errno::OutOfRange),
+    };
     Ok(ServiceReport {
         transmitted,
         received,
         rx_ring_full,
+        link,
     })
 }
 
@@ -665,14 +675,25 @@ mod tests {
             transmitted: 3,
             received: 7,
             rx_ring_full: true,
+            link: LinkState::Down,
         };
         let ok = encode_service_reply(Ok(report));
         assert_eq!(decode_service_reply(&ok), Ok(report));
+        // The other link state also round-trips.
+        let up = ServiceReport {
+            link: LinkState::Up,
+            ..report
+        };
+        assert_eq!(decode_service_reply(&encode_service_reply(Ok(up))), Ok(up));
         let err = encode_service_reply(Err(Errno::BadMagic));
         assert_eq!(decode_service_reply(&err), Err(Errno::BadMagic));
         // A flag byte that is neither 0 nor 1 is refused.
         let mut bad = encode_service_reply(Ok(report));
         bad[4 + 8] = 2;
+        assert_eq!(decode_service_reply(&bad), Err(Errno::OutOfRange));
+        // A link byte that is neither LINK_UP nor LINK_DOWN is refused.
+        let mut bad = encode_service_reply(Ok(report));
+        bad[4 + 9] = 0x55;
         assert_eq!(decode_service_reply(&bad), Err(Errno::OutOfRange));
     }
 }

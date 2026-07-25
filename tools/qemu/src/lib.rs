@@ -382,6 +382,31 @@ pub struct Screendump {
     pub path: PathBuf,
 }
 
+/// A deterministic, marker-gated raw QEMU-monitor command.
+///
+/// The generic sibling of [`Screendump`] and [`KeyInjection`]: once
+/// [`ready_marker`](Self::ready_marker) has appeared the required number of
+/// times on the serial console, the runner sends [`command`](Self::command)
+/// verbatim over the QEMU human monitor exactly once. It exists for
+/// deterministic device-state changes a guest cannot make itself — the bond
+/// failover vertical uses `set_link net0 off` to drop the active member's
+/// carrier mid-flow (QEMU raises the guest's virtio config-change interrupt,
+/// the driver reports the link down, the bond fails over). Commands run
+/// strictly in declaration order, each once its own marker is seen; a run
+/// that exits before every command was sent fails the run, so an unreached
+/// marker is a test failure, never a silent skip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorCommand {
+    /// Serial-console substring the runner waits for before sending.
+    pub ready_marker: String,
+    /// How many times [`ready_marker`](Self::ready_marker) must appear
+    /// before the command is sent (minimum 1).
+    pub ready_occurrences: u32,
+    /// The human-monitor command line to send (no trailing newline; the
+    /// runner appends it).
+    pub command: String,
+}
+
 /// One step of a deterministic serial-input script for an interactive
 /// vertical.
 ///
@@ -540,6 +565,13 @@ pub struct Spec {
     /// strictly ordered and no dump can be truncated by the guest
     /// exiting. Empty takes no dump.
     pub screendumps: Vec<Screendump>,
+    /// When non-empty, send each raw QEMU-monitor command in order, each
+    /// once its readiness marker has appeared the required number of times
+    /// on the serial console. Used for deterministic device-state changes a
+    /// guest cannot make itself (e.g. `set_link net0 off` to fail a bond
+    /// member over mid-flow). A run that exits before every command was
+    /// sent fails.
+    pub monitor_commands: Vec<MonitorCommand>,
     /// How the session presents itself to a human. Only the aarch64
     /// argv honours it today.
     pub session: SessionKind,
@@ -580,6 +612,7 @@ impl Spec {
             pointer_script: Vec::new(),
             serial_input: Vec::new(),
             screendumps: Vec::new(),
+            monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -619,6 +652,7 @@ impl Spec {
             pointer_script: Vec::new(),
             serial_input: Vec::new(),
             screendumps: Vec::new(),
+            monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -643,6 +677,7 @@ impl Spec {
             pointer_script: Vec::new(),
             serial_input: Vec::new(),
             screendumps: Vec::new(),
+            monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -846,6 +881,27 @@ impl Spec {
         self
     }
 
+    /// Append one raw QEMU-monitor command, sent once `ready_marker` has
+    /// appeared `occurrences` times (clamped at `>= 1`) on the serial
+    /// console. Commands run strictly in declaration order; a run that
+    /// exits before every command was sent fails. Used for deterministic
+    /// device-state changes a guest cannot make itself (e.g.
+    /// `set_link net0 off` to fail a bond member over mid-flow).
+    #[must_use]
+    pub fn with_monitor_command(
+        mut self,
+        ready_marker: impl Into<String>,
+        occurrences: u32,
+        command: impl Into<String>,
+    ) -> Self {
+        self.monitor_commands.push(MonitorCommand {
+            ready_marker: ready_marker.into(),
+            ready_occurrences: occurrences.max(1),
+            command: command.into(),
+        });
+        self
+    }
+
     /// Present QEMU's default windowed display and attach human-driven
     /// virtio keyboard and mouse devices — the interactive session shape
     /// [`Runner::run_interactive`] launches for `cargo xtask run`.
@@ -900,7 +956,8 @@ impl Runner {
         let monitor = (spec.input_keyboard.is_some()
             || !spec.input_typing.is_empty()
             || !spec.pointer_script.is_empty()
-            || !spec.screendumps.is_empty())
+            || !spec.screendumps.is_empty()
+            || !spec.monitor_commands.is_empty())
         .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
@@ -1040,6 +1097,7 @@ fn supervise(
         typing_markers_seen,
         pointer_markers_seen,
         screendump_markers_seen,
+        monitor_markers_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
     let mut reader = Some(reader);
@@ -1079,14 +1137,7 @@ fn supervise(
     let mut serial_closed = false;
     let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
-            break 'run exit_reason(
-                spec,
-                serial_script.step,
-                injections.pointer_done(spec),
-                injections.typing_done(spec),
-                injections.screendumps_verified(spec),
-                status,
-            );
+            break 'run exit_reason(spec, serial_script.step, &injections, status);
         }
         if let Some(result) = completed_drain_result(&mut reader, "serial output") {
             serial_closed = result.is_ok();
@@ -1104,10 +1155,13 @@ fn supervise(
         if let Err(e) = injections.drive(
             spec,
             monitor,
-            &marker_seen,
-            &typing_markers_seen,
-            &pointer_markers_seen,
-            &screendump_markers_seen,
+            &InjectionMarkers {
+                key: &marker_seen,
+                typing: &typing_markers_seen,
+                pointer: &pointer_markers_seen,
+                screendump: &screendump_markers_seen,
+                monitor: &monitor_markers_seen,
+            },
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1359,6 +1413,10 @@ struct SerialDrain {
     /// has appeared the required number of times. Index-aligned with
     /// [`Spec::screendumps`].
     screendump_markers_seen: Vec<Arc<AtomicBool>>,
+    /// One flag per monitor command, set once that command's readiness
+    /// marker has appeared the required number of times. Index-aligned
+    /// with [`Spec::monitor_commands`].
+    monitor_markers_seen: Vec<Arc<AtomicBool>>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<io::Result<()>>,
 }
@@ -1389,6 +1447,11 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         .collect();
     let screendump_markers_seen: Vec<Arc<AtomicBool>> = spec
         .screendumps
+        .iter()
+        .map(|_| Arc::new(AtomicBool::new(false)))
+        .collect();
+    let monitor_markers_seen: Vec<Arc<AtomicBool>> = spec
+        .monitor_commands
         .iter()
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
@@ -1424,6 +1487,13 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(seen),
             ));
         }
+        for (m, seen) in spec.monitor_commands.iter().zip(&monitor_markers_seen) {
+            markers.push((
+                m.ready_marker.clone(),
+                m.ready_occurrences.max(1),
+                Arc::clone(seen),
+            ));
+        }
         std::thread::spawn(move || drain_stream(stdout, &captured, &markers))
     };
     SerialDrain {
@@ -1432,6 +1502,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         typing_markers_seen,
         pointer_markers_seen,
         screendump_markers_seen,
+        monitor_markers_seen,
         reader,
     }
 }
@@ -1603,6 +1674,9 @@ struct InjectionState {
     dump_step: usize,
     /// Progress of the current ([`Self::dump_step`]) screendump.
     dump_state: DumpState,
+    /// The raw monitor command to send next (`monitor_commands.len()`
+    /// once every command was sent, or when none was requested).
+    monitor_step: usize,
     conn: Option<UnixStream>,
 }
 
@@ -1626,6 +1700,23 @@ const TYPED_KEY_HOLD_MS: u32 = 40;
 /// redundant press the device would coalesce.
 const TYPED_KEY_INTERVAL: Duration = Duration::from_millis(80);
 
+/// The per-injection readiness flags [`InjectionState::drive`] consults on
+/// each poll tick, one slice per injection kind. Bundled into one borrow so
+/// `drive` takes the markers as a single argument rather than five, keeping
+/// its signature honest as injection kinds are added.
+struct InjectionMarkers<'a> {
+    /// The key-injection readiness flag ([`Spec::input_keyboard`]).
+    key: &'a AtomicBool,
+    /// Per typed-text-step flags ([`Spec::input_typing`]).
+    typing: &'a [Arc<AtomicBool>],
+    /// Per pointer-step flags ([`Spec::pointer_script`]).
+    pointer: &'a [Arc<AtomicBool>],
+    /// Per screendump flags ([`Spec::screendumps`]).
+    screendump: &'a [Arc<AtomicBool>],
+    /// Per monitor-command flags ([`Spec::monitor_commands`]).
+    monitor: &'a [Arc<AtomicBool>],
+}
+
 impl InjectionState {
     /// Each cursor starts "done" only through its list being empty, so
     /// [`Self::drive`] only ever acts on requested injections.
@@ -1639,6 +1730,7 @@ impl InjectionState {
             next_typed_key_at: Instant::now(),
             dump_step: 0,
             dump_state: DumpState::NotSent,
+            monitor_step: 0,
             conn: None,
         }
     }
@@ -1660,6 +1752,69 @@ impl InjectionState {
         self.typed_step >= spec.input_typing.len()
     }
 
+    /// `true` once every requested raw monitor command has been sent.
+    fn monitor_done(&self, spec: &Spec) -> bool {
+        self.monitor_step >= spec.monitor_commands.len()
+    }
+
+    /// The message for the first ordered injection script that had not
+    /// completed when the guest exited, or `None` when every requested
+    /// injection finished. [`exit_reason`] fails the run on a `Some`, so a
+    /// vertical whose device-driven exchange never happened cannot pass on
+    /// the guest's own exit status alone.
+    fn incomplete_reason(&self, spec: &Spec) -> Option<&'static str> {
+        if !self.pointer_done(spec) {
+            return Some(
+                "pointer script incomplete: a step's readiness marker was not seen (or a dump \
+                 it waited on never verified) before exit",
+            );
+        }
+        if !self.typing_done(spec) {
+            return Some(
+                "typed-text script incomplete: its readiness marker was not seen (or the guest \
+                 exited mid-script)",
+            );
+        }
+        if !spec.screendumps.is_empty() && !self.screendumps_verified(spec) {
+            return Some(
+                "screendumps incomplete: a dump's readiness marker was not seen, or the guest \
+                 exited before its dumped image parsed completely",
+            );
+        }
+        if !self.monitor_done(spec) {
+            return Some(
+                "monitor command script incomplete: a command's readiness marker was not seen \
+                 before the guest exited",
+            );
+        }
+        None
+    }
+
+    /// Send the next raw monitor command if its readiness marker has
+    /// appeared: strictly in order, at most one per tick so a burst arrives
+    /// as distinct monitor lines.
+    ///
+    /// # Errors
+    ///
+    /// The failing command's message; the caller kills the child.
+    fn drive_monitor_commands(
+        &mut self,
+        spec: &Spec,
+        monitor: Option<&MonitorSocket>,
+        monitor_seen: &[Arc<AtomicBool>],
+    ) -> Result<(), String> {
+        if let Some(command) = spec.monitor_commands.get(self.monitor_step) {
+            let step_seen = monitor_seen
+                .get(self.monitor_step)
+                .is_some_and(|seen| seen.load(Ordering::Acquire));
+            if step_seen {
+                self.send(monitor, "monitor-command", &command.command)?;
+                self.monitor_step += 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Send whichever requested injections have just become ready.
     ///
     /// # Errors
@@ -1670,25 +1825,24 @@ impl InjectionState {
         &mut self,
         spec: &Spec,
         monitor: Option<&MonitorSocket>,
-        key_seen: &AtomicBool,
-        typing_seen: &[Arc<AtomicBool>],
-        pointer_seen: &[Arc<AtomicBool>],
-        screendump_seen: &[Arc<AtomicBool>],
+        markers: &InjectionMarkers<'_>,
     ) -> Result<(), String> {
         // Safe to unwrap inside the closures: each `*_sent` flag is only
         // `false` when its injection request and `monitor` are both `Some`.
-        if !self.key_sent && key_seen.load(Ordering::Acquire) {
+        if !self.key_sent && markers.key.load(Ordering::Acquire) {
             let key = &spec.input_keyboard.as_ref().expect("key present").key;
             self.send(monitor, "key", &format!("sendkey {key}"))?;
             self.key_sent = true;
         }
+        self.drive_monitor_commands(spec, monitor, markers.monitor)?;
         if let Some(typing) = spec.input_typing.get(self.typed_step) {
             // Steps run strictly in order, each gated on its own marker;
             // within a step the keys are paced — at most one per call,
             // and only once the previous key's hold has fully elapsed —
             // so repeated characters arrive as distinct press/release
             // edges.
-            let step_seen = typing_seen
+            let step_seen = markers
+                .typing
                 .get(self.typed_step)
                 .is_some_and(|seen| seen.load(Ordering::Acquire));
             if step_seen && Instant::now() >= self.next_typed_key_at {
@@ -1718,7 +1872,8 @@ impl InjectionState {
             }
         }
         if let Some(dump) = spec.screendumps.get(self.dump_step) {
-            let dump_seen = screendump_seen
+            let dump_seen = markers
+                .screendump
                 .get(self.dump_step)
                 .is_some_and(|seen| seen.load(Ordering::Acquire));
             if self.dump_state == DumpState::NotSent && dump_seen {
@@ -1752,12 +1907,14 @@ impl InjectionState {
         // device events.
         let dump_pending = spec.screendumps.get(self.dump_step).is_some_and(|_| {
             self.dump_state == DumpState::Sent
-                || screendump_seen
+                || markers
+                    .screendump
                     .get(self.dump_step)
                     .is_some_and(|seen| seen.load(Ordering::Acquire))
         });
         if let Some(step) = spec.pointer_script.get(self.pointer_step) {
-            let step_seen = pointer_seen
+            let step_seen = markers
+                .pointer
                 .get(self.pointer_step)
                 .is_some_and(|seen| seen.load(Ordering::Acquire));
             if step_seen && !dump_pending {
@@ -1818,9 +1975,7 @@ impl InjectionState {
 fn exit_reason(
     spec: &Spec,
     serial_step: usize,
-    pointer_done: bool,
-    typing_done: bool,
-    screendumps_verified: bool,
+    injections: &InjectionState,
     status: std::process::ExitStatus,
 ) -> DoneReason {
     if serial_step < spec.serial_input.len() {
@@ -1831,26 +1986,8 @@ fn exit_reason(
             spec.serial_input[serial_step].ready_marker,
         ));
     }
-    if !pointer_done {
-        return DoneReason::InjectionFailed(
-            "pointer script incomplete: a step's readiness marker was not seen (or a dump it \
-             waited on never verified) before exit"
-                .into(),
-        );
-    }
-    if !typing_done {
-        return DoneReason::InjectionFailed(
-            "typed-text script incomplete: its readiness marker was not seen (or the guest \
-             exited mid-script)"
-                .into(),
-        );
-    }
-    if !spec.screendumps.is_empty() && !screendumps_verified {
-        return DoneReason::InjectionFailed(
-            "screendumps incomplete: a dump's readiness marker was not seen, or the guest \
-             exited before its dumped image parsed completely"
-                .into(),
-        );
+    if let Some(reason) = injections.incomplete_reason(spec) {
+        return DoneReason::InjectionFailed(reason.into());
     }
     DoneReason::Exited(status.code().unwrap_or(-1))
 }
@@ -2401,6 +2538,7 @@ mod tests {
             pointer_script: Vec::new(),
             serial_input: Vec::new(),
             screendumps: Vec::new(),
+            monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");

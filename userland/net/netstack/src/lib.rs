@@ -37,7 +37,7 @@ mod socket;
 
 pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelTransport};
 pub use cookie::CryptoCookieSecret;
-pub use iface::{queue_tx, BondMemberHealth, FrameBatch, Interface, Netstack};
+pub use iface::{queue_tx, BondMemberHealth, FrameBatch, Interface, Netstack, ServiceOutcome};
 pub use service::{serve, Caller};
 pub use socket::{
     Delivery, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET,

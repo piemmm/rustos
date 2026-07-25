@@ -280,6 +280,44 @@ pub fn static_net_store_files(
         .map_err(Clone::clone)
 }
 
+/// The composed store files the bond-failover vertical's disk plants: the
+/// shared [`app_store_files`] set **plus** the planted
+/// `/System/Settings/Network/network.conf`
+/// ([`tairix_test_netstack_wire::BOND_NETWORK_CONF`]) that binds two NICs by
+/// `match.mac` as the members of one active-backup bond carrying a static
+/// IPv6 address (`plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond). The sibling of
+/// [`static_net_store_files`] — same shape, a different config — so the two
+/// verticals cannot share a config by accident; memoised per arch.
+///
+/// # Errors
+///
+/// As [`app_store_files`].
+pub fn bond_net_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| {
+            let mut files = app_store_files(ctx, arch)?.to_vec();
+            files.push(AppStoreFile {
+                components: vec![
+                    b"Settings".to_vec(),
+                    b"Network".to_vec(),
+                    b"network.conf".to_vec(),
+                ],
+                bytes: tairix_test_netstack_wire::BOND_NETWORK_CONF
+                    .as_bytes()
+                    .to_vec(),
+            });
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// Run `body` over the borrowed `(components, bytes)` view of `files` —
 /// the planting shape `tools/mkimage` and the QEMU fixture accept. The
 /// borrow gymnastics live here once instead of at every call site.

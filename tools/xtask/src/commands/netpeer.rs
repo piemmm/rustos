@@ -114,6 +114,32 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_static_peer)
     }
 
+    /// Bind **both** wires' peer sockets and start the **bond-failover**
+    /// peer thread (the N9b-3-2-β-2-ii-b-bond vertical): the guest binds
+    /// two NICs as the members of one active-backup bond, and this peer
+    /// serves *both* wires at once — it replies on whichever wire a frame
+    /// arrived on and campaigns on both — so it follows the bond's active
+    /// member across the mid-flow failover (`set_link net0 off`) without
+    /// knowing which member is live. It pings the bond's *static* address
+    /// ([`wire::GUEST_STATIC_V6`]); its verdict ([`Self::stop_and_join`]) is
+    /// `Ok` only once the guest replied, and the guest's own witnesses
+    /// (`BOND_CONFIG_APPLIED`, `BOND_FAILOVER`, a post-failover
+    /// `INBOUND_ECHO_SERVED`) prove the failover was exercised, so neither
+    /// side can pass alone.
+    pub fn spawn_bond(
+        primary_qemu_sock: &Path,
+        primary_peer_sock: &Path,
+        backup_qemu_sock: &Path,
+        backup_peer_sock: &Path,
+    ) -> Result<Self, String> {
+        let primary = bind_wire(primary_qemu_sock, primary_peer_sock)?;
+        let backup = bind_wire(backup_qemu_sock, backup_peer_sock)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || run_bond_peer(&primary, &backup, &thread_stop));
+        Ok(Self { stop, handle })
+    }
+
     /// Shared socket bring-up + thread spawn for both peer roles: remove any
     /// stale socket files, bind the peer's datagram socket, and run `body`
     /// on a host thread until [`Self::stop_and_join`] signals it. Factored so
@@ -123,27 +149,10 @@ impl NetPeer {
         peer_sock: &Path,
         body: fn(&UnixDatagram, &PathBuf, &AtomicBool) -> Result<(), String>,
     ) -> Result<Self, String> {
-        for path in [qemu_sock, peer_sock] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(format!(
-                        "netstack peer: remove stale {}: {e}",
-                        path.display()
-                    ))
-                }
-            }
-        }
-        let socket = UnixDatagram::bind(peer_sock)
-            .map_err(|e| format!("netstack peer: bind {}: {e}", peer_sock.display()))?;
-        socket
-            .set_read_timeout(Some(RECV_TIMEOUT))
-            .map_err(|e| format!("netstack peer: set read timeout: {e}"))?;
+        let wire = bind_wire(qemu_sock, peer_sock)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let qemu_sock = qemu_sock.to_path_buf();
-        let handle = std::thread::spawn(move || body(&socket, &qemu_sock, &thread_stop));
+        let handle = std::thread::spawn(move || body(&wire.socket, &wire.qemu_sock, &thread_stop));
         Ok(Self { stop, handle })
     }
 
@@ -156,6 +165,158 @@ impl NetPeer {
             .join()
             .map_err(|_| "netstack peer: thread panicked".to_string())?
     }
+}
+
+/// One emulated wire the peer serves: the bound datagram socket QEMU sends
+/// this wire's guest frames to, and the QEMU-end socket path the peer sends
+/// its frames back to.
+struct Wire {
+    socket: UnixDatagram,
+    qemu_sock: PathBuf,
+}
+
+/// Remove any stale socket files, bind the peer end of one wire, and set its
+/// read timeout — the one binding path every peer role shares (the single
+/// wire of the ICMP/TCP peers and each of the bond peer's two).
+fn bind_wire(qemu_sock: &Path, peer_sock: &Path) -> Result<Wire, String> {
+    for path in [qemu_sock, peer_sock] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "netstack peer: remove stale {}: {e}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    let socket = UnixDatagram::bind(peer_sock)
+        .map_err(|e| format!("netstack peer: bind {}: {e}", peer_sock.display()))?;
+    socket
+        .set_read_timeout(Some(RECV_TIMEOUT))
+        .map_err(|e| format!("netstack peer: set read timeout: {e}"))?;
+    Ok(Wire {
+        socket,
+        qemu_sock: qemu_sock.to_path_buf(),
+    })
+}
+
+/// The peer's event loop for the **bond-failover** vertical
+/// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond): serve the guest's bond over
+/// *both* member wires and ping its static address until a reply arrives,
+/// surviving the mid-flow failover the harness triggers by dropping the
+/// primary member's carrier.
+///
+/// One `lib/net` engine, one MAC, one static address ([`wire::PEER_STATIC_V6`])
+/// in the guest bond's `/64`: the peer is a single host multi-homed onto the
+/// two wires that both reach the same guest bond. Because active-backup
+/// failover keeps the bond's MAC and address stable and only changes *which
+/// member carries the frames*, the peer need not track the active member —
+/// it transmits every frame on **both** wires (the down member simply drops
+/// it) and services frames arriving on **either**, replying to the wire each
+/// arrived on. So before the failover the guest answers over the primary
+/// wire and after it over the backup wire, and the peer follows without
+/// knowing which is live. Its verdict is `Ok` once the guest's echo reply
+/// (to the bond's static address) arrives; the guest's own witnesses prove
+/// the failover was exercised.
+fn run_bond_peer(primary: &Wire, backup: &Wire, stop: &AtomicBool) -> Result<(), String> {
+    let facts = DeviceFacts {
+        mac: MacAddress(wire::PEER_MAC),
+        mtu: 1500,
+        link: LinkState::Up,
+        offloads: NetOffloads::empty(),
+        rx_queues: 1,
+    };
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let mut stack = Stack::new(
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        now(start),
+    )
+    .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
+    // The peer shares the guest bond's on-link `/64`, so it reaches the
+    // bond's static address directly (no router).
+    stack
+        .add_ipv6_static(wire::PEER_STATIC_V6, wire::STATIC_PREFIX_LEN, now(start))
+        .map_err(|e| format!("netstack peer: static address assignment: {e:?}"))?;
+
+    let guest_v6 = wire::GUEST_STATIC_V6;
+    let mut reply_v6 = false;
+    let mut sequence: u16 = 0;
+    let mut next_send = Instant::now();
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        // Timer-due engine output (DAD probes, NS retransmits) goes out both
+        // wires — a member that is down drops it harmlessly.
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
+        note_replies(&out, guest_v6, &mut reply_v6);
+        send_frames_dual(primary, backup, &out.frames);
+
+        // The campaign: keep pinging the bond's static address on the
+        // cadence, on both wires so it reaches whichever member is active.
+        // Unlike the single-wire campaign this never stops at the first
+        // reply: the whole point is that the guest keeps answering *across*
+        // the mid-flow failover, so the guest can witness a served echo
+        // after the primary member is dropped. Transient refusals (our own
+        // DAD still pending) are simply retried on the next tick.
+        if Instant::now() >= next_send {
+            next_send = Instant::now() + RESEND_INTERVAL;
+            sequence = sequence.wrapping_add(1);
+            let mut out = StackOutput::default();
+            if stack
+                .send_echo_request(
+                    IpAddr::V6(guest_v6),
+                    wire::PEER_ECHO_ID,
+                    sequence,
+                    wire::PEER_ECHO_PAYLOAD,
+                    now(start),
+                    &mut out,
+                )
+                .is_ok()
+            {
+                send_frames_dual(primary, backup, &out.frames);
+            }
+        }
+
+        // Service frames arriving on either wire; a reply staged for one
+        // goes back out the wire it arrived on (the active member), so the
+        // exchange follows the bond across the failover.
+        for wire_end in [primary, backup] {
+            match wire_end.socket.recv(&mut buf) {
+                Ok(len) => {
+                    let mut out = StackOutput::default();
+                    stack.on_frame(&buf[..len], now(start), &mut out);
+                    note_replies(&out, guest_v6, &mut reply_v6);
+                    send_frames(&wire_end.socket, &wire_end.qemu_sock, &out.frames);
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+            }
+        }
+    }
+
+    if reply_v6 {
+        Ok(())
+    } else {
+        Err("netstack peer: bond static-address echo campaign incomplete".to_string())
+    }
+}
+
+/// Transmit engine output onto **both** bond wires, one frame per datagram
+/// per wire. The active member delivers the frames to the guest; the
+/// down/backup member's QEMU end drops them (link down or simply the member
+/// the bond is not transmitting on), so sending on both reaches the guest
+/// regardless of which member is currently active.
+fn send_frames_dual(primary: &Wire, backup: &Wire, frames: &[TxFrame]) {
+    send_frames(&primary.socket, &primary.qemu_sock, frames);
+    send_frames(&backup.socket, &backup.qemu_sock, frames);
 }
 
 /// The peer's event loop for the link-local ICMP campaign (the two-process

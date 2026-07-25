@@ -226,6 +226,22 @@ mod wire {
     /// device dropping everything past a single outstanding buffer) and
     /// obliges it to reassemble a multi-buffer frame.
     pub const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
+    /// `VIRTIO_NET_F_STATUS` (virtio 1.1 §5.1.4, feature bit 16): the
+    /// device exposes a live link-status word in its configuration space
+    /// (`status`, at [`CONFIG_STATUS_OFFSET`]) and raises a
+    /// configuration-change interrupt when the word changes. Negotiating
+    /// it lets the driver sense link up/down (a NIC unplugged, a carrier
+    /// lost) rather than assuming a permanently-up link — the sole live
+    /// source of a bond failover (`plans/NETWORK.md` §6.3).
+    pub const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
+    /// `VIRTIO_NET_S_LINK_UP` (virtio 1.1 §5.1.4): the bit set in the
+    /// device-config `status` word while the link carries frames. Valid
+    /// only when [`VIRTIO_NET_F_STATUS`] was negotiated.
+    pub const VIRTIO_NET_S_LINK_UP: u16 = 1 << 0;
+    /// `status` (`le16`) byte offset in the device-configuration window:
+    /// it follows the 6-byte MAC (virtio 1.1 §5.1.4). Read only when
+    /// [`VIRTIO_NET_F_STATUS`] was negotiated.
+    pub const CONFIG_STATUS_OFFSET: usize = 6;
     /// Minimum Ethernet frame size (excluding FCS).
     pub const MIN_ETHERNET_FRAME: usize = 14;
     /// Link MTU: the largest link-layer payload (IP packet) carried.
@@ -491,6 +507,11 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // reassemble a multi-buffer frame. It also grows every chain's
         // header to 12 bytes on both rings.
         let mergeable = device_features & wire::VIRTIO_NET_F_MRG_RXBUF != 0;
+        // Link-status sensing: with it the device exposes a live `status`
+        // word and raises a config-change interrupt on a link change, so
+        // the driver reports a real link state instead of a permanent
+        // "up". Without it the link is assumed up once operational.
+        let status_feature = device_features & wire::VIRTIO_NET_F_STATUS != 0;
         let mut driver_features = 0u64;
         if guest_csum {
             driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
@@ -503,6 +524,9 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         }
         if mergeable {
             driver_features |= wire::VIRTIO_NET_F_MRG_RXBUF;
+        }
+        if status_feature {
+            driver_features |= wire::VIRTIO_NET_F_STATUS;
         }
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
@@ -693,6 +717,35 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// a frame span several receive buffers.
     fn mergeable(&self) -> bool {
         self.features & wire::VIRTIO_NET_F_MRG_RXBUF != 0
+    }
+
+    /// Whether `VIRTIO_NET_F_STATUS` was negotiated: only then does the
+    /// device-config `status` word carry a meaningful link bit.
+    fn status_feature(&self) -> bool {
+        self.features & wire::VIRTIO_NET_F_STATUS != 0
+    }
+
+    /// The device's current link state.
+    ///
+    /// Reads the device-config `status` word's `VIRTIO_NET_S_LINK_UP` bit
+    /// when link-status sensing was negotiated; a device that does not
+    /// expose the word (`VIRTIO_NET_F_STATUS` un-negotiated) is reported
+    /// [`LinkState::Up`] once operational — an unsensed link is not a
+    /// state the stack can act on. Reads two bytes; the transport zero-
+    /// fills a short config window, which reads as link-down (fail
+    /// closed: an unreadable status is not treated as "up").
+    fn read_link(&self) -> LinkState {
+        if !self.status_feature() {
+            return LinkState::Up;
+        }
+        let mut status = [0u8; 2];
+        self.transport
+            .read_config(wire::CONFIG_STATUS_OFFSET, &mut status);
+        if u16::from_le_bytes(status) & wire::VIRTIO_NET_S_LINK_UP != 0 {
+            LinkState::Up
+        } else {
+            LinkState::Down
+        }
     }
 
     /// Build the `virtio_net_hdr` for a transmit frame carrying `offload`.
@@ -1266,7 +1319,7 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
             mac: self.mac,
             mtu: u32::try_from(self.max_frame_len - wire::MIN_ETHERNET_FRAME)
                 .map_err(|_| DriverError::LengthOutOfRange)?,
-            link: LinkState::Up,
+            link: self.read_link(),
             offloads,
             rx_queues: 1,
         })
@@ -1276,6 +1329,11 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
         let mut report = ServiceReport::default();
         self.drain_tx(rings, &mut report)?;
         self.harvest_rx(rings, &mut report)?;
+        // Report the live link on every doorbell so a config-change the
+        // driver interrupt woke the stack for reaches it here: the stack
+        // turns a change into a bond-member link report (the sole live
+        // source of a failover).
+        report.link = self.read_link();
         // The doorbell never parks: it drains what is ready and returns.
         // A `Service` doorbell may cross a process boundary (the driver
         // process serving the stack's `NetChannelRequest::Service`), where

@@ -153,11 +153,22 @@ composing the bond over those
 members, and (c) the bond's own addressing (matched by the bond alias),
 delivering all three over the `CAP_NET_ADMIN` admin endpoint and retrying
 `NotFound` until each member has bound — so a bond composes once all its
-members are present, in any bind order.
+members are present, in any bind order. The delivery re-attempts the
+still-pending per-interface configs after composing the bonds (a bounded
+until-stable pass), so the bond's own address lands in the *same* bump the
+bond was composed, not a later one — a per-interface config for the bond
+alias returns `NotFound` until the bond exists.
 
 Failover is driven by the pure `tairix_net::bond` engine: the bond
 inherits its first member's MAC (kept stable for its life, so a peer's
-ARP/ND cache survives failover). A member that loses its link becomes
+ARP/ND cache survives failover). The live link-down/up report is the sole
+source of a failover: a NIC driver senses its link (the virtio-net driver
+negotiates `VIRTIO_NET_F_STATUS` and reads the device-config link bit,
+updated on the config-change interrupt it already wakes the stack for) and
+carries the current `LinkState` on every `netchan` `Service` reply
+(`ServiceReport.link`); `service_interface` turns a change into a
+`set_member_link` report the service (`run.rs` `on_member_link_change`)
+drives. A member that loses its link becomes
 ineligible **immediately**, and transmit re-targets a healthy member
 within one link-down report; a recovered member (or a declared `primary`)
 is readmitted only after one `monitor-interval` up-delay (deliberate
@@ -265,3 +276,15 @@ and answers a host peer's link-local echo — witnessed by `devmgr`'s
 its errno through `DRIVER_BIND_FAILED`, fail-loud). The riscv64 vertical is
 the headless `virt`-board virtio-mmio / PLIC analogue; x86_64 (over virtio-PCI)
 is the remaining follow-up.
+
+The `netstack_static_qemu_aarch64` and `netstack_bond_qemu_aarch64` verticals
+prove the declarative `network.conf` path live. The static vertical binds one
+NIC to an admin alias by `match.node` and assigns it a static IPv6 address.
+The bond vertical composes an active-backup bond over **two** NICs (bound by
+`match.mac`) with a static address, then drops the primary member's carrier
+mid-flow over the QEMU monitor (`set_link net0 off`): the driver's
+`VIRTIO_NET_F_STATUS` config-change interrupt reports the link down and the
+bond fails over to the surviving member, witnessed by `BOND_CONFIG_APPLIED`,
+`BOND_FAILOVER`, and a post-failover `INBOUND_ECHO_SERVED` (the ordering makes
+a pre-failover echo insufficient) — the end-to-end proof of the live
+link-status → failover path.

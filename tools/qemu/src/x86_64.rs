@@ -231,6 +231,7 @@ mod tests {
             pointer_script: Vec::new(),
             serial_input: Vec::new(),
             screendumps: Vec::new(),
+            monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }

@@ -43,7 +43,13 @@
 // kernel and host tooling build only this crate's *library*, so this module
 // (and `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
+extern crate alloc;
+
+#[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use alloc::vec::Vec;
+
+    use tairix_abi::driver::net::LinkState;
     use tairix_abi::driver::net_channel::{
         notify_endpoint_for, NET_CHANNEL_ENDPOINT_COUNT, NET_CHANNEL_NOTIFY_LEN,
     };
@@ -344,7 +350,43 @@ mod program {
         // immediately ready again; the notify carries no data, only "there
         // is receive work", which the pump discovers itself.
         drain_notify(channel.notify);
-        pump_channel(stack, sockets, channel, secret, now());
+        // A driver rings the notify port on *any* device interrupt, a
+        // config-change (link) interrupt included, so this wake is exactly
+        // where a member's link-down/up is discovered live. Handle the
+        // change after the pump releases its borrow of `channel`, so the
+        // failover announcement can go out the *other* member's channel.
+        let link_change = pump_channel(stack, sockets, channel, secret, now());
+        if let Some((iface, link)) = link_change {
+            handle_link_change(stack, sockets, channels, secret, iface, link, now());
+        }
+    }
+
+    /// Apply a member NIC's live link change to the bond and transmit any
+    /// resulting presence re-announcement (a failover), auditing it. A
+    /// change that produces no announcement (a plain interface, or a bond
+    /// with no path change) is silent. Callable only where the whole
+    /// `channels` table is in hand, because the announcement egresses the
+    /// newly-selected member — a *different* channel from the one that
+    /// reported the change.
+    fn handle_link_change(
+        stack: &mut Netstack,
+        sockets: &mut SocketService,
+        channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
+        iface: [u8; IF_NAME_LEN],
+        link: LinkState,
+        now: Duration64,
+    ) {
+        let announcements = stack.on_member_link_change(iface, link, now);
+        if !announcements.is_empty() {
+            audit(
+                events::BOND_FAILOVER,
+                Level::Info,
+                "netstack: bond transmit path changed on a member link report (presence \
+                 re-announced)",
+            );
+            transmit_batch(stack, sockets, channels, secret, &announcements);
+        }
     }
 
     /// Serve one waiting admin request on [`NETSTACK_ENDPOINT`].
@@ -868,7 +910,11 @@ mod program {
                 continue;
             };
             let _ = queue_tx(&mut channel.client, frames);
-            pump_channel(stack, sockets, channel, secret, now());
+            // A link change observed while draining a TX batch is left for
+            // the next notify/timer pump to act on (the channels table is
+            // borrowed here); `facts.link` is untouched until handled, so it
+            // is re-observed then, never lost.
+            let _ = pump_channel(stack, sockets, channel, secret, now());
         }
     }
 
@@ -900,21 +946,30 @@ mod program {
     /// TCP segment to its connection (whose response frames are re-queued
     /// onto this channel and re-transmitted in the same pump). A ring or
     /// device fault leaves the interface in place; the next wake retries.
+    ///
+    /// Returns the interface's live link change, if the driver's service
+    /// report showed one during this pump, for the caller to feed to
+    /// [`handle_link_change`] once it holds the whole channels table (a
+    /// failover announcement egresses a *different* member's channel).
     fn pump_channel(
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channel: &mut Channel,
         secret: &CryptoCookieSecret,
         now: Duration64,
-    ) {
+    ) -> Option<([u8; IF_NAME_LEN], LinkState)> {
+        let mut link_change = None;
         for _ in 0..PUMP_ROUNDS {
-            let Ok(events) = stack.service_interface(channel.iface, &mut channel.client, now)
+            let Ok(outcome) = stack.service_interface(channel.iface, &mut channel.client, now)
             else {
-                return;
+                return link_change;
             };
+            if let Some(link) = outcome.link_change {
+                link_change = Some((channel.iface, link));
+            }
             let mut staged = false;
             let mut saw_event = false;
-            for event in &events {
+            for event in &outcome.events {
                 saw_event = true;
                 match event {
                     StackEvent::EchoRequestServed { .. } => audit(
@@ -958,6 +1013,7 @@ mod program {
                 break;
             }
         }
+        link_change
     }
 
     /// Pump every bound channel (a deadline lapse): first advance every
@@ -986,8 +1042,18 @@ mod program {
             );
             transmit_batch(stack, sockets, channels, secret, &announcements);
         }
+        // Pump each channel; collect any live link change a driver report
+        // surfaced so it can be applied after this borrow of `channels`
+        // ends (a failover announcement egresses a *different* member's
+        // channel). Bounded by the channel count.
+        let mut link_changes: Vec<([u8; IF_NAME_LEN], LinkState)> = Vec::new();
         for channel in channels.iter_mut().flatten() {
-            pump_channel(stack, sockets, channel, secret, now);
+            if let Some(change) = pump_channel(stack, sockets, channel, secret, now) {
+                link_changes.push(change);
+            }
+        }
+        for (iface, link) in link_changes {
+            handle_link_change(stack, sockets, channels, secret, iface, link, now);
         }
     }
 

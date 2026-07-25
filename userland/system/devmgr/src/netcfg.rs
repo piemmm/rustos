@@ -460,81 +460,108 @@ pub fn deliver_interface_configs(
         state.rejected_logged = true;
     }
 
-    // Deliver every not-yet-delivered interface. `NetInterfaceConfigMsg` is
-    // `Copy`, so collect the pending set to end the immutable borrow of
-    // `state.plan` before recording deliveries into `state.delivered`.
-    let pending: Vec<NetInterfaceConfigMsg> = match &state.plan {
-        Some(plan) => plan
-            .messages
-            .iter()
-            .filter(|msg| !state.delivered.contains(&msg.alias))
-            .copied()
-            .collect(),
-        None => Vec::new(),
+    // Deliver the per-interface configs and the bond compositions, repeating
+    // while a pass records a new delivery. One pass is not enough because the
+    // three kinds form a dependency chain that resolves in order:
+    //   1. a member/plain interface's config binds once its driver is up;
+    //   2. a bond composes once its member aliases exist (step 1);
+    //   3. a **bond** interface's own addressing (a per-interface config
+    //      whose alias is the bond) applies only once the bond exists (step
+    //      2) — an earlier attempt returns `NotFound` and is not recorded.
+    // Re-running the per-interface pass after composing the bonds is what
+    // lets the bond's address land in the same bump the bond was composed,
+    // rather than waiting for an unrelated later bump that may never come.
+    // Bounded to one pass per pending item (progress each round guarantees
+    // termination well inside it): a hostile or misconfigured store can never
+    // spin this. Items still `NotFound` after the loop (an unbound driver)
+    // are left for the next bump, exactly as before.
+    let max_passes = match &state.plan {
+        Some(plan) => plan.messages.len() + plan.bonds.len() + 1,
+        None => 0,
     };
-    for msg in &pending {
-        match netstack.apply_interface_config(msg) {
-            Ok(()) => {
-                state.delivered.insert(msg.alias);
-                audit_iface(
-                    sink,
-                    events::NETWORK_IFCONFIG_DELIVERED,
-                    Level::Info,
-                    "per-interface network configuration delivered",
-                    &msg.alias,
-                );
-            }
-            // The interface has not bound yet: the expected state until its
-            // driver comes up, retried silently on the next bump.
-            Err(Errno::NotFound) => {}
-            Err(_) => {
-                audit_iface(
-                    sink,
-                    events::NETWORK_IFCONFIG_DELIVERY_FAILED,
-                    Level::Warn,
-                    "per-interface network configuration refused; will retry",
-                    &msg.alias,
-                );
+    for _ in 0..max_passes {
+        let before = state.delivered.len() + state.delivered_bonds.len();
+
+        // `NetInterfaceConfigMsg` is `Copy`, so collect the pending set to end
+        // the immutable borrow of `state.plan` before recording deliveries.
+        let pending: Vec<NetInterfaceConfigMsg> = match &state.plan {
+            Some(plan) => plan
+                .messages
+                .iter()
+                .filter(|msg| !state.delivered.contains(&msg.alias))
+                .copied()
+                .collect(),
+            None => Vec::new(),
+        };
+        for msg in &pending {
+            match netstack.apply_interface_config(msg) {
+                Ok(()) => {
+                    state.delivered.insert(msg.alias);
+                    audit_iface(
+                        sink,
+                        events::NETWORK_IFCONFIG_DELIVERED,
+                        Level::Info,
+                        "per-interface network configuration delivered",
+                        &msg.alias,
+                    );
+                }
+                // The interface has not bound yet (or its bond is not composed
+                // yet): the expected state, retried on a later pass or bump.
+                Err(Errno::NotFound) => {}
+                Err(_) => {
+                    audit_iface(
+                        sink,
+                        events::NETWORK_IFCONFIG_DELIVERY_FAILED,
+                        Level::Warn,
+                        "per-interface network configuration refused; will retry",
+                        &msg.alias,
+                    );
+                }
             }
         }
-    }
 
-    // Deliver every not-yet-composed bond. A bond needs its members
-    // renamed first, so an early attempt returns `NotFound` — retried
-    // silently on the next bump, exactly like an unbound interface.
-    let pending_bonds: Vec<NetBondConfigMsg> = match &state.plan {
-        Some(plan) => plan
-            .bonds
-            .iter()
-            .filter(|msg| !state.delivered_bonds.contains(&msg.alias))
-            .copied()
-            .collect(),
-        None => Vec::new(),
-    };
-    for msg in &pending_bonds {
-        match netstack.apply_bond_config(msg) {
-            Ok(()) => {
-                state.delivered_bonds.insert(msg.alias);
-                audit_iface(
-                    sink,
-                    events::NETWORK_IFCONFIG_DELIVERED,
-                    Level::Info,
-                    "bond interface composed",
-                    &msg.alias,
-                );
+        // Deliver every not-yet-composed bond. A bond needs its members
+        // renamed first, so an early attempt returns `NotFound` — retried on
+        // a later pass or bump, exactly like an unbound interface.
+        let pending_bonds: Vec<NetBondConfigMsg> = match &state.plan {
+            Some(plan) => plan
+                .bonds
+                .iter()
+                .filter(|msg| !state.delivered_bonds.contains(&msg.alias))
+                .copied()
+                .collect(),
+            None => Vec::new(),
+        };
+        for msg in &pending_bonds {
+            match netstack.apply_bond_config(msg) {
+                Ok(()) => {
+                    state.delivered_bonds.insert(msg.alias);
+                    audit_iface(
+                        sink,
+                        events::NETWORK_IFCONFIG_DELIVERED,
+                        Level::Info,
+                        "bond interface composed",
+                        &msg.alias,
+                    );
+                }
+                Err(Errno::NotFound) => {}
+                Err(_) => {
+                    audit_iface(
+                        sink,
+                        events::NETWORK_IFCONFIG_DELIVERY_FAILED,
+                        Level::Warn,
+                        "bond interface composition refused; will retry",
+                        &msg.alias,
+                    );
+                }
             }
-            // A declared member has not bound yet: the expected state,
-            // retried silently on the next bump.
-            Err(Errno::NotFound) => {}
-            Err(_) => {
-                audit_iface(
-                    sink,
-                    events::NETWORK_IFCONFIG_DELIVERY_FAILED,
-                    Level::Warn,
-                    "bond interface composition refused; will retry",
-                    &msg.alias,
-                );
-            }
+        }
+
+        // A pass that recorded no new delivery has reached a fixed point:
+        // every remaining item is waiting on something outside this bump (an
+        // unbound driver), so stop rather than spin.
+        if state.delivered.len() + state.delivered_bonds.len() == before {
+            break;
         }
     }
 }

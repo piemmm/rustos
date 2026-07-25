@@ -1663,14 +1663,45 @@ exercised live**:
   each channel after an admin mutation so a freshly-assigned address's DAD/MLD
   reaches the wire immediately. Regression tests at every layer.
 
-#### N9b-3-2-β-2-ii-b-bond — the live bond-failover vertical `[ ]`
-Remaining: kill a bond member mid-TCP-transfer and assert the flow survives
-within the monitor budget. Needs the shared QEMU harness extended to **two**
-virtio-net NICs, a mid-run monitor hot-unplug (`device_del`/`netdev_del`), and
-a bond-aware host peer serving both wires, plus a bond `network.conf` fixture
-and guest crate. The bond-member rename is already covered by the ii-b-static
-rename fix (members are renamed through `apply_interface_config`). Heed the
-"always times out = stuck-state bug, diagnose it" reminder.
+#### N9b-3-2-β-2-ii-b-bond — the live bond-failover vertical (gate-green) `[x]`
+`tairix-test-netstack-bond-qemu-aarch64` boots the production aarch64 pipeline
+against a `bond-net-root` disk: the net-only signed driver bundle **plus** a
+planted `network.conf` binding two NICs by `match.mac` as the members of one
+active-backup bond (`wan`, primary `m0`) carrying a static IPv6 address
+(`fd00::2/64`). Two `virtio-net-device`s are attached (`net0`=`m0`/`GUEST_MAC`,
+`net1`=`m1`/`GUEST_MAC_2`); `devmgr` autoloads the NIC driver into a process per
+NIC and `netstack` composes the bond. The harness-side **bond peer** serves
+*both* wires (replies on the arrival wire, campaigns on both), so it follows the
+active member across the failover without tracking it. Once the guest serves its
+first inbound echo, the runner drops the primary member's carrier over the QEMU
+monitor (`set_link net0 off`); the driver's virtio config-change interrupt makes
+`netstack` fail the bond over to the backup member, and the guest keeps
+answering over the second wire. PASS keys on `BOND_CONFIG_APPLIED`,
+`BOND_FAILOVER`, **and** an `INBOUND_ECHO_SERVED` observed *after* the failover
+(the ordering makes a pre-failover echo insufficient), plus the peer's own
+reply verdict — so neither side passes without the flow surviving the drop.
+
+Bringing it up required two supporting pieces, both first-class:
+- **A live link-status path (the sole live source of a bond failover).** The
+  bond monitor is link-state driven, but the stack had no live link-down
+  source. Now `lib/virtio_net` negotiates `VIRTIO_NET_F_STATUS`, reads the
+  device-config `status` link bit (updated on the config-change interrupt the
+  driver process already wakes the stack for), and stamps it into
+  `DeviceFacts::link` and a new `ServiceReport.link` carried on every
+  `netchan` `Service` reply. `Netstack::service_interface` returns a
+  `link_change`; `run.rs` turns it into `on_member_link_change` →
+  `set_member_link` → `BOND_FAILOVER`, transmitting the gratuitous
+  announcement out the newly-selected member. Fully host-tested at each layer.
+- **A config-delivery fix.** `devmgr`'s `deliver_interface_configs` applied a
+  bond interface's own addressing before the bond was composed (a `NotFound`
+  never retried in the same bump), so `fd00::2` was never assigned. It now
+  re-attempts pending per-interface configs after composing the bonds
+  (bounded until-stable), so the bond's address lands in the same bump.
+
+Harness additions (all reusable): `tools/qemu` gained a generic marker-gated
+`MonitorCommand` injection (used for `set_link`); a second attached NIC needs
+no new builder (two `with_virtio_net_dgram_mac` calls); the bond peer
+(`NetPeer::spawn_bond`/`run_bond_peer`) serves two wires from one engine.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

@@ -74,6 +74,12 @@ fn local_service(net: PeerNet, region: &mut [u8]) -> LocalFrameService<'_, PeerN
     LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
 }
 
+/// Wrap a link-toggling [`LinkNet`] as the in-process [`LocalFrameService`]
+/// the pump drives (the live link-status path).
+fn local_service_link(net: LinkNet, region: &mut [u8]) -> LocalFrameService<'_, LinkNet> {
+    LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
+}
+
 /// Queue engine output onto the service's TX ring before pumping, exactly
 /// as the service layer would.
 fn push_tx<N: Net>(fs: &mut LocalFrameService<'_, N>, frames: &[TxFrame]) {
@@ -143,6 +149,103 @@ impl Net for PeerNet {
         }
         Ok(report)
     }
+}
+
+/// A minimal [`Net`] fake whose reported link state is settable, so a test
+/// can drive the live link-status path (`service`'s report link) the
+/// production virtio-net driver feeds from its config-change interrupt.
+/// It moves no frames — the pump's link-change detection is independent of
+/// traffic.
+struct LinkNet {
+    link: LinkState,
+}
+
+impl LinkNet {
+    fn new() -> Self {
+        Self {
+            link: LinkState::Up,
+        }
+    }
+
+    fn set_link(&mut self, link: LinkState) {
+        self.link = link;
+    }
+}
+
+impl Net for LinkNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        Ok(DeviceFacts {
+            link: self.link,
+            ..facts(MAC_A)
+        })
+    }
+
+    fn service(&mut self, _rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        Ok(ServiceReport {
+            link: self.link,
+            ..ServiceReport::default()
+        })
+    }
+}
+
+/// A plain interface's live link change (a device config-change the driver
+/// reports on its service reply) is surfaced by the pump only when it
+/// differs from the last-seen state, and applying it records the link on
+/// the interface's own stack (no bond, so no announcement).
+#[test]
+fn service_interface_surfaces_a_device_link_change() {
+    let mut stack = Netstack::new();
+    stack
+        .add_interface(
+            name("eth0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    let mut region = rings_region();
+    let mut fs = local_service_link(LinkNet::new(), &mut region);
+
+    // Initially up (matches the recorded facts): no change reported.
+    assert_eq!(
+        stack
+            .service_interface(name("eth0"), &mut fs, t(1))
+            .expect("pump")
+            .link_change,
+        None
+    );
+
+    // The device drops its link: the next pump surfaces exactly one change.
+    fs.net_mut().set_link(LinkState::Down);
+    let outcome = stack
+        .service_interface(name("eth0"), &mut fs, t(2))
+        .expect("pump");
+    assert_eq!(outcome.link_change, Some(LinkState::Down));
+
+    // Applying it (a plain interface: no bond, so no announcement) records
+    // the state, so a subsequent unchanged pump reports no further change.
+    let batch = stack.on_member_link_change(name("eth0"), LinkState::Down, t(2));
+    assert!(batch.is_empty());
+    assert_eq!(
+        stack
+            .service_interface(name("eth0"), &mut fs, t(3))
+            .expect("pump")
+            .link_change,
+        None
+    );
+
+    // Recovery is surfaced the same way.
+    fs.net_mut().set_link(LinkState::Up);
+    assert_eq!(
+        stack
+            .service_interface(name("eth0"), &mut fs, t(4))
+            .expect("pump")
+            .link_change,
+        Some(LinkState::Up)
+    );
 }
 
 /// Records every event it receives so tests can assert on audit output.
@@ -266,7 +369,8 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         events.extend(
             stack
                 .service_interface(name("wan"), &mut fs, t(2))
-                .expect("pump"),
+                .expect("pump")
+                .events,
         );
         if !events.is_empty() {
             break;
@@ -302,7 +406,8 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         events.extend(
             stack
                 .service_interface(name("wan"), &mut fs, t(step))
-                .expect("pump"),
+                .expect("pump")
+                .events,
         );
     }
     let ours = link_local(IID_A);
@@ -324,7 +429,8 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         events.extend(
             stack
                 .service_interface(name("wan"), &mut fs, t(3))
-                .expect("pump"),
+                .expect("pump")
+                .events,
         );
         if !events.is_empty() {
             break;
@@ -1997,7 +2103,10 @@ fn pump_client(
     let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
     let mut deliveries = Vec::new();
     for _ in 0..64 {
-        let events = ns.service_interface(name("wan"), fs, now).expect("pump");
+        let events = ns
+            .service_interface(name("wan"), fs, now)
+            .expect("pump")
+            .events;
         let io = svc.advance_streams(ns, now);
         stage_batch(fs, &io.tx);
         deliveries.extend(io.deliveries);

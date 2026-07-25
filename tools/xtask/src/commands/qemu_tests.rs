@@ -176,6 +176,18 @@ enum NetPeerMode {
     /// `match.node` mis-bind (the static address never assigned) leaves the
     /// campaign incomplete and fails the run loud.
     V6StaticEcho,
+    /// A **bond-failover** peer (the N9b-3-2-β-2-ii-b-bond vertical): the
+    /// guest binds *two* virtio-net NICs as the members of one active-backup
+    /// bond, so the runner attaches **two** `dgram` netdevs (`net0` pinned to
+    /// [`tairix_test_netstack_wire::GUEST_MAC`], `net1` to `GUEST_MAC_2`) and
+    /// the peer serves both wires at once, campaigning to the bond's static
+    /// address ([`tairix_test_netstack_wire::GUEST_STATIC_V6`]). Mid-flow the
+    /// runner drops the primary member's carrier over the QEMU monitor
+    /// (`set_link net0 off`, gated on the guest's first served echo), forcing
+    /// the failover the guest witnesses. Its verdict requires a reply, and
+    /// the guest requires a post-failover served echo, so neither side can
+    /// pass without the flow surviving the member drop.
+    Bond,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -266,6 +278,18 @@ enum FsDisk {
     /// the guest always forms. The console stays the UART text console (no
     /// display/input driver).
     StaticNetRootDisk,
+    /// The net-only-driver encrypted-root layout carrying the **standard**
+    /// signed application store **plus** a planted
+    /// `/System/Settings/Network/network.conf`
+    /// ([`tairix_test_netstack_wire::BOND_NETWORK_CONF`]) that binds two NICs
+    /// by `match.mac` as the members of one active-backup bond carrying a
+    /// static IPv6 address — the bond-failover vertical's backing
+    /// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond). `devmgr` autoloads the NIC
+    /// driver into a process per NIC and reads the planted config; `netstack`
+    /// composes the bond over the two members and assigns it the static
+    /// address — all pre-unlock, no console dialogue. The console stays the
+    /// UART text console (no display/input driver).
+    BondNetRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -4102,6 +4126,49 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
+    // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
+    // *production* aarch64 pipeline with the `bond-net-root` disk: the
+    // net-only signed driver set **plus** a planted
+    // `/System/Settings/Network/network.conf` that binds two NICs by
+    // `match.mac` as the members of one active-backup bond (`wan`) carrying
+    // a static IPv6 address (`FsDisk::BondNetRootDisk`), with **two**
+    // `virtio-net-device`s attached and the harness-side bond peer serving
+    // both wires (`NetPeerMode::Bond`). Everything runs **before** any root
+    // unlock (headless, no serial script), like the static sibling. `devmgr`
+    // autoloads the NIC driver into a process per NIC; `netstack` composes
+    // the active-backup bond over the two members and assigns it the static
+    // address, answering the peer's echo campaign over the primary member.
+    // Once the flow is established (the guest's first served echo), the
+    // runner drops the primary member's carrier over the QEMU monitor
+    // (`set_link net0 off`); the driver's virtio config-change interrupt
+    // makes `netstack` fail the bond over to the backup member, and the
+    // guest keeps answering over the second wire. PASS once the log sink has
+    // seen `netstack`'s `BOND_CONFIG_APPLIED`, `BOND_FAILOVER`, and an
+    // `INBOUND_ECHO_SERVED` observed **after** the failover — the last
+    // gating exit so the guest stays alive until a frame has been served
+    // post-failover; the peer's own campaign verdict (a reply at the bond's
+    // static address) is required too, so neither side can pass without the
+    // flow surviving the member drop. A 240-second budget covers boot +
+    // autoload of two NIC drivers + service bring-up + the bond compose +
+    // the paced echo campaign and the mid-flow failover on QEMU TCG; single
+    // CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-bond-qemu-aarch64",
+        binary: "tairix-test-netstack-bond-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::Bond,
+        ramfb: false,
+        fs_disk: FsDisk::BondNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
     // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
@@ -5391,6 +5458,9 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the static-addressing vertical plants:
     /// the shared set plus the planted `network.conf` (no test-only bundle).
     static_net_apps: &'static [AppStoreFile],
+    /// The application/service bundles the bond-failover vertical plants: the
+    /// shared set plus the planted bond `network.conf` (no test-only bundle).
+    bond_net_apps: &'static [AppStoreFile],
 }
 
 /// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
@@ -5436,11 +5506,16 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::StreamRootDisk
         | FsDisk::ListenRootDisk
         | FsDisk::PingRootDisk
-        | FsDisk::StaticNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
+        | FsDisk::StaticNetRootDisk
+        | FsDisk::BondNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     let static_net_apps = match t.fs_disk {
         FsDisk::StaticNetRootDisk => super::image_apps::static_net_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    let bond_net_apps = match t.fs_disk {
+        FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     Ok(StoreSet {
@@ -5451,6 +5526,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_tcpserve,
         net_only_drivers,
         static_net_apps,
+        bond_net_apps,
     })
 }
 
@@ -6551,6 +6627,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         apps_with_tcpserve,
         net_only_drivers,
         static_net_apps,
+        bond_net_apps,
     } = stores;
     Ok(match t.fs_disk {
         FsDisk::None => None,
@@ -6642,6 +6719,17 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
             "static-net-root.img",
             "static-net-root",
         )?),
+        // The bond-failover vertical: the same net-only driver set and
+        // whole-disk author, planting the standard app store **plus** the
+        // bond `network.conf` (carried in `bond_net_apps`) — one builder, no
+        // copy.
+        FsDisk::BondNetRootDisk => Some(net_root_image(
+            t,
+            net_only_drivers,
+            bond_net_apps,
+            "bond-net-root.img",
+            "bond-net-root",
+        )?),
     })
 }
 
@@ -6699,38 +6787,111 @@ fn spawn_net_peer(
             super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
         }
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
+        // The bond peer needs two wires (two socket pairs), so it is attached
+        // directly in `finish_run`, never through this single-wire spawner.
+        NetPeerMode::Bond => {
+            unreachable!("bond mode is attached in finish_run, not spawn_net_peer")
+        }
     }
+}
+
+/// Serial marker gating the bond vertical's mid-flow member drop: the
+/// `netstack` `INBOUND_ECHO_SERVED` audit message. Its first appearance means
+/// the bond is up and has served the peer's echo over the primary member, so
+/// dropping that member's carrier now exercises a genuine mid-flow failover
+/// (never before the flow exists). It is the literal `netstack` audit message
+/// (`userland/net/netstack/src/run.rs`), matching the established pattern of
+/// gating monitor injections on an audit message substring.
+const BOND_FAILOVER_TRIGGER_MARKER: &str = "netstack: inbound echo request served (reply queued)";
+
+/// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
+/// `netpeer` link peer, returning the updated spec and the running peer (if
+/// any). Every frame is captured to a `<binary>.pcap` beside the kernel image
+/// so a failing run leaves the on-wire exchange to inspect. The socket paths
+/// live in the temp dir: unix datagram paths are length-bounded (108 bytes)
+/// and the target dir can exceed that; the per-binary + per-process name keeps
+/// concurrent runs on private wires. Kept out of [`finish_run`] so that
+/// function stays within the line budget.
+fn attach_net_peer(
+    t: &QemuTest,
+    kernel: &Path,
+    mut spec: Spec,
+) -> Result<(Spec, Option<super::netpeer::NetPeer>), String> {
+    let mut peer = None;
+    match t.netstack_peer {
+        NetPeerMode::None => {}
+        // The bond vertical: two NICs (the bond's two members) on two private
+        // wires, one bond peer serving both, and a mid-flow monitor `set_link`
+        // that drops the primary member's carrier once the flow is established.
+        NetPeerMode::Bond => {
+            let sock_base =
+                std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
+            // Two private wires, one per bond member. `net0` carries the
+            // primary member ([`GUEST_MAC`]); `net1` the backup ([`GUEST_MAC_2`]).
+            let p_qemu = sock_base.with_extension("net0.qemu.sock");
+            let p_peer = sock_base.with_extension("net0.peer.sock");
+            let b_qemu = sock_base.with_extension("net1.qemu.sock");
+            let b_peer = sock_base.with_extension("net1.peer.sock");
+            let started = super::netpeer::NetPeer::spawn_bond(&p_qemu, &p_peer, &b_qemu, &b_peer);
+            peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
+            // Attach the two members in order, each with its pinned MAC and
+            // its own `.pcap`, so the bond's `match.mac` binding is
+            // deterministic and `net0` is the primary member.
+            spec = spec.with_virtio_net_dgram_mac(
+                &p_qemu,
+                &p_peer,
+                kernel.with_extension("net0.pcap"),
+                tairix_test_netstack_wire::GUEST_MAC_STR,
+            );
+            spec = spec.with_virtio_net_dgram_mac(
+                &b_qemu,
+                &b_peer,
+                kernel.with_extension("net1.pcap"),
+                tairix_test_netstack_wire::GUEST_MAC_2_STR,
+            );
+            // Once the guest has served its first inbound echo — the bond is
+            // up and carrying the flow over the primary member — drop that
+            // member's carrier. The driver's virtio config-change interrupt
+            // reports the link down and `netstack` fails the bond over to the
+            // backup member; the guest then serves a further echo over it,
+            // proving the flow survived.
+            spec = spec.with_monitor_command(
+                BOND_FAILOVER_TRIGGER_MARKER,
+                1,
+                format!(
+                    "set_link {} off",
+                    tairix_test_netstack_wire::BOND_PRIMARY_NETDEV_ID
+                ),
+            );
+        }
+        // Every single-wire peer role: one NIC over one `dgram` netdev, the
+        // MAC pinned to the wire constant both sides agree on (the guest
+        // derives its link-local from it).
+        _ => {
+            let pcap = kernel.with_extension("pcap");
+            let sock_base =
+                std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
+            let qemu_sock = sock_base.with_extension("qemu.sock");
+            let peer_sock = sock_base.with_extension("peer.sock");
+            let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock);
+            peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
+            spec = spec.with_virtio_net_dgram_mac(
+                &qemu_sock,
+                &peer_sock,
+                &pcap,
+                tairix_test_netstack_wire::GUEST_MAC_STR,
+            );
+        }
+    }
+    Ok((spec, peer))
 }
 
 /// Attach `t`'s remaining devices (network capture, display, input, the
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
 /// file.
-fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String> {
-    // Attach a virtio-net interface over a `dgram` unix-socket netdev and
-    // start the harness-side `netpeer` link peer on its other end, dumping
-    // every frame to a `<binary>.pcap` capture beside the kernel image so
-    // a failing run leaves the on-wire exchange to inspect. The socket
-    // paths live in the temp dir: unix datagram paths are length-bounded
-    // (108 bytes) and the target dir can exceed that; the per-binary +
-    // per-process name keeps concurrent runs on private wires.
-    let mut peer = None;
-    if t.netstack_peer != NetPeerMode::None {
-        let pcap = kernel.with_extension("pcap");
-        let sock_base = std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
-        let qemu_sock = sock_base.with_extension("qemu.sock");
-        let peer_sock = sock_base.with_extension("peer.sock");
-        let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock);
-        peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
-        // The guest derives its link-local from the device MAC, so the MAC
-        // is pinned to the wire constant both sides agree on.
-        spec = spec.with_virtio_net_dgram_mac(
-            &qemu_sock,
-            &peer_sock,
-            &pcap,
-            tairix_test_netstack_wire::GUEST_MAC_STR,
-        );
-    }
+fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
+    let (mut spec, peer) = attach_net_peer(t, kernel, spec)?;
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {

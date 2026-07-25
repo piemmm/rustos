@@ -46,9 +46,11 @@ impl MacAddress {
 /// stack could act on differently.
 ///
 /// [`Up`]: LinkState::Up
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum LinkState {
-    /// The link carries frames.
+    /// The link carries frames. An operational device that cannot sense
+    /// its link reports this, so it is the default.
+    #[default]
     Up,
     /// The link is down; transmits will not reach a peer.
     Down,

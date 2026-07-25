@@ -248,6 +248,66 @@ fn open_reports_device_facts() {
     assert_eq!(facts.rx_queues, 1);
 }
 
+/// A device that offers `VIRTIO_NET_F_STATUS` reports its live link state
+/// through both `device_facts()` and every `service` report, and a
+/// config-space link change (the guest half of a hot-unplug / carrier
+/// loss) is observed on the next doorbell — the sole live source of a
+/// bond failover.
+#[test]
+fn link_status_reports_up_and_down() {
+    // An 8-byte config window (6-byte MAC + a 2-byte `status` word) and
+    // the STATUS feature offered, with the link initially up.
+    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_STATUS, 8);
+    t.set_config(0, &DEVICE_MAC);
+    t.set_config(
+        wire::CONFIG_STATUS_OFFSET,
+        &wire::VIRTIO_NET_S_LINK_UP.to_le_bytes(),
+    );
+    let mut net = open_net_no_wait(t);
+    assert_eq!(net.device_facts().expect("facts").link, LinkState::Up);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    assert_eq!(
+        net.service(&mut rings).expect("service").link,
+        LinkState::Up
+    );
+    // The link drops (carrier lost). The device would raise a
+    // config-change interrupt; the driver reads the new state on the next
+    // service.
+    net.transport_mut()
+        .set_config(wire::CONFIG_STATUS_OFFSET, &[0, 0]);
+    assert_eq!(
+        net.service(&mut rings).expect("service").link,
+        LinkState::Down
+    );
+    assert_eq!(net.device_facts().expect("facts").link, LinkState::Down);
+    // And it recovers.
+    net.transport_mut().set_config(
+        wire::CONFIG_STATUS_OFFSET,
+        &wire::VIRTIO_NET_S_LINK_UP.to_le_bytes(),
+    );
+    assert_eq!(
+        net.service(&mut rings).expect("service").link,
+        LinkState::Up
+    );
+}
+
+/// A device that does **not** offer `VIRTIO_NET_F_STATUS` has no
+/// sensible `status` word; the driver reports it permanently up (an
+/// unsensed link is not a state the stack can act on).
+#[test]
+fn link_status_absent_reports_up() {
+    let (t, _, _) = build_device();
+    let mut net = open_net_no_wait(t);
+    assert_eq!(net.device_facts().expect("facts").link, LinkState::Up);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    assert_eq!(
+        net.service(&mut rings).expect("service").link,
+        LinkState::Up
+    );
+}
+
 #[test]
 fn service_transmits_queued_frames_to_the_peer() {
     let (t, tx_log, _) = build_device();

@@ -684,6 +684,15 @@ pub struct ServiceReport {
     pub received: u32,
     /// The RX ring filled while the device still had frames pending.
     pub rx_ring_full: bool,
+    /// The device's live link state at the moment of this service call.
+    ///
+    /// Reported on every doorbell so a link change a device signals
+    /// out of band (a virtio config-change interrupt, a PHY carrier
+    /// loss) reaches the stack the next time it services the ring —
+    /// which the driver provokes by waking the stack on the interrupt.
+    /// The stack turns a change into a bond-member link report
+    /// (`set_member_link`), the sole live source of a bond failover.
+    pub link: super::net::LinkState,
 }
 
 #[cfg(test)]
