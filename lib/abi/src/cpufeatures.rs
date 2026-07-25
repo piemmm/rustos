@@ -58,6 +58,12 @@ pub enum CpuFeature {
     Asimd = 7,
     /// aarch64 Data-Independent Timing, `ID_AA64PFR0_EL1.DIT`.
     Dit = 8,
+    /// aarch64 Data Cache Zero by VA (`DC ZVA`) usable at the current
+    /// exception level — `DCZID_EL0.DZP == 0`. `DC ZVA` zeroes a whole
+    /// cache-block (`4 << DCZID_EL0.BS` bytes) in one instruction without a
+    /// read-for-ownership, the fastest way to clear a page; `DZP == 1` means
+    /// the instruction is prohibited here and the bit is absent (fail closed).
+    DcZva = 9,
 
     // --- x86_64 ---
     /// x86_64 SSE2 (baseline on x86-64), CPUID.1:EDX.26.
@@ -81,6 +87,12 @@ pub enum CpuFeature {
     Rdrand = 24,
     /// x86_64 `RDSEED`, CPUID.7.0:EBX.18.
     Rdseed = 25,
+    /// x86_64 Enhanced `REP MOVSB`/`STOSB` (ERMS), CPUID.7.0:EBX.9. `REP
+    /// STOSB` is correct on every x86_64 CPU; with ERMS the microcode uses a
+    /// wide, cache-optimised path, making it the fastest general memory fill,
+    /// so a fill routine is only worth selecting over the baseline when this
+    /// bit is present.
+    Erms = 26,
 
     // --- riscv64 ---
     /// riscv64 `Zbb` basic bit-manipulation extension.
@@ -187,6 +199,7 @@ mod tests {
             CpuFeature::Lse,
             CpuFeature::Asimd,
             CpuFeature::Dit,
+            CpuFeature::DcZva,
             CpuFeature::Sse2,
             CpuFeature::Ssse3,
             CpuFeature::Sse42,
@@ -197,6 +210,7 @@ mod tests {
             CpuFeature::ShaNi,
             CpuFeature::Rdrand,
             CpuFeature::Rdseed,
+            CpuFeature::Erms,
             CpuFeature::Zbb,
             CpuFeature::Zbc,
             CpuFeature::Zbkc,

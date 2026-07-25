@@ -1508,6 +1508,7 @@ dependencies = [
  "tairix-kernel-syscall",
  "tairix-keymap",
  "tairix-log",
+ "tairix-pagezero",
  "tairix-path",
  "tairix-resref",
  "tairix-rng",
@@ -1560,6 +1561,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-kernel-mem",
  "tairix-log",
+ "tairix-pagezero",
  "tairix-sync",
  "zeroize",
 ]
@@ -1822,6 +1824,16 @@ dependencies = [
  "tairix-net",
  "tairix-rt",
  "tairix-virtio-net",
+]
+
+[[package]]
+name = "tairix-pagezero"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-cpuops",
+ "tairix-fuzzseed",
+ "tairix-sync",
 ]
 
 [[package]]

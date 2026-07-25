@@ -1,0 +1,33 @@
+[package]
+name = "tairix-pagezero"
+description = "TAIRiX page/region zeroing: the one first-party definition of the fast memory-clear the kernel uses to scrub freshly-allocated and freed frames (zero-before-map and the zero-on-free secret scrub), with a portable byte-fill baseline and per-arch hardware-accelerated candidates (aarch64 `DC ZVA` cache-block zero, x86_64 ERMS `rep stosb`) selected and self-verified through lib/cpuops from a delivered CpuFeatureSet, always falling closed to the portable baseline. Capability-gated (never benchmarked): the fast primitive is unconditionally better when present. no_std, no cfg(target_arch) (build.rs-emitted per-arch cfg, the lib/crc32c precedent), fuzzed against the reference (AGENTS.md §2.2/§2.16/§2.20; plans/FIX-HARDWARE-FEATURES.md P3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The self-optimising dispatch framework: the registry, capability gate,
+# mandatory self-verify, and fail-closed baseline selection are written once
+# there and reused here (§2.2), never re-implemented per accelerated op.
+# `default-features = false` drops the framework's optional heap-backed
+# `OpsTables` (unused here — this crate only *selects* a single kernel-wide
+# routine), so page-zero stays allocation-free and never forces a global
+# allocator onto a consumer (§2.16).
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
+# The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) a
+# candidate's required-feature gate is expressed in.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The set-once cell holding the resolved implementation for the whole kernel
+# image (a fn pointer is `Copy + Send + Sync`), so no ad-hoc atomic/`unsafe` is
+# rolled here (§2.2).
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+
+[dev-dependencies]
+# Shared per-run seed / budget seam for the §19.6 fuzz harness (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

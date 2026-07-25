@@ -93,6 +93,11 @@ pub fn system_features() -> CpuFeatureSet {
 ///   in-kernel, so on a core with the `crc32c*` / SSE4.2 instruction the
 ///   checksum uses the hardware path (self-verified bit-identical to the
 ///   portable baseline before it can be selected).
+/// - **Page-zero**: the frame scrub (zero-before-map and the zero-on-free
+///   secret scrub, `kernel/mem`) runs through it, so on a core with a
+///   block-zero instruction (`DC ZVA` / ERMS) it uses the hardware path
+///   (self-verified bit-identical to the portable byte fill before it can be
+///   selected). A pure capability decision, never benchmarked.
 /// - **Crypto (SHA-256) backend availability**: an availability-only decision
 ///   whose self-verify is a FIPS known-answer self-test of the live SHA-256
 ///   path (`tairix_crypto::backend`). Never benchmarked (a benchmark must not
@@ -107,6 +112,7 @@ pub fn system_features() -> CpuFeatureSet {
 pub fn resolve_accelerated_ops(audit: &dyn Sink) -> bool {
     let features = system_features();
     record(audit, &tairix_crc32c::resolve(features));
+    record(audit, &tairix_pagezero::resolve(features));
 
     let crypto = tairix_crypto::backend::resolve(features);
     record(audit, &crypto);

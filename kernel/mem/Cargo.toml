@@ -49,6 +49,14 @@ tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 # never an external dependency.
 tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
 
+# The self-optimising page-zero routine (`plans/FIX-HARDWARE-FEATURES.md` P3):
+# frame scrub (zero-before-map and the zero-on-free secret scrub) clears a page
+# through the one resolved implementation, so on a core with `DC ZVA` / ERMS it
+# uses the hardware block-zero (self-verified bit-identical to the byte fill
+# before it can be selected). `default-features = false` keeps it allocation-
+# free. §17.4 permits a kernel subsystem to depend on `lib/*`.
+tairix-pagezero = { path = "../../lib/pagezero", version = "=0.0.0", default-features = false }
+
 # Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.

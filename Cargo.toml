@@ -75,6 +75,7 @@ members = [
     "lib/multiboot2",
     "lib/net",
     "lib/netconfig",
+    "lib/pagezero",
     "lib/partition",
     "lib/path",
     "lib/pci",

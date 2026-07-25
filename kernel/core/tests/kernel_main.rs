@@ -160,11 +160,11 @@ fn happy_path_runs_documented_init_order_and_halts() {
     assert_eq!(field("chosen").as_deref(), Some("crc32c-portable"));
     assert_eq!(field("reason").as_deref(), Some("baseline"));
 
-    // Two families resolve at boot: CRC-32C (asserted above) and the crypto
-    // SHA-256 backend-availability decision, recorded in that order. On the
-    // host TestArch the common set is empty, so the crypto family resolves to
-    // the audited software baseline — and its self-verify (the FIPS
-    // known-answer power-on self-test) passed, so no fatal
+    // Three families resolve at boot, recorded in this order: CRC-32C
+    // (asserted above), page-zero, and the crypto SHA-256 backend-availability
+    // decision. On the host TestArch the common set is empty, so each falls
+    // closed to its portable/software baseline — and the crypto self-verify
+    // (the FIPS known-answer power-on self-test) passed, so no fatal
     // `CryptoSelfTestFailed` is emitted and the kernel did not halt early.
     let selections: Vec<_> = audit_sink
         .snapshot()
@@ -173,11 +173,26 @@ fn happy_path_runs_documented_init_order_and_halts() {
         .collect();
     assert_eq!(
         selections.len(),
-        2,
-        "CRC-32C and crypto-sha256 families both record a selection: {:#?}",
+        3,
+        "CRC-32C, page-zero, and crypto-sha256 families each record a selection: {:#?}",
         audit_sink.snapshot(),
     );
-    let crypto = &selections[1];
+    let page_zero = &selections[1];
+    let page_zero_field = |key: &str| {
+        page_zero
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(page_zero_field("family").as_deref(), Some("pagezero"));
+    assert_eq!(
+        page_zero_field("chosen").as_deref(),
+        Some("pagezero-portable")
+    );
+    assert_eq!(page_zero_field("reason").as_deref(), Some("baseline"));
+
+    let crypto = &selections[2];
     let crypto_field = |key: &str| {
         crypto
             .fields

@@ -112,7 +112,11 @@ pub(crate) fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), Anon
     let page = unsafe {
         slice_within(ptr.as_ptr(), PAGE_SIZE, 0, PAGE_SIZE).ok_or(AnonError::PhysUnmapped)?
     };
-    page.fill(0);
+    // Clear through the self-optimising page-zero routine: on a core with a
+    // block-zero instruction (`DC ZVA` / ERMS) this is the hardware path,
+    // self-verified bit-identical to the byte fill before it could be
+    // selected, and the portable byte fill everywhere else.
+    tairix_pagezero::zero(page);
     Ok(())
 }
 

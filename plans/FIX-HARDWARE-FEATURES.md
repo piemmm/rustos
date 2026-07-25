@@ -23,9 +23,42 @@ there; on `aarch64`/`riscv64`/`wasm32` there is no runtime-selected hardware
 SHA-256 path, so the honest software answer is recorded. Recovering hardware
 SHA-256 on `aarch64` (whose `sha2` HWCAP gate is inert on `target_os="none"`)
 awaits a **vetted, driveable audited backend** — a supply-chain decision,
-deliberately not faked. Remaining: that aarch64 hardware-crypto backend, P3 (the
-`ByBenchmark` memcpy/blit/checksum/XOR families + per-arch QEMU verticals), and
-P4 (matrix + burn-down). Design fixed below.
+deliberately not faked.
+
+The P3 **page-zero** consumer is also done: `lib/pagezero` is a capability-gated
+(`ByPriority`) family — portable byte-fill baseline + per-arch hardware
+candidates (aarch64 `DC ZVA` cache-block zero, x86_64 ERMS `rep stosb`), gated
+on the new `DcZva`/`Erms` `CpuFeatureSet` bits, `lib/cpuops`-selected +
+self-verified + host-fuzzed. The `kernel/mem` frame scrub (`zero_frame` /
+`fill_frame`: zero-before-map and the zero-on-free secret scrub) routes through
+it, and `kernel/core::cpuops::resolve_accelerated_ops` resolves it once against
+the finalised common set and audits the choice (`CpuOpsRoutineSelected`).
+
+**A design correction landed with it (§2.13, no staged migration):** page-zero
+was listed below under `ByBenchmark`; that is wrong. A block-zero primitive is
+unconditionally better when present and bit-identical, so it is chosen by
+*capability* (`ByPriority`), never a benchmark — exactly as Linux selects
+`DC ZVA`/ERMS by feature. `memcpy`/`memset` fall in the same bucket where a
+hardware fill/copy dominates. The plan is corrected accordingly below.
+
+Remaining: that aarch64 hardware-crypto backend; the genuine **`ByBenchmark`**
+demonstration (below); and P4 (matrix + burn-down). Design fixed below.
+
+**Open design question for the `ByBenchmark` axis (must be resolved before its
+consumers land, §15.7).** The families where a benchmark genuinely decides
+(the raid6/xor case: best SIMD width varies by microarch) are the framebuffer
+blit/blend/fill (`lib/raster`) and the RFC-1071 IP checksum (`lib/net`) — both
+**userland**. But the bounded microbenchmark measures over the Arch HAL
+`CpuCycles` counter, which is **kernel-only**: there is no mechanism today for
+a user-space process to obtain a per-core-type "fastest routine" decision.
+Resolving this needs a deliberate design (e.g. `lib/rt` benchmarks its own
+candidates at startup keyed by the delivered feature set over a cycle-counter
+access path, or the kernel measures per core type and delivers the winners),
+which is a separate, ABI-touching sub-plan — not started. The plan's former
+XOR/parity `ByBenchmark` family is **dropped** until a real RAID/FEC/parity
+consumer exists (a family with no caller is speculative/dead surface, §2.4);
+`lib/cpuops`'s `ByBenchmark` policy + `BenchHarness` remain fully implemented
+and host-tested against a fake counter, ready for the first real consumer.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
@@ -575,11 +608,45 @@ family's fn pointer from the per-CPU/per-core-type `OpsTable`.
 route through it; `kernel/core` builds per-core-type tables; whole-project
 gate green; coverage ≥ 85% for the new `lib/*` crate (§7).
 
-### P3 — The `ByBenchmark` axis (bounded, deterministic boot microbenchmark)
+### P3a — Capability-gated fill/zero (`ByPriority`) — **done**
 
-**Scope in one line:** turn the P2 `ByBenchmark` seam into a real bounded
-one-shot microbenchmark keyed per core type, then move the secret-free,
-bit-identical families onto it.
+**Delivered.** The page-zero family (`lib/pagezero`) is a capability-gated
+(`ByPriority`) consumer, resolved once at bring-up against the migration-safe
+common feature set:
+
+- New `DcZva` (aarch64, `DCZID_EL0.DZP`) and `Erms` (x86_64, `CPUID.7:EBX.9`)
+  `CpuFeatureSet` bits + per-port detection (each the sole reader of its ID
+  source; `dczva_usable` pure and host-tested).
+- `lib/pagezero`: portable byte-fill baseline (`zero_portable`), aarch64
+  `DC ZVA` candidate (reads the `DCZID_EL0` block size; head/aligned-middle/
+  tail so it is correct for any base/length) and x86_64 ERMS `rep stosb`
+  candidate, behind the `build.rs`-emitted `pagezero_<arch>` cfg (no
+  `cfg(target_arch)` in source). Selected + self-verified (byte-identical to
+  the fill over a fixed length/alignment vector, including that it zeroes
+  *exactly* the region) + host-fuzzed, fail-closed to the baseline.
+- Consumer: the `kernel/mem` frame scrub (`anon::zero_frame`,
+  `spawn::fill_frame`) routes through `tairix_pagezero::zero`;
+  `kernel/core::cpuops::resolve_accelerated_ops` resolves it once and audits
+  the choice (`CpuOpsRoutineSelected`).
+
+**Why `ByPriority`, not `ByBenchmark`:** a block-zero primitive is
+unconditionally faster when present and bit-identical, so the choice is pure
+capability (as in Linux). A single kernel-wide routine (one set-once fn
+pointer, no per-call per-CPU table lookup) resolved against the *intersection*
+set is correct because a kernel routine may migrate between cores.
+
+### P3b — The `ByBenchmark` axis (bounded, deterministic boot microbenchmark)
+
+**Status: blocked on an open design question — the harness is built, its real
+consumers are not.** The `lib/cpuops` `BenchHarness` + `ByBenchmark` selection
+policy are complete and host-tested against a fake counter (P2). What is *not*
+done is a real consumer, because the families where a benchmark genuinely
+decides are userland and the cycle counter is kernel-only (see the status
+header). **Before P3b consumers land, the userland-measurement mechanism must
+be designed and agreed (§15.7).**
+
+**Scope in one line (once unblocked):** wire the userland measurement path,
+then move the secret-free, bit-identical userland families onto `ByBenchmark`.
 
 **Deliverables — the harness (`lib/cpuops/src/bench.rs`):**
 
@@ -605,20 +672,23 @@ in `OpsTables`; the boot CPU's result is never imposed on a different core
 type.
 
 **Deliverables — `ByBenchmark` consumers (secret-free, bit-identical only —
-invariant 8):**
+invariant 8; all pending the userland-measurement design above):**
 
-- `memcpy` / `memset` / page-zero: candidates (portable, NEON/`ASIMD`,
-  x86_64 AVX2) behind the ops table; the baseline is the current portable
-  loop. First real caller: the `kernel/mem` page-zero path.
 - Framebuffer blit/blend/fill: `lib/raster/src/surface.rs`
   (`fill_rect`, `fill_round_rect`, `blit`) — route the inner fill/blend loop
   through an ops-table fn pointer; NEON/AVX candidates gated on the feature
-  bit, portable baseline unchanged.
+  bit, portable baseline unchanged. **Userland** — needs the measurement path.
 - RFC-1071 IP checksum: `lib/net/src/checksum.rs`
   (`internet_checksum` / `Checksum::push`/`finish`) — a SIMD folding
-  candidate vs the portable ones'-complement baseline.
-- XOR/parity: the baseline word-XOR with a SIMD candidate (a future RAID/FEC
-  consumer — land the family; `ByBenchmark` proven on it).
+  candidate vs the portable ones'-complement baseline. **Userland** — needs
+  the measurement path.
+- `memcpy` / `memset`: where a hardware fill/copy dominates unconditionally
+  these belong on the *capability* axis with page-zero (P3a), not here; a
+  `ByBenchmark` memcpy is warranted only if two feature-legal SIMD widths
+  genuinely trade places by microarch, and only with a real caller.
+- XOR/parity: **dropped** until a real RAID/FEC/parity consumer exists (a
+  family with no caller is speculative/dead surface, §2.4). Land it *with*
+  that consumer.
 - Crypto stays strictly on the P1/P2 capability axis — **never** here.
 
 **Deliverables — logging + pin:** each `Decision` (family × core type) is

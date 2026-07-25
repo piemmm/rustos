@@ -54,6 +54,21 @@ const PFR0_DIT: u32 = 48;
 /// values indicate a present, increasingly-capable Advanced SIMD unit).
 const ADVSIMD_ABSENT: u64 = 0xF;
 
+/// `DCZID_EL0.DZP` — bit 4. When set, the `DC ZVA` block-zero instruction is
+/// *prohibited* at the current exception level; when clear it is permitted.
+const DCZID_DZP: u32 = 4;
+
+/// `true` if `DC ZVA` is usable at the current EL, decoded from a raw
+/// `DCZID_EL0` value: the prohibit bit (`DZP`) must be clear.
+///
+/// Pure and host-testable; the register read lives in [`CpuFeatureDetect::detect`].
+/// Failing closed on a prohibited instruction is essential — issuing `DC ZVA`
+/// when `DZP == 1` would trap.
+#[must_use]
+pub const fn dczva_usable(dczid: u64) -> bool {
+    (dczid >> DCZID_DZP) & 1 == 0
+}
+
 /// Decode the two aarch64 feature-ID registers into a [`CpuFeatureSet`].
 ///
 /// Pure and host-testable: the bare-metal probe feeds it the registers
@@ -144,7 +159,22 @@ impl CpuFeatures for CpuFeatureDetect {
                     options(nomem, nostack, preserves_flags),
                 );
             }
-            features_from_id_regs(isar0, pfr0)
+            let dczid: u64;
+            // SAFETY: `DCZID_EL0` is readable at EL1 with no architectural
+            // side effect; it reports the `DC ZVA` block size and whether the
+            // instruction is permitted here.
+            unsafe {
+                core::arch::asm!(
+                    "mrs {dczid}, dczid_el0",
+                    dczid = out(reg) dczid,
+                    options(nomem, nostack, preserves_flags),
+                );
+            }
+            let mut set = features_from_id_regs(isar0, pfr0);
+            if dczva_usable(dczid) {
+                set = set.with(CpuFeature::DcZva);
+            }
+            set
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
@@ -283,6 +313,16 @@ mod tests {
         // Any other value (0, 1) => present.
         assert!(features_from_id_regs(0, 0).contains(CpuFeature::Asimd));
         assert!(features_from_id_regs(0, 1 << PFR0_ADVSIMD).contains(CpuFeature::Asimd));
+    }
+
+    #[test]
+    fn dczva_usable_decodes_the_prohibit_bit() {
+        // DZP clear (bit 4 == 0): DC ZVA permitted, whatever the block size.
+        assert!(dczva_usable(0));
+        assert!(dczva_usable(0x4)); // BS = 4 words, DZP clear.
+                                    // DZP set (bit 4 == 1): prohibited — fail closed.
+        assert!(!dczva_usable(1 << DCZID_DZP));
+        assert!(!dczva_usable((1 << DCZID_DZP) | 0x4));
     }
 
     #[test]

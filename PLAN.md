@@ -325,11 +325,24 @@ into every process's startup vector (`ProcessStart::cpu_features`, exposed by
 SMP bring-up (auditing each choice, `AuditEvent::CpuOpsRoutineSelected`). ARXFS
 routes its fast `physical_checksum` through `lib/crc32c` (replacing the former
 FNV-1a; on-disk physical-integrity trailer 8→4 bytes, pre-release format change,
-`docs/src/filesystem/arxfs-spec.md`). Remaining P3/P4 work: the `ByBenchmark`
-consumers (memcpy/page-zero, blit, RFC-1071 checksum, XOR/parity), the
-`lib/crypto` hardware/software backend-availability seam (capability-gated,
-never benchmarked), the per-arch QEMU verticals, and the P0 build-time floor
-raise if a minimum requirement is documented.
+`docs/src/filesystem/arxfs-spec.md`). The `lib/crypto` SHA-256 backend-
+availability seam (capability-gated, never benchmarked, with a boot-time FIPS
+known-answer self-test) has also landed.
+
+The P3 **page-zero** family (`lib/pagezero`) has landed as a second
+capability-gated (`ByPriority`) consumer: a portable byte-fill baseline plus
+per-arch hardware candidates (aarch64 `DC ZVA`, x86_64 ERMS `rep stosb`; new
+`DcZva`/`Erms` `CpuFeatureSet` bits, `build.rs`-emitted per-arch cfg,
+host-fuzzed), selected once and self-verified bit-identical through
+`lib/cpuops`, fail-closed. The `kernel/mem` frame scrub (`zero_frame` /
+`fill_frame`) routes through it. This corrected a plan error — page-zero (and
+`memcpy`/`memset` where a hardware fill dominates) is a *capability* decision,
+not `ByBenchmark`. Remaining P3/P4 work: the genuine `ByBenchmark` consumers
+(userland `lib/raster` blit, `lib/net` RFC-1071 checksum) are **blocked** on an
+undesigned userland-measurement path (the cycle counter is kernel-only); the
+former XOR/parity family is dropped until a real RAID/FEC consumer exists; plus
+the aarch64 hardware-crypto backend, the per-arch QEMU verticals, and the P0
+build-time floor raise if a minimum requirement is documented.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

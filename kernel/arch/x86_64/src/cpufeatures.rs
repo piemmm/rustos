@@ -34,6 +34,7 @@ const LEAF1_EDX_SSE2: u32 = 26;
 
 // --- CPUID leaf 7 sub-leaf 0: EBX feature bits ---
 const LEAF7_EBX_AVX2: u32 = 5;
+const LEAF7_EBX_ERMS: u32 = 9;
 const LEAF7_EBX_RDSEED: u32 = 18;
 const LEAF7_EBX_SHA: u32 = 29;
 
@@ -63,6 +64,7 @@ pub fn features_from_cpuid(leaf1_ecx: u32, leaf1_edx: u32, leaf7_ebx: u32) -> Cp
     on(leaf1_ecx, LEAF1_ECX_PCLMULQDQ, CpuFeature::Pclmulqdq);
     on(leaf1_ecx, LEAF1_ECX_RDRAND, CpuFeature::Rdrand);
     on(leaf7_ebx, LEAF7_EBX_AVX2, CpuFeature::Avx2);
+    on(leaf7_ebx, LEAF7_EBX_ERMS, CpuFeature::Erms);
     on(leaf7_ebx, LEAF7_EBX_SHA, CpuFeature::ShaNi);
     on(leaf7_ebx, LEAF7_EBX_RDSEED, CpuFeature::Rdseed);
     set
@@ -233,10 +235,11 @@ mod tests {
         assert!(set.contains(CpuFeature::Avx));
         assert!(set.contains(CpuFeature::Rdrand));
 
-        // AVX2 (5) + RDSEED (18) + SHA-NI (29) in leaf-7 EBX.
-        let ebx = (1 << 5) | (1 << 18) | (1 << 29);
+        // AVX2 (5) + ERMS (9) + RDSEED (18) + SHA-NI (29) in leaf-7 EBX.
+        let ebx = (1 << 5) | (1 << 9) | (1 << 18) | (1 << 29);
         let set = features_from_cpuid(0, 0, ebx);
         assert!(set.contains(CpuFeature::Avx2));
+        assert!(set.contains(CpuFeature::Erms));
         assert!(set.contains(CpuFeature::Rdseed));
         assert!(set.contains(CpuFeature::ShaNi));
     }

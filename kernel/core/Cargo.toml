@@ -144,6 +144,13 @@ tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
 # `crc32c*`/SSE4.2 hardware path where present, self-verified against the
 # portable baseline (never hand-rolled per op — one shared definition, §2.2).
 tairix-crc32c = { path = "../../lib/crc32c", version = "=0.0.0" }
+# The self-optimising page-zero dispatch (`plans/FIX-HARDWARE-FEATURES.md` P3):
+# `kernel_main` resolves it once against the finalised common CPU-feature set
+# (`src/cpuops.rs`) so the in-kernel frame scrub (`kernel/mem`) uses the
+# `DC ZVA`/ERMS hardware block-zero where present, self-verified bit-identical
+# to the byte fill (never hand-rolled per op — one shared definition, §2.2).
+# `default-features = false` drops the unused heap-backed `OpsTables`.
+tairix-pagezero = { path = "../../lib/pagezero", version = "=0.0.0", default-features = false }
 # The generic self-optimising dispatch framework: `src/cpuops.rs` names its
 # `Decision`/`DecisionReason` to record which accelerated routine won through
 # the audit log (`plans/FIX-HARDWARE-FEATURES.md` P2, `AGENTS.md` §19.4).

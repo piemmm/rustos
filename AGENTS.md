@@ -834,6 +834,20 @@ tairix/
 │   │                    #   the bounded provider-agnostic RFC 4861
 │   │                    #   neighbour cache ARP and ND both drive (§2.2).
 │   │                    #   No I/O: the netstack service is the glue.
+│   ├── pagezero/        # Page/region zeroing (plans/FIX-HARDWARE-FEATURES.md
+│   │                    #   P3a): the one first-party definition of the fast
+│   │                    #   memory-clear the kernel uses to scrub freshly-
+│   │                    #   allocated frames (zero-before-map) and freed frames
+│   │                    #   (the zero-on-free secret scrub) — a portable byte-
+│   │                    #   fill baseline plus per-arch hardware candidates
+│   │                    #   (aarch64 DC ZVA cache-block zero, x86_64 ERMS rep
+│   │                    #   stosb; build.rs-emitted cfg, no cfg(target_arch))
+│   │                    #   selected once and self-verified bit-identical to the
+│   │                    #   baseline through lib/cpuops, fail-closed. Capability-
+│   │                    #   gated (ByPriority), never benchmarked: a block-zero
+│   │                    #   primitive is unconditionally better when present.
+│   │                    #   Consumed by the kernel/mem frame scrub. no_std,
+│   │                    #   fuzzed (§2.12/§2.16/§2.20; §19.6).
 │   ├── partition/       # Shared, scheme-neutral partition-table layer: MBR
 │   │                    #   encode + fail-closed MBR/GPT parse and a
 │   │                    #   bounds-checked PartitionBlock window, the one

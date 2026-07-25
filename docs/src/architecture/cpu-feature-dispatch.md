@@ -3,7 +3,8 @@
 TAIRiX images are compiled against a conservative **build-time floor** — the
 common instruction set of every machine an image must boot (a single generic
 image per architecture, not per board). Anything the booted CPU offers *above*
-that floor — CRC32, the crypto extension, wide SIMD — is reached only by asking
+that floor — CRC32, the crypto extension, wide SIMD, a block-zero instruction
+— is reached only by asking
 the silicon at runtime which extensions it implements and dispatching to an
 extension-using routine **only on cores that have it**. This is the runtime
 *ceiling* that recovers, per booted CPU, everything the conservative floor
@@ -94,3 +95,27 @@ instruction per word; everywhere else it is the portable table baseline, and
 the hardware path is self-verified bit-identical to that baseline before it can
 be selected. The kernel resolves it once, after SMP bring-up, against the
 finalised common feature set.
+
+## Consumer: page-zero (`lib/pagezero`)
+
+Clearing memory to zero is one of the kernel's hottest and most
+security-critical primitives: every freshly-allocated frame is zeroed before it
+becomes user-visible (no stale bytes cross a process boundary), and every frame
+that ever held a secret is scrubbed on free. `lib/pagezero` routes the
+`kernel/mem` frame scrub through the framework: on a core with a block-zero
+instruction it uses aarch64 `DC ZVA` (which clears a whole cache block without
+a read-for-ownership) or x86_64 ERMS `rep stosb`, and the portable byte fill
+everywhere else.
+
+Page-zero sits firmly on the **capability** axis: a block-zero primitive is
+unconditionally faster than a scalar loop when present and bit-identical in
+result, so the choice is `ByPriority` (hardware first, portable baseline last)
+— **never** benchmarked. Racing a page-zero benchmark at boot would be
+pointless churn, and Linux likewise selects `DC ZVA`/ERMS by feature, not by
+timing. The hardware candidate is self-verified against the byte fill — over a
+fixed vector of lengths and alignments, including that it zeroes *exactly* the
+requested region and touches nothing past it — before it can be selected. Like
+CRC-32C, the kernel resolves one routine, after SMP bring-up, against the
+finalised common feature set (a kernel routine may migrate between cores, so it
+must be legal on all of them); the `ERMS` (x86_64) and `DcZva` (aarch64)
+capability bits gate the two candidates.

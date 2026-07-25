@@ -166,6 +166,12 @@ pub const TARGETS: &[Target] = &[
         description: "CRC-32C accelerated candidates vs the portable reference (bit-identity)",
     },
     Target {
+        package: "tairix-pagezero",
+        test: "fuzz_pagezero",
+        description:
+            "page-zero accelerated candidates vs the portable reference (zeroes exactly the region, touches nothing past it)",
+    },
+    Target {
         package: "tairix-svg",
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",

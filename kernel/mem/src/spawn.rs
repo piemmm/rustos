@@ -230,7 +230,10 @@ fn fill_frame(physmap: &dyn PhysMap, frame: Frame, content: &[u8]) -> Result<(),
     let page = unsafe {
         slice_within(ptr.as_ptr(), PAGE_SIZE, 0, PAGE_SIZE).ok_or(SpawnError::PhysUnmapped)?
     };
-    page.fill(0);
+    // Clear through the self-optimising page-zero routine (the hardware
+    // block-zero on a core that has one, the portable byte fill otherwise),
+    // then copy the segment content over the zeroed head.
+    tairix_pagezero::zero(page);
     page[..content.len()].copy_from_slice(content);
     Ok(())
 }
