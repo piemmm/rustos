@@ -1672,6 +1672,17 @@ rather than the aarch64 mmio slot. `static_net_store_files` plants the arch's
 conf by `PieArch`; everything else (runner, peer, fixture, sinks) is reused
 unchanged. No production code changed.
 
+`tairix-test-netstack-static-qemu-riscv64` is the riscv64 virtio-**MMIO**
+sibling (the third and last Tier-1 target), over the QEMU `virt` board's PLIC
+device-IRQ path: the same production `boot_riscv64::boot` pipeline,
+`static-net-root` disk, and `V6StaticEcho` peer, differing only in
+`STATIC_NETWORK_CONF_RISCV64`'s `match.node` value — the NIC's virtio-mmio
+transport slot base `0x1000_7000` (slot 6 of the eight `0x1000_1000`-based
+transports; QEMU fills them top-down and the root disk takes the top slot).
+`static_net_store_files` plants it by `PieArch`; runner, peer, fixture, and
+sinks are reused unchanged. No production code changed — all riscv64 autoload
+foundations were already in place.
+
 #### N9b-3-2-β-2-ii-b-bond — the live bond-failover vertical (gate-green) `[x]`
 `tairix-test-netstack-bond-qemu-aarch64` boots the production aarch64 pipeline
 against a `bond-net-root` disk: the net-only signed driver bundle **plus** a
@@ -1720,6 +1731,15 @@ two members and the failover simply live on the PCI bus. No production code
 changed — the two dual-NIC verticals differ only in the emitted device model
 (`virtio-net-pci` vs `virtio-net-device`), which the shared `Spec` builder
 already selects per arch.
+
+`tairix-test-netstack-bond-qemu-riscv64` is the riscv64 virtio-**MMIO** sibling
+(the third and last Tier-1 target), over the QEMU `virt` board's PLIC
+device-IRQ path: the same production `boot_riscv64::boot` pipeline,
+`bond-net-root` disk, `Bond` peer, and mid-flow `set_link net0 off` failover
+trigger. The bond binds by `match.mac`, so `BOND_NETWORK_CONF` is arch-neutral
+and reused verbatim; the two NICs and the failover live on the board's
+virtio-mmio transports. No production code changed. With it all three Tier-1
+targets carry both declarative-config verticals.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

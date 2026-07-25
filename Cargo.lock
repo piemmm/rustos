@@ -3084,6 +3084,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-bond-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
 name = "tairix-test-netstack-bond-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
@@ -3122,6 +3135,20 @@ name = "tairix-test-netstack-static-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
+name = "tairix-test-netstack-static-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
  "tairix-devmgr",
  "tairix-itest-harness",
  "tairix-kalloc",

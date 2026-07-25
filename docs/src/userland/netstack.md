@@ -265,23 +265,26 @@ stream connect-and-echo through the real socket-service pump against a
 passive-peer echo server, and the dispatcher's capability-refusal/audit
 matrix.
 
-The `netstack_autoload_qemu_aarch64` and `netstack_autoload_qemu_riscv64`
-QEMU verticals (`plans/NETWORK.md` N4e-β / N4e-riscv64) prove the service
-live in the **two-process** production boot on both arches: the autoloaded
+The `netstack_autoload_qemu_{aarch64,riscv64,x86_64}` QEMU verticals
+(`plans/NETWORK.md` N4e-β / N4e-riscv64 / A4) prove the service live in the
+**two-process** production boot on all three Tier-1 targets: the autoloaded
 virtio-net driver runs in its own process, `devmgr` calls `BindDriver`, and
 `netstack` auto-configures the interface's EUI-64 IPv6 link-local (no IPv4)
 and answers a host peer's link-local echo — witnessed by `devmgr`'s
 `NETSTACK_BOUND`, the stack's `DRIVER_BOUND`, and the stack's
 `INBOUND_ECHO_SERVED` audit records (a provisioning failure now also reports
-its errno through `DRIVER_BIND_FAILED`, fail-loud). The riscv64 vertical is
-the headless `virt`-board virtio-mmio / PLIC analogue; x86_64 (over virtio-PCI)
-is the remaining follow-up.
+its errno through `DRIVER_BIND_FAILED`, fail-loud). aarch64 and riscv64 drive
+the headless `virt`-board virtio-mmio / GIC-or-PLIC path; x86_64 drives
+virtio-PCI with kernel-routed MSI-X.
 
-The `netstack_static_qemu_aarch64` and `netstack_bond_qemu_aarch64` verticals
-prove the declarative `network.conf` path live. The static vertical binds one
-NIC to an admin alias by `match.node` and assigns it a static IPv6 address.
-The bond vertical composes an active-backup bond over **two** NICs (bound by
-`match.mac`) with a static address, then drops the primary member's carrier
+The `netstack_static_qemu_{aarch64,riscv64,x86_64}` and
+`netstack_bond_qemu_{aarch64,riscv64,x86_64}` verticals prove the declarative
+`network.conf` path live on all three Tier-1 targets. The static vertical binds
+one NIC to an admin alias by `match.node` (its bus location — the virtio-mmio
+transport slot base on aarch64/riscv64, the config-window BAR base on x86_64)
+and assigns it a static IPv6 address. The bond vertical composes an
+active-backup bond over **two** NICs (bound by `match.mac`, so its config is
+arch-neutral) with a static address, then drops the primary member's carrier
 mid-flow over the QEMU monitor (`set_link net0 off`): the driver's
 `VIRTIO_NET_F_STATUS` config-change interrupt reports the link down and the
 bond fails over to the surviving member, witnessed by `BOND_CONFIG_APPLIED`,
