@@ -4787,3 +4787,106 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
     let tiny = Rect::new(0, 0, 20, 16);
     assert!(!progress_cancel_at(tiny, font, &theme, Point::new(5, 5)));
 }
+
+mod trash {
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use crate::execute::VolumeId;
+    use crate::trash::{trash_dest_path, trash_strategy, TrashError, TrashStrategy};
+
+    fn vol(byte: u8) -> VolumeId {
+        VolumeId::new([byte; 16])
+    }
+
+    fn owned(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| String::from(*p)).collect()
+    }
+
+    #[test]
+    fn same_volume_moves_and_cross_volume_unlinks() {
+        // An item on the same volume as Trash is a cheap recoverable rename;
+        // a different volume falls back to the irreversible unlink.
+        assert_eq!(trash_strategy(vol(7), vol(7)), TrashStrategy::Move);
+        assert_eq!(trash_strategy(vol(1), vol(2)), TrashStrategy::Unlink);
+    }
+
+    #[test]
+    fn a_free_name_lands_unchanged_under_the_trash_dir() {
+        let trash = owned(&["Users", "root", "Library", "Trash"]);
+        let dest = trash_dest_path(&trash, "notes.txt", &[]).expect("free name");
+        assert_eq!(
+            dest,
+            owned(&["Users", "root", "Library", "Trash", "notes.txt"])
+        );
+    }
+
+    #[test]
+    fn a_clashing_name_disambiguates_before_the_extension() {
+        let trash = owned(&["Trash"]);
+        let taken = owned(&["notes.txt"]);
+        let dest = trash_dest_path(&trash, "notes.txt", &taken).expect("disambiguated");
+        assert_eq!(dest.last().map(String::as_str), Some("notes (2).txt"));
+    }
+
+    #[test]
+    fn disambiguation_skips_every_taken_suffix_in_order() {
+        let trash = owned(&["Trash"]);
+        let taken = owned(&["notes.txt", "notes (2).txt", "notes (3).txt"]);
+        let dest = trash_dest_path(&trash, "notes.txt", &taken).expect("disambiguated");
+        assert_eq!(dest.last().map(String::as_str), Some("notes (4).txt"));
+    }
+
+    #[test]
+    fn a_name_with_no_extension_disambiguates_as_a_whole() {
+        let trash = owned(&["Trash"]);
+        let taken = owned(&["report"]);
+        let dest = trash_dest_path(&trash, "report", &taken).expect("disambiguated");
+        assert_eq!(dest.last().map(String::as_str), Some("report (2)"));
+    }
+
+    #[test]
+    fn a_dotfile_disambiguates_after_the_whole_name() {
+        // A leading-dot name has no extension to split on, so the suffix lands
+        // after the whole name rather than before the leading dot.
+        let trash = owned(&["Trash"]);
+        let taken = owned(&[".profile"]);
+        let dest = trash_dest_path(&trash, ".profile", &taken).expect("disambiguated");
+        assert_eq!(dest.last().map(String::as_str), Some(".profile (2)"));
+    }
+
+    #[test]
+    fn a_root_trash_dir_is_refused() {
+        assert_eq!(
+            trash_dest_path(&[], "notes.txt", &[]),
+            Err(TrashError::RootTrash)
+        );
+    }
+
+    #[test]
+    fn an_invalid_original_name_is_refused() {
+        let trash = owned(&["Trash"]);
+        for bad in ["", ".", "..", "a/b", "a:b"] {
+            assert_eq!(
+                trash_dest_path(&trash, bad, &[]),
+                Err(TrashError::InvalidName),
+                "name {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disambiguation_past_the_name_limit_is_refused() {
+        // The original leaf is exactly at the 255-byte per-name limit (a valid
+        // name), but a forced " (2)" disambiguation would push it over: refused
+        // (TooLong), never truncated to a name that could collide.
+        let trash = owned(&["Trash"]);
+        let leaf = "a".repeat(255); // exactly the per-name limit: a valid leaf.
+        let taken = vec![leaf.clone()];
+        assert_eq!(
+            trash_dest_path(&trash, &leaf, &taken),
+            Err(TrashError::TooLong)
+        );
+    }
+}

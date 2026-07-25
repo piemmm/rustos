@@ -27,9 +27,13 @@ which the drift guard enforces.
 
 ## Status
 
-`done` — FM1–FM9 are all landed, including the full FM9-c right-click delete
-click-through in the aarch64 `autoload_input` QEMU vertical (a tenth guest PASS
-witness, `FsNodeMutated op=rmdir`, gated after the FM9-b `fd_redeem`). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
+`in progress` — FM1–FM9 are all landed, including the full FM9-c right-click
+delete click-through in the aarch64 `autoload_input` QEMU vertical (a tenth
+guest PASS witness, `FsNodeMutated op=rmdir`, gated after the FM9-b
+`fd_redeem`). **FM10a — the pure move-to-Trash model (`lib/browse::trash`:
+`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`,
+host-proven) — is now landed too; FM10b (the app-side Trash verb + its QEMU
+witness) is staged next** (see §1 FM10). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
@@ -1297,6 +1301,53 @@ the click-through that keys on them is written.
   the `lib/browse`/`lib/icon`/`lib/controls` rustdoc + `README.md`
   stability tiers (§6), and the app's 13-locale `Help/` tree (§16.5 —
   authored in the bundle, discovered by `tools/syshelp`, never hardcoded).
+
+### FM10 — recoverable delete: move to Trash
+
+The §0 scope promises a delete that "prefers a recoverable move to a per-user
+trash location over an irreversible unlink … where the backing supports it
+cheaply" (§2.24). FM9 shipped delete as an irreversible recursive `fs_unlink`;
+FM10 makes it recoverable in the cheap case. Split (§2.19) into the pure engine
+model and the app wiring, exactly as FM6/FM7/FM8 were.
+
+- **FM10a — the pure move-to-Trash model `[x]` (done).** `lib/browse::trash`,
+  host-proven ahead of the app verb exactly as the pure delete/paste-execution
+  models landed. `trash_strategy(item, trash)` makes the one recoverable-vs-
+  irreversible decision from the item's and the user's Trash directory's
+  `execute::VolumeId`s — `TrashStrategy::Move` (a single same-volume `fs_rename`
+  carrying the item into Trash intact, recoverable until emptied) when they
+  share a volume, else `TrashStrategy::Unlink` (the existing `DeleteWalk` path,
+  since a rename cannot cross a volume, exactly as `mv` decides from `st_dev`) —
+  reusing the same volume identity `paste_strategy` compares, one definition
+  (§2.2). `trash_dest_path(trash_dir, leaf, taken)` resolves a collision-free
+  home inside Trash: the original leaf when free, else the smallest ` (n)`
+  disambiguation inserted before the extension (`notes (2).txt`) via the one
+  shared `icon::extension` split (§2.2). It never clobbers an existing trashed
+  item (§2.24) and is fail closed — `RootTrash` (an empty/root Trash dir),
+  `InvalidName` (a bad original leaf), `TooLong` (a disambiguation past
+  `FS_NAME_MAX`), and `NoFreeName` past the fixed `MAX_TRASH_NAME_ATTEMPTS`
+  bound (§5.4, §24.4). The model touches no filesystem and holds no authority
+  (the app performs the `fs_stat`/`fs_rename` under the user's own identity, no
+  new capability), so composing it grants nothing and the read-only picker never
+  runs it. Host-tested in `lib/browse` (same-/cross-volume strategy, free-name
+  passthrough, extension-aware and whole-name and dotfile disambiguation,
+  suffix-skipping over taken names, and each fail-closed refusal). Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+- **FM10b — the app-side Trash verb + the QEMU witness (staged).** The
+  `files.app` `Run` binary, on a confirmed delete, stats each target's volume
+  against the per-user Trash directory (a fixed subtree under the user's home
+  `Library/`, honouring the fixed `/Users/<u>/` shape — Trash is *inside*
+  `Library/`, never a new sibling, §16.3), ensures the Trash directory exists
+  (`fs_mkdir`, the user's own authority), and for a `TrashStrategy::Move`
+  renames the item into its `trash_dest_path` instead of unlinking; a
+  `TrashStrategy::Unlink` (cross-volume, or a refused/unavailable Trash) falls
+  back to the existing `DeleteWalk`. The confirmation `Dialog` gains an honest
+  "Move to Trash" vs "Delete permanently" wording so the user knows which will
+  happen (§2.24). Rides the autoload QEMU vertical with a new kernel-attested
+  witness (`FsNodeMutated op=rename` into the Trash subtree for the recoverable
+  case) appended after the FM9-c removal, gated so no earlier mutation can
+  satisfy it. (An "empty Trash" verb and a Trash view are a later increment, not
+  built ahead of the move that fills it, §2.4.)
 
 ## 2. Sequencing and dependencies
 

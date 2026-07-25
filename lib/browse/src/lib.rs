@@ -57,6 +57,10 @@
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
 //!   model ([`applications_for`]) over the injected [`BundleSource`] seam.
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
+//! * [`trash`](mod@trash) — the recoverable-delete model: the
+//!   [`trash_strategy`] same-volume move-vs-unlink decision and the
+//!   collision-safe [`trash_dest_path`] destination naming
+//!   (`plans/NEW-FILEMANAGER.md` `FM10`).
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
 //! * [`browser`] — the [`Browser`] navigation model.
@@ -121,6 +125,7 @@ pub mod render;
 pub mod select;
 pub mod sort;
 pub mod source;
+pub mod trash;
 pub mod vfs;
 
 pub use activate::Activation;
@@ -155,6 +160,9 @@ pub use render::render;
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;
+pub use trash::{
+    trash_dest_path, trash_strategy, TrashError, TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
+};
 pub use vfs::VfsDirectorySource;
 
 /// Window content width of a browser view, in pixels — the one definition

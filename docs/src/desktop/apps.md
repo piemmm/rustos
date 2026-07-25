@@ -668,6 +668,34 @@ source-removal cleanup runs as a `Deleting` stage of the same interleaved
 `Paste`, over the shared delete walk, so a move's cleanup and an interactive
 delete share one removal definition (`AGENTS.md` §2.2).
 
+### The move-to-Trash model
+
+A delete should be reversible when that costs nothing (`AGENTS.md` §2.24). The
+`lib/browse::trash` model (`plans/NEW-FILEMANAGER.md` FM10) is the pure decision
+behind that recoverable delete, host-proven ahead of the app wiring exactly as
+the delete and paste-execution models landed ahead of their verbs.
+`trash_strategy` decides, from the item's and the user's Trash directory's
+`execute::VolumeId`s, whether the removal can be a cheap `TrashStrategy::Move` —
+a single same-volume `fs_rename` that carries the item into Trash intact,
+recoverable until the user empties it — or must fall back to the irreversible
+`TrashStrategy::Unlink`, the existing `DeleteWalk` path, when the item lives on
+a different volume from Trash (a rename cannot span a volume boundary, exactly
+as `mv` decides from `st_dev`). It is the same volume identity
+`execute::paste_strategy` compares, so the two decisions share one definition
+(`AGENTS.md` §2.2). `trash_dest_path` resolves a collision-free home *inside*
+the Trash directory: the original leaf name when it is free, otherwise the
+smallest ` (n)` disambiguation inserted before the extension (`notes (2).txt`),
+reusing the one shared `icon` extension split so a disambiguation lands before
+the same extension the icon and "Open With…" classifiers recognise. It never
+overwrites an existing trashed item (`AGENTS.md` §2.24) and is fail closed: it
+refuses a Trash directory that names the root (`RootTrash`), an invalid original
+name (`InvalidName`), a disambiguation past the per-name length limit
+(`TooLong`), and a search that exhausts the fixed `MAX_TRASH_NAME_ATTEMPTS`
+bound (`NoFreeName`, `AGENTS.md` §5.4, §24.4). The model touches no filesystem
+and holds no authority — the app performs the `fs_stat`/`fs_rename` under the
+launching user's own identity, no new capability — so composing it grants
+nothing and the read-only picker never runs it.
+
 ### The cut / copy / paste verbs
 
 The clipboard verbs (`plans/NEW-FILEMANAGER.md` FM7b) are wired in the

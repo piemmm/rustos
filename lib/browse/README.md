@@ -236,6 +236,23 @@ can never diverge in navigation semantics, listing policy, or look.
   `Enter`/Delete and cancels with `Escape`/Cancel, then drives the `DeleteWalk`
   to completion over the user's own `fs_readdir`/`fs_unlink`. Only the write-capable
   file manager builds and drives it — the read-only picker never deletes.
+- **Move to Trash** (`trash`, `plans/NEW-FILEMANAGER.md` FM10): the pure model
+  of a *recoverable* delete — a delete is reversible when that costs nothing.
+  `trash_strategy` decides, from the item's and the Trash directory's
+  `VolumeId`s, whether the removal is a cheap `TrashStrategy::Move` (a single
+  same-volume `fs_rename` into Trash, recoverable until emptied) or must fall
+  back to the irreversible `TrashStrategy::Unlink` (a cross-volume removal — a
+  rename cannot span volumes — the existing `DeleteWalk` path), reusing the same
+  volume identity `execute::paste_strategy` compares. `trash_dest_path` resolves
+  a collision-free home inside the Trash directory: the original leaf when free,
+  otherwise the smallest ` (n)` disambiguation inserted before the extension
+  (`notes (2).txt`), reusing the one shared `icon` extension split. It is fail
+  closed — it never overwrites an existing trashed item and refuses a root Trash
+  dir (`RootTrash`), an invalid original name (`InvalidName`), a disambiguation
+  past the per-name limit (`TooLong`), or a search past `MAX_TRASH_NAME_ATTEMPTS`
+  (`NoFreeName`). It touches no filesystem and holds no authority (the app
+  performs the `fs_stat`/`fs_rename` under the user's own identity), so the
+  read-only picker never runs it.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`
