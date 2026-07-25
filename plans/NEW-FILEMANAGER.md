@@ -27,7 +27,17 @@ which the drift guard enforces.
 
 ## Status
 
-`done` — FM1–FM11 are all landed, including **FM11c (the empty-Trash QEMU
+`done` — FM1–FM12 are all landed. **FM12 (double-click activation)** is the
+latest: a double-click on an item now activates it (descend / launch a bundle /
+open a file), driven by the shared pure `lib/browse::click::DoubleClickTracker`
+over the capability-free monotonic clock, through the very same `activate`
+dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2).
+The `files.app` primary-press routing is factored into `apply_primary_press`
+(manager tool → item single-select vs same-item double-activate → read-only
+chrome via the trimmed `apply_chrome_press`), the tracker reset on any
+tool/chrome press so a click through the chrome and back never mis-pairs; nine
+host tests in `lib/browse`, freestanding app builds + lints clean. FM1–FM11
+remain landed, including **FM11c (the empty-Trash QEMU
 witness)**: the aarch64 `autoload_input` vertical now proves the empty-Trash
 click-through end to end (after FM10's move-to-Trash `op=rename`, the runner
 clicks Go to Trash → Empty Trash → confirm *Delete Permanently*, and the guest
@@ -756,10 +766,10 @@ full-window mirror + fail-closed off the menu); the app wiring rides the FM9
 vertical and builds clippy-clean cross-compiled. Docs: `docs/src/desktop/apps.md`,
 `lib/browse/README.md` + rustdoc.
 
-Deliberately deferred to a later pointer pass (not FM6b): **double-click
-activation.** Activation is keyboard-driven (`Enter`) and pointer-driven via
-the context-menu Open today; a pointer double-click needs press-time tracking
-and lands with the pointer refinements, not as speculative state now (§2.4).
+Double-click activation was deferred from FM6b to its own pointer pass; it is
+now landed as **FM12** below (the shared `click::DoubleClickTracker` over the
+capability-free monotonic clock, driving the same `activate` dispatch `Enter`
+does).
 
 ### FM7a — the selection + clipboard model `[x]`
 
@@ -1487,6 +1497,39 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   live beside the guest PASS gate (`FM11_TRASH_FILLED_MARKER` in the vertical
   crate's `lib.rs`), so the script and its observer cannot drift (§2.2).
 
+### FM12 — double-click activation `[x]`
+
+Done. The pointer pass FM6b deferred: a double-click on an item now activates
+it (descend / launch a bundle / open a file), exactly as a keyboard `Enter`
+does. Not speculative surface — the activation behaviour already exists
+(`Enter`, context-menu Open), so this only adds the pointer *gesture* that
+drives it (§2.4).
+
+- **The pure detector `[x]`.** `lib/browse::click::DoubleClickTracker` is the
+  one host-proven rule that turns a stream of primary presses into single- and
+  double-click gestures (`ClickKind`). `register(now_ns, index)` pairs a press
+  with the previous one only when it lands on the **same** item within
+  `DOUBLE_CLICK_INTERVAL_NS` (half a second); a completed double *consumes*
+  both presses (a third quick press begins a fresh single — standard
+  triple-click semantics), a non-monotonic clock reading fails closed to a
+  single, and `reset` breaks the pair when an intervening interaction (a chrome
+  click) interrupts it. It holds no authority and does no I/O — the caller
+  supplies the hit-test index and the timestamp — so it is fully host-tested
+  and the read-only picker can compose it for free (§2.2). Host-tested in
+  `lib/browse` (lone single, quick same-item double, exactly-at-interval pair,
+  slow-second single, different-item single, double-consumes-both,
+  reset-breaks-pair, backwards-clock fail-closed, custom interval).
+- **The app wiring `[x]`.** The `files.app` `Run` binary threads a
+  `DoubleClickTracker` in its `Overlays` state and reads the capability-free
+  monotonic clock (`tairix_rt::clock_get`) at each primary press. Primary-press
+  routing is factored into `apply_primary_press` (manager write tool → item
+  single-select vs same-item double-**activate** via the shared `activate` →
+  read-only chrome) with `apply_chrome_press` the trimmed toolbar/crumb router;
+  the tracker is `reset` on any tool or chrome press so a click through the
+  chrome and back never mis-pairs. The freestanding binary builds and lints
+  clean cross-compiled. Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md`
+  + rustdoc.
+
 ## 2. Sequencing and dependencies
 
 FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
@@ -1503,7 +1546,9 @@ selection/menu. FM8 is split the same way: FM8a models the properties view
 core with the autoload QEMU vertical. FM10 makes delete recoverable (move to
 Trash), and FM11 gives the way back — emptying the Trash (FM11a the pure model,
 FM11b the app verb + navigable Trash view, FM11c the QEMU witness), each split
-the same way and depending on the FM7 delete walk it reuses (§2.2). Each lands
+the same way and depending on the FM7 delete walk it reuses (§2.2). FM12 adds
+the pointer double-click gesture (the pointer pass FM6b deferred), reusing the
+FM6 `activate` dispatch so pointer and keyboard never diverge. Each lands
 fully gated; a stage that turns out larger than one clean increment is split and
 staged here, never shipped half-done "for now" (§2.19).
 

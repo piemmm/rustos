@@ -82,12 +82,12 @@ mod program {
     use tairix_browse::{
         applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
         suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
-        Activation, AppAssociation, Browser, BundleSource, Clipboard, ClipboardOp, ContextCommand,
-        ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeleteDisposition,
-        DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, ManagerToolModel,
-        OwnerChange, PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
-        ToolbarCommand, TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_WIDTH,
+        Activation, AppAssociation, Browser, BundleSource, ClickKind, Clipboard, ClipboardOp,
+        ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction,
+        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind,
+        ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy, ProgressModel,
+        ProgressOp, Properties, RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource,
+        VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -675,6 +675,12 @@ mod program {
         /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
         /// offering the ownership control (read once at start-up).
         can_chown: bool,
+        /// The pointer double-click detector: a second quick primary press on
+        /// the same item activates it, exactly as `Enter` does. It lives in the
+        /// app (the engine is pointer-agnostic) and is reset whenever a press
+        /// lands on chrome rather than an item, so a click through the toolbar
+        /// or path bar never pairs across it.
+        double_click: DoubleClickTracker,
     }
 
     /// Render the browser into `frame` (the shared window surface) and
@@ -898,8 +904,9 @@ mod program {
                 (moved, false)
             }
             // A pointer event the desktop routed into this window's local
-            // coordinates: a primary-button press navigates (a path-bar crumb)
-            // or selects (an item); every other pointer action is a no-op.
+            // coordinates. A secondary-button press opens the context menu; a
+            // primary press is routed by `apply_primary_press`. Every other
+            // pointer action is a no-op.
             WindowEvent::Pointer { x, y, action, .. } => {
                 // A secondary-button (right-click) press opens the context
                 // menu on the item under the pointer; its commands are the
@@ -907,27 +914,12 @@ mod program {
                 if let Some(point) = secondary_press_point(*action, *x, *y) {
                     return open_context_menu(browser, overlays, font, theme, viewport, point);
                 }
-                // A primary click on a manager write tool (New Folder, the
-                // Trash location, or Empty Trash) is dispatched here because
-                // the write path needs the overlay state; all read-only
-                // pointer routing (toolbar commands, path-bar crumbs, item
-                // selection) stays in `apply_pointer`, the same read-only
-                // router the trusted picker uses. The tool's enable state
-                // gates the hit-test, so a click on a disabled Empty Trash
-                // resolves to nothing (fail closed).
-                if let Some(point) = press_point(*action, *x, *y) {
-                    if let Some(tool) = manager_tool_at(
-                        browser,
-                        theme,
-                        viewport,
-                        point,
-                        MANAGER_TOOLS,
-                        manager_tool_model(browser),
-                    ) {
-                        return apply_manager_tool(browser, overlays, font, theme, viewport, tool);
-                    }
+                match press_point(*action, *x, *y) {
+                    Some(point) => apply_primary_press(
+                        browser, overlays, launcher, font, theme, viewport, point,
+                    ),
+                    None => (false, false),
                 }
-                apply_pointer(browser, font, theme, viewport, *x, *y, *action)
             }
             // Focus changes and key releases repaint nothing. The browser
             // never requests a pick, so a pick conclusion is a session bug and
@@ -2192,29 +2184,86 @@ mod program {
         ))
     }
 
-    /// Apply one routed pointer event in navigation mode, reporting whether the
-    /// view changed (and must re-present).
+    /// Route one primary-button press at window-local `point` in navigation
+    /// mode, reporting whether the view changed (and must re-present).
     ///
-    /// Only a primary-button press acts, and it is the spelling of one user
-    /// intent, never an escalation: a click on a path-bar crumb climbs to that
-    /// ancestor through the same transactional [`Browser::navigate_to_depth`]
-    /// the keyboard uses (a refused re-listing leaves the browser exactly where
-    /// it was); a click on an item selects it. A click on the inert current
+    /// The press is resolved in the order the layers overlap on screen, each
+    /// action the spelling of one user intent, never an escalation:
+    ///
+    /// * a **manager write tool** (New Folder, Go to Trash, Empty Trash) is
+    ///   dispatched here because the write path needs the overlay state; its
+    ///   enable state gates the hit-test, so a click on a disabled Empty Trash
+    ///   resolves to nothing (fail closed);
+    /// * an **item** is activated on a quick second press on that same item —
+    ///   descend / launch a bundle / open a file, through the very same
+    ///   [`activate`] dispatch a keyboard `Enter` drives, so pointer and
+    ///   keyboard can never diverge (§2.2) — and merely selected on a first or
+    ///   lone press. The monotonic [`tairix_rt::clock_get`] needs no
+    ///   capability, and the pairing rule lives once in the shared engine
+    ///   ([`DoubleClickTracker`]);
+    /// * anything else lands on the read-only **chrome** and routes through
+    ///   [`apply_chrome_press`].
+    ///
+    /// A tool or chrome press is not an item, so it resets the double-click
+    /// tracker: a click *through* the chrome and back onto the same item is
+    /// never mistaken for a double-click of that item.
+    fn apply_primary_press<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        point: Point,
+    ) -> (bool, bool) {
+        if let Some(tool) = manager_tool_at(
+            browser,
+            theme,
+            viewport,
+            point,
+            MANAGER_TOOLS,
+            manager_tool_model(browser),
+        ) {
+            overlays.double_click.reset();
+            return apply_manager_tool(browser, overlays, font, theme, viewport, tool);
+        }
+        if let Some(index) =
+            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
+        {
+            return match overlays
+                .double_click
+                .register(tairix_rt::clock_get(), index)
+            {
+                ClickKind::Double => {
+                    let _ = browser.select(index);
+                    activate(browser, launcher, font, theme, viewport)
+                }
+                ClickKind::Single => (browser.select(index).is_ok(), false),
+            };
+        }
+        overlays.double_click.reset();
+        apply_chrome_press(browser, font, theme, viewport, point)
+    }
+
+    /// Apply one primary press that landed on the read-only **chrome** (the
+    /// toolbar or the path bar), reporting whether the view changed.
+    ///
+    /// The caller ([`apply_primary_press`]) resolves manager write tools and
+    /// item clicks first, so by the time a press reaches here it is neither. A
+    /// click on a toolbar command runs it through the same shared dispatch the
+    /// keyboard accelerators use, and a click on a path-bar crumb climbs to
+    /// that ancestor through the same transactional
+    /// [`Browser::navigate_to_depth`] the keyboard uses (a refused re-listing
+    /// leaves the browser exactly where it was). A click on the inert current
     /// crumb, a separator gap, or empty space resolves to nothing and repaints
-    /// nothing. Opening an item stays keyboard-driven until the launch/open
-    /// stage wires the spawn path.
-    fn apply_pointer<S: DirectorySource>(
+    /// nothing.
+    fn apply_chrome_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         font: BitmapFont,
         theme: &Theme,
         viewport: Rect,
-        x: u32,
-        y: u32,
-        action: PointerAction,
+        point: Point,
     ) -> (bool, bool) {
-        let Some(point) = press_point(action, x, y) else {
-            return (false, false);
-        };
         // A click on a toolbar command runs it through the same shared dispatch
         // the keyboard accelerators use; a disabled command resolves to nothing
         // (`toolbar_command_at` fails closed) and repaints nothing.
@@ -2230,11 +2279,6 @@ mod program {
                 tairix_browse::render::reveal_selection(browser, font, theme, viewport);
             }
             return (moved, false);
-        }
-        if let Some(index) =
-            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
-        {
-            return (browser.select(index).is_ok(), false);
         }
         (false, false)
     }
@@ -3196,6 +3240,7 @@ mod program {
             clipboard: None,
             can_chown: tairix_rt::self_origin()
                 .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
+            double_click: DoubleClickTracker::new(),
         }
     }
 

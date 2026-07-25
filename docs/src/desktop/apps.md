@@ -269,10 +269,19 @@ target is and *what should happen*, never performing the spawn or the
 launching user's identity (so the read-only picker composes the same
 `Browser` and simply never launches).
 
-The `files.app` `Run` binary acts on this decision both when the user
-presses `Enter` and when they choose **Open** from the right-click menu
-(both route through the one shared `activate`): a `Descended` reveals the
-selection and repaints, and a
+The `files.app` `Run` binary acts on this decision when the user presses
+`Enter`, **double-clicks an item**, and chooses **Open** from the right-click
+menu — all three route through the one shared `activate`, so a pointer
+double-click can never open something a keyboard `Enter` would not
+(`AGENTS.md` §2.2). The double-click is the shared, pure
+`click::DoubleClickTracker` (`plans/NEW-FILEMANAGER.md` FM12): a primary press
+selects the item under the pointer, and a second press on that *same* item
+within `DOUBLE_CLICK_INTERVAL_NS` (half a second, timed by the capability-free
+monotonic `clock_get`) activates it. The tracker is reset whenever a press
+lands on chrome (a toolbar tool or a path-bar crumb) rather than an item, so a
+click *through* the chrome and back is never mistaken for a double-click; a
+non-monotonic clock reading fails closed to a single click. On any activation,
+a `Descended` reveals the selection and repaints, and a
 `LaunchBundle { path }` **launches the bundle** — its own `Launcher` spawns the
 bundle's own `Run` (`<path>/Run`) through the ordinary signed app-load gate
 (`CAP_PROC_SPAWN`, added to the manifest in the stage that first uses it),

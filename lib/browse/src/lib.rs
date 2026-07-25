@@ -32,6 +32,10 @@
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
+//! * [`click`](mod@click) — the [`DoubleClickTracker`] pure double-click
+//!   detector: the one rule that turns primary presses into single/double
+//!   clicks so a pointer double-click activates an item exactly as `Enter`
+//!   does (`plans/NEW-FILEMANAGER.md` `FM12`).
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
 //!   enable state, the [`breadcrumbs`] path bar
@@ -108,6 +112,7 @@ pub mod activate;
 pub mod breadcrumb;
 pub mod browser;
 pub mod chrome;
+pub mod click;
 pub mod clipboard;
 pub mod delete;
 pub mod entry;
@@ -137,6 +142,7 @@ pub use chrome::{
     ManagerToolModel, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS,
     TOOLBAR_COMMANDS,
 };
+pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
