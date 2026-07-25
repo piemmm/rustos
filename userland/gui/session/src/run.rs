@@ -74,7 +74,7 @@ mod program {
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
-        WaitStatus, ORIGIN_WIRE_LEN, WAIT_PID_ANY,
+        WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
@@ -959,7 +959,7 @@ mod program {
                 // path) is reported here; a load refusal surfaces later as
                 // the child's exit status, reported by the reap. Either way
                 // a denied optional action never ends the session.
-                record_launch(in_flight, tairix_rt::spawn(FILES_RUN_PATH), FILES_LABEL);
+                record_launch(in_flight, spawn_app(FILES_RUN_PATH), FILES_LABEL);
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
                 action: MenuAction::Launch(launcher),
@@ -968,11 +968,7 @@ mod program {
                 // The terminal, exactly as the file browser above: admitted
                 // immediately, loaded on its own task, refusal reported
                 // (synchronously here or by the reap), desktop carries on.
-                record_launch(
-                    in_flight,
-                    tairix_rt::spawn(TERMINAL_RUN_PATH),
-                    TERMINAL_LABEL,
-                );
+                record_launch(in_flight, spawn_app(TERMINAL_RUN_PATH), TERMINAL_LABEL);
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
                 action: MenuAction::Launch(launcher),
@@ -981,10 +977,33 @@ mod program {
                 // The file viewer, exactly as the apps above: admitted
                 // immediately, loaded on its own task, refusal reported
                 // (synchronously here or by the reap), desktop carries on.
-                record_launch(in_flight, tairix_rt::spawn(VIEWER_RUN_PATH), VIEWER_LABEL);
+                record_launch(in_flight, spawn_app(VIEWER_RUN_PATH), VIEWER_LABEL);
             }
             _ => {}
         }
+    }
+
+    /// Spawn a desktop app under the session's own identity and console,
+    /// forwarding the **user's environment** to it (`HOME`, `LANG`, …). Plain
+    /// [`tairix_rt::spawn`] hands a child an *empty* environment; the desktop is
+    /// the logged-in user's session, so an app it launches must inherit the
+    /// same environment login exported and the session itself runs under —
+    /// exactly as a login shell's children do. The file manager reads `HOME` to
+    /// locate the user's Trash (`plans/NEW-FILEMANAGER.md` FM10), and apps read
+    /// `LANG` for help localisation; forwarding the whole environment keeps the
+    /// session from having to know which variables an app cares about. The
+    /// child still runs under the session's attested credential and console
+    /// ([`CONSOLE_INHERIT`]/[`SPAWN_UID_INHERIT`]) — the environment is data and
+    /// carries no authority (§4, §5.4).
+    fn spawn_app(path: &[u8]) -> i64 {
+        let count = tairix_rt::env_count();
+        let mut env: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(count as usize);
+        for index in 0..count {
+            if let Some(entry) = tairix_rt::env(index) {
+                env.push(entry);
+            }
+        }
+        tairix_rt::spawn_with(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &[], &env)
     }
 
     /// Record a just-issued launch. Asynchronous launch admits the child and

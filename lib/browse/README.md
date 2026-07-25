@@ -252,7 +252,14 @@ can never diverge in navigation semantics, listing policy, or look.
   past the per-name limit (`TooLong`), or a search past `MAX_TRASH_NAME_ATTEMPTS`
   (`NoFreeName`). It touches no filesystem and holds no authority (the app
   performs the `fs_stat`/`fs_rename` under the user's own identity), so the
-  read-only picker never runs it.
+  read-only picker never runs it. `trash_dir` spells the fixed `Library/Trash`
+  subtree of the user's home — the one definition the app and its QEMU witness
+  share so where a trashed item lands cannot drift. The confirmation dialog is
+  disposition-aware: `DeleteDisposition` (threaded into `build_delete_dialog`)
+  picks a safe, recoverable *Move to Trash* wording or the destructive *Delete
+  Permanently* wording, so what the dialog promises always matches what the
+  confirmed delete does (the app decides the disposition from the targets' and
+  Trash's `VolumeId`s via `trash_strategy`, FM10b).
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`
@@ -357,8 +364,9 @@ can never diverge in navigation semantics, listing policy, or look.
 - **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
   pure display + cancel *state* of a long file operation the file manager
   drives interleaved with its event loop. `ProgressModel` carries the
-  operation kind (`ProgressOp::Delete`/`Copy`), the honest rising count the
-  driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied`), and a
+  operation kind (`ProgressOp::Delete`/`Copy`/`Trash`), the honest rising count
+  the driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied` / the
+  move-to-Trash item count), and a
   *latched* cancel; its `title`/`status_line` never fabricate a percentage,
   since the total is unknown until the walk's reads reveal it. The drawn
   surface is the renderer's `draw_progress_dialog` (a `lib/controls` `Panel`,
@@ -366,8 +374,8 @@ can never diverge in navigation semantics, listing policy, or look.
   Cancel `Button`), with `progress_cancel_at` the mirror hit-test resolving a
   click to the drawn Cancel (fail closed off it). The model holds no authority
   and does no I/O, so the read-only picker (which never deletes or copies)
-  never builds one. The delete drive is wired end to end in the files app; the
-  copy/paste drive reuses the same panel in a staged follow-up.
+  never builds one. The delete, copy/paste, and move-to-Trash drives are all
+  wired end to end in the files app, each reusing this one panel.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the

@@ -81,11 +81,12 @@ mod program {
     };
     use tairix_browse::{
         applications_for, association_from_appinfo, paste_strategy, plan_paste,
-        suggest_new_dir_name, validate_new_name, Activation, AppAssociation, Browser, BundleSource,
-        Clipboard, ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
-        DeleteAction, DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange,
-        PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
-        ToolbarCommand, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
+        Activation, AppAssociation, Browser, BundleSource, Clipboard, ClipboardOp, ContextCommand,
+        ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction, DeleteDisposition,
+        DeletePlan, DeleteWalk, DirectorySource, EntryKind, ManagerTool, OwnerChange, PasteItem,
+        PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError, ToolbarCommand,
+        TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -550,6 +551,14 @@ mod program {
         dialog: Dialog,
         /// What the confirmed delete would remove, captured at open time.
         plan: DeletePlan,
+        /// The recoverable move-to-Trash plan when the removal can be carried
+        /// out as same-volume renames into the user's Trash
+        /// (`plans/NEW-FILEMANAGER.md` `FM10`): the per-target
+        /// source→destination renames, captured at open time so the dialog's
+        /// "Move to Trash" wording and the confirmed action stay in step
+        /// (§2.24). `None` when Trash is unavailable or cross-volume, in which
+        /// case the removal is the irreversible unlink and the dialog says so.
+        trash_moves: Option<alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>>,
     }
 
     /// A running long file operation the event loop drives interleaved with
@@ -583,6 +592,10 @@ mod program {
         /// A move/copy paste of a captured plan, driven by the [`Paste`] state
         /// machine.
         Paste(Paste),
+        /// A recoverable move to Trash (`plans/NEW-FILEMANAGER.md` `FM10`),
+        /// driven by a [`TrashRun`]: one same-volume `fs_rename` per target
+        /// into the user's Trash directory, in place of an irreversible unlink.
+        Trash(TrashRun),
     }
 
     /// The open right-click context menu: the built [`Menu`] and the
@@ -1111,9 +1124,115 @@ mod program {
         let Some(plan) = browser.plan_delete() else {
             return (false, false);
         };
-        let dialog = build_delete_dialog(&plan);
-        *delete = Some(DeleteConfirm { dialog, plan });
+        // Decide now — before showing the dialog — whether the removal can be a
+        // recoverable move to Trash (`plans/NEW-FILEMANAGER.md` `FM10`), so the
+        // confirmation's wording matches exactly what a confirmed delete will
+        // do (§2.24). A resolvable, same-volume, ensured Trash gives the
+        // per-target rename plan; anything else falls back to the irreversible
+        // unlink and the dialog says "Delete Permanently".
+        let trash_moves = plan_trash_moves(&plan);
+        let disposition = if trash_moves.is_some() {
+            DeleteDisposition::Trash
+        } else {
+            DeleteDisposition::Permanent
+        };
+        let dialog = build_delete_dialog(&plan, disposition);
+        *delete = Some(DeleteConfirm {
+            dialog,
+            plan,
+            trash_moves,
+        });
         (true, false)
+    }
+
+    /// Resolve, for a confirmed removal of `plan`, whether it can be carried
+    /// out as a recoverable move to the user's Trash and, if so, the per-target
+    /// source→destination rename plan (`plans/NEW-FILEMANAGER.md` `FM10`).
+    ///
+    /// Returns `Some(moves)` only when the removal is wholly recoverable:
+    /// `HOME` resolves to a real per-user home, the `Library/Trash` subtree is
+    /// ensured, and **every** target shares Trash's volume (so a single
+    /// `fs_rename` carries each intact). Any other outcome — an absent or root
+    /// `HOME`, a Trash directory that cannot be created or stat'd, a
+    /// cross-volume target (a mounted volume under the current directory), or a
+    /// name that cannot be given a collision-free home in Trash — returns
+    /// `None`, and the removal falls back to the irreversible unlink (§2.24,
+    /// fail closed). Every call here is the user's own §5.3-checked I/O — no new
+    /// capability, no ambient authority (§4, §5.4).
+    fn plan_trash_moves(
+        plan: &DeletePlan,
+    ) -> Option<alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>> {
+        let home = home_components()?;
+        // A root (empty) home has no per-user Trash; fall back to permanent.
+        if home.is_empty() {
+            return None;
+        }
+        let trash = trash_dir(&home);
+        if !ensure_trash_dir(&trash) {
+            return None;
+        }
+        let trash_vol = VolumeId::new(stat_node(&trash)?.id.volume);
+        // The names already in Trash: a move must never overwrite a
+        // previously-trashed item (§2.24), and a second same-named target in
+        // this very batch must not collide with the first, so each resolved
+        // leaf is reserved as it is chosen.
+        let mut taken: alloc::vec::Vec<String> = read_children(&trash)
+            .ok()?
+            .into_iter()
+            .map(|(name, _is_directory)| name)
+            .collect();
+        let mut moves = alloc::vec::Vec::with_capacity(plan.len());
+        for target in plan.targets() {
+            let item_vol = VolumeId::new(stat_node(target.path())?.id.volume);
+            if trash_strategy(item_vol, trash_vol) != TrashStrategy::Move {
+                // A cross-volume target cannot be renamed into Trash; the whole
+                // removal takes the permanent path so the dialog stays honest.
+                return None;
+            }
+            let dest = trash_dest_path(&trash, target.name(), &taken).ok()?;
+            if let Some(leaf) = dest.last() {
+                taken.push(leaf.clone());
+            }
+            moves.push((target.path().to_vec(), dest));
+        }
+        Some(moves)
+    }
+
+    /// The logged-in user's home directory as root-first path components, read
+    /// from the `HOME` the session exported (the same source the trusted picker
+    /// starts at). `None` when `HOME` is unset or not a valid absolute path
+    /// (fail closed — the caller falls back to the permanent delete rather than
+    /// guessing a home).
+    fn home_components() -> Option<alloc::vec::Vec<String>> {
+        let home = tairix_rt::env_var(b"HOME")?;
+        let home = core::str::from_utf8(home).ok()?;
+        tairix_browse::vfs::components_from_absolute_path(home).ok()
+    }
+
+    /// Ensure the `Library/Trash` directory exists, creating the `Library`
+    /// parent then `Trash` under the user's own identity (`fs_mkdir` is
+    /// idempotent here — an already-present directory is success). `home`
+    /// itself is assumed to exist (it came from `HOME`). Returns `false`,
+    /// fail closed, if either directory cannot be created and is not already a
+    /// directory, so the trash move degrades to the permanent path.
+    fn ensure_trash_dir(trash: &[String]) -> bool {
+        // Trash lives at `<home>/Library/Trash`; ensure the immediate `Library`
+        // parent, then Trash itself.
+        trash.len() >= 2 && ensure_dir(&trash[..trash.len() - 1]) && ensure_dir(trash)
+    }
+
+    /// Ensure a single directory at `components` exists, under the user's own
+    /// identity. `true` when it was created, or already exists as a directory;
+    /// `false` (fail closed) when the path cannot be spelled, the create is
+    /// refused, or the name exists as a non-directory.
+    fn ensure_dir(components: &[String]) -> bool {
+        let Ok(spelled) = spell_path(components) else {
+            return false;
+        };
+        if tairix_rt::fs_mkdir(spelled.as_bytes()) == 0 {
+            return true;
+        }
+        matches!(stat_node(components), Some(stat) if stat.kind == FileKind::Directory)
     }
 
     /// Handle one event while the delete-confirmation dialog owns the window.
@@ -1175,10 +1294,19 @@ mod program {
                 // progress and honouring a mid-run cancel, so a large recursive
                 // delete never freezes the window (§2.23). The plan was captured
                 // at open time, so a listing change cannot move what it targets;
-                // the view is re-listed when the operation finishes.
-                overlays.operation = Some(Operation {
-                    job: Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
-                    progress: ProgressModel::new(ProgressOp::Delete),
+                // the view is re-listed when the operation finishes. A
+                // recoverable move to Trash (captured at open time, matching the
+                // dialog's wording) renames each target into Trash; anything
+                // else is the irreversible recursive unlink (§2.24, `FM10`).
+                overlays.operation = Some(match confirm.trash_moves {
+                    Some(moves) => Operation {
+                        job: Job::Trash(TrashRun::new(moves)),
+                        progress: ProgressModel::new(ProgressOp::Trash),
+                    },
+                    None => Operation {
+                        job: Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
+                        progress: ProgressModel::new(ProgressOp::Delete),
+                    },
                 });
                 (true, false)
             }
@@ -1215,6 +1343,34 @@ mod program {
         match &mut operation.job {
             Job::Delete(walk) => advance_delete_walk(walk, &mut operation.progress),
             Job::Paste(paste) => advance_paste(paste, &mut operation.progress),
+            Job::Trash(run) => advance_trash(run, &mut operation.progress),
+        }
+    }
+
+    /// A recoverable move to Trash in progress (`plans/NEW-FILEMANAGER.md`
+    /// `FM10`): the captured per-target source→destination renames, carried out
+    /// one item per step so the window stays responsive and a cancel is
+    /// honoured between items (§2.23). Each rename is a single same-volume
+    /// `fs_rename` — no tree is walked, since the item moves intact — so a
+    /// move of any size is cheap; the interleaving matches the delete/paste
+    /// runners only so a pathological count of targets can still be cancelled.
+    struct TrashRun {
+        /// The remaining source→destination renames, in listing order.
+        moves: alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>,
+        /// The next move to carry out — the honest count already done.
+        index: usize,
+    }
+
+    impl TrashRun {
+        /// A fresh run over the captured move plan.
+        fn new(moves: alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>) -> Self {
+            Self { moves, index: 0 }
+        }
+
+        /// The honest count of items moved to Trash so far (the progress
+        /// figure).
+        fn done(&self) -> usize {
+            self.index
         }
     }
 
@@ -1274,6 +1430,50 @@ mod program {
             progress.set_done(walk.removed());
         }
         false
+    }
+
+    /// Advance a move-to-Trash `run` by up to [`OPERATION_STEP_BUDGET`] items,
+    /// returning `true` once it has finished.
+    ///
+    /// Each step renames one target into its captured Trash destination
+    /// (`fs_rename`) under the user's own identity — the ordinary §5.3-checked
+    /// move the user could perform themselves, no new capability — and updates
+    /// the honest progress count. A latched cancel stops at the next item
+    /// boundary (never mid-rename); the first refused move stops the run,
+    /// states the reason on `stderr` (fail loud, §2.24), and leaves whatever
+    /// already moved in Trash rather than a fabricated success (§5.4). The
+    /// destinations were resolved collision-free at open time, so a rename
+    /// never overwrites an existing trashed item.
+    fn advance_trash(run: &mut TrashRun, progress: &mut ProgressModel) -> bool {
+        for _ in 0..OPERATION_STEP_BUDGET {
+            if progress.is_cancel_requested() {
+                return true;
+            }
+            // Copy the current move out so `run` is free to be advanced.
+            let Some((source, dest)) = run.moves.get(run.index).cloned() else {
+                return true;
+            };
+            if let Err(reason) = rename_item(&source, &dest) {
+                report_trash_item_error(&source, reason);
+                return true;
+            }
+            run.index += 1;
+            progress.set_done(run.done());
+        }
+        false
+    }
+
+    /// State on `stderr` that the move to Trash stopped while handling
+    /// `source` — an honest, fail-loud diagnosis naming the item and the
+    /// reason, never a silent failure or a fabricated success (§2.24). Carries
+    /// no path prefix beyond the leaf name the user already sees.
+    fn report_trash_item_error(source: &[String], reason: &str) {
+        let name = source.last().map_or("", String::as_str);
+        let _ = tairix_rt::stderr(b"files: could not move ");
+        let _ = tairix_rt::stderr(name.as_bytes());
+        let _ = tairix_rt::stderr(b" to Trash: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
     }
 
     /// Poll (non-blocking) the app's event mailbox for one genuine session

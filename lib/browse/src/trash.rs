@@ -72,6 +72,56 @@ pub enum TrashStrategy {
     Unlink,
 }
 
+/// The name of the per-user library directory the Trash lives inside — the
+/// fixed `/Users/<u>/Library/` subtree (never a new sibling of `Library`), the
+/// one the charter's home layout reserves for per-user state.
+pub const TRASH_LIBRARY_DIR: &str = "Library";
+
+/// The name of the Trash directory itself, inside [`TRASH_LIBRARY_DIR`].
+pub const TRASH_LEAF_DIR: &str = "Trash";
+
+/// The per-user Trash directory: the fixed `Library/Trash` subtree under the
+/// user's `home` (root-first component path). One definition so the file
+/// manager and its tests agree on exactly where a trashed item lands, and a
+/// change to the location cannot silently diverge between them (§2.2).
+///
+/// `home` is the user's home as root-first components (e.g. `["Users",
+/// "root"]`); the returned path appends [`TRASH_LIBRARY_DIR`] then
+/// [`TRASH_LEAF_DIR`]. It spells only a location — it performs no I/O, creates
+/// nothing, and grants no authority (the app creates and writes it under the
+/// user's own identity).
+#[must_use]
+pub fn trash_dir(home: &[String]) -> Vec<String> {
+    let mut dir = Vec::with_capacity(home.len() + 2);
+    dir.extend_from_slice(home);
+    dir.push(String::from(TRASH_LIBRARY_DIR));
+    dir.push(String::from(TRASH_LEAF_DIR));
+    dir
+}
+
+/// Whether a confirmed delete will move its targets to Trash (recoverable) or
+/// remove them permanently — the honest distinction the confirmation dialog
+/// states so the user knows which will happen (§2.24).
+///
+/// A file-manager selection lives in one directory, hence on one volume, so a
+/// whole delete plan is uniform: either every target can be moved to Trash (the
+/// current directory is on Trash's volume and a usable Trash exists) or the
+/// removal is permanent (a cross-volume target — a mounted volume under the
+/// current directory — or an unresolved/unavailable Trash forces the
+/// irreversible unlink). The app computes this from the targets' and Trash's
+/// [`VolumeId`]s via [`trash_strategy`] and never shows a wording its execution
+/// will not honour.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeleteDisposition {
+    /// Every target moves into the user's Trash — a same-volume rename per
+    /// item, recoverable until the Trash is emptied.
+    Trash,
+    /// The targets are removed permanently (the existing irreversible
+    /// [`DeleteWalk`](crate::delete::DeleteWalk) unlink), because Trash is
+    /// cross-volume or unavailable.
+    Permanent,
+}
+
 /// Decide how to remove a delete target, given the [`VolumeId`] of the item and
 /// of the user's Trash directory.
 ///

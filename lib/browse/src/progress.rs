@@ -31,6 +31,10 @@ pub enum ProgressOp {
     /// A recursive copy or cross-volume move (driven by
     /// [`CopyWalk`](crate::CopyWalk)).
     Copy,
+    /// A move to Trash: a recoverable delete carried out as same-volume
+    /// renames into the user's Trash directory (`plans/NEW-FILEMANAGER.md`
+    /// `FM10`), one item per step.
+    Trash,
 }
 
 /// The running display + cancel state of a long file operation.
@@ -97,6 +101,7 @@ impl ProgressModel {
             match self.op {
                 ProgressOp::Delete => "Deleting\u{2026}",
                 ProgressOp::Copy => "Copying\u{2026}",
+                ProgressOp::Trash => "Moving to Trash\u{2026}",
             }
         }
     }
@@ -110,6 +115,7 @@ impl ProgressModel {
         let verb = match self.op {
             ProgressOp::Delete => "removed",
             ProgressOp::Copy => "copied",
+            ProgressOp::Trash => "moved to Trash",
         };
         let noun = if self.done == 1 { "item" } else { "items" };
         format!("{} {noun} {verb}", self.done)

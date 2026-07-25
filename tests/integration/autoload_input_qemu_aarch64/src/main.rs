@@ -202,6 +202,14 @@ mod kernel {
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
+    /// The path fragment that identifies a rename destination as landing in the
+    /// user's Trash (`plans/NEW-FILEMANAGER.md` FM10). The file manager spells
+    /// its Trash destination from `lib/browse`'s `trash_dir` —
+    /// `<home>/Library/Trash/<name>` — so a `FsNodeMutated op=rename` whose
+    /// `to` contains this fragment is the recoverable move-to-Trash delete, and
+    /// never the FM9-a naming rename (whose destination is the home folder).
+    const TRASH_PATH_MARKER: &str = "/Library/Trash/";
+
     /// Static boot heap, mirroring the production aarch64 kernel binary's
     /// `.bss`-resident heap (zeroed by the boot trampoline).
     ///
@@ -235,11 +243,14 @@ mod kernel {
     /// created and named a folder in `/Users/root` under the user's own
     /// identity), the FM9-b CU6 delegation (`fd_grant` then `fd_redeem` —
     /// the session handing the user's chosen file to the Viewer), and the
-    /// FM9-c delete (`FsNodeMutated op=rmdir` after the delegation — the
-    /// manager removing the FM9-a folder through its right-click context
-    /// menu and confirmation dialog). The guest exits only after the host
-    /// has everything it needs (`plans/APPWIN.md` AW3 + AW4,
-    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/-c).
+    /// FM10 recoverable delete (`FsNodeMutated op=rename` into
+    /// `<home>/Library/Trash/` after the delegation — the manager removing the
+    /// FM9-a folder through its right-click context menu and confirmation
+    /// dialog, which, the folder being on the same volume as the user's Trash,
+    /// is carried out as a recoverable move to Trash rather than an
+    /// irreversible unlink). The guest exits only after the host has everything
+    /// it needs (`plans/APPWIN.md` AW3 + AW4, `plans/NEW-FILEMANAGER.md`
+    /// FM9-a/-b/FM10).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
@@ -294,52 +305,65 @@ mod kernel {
         }
 
         /// Latch the file-manager mutation witnesses from a `FsNodeMutated`
-        /// record's `op` field: `mkdir`, then `rename` (FM9-a), then a
-        /// `rmdir`/`unlink` delete (FM9-c). Only mutations that occur *after*
-        /// the AW4 terminal round trip are counted (the delivery counter is at
-        /// or past [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many
-        /// boot- and login-time directory creations — all strictly before the
-        /// desktop click-through — can never latch these. `rename` requires
-        /// `mkdir` first and the delete requires the FM9-b delegation redeemed,
-        /// so a stray mutation cannot satisfy PASS on its own, and the refusal
-        /// event (`FsMutationDenied`) is a different id that never reaches here
-        /// (fail closed).
+        /// record's `op` (and, for a rename, `to`) fields: `mkdir`, then
+        /// `rename` (FM9-a), then the FM9-c/FM10 recoverable delete — a
+        /// `rename` whose destination is under the user's `Library/Trash`.
+        /// Only mutations that occur *after* the AW4 terminal round trip are
+        /// counted (the delivery counter is at or past
+        /// [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many boot- and
+        /// login-time directory creations — all strictly before the desktop
+        /// click-through — can never latch these. The FM9-a `rename` requires
+        /// `mkdir` first; the FM10 move-to-Trash requires the FM9-b delegation
+        /// redeemed **and** a `Library/Trash` destination, so neither the
+        /// FM9-a naming rename (its destination is the home folder, not Trash)
+        /// nor any earlier mutation can satisfy it, and the refusal event
+        /// (`FsMutationDenied`) is a different id that never reaches here (fail
+        /// closed).
         fn note_fs_mutation(&self, event: &Event<'_>) {
             if self.window_events_delivered.load(Ordering::Acquire)
                 < tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
             {
                 return;
             }
+            // Read the `op` and (for a rename) `to` destination once.
+            let mut op = "";
+            let mut to = "";
             for field in event.fields {
-                if field.key != "op" {
-                    continue;
+                match (field.key, field.value) {
+                    ("op", tairix_log::FieldValue::Str(value)) => op = value,
+                    ("to", tairix_log::FieldValue::Str(value)) => to = value,
+                    _ => {}
                 }
-                match field.value {
-                    tairix_log::FieldValue::Str("mkdir") => {
-                        self.fs_folder_created.store(true, Ordering::Release);
-                    }
-                    tairix_log::FieldValue::Str("rename")
-                        if self.fs_folder_created.load(Ordering::Acquire) =>
-                    {
-                        self.fs_folder_renamed.store(true, Ordering::Release);
-                    }
-                    // The FM9-c delete witness (`plans/NEW-FILEMANAGER.md`
-                    // FM9-c): the file manager removed the FM9-a folder via
-                    // the right-click context menu → confirm dialog, a real
-                    // permission-checked `rmdir` (an empty directory; a file
-                    // would be `unlink`) under the user's own identity. It is
-                    // gated on the FM9-b delegation having been redeemed, so it
-                    // fires strictly after the whole FM9-a/-b sequence and no
-                    // earlier boot/login removal can satisfy it (fail closed —
-                    // `FsMutationDenied` is a different id that never reaches
-                    // here).
-                    tairix_log::FieldValue::Str("rmdir" | "unlink")
-                        if self.fd_delegation_redeemed.load(Ordering::Acquire) =>
+            }
+            match op {
+                "mkdir" => {
+                    self.fs_folder_created.store(true, Ordering::Release);
+                }
+                "rename" if self.fs_folder_created.load(Ordering::Acquire) => {
+                    self.fs_folder_renamed.store(true, Ordering::Release);
+                    // The FM10 move-to-Trash delete witness
+                    // (`plans/NEW-FILEMANAGER.md` FM10): the file manager
+                    // removed the FM9-a folder via the right-click context menu
+                    // → confirm dialog. The folder is in the user's home, on
+                    // the same volume as the user's Trash, so the confirmed
+                    // delete is a recoverable `fs_rename` of the folder into
+                    // `<home>/Library/Trash/` (in place of the old irreversible
+                    // `rmdir`). It is gated on the FM9-b delegation having been
+                    // redeemed **and** a `Library/Trash` destination, so it
+                    // fires strictly after the whole FM9-a/-b sequence and
+                    // neither the FM9-a naming rename (destination in the home
+                    // folder, not Trash) nor any earlier boot/login mutation
+                    // can satisfy it (fail closed — `FsMutationDenied` is a
+                    // different id that never reaches here). The app spells the
+                    // destination from `lib/browse`'s `trash_dir`
+                    // (`<home>/Library/Trash`), so this marker matches it.
+                    if self.fd_delegation_redeemed.load(Ordering::Acquire)
+                        && to.contains(TRASH_PATH_MARKER)
                     {
                         self.fs_node_deleted.store(true, Ordering::Release);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 

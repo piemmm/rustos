@@ -5993,7 +5993,15 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         let plan = browser
             .plan_delete()
             .ok_or_else(|| "desktop pointer script: delete plan is empty".to_string())?;
-        let dialog = tairix_browse::render::build_delete_dialog(&plan);
+        // The guest's confirmed delete of a same-volume folder in the user's
+        // home is a recoverable move to Trash (`plans/NEW-FILEMANAGER.md`
+        // FM10), so the app builds the Trash-disposition dialog; reconstruct
+        // the same one here (same `DeleteDisposition`) so the confirm button's
+        // rect matches the one the guest draws and hit-tests (§2.2).
+        let dialog = tairix_browse::render::build_delete_dialog(
+            &plan,
+            tairix_browse::DeleteDisposition::Trash,
+        );
         let dialog_bounds =
             tairix_browse::render::delete_dialog_rect(files_vp, files_font, files_theme);
         let confirm = *dialog
@@ -6298,9 +6306,13 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ),
         step(FM9C_DELETE_GATE, 1, press),
         step(FM9C_DELETE_GATE, 1, release),
-        // Primary click on the dialog's Delete button: confirms the removal,
-        // which the app's operation runner carries out as a real permission-
-        // checked `rmdir` — the guest PASS's `FsNodeMutated op=rmdir` witness.
+        // Primary click on the dialog's Delete button: confirms the removal.
+        // The FM9-a folder lives in the user's home, on the same volume as the
+        // user's Trash, so the app's operation runner carries the confirmed
+        // delete out as a recoverable **move to Trash** (`plans/NEW-FILEMANAGER.md`
+        // FM10): one real permission-checked `fs_rename` of the folder into
+        // `<home>/Library/Trash/` — the guest PASS's `FsNodeMutated op=rename`
+        // (destination under `Library/Trash`) witness.
         step(
             FM9C_DELETE_GATE,
             1,

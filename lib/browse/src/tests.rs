@@ -4518,6 +4518,7 @@ use crate::render::{
     build_delete_dialog, delete_dialog_action_at, delete_dialog_rect, draw_delete_dialog,
     DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
 };
+use crate::trash::DeleteDisposition;
 
 /// A plan removing a single regular file.
 fn one_file_plan() -> DeletePlan {
@@ -4535,7 +4536,7 @@ fn folder_plan() -> DeletePlan {
 
 #[test]
 fn delete_dialog_titles_a_single_target_by_its_name() {
-    let dialog = build_delete_dialog(&one_file_plan());
+    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
     // A single target is named, so the user sees exactly what they are about
     // to remove.
     assert!(dialog.title().contains("Kernel"));
@@ -4547,7 +4548,7 @@ fn delete_dialog_titles_a_single_target_by_its_name() {
 
 #[test]
 fn delete_dialog_reports_the_honest_count_and_folder_warning() {
-    let dialog = build_delete_dialog(&folder_plan());
+    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
     // More than one target: the honest count, not a single name (§2.24).
     assert!(dialog.title().contains('2'));
     // A plan that includes a directory warns that folders (and their contents)
@@ -4559,7 +4560,7 @@ fn delete_dialog_reports_the_honest_count_and_folder_warning() {
 #[test]
 fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
     use tairix_controls::state::ControlRole;
-    let dialog = build_delete_dialog(&one_file_plan());
+    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
     let actions = dialog.actions();
     assert_eq!(actions.len(), 2);
     // The honest warmth is on the safe Cancel, never on the destructive Delete
@@ -4607,7 +4608,7 @@ fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
-    let dialog = build_delete_dialog(&folder_plan());
+    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
 
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
@@ -4624,7 +4625,7 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
-    let dialog = build_delete_dialog(&folder_plan());
+    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
 
     // Scanning the whole window, every index the hit-test resolves is one of
     // the two action buttons, and both are reachable — so the drawn buttons
@@ -4668,6 +4669,54 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
     );
 }
 
+// --- FM10: the move-to-Trash confirmation wording -------------------------
+
+#[test]
+fn trash_dialog_is_recoverable_and_worded_honestly() {
+    use tairix_controls::state::ControlRole;
+    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Trash);
+    // The recoverable move names the item and says "Trash", never "delete" or
+    // "cannot be undone" (§2.24 — the wording matches what will happen).
+    assert!(dialog.title().contains("Kernel"));
+    assert!(dialog.title().contains("Trash"));
+    let message = dialog.message().expect("a message");
+    assert!(message.contains("restore"));
+    assert!(!message.to_ascii_lowercase().contains("cannot be undone"));
+    // A recoverable move is not destructive: the confirm action is the
+    // recommended (safe) primary, and Cancel carries no honest-warmth role.
+    let actions = dialog.actions();
+    assert_eq!(actions.len(), 2);
+    assert_eq!(
+        actions[DELETE_CONFIRM_INDEX].role(),
+        ControlRole::Recommended
+    );
+    assert_eq!(actions[DELETE_CANCEL_INDEX].role(), ControlRole::Neutral);
+}
+
+#[test]
+fn permanent_dialog_names_the_irreversible_delete() {
+    // The permanent wording is explicit that the removal is forever, so it can
+    // never be mistaken for the recoverable Trash move (§2.24).
+    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
+    assert!(dialog.title().to_ascii_lowercase().contains("permanently"));
+}
+
+// --- FM10: the shared Trash-directory location ----------------------------
+
+#[test]
+fn trash_dir_is_the_library_trash_subtree_of_home() {
+    use crate::trash::{trash_dir, TRASH_LEAF_DIR, TRASH_LIBRARY_DIR};
+    let home = comps(&["Users", "root"]);
+    assert_eq!(
+        trash_dir(&home),
+        comps(&["Users", "root", TRASH_LIBRARY_DIR, TRASH_LEAF_DIR])
+    );
+    // It reads only `home` — nothing is fabricated for an empty home (that
+    // parses to no components, the root, upstream), and the leaves are the
+    // shared constants, so the location cannot drift from the app's (§2.2).
+    assert_eq!(trash_dir(&[]), comps(&["Library", "Trash"]));
+}
+
 // --- FM7b: the long-operation progress + cancel surface -------------------
 
 use crate::progress::{ProgressModel, ProgressOp};
@@ -4694,6 +4743,13 @@ fn progress_model_reports_the_honest_count_and_never_a_percentage() {
     assert_eq!(copy.status_line(), "3 items copied");
     assert!(copy.title().starts_with("Copying"));
     assert!(model.title().starts_with("Deleting"));
+
+    // A move-to-Trash model reads with the Trash verb (`plans/NEW-FILEMANAGER.md`
+    // FM10): an honest recoverable-move caption, never "removed".
+    let mut trash = ProgressModel::new(ProgressOp::Trash);
+    trash.set_done(1);
+    assert_eq!(trash.status_line(), "1 item moved to Trash");
+    assert!(trash.title().starts_with("Moving to Trash"));
 }
 
 #[test]

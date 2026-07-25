@@ -161,7 +161,8 @@ pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;
 pub use trash::{
-    trash_dest_path, trash_strategy, TrashError, TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
+    trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError, TrashStrategy,
+    MAX_TRASH_NAME_ATTEMPTS,
 };
 pub use vfs::VfsDirectorySource;
 

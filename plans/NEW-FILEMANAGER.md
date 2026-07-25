@@ -27,13 +27,26 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — FM1–FM9 are all landed, including the full FM9-c right-click
-delete click-through in the aarch64 `autoload_input` QEMU vertical (a tenth
-guest PASS witness, `FsNodeMutated op=rmdir`, gated after the FM9-b
-`fd_redeem`). **FM10a — the pure move-to-Trash model (`lib/browse::trash`:
-`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`,
-host-proven) — is now landed too; FM10b (the app-side Trash verb + its QEMU
-witness) is staged next** (see §1 FM10). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
+`in progress` — FM1–FM10 are all landed. **FM10 (recoverable delete: move to
+Trash) is now complete.** FM10a landed the pure `lib/browse::trash` model
+(`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
+**FM10b now lands the app-side Trash verb and its QEMU witness.** On a confirmed
+delete the `files.app` `Run` binary resolves the user's home from the exported
+`HOME`, ensures the fixed `Library/Trash` subtree (shared `trash::trash_dir`),
+and — when Trash and every target share a volume — carries the removal out as a
+recoverable **move to Trash** (`Job::Trash`: one `fs_rename` per target into its
+collision-free `trash_dest_path`, driven by the same interleaved
+progress/cancel runner), falling back fail-closed to the irreversible
+`DeleteWalk` unlink when Trash is unavailable or cross-volume. The confirmation
+`Dialog` is disposition-aware (`DeleteDisposition` threaded into the shared
+`render::build_delete_dialog`): a recoverable *Move to Trash* vs an irreversible
+*Delete Permanently*, so the wording always matches what will happen (§2.24).
+The desktop session now forwards the **user environment** (incl. `HOME`) to its
+launched apps (`spawn_app` → `spawn_with`), the prerequisite that lets the file
+manager locate the per-user Trash. The aarch64 `autoload_input` QEMU vertical's
+tenth witness changed from `FsNodeMutated op=rmdir` to `op=rename` with a
+destination under `Library/Trash` (still gated after the FM9-b `fd_redeem`, so
+no earlier mutation can satisfy it — fail closed). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
@@ -1333,21 +1346,30 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   passthrough, extension-aware and whole-name and dotfile disambiguation,
   suffix-skipping over taken names, and each fail-closed refusal). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-- **FM10b — the app-side Trash verb + the QEMU witness (staged).** The
-  `files.app` `Run` binary, on a confirmed delete, stats each target's volume
-  against the per-user Trash directory (a fixed subtree under the user's home
-  `Library/`, honouring the fixed `/Users/<u>/` shape — Trash is *inside*
-  `Library/`, never a new sibling, §16.3), ensures the Trash directory exists
-  (`fs_mkdir`, the user's own authority), and for a `TrashStrategy::Move`
-  renames the item into its `trash_dest_path` instead of unlinking; a
-  `TrashStrategy::Unlink` (cross-volume, or a refused/unavailable Trash) falls
-  back to the existing `DeleteWalk`. The confirmation `Dialog` gains an honest
-  "Move to Trash" vs "Delete permanently" wording so the user knows which will
-  happen (§2.24). Rides the autoload QEMU vertical with a new kernel-attested
-  witness (`FsNodeMutated op=rename` into the Trash subtree for the recoverable
-  case) appended after the FM9-c removal, gated so no earlier mutation can
-  satisfy it. (An "empty Trash" verb and a Trash view are a later increment, not
-  built ahead of the move that fills it, §2.4.)
+- **FM10b — the app-side Trash verb + the QEMU witness `[x]` (done).** The
+  `files.app` `Run` binary, on a confirmed delete, decides one disposition for
+  the whole plan (a selection lives in one directory, hence one volume): it
+  resolves the user's home from the exported `HOME`, spells the fixed
+  `Library/Trash` subtree with the shared `trash::trash_dir` (honouring the
+  fixed `/Users/<u>/` shape — Trash is *inside* `Library/`, never a new
+  sibling, §16.3), ensures that directory exists (`fs_mkdir` of `Library` then
+  `Trash`, the user's own authority), and — when Trash and every target share a
+  volume — resolves each target's collision-free `trash_dest_path`. On confirm
+  a recoverable removal is a `Job::Trash` (one `fs_rename` per target into
+  Trash, driven by the same interleaved progress/cancel runner as delete/paste,
+  `ProgressOp::Trash`); an unavailable or cross-volume Trash falls back, fail
+  closed, to the existing `DeleteWalk` unlink. The confirmation `Dialog` is
+  disposition-aware (`DeleteDisposition` threaded into the shared
+  `render::build_delete_dialog`): a safe, recoverable *Move to Trash* vs the
+  destructive *Delete Permanently*, so the wording always matches what will
+  happen (§2.24). The prerequisite — the desktop session forwarding the user
+  environment (incl. `HOME`) to its launched apps (`spawn_app` → `spawn_with`);
+  plain `spawn` gave a child an empty environment — is done in the same change
+  (§2.19). Rides the aarch64 `autoload_input` QEMU vertical: its tenth witness
+  changed from `FsNodeMutated op=rmdir` to `op=rename` whose `to` is under
+  `Library/Trash` (still gated after the FM9-b `fd_redeem`, so no earlier
+  mutation can satisfy it — fail closed). (An "empty Trash" verb and a Trash
+  view are a later increment, not built ahead of the move that fills it, §2.4.)
 
 ## 2. Sequencing and dependencies
 

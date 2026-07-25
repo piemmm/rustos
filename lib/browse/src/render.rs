@@ -55,6 +55,7 @@ use crate::open_with::AppAssociation;
 use crate::progress::ProgressModel;
 use crate::properties::Properties;
 use crate::source::DirectorySource;
+use crate::trash::DeleteDisposition;
 
 /// Padding in pixels between the path bar's edge and its label text.
 const LABEL_PADDING: u32 = 4;
@@ -1180,37 +1181,80 @@ pub const DELETE_CONFIRM_INDEX: usize = 0;
 /// delete-confirmation [`Dialog`] [`build_delete_dialog`] produces.
 pub const DELETE_CANCEL_INDEX: usize = 1;
 
-/// Build the modal delete-confirmation [`Dialog`] for `plan`: an honest
-/// question naming what would be removed, a warning appropriate to whether
-/// folders (removed recursively) are involved, a destructive **Delete**
-/// action, and a safe recommended **Cancel** action (§2.24).
+/// Build the modal delete-confirmation [`Dialog`] for `plan`, worded honestly
+/// for the `disposition` the caller will actually carry out (§2.24): a
+/// recoverable **Move to Trash** or an irreversible **Delete Permanently**.
 ///
 /// The [`DeleteTarget`](crate::DeleteTarget) count and
 /// [`has_directories`](DeletePlan::has_directories) come straight from the
 /// already-captured [`DeletePlan`], so the confirmation reports the true scope
-/// of the removal rather than a fabricated figure. The dialog performs nothing
-/// itself — the caller drives the removal in its own capability-checked tail
-/// once the user confirms — so composing it grants no authority. Both the
-/// file manager (which builds one) and, in principle, any other write-capable
-/// consumer share this one definition; the read-only picker never deletes, so
-/// it never builds one.
+/// of the removal rather than a fabricated figure. `disposition`
+/// ([`DeleteDisposition`]) is the caller's own decision — computed from the
+/// targets' and the user's Trash directory's volume ids — so the dialog never
+/// promises a wording its execution will not honour: a
+/// [`Trash`](DeleteDisposition::Trash) confirmation offers a safe, recoverable
+/// **Move to Trash**, a [`Permanent`](DeleteDisposition::Permanent) one the
+/// destructive **Delete Permanently** with the honest warmth on the safe
+/// Cancel. The dialog performs nothing itself — the caller drives the removal
+/// in its own capability-checked tail once the user confirms — so composing it
+/// grants no authority. Both the file manager (which builds one) and, in
+/// principle, any other write-capable consumer share this one definition; the
+/// read-only picker never deletes, so it never builds one.
 #[must_use]
-pub fn build_delete_dialog(plan: &DeletePlan) -> Dialog {
+pub fn build_delete_dialog(plan: &DeletePlan, disposition: DeleteDisposition) -> Dialog {
+    match disposition {
+        DeleteDisposition::Trash => build_trash_dialog(plan),
+        DeleteDisposition::Permanent => build_permanent_delete_dialog(plan),
+    }
+}
+
+/// The recoverable **Move to Trash** confirmation: nothing is destroyed, so the
+/// confirm action is the recommended (safe) primary rather than a destructive
+/// one, and the message states that trashed items can be restored.
+fn build_trash_dialog(plan: &DeletePlan) -> Dialog {
     let title = if plan.len() == 1 {
-        alloc::format!("Delete \u{201c}{}\u{201d}?", plan.targets()[0].name())
+        alloc::format!(
+            "Move \u{201c}{}\u{201d} to Trash?",
+            plan.targets()[0].name()
+        )
     } else {
-        alloc::format!("Delete {} items?", plan.len())
+        alloc::format!("Move {} items to Trash?", plan.len())
+    };
+    // Recoverable: the honest warmth sits on the confirm action because the
+    // move can be undone by restoring from Trash — it is not destructive.
+    let confirm = Button::new(
+        ButtonContent::Label(String::from("Move to Trash")),
+        ControlRole::Recommended,
+    );
+    let cancel = Button::new(
+        ButtonContent::Label(String::from("Cancel")),
+        ControlRole::Neutral,
+    );
+    Dialog::new(title)
+        .with_message("Items stay in the Trash until you empty it, so you can restore them.")
+        .with_actions(vec![confirm, cancel])
+}
+
+/// The irreversible **Delete Permanently** confirmation: the destructive action
+/// carries the Destructive role and the confirmation posture, and Cancel is the
+/// recommended (safe, trailing) action so the honest warmth sits on the safe
+/// choice, never on the delete.
+fn build_permanent_delete_dialog(plan: &DeletePlan) -> Dialog {
+    let title = if plan.len() == 1 {
+        alloc::format!(
+            "Delete \u{201c}{}\u{201d} permanently?",
+            plan.targets()[0].name()
+        )
+    } else {
+        alloc::format!("Delete {} items permanently?", plan.len())
     };
     let message = if plan.has_directories() {
         "Folders and everything inside them will be removed. This cannot be undone."
     } else {
         "This cannot be undone."
     };
-    // The destructive action carries the Destructive role and the
-    // confirmation posture; Cancel is the recommended (safe, trailing) action
-    // so the honest warmth sits on the safe choice, never on the delete.
     let mut delete = Button::new(
-        ButtonContent::Label(String::from("Delete")),
+        ButtonContent::Label(String::from("Delete Permanently")),
         ControlRole::Destructive,
     );
     delete.set_state(ControlState::idle().with_authority(AuthorityState::NeedsConfirmation));

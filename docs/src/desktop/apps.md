@@ -631,7 +631,10 @@ folders (and their contents) are removed when the plan includes a directory
 centres and clamps the dialog to the window and `render::delete_dialog_action_at`
 mirrors its button geometry so a click resolves to exactly the button pressed
 (`AGENTS.md` §2.2); `Escape` (or Cancel) dismisses it, `Enter` (or Delete)
-confirms. On confirm the app drives a `DeleteWalk` to completion — reading each
+confirms. On confirm a *recoverable* removal is a move to Trash (the
+move-to-Trash section below); this paragraph describes the *permanent* removal
+the app falls back to when Trash is unavailable or cross-volume. It drives a
+`DeleteWalk` to completion — reading each
 directory with the same capability-checked listing call and shared decode the
 browser navigates with, and `fs_unlink`-ing each node depth-first (with
 `UnlinkFlags::DIRECTORY` for a directory-backed target) under the launching
@@ -695,6 +698,43 @@ bound (`NoFreeName`, `AGENTS.md` §5.4, §24.4). The model touches no filesystem
 and holds no authority — the app performs the `fs_stat`/`fs_rename` under the
 launching user's own identity, no new capability — so composing it grants
 nothing and the read-only picker never runs it.
+
+The **move-to-Trash verb** (`plans/NEW-FILEMANAGER.md` FM10b) is wired into the
+confirmed-delete path in the `files.app` `Run` binary. Because a selection lives
+in one directory — hence on one volume — a whole delete plan is uniform, so the
+app decides one disposition for it *before* showing the confirmation, and the
+dialog's wording matches exactly what a confirmed delete will do (`AGENTS.md`
+§2.24). `begin_delete` resolves the user's home from the `HOME` the session
+exported (the same source the trusted picker starts at), spells the fixed
+`Library/Trash` subtree with the shared `trash::trash_dir` (one definition, so
+the app and its QEMU witness agree on where a trashed item lands, `AGENTS.md`
+§2.2), ensures that directory exists (`fs_mkdir` of `Library` then `Trash` under
+the user's own identity), and — when the Trash and every target share a volume —
+resolves each target's collision-free `trash_dest_path`. If all of that holds
+the removal is a recoverable **move to Trash**: `render::build_delete_dialog` is
+built with `trash::DeleteDisposition::Trash` (a safe, recommended *Move to
+Trash* action and a "you can restore them" message), and on confirm the app
+drives a `Job::Trash` operation that renames each target into its captured Trash
+destination — one `fs_rename` per item through the same interleaved
+progress/cancel runner as a delete or paste (`ProgressOp::Trash`), so even a
+large selection stays responsive and cancellable (`AGENTS.md` §2.23). Anything
+that makes the move impossible — an unset or root `HOME`, a Trash directory that
+cannot be created or stat'd, or a cross-volume target (a mounted volume under
+the current directory) — falls back, fail closed, to the irreversible
+`DeleteWalk` unlink, and the dialog is built with `DeleteDisposition::Permanent`
+(the destructive *Delete Permanently* action and the "cannot be undone"
+warning), so the user is never promised a recovery the removal will not honour.
+Every step is the launching user's own §5.3-checked call — **no new
+capability**, no ambient authority. An "empty Trash" verb and a Trash view are a
+later increment, not built ahead of the move that fills it (`AGENTS.md` §2.4).
+
+For the file manager to find the user's Trash, the desktop session hands its
+launched apps the **user environment** login exported. Plain `spawn` gives a
+child an empty environment; the session's `spawn_app` helper instead launches
+the file manager, terminal, and viewer with `spawn_with`, forwarding its own
+environment (so `HOME`, `LANG`, … are inherited exactly as a login shell's
+children inherit them) under the session's attested credential and console —
+the environment is data and carries no authority (`AGENTS.md` §4, §5.4).
 
 ### The cut / copy / paste verbs
 
