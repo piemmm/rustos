@@ -1,6 +1,7 @@
 # FIX-HARDWARE-FEATURES — Boot-time CPU feature detection and self-optimising routine selection
 
-Status: **planned** (design fixed below; no code landed).
+Status: **in progress** — P0 (build-time floor) done; P1–P4 planned (design
+fixed below).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan turns the standing
 performance defect — *every* TAIRiX image is built and run against the
@@ -210,124 +211,67 @@ consumers P2/P3 landed. Each phase ends only when the whole-project §7 gate
 is green (§2.15); the per-phase **Acceptance** blocks state the phase-local
 bar on top of that.
 
-### P0 — Build-time floor (the layer under everything)
+### P0 — Build-time floor (the layer under everything) — **done**
 
-**Scope in one line:** give `tools/xtask` a single, total `image → CPU
-floor` mapping and thread its `-C target-cpu`/`-C target-feature` flags into
-*both* the kernel build and the PIE user-space build, without touching the
-shared `.cargo/config.toml` `[target.*]` blocks.
+The per-image CPU floor lives in `tools/xtask/src/floor.rs` (declared
+`mod floor;` in `tools/xtask/src/main.rs`): the single source of truth for
+the `-C target-cpu`/`-C target-feature` baseline each image is compiled
+against. It is injected per image at the point each image's binaries are
+built (never in the shared `.cargo/config.toml` `[target.*]` blocks, which
+are consumed by every build for that triple and would leak a floor across
+images).
 
-**Why not `.cargo/config.toml`:** the `[target.aarch64-unknown-none]` block
-is shared by the RPi image kernel, the QEMU-virt run kernel, and every PIE
-user-space cross-build. A floor set there would leak across images and
-violate the "floor is per-image" decision. The floor must be injected at the
-point each image's binaries are built.
+**Shape.** `enum ImageKind { AArch64Generic, X86_64Iso, Riscv64Generic,
+AArch64Virt }` (each carries its triple); `struct CpuFloor { target_cpu:
+Option<&str>, target_features: &[&str], rationale: &str, triple: &str }`;
+`floor_for_image(ImageKind) -> CpuFloor` is total over `ImageKind`.
+`CpuFloor::floor_tokens()` yields the floor-only `-C target-cpu`/`-C
+target-feature` tokens (empty for a baseline floor); `CpuFloor::rustflags()`
+= `base_rustflags(triple)` ⧺ floor tokens; `CpuFloor::encoded_rustflags()`
+is that joined by `0x1f` for `CARGO_ENCODED_RUSTFLAGS`.
 
-**Deliverables (files + symbols):**
+**Flag precedence + the divergence guard.** `CARGO_ENCODED_RUSTFLAGS`
+*replaces* (does not merge with) the config `[target.*]` `rustflags` block,
+so `base_rustflags(triple)` reproduces the flags that block supplies
+(`-C force-frame-pointers=yes` on the bare-metal targets; plus the x86_64
+soft-crypto `--cfg`s). The `base_rustflags_match_cargo_config` unit test
+parses `.cargo/config.toml` and pins the two together, so they can never
+diverge (§2.2).
 
-- New module `tools/xtask/src/floor.rs` (add `mod floor;` to
-  `tools/xtask/src/commands.rs` or `lib.rs` as the sibling modules are
-  declared): the single source of truth.
-  - `pub struct CpuFloor { pub target_cpu: Option<&'static str>, pub
-    target_features: &'static [&'static str], pub rationale: &'static str }`.
-  - `pub fn floor_for_image(image: ImageKind) -> CpuFloor` — total over a
-    new `enum ImageKind { AArch64Generic, X86_64Iso, Riscv64Generic,
-    AArch64Virt, /* … every shipped image */ }`. Values decided below.
-  - `impl CpuFloor { pub fn rustflags(&self) -> Vec<String> }` — emits the
-    `["-C","target-cpu=…","-C","target-feature=+a,+b"]` token list (empty
-    vec when both are `None`/empty, i.e. a genuinely generic floor).
-- **Cargo flag-precedence constraint (get this right).** Setting the
-  `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS` env var **replaces** (does not
-  merge with) the `.cargo/config.toml` `[target.*]` `rustflags` block —
-  cargo takes flags from exactly one source, env outranking config. So the
-  injected floor string must **also carry** the flags the shared block
-  currently supplies (`-C force-frame-pointers=yes` on every bare-metal
-  target; plus the x86_64 soft-backend `--cfg`s). To keep those in one
-  place, hoist the per-target base flags into `floor.rs` as
-  `base_rustflags(triple)` and have `CpuFloor::rustflags()` = base ⧺ floor,
-  so config and the injected set can never diverge (§2.2). (The PIE recipe
-  already reconstructs the whole string, so it has the same requirement.)
-- Wire into the **kernel** build: `build_platform_image`
-  (`tools/xtask/src/commands.rs` ~line 1462) and `build_virt_run_kernel`
-  (~line 1601). Both currently rely on the `ctx.cargo()` inherited
-  `.cargo/config.toml` flags. Set `CARGO_ENCODED_RUSTFLAGS` (0x1f-joined,
-  = `base_rustflags(triple)` ⧺ floor tokens) on the kernel `cargo build`
-  `Command` for that image.
-- Wire into the **PIE** build: `cross_compile_pie_elf`
-  (`tools/xtask/src/commands/pie_build.rs` line 73) already clears
-  `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` and sets `arch.rustflags_env_var()`
-  to the PIE link recipe. Extend its signature with a `floor: &CpuFloor`
-  parameter and prepend the floor tokens to that string (the PIE recipe's
-  existing link flags stand in for the base set for user-space) so kernel and
-  user-space in one image share the exact floor (§2.2). Update the two
-  callers (`image_drivers`, `image_apps`) to pass the same
-  `floor_for_image(image)` the kernel build used — thread the resolved
-  `ImageKind`/`CpuFloor` down from `build_platform_image`.
+**Wiring.** The kernel builds (`build_platform_image` → `AArch64Generic`,
+`build_virt_run_kernel` → `AArch64Virt`) set `CARGO_ENCODED_RUSTFLAGS =
+floor.encoded_rustflags()`. The PIE recipe (`cross_compile_pie_elf`)
+*prepends* `floor.floor_tokens()` to its link recipe, resolving the floor
+purely from its `PieArch` via `ImageKind::generic_for_pie_arch` (every
+bundle is the generic per-arch user-space, so the floor is a pure function
+of the arch — never a value carried two ways, §2.2/§2.3). Kernel and
+user-space of the generic image therefore share one floor
+(`generic_image_kernel_and_pie_share_one_floor`).
 
-**Floor values (decided).** Each image's floor is chosen from *which
-SoCs/PCs it must boot*, and every one is recorded in `floor_for_image` with
-its `rationale`:
+**Floor values (decided, at baseline).** `AArch64Generic`: baseline
+ARMv8.0-A (`target_cpu: None`, no features) — the common set of every ARMv8
+SBC the universal media boots. `X86_64Iso`: `target_cpu: Some("x86-64")`
+(v1) for maximum reach; raised to `x86-64-v2` only with a documented minimum
+requirement. `Riscv64Generic`: the base `rv64gc` the triple implies.
+`AArch64Virt`: baseline (dev kernel, not shipped hardware). Everything above
+the floor is recovered per booted CPU by P1–P3 runtime dispatch, so the low
+floor costs nothing at runtime. Because every floor is baseline, the injected
+flags reproduce the config byte-for-byte and the images build exactly as
+before (verified: `cargo xtask ci`'s image gate builds the RPi image green).
 
-- `AArch64Generic` (universal ARM media, boots RPi 4 / CM4 / OrangePi /
-  other ARMv8 SBCs): floor = baseline **ARMv8.0-A**, i.e. `target_cpu:
-  None`, `target_features: []` (the common set A53∩A72∩A76∩Allwinner∩… ≈
-  baseline). **Not** `cortex-a72`.
-- `X86_64Iso` (boots arbitrary PCs): floor = **`x86-64` (v1)**,
-  `target_cpu: Some("x86-64")`, for maximum reach. Raised to `x86-64-v2`
-  only if a published minimum-hardware requirement is added and documented.
-- `Riscv64Generic`: floor = the base `rv64gc` the triple already implies;
-  no extra features baked in.
-- `AArch64Virt` / other QEMU-run kernels: a documented model floor may be
-  chosen (e.g. the core QEMU `virt` models) since the image is not shipped
-  hardware; record it.
-
-Everything above the floor is recovered per booted CPU by P1–P3 runtime
-dispatch, so the low floor costs nothing at runtime.
-
-- **Product-model decision (settled — was the P0 open question).** TAIRiX
-  ships **one generic floor image per architecture, not per-board**: a
-  single `aarch64` media boots RPi 4 / CM4 / OrangePi / other ARMv8 SBCs and
-  a single `x86_64` ISO boots arbitrary PCs, hardware worked out at runtime
-  via discovery (§18.1) and CPU extensions via P1–P3 dispatch. This matches
-  the charter's discovery-first design and `plans/PI.md` §0.2/§0.3, and is
-  mandatory for x86_64 (per-board is impractical there). Per-board images
-  are reserved as a rare boot-layer escape hatch (a board whose firmware
-  handoff cannot be unified onto shared media), never the default; that
-  escape hatch and the multi-board boot partition/DTB packaging are
-  `plans/BOOTLOADER.md`'s concern, not this plan's. Reconciled against
-  `plans/UNIVERSAL.md` (universal `.app`/Wasm distribution) and
-  `plans/PI.md`.
-
-**Codegen validation (a real build step, not a claim).** Any floor that
-raises `target-cpu`/`target-feature` above the current default must be
-proven to actually lower on the freestanding target before it is adopted:
-the x86_64 `[target.x86_64-unknown-none]` block already pins *soft* crypto
-backends (`chacha20_force_soft`, `poly1305_force_soft`,
+**Codegen-validation obligation for a future floor-raise.** Any floor that
+raises `target-cpu`/`target-feature` above the current default must be proven
+to lower on the freestanding target before adoption — the x86_64 target pins
+*soft* crypto backends (`chacha20_force_soft`, `poly1305_force_soft`,
 `curve25519_dalek_backend="serial"`) to dodge the freestanding-SIMD codegen
-crash. When a floor turns a feature on, re-verify those crates still lower;
-if enabling a feature reintroduces a codegen crash, **fail the build**
-(§2.1), do not ship broken codegen and do not silently drop the feature.
-The generic floors decided above deliberately stay at baseline, so P0 as
-specified changes no codegen — but the validation step is part of the phase
-so a future floor-raise cannot skip it.
+crash. If enabling a feature reintroduces that crash, **fail the build**
+(§2.1); never ship broken codegen and never silently drop the feature. The
+decided floors stay at baseline, so nothing raises codegen today.
 
-**Tests (host, in `tools/xtask`):**
-
-- `floor_for_image` is **total**: a table-driven test over every `ImageKind`
-  variant asserts each resolves to a `CpuFloor` with a non-empty `rationale`
-  (mirrors the existing `kernel_build_profile_matches_image_profile` test
-  style at `commands.rs` ~line 1852).
-- **Kernel and PIE share one floor:** a test that, for a given `ImageKind`,
-  the token list injected into the kernel `cargo` env equals the token list
-  prepended to the `cross_compile_pie_elf` rustflags string (§2.2 — they
-  cannot skew).
-- `CpuFloor::rustflags()` emits an empty vec for a generic
-  (`None`/empty) floor and a well-formed `-C target-cpu=…` / `-C
-  target-feature=+…` pair otherwise.
-
-**Acceptance:** every shipped image resolves to a documented floor; the
-generic images build byte-for-byte as today (baseline floor is a no-op flag
-set); `cargo xtask ci` green.
+**Product model (settled).** One generic floor image per architecture, not
+per-board; hardware worked out at runtime via discovery (§18.1) and CPU
+extensions via P1–P3 dispatch. Per-board images are a rare boot-layer escape
+hatch owned by `plans/BOOTLOADER.md`, never the default.
 
 ### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer)
 

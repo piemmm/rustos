@@ -22,6 +22,7 @@
 //! nested `cargo` no-ops incrementally instead of rebuilding `build-std`
 //! on every invocation.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -61,6 +62,24 @@ pub fn cross_compile_pie_elf(
     let target_dir = ctx.target_dir().join(group).join(triple).join(package);
     wipe_target_dir_on_linker_change(&run_ld, &target_dir);
 
+    // Every bundle the pipeline cross-compiles is part of the generic per-arch
+    // user-space, so it builds against that image's CPU floor — the identical
+    // floor the generic image's kernel uses (resolved from the arch, so the
+    // value is not carried two ways). The floor tokens are *prepended* to the
+    // PIE link recipe, which stands in for the base flags for user-space; a
+    // baseline floor prepends nothing and the build is unchanged.
+    let floor = crate::floor::floor_for_image(crate::floor::ImageKind::generic_for_pie_arch(arch));
+    let mut rustflags = floor.floor_tokens().join(" ");
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    // `write!` into a `String` is infallible; the result is discarded.
+    let _ = write!(
+        rustflags,
+        "-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{}",
+        run_ld.display()
+    );
+
     let mut cmd = Command::new(&ctx.cargo);
     cmd.current_dir(&ctx.workspace_root)
         // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS`
@@ -70,13 +89,7 @@ pub fn cross_compile_pie_elf(
         // win and apply only to this target's crates.
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        .env(
-            arch.rustflags_env_var(),
-            format!(
-                "-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{}",
-                run_ld.display()
-            ),
-        )
+        .env(arch.rustflags_env_var(), rustflags)
         .args([
             "build",
             "--locked",

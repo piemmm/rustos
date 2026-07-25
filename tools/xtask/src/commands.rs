@@ -1477,11 +1477,18 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     //    stream to the UART, the shippable `installer` image gets an
     //    optimised `--release` kernel that renders the log on screen.
     let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
+    // The flashable image is the universal ARM media, so its kernel builds
+    // against that image's CPU floor. Injecting the floor's `rustflags` via
+    // `CARGO_ENCODED_RUSTFLAGS` *replaces* the shared `.cargo/config.toml`
+    // block, so the floor carries the base flags too (`CpuFloor::rustflags`);
+    // a baseline floor reproduces the config byte-for-byte.
+    let floor = crate::floor::floor_for_image(crate::floor::ImageKind::AArch64Generic);
     let mut cmd = ctx.cargo();
     cmd.arg("build").arg("--locked");
     cmd.args(build_profile_args);
     cmd.args(["-p", "tairix-kernel", "--target", "aarch64-unknown-none"]);
     cmd.args(kernel_diag_feature_args(profile));
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", floor.encoded_rustflags());
     ctx.run(
         &format!("image: kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
@@ -1626,6 +1633,10 @@ fn build_virt_run_kernel(
 ) -> Result<PathBuf, String> {
     let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
     let target_dir = ctx.target_dir().join("virt-kernel");
+    // The `run` development kernel targets the QEMU `virt` board (not shipped
+    // hardware); it builds against that image's CPU floor, injected the same
+    // way as the flashable image's kernel so both go through one definition.
+    let floor = crate::floor::floor_for_image(crate::floor::ImageKind::AArch64Virt);
     let mut cmd = ctx.cargo();
     cmd.arg("build").arg("--locked");
     cmd.args(build_profile_args);
@@ -1639,6 +1650,7 @@ fn build_virt_run_kernel(
     cmd.arg(&target_dir);
     cmd.args(kernel_diag_feature_args(profile));
     cmd.env("TAIRIX_KERNEL_BOARD", "virt");
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", floor.encoded_rustflags());
     ctx.run(
         &format!("run: virt kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
