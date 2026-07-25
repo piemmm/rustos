@@ -27,8 +27,25 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — FM1–FM10 are all landed. **FM10 (recoverable delete: move to
-Trash) is now complete.** FM10a landed the pure `lib/browse::trash` model
+`in progress` — FM1–FM10 are all landed, and **FM11a (the pure empty-Trash
+model) now lands too.** `lib/browse::trash::empty_trash_plan` turns the Trash
+directory's `fs_readdir` listing into a `delete::DeletePlan` over its *contents*
+(never the Trash directory itself, so emptying leaves the now-empty folder in
+place), carried out by the same recursive `DeleteWalk` a permanent delete uses
+(no second removal engine, §2.2). Emptying is always permanent, so the app
+confirms it with `DeleteDisposition::Permanent`; it returns `None` for an
+already-empty Trash (a no-op the app just does not offer, never an error) and is
+fail closed — a root Trash dir (`RootTrash`) or an invalid child leaf
+(`InvalidName`) refuses the whole empty rather than remove outside Trash or
+silently skip an item (§5.4). It touches no filesystem and holds no authority
+(the app drives the plan with its own `fs_readdir`/`fs_unlink` under the user's
+identity), so composing it grants nothing and the read-only picker never builds
+one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
+root-trash refusal, invalid-child refusal). Now justified rather than
+speculative: the move that fills the Trash (FM10) has landed, so the way back to
+a permanent removal is real surface (§2.4). The drawn empty-Trash verb + a Trash
+view + its QEMU witness are FM11b, staged below. **FM10 (recoverable delete:
+move to Trash) is complete.** FM10a landed the pure `lib/browse::trash` model
 (`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
 **FM10b now lands the app-side Trash verb and its QEMU witness.** On a confirmed
 delete the `files.app` `Run` binary resolves the user's home from the exported
@@ -1368,8 +1385,48 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   (§2.19). Rides the aarch64 `autoload_input` QEMU vertical: its tenth witness
   changed from `FsNodeMutated op=rmdir` to `op=rename` whose `to` is under
   `Library/Trash` (still gated after the FM9-b `fd_redeem`, so no earlier
-  mutation can satisfy it — fail closed). (An "empty Trash" verb and a Trash
-  view are a later increment, not built ahead of the move that fills it, §2.4.)
+  mutation can satisfy it — fail closed).
+
+### FM11 — emptying the Trash
+
+FM10 made a delete recoverable by moving items into the per-user Trash; FM11
+gives the user the deliberate way back to a permanent removal — emptying it.
+Because the move that fills the Trash now exists, emptying it is real surface,
+not speculative (§2.4). Split (§2.19) into the pure engine model and the app
+wiring, exactly as FM6/FM7/FM8/FM10 were.
+
+- **FM11a — the pure empty-Trash model `[x]` (done).**
+  `lib/browse::trash::empty_trash_plan(trash_dir, children)`, host-proven ahead
+  of the app verb exactly as the pure delete/paste/trash models landed. It turns
+  an `fs_readdir` listing of the Trash directory into a `delete::DeletePlan`
+  over its *contents* — one target per immediate child, in
+  listing order — never the Trash directory itself, so emptying removes the
+  contents and leaves the now-empty folder in place. The removal is carried out
+  by the *same* recursive `DeleteWalk` an ordinary permanent delete uses, so
+  there is no second removal engine (§2.2), and it is always permanent (there is
+  no trash-of-the-trash), so the app confirms it with
+  `DeleteDisposition::Permanent`. It returns `None` for an already-empty Trash —
+  a no-op the app simply does not offer, never an error — and is fail closed: a
+  root Trash dir (`RootTrash`) or an invalid child leaf (`InvalidName`) refuses
+  the whole empty rather than remove outside Trash or silently skip an item
+  (§5.4). The model touches no filesystem and holds no authority (the app drives
+  the plan's walk with its own `fs_readdir`/`fs_unlink` under the user's own
+  identity, no new capability), so composing it grants nothing and the read-only
+  picker never builds one. Host-tested in `lib/browse` (contents-not-the-dir
+  removal preserving listing order and directory-backed flags, empty=no-op
+  `None`, root-trash refusal, invalid-child refusal across `""`/`.`/`..`/`a/b`/
+  `a:b`). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+- **FM11b — the app-side empty-Trash verb, a Trash view, and the QEMU witness.**
+  Wire the drawn verb into the `files.app` `Run` binary: an **Empty Trash**
+  action (reachable when the current directory is the user's Trash and it is
+  non-empty) that stats/reads the Trash directory, builds the `empty_trash_plan`,
+  confirms with the `DeleteDisposition::Permanent` dialog, and drives the plan's
+  `DeleteWalk` through the same interleaved progress/cancel runner as a delete
+  (`ProgressOp::Delete`), fail closed and fail loud. A dedicated Trash view (a
+  navigable location showing the Trash contents) rides the same increment. Prove
+  it on the aarch64 `autoload_input` QEMU vertical with a new post-`fd_redeem`
+  witness. (Not built here — it is the app/compositor half, staged after this
+  pure model, §2.19.)
 
 ## 2. Sequencing and dependencies
 
@@ -1383,9 +1440,13 @@ on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7 is
 split (§2.19): FM7a models the selection + clipboard in the engine
 (host-proven); FM7b executes the verbs in the app and depends on FM4b's
 selection/menu. FM8 is split the same way: FM8a models the properties view
-(host-proven); FM8b paints it and adds permission editing. FM9 closes out. Each
-lands fully gated; a stage that turns out larger than one clean increment is
-split and staged here, never shipped half-done "for now" (§2.19).
+(host-proven); FM8b paints it and adds permission editing. FM9 closes out the
+core with the autoload QEMU vertical. FM10 makes delete recoverable (move to
+Trash), and FM11 gives the way back — emptying the Trash (FM11a the pure model,
+FM11b the app verb + Trash view), each split the same way and depending on the
+FM7 delete walk it reuses (§2.2). Each lands fully gated; a stage that turns out
+larger than one clean increment is split and staged here, never shipped
+half-done "for now" (§2.19).
 
 ## 3. What this explicitly refuses to become
 

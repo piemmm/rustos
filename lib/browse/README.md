@@ -259,7 +259,16 @@ can never diverge in navigation semantics, listing policy, or look.
   picks a safe, recoverable *Move to Trash* wording or the destructive *Delete
   Permanently* wording, so what the dialog promises always matches what the
   confirmed delete does (the app decides the disposition from the targets' and
-  Trash's `VolumeId`s via `trash_strategy`, FM10b).
+  Trash's `VolumeId`s via `trash_strategy`, FM10b). `empty_trash_plan`
+  (`plans/NEW-FILEMANAGER.md` FM11) models the irreversible counterpart —
+  emptying the Trash: it turns the Trash directory's listing into a
+  `DeletePlan` over its *contents* (never the Trash directory itself), carried
+  out by the same recursive `DeleteWalk` a permanent delete uses (§2.2), so
+  emptying leaves the now-empty Trash folder in place. It returns `None` for an
+  already-empty Trash (a no-op, not an error) and is fail closed: a root Trash
+  dir (`RootTrash`) or an invalid child leaf (`InvalidName`) refuses the whole
+  empty rather than remove outside Trash or silently skip an item. It touches
+  no filesystem and holds no authority, so the read-only picker never builds one.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`

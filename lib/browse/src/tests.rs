@@ -4850,7 +4850,9 @@ mod trash {
     use alloc::vec::Vec;
 
     use crate::execute::VolumeId;
-    use crate::trash::{trash_dest_path, trash_strategy, TrashError, TrashStrategy};
+    use crate::trash::{
+        empty_trash_plan, trash_dest_path, trash_strategy, TrashError, TrashStrategy,
+    };
 
     fn vol(byte: u8) -> VolumeId {
         VolumeId::new([byte; 16])
@@ -4858,6 +4860,10 @@ mod trash {
 
     fn owned(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| String::from(*p)).collect()
+    }
+
+    fn child(name: &str, is_dir: bool) -> (String, bool) {
+        (String::from(name), is_dir)
     }
 
     #[test]
@@ -4944,5 +4950,60 @@ mod trash {
             trash_dest_path(&trash, &leaf, &taken),
             Err(TrashError::TooLong)
         );
+    }
+
+    // --- FM11: emptying the Trash --------------------------------------------
+
+    #[test]
+    fn emptying_removes_every_child_under_the_trash_dir_not_the_dir_itself() {
+        let trash = owned(&["Users", "root", "Library", "Trash"]);
+        let children = vec![child("notes.txt", false), child("old_project", true)];
+        let plan = empty_trash_plan(&trash, &children)
+            .expect("a valid listing")
+            .expect("a non-empty Trash yields a plan");
+
+        // One target per child, in listing order — the Trash directory itself is
+        // never a target, so emptying leaves the (now-empty) folder in place.
+        assert_eq!(plan.len(), 2);
+        let targets = plan.targets();
+        assert_eq!(
+            targets[0].path(),
+            owned(&["Users", "root", "Library", "Trash", "notes.txt"]).as_slice()
+        );
+        assert!(!targets[0].is_directory());
+        assert_eq!(
+            targets[1].path(),
+            owned(&["Users", "root", "Library", "Trash", "old_project"]).as_slice()
+        );
+        assert!(targets[1].is_directory());
+        // A directory-backed child means the recursive DeleteWalk is exercised.
+        assert!(plan.has_directories());
+    }
+
+    #[test]
+    fn emptying_an_already_empty_trash_is_a_no_op_not_an_error() {
+        let trash = owned(&["Users", "root", "Library", "Trash"]);
+        assert_eq!(empty_trash_plan(&trash, &[]), Ok(None));
+    }
+
+    #[test]
+    fn emptying_a_root_trash_dir_is_refused() {
+        // An empty Trash path would spell each child as a top-level root entry:
+        // refused rather than risk removing outside Trash.
+        let children = vec![child("notes.txt", false)];
+        assert_eq!(empty_trash_plan(&[], &children), Err(TrashError::RootTrash));
+    }
+
+    #[test]
+    fn an_invalid_child_name_refuses_the_whole_empty() {
+        let trash = owned(&["Trash"]);
+        for bad in ["", ".", "..", "a/b", "a:b"] {
+            let children = vec![child("safe.txt", false), child(bad, false)];
+            assert_eq!(
+                empty_trash_plan(&trash, &children),
+                Err(TrashError::InvalidName),
+                "a child named {bad:?} must refuse the whole empty"
+            );
+        }
     }
 }

@@ -725,8 +725,26 @@ the current directory) — falls back, fail closed, to the irreversible
 (the destructive *Delete Permanently* action and the "cannot be undone"
 warning), so the user is never promised a recovery the removal will not honour.
 Every step is the launching user's own §5.3-checked call — **no new
-capability**, no ambient authority. An "empty Trash" verb and a Trash view are a
-later increment, not built ahead of the move that fills it (`AGENTS.md` §2.4).
+capability**, no ambient authority.
+
+The **empty-Trash model** (`plans/NEW-FILEMANAGER.md` FM11a) is the irreversible
+counterpart of the move above — now that the move fills the Trash, permanently
+emptying it is no longer speculative surface (`AGENTS.md` §2.4).
+`trash::empty_trash_plan` turns an `fs_readdir` of the Trash directory into a
+`delete::DeletePlan` over its *contents* — never the Trash directory itself, so
+emptying leaves the now-empty folder in place — carried out by the same
+recursive `DeleteWalk` a permanent delete already uses, so there is no second
+removal engine (`AGENTS.md` §2.2). Emptying is always permanent, so the app
+confirms it with `DeleteDisposition::Permanent`. It returns nothing to do for an
+already-empty Trash (a no-op the app simply does not offer, not an error) and is
+fail closed: a root Trash directory (`RootTrash`) or an invalid child leaf
+(`InvalidName`) refuses the whole empty rather than remove outside Trash or
+silently skip an item (`AGENTS.md` §5.4). Like the move, it touches no
+filesystem and holds no authority — the app drives the plan with its own
+`fs_readdir`/`fs_unlink` under the launching user's identity — so composing it
+grants nothing and the read-only picker never builds one. The drawn empty-Trash
+verb and a dedicated Trash view are a later increment (FM11b), not built ahead of
+this model.
 
 For the file manager to find the user's Trash, the desktop session hands its
 launched apps the **user environment** login exported. Plain `spawn` gives a

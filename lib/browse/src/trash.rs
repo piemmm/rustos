@@ -42,6 +42,17 @@
 //! the disambiguation lands before the same extension the icon and "Open With…"
 //! classifiers recognise (§2.2).
 //!
+//! # Emptying the Trash
+//!
+//! A trashed item stays recoverable until the user empties the Trash;
+//! [`empty_trash_plan`] models that irreversible step. It turns the Trash
+//! directory's listing into a [`DeletePlan`] over its
+//! contents — never over the Trash directory itself — which the app carries out
+//! with the same recursive [`DeleteWalk`](crate::delete::DeleteWalk) an ordinary
+//! permanent delete uses (§2.2). It is the inverse of the move above: the move
+//! is only offered because emptying gives the user the way back to a permanent
+//! removal on their own terms.
+//!
 //! [`fs_rename`]: tairix_abi::SyscallNumber::FS_RENAME
 
 use alloc::format;
@@ -50,6 +61,7 @@ use alloc::vec::Vec;
 
 use tairix_path::validate_file_name;
 
+use crate::delete::DeletePlan;
 use crate::execute::VolumeId;
 use crate::icon::extension;
 
@@ -97,6 +109,68 @@ pub fn trash_dir(home: &[String]) -> Vec<String> {
     dir.push(String::from(TRASH_LIBRARY_DIR));
     dir.push(String::from(TRASH_LEAF_DIR));
     dir
+}
+
+/// Build the removal plan that **empties** the user's Trash: one
+/// [`DeleteTarget`](crate::delete::DeleteTarget) per immediate child of the
+/// Trash directory, in the source's listing order, each removed by the existing
+/// recursive [`DeleteWalk`](crate::delete::DeleteWalk) (§2.2 — no second removal
+/// engine). The Trash directory *itself* is never a target: emptying Trash
+/// removes its contents and leaves the (now-empty) Trash folder in place, ready
+/// to receive the next trashed item.
+///
+/// `trash_dir` is the Trash directory's root-first component path (from
+/// [`trash_dir`]); `children` is each immediate child's leaf name and whether it
+/// is directory-backed, in listing order — an `fs_readdir` of the Trash
+/// directory the app performs under the user's own identity. Emptying is always
+/// permanent (there is no trash-of-the-trash), so the caller confirms it as an
+/// irreversible removal.
+///
+/// This model touches no filesystem and holds no authority — the app drives the
+/// returned plan's [`DeleteWalk`](crate::delete::DeleteWalk) with its own
+/// capability-checked `fs_readdir`/`fs_unlink` (§4, §5.4) — so composing it
+/// grants nothing and the read-only picker never builds one.
+///
+/// Returns `Ok(None)` when the Trash is already empty: emptying it is then a
+/// no-op the app can simply not offer, never an error.
+///
+/// # Errors
+///
+/// Fail closed (§5.4), so the app never carries out a removal spelled from a
+/// bad location or name:
+///
+/// * [`TrashError::RootTrash`] — `trash_dir` is empty (names the root): a child
+///   spelled under it would name a top-level root entry, so the empty is
+///   refused rather than risk removing outside Trash.
+/// * [`TrashError::InvalidName`] — a child leaf is not a valid single filename
+///   (empty, `.`/`..`, or containing a `/`, control character, or `:`): the
+///   whole empty is refused rather than silently skip an item, so a Trash the
+///   verb reports as emptied is genuinely emptied.
+pub fn empty_trash_plan(
+    trash_dir: &[String],
+    children: &[(String, bool)],
+) -> Result<Option<DeletePlan>, TrashError> {
+    if trash_dir.is_empty() {
+        return Err(TrashError::RootTrash);
+    }
+    if children.is_empty() {
+        return Ok(None);
+    }
+    let mut targets = Vec::with_capacity(children.len());
+    for (leaf, is_directory) in children {
+        if validate_file_name(leaf).is_err() {
+            return Err(TrashError::InvalidName);
+        }
+        let mut path = Vec::with_capacity(trash_dir.len() + 1);
+        path.extend_from_slice(trash_dir);
+        path.push(leaf.clone());
+        targets.push((path, *is_directory));
+    }
+    // Every target path is `trash_dir` + a validated leaf, so none is empty and
+    // the set is non-empty: `DeletePlan::new` yields `Some`. Threading the
+    // `Option` through keeps the one fail-closed definition of "nothing to
+    // remove" rather than asserting it here.
+    Ok(DeletePlan::new(targets))
 }
 
 /// Whether a confirmed delete will move its targets to Trash (recoverable) or
