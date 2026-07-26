@@ -35,10 +35,16 @@ fail-closed re-map, min-size clamp), replaces the cramped, overlapping,
 unlabelled inline permission toggles with a **labelled permissions grid popup**
 (`render::PermGrid` — `Read`/`Write`/`Exec` × `Owner`/`Group`/`Other`, drawn in
 the taller `properties_editable_panel_rect`, with the default `WIN_HEIGHT`
-raised so it fits), and enlarges **icon-only buttons** to fill their plate (the
-one `lib/controls` `paint_content` icon path, so every icon-only button across
-the desktop benefits). Host tests: the `lib/browse` permission-grid non-overlap
-regression + updated hit-test scan; freestanding app builds + lints clean.
+raised so it fits), and enlarges **icon-only buttons** to fill their plate. The
+icon-only glyph is now sized from the plate (the smaller plate dimension inside
+its frame, less a margin proportional to the plate — `lib/controls`
+`icon_content_side`) instead of from the text inset (`control_inset`), which had
+shrunk it to a ~6px glyph adrift in the 28px control plate (the "tiny icon"
+defect); it is the one `lib/controls` icon-button paint path, so every icon-only
+button across the desktop benefits. Host tests: the `lib/browse`
+permission-grid non-overlap regression + updated hit-test scan, and the
+`lib/controls` `icon_only_glyph_fills_the_plate_not_the_text_inset` regression;
+freestanding app builds + lints clean.
 
 **FM12 (double-click activation)**: a double-click on an item now activates it (descend / launch a bundle /
 open a file), driven by the shared pure `lib/browse::click::DoubleClickTracker`

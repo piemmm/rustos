@@ -211,6 +211,22 @@ fn paint_signals(
     }
 }
 
+/// The side length of the square glyph an icon-only plate `w`×`h` (with border
+/// thickness `border`) should draw: the smaller plate dimension inside its
+/// frame, reduced by a small margin proportional to the plate so the glyph
+/// fills the button yet stays clear of the frame.
+///
+/// Unlike a labelled plate, an icon-only button gives its whole face to the
+/// glyph, so it is sized off the plate rather than the text inset (which is
+/// tuned for a line of type and would shrink the glyph to a few pixels).
+pub(crate) fn icon_content_side(w: u32, h: u32, border: u32) -> u32 {
+    let plate = w.min(h);
+    // An eighth of the plate on each side keeps the glyph clear of the frame
+    // (about a 75% fill on the default 28px plate) while scaling with size.
+    let margin = border.saturating_add(plate / 8);
+    plate.saturating_sub(margin.saturating_mul(2))
+}
+
 /// Paint the content group (icon and/or label) centred within the plate.
 fn paint_content(
     surface: &mut Surface,
@@ -242,10 +258,13 @@ fn paint_content(
         }
         ButtonContent::Icon(kind) => {
             // An icon-only button has no label competing for the plate, so the
-            // glyph fills the inset content box rather than shrinking to the
-            // text line height — a tiny glyph adrift in a large plate reads as
-            // broken, not deliberate.
-            let side = avail_w.min(avail_h);
+            // glyph fills the plate rather than shrinking to the text inset.
+            // The text inset (`control_inset`) is sized to keep a line of type
+            // clear of the frame; applied to an icon-only plate it leaves only
+            // a few pixels of glyph adrift in a large button, which reads as
+            // broken. The icon instead uses a small margin proportional to the
+            // plate, so it fills the button while staying clear of the frame.
+            let side = icon_content_side(w, h, border);
             if side > 0 {
                 if let Some(image) = builtin_icon(*kind, res.label).rasterise(side) {
                     let ix = cx - to_i32(side) / 2;

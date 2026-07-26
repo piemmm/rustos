@@ -1127,11 +1127,16 @@ blanking or crashing. A drag toward nothing is clamped to `MIN_WIN_WIDTH` ×
 so the editable Properties popup (metadata plus the permissions grid) fits
 without resizing.
 
-Toolbar buttons draw their glyphs at the size of the button's inset content box
-rather than at the text line-height, so an icon-only button (the navigation and
-manager-write tools) shows a full-size pixmap instead of a small glyph adrift in
-a large plate — the one `lib/controls` icon-button paint path, so every
-icon-only button across the desktop benefits (`AGENTS.md` §2.2).
+Icon-only buttons size their glyph from the plate itself — the smaller plate
+dimension inside its frame, less a small margin proportional to the plate
+(`lib/controls` `icon_content_side`) — rather than from the text inset
+(`control_inset`, tuned to keep a *line of type* clear of the frame). On the
+default 28px control plate the text inset left only a ~6px glyph adrift in the
+button (the "tiny icon" defect); the proportional margin instead fills roughly
+three-quarters of the plate. This is the one `lib/controls` icon-button paint
+path, so every icon-only button across the desktop (the file manager's
+navigation and manager-write tools, window controls, the taskbar) benefits
+(`AGENTS.md` §2.2).
 
 ## Terminal emulator (`tairix-terminal`)
 

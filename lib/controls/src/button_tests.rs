@@ -294,6 +294,36 @@ fn icon_button_paints_and_activates() {
     );
 }
 
+#[test]
+fn icon_only_glyph_fills_the_plate_not_the_text_inset() {
+    // An icon-only button gives its whole face to the glyph. Regression: it
+    // was sized off the text inset (`control_inset`, tuned for a line of type),
+    // which on the default 28px plate left only a ~6px glyph adrift in the
+    // button — the "tiny icon" defect. It must instead fill most of the plate.
+    let theme = Theme::dark();
+    let border = theme.metrics().border_thickness;
+    let inset = theme.metrics().control_inset;
+    let plate = theme.metrics().control_height; // the toolbar icon plate is square
+
+    let side = crate::button::icon_content_side(plate, plate, border);
+
+    // Comfortably larger than the old text-inset content box would have been.
+    let text_box = plate.saturating_sub((border + inset).saturating_mul(2));
+    assert!(
+        side > text_box.saturating_mul(2),
+        "icon side {side} is not clearly larger than the old text box {text_box}",
+    );
+    // A generous fill (at least ~60%) yet clear of the frame (never overflows).
+    assert!(
+        side >= plate * 3 / 5,
+        "icon side {side} under-fills the plate"
+    );
+    assert!(
+        side <= plate,
+        "icon side {side} overflows the plate {plate}"
+    );
+}
+
 // --- SplitButton --------------------------------------------------------
 
 #[test]
