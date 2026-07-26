@@ -141,6 +141,49 @@ fn happy_path_runs_documented_init_order_and_halts() {
         "happy path must not emit PhaseFailed on the audit sink",
     );
 
+    // The accelerated-routine-selection audit records (CRC-32C, page-zero,
+    // and the crypto SHA-256 backend decision) are asserted in a helper to
+    // keep this test readable.
+    assert_boot_routine_selection(audit_sink, &audit_ids);
+
+    // Log-channel events: every PhaseStarted in the documented order,
+    // each followed by exactly one PhaseReady, and no audit-class
+    // lifecycle events leaking onto the diagnostic channel.
+    let log_ids: Vec<u32> = log_sink.event_ids();
+    assert!(
+        !log_ids.contains(&AuditEvent::BootStarted.id().0)
+            && !log_ids.contains(&AuditEvent::BootCompleted.id().0)
+            && !log_ids.contains(&AuditEvent::PhaseFailed.id().0),
+        "audit-class events must not appear on the log sink",
+    );
+
+    let phases: Vec<String> = log_sink
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.id == AuditEvent::PhaseStarted.id())
+        .map(|e| e.fields[0].1.clone())
+        .collect();
+    let expected: Vec<&str> = Phase::ORDER.iter().map(|p| p.as_str()).collect();
+    assert_eq!(phases, expected);
+
+    let ready_count = log_sink
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.id == AuditEvent::PhaseReady.id())
+        .count();
+    assert_eq!(ready_count, Phase::ORDER.len());
+}
+
+/// Assert the three accelerated-routine-selection audit records the
+/// happy-path boot emits, in order: CRC-32C, page-zero, and the crypto
+/// SHA-256 backend-availability decision. On the host `TestArch` there is
+/// no CPU-feature HAL slice, so the common feature set is empty and each
+/// family falls closed to its portable/software baseline; the crypto
+/// power-on self-test passes, so no fatal `CryptoSelfTestFailed` is
+/// emitted and the kernel does not halt early. Extracted from
+/// [`happy_path_runs_documented_init_order_and_halts`] so that test stays
+/// within the readable-length bar.
+fn assert_boot_routine_selection(audit_sink: &TestSink, audit_ids: &[u32]) {
     // The selection record names the family, the chosen implementation, and
     // the reason. On the host TestArch (no CPU-feature HAL slice) the common
     // set is empty, so CRC-32C falls closed to the portable baseline.
@@ -207,33 +250,6 @@ fn happy_path_runs_documented_init_order_and_halts() {
         !audit_ids.contains(&AuditEvent::CryptoSelfTestFailed.id().0),
         "the crypto power-on self-test must pass on the happy path",
     );
-
-    // Log-channel events: every PhaseStarted in the documented order,
-    // each followed by exactly one PhaseReady, and no audit-class
-    // lifecycle events leaking onto the diagnostic channel.
-    let log_ids: Vec<u32> = log_sink.event_ids();
-    assert!(
-        !log_ids.contains(&AuditEvent::BootStarted.id().0)
-            && !log_ids.contains(&AuditEvent::BootCompleted.id().0)
-            && !log_ids.contains(&AuditEvent::PhaseFailed.id().0),
-        "audit-class events must not appear on the log sink",
-    );
-
-    let phases: Vec<String> = log_sink
-        .snapshot()
-        .into_iter()
-        .filter(|e| e.id == AuditEvent::PhaseStarted.id())
-        .map(|e| e.fields[0].1.clone())
-        .collect();
-    let expected: Vec<&str> = Phase::ORDER.iter().map(|p| p.as_str()).collect();
-    assert_eq!(phases, expected);
-
-    let ready_count = log_sink
-        .snapshot()
-        .into_iter()
-        .filter(|e| e.id == AuditEvent::PhaseReady.id())
-        .count();
-    assert_eq!(ready_count, Phase::ORDER.len());
 }
 
 #[test]

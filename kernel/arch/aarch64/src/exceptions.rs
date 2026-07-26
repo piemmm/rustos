@@ -300,6 +300,81 @@ pub unsafe fn wait_for_interrupt() {
     }
 }
 
+/// `DAIF` asynchronous-exception mask immediates and the debug
+/// watchdog's `DAIF.F` (FIQ) execution discipline.
+///
+/// `DAIFSet`/`DAIFClr` take a 4-bit immediate selecting the
+/// Debug/SError/IRQ/FIQ mask bits `D A I F` (bits 3..0). The port masks
+/// **IRQ** (`I`, bit 1) around an interrupt-safe critical section. The
+/// debug watchdog's non-maskable FIQ self-sample (`plans/WATCHDOG.md`,
+/// staged) additionally needs **FIQ** (`F`, bit 0) left *unmasked*
+/// wherever a wedge can occur, so a Group-0/FIQ cadence can fire inside a
+/// `DAIF.I`-masked section that the maskable IRQ cadence cannot observe.
+///
+/// The immediate an interrupt-safe critical section masks with therefore
+/// depends on the build, and [`daif::critical_section_mask`] is the single
+/// definition of it that the lock primitive consumes, so the value can
+/// never be transcribed inconsistently.
+pub mod daif {
+    /// `DAIF` FIQ-mask immediate bit (`F`).
+    pub const F: u64 = 1 << 0;
+    /// `DAIF` IRQ-mask immediate bit (`I`).
+    pub const I: u64 = 1 << 1;
+
+    /// The `DAIFSet` immediate an interrupt-safe critical section masks
+    /// with.
+    ///
+    /// When the debug watchdog's FIQ self-sample is compiled in
+    /// (`diagnostics = true`) it masks **IRQ only**, leaving `DAIF.F`
+    /// clear so a Group-0/FIQ cadence can still fire inside the section
+    /// and observe a core wedged there; otherwise it masks **IRQ + FIQ**,
+    /// the classic shippable discipline.
+    #[must_use]
+    pub const fn critical_section_mask(diagnostics: bool) -> u64 {
+        if diagnostics {
+            I
+        } else {
+            I | F
+        }
+    }
+}
+
+/// Unmask **FIQ** taking at the PE (`DAIF.F`) so the debug watchdog's
+/// non-maskable Group-0/FIQ self-sample can fire on this CPU.
+///
+/// The sibling of [`enable_irq`] the staged FIQ masked-section sampler
+/// (`plans/WATCHDOG.md`) requires. AArch64 exception entry masks `DAIF.F`
+/// in hardware and [`enable_irq`] clears only `DAIF.I`, so without this
+/// the `svc`/fault handler paths — and, once cleared per-CPU at boot,
+/// thread-mode kernel code — would keep FIQ masked and a Group-0 cadence
+/// could never reach a core wedged in a `DAIF.I`-masked section.
+///
+/// Compiled only into the debug (`watchdog-diagnostics`) image, and inert
+/// until a Group-0/FIQ source is actually routed (staged separately): with
+/// no Group-0 interrupt enabled, clearing `DAIF.F` raises nothing, so on
+/// its own this changes no observable behaviour. It is deliberately never
+/// called from the FIQ handler's own entry or from
+/// [`crate::kernel_arch::halt_current_cpu`] (`msr DAIFSet, #0xf`), where a
+/// nested FIQ would be unsafe.
+///
+/// # Safety
+///
+/// Clearing `DAIF.F` only changes the FIQ mask; it has no other side
+/// effect. The caller must have installed the vector table
+/// ([`init_vectors`]) so a taken FIQ dispatches through a real slot.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn enable_fiq_delivery() {
+    // SAFETY: clearing `DAIF.F` (immediate bit 0) unmasks FIQ taking; it
+    // has no other side effect.
+    unsafe {
+        core::arch::asm!("msr DAIFClr, #{f}", f = const daif::F, options(nomem, nostack));
+    }
+}
+
 /// Read the `ESR_EL1` exception syndrome.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn read_esr() -> u64 {
@@ -484,6 +559,20 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
     if is_sync(kind) {
         let esr = read_esr();
 
+        // Debug watchdog FIQ self-sample discipline: run the syscall body
+        // and the user-fault resolver with `DAIF.F` clear so a Group-0/FIQ
+        // cadence can observe a core wedged in this (IRQ-masked) section
+        // (`plans/WATCHDOG.md`). Exception entry masked `DAIF.F` in
+        // hardware; re-clear it for the handler. Inert until a Group-0
+        // source is routed, and compiled out of shippable images.
+        #[cfg(feature = "watchdog-diagnostics")]
+        // SAFETY: the vector table is installed before any exception can be
+        // taken, so a taken FIQ dispatches through a real slot; clearing
+        // `DAIF.F` only changes the FIQ mask.
+        unsafe {
+            enable_fiq_delivery();
+        }
+
         // An `svc` from a lower EL (AArch64) is the EL0 syscall path:
         // marshal the saved registers into the canonical
         // `[u64; SYSCALL_MAX_ARGS]` layout and forward to the installed
@@ -644,6 +733,22 @@ mod tests {
         assert!(is_sync(kind::CUR_SPX_SYNC));
         assert!(is_sync(kind::LOWER_SYNC));
         assert!(!is_sync(kind::CUR_SPX_IRQ));
+    }
+
+    #[test]
+    fn daif_immediate_bits_match_the_arm_encoding() {
+        // `DAIFSet`/`DAIFClr` immediate: bit 0 = FIQ (F), bit 1 = IRQ (I).
+        assert_eq!(daif::F, 0b01);
+        assert_eq!(daif::I, 0b10);
+    }
+
+    #[test]
+    fn critical_section_masks_irq_only_in_the_diagnostics_build() {
+        // The debug watchdog build masks IRQ only, leaving FIQ deliverable
+        // for the non-maskable self-sample; a shippable build masks
+        // IRQ+FIQ, the classic discipline.
+        assert_eq!(daif::critical_section_mask(true), daif::I);
+        assert_eq!(daif::critical_section_mask(false), daif::I | daif::F);
     }
 
     #[test]

@@ -563,34 +563,57 @@ struct DaifState(u64);
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 impl IrqState for DaifState {}
 
-/// The aarch64 `InterruptControl` behind [`UART_RX_GATE`]: masks IRQ+FIQ
-/// via DAIF for the critical section and restores the exact prior state
-/// on release (reentrant — an already-masked state round-trips
-/// unchanged). The same masking discipline as the arch port's video
-/// render lock, plugged into `lib/sync`'s IRQ-safe spinlock so the gate
-/// is also correct across CPUs (mask locally, spin globally).
+/// The aarch64 `InterruptControl` behind [`UART_RX_GATE`]: masks
+/// asynchronous interrupts via DAIF for the critical section and restores
+/// the exact prior state on release (reentrant — an already-masked state
+/// round-trips unchanged). Plugged into `lib/sync`'s IRQ-safe spinlock so
+/// the gate is also correct across CPUs (mask locally, spin globally).
+///
+/// The masked set is [`tairix_arch_aarch64::exceptions::daif::critical_section_mask`]:
+/// a shippable build masks IRQ+FIQ (the classic discipline, matching the
+/// arch port's video render lock); the debug watchdog build masks IRQ
+/// only, leaving FIQ (`DAIF.F`) deliverable so its non-maskable
+/// Group-0/FIQ self-sample can observe a core wedged inside this section
+/// (`plans/WATCHDOG.md`).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 struct DaifIrqControl;
 
-// SAFETY: `disable` reads DAIF and sets its I/F mask bits
-// (`msr daifset, #3`) — always permitted at EL1, touches no memory —
-// atomically masking asynchronous interrupts on this CPU and returning
-// the exact prior state; `restore` writes that state back verbatim. A
-// `disable` while already masked returns the masked state, whose restore
-// leaves interrupts masked (reentrant), exactly as the trait requires.
+// SAFETY: `disable` reads DAIF and sets the mask bits
+// `exceptions::daif::critical_section_mask` selects — always permitted at
+// EL1, touches no memory — atomically masking asynchronous interrupts on
+// this CPU and returning the exact prior state; `restore` writes that
+// state back verbatim. A `disable` while already masked returns the masked
+// state, whose restore leaves interrupts masked (reentrant), exactly as
+// the trait requires. In the debug watchdog build the mask leaves FIQ
+// (`DAIF.F`) clear: that is sound because the only Group-0/FIQ source is
+// the watchdog self-sample, which reads the interrupted context and never
+// takes this lock, so it cannot deadlock against a held critical section;
+// no other Group-0 source is routed.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 unsafe impl InterruptControl for DaifIrqControl {
     type State = DaifState;
 
     fn disable() -> Self::State {
         let daif: u64;
-        // SAFETY: reading DAIF and setting its I/F mask bits is always
+        // Mask asynchronous interrupts for the critical section. The mask
+        // is the port's single definition (`exceptions::daif`): a shippable
+        // build masks IRQ+FIQ (the classic discipline); the debug watchdog
+        // build masks IRQ only, leaving FIQ (`DAIF.F`) clear so its
+        // non-maskable Group-0/FIQ self-sample can still observe a core
+        // wedged inside this section (`plans/WATCHDOG.md`). `restore`
+        // writes the captured prior state back verbatim, so either mask is
+        // reentrant.
+        const MASK: u64 = tairix_arch_aarch64::exceptions::daif::critical_section_mask(cfg!(
+            feature = "watchdog-diagnostics"
+        ));
+        // SAFETY: reading DAIF and setting its mask bits is always
         // permitted at EL1 and touches no memory.
         unsafe {
             core::arch::asm!(
                 "mrs {0}, daif",
-                "msr daifset, #3",
+                "msr daifset, #{mask}",
                 out(reg) daif,
+                mask = const MASK,
                 options(nomem, nostack, preserves_flags)
             );
         }

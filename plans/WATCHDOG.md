@@ -389,15 +389,31 @@ FIQ arm to `tairix_aarch64_trap_handler` that runs the same
 only through an **empirical, fail-closed delivery probe** — if an FIQ is not
 actually taken in a deliberately `DAIF.I`-masked test window (metal armstub
 routing, GIC group semantics), it reverts to the IRQ cadence + buddy detector
-with no broken channel (§5.4). The decisive prerequisite (staged first): the
-port currently masks `DAIF.F` wherever the wedge lives — exception entry masks
-F in hardware, `enable_irq` clears I-only, and `IrqSafeSpinLock`'s
-`DaifIrqControl` masks I+F — so a feature-gated `DAIF.F`-clear execution
-discipline is landed and QEMU-validated before Group-0 routing is enabled.
-GICv2 Group-0 acknowledge semantics differ QEMU-`virt` vs the Pi-4 GIC-400, so
-metal delivery stays a boot-time hardware capability
-(`plans/FIX-HARDWARE-FEATURES.md`) and is not claimed until a Pi 4B confirms
-it. Full staged design (B1–B4) in `.junie/fix-details.md`.
+with no broken channel (§5.4).
+
+The decisive prerequisite — a feature-gated `DAIF.F`-clear execution
+discipline — **is landed (B1, QEMU-validated)**. Exception entry masks `DAIF.F`
+in hardware, `enable_irq` clears I-only, and `IrqSafeSpinLock`'s
+`DaifIrqControl` classically masks I+F, so a wedge lives with FIQ masked and a
+Group-0 cadence could never reach it. In a `watchdog-diagnostics` build the
+port now clears `DAIF.F` where the wedge lives:
+`exceptions::daif::critical_section_mask` is the single definition of the lock
+mask (I-only in debug, I+F shippable) that `DaifIrqControl` consumes via a
+`const` asm operand; `exceptions::enable_fiq_delivery()` (the sibling of
+`enable_irq`) clears F on the `svc`/fault sync-handler entry and per-CPU at
+boot (`watchdog::init_local_watchdog`). `halt_current_cpu` (`#0xf`), the FIQ
+trap arm, and the EL0 `SPSR` stay F-masked (nested-FIQ-unsafe / deferred to the
+sampler). It is **inert** until Group-0 routing lands — with no Group-0 source
+enabled, clearing `DAIF.F` raises nothing — and compiled out of shippable
+images, so the discipline changes no observable behaviour on its own.
+
+Remaining (B2–B4, `.junie/fix-details.md`): the GIC Group-0 routing
+(`GICD_IGROUPR`/`GICC_CTLR.FIQEn`), the `is_fiq` dispatcher arm →
+`on_watchdog_interrupt`, and the empirical fail-closed delivery probe; the QEMU
+vertical proving the self-sample names a `DAIF.I`-masked section; and using it
+to fix D13. GICv2 Group-0 acknowledge semantics differ QEMU-`virt` vs the Pi-4
+GIC-400, so metal delivery stays a boot-time hardware capability
+(`plans/FIX-HARDWARE-FEATURES.md`) and is not claimed until a Pi 4B confirms it.
 
 ## Other architectures (staged)
 

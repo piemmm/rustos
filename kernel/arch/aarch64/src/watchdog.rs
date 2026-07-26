@@ -429,6 +429,19 @@ pub unsafe fn init_local_watchdog(interval_ticks: u64) {
         crate::gic::enable_ppi(WATCHDOG_PPI);
     }
     arm(interval_ticks);
+    // Debug watchdog: clear `DAIF.F` on this CPU so the non-maskable
+    // Group-0/FIQ self-sample can fire in thread-mode kernel code
+    // (`plans/WATCHDOG.md`) — the D13 `stress --cpu N` wedge lives in an
+    // IRQ-masked thread-mode busy-spin the maskable IRQ cadence cannot
+    // observe. Inert until a Group-0 source is routed, and compiled out of
+    // shippable images.
+    #[cfg(feature = "watchdog-diagnostics")]
+    // SAFETY: the GIC and vector table are installed per this fn's
+    // contract, so a taken FIQ dispatches through a real slot; clearing
+    // `DAIF.F` only changes the FIQ mask.
+    unsafe {
+        crate::exceptions::enable_fiq_delivery();
+    }
 }
 
 /// Handle a virtual-timer watchdog interrupt on `cpu`: re-arm the next
