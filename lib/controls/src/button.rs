@@ -241,7 +241,11 @@ fn paint_content(
             font.draw_text(surface, cx - to_i32(width) / 2, text_y, fitted, res.label);
         }
         ButtonContent::Icon(kind) => {
-            let side = glyph_h.min(avail_w).min(avail_h);
+            // An icon-only button has no label competing for the plate, so the
+            // glyph fills the inset content box rather than shrinking to the
+            // text line height — a tiny glyph adrift in a large plate reads as
+            // broken, not deliberate.
+            let side = avail_w.min(avail_h);
             if side > 0 {
                 if let Some(image) = builtin_icon(*kind, res.label).rasterise(side) {
                     let ix = cx - to_i32(side) / 2;

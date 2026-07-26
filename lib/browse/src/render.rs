@@ -749,10 +749,6 @@ const PROPERTY_LABELS: [&str; PROPERTY_ROW_COUNT] = [
     "Changed",
 ];
 
-/// The index of the "Permissions" row within [`PROPERTY_LABELS`] — the row the
-/// file manager overlays with the inline permission toggles.
-const PERMISSIONS_ROW_INDEX: usize = 2;
-
 /// The labelled metadata fields the Properties overlay shows for `props`, in
 /// display order: kind, size (apparent + on-disk), permissions (symbolic +
 /// octal), owner, and the four timestamps.
@@ -789,24 +785,30 @@ pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
     PROPERTY_LABELS.into_iter().zip(values).collect()
 }
 
-/// The centered bounds of the Properties overlay [`Panel`] within `viewport`,
-/// sized to comfortably show the [`properties_rows`] fields (a header plus one
-/// line per field with a top and bottom margin) and clamped to the window so a
-/// small window still yields a drawable — if clipped — panel rather than a
-/// panic.
+/// The number of extra content rows the *editable* Properties popup reserves
+/// below the metadata fields for the labelled permissions grid: one blank
+/// separator row, one column-header row (Read / Write / Execute), and the
+/// three owner/group/other triad rows.
+const PERMISSION_GRID_ROWS: usize = 5;
+
+/// The centered bounds of a Properties popup [`Panel`] within `viewport`
+/// holding `content_rows` text rows (a title bar plus one line per row with a
+/// top and bottom margin), clamped to the window so a small window still
+/// yields a drawable — if clipped — panel rather than a panic.
 ///
-/// Both the file manager and the trusted read-only picker draw this. The file
-/// manager's editable overlay ([`draw_properties_editable`]) reuses the same
-/// bounds: it edits permissions *inline* on the existing permissions row
-/// rather than growing the panel, so the overlay stays within the fixed
-/// window (§2.3 — no bloat).
-#[must_use]
-pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+/// One definition so the read-only and editable popups differ only in how many
+/// rows they reserve, never in how the panel is placed or clamped (§2.2).
+fn properties_panel_rect_for(
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    content_rows: usize,
+) -> Rect {
     let line = row_height(font);
     let title = Scale::ONE
         .scale_length(theme.metrics().title_bar_height)
         .max(1);
-    let rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
+    let rows = u32::try_from(content_rows).unwrap_or(u32::MAX);
     let content = line.saturating_mul(rows.saturating_add(2));
     let height = title.saturating_add(content).min(viewport.height.max(1));
     let width = viewport
@@ -824,6 +826,38 @@ pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) ->
         .y
         .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
     Rect::new(x, y, width, height)
+}
+
+/// The centered bounds of the read-only Properties popup [`Panel`] within
+/// `viewport`, sized to comfortably show the [`properties_rows`] fields (a
+/// title bar plus one line per field with a top and bottom margin) and clamped
+/// to the window.
+///
+/// The trusted read-only picker draws this. The file manager's *editable*
+/// popup uses the taller [`properties_editable_panel_rect`], which reserves
+/// extra rows below the fields for the labelled permissions grid.
+#[must_use]
+pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    properties_panel_rect_for(viewport, font, theme, PROPERTY_ROW_COUNT)
+}
+
+/// The centered bounds of the *editable* Properties popup [`Panel`] within
+/// `viewport`: the read-only panel grown by a few extra rows so the labelled
+/// owner/group/other × read/write/execute permissions grid has its own room
+/// below the metadata fields rather than being crammed onto — and overlapping
+/// — a single text row.
+///
+/// Only the write-capable file manager draws this; the read-only picker uses
+/// [`properties_panel_rect`] and never draws a permission toggle (the editable
+/// surface is separated by call site, the manager-only write-tool precedent).
+#[must_use]
+pub fn properties_editable_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    properties_panel_rect_for(
+        viewport,
+        font,
+        theme,
+        PROPERTY_ROW_COUNT + PERMISSION_GRID_ROWS,
+    )
 }
 
 /// The shared column geometry of the Properties overlay content area: the
@@ -886,14 +920,37 @@ fn draw_property_fields(
     }
 }
 
-/// Draw the Properties overlay for `props` centered in `viewport`: a [`Panel`]
-/// titled with the node's name, its labelled metadata fields drawn as
-/// muted-label / solid-value rows in the panel's content area.
+/// Draw the Properties [`Panel`] for `props` at `bounds`: a panel titled with
+/// the node's name, its labelled metadata fields drawn as muted-label /
+/// solid-value rows in the panel's content area.
 ///
-/// The overlay is drawn on top of the current view. Every blit clips, so a
-/// window too small for the whole panel simply shows what fits rather than
-/// panicking. It reads only the already-authorised [`Properties`] and draws —
-/// it performs no I/O and holds no authority (§4, §5.4).
+/// The read-only and editable popups share this so the metadata reads
+/// identically and the panel is placed identically (§2.2); the editable popup
+/// then draws the permissions grid over the room its taller `bounds` reserve.
+/// Every blit clips, so a window too small for the whole panel simply shows
+/// what fits rather than panicking. It reads only the already-authorised
+/// [`Properties`] and draws — it performs no I/O and holds no authority
+/// (§4, §5.4).
+fn draw_properties_at(
+    surface: &mut Surface,
+    props: &Properties,
+    theme: &Theme,
+    font: BitmapFont,
+    bounds: Rect,
+) {
+    let panel = Panel::new(props.name());
+    panel.render(surface, bounds, Scale::ONE, theme, font);
+    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
+        return;
+    };
+    draw_property_fields(surface, props, content, theme.palette(), font);
+}
+
+/// Draw the read-only Properties overlay for `props` centered in `viewport`.
+///
+/// The trusted read-only picker draws this. It reads only the already-
+/// authorised [`Properties`] and draws — it performs no I/O and holds no
+/// authority (§4, §5.4).
 pub fn draw_properties(
     surface: &mut Surface,
     props: &Properties,
@@ -901,13 +958,13 @@ pub fn draw_properties(
     font: BitmapFont,
     viewport: Rect,
 ) {
-    let bounds = properties_panel_rect(viewport, font, theme);
-    let panel = Panel::new(props.name());
-    panel.render(surface, bounds, Scale::ONE, theme, font);
-    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
-        return;
-    };
-    draw_property_fields(surface, props, content, theme.palette(), font);
+    draw_properties_at(
+        surface,
+        props,
+        theme,
+        font,
+        properties_panel_rect(viewport, font, theme),
+    );
 }
 
 /// The nine settable owner/group/other × read/write/execute permission bits,
@@ -943,45 +1000,128 @@ pub const fn permission_cells(mode: u32) -> [bool; 9] {
     cells
 }
 
-/// The nine clickable permission-toggle rects, one over each `rwx` character
-/// of the symbolic permission string on the Properties overlay's permissions
-/// row, left-to-right to match [`PERMISSION_BITS`]. `None` when the
-/// permissions row does not fit the panel's content (a window too small),
-/// so the painter and the hit-test both fail closed there rather than placing
-/// toggles off the row (§2.2, §5.4).
+/// The column headers of the permissions grid, left-to-right, matching the
+/// read/write/execute order of each triad in [`PERMISSION_BITS`].
+const PERMISSION_COLUMN_LABELS: [&str; 3] = ["Read", "Write", "Exec"];
+
+/// The row labels of the permissions grid, top-to-bottom, matching the
+/// owner/group/other triad order of [`PERMISSION_BITS`].
+const PERMISSION_ROW_LABELS: [&str; 3] = ["Owner", "Group", "Other"];
+
+/// The shared geometry of the editable Properties popup's labelled permissions
+/// grid: a column-header row (Read / Write / Execute) above three
+/// owner/group/other triad rows, each triad a leading row label followed by
+/// its three `rwx` checkboxes.
 ///
-/// The toggles sit over characters 1..=9 of the ten-character `drwxr-xr-x`
-/// spelling (the leading type indicator, character 0, is left as text), so a
-/// toggle lands exactly on the letter it flips.
-fn permission_toggle_cells(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<[Rect; 9]> {
-    let bounds = properties_panel_rect(viewport, font, theme);
-    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
-    let layout = FieldLayout::resolve(content, font);
-    let advance = font.text_width("r").max(1);
-    let glyph = font.glyph_height().max(1);
-    let row_index = u32::try_from(PERMISSIONS_ROW_INDEX).unwrap_or(u32::MAX);
-    let row_top = content
-        .top()
-        .saturating_add(to_i32(ROW_PADDING))
-        .saturating_add(to_i32(layout.line.saturating_mul(row_index)));
-    let content_bottom = content.top().saturating_add(to_i32(content.height));
-    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
-        return None;
-    }
-    Some(core::array::from_fn(|i| {
-        // Character 0 is the type indicator; the nine `rwx` bits are characters
-        // 1..=9, so bit `i` sits over character `i + 1`.
-        let step = u32::try_from(i + 1).unwrap_or(0);
-        let x = layout
-            .value_x
-            .saturating_add(to_i32(advance.saturating_mul(step)));
-        Rect::new(x, row_top, advance, glyph)
-    }))
+/// One definition so the painted grid, its headers and row labels, and the
+/// click hit-test all agree on where every cell sits — the checkboxes are laid
+/// out on a real grid pitch (never crammed one glyph apart), so they no longer
+/// overlap and each column and row reads under its own label (§2.2).
+struct PermGrid {
+    /// Left x of the row-label column (Owner / Group / Other).
+    label_x: i32,
+    /// Left x of the first (Read) checkbox column.
+    cols_x: i32,
+    /// Horizontal pitch between successive `rwx` columns.
+    col_pitch: u32,
+    /// The square side of each checkbox box.
+    box_side: u32,
+    /// Top y of the column-header row.
+    header_y: i32,
+    /// Top y of the first (Owner) triad row.
+    first_row_y: i32,
+    /// Vertical pitch between successive triad rows.
+    row_line: u32,
 }
 
-/// Draw the editable Properties overlay for `props`: the same panel and fields
-/// as [`draw_properties`], with the permissions row's nine `rwx` characters
-/// overlaid by clickable [`Checkbox`] toggles reflecting the current mode.
+impl PermGrid {
+    /// The checkbox cell for grid index `i` (`i = triad * 3 + bit`, matching
+    /// [`PERMISSION_BITS`]): triad selects the owner/group/other row, bit the
+    /// read/write/execute column.
+    fn cell(&self, index: usize) -> Rect {
+        let triad = u32::try_from(index / 3).unwrap_or(0);
+        let bit = u32::try_from(index % 3).unwrap_or(0);
+        let x = self
+            .cols_x
+            .saturating_add(to_i32(self.col_pitch.saturating_mul(bit)));
+        let y = self
+            .first_row_y
+            .saturating_add(to_i32(self.row_line.saturating_mul(triad)));
+        Rect::new(x, y, self.box_side, self.box_side)
+    }
+
+    /// All nine checkbox cells, in [`PERMISSION_BITS`] order.
+    fn cells(&self) -> [Rect; 9] {
+        core::array::from_fn(|i| self.cell(i))
+    }
+}
+
+/// The editable Properties popup's permissions-grid geometry, or `None` when
+/// the grid does not fit the panel's content (a window too small) — so the
+/// painter and the hit-test both fail closed there rather than placing cells
+/// off the panel (§2.2, §5.4).
+fn perm_grid(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<PermGrid> {
+    let bounds = properties_editable_panel_rect(viewport, font, theme);
+    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
+    let line = row_height(font);
+    let box_side = font.glyph_height().max(1);
+    // The metadata fields occupy the first `PROPERTY_ROW_COUNT` rows from the
+    // top; the grid sits below a one-row blank separator, its column headers
+    // one row above the three triad rows.
+    let meta_rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
+    let top = content.top().saturating_add(to_i32(ROW_PADDING));
+    let header_y = top.saturating_add(to_i32(line.saturating_mul(meta_rows.saturating_add(1))));
+    let first_row_y = header_y.saturating_add(to_i32(line));
+    let last_row_bottom = first_row_y
+        .saturating_add(to_i32(line.saturating_mul(2)))
+        .saturating_add(to_i32(box_side));
+    let content_bottom = content.top().saturating_add(to_i32(content.height));
+    if last_row_bottom > content_bottom {
+        return None;
+    }
+    let label_x = content.left().saturating_add(to_i32(LABEL_PADDING));
+    let row_label_w = PERMISSION_ROW_LABELS
+        .iter()
+        .map(|label| font.text_width(label))
+        .max()
+        .unwrap_or(0);
+    let col_label_w = PERMISSION_COLUMN_LABELS
+        .iter()
+        .map(|label| font.text_width(label))
+        .max()
+        .unwrap_or(0);
+    let gap = font.text_width("  ").max(LABEL_PADDING);
+    let cols_x = label_x.saturating_add(to_i32(row_label_w.saturating_add(gap)));
+    let col_pitch = col_label_w.max(box_side).saturating_add(gap);
+    Some(PermGrid {
+        label_x,
+        cols_x,
+        col_pitch,
+        box_side,
+        header_y,
+        first_row_y,
+        row_line: line,
+    })
+}
+
+/// The nine clickable permission-toggle rects, in [`PERMISSION_BITS`] order,
+/// laid out on the labelled permissions grid. `None` when the grid does not
+/// fit the panel's content (a window too small), so the painter and the
+/// hit-test both fail closed there (§2.2, §5.4).
+pub(crate) fn permission_toggle_cells(
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+) -> Option<[Rect; 9]> {
+    Some(perm_grid(viewport, font, theme)?.cells())
+}
+
+/// Draw the editable Properties overlay for `props`: the metadata fields as in
+/// [`draw_properties`], drawn in the taller editable popup, plus the labelled
+/// permissions grid below them — read/write/execute column headers over three
+/// owner/group/other triad rows of clickable [`Checkbox`] toggles reflecting
+/// the current mode. The grid replaces the old cramped single-row layout, so
+/// the toggles never overlap and each reads under its own label.
 ///
 /// Only the write-capable file manager calls this; the trusted read-only
 /// picker calls [`draw_properties`] and never draws or resolves a permission
@@ -999,18 +1139,64 @@ pub fn draw_properties_editable(
     font: BitmapFont,
     viewport: Rect,
 ) {
-    draw_properties(surface, props, theme, font, viewport);
-    let Some(cells) = permission_toggle_cells(viewport, font, theme) else {
+    draw_properties_at(
+        surface,
+        props,
+        theme,
+        font,
+        properties_editable_panel_rect(viewport, font, theme),
+    );
+    let Some(grid) = perm_grid(viewport, font, theme) else {
         return;
     };
+    let palette = theme.palette();
+    // Column headers (Read / Write / Exec) above their checkbox columns, so
+    // each toggle reads under the access it grants rather than as an unlabelled
+    // box.
+    for (bit, label) in PERMISSION_COLUMN_LABELS.iter().enumerate() {
+        let x = grid.cols_x.saturating_add(to_i32(
+            grid.col_pitch
+                .saturating_mul(u32::try_from(bit).unwrap_or(0)),
+        ));
+        font.draw_text(
+            surface,
+            x,
+            grid.header_y,
+            label,
+            palette.on_surface_muted.into(),
+        );
+    }
+    // Each triad row: its Owner / Group / Other label, then the three `rwx`
+    // checkboxes reflecting the current mode.
     let states = permission_cells(props.mode());
-    for (rect, &on) in cells.iter().zip(states.iter()) {
-        let selection = if on {
-            SelectionState::Selected
-        } else {
-            SelectionState::Unselected
-        };
-        Checkbox::new(String::new(), selection).render(surface, *rect, Scale::ONE, theme, font);
+    let label_dy = (to_i32(grid.box_side) - to_i32(font.glyph_height())).max(0) / 2;
+    for (triad, row_label) in PERMISSION_ROW_LABELS.iter().enumerate() {
+        let row_y = grid.first_row_y.saturating_add(to_i32(
+            grid.row_line
+                .saturating_mul(u32::try_from(triad).unwrap_or(0)),
+        ));
+        font.draw_text(
+            surface,
+            grid.label_x,
+            row_y.saturating_add(label_dy),
+            row_label,
+            palette.on_surface.into(),
+        );
+        for bit in 0..3 {
+            let index = triad * 3 + bit;
+            let selection = if states[index] {
+                SelectionState::Selected
+            } else {
+                SelectionState::Unselected
+            };
+            Checkbox::new(String::new(), selection).render(
+                surface,
+                grid.cell(index),
+                Scale::ONE,
+                theme,
+                font,
+            );
+        }
     }
 }
 
@@ -1084,7 +1270,7 @@ fn owner_row_geom(
     font: BitmapFont,
     theme: &Theme,
 ) -> Option<OwnerRowGeom> {
-    let bounds = properties_panel_rect(viewport, font, theme);
+    let bounds = properties_editable_panel_rect(viewport, font, theme);
     let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
     let layout = FieldLayout::resolve(content, font);
     let glyph = font.glyph_height().max(1);

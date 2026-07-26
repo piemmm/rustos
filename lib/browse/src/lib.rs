@@ -183,7 +183,12 @@ pub const WIN_WIDTH: u32 = 480;
 
 /// Window content height of a browser view, in pixels (see
 /// [`WIN_WIDTH`]).
-pub const WIN_HEIGHT: u32 = 320;
+///
+/// Sized so the editable Properties popup (the metadata fields plus the
+/// labelled owner/group/other × read/write/execute permissions grid) fits at
+/// the default window size; the window is resizable, so a user may grow it
+/// further.
+pub const WIN_HEIGHT: u32 = 480;
 
 /// The deepest directory nesting any of the file manager's recursive
 /// component-path filesystem walks will descend, counted in root-first path

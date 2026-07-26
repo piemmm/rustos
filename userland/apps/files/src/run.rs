@@ -148,6 +148,77 @@ mod program {
     /// reserved "unchanged" sentinel).
     const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
 
+    /// The smallest client size the window is allowed to shrink to, in pixels.
+    /// The window manager offers a resize grabber and a maximize/restore
+    /// toggle; a hostile or fat-fingered drag to nothing is clamped to a size
+    /// that still shows the chrome rather than a zero-area surface that could
+    /// never be allocated (fail closed, §5.4). The content clips gracefully
+    /// below its natural size; it is never a panic.
+    const MIN_WIN_WIDTH: u32 = 240;
+
+    /// The smallest client height the window is allowed to shrink to (see
+    /// [`MIN_WIN_WIDTH`]).
+    const MIN_WIN_HEIGHT: u32 = 160;
+
+    /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
+    /// tightly-packed four-bytes-per-pixel row. One definition so the initial
+    /// window and every resize build the surface identically (§2.2).
+    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
+        DisplayMode {
+            width_px,
+            height_px,
+            stride_bytes: width_px.saturating_mul(4),
+            format: DisplayFormat::Rgba8888,
+        }
+    }
+
+    /// Re-map the window `window` onto a fresh frame region shaped as
+    /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
+    /// success — the old region (`old_base` / `old_len`) already unmapped — or
+    /// `None` when the region could not be allocated or the session refused the
+    /// re-map, in which case the old region is left intact and still mapped so
+    /// the current surface stays valid (never a crash or a blank window, §5.4).
+    ///
+    /// The ordering is deliberately fail-closed: the fresh region is created
+    /// and granted first and adopted only once [`WindowClient::resize`]
+    /// succeeds; the old mapping is released only after adoption, and a refused
+    /// resize releases the freshly-allocated region so nothing leaks.
+    fn resize_frames(
+        client: &mut WindowClient<RtWindowTransport>,
+        window: u64,
+        old_base: usize,
+        old_len: usize,
+        new_mode: &DisplayMode,
+    ) -> Option<(usize, usize)> {
+        let new_len = (new_mode.stride_bytes as usize)
+            .checked_mul(new_mode.height_px as usize)?
+            .checked_mul(FRAME_COUNT as usize)?;
+        let mut region_id: u64 = 0;
+        let new_base = tairix_rt::shm_create(new_len, &mut region_id);
+        if new_base < 0 {
+            return None;
+        }
+        let Ok(new_base) = usize::try_from(new_base) else {
+            return None;
+        };
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        if grant < 1 {
+            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        let accepted = client
+            .resize(window, grant as u64, FRAME_COUNT, new_mode)
+            .is_ok();
+        if !accepted {
+            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
+            return None;
+        }
+        // The session adopted the new region; release the old one.
+        let _ = tairix_rt::shm_unmap(old_base as u64, old_len);
+        Some((new_base, new_len))
+    }
+
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
     /// [`Errno::NotImplemented`] rather than being guessed.
@@ -928,12 +999,11 @@ mod program {
             //
             // Minimized needs no action: the window manager hides the
             // window and keeps its taskbar entry; the browser renders on
-            // demand, so there is nothing to pause. Resized cannot reach
-            // this window: the browser presents a single fixed-size window
-            // and does not request resizable decoration, so the window
-            // manager offers it neither a maximize nor a resize grabber
-            // (the size controls render disabled) and never sends it a new
-            // client size. Both are honest no-ops, not deferred work.
+            // demand, so there is nothing to pause. A `Resized` is handled by
+            // the event loop itself (it re-maps the frame region before
+            // `apply_event` is called), so it never reaches this match; it is
+            // listed here only to keep the arm exhaustive. These are honest
+            // no-ops, not deferred work.
             WindowEvent::Key { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
@@ -3259,12 +3329,7 @@ mod program {
 
         // --- The shared window surface: FRAME_COUNT frames shaped as the
         // window mode, created here and granted to the session.
-        let mode = DisplayMode {
-            width_px: WIN_WIDTH,
-            height_px: WIN_HEIGHT,
-            stride_bytes: WIN_WIDTH * 4,
-            format: DisplayFormat::Rgba8888,
-        };
+        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
@@ -3284,12 +3349,20 @@ mod program {
         };
         // SAFETY: the kernel mapped at least `total` zeroed bytes
         // read/write into this process at `base` (`shm_create` maps the
-        // exact length it was asked for) and the mapping stays live for
-        // the life of the process — nothing below unmaps or aliases it.
-        // The session maps the same frames read-only for its blit, and
-        // the protocol serialises access: this app is parked in its
-        // present call while the session reads.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        // exact length it was asked for). The mapping stays live until the
+        // resize path (below) unmaps it, and it does so only *after* the
+        // session has adopted a freshly-mapped replacement region and only
+        // after re-pointing `frames` at that new region — so `frames` is never
+        // read against an unmapped or aliased address. The session maps the
+        // same frames read-only for its blit, and the protocol serialises
+        // access: this app is parked in its present call while the session
+        // reads.
+        let mut frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        // The live frame region the window is mapped onto: tracked as base +
+        // length (not just the slice) so a resize can unmap the old region and
+        // adopt a fresh one, re-pointing `frames` at it.
+        let mut region_base = base;
+        let mut region_len = total;
 
         // --- The event mailbox the app parks on, bound and added to a
         // fresh wait-set (a bring-up refusal exits fail-loud with its code).
@@ -3307,7 +3380,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Files",
-            false,
+            true,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
@@ -3418,6 +3491,48 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
+            // The window manager resized (or maximized/restored) the window.
+            // Re-map the frame region at the new client size and repaint so the
+            // listing fills the new window; the browser lays out to the new
+            // viewport automatically. A refused or unallocatable resize keeps
+            // the current window rather than failing the app (fail closed).
+            if let WindowEvent::Resized {
+                width_px,
+                height_px,
+                ..
+            } = event
+            {
+                let new_mode = mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT));
+                if let Some((new_base, new_len)) =
+                    resize_frames(&mut client, window, region_base, region_len, &new_mode)
+                {
+                    region_base = new_base;
+                    region_len = new_len;
+                    mode = new_mode;
+                    // SAFETY: `resize_frames` mapped `region_len` zeroed R/W
+                    // bytes at `region_base` and the session adopted them; the
+                    // old region is now unmapped. Same invariants as the
+                    // initial mapping — nothing else aliases it, and the
+                    // present call below serialises access with the session.
+                    frames = unsafe {
+                        core::slice::from_raw_parts_mut(region_base as *mut u8, region_len)
+                    };
+                    if present_frame(
+                        &browser,
+                        &overlays,
+                        theme,
+                        &mut client,
+                        window,
+                        frames,
+                        &mode,
+                    )
+                    .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                }
+                continue;
+            }
             let (changed, close) =
                 apply_event(&mut browser, &mut overlays, &launcher, theme, &mode, &event);
             if close {

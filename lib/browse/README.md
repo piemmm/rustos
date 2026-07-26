@@ -355,13 +355,16 @@ can never diverge in navigation semantics, listing policy, or look.
   nothing (the app re-stats to refresh the Properties view). The change is the
   caller's own permission-checked `fs_set_mode` (no new capability), so the
   read-only picker composes the same `Browser` and never calls it. The drawn
-  control is inline on the Properties panel: `render::PERMISSION_BITS` /
-  `permission_cells` are the one definition of the nine owner/group/other
-  `rwx` bits, `render::draw_properties_editable` overlays each with a clickable
-  `lib/controls` `Checkbox` over the symbolic permission string, and
-  `render::permission_cell_at` is the mirror hit-test returning the bit a click
-  toggles (fail closed off a toggle). Only the write-capable file manager draws
-  the editable overlay; the picker draws the read-only `draw_properties` and
+  control is a labelled permissions grid below the metadata fields:
+  `render::PERMISSION_BITS` / `permission_cells` are the one definition of the
+  nine owner/group/other `rwx` bits, `render::draw_properties_editable` draws
+  `Read`/`Write`/`Exec` column headers over three `Owner`/`Group`/`Other` triad
+  rows of clickable `lib/controls` `Checkbox`es (replacing an earlier cramped
+  single-row layout whose boxes overlapped and carried no label), the shared
+  `render::PermGrid` geometry places the painted grid and its hit-test from one
+  definition, and `render::permission_cell_at` returns the bit a click toggles
+  (fail closed off a toggle). Only the write-capable file manager draws the
+  editable overlay; the picker draws the read-only `draw_properties` and
   never resolves a toggle (separated by call site, not a runtime flag). The
   setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
   via `chmod` — a deliberate scope boundary, and a toggle preserves them.
@@ -452,13 +455,17 @@ can never diverge in navigation semantics, listing policy, or look.
   overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
   the selected node's `Properties`, clipped so a too-small window shows what
   fits rather than panicking. `draw_properties_editable` is the file manager's
-  variant: the same panel with the permissions row's nine `rwx` characters
-  overlaid by clickable permission toggles (`permission_cell_at` its hit-test);
+  variant, drawn in the taller `properties_editable_panel_rect`: the metadata
+  fields plus a labelled `Owner`/`Group`/`Other` × `Read`/`Write`/`Exec`
+  permissions grid of clickable toggles (`permission_cell_at` its hit-test, the
+  shared `PermGrid` geometry placing both);
   `draw_owner_control` (`owner_field_at` its hit-test) likewise makes the owner
   row's uid/gid values editable, drawn only for a `CAP_FS_CHOWN` holder.
   `WIN_WIDTH`/`WIN_HEIGHT` are the one
   browser-view geometry the files app, the picker, and the QEMU vertical's
-  host-side assertions share.
+  host-side assertions share; the files app opens its window `resizable` and
+  re-maps this surface on a `WindowEvent::Resized`, laying the same renderer out
+  to the new viewport.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — each component checked by the shared
   `tairix_path::validate_file_name` rule, the same rule the rename editor

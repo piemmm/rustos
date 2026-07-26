@@ -4443,9 +4443,40 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
 // --- FM8b: the drawn permission (mode) control ----------------------------
 
 use crate::render::{
-    draw_properties_editable, permission_cell_at, permission_cells, PERMISSION_BITS,
+    draw_properties_editable, permission_cell_at, permission_cells, permission_toggle_cells,
+    PERMISSION_BITS,
 };
 use tairix_geometry::Point;
+
+#[test]
+fn permission_toggle_cells_are_pairwise_non_overlapping() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 480);
+    let cells = permission_toggle_cells(vp, font, &theme).expect("grid fits the default popup");
+
+    // Every checkbox is a legible, non-degenerate target.
+    for cell in &cells {
+        assert!(
+            cell.width >= 4 && cell.height >= 4,
+            "checkbox too small to hit"
+        );
+    }
+
+    // No two checkboxes overlap — the defect this grid replaces crammed nine
+    // boxes one glyph apart, so they piled on top of one another. Half-open
+    // rectangles are disjoint when one ends at or before the other begins on
+    // either axis.
+    for (i, a) in cells.iter().enumerate() {
+        for b in &cells[i + 1..] {
+            let disjoint_x = a.left() + i32::try_from(a.width).unwrap() <= b.left()
+                || b.left() + i32::try_from(b.width).unwrap() <= a.left();
+            let disjoint_y = a.top() + i32::try_from(a.height).unwrap() <= b.top()
+                || b.top() + i32::try_from(b.height).unwrap() <= a.top();
+            assert!(disjoint_x || disjoint_y, "permission checkboxes overlap");
+        }
+    }
+}
 
 #[test]
 fn permission_bits_are_the_nine_settable_rwx_bits_row_major() {
@@ -4489,7 +4520,7 @@ fn draw_properties_editable_paints_the_toggles_without_panicking() {
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
+    let vp = Rect::new(0, 0, 480, 480);
     let props = Properties::from_stat(
         "notes.txt",
         crate::entry::EntryKind::File,
@@ -4509,7 +4540,9 @@ fn draw_properties_editable_paints_the_toggles_without_panicking() {
 fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
+    // The editable Properties popup is tall enough to hold the metadata fields
+    // plus the labelled permissions grid at the default window height.
+    let vp = Rect::new(0, 0, 480, 480);
 
     // Scanning the whole window, every bit the hit-test resolves is one of the
     // nine settable bits, and all nine are reachable — so the drawn grid and

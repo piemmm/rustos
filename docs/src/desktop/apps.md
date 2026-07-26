@@ -1012,19 +1012,28 @@ nothing and holds no authority, so the trusted picker composes the same
 ### The drawn permission control
 
 The file manager's Properties overlay is *editable*: `render::draw_properties_editable`
-draws the same panel as the read-only `render::draw_properties` and overlays
-the permissions row's nine `rwx` characters with clickable `lib/controls`
-`Checkbox` toggles reflecting the current mode. `render::PERMISSION_BITS` and
+draws the metadata fields as the read-only `render::draw_properties` does, then
+below them a **labelled permissions grid** — `Read`/`Write`/`Exec` column
+headers over three `Owner`/`Group`/`Other` triad rows of clickable
+`lib/controls` `Checkbox` toggles reflecting the current mode. The grid replaces
+an earlier cramped single-row layout in which nine boxes were placed a single
+glyph apart (so they overlapped) with no label; each toggle now sits on a real
+grid pitch under its own row and column label. `render::PERMISSION_BITS` and
 `permission_cells` are the one definition of which of the nine
 owner/group/other bits each toggle carries, and `render::permission_cell_at` is
 the mirror hit-test returning the bit a click flips (and nothing off a toggle,
-fail closed). Only the write-capable file manager draws the editable overlay;
-the trusted read-only picker draws `draw_properties` and never resolves a
-toggle, so the write surface is separated from the picker by call site, not a
-runtime flag — the same discipline as the manager-only write tools (`AGENTS.md`
-§2.2). Keeping the toggles *inline* on the existing permissions row means the
-overlay stays within the fixed browser window rather than growing a second
-panel (`AGENTS.md` §2.3).
+fail closed). The shared `render::PermGrid` geometry places the painted grid,
+its headers/row-labels, and the hit-test from one definition, so a click always
+lands on the box it depicts (§2.2). Only the write-capable file manager draws
+the editable overlay; the trusted read-only picker draws `draw_properties` and
+never resolves a toggle, so the write surface is separated from the picker by
+call site, not a runtime flag — the same discipline as the manager-only write
+tools (`AGENTS.md` §2.2). The editable popup is the taller
+`render::properties_editable_panel_rect` (the read-only picker keeps the
+shorter `properties_panel_rect`) so the grid has its own room; the browser
+window is resizable (see *Resizable window* below), so a user may enlarge it
+further, and the grid fails closed — drawing nothing rather than off-panel —
+only when the window is genuinely too small (§5.4).
 
 A primary-button press on a toggle flips only that `rwx` bit — preserving the
 current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
@@ -1100,6 +1109,29 @@ without `CAP_FS_CHOWN` receives — states its reason in the field and keeps the
 editor open, an honest answer rather than a silent or fabricated result
 (`AGENTS.md` §2.24, §5.4). On success the panel is re-stat'd so it reflects the
 new owner.
+
+### Resizable window
+
+The file manager opens its window `resizable`, so the window manager presents
+it with a live maximize/restore size toggle and a resize grabber (a fixed-size
+app is offered neither). On a `WindowEvent::Resized` the `Run` binary re-maps
+its zero-copy frame region at the new client size and re-presents; the shared
+`lib/browse` renderer lays the toolbar, path bar, listing, and scrollbar out to
+whatever viewport it is handed, so the content fills the new size with no
+per-size layout code. The re-map is fail-closed (`AGENTS.md` §5.4): a fresh
+region is allocated and granted and adopted only once the session accepts
+`WindowClient::resize`; the old region is released only after adoption, and a
+refused or unallocatable resize leaves the current window intact rather than
+blanking or crashing. A drag toward nothing is clamped to `MIN_WIN_WIDTH` ×
+`MIN_WIN_HEIGHT` so the surface is never zero-area. The default window is sized
+so the editable Properties popup (metadata plus the permissions grid) fits
+without resizing.
+
+Toolbar buttons draw their glyphs at the size of the button's inset content box
+rather than at the text line-height, so an icon-only button (the navigation and
+manager-write tools) shows a full-size pixmap instead of a small glyph adrift in
+a large plate — the one `lib/controls` icon-button paint path, so every
+icon-only button across the desktop benefits (`AGENTS.md` §2.2).
 
 ## Terminal emulator (`tairix-terminal`)
 

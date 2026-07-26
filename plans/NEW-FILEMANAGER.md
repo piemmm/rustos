@@ -27,8 +27,20 @@ which the drift guard enforces.
 
 ## Status
 
-`done` — FM1–FM12 are all landed. **FM12 (double-click activation)** is the
-latest: a double-click on an item now activates it (descend / launch a bundle /
+`done` — FM1–FM12 plus a UI-polish increment are all landed. **The UI-polish
+increment (latest)** makes the browser window **resizable/maximizable**
+(`files.app` opens `resizable` and re-maps its zero-copy frame region on a
+`WindowEvent::Resized`, laying the shared renderer out to the new viewport;
+fail-closed re-map, min-size clamp), replaces the cramped, overlapping,
+unlabelled inline permission toggles with a **labelled permissions grid popup**
+(`render::PermGrid` — `Read`/`Write`/`Exec` × `Owner`/`Group`/`Other`, drawn in
+the taller `properties_editable_panel_rect`, with the default `WIN_HEIGHT`
+raised so it fits), and enlarges **icon-only buttons** to fill their plate (the
+one `lib/controls` `paint_content` icon path, so every icon-only button across
+the desktop benefits). Host tests: the `lib/browse` permission-grid non-overlap
+regression + updated hit-test scan; freestanding app builds + lints clean.
+
+**FM12 (double-click activation)**: a double-click on an item now activates it (descend / launch a bundle /
 open a file), driven by the shared pure `lib/browse::click::DoubleClickTracker`
 over the capability-free monotonic clock, through the very same `activate`
 dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2).
@@ -1113,12 +1125,18 @@ syscall, a VFS refusal surfaced leaving the listing put, empty-directory
 README + rustdoc.
 
 **The drawn permission (mode) control is done.** The Properties overlay is
-editable in the file manager: `render::draw_properties_editable` draws the same
-panel as the read-only `render::draw_properties` and overlays the permissions
-row's nine `rwx` characters with clickable `lib/controls` `Checkbox` toggles
-reflecting the current mode — kept *inline* on the existing row so the overlay
-stays within the fixed window rather than growing a second panel (§2.3).
-`render::PERMISSION_BITS` / `permission_cells` are the one definition of which
+editable in the file manager: `render::draw_properties_editable` draws the
+metadata fields (as the read-only `render::draw_properties`) and, below them, a
+labelled permissions grid — `Read`/`Write`/`Exec` column headers over three
+`Owner`/`Group`/`Other` triad rows of clickable `lib/controls` `Checkbox`
+toggles reflecting the current mode. The grid is drawn in the taller
+`render::properties_editable_panel_rect` (the read-only picker keeps the shorter
+`render::properties_panel_rect`), and the shared `render::PermGrid` geometry
+places the painted grid, its headers/row-labels, and the hit-test from one
+definition (§2.2), so the toggles sit on a real grid pitch under their own
+labels — replacing the earlier cramped single-row layout whose nine boxes were
+a glyph apart (overlapping) with no label. `render::PERMISSION_BITS` /
+`permission_cells` are the one definition of which
 of the nine owner/group/other bits each toggle carries, and
 `render::permission_cell_at` is the mirror hit-test returning the bit a click
 flips (nothing off a toggle, fail closed). Only the write-capable file manager
