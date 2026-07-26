@@ -2454,6 +2454,45 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // plans/WATCHDOG.md B3 (plans/OPEN-DEFECTS.md D13): the aarch64
+    // non-maskable-FIQ masked-section watchdog self-sample vertical — the
+    // runtime proof of the debug-only tool that observes a core wedged in a
+    // `DAIF.I`-masked section the maskable IRQ cadence physically cannot see.
+    // On boot it reads the GICv2 base + timer rate from the embedded `virt`
+    // DTB, brings up the EL1 vectors + GICv2, and runs the production
+    // `watchdog::probe_fiq_deliverability` capability probe. QEMU `virt` is a
+    // single-Security-state GIC (`secure=off`), so Group 0 / FIQ reaches
+    // non-secure EL1 and the probe reports `Supported` (a real Pi 4 GIC-400
+    // keeps Group 0 secure and would report `Unsupported`, falling back to the
+    // complete cross-CPU buddy detector — the fail-closed capability). It then
+    // installs the production cadence callback, arms a short Group-0 (FIQ)
+    // cadence, deliberately masks `DAIF.I`, and busy-spins in a
+    // `#[inline(never)]` marker issuing no yield and no syscall. Because FIQ is
+    // gated by the *separate* `DAIF.F` bit the diagnostics build leaves clear,
+    // the cadence fires *through* the mask and the self-sample captures a LIVE
+    // snapshot of the interrupted PC. PASS once the probe reported `Supported`,
+    // the FIQ fired while `DAIF.I` was masked (the sampled `SPSR_EL1.I` proves
+    // it), the sample interrupted kernel context, and the sampled PC *and* the
+    // `capture_sample_backtrace` top land inside the masked-spin marker
+    // (`sampled=live`, not the stale `pre_silence` a buddy would see). Any
+    // shortfall writes a distinct failure finisher or times out (fail-loud).
+    // Single CPU; a 60-second budget covers the short cadence under QEMU TCG.
+    QemuTest {
+        package: "tairix-test-fiq-selfsample-qemu-aarch64",
+        binary: "tairix-test-fiq-selfsample-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
     // script compiles the pure-Rust driver-stub fixture

@@ -1112,6 +1112,23 @@ pub fn arm_preemption(cpu_count: u32) {
         }
         let interval = preempt::interval_for_hz(counter_hz, PREEMPT_TICK_HZ);
 
+        // Probe non-secure FIQ (Group 0) deliverability once on the boot
+        // CPU, before arming the cadence. If the self-sample can reach a
+        // `DAIF.I`-masked wedge (a single-Security-state GIC — measured:
+        // QEMU `virt` with `secure=off`), the watchdog routes its cadence to
+        // Group 0 as a non-maskable FIQ; if not (a two-Security-state GIC —
+        // QEMU `virt,secure=on` or a real Pi 4 GIC-400, where Group 0 is
+        // secure) it falls back to the complete cross-CPU buddy detector with
+        // no broken channel — the empirical, fail-closed capability the D13
+        // masked-section sampler consumes (`plans/WATCHDOG.md`,
+        // `plans/FIX-HARDWARE-FEATURES.md`). Debug image only; a shippable
+        // image compiles this and the whole FIQ path out.
+        #[cfg(feature = "watchdog-diagnostics")]
+        // SAFETY: boot CPU during bring-up; the GIC is up
+        // (`install_device_irq_dispatch` ran) and the EL1 vector table is
+        // installed (`boot::init_vectors`), with IRQs still masked.
+        let _ = unsafe { tairix_arch_aarch64::watchdog::probe_fiq_deliverability(counter_hz) };
+
         // SAFETY: this is the boot CPU (id 0); the preempt and IPI
         // callbacks are installed (above), the per-CPU storage is
         // registered (above), the EL1 vector table is installed

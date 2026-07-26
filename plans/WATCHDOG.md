@@ -379,41 +379,88 @@ upgrade to the design here.
 
 The buddy detector above is the **shippable, complete** design and is
 unchanged. For the **debug** image only (`watchdog-diagnostics`), a
-non-maskable **FIQ self-sample** is being added beside it to observe a core
-wedged in a `DAIF.I`-masked section that the maskable IRQ cadence cannot see
-(the D13 `stress --cpu N` class: an untracked IRQ-masked busy-spin inside a
-task body, `plans/OPEN-DEFECTS.md` D13). It routes the existing
-`WATCHDOG_PPI` cadence to GIC **Group 0** so it is signalled as FIQ, adds a
-FIQ arm to `tairix_aarch64_trap_handler` that runs the same
-`on_watchdog_interrupt` self-sample + `walk_frames` backtrace, and enables it
-only through an **empirical, fail-closed delivery probe** — if an FIQ is not
-actually taken in a deliberately `DAIF.I`-masked test window (metal armstub
-routing, GIC group semantics), it reverts to the IRQ cadence + buddy detector
-with no broken channel (§5.4).
+non-maskable **FIQ self-sample** is added beside it to observe a core wedged
+in a `DAIF.I`-masked section that the maskable IRQ cadence cannot see (the D13
+`stress --cpu N` class: an untracked IRQ-masked busy-spin inside a task body,
+`plans/OPEN-DEFECTS.md` D13). It routes the `WATCHDOG_PPI` cadence to GIC
+**Group 0** so it is signalled as FIQ, adds a FIQ arm to
+`tairix_aarch64_trap_handler` that runs the same `on_watchdog_interrupt`
+self-sample + `walk_frames` backtrace, and enables it only through an
+**empirical, fail-closed delivery probe** — if an FIQ is not actually taken in
+a deliberately `DAIF.I`-masked test window (metal armstub routing, GIC group
+semantics), it reverts to the IRQ cadence + buddy detector with no broken
+channel (fail closed).
 
-The decisive prerequisite — a feature-gated `DAIF.F`-clear execution
-discipline — **is landed (B1, QEMU-validated)**. Exception entry masks `DAIF.F`
-in hardware, `enable_irq` clears I-only, and `IrqSafeSpinLock`'s
-`DaifIrqControl` classically masks I+F, so a wedge lives with FIQ masked and a
-Group-0 cadence could never reach it. In a `watchdog-diagnostics` build the
-port now clears `DAIF.F` where the wedge lives:
+**B1 — `DAIF.F`-clear execution discipline — DONE (QEMU-validated).** Exception
+entry masks `DAIF.F` in hardware, `enable_irq` clears I-only, and
+`IrqSafeSpinLock`'s `DaifIrqControl` classically masks I+F, so a wedge lives
+with FIQ masked and a Group-0 cadence could never reach it. In a
+`watchdog-diagnostics` build the port clears `DAIF.F` where the wedge lives:
 `exceptions::daif::critical_section_mask` is the single definition of the lock
 mask (I-only in debug, I+F shippable) that `DaifIrqControl` consumes via a
 `const` asm operand; `exceptions::enable_fiq_delivery()` (the sibling of
 `enable_irq`) clears F on the `svc`/fault sync-handler entry and per-CPU at
-boot (`watchdog::init_local_watchdog`). `halt_current_cpu` (`#0xf`), the FIQ
-trap arm, and the EL0 `SPSR` stay F-masked (nested-FIQ-unsafe / deferred to the
-sampler). It is **inert** until Group-0 routing lands — with no Group-0 source
-enabled, clearing `DAIF.F` raises nothing — and compiled out of shippable
-images, so the discipline changes no observable behaviour on its own.
+boot. `halt_current_cpu` (`#0xf`) and the EL0 `SPSR` stay F-masked
+(nested-FIQ-unsafe), and the FIQ trap arm never re-clears F.
 
-Remaining (B2–B4, `.junie/fix-details.md`): the GIC Group-0 routing
-(`GICD_IGROUPR`/`GICC_CTLR.FIQEn`), the `is_fiq` dispatcher arm →
-`on_watchdog_interrupt`, and the empirical fail-closed delivery probe; the QEMU
-vertical proving the self-sample names a `DAIF.I`-masked section; and using it
-to fix D13. GICv2 Group-0 acknowledge semantics differ QEMU-`virt` vs the Pi-4
-GIC-400, so metal delivery stays a boot-time hardware capability
-(`plans/FIX-HARDWARE-FEATURES.md`) and is not claimed until a Pi 4B confirms it.
+**B2 — Group-0 routing + FIQ dispatcher + empirical probe — DONE (host-tested,
+both target builds clean).** The mechanism and its fail-closed capability:
+
+- **GIC Group-0 register layer (`gic.rs`).** `GICD_IGROUPR` (base 0x080,
+  banked `IGROUPR0` for the SGIs/PPIs), `GICC_CTLR_ENABLE_GRP0`/
+  `GICC_CTLR_FIQEN` (single-Security-state bits 0/3), the `igroupr_offset`
+  helper, and `Gicv2::{set_group0,set_group1,read/write_gicc_ctlr,
+  read/write_gicd_ctlr}` with feature-gated freestanding wrappers. Host-tested
+  against the mock distributor.
+- **FIQ dispatcher arm (`exceptions.rs`).** `is_fiq(kind)` (vector kinds
+  2/6/10, disjoint from IRQ/sync) and a `watchdog-diagnostics`-gated
+  `handle_fiq` arm that acknowledges Group 0 through the same `GICC_IAR`/
+  `GICC_EOIR` full-cookie handshake, records the delivery (`note_fiq_taken`),
+  and for the cadence PPI runs `on_watchdog_interrupt`. It is purely
+  observational: it never clears `DAIF.F` (nested FIQ unsafe) and never
+  preempts.
+- **Fail-closed capability (`watchdog.rs`).** `probe_fiq_deliverability`
+  routes the cadence PPI to Group 0, enables Group 0 as FIQ, arms a ~1 ms
+  one-shot, masks `DAIF.I` (leaving `DAIF.F` clear), and waits a bounded
+  interval (a `CNTPCT_EL0` deadline backed by a hard iteration cap) for an FIQ
+  to actually be taken. On success it stays routed; on failure it restores the
+  perturbed group/enable registers *verbatim* from values saved before the
+  probe (so the ordinary-IRQ enable bit is preserved on any GIC Security
+  configuration) and reports `FeatureSupport::Unsupported`, leaving the buddy
+  detector in place. The pure decision `fiq_support_from_probe` is
+  always-compiled and host-tested; the boot path calls the probe once on the
+  boot CPU (`arm_preemption`), and `init_local_watchdog` routes each online
+  CPU's banked cadence PPI to Group 0 only when the capability is Supported.
+
+The probe is `Supported` on a **single-Security-state** GIC and `Unsupported`
+on a **two-Security-state** GIC. Measured under QEMU: the `virt` default
+(`secure=off`, the board and test-runner configuration) is single-Security-
+state, so Group 0 / FIQ reaches non-secure EL1 and the probe returns
+`Supported` — the debug image self-samples via FIQ there (this corrects an
+earlier assumption that QEMU `virt` was `Unsupported`; it was never measured).
+A two-Security-state GIC (QEMU `virt,secure=on`, or a real Pi 4 GIC-400 whose
+Group 0 belongs to the secure world) returns `Unsupported`, and the debug
+image falls back to the complete cross-CPU buddy detector with no broken
+channel (fail closed).
+
+**B3 — QEMU masked-section vertical — DONE.** `tests/integration/
+fiq_selfsample_qemu_aarch64` (enrolled in `cargo xtask test --qemu`) boots the
+`virt` board, runs `probe_fiq_deliverability` (asserts `Supported`), installs
+the production cadence callback, arms a short Group-0 (FIQ) cadence,
+deliberately masks `DAIF.I`, and busy-spins in an `#[inline(never)]` marker.
+The FIQ fires *through* the `DAIF.I` mask and the self-sample captures a
+**live** snapshot: the vertical asserts the interrupted `SPSR_EL1.I` was
+masked, the sample was kernel-context, and the sampled PC *and*
+`capture_sample_backtrace` top land inside the marker — the proof the
+masked-section sampler names the section it is stuck in (`sampled=live`, not
+the stale `pre_silence` a buddy sees).
+
+Remaining (B4, `.junie/fix-details.md`): reproduce the D13 `stress --cpu N`
+wedge on the FIQ-enabled debug image (the sampler is now known to be active on
+QEMU) and fix the underlying SMP defect structurally with a regression test.
+Metal delivery on a real Pi 4B stays a boot-time hardware capability
+(`plans/FIX-HARDWARE-FEATURES.md`) — there the probe returns `Unsupported` and
+the buddy detector runs — and is not claimed until a Pi 4B confirms it.
 
 ## Other architectures (staged)
 

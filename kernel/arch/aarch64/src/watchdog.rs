@@ -51,7 +51,9 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tairix_arch_api::{CpuId, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind};
+use tairix_arch_api::{
+    CpuId, FeatureSupport, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind,
+};
 
 /// GIC INTID of the EL1 **virtual** generic-timer private-peripheral
 /// interrupt (the ARM Generic Timer raises the virtual timer on PPI 27).
@@ -442,6 +444,21 @@ pub unsafe fn init_local_watchdog(interval_ticks: u64) {
     unsafe {
         crate::exceptions::enable_fiq_delivery();
     }
+    // If the boot probe confirmed FIQ deliverability, route this CPU's
+    // cadence PPI to Group 0 so its sample fires as a non-maskable FIQ,
+    // observing a core wedged in a `DAIF.I`-masked section (`plans/
+    // WATCHDOG.md`). Otherwise the PPI stays Group 1 (IRQ) and the
+    // cross-CPU buddy detector runs unchanged (fail closed). The group and
+    // CPU-interface control are banked per CPU, so every online core routes
+    // its own; the distributor's Group-0 enable was set once by the probe.
+    #[cfg(feature = "watchdog-diagnostics")]
+    if fiq_cadence_enabled() {
+        // SAFETY: GIC + vectors up per this fn's contract; this configures
+        // only this CPU's banked group bit and CPU-interface control.
+        unsafe {
+            route_watchdog_group0();
+        }
+    }
 }
 
 /// Handle a virtual-timer watchdog interrupt on `cpu`: re-arm the next
@@ -465,6 +482,300 @@ pub(crate) fn on_watchdog_interrupt(cpu: CpuId, frame: *const u64) {
             unsafe { core::mem::transmute::<usize, WatchdogCallbackFn>(raw) };
         cb(cpu, frame);
     }
+}
+
+// --- Debug-only non-maskable FIQ masked-section self-sample -------------
+//
+// The buddy detector below is the shippable, complete design. For the debug
+// image (`watchdog-diagnostics`) only, a non-maskable FIQ self-sample is
+// added beside it to observe a core wedged in a `DAIF.I`-masked section the
+// maskable IRQ cadence cannot see (the D13 `stress --cpu N` class,
+// `plans/OPEN-DEFECTS.md`). Whether Group 0 / FIQ actually reaches the
+// non-secure kernel is platform/firmware-owned — deliverable on a
+// single-Security-state GIC (measured: QEMU `virt` with `secure=off`, the
+// board default), secure on a two-Security-state GIC (QEMU `virt,secure=on`
+// or a real Pi 4 GIC-400, where Group 0 belongs to the secure world) — so
+// it is decided by an *empirical, fail-closed* boot probe and reported
+// through the Arch-HAL capability honesty vocabulary
+// (`plans/FIX-HARDWARE-FEATURES.md`). The watchdog is a consumer that
+// chooses the FIQ cadence over the buddy detector from it.
+
+/// Map the empirical FIQ-deliverability probe's outcome to the Arch-HAL
+/// capability vocabulary. `delivered` is whether an FIQ was actually taken
+/// in the deliberately `DAIF.I`-masked probe window.
+///
+/// A `true` outcome is [`FeatureSupport::Supported`]: Group 0 / FIQ reaches
+/// the non-secure kernel, so the watchdog delivers its cadence as a
+/// non-maskable self-sample. A `false` outcome is
+/// [`FeatureSupport::Unsupported`] with the reason — on a two-Security-state
+/// GIC that keeps Group 0 (FIQ) in the secure world (QEMU `virt,secure=on`
+/// or a real Raspberry Pi 4 GIC-400) a non-secure kernel genuinely has no
+/// such source, so the watchdog stays on the complete cross-CPU buddy
+/// detector with no broken channel (fail closed). A single-Security-state
+/// GIC (measured: the QEMU `virt` default, `secure=off`) delivers it, so the
+/// probe returns `Supported` there and the debug image self-samples.
+///
+/// This decision is pure and always compiled (host-tested); the metal
+/// probe that produces `delivered` is debug-only.
+#[must_use]
+pub const fn fiq_support_from_probe(delivered: bool) -> FeatureSupport {
+    if delivered {
+        FeatureSupport::Supported
+    } else {
+        FeatureSupport::Unsupported(
+            "non-secure FIQ (Group 0) is not delivered to EL1 on this GIC; \
+             the cross-CPU buddy watchdog is used instead",
+        )
+    }
+}
+
+/// The cadence PPI is delivered as a non-maskable FIQ only once this many
+/// microarchitectural readings confirm delivery; the boot probe reads it.
+/// `false` until an FIQ is actually taken (the deliverability probe clears
+/// it, arms a Group-0 cadence, and waits on it).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+static FIQ_TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Cached FIQ-deliverability capability: `0` unprobed, `1` deliverable
+/// (Supported), `2` not deliverable (Unsupported). Read by
+/// [`fiq_deliverability`] / [`fiq_cadence_enabled`] after the boot probe.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+static FIQ_DELIVERABLE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Record that an FIQ was actually taken on this CPU. Called from the FIQ
+/// dispatcher arm ([`crate::exceptions`]) for every FIQ, so the boot
+/// deliverability probe observes delivery. One relaxed store.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub(crate) fn note_fiq_taken() {
+    FIQ_TAKEN.store(true, Ordering::Relaxed);
+}
+
+/// The FIQ-deliverability capability decided by the boot probe, reported
+/// through the Arch-HAL honesty vocabulary. [`FeatureSupport::Pending`]
+/// before the probe has run.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+#[must_use]
+pub fn fiq_deliverability() -> FeatureSupport {
+    match FIQ_DELIVERABLE.load(Ordering::Relaxed) {
+        1 => fiq_support_from_probe(true),
+        2 => fiq_support_from_probe(false),
+        _ => FeatureSupport::Pending("non-secure FIQ deliverability not yet probed"),
+    }
+}
+
+/// `true` iff the boot probe confirmed the cadence can be delivered as a
+/// non-maskable FIQ, so [`init_local_watchdog`] should route the cadence
+/// PPI to Group 0 on the calling CPU.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+fn fiq_cadence_enabled() -> bool {
+    FIQ_DELIVERABLE.load(Ordering::Relaxed) == 1
+}
+
+/// Read the physical count `CNTPCT_EL0` (a free-running monotonic counter,
+/// unaffected by `DAIF` masking) for the probe's bounded spin deadline.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+fn read_cntpct() -> u64 {
+    let cnt: u64;
+    // SAFETY: reading `CNTPCT_EL0` has no side effects.
+    unsafe {
+        core::arch::asm!("mrs {}, CNTPCT_EL0", out(reg) cnt, options(nomem, nostack, preserves_flags));
+    }
+    cnt
+}
+
+/// Route the watchdog cadence PPI to interrupt **Group 0** on the calling
+/// CPU, so its sample is delivered as a non-maskable FIQ.
+///
+/// The interrupt-group word `GICD_IGROUPR0` and the CPU-interface control
+/// `GICC_CTLR` are both **banked per CPU**, so every online core routes its
+/// own; the distributor's global Group-0 enable is set once by the boot
+/// probe. Called from [`init_local_watchdog`] only when
+/// [`fiq_cadence_enabled`] (the probe confirmed delivery).
+///
+/// # Safety
+///
+/// The GIC must be initialised and the calling CPU's interface enabled
+/// ([`crate::gic::init`]); the fixed windows are mapped and owned by the
+/// kernel.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+unsafe fn route_watchdog_group0() {
+    // SAFETY: GIC up per this fn's contract; these configure only this
+    // CPU's banked group bit and CPU-interface control register.
+    unsafe {
+        crate::gic::set_group0(WATCHDOG_PPI);
+        let ctlr = crate::gic::read_gicc_ctlr();
+        crate::gic::write_gicc_ctlr(
+            ctlr | crate::gic::GICC_CTLR_ENABLE_GRP0 | crate::gic::GICC_CTLR_FIQEN,
+        );
+    }
+}
+
+/// The bounded spin cap for [`probe_fiq_deliverability`]: a hard ceiling on
+/// loop iterations that backs up the counter deadline so the probe can
+/// never spin unbounded even with a broken counter (fail closed, §no-hacks).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+const MAX_PROBE_SPINS: u64 = 100_000_000;
+
+/// Probe, once on the boot CPU, whether the watchdog cadence can be
+/// delivered as a **non-maskable FIQ** to the non-secure kernel, caching
+/// and returning the capability.
+///
+/// Group 0 / FIQ routing to non-secure EL1 is platform/firmware-owned and
+/// cannot be known a priori (it differs QEMU `virt` vs the Pi 4 GIC-400),
+/// so this *measures* it: it routes the cadence PPI to Group 0, enables
+/// Group 0 as FIQ, arms a short one-shot, deliberately masks `DAIF.I`
+/// (leaving `DAIF.F` clear) so only a non-maskable FIQ can fire in the
+/// window, and waits a **bounded** interval (a counter deadline backed by
+/// [`MAX_PROBE_SPINS`]) for an FIQ to actually be taken
+/// ([`note_fiq_taken`]). This is a hardware-handshake spin with a bounded
+/// budget, not a steady-state busy-loop.
+///
+/// **Fail closed:** if no FIQ arrives (the secure-world case) the perturbed
+/// group/enable state is restored *verbatim* from the values saved before
+/// the probe — so the ordinary-IRQ enable bit is preserved on any GIC
+/// security configuration — and the capability is
+/// [`FeatureSupport::Unsupported`], leaving the complete cross-CPU buddy
+/// detector in place with no broken channel. Idempotent: a second call
+/// returns the cached capability.
+///
+/// # Safety
+///
+/// Must be called on the boot CPU during bring-up, after the GIC is up
+/// ([`crate::gic::init`]) and the vector table is installed
+/// ([`crate::exceptions::init_vectors`]), while the kernel still runs with
+/// IRQs masked. `counter_hz` is `CNTFRQ_EL0` (used to size the short arm
+/// and the deadline).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn probe_fiq_deliverability(counter_hz: u64) -> FeatureSupport {
+    // Idempotent: only probe once (the boot CPU).
+    if FIQ_DELIVERABLE.load(Ordering::Relaxed) != 0 {
+        return fiq_deliverability();
+    }
+    // A degenerate counter cannot size the probe window; fail closed.
+    if counter_hz == 0 {
+        FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
+        return fiq_deliverability();
+    }
+    // Record the cadence interval first, so an FIQ taken during the probe
+    // re-arms the one-shot to ~1 s rather than a zero-tick storm.
+    WATCHDOG_INTERVAL_TICKS.store(counter_hz, Ordering::Relaxed);
+
+    // Save the interrupt-group / enable state the probe perturbs, to restore
+    // verbatim on a fail-closed revert. The saved values already carry the
+    // ordinary-IRQ enable bit, so restoring them is safe regardless of the
+    // GIC's Security configuration.
+    // SAFETY: GIC up per this fn's contract.
+    let (saved_cpu_ctlr, saved_dist_ctlr) =
+        unsafe { (crate::gic::read_gicc_ctlr(), crate::gic::read_gicd_ctlr()) };
+
+    // SAFETY: GIC up. Route the cadence PPI to Group 0 (FIQ) on this CPU,
+    // enable Group 0 at the distributor and CPU interface, and signal
+    // Group 0 as FIQ. On a two-Security-state GIC these Secure-only bits are
+    // RAO/WI from Non-secure EL1, so this is a harmless no-op there and the
+    // wait below discovers FIQ is undeliverable.
+    unsafe {
+        crate::gic::enable_ppi(WATCHDOG_PPI);
+        crate::gic::set_group0(WATCHDOG_PPI);
+        crate::gic::write_gicd_ctlr(saved_dist_ctlr | 0b11);
+        crate::gic::write_gicc_ctlr(
+            saved_cpu_ctlr | crate::gic::GICC_CTLR_ENABLE_GRP0 | crate::gic::GICC_CTLR_FIQEN,
+        );
+    }
+
+    FIQ_TAKEN.store(false, Ordering::Relaxed);
+    // Arm the cadence to fire very soon (~1 ms) so the probe window is short.
+    arm((counter_hz / 1000).max(1));
+
+    // Ensure FIQ is deliverable at the PE, then deliberately mask IRQ so
+    // only a *non-maskable* FIQ can fire in the window. Boot already runs
+    // IRQ-masked; save DAIF and restore it exactly afterwards.
+    // SAFETY: clearing `DAIF.F` only unmasks FIQ; the vectors are installed.
+    unsafe {
+        crate::exceptions::enable_fiq_delivery();
+    }
+    let daif: u64;
+    // SAFETY: reading DAIF and setting its IRQ-mask bit is always permitted
+    // at EL1 and touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, daif",
+            "msr daifset, #{i}",
+            out(reg) daif,
+            i = const crate::exceptions::daif::I,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    // Bounded wait: a counter deadline (~20 ms) backed by a hard iteration
+    // cap. If an FIQ can reach us it fires within the ~1 ms arm above.
+    let start = read_cntpct();
+    let deadline = counter_hz / 50;
+    let mut spins = 0u64;
+    while !FIQ_TAKEN.load(Ordering::Relaxed) {
+        if read_cntpct().wrapping_sub(start) >= deadline || spins >= MAX_PROBE_SPINS {
+            break;
+        }
+        spins += 1;
+        core::hint::spin_loop();
+    }
+
+    // Restore the exact prior IRQ-mask state.
+    // SAFETY: writing back the captured DAIF value restores the prior mask.
+    unsafe {
+        core::arch::asm!("msr daif, {0}", in(reg) daif, options(nomem, nostack, preserves_flags));
+    }
+
+    let delivered = FIQ_TAKEN.load(Ordering::Relaxed);
+    if delivered {
+        FIQ_DELIVERABLE.store(1, Ordering::Relaxed);
+    } else {
+        // Fail closed: restore the perturbed group/enable state verbatim,
+        // back to the buddy detector with no broken channel.
+        // SAFETY: GIC up; these restore the saved register values.
+        unsafe {
+            crate::gic::set_group1(WATCHDOG_PPI);
+            crate::gic::write_gicc_ctlr(saved_cpu_ctlr);
+            crate::gic::write_gicd_ctlr(saved_dist_ctlr);
+        }
+        FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
+    }
+    fiq_deliverability()
 }
 
 // --- Cross-CPU recovery -------------------------------------------
@@ -589,6 +900,22 @@ mod tests {
         // on the host the handle honestly reports no stuck line rather than
         // fabricating one, exactly as the recovery SGI compiles out.
         assert_eq!(AARCH64_WATCHDOG.stuck_interrupt(), None);
+    }
+
+    #[test]
+    fn fiq_support_maps_the_probe_outcome_honestly() {
+        // Delivered → Supported (release-ready), so the watchdog uses the
+        // non-maskable FIQ cadence.
+        assert_eq!(fiq_support_from_probe(true), FeatureSupport::Supported);
+        assert!(fiq_support_from_probe(true).is_release_ready());
+        // Not delivered → a justified Unsupported (release-ready, never
+        // Pending): the port genuinely has no such source (secure-world
+        // Group 0), and the buddy detector is used. The reason is non-empty.
+        let no = fiq_support_from_probe(false);
+        assert!(matches!(no, FeatureSupport::Unsupported(_)));
+        assert!(no.is_release_ready());
+        assert!(!no.is_pending());
+        assert!(no.detail().is_some_and(|r| !r.trim().is_empty()));
     }
 
     // --- `walk_frames` (the pure backtrace core) --------------------------

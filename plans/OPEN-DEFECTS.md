@@ -734,17 +734,42 @@ hardware inner-shareable broadcast (no IPI busy-wait) — both ruled out. So
 IRQ-masked section no maskable sample can see.
 
 **Decision (build the masked-section sampler):** the non-maskable **FIQ
-self-sample** is the tool this evidence calls for and is being built, staged
-B1–B4 (full design + the decisive `DAIF.F` constraint in
-`.junie/fix-details.md`). The blocking constraint: aarch64 already masks
-`DAIF.F` in *every* section the wedge lives in (exception entry masks F in
-hardware; `enable_irq` clears I-only; `IrqSafeSpinLock`'s `DaifIrqControl`
-masks I+F), so an effective FIQ sample needs a cross-cutting, feature-gated
-`DAIF.F`-clear execution discipline plus GICv2 Group-0 routing whose
-acknowledge semantics differ QEMU-`virt` vs the Pi-4 GIC-400 — landed
-incrementally with an empirical, fail-closed delivery probe, never guessed
-(§2.1/§2.16/§2.19). The Pi-4B armstub FIQ-routing dependency remains a
-hardware-capability concern for `plans/FIX-HARDWARE-FEATURES.md`.
+self-sample** is the tool this evidence calls for, staged B1–B4 (full design +
+the decisive `DAIF.F` constraint in `.junie/fix-details.md`). The blocking
+constraint was that aarch64 already masks `DAIF.F` in *every* section the wedge
+lives in (exception entry masks F in hardware; `enable_irq` clears I-only;
+`IrqSafeSpinLock`'s `DaifIrqControl` masks I+F), so an effective FIQ sample
+needs a cross-cutting, feature-gated `DAIF.F`-clear execution discipline plus
+GICv2 Group-0 routing whose acknowledge semantics differ QEMU-`virt` vs the
+Pi-4 GIC-400 — landed incrementally with an empirical, fail-closed delivery
+probe, never guessed (§2.1/§2.16/§2.19).
+
+- **B1 (DAIF.F-clear discipline) — DONE.** Feature-gated, QEMU-validated.
+- **B2 (GIC Group-0 routing + `is_fiq` FIQ dispatcher arm + fail-closed
+  boot deliverability probe reported as a `FeatureSupport` capability) —
+  DONE.** Host-tested; debug + shippable aarch64 builds clean. The probe is
+  `Supported` on a single-Security-state GIC and `Unsupported` on a
+  two-Security-state GIC. Measured under QEMU (B3): the `virt` default
+  (`secure=off`) is single-Security-state and the probe returns `Supported`,
+  so the debug image self-samples via FIQ on QEMU (correcting an earlier
+  untested assumption that it was `Unsupported`). Only a real Pi 4 GIC-400,
+  or QEMU `virt,secure=on`, keeps Group 0 secure and returns `Unsupported`,
+  falling back to the complete buddy detector (fail closed).
+- **B3 (QEMU vertical proving `sampled=live`) — DONE.**
+  `tests/integration/fiq_selfsample_qemu_aarch64` (enrolled in `cargo xtask
+  test --qemu`) probes `Supported`, arms a short Group-0 (FIQ) cadence, masks
+  `DAIF.I`, busy-spins in an `#[inline(never)]` marker, and asserts the FIQ
+  self-sample captured a live in-kernel PC (interrupted `SPSR_EL1.I` masked)
+  whose value and `capture_sample_backtrace` top land inside the marker
+  (`sampled=live`).
+- **B4 (use the sampler to fix D13) — REMAINING.** The tool is proven (B3) and
+  active on the QEMU debug image; reproducing the nondeterministic
+  `stress --cpu N` multi-core wedge and fixing the SMP defect structurally
+  (with a regression test, never a timeout/limit bump §2.17) is the open work.
+  Not yet reproduced/fixed.
+
+The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
+for `plans/FIX-HARDWARE-FEATURES.md`.
 **Done when:** the FIQ sampler names the wedge, the root cause is fixed with
 evidence and a regression test, and `stress --cpu 20` no longer wedges on
 metal + the QEMU stress vertical.

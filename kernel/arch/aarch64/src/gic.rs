@@ -187,6 +187,15 @@ const GICD_ISENABLER: usize = 0x100;
 /// `GICD_ICENABLER<n>` — clear-enable, one bit per interrupt (base
 /// 0x180). Writing a `1` disables (masks) the corresponding interrupt.
 const GICD_ICENABLER: usize = 0x180;
+/// `GICD_IGROUPR<n>` — interrupt group, one bit per interrupt (base
+/// 0x080). A **clear** bit assigns the interrupt to **Group 0** (signalled
+/// as FIQ when the CPU interface's `GICC_CTLR.FIQEn` is set); a **set** bit
+/// is **Group 1** (signalled as IRQ). The first word `GICD_IGROUPR0`
+/// (INTIDs `0..32`, the SGIs/PPIs) is **banked per CPU**, so each core
+/// configures its own private-interrupt group bits. Used only by the debug
+/// watchdog's non-maskable FIQ self-sample (`plans/WATCHDOG.md`) to move
+/// its cadence PPI into Group 0.
+const GICD_IGROUPR: usize = 0x080;
 /// `GICD_ISPENDR<n>` — set-pending status, one bit per interrupt (base
 /// 0x200). A set bit means the interrupt is pending delivery.
 const GICD_ISPENDR: usize = 0x200;
@@ -220,6 +229,28 @@ const GICC_IAR: usize = 0x00C;
 /// `GICC_EOIR` — end of interrupt (offset 0x010). Writing the INTID read
 /// from `GICC_IAR` deactivates it.
 const GICC_EOIR: usize = 0x010;
+
+/// `GICC_CTLR.EnableGrp1` (bit 1 in the single-Security-state view; the
+/// only enable bit visible to a two-Security-state Non-secure kernel,
+/// where it appears at bit 0). The [`Gicv2::init`] baseline writes exactly
+/// `1`, which is `EnableGrp1` in the Non-secure view — the group ordinary
+/// IRQs (timer, SGIs, device SPIs) are delivered on.
+///
+/// The debug watchdog's non-maskable FIQ self-sample additionally needs
+/// **Group 0** enabled and signalled as FIQ. On a GIC that exposes a
+/// single Security state (no Security Extensions, or `GICD_CTLR.DS == 1`)
+/// the CPU-interface control bits are:
+/// `EnableGrp0` (bit 0), `EnableGrp1` (bit 1), and `FIQEn` (bit 3, which
+/// routes Group 0 to the FIQ signal). On a GIC that implements two
+/// Security states these are Secure-only from the Non-secure view
+/// (`FIQEn` is RAO/WI), so setting them is a harmless no-op there and the
+/// empirical probe (`plans/WATCHDOG.md`) discovers FIQ is undeliverable
+/// and reverts. The port never guesses which world it is in — it
+/// configures, probes, and falls back (`crate::watchdog`).
+pub const GICC_CTLR_ENABLE_GRP0: u32 = 1 << 0;
+/// `GICC_CTLR.FIQEn` (bit 3, single-Security-state view): route Group 0
+/// interrupts to the FIQ signal. See [`GICC_CTLR_ENABLE_GRP0`].
+pub const GICC_CTLR_FIQEN: u32 = 1 << 3;
 
 /// Highest addressable GICv2 INTID. INTIDs `1020..=1023` are reserved by
 /// the spec (1023 is [`SPURIOUS_INTID`]); a controller rejects anything
@@ -282,6 +313,14 @@ pub const fn itargetsr_offset(intid: u32) -> usize {
 #[must_use]
 pub const fn icenabler_offset(intid: u32) -> usize {
     gicd_bit_word_offset(GICD_ICENABLER, intid)
+}
+
+/// Byte offset of the `GICD_IGROUPR` word covering interrupt `intid`.
+/// Parallel layout to [`isenabler_offset`]; the bit position is the same
+/// one-bit-per-interrupt index ([`isenabler_bit`]).
+#[must_use]
+pub const fn igroupr_offset(intid: u32) -> usize {
+    gicd_bit_word_offset(GICD_IGROUPR, intid)
 }
 
 /// Scan the SPI range `[MIN_SPI_INTID, max_intid]` for the lowest
@@ -512,6 +551,52 @@ impl<M: GicMmio> Gicv2<M> {
             self.mmio.publish_barrier();
             self.mmio.gicd_write(GICD_SGIR, sgir_value(0, target_list));
         }
+    }
+
+    /// Assign `intid` to interrupt **Group 0** (clear its `GICD_IGROUPR`
+    /// bit), so it is signalled as **FIQ** when the CPU interface's
+    /// `GICC_CTLR.FIQEn` is set. A read-modify-write of the one-bit-per-
+    /// interrupt group word; for an SGI/PPI (`intid < 32`) this targets the
+    /// banked `GICD_IGROUPR0`, so it configures the **calling** CPU's copy.
+    /// Used only by the debug watchdog's FIQ self-sample
+    /// (`plans/WATCHDOG.md`).
+    pub fn set_group0(&self, intid: u32) {
+        let off = igroupr_offset(intid);
+        let word = self.mmio.gicd_read(off) & !isenabler_bit(intid);
+        self.mmio.gicd_write(off, word);
+    }
+
+    /// Assign `intid` back to interrupt **Group 1** (set its `GICD_IGROUPR`
+    /// bit), so it is signalled as an ordinary IRQ — the reset default and
+    /// the fail-closed revert when the FIQ-deliverability probe finds
+    /// Group 0 is not reachable. The banking note on [`Self::set_group0`]
+    /// applies.
+    pub fn set_group1(&self, intid: u32) {
+        let off = igroupr_offset(intid);
+        let word = self.mmio.gicd_read(off) | isenabler_bit(intid);
+        self.mmio.gicd_write(off, word);
+    }
+
+    /// Read the CPU-interface control register `GICC_CTLR`.
+    #[must_use]
+    pub fn read_gicc_ctlr(&self) -> u32 {
+        self.mmio.gicc_read(GICC_CTLR)
+    }
+
+    /// Write the CPU-interface control register `GICC_CTLR`.
+    pub fn write_gicc_ctlr(&self, val: u32) {
+        self.mmio.gicc_write(GICC_CTLR, val);
+    }
+
+    /// Read the distributor control register `GICD_CTLR`.
+    #[must_use]
+    pub fn read_gicd_ctlr(&self) -> u32 {
+        self.mmio.gicd_read(GICD_CTLR)
+    }
+
+    /// Write the distributor control register `GICD_CTLR`.
+    pub fn write_gicd_ctlr(&self, val: u32) {
+        self.mmio.gicd_write(GICD_CTLR, val);
     }
 }
 
@@ -754,6 +839,103 @@ pub fn stuck_spi() -> Option<StuckInterrupt> {
     unsafe { volatile_gic() }.stuck_spi(MAX_INTID)
 }
 
+/// Assign `intid` to interrupt Group 0 (FIQ) on the calling CPU (banked
+/// `GICD_IGROUPR0` for an SGI/PPI). Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// The distributor must be enabled ([`init`]); the fixed windows are
+/// mapped and owned by the kernel.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn set_group0(intid: u32) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.set_group0(intid);
+}
+
+/// Assign `intid` back to interrupt Group 1 (IRQ) on the calling CPU —
+/// the fail-closed revert of [`set_group0`]. Debug watchdog only.
+///
+/// # Safety
+///
+/// As [`set_group0`].
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn set_group1(intid: u32) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.set_group1(intid);
+}
+
+/// Read `GICC_CTLR`. Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// The fixed CPU-interface window is mapped and owned by the kernel.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+#[must_use]
+pub unsafe fn read_gicc_ctlr() -> u32 {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.read_gicc_ctlr()
+}
+
+/// Write `GICC_CTLR`. Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// As [`read_gicc_ctlr`]; `val` must keep the ordinary-IRQ enable bit set
+/// (the caller save/restores the prior value around the probe).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn write_gicc_ctlr(val: u32) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.write_gicc_ctlr(val);
+}
+
+/// Read `GICD_CTLR`. Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// The fixed distributor window is mapped and owned by the kernel.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+#[must_use]
+pub unsafe fn read_gicd_ctlr() -> u32 {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.read_gicd_ctlr()
+}
+
+/// Write `GICD_CTLR`. Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// As [`read_gicd_ctlr`]; the caller save/restores the prior value around
+/// the probe.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn write_gicd_ctlr(val: u32) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.write_gicd_ctlr(val);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1113,54 @@ mod tests {
             gic.mmio.gicd_read(icenabler_offset(42)) & isenabler_bit(42),
             isenabler_bit(42)
         );
+    }
+
+    #[test]
+    fn igroupr_offset_selects_the_first_word_for_ppis() {
+        // The SGIs/PPIs (INTID 0..32) all live in the banked first word
+        // `GICD_IGROUPR0` at base 0x080; INTID 32 spills into the next.
+        assert_eq!(igroupr_offset(0), 0x080);
+        assert_eq!(igroupr_offset(27), 0x080);
+        assert_eq!(igroupr_offset(31), 0x080);
+        assert_eq!(igroupr_offset(32), 0x084);
+    }
+
+    #[test]
+    fn gicc_ctlr_group0_fiq_bits_match_the_gicv2_spec() {
+        // Single-Security-state view: EnableGrp0 = bit 0, FIQEn = bit 3.
+        assert_eq!(GICC_CTLR_ENABLE_GRP0, 0b0001);
+        assert_eq!(GICC_CTLR_FIQEN, 0b1000);
+    }
+
+    #[test]
+    fn set_group0_clears_only_the_target_group_bit() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // Start with every bit in IGROUPR0 set to Group 1 (the reset for a
+        // Non-secure view), then move only the watchdog PPI (27) to Group 0
+        // and confirm no sibling bit changed.
+        gic.mmio.gicd_write(igroupr_offset(27), 0xFFFF_FFFF);
+        gic.set_group0(27);
+        // Every bit stays set except PPI 27, now Group 0.
+        assert_eq!(gic.mmio.gicd_read(igroupr_offset(27)), !(1u32 << 27));
+    }
+
+    #[test]
+    fn set_group1_restores_only_the_target_group_bit() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // From all-Group-0 (0), returning PPI 27 to Group 1 sets exactly
+        // its bit — the fail-closed revert of the probe.
+        gic.set_group1(27);
+        assert_eq!(gic.mmio.gicd_read(igroupr_offset(27)), 1 << 27);
+    }
+
+    #[test]
+    fn gicc_and_gicd_ctlr_round_trip() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        let ctlr = GICC_CTLR_ENABLE_GRP0 | (1 << 1) | GICC_CTLR_FIQEN;
+        gic.write_gicc_ctlr(ctlr);
+        assert_eq!(gic.read_gicc_ctlr(), ctlr);
+        gic.write_gicd_ctlr(0b11);
+        assert_eq!(gic.read_gicd_ctlr(), 0b11);
     }
 
     #[test]

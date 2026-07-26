@@ -2580,6 +2580,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-fiq-selfsample-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-fdt",
+ "tairix-itest-harness",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-framebuffer-display-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

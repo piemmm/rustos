@@ -281,6 +281,7 @@ members = [
     "tests/integration/preempt_el0_qemu_riscv64",
     "tests/integration/preempt_el0_qemu_x86_64",
     "tests/integration/preempt_inkernel_qemu_aarch64",
+    "tests/integration/fiq_selfsample_qemu_aarch64",
     "tests/integration/mem_map_program",
     "tests/integration/mem_map_qemu_aarch64",
     "tests/integration/mem_pin_program",

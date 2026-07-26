@@ -72,6 +72,14 @@ pub mod kind {
     pub const CUR_SPX_SYNC: u64 = 4;
     /// Current EL with SPx — IRQ (the timer / SGI path).
     pub const CUR_SPX_IRQ: u64 = 5;
+    /// Current EL with SP0 — FIQ (unused SP0 group; classified for the
+    /// debug watchdog's non-maskable self-sample).
+    pub const CUR_SP0_FIQ: u64 = 2;
+    /// Current EL with SPx — FIQ (the debug watchdog's Group-0 cadence
+    /// while the kernel runs on `SP_EL1`).
+    pub const CUR_SPX_FIQ: u64 = 6;
+    /// Lower EL (AArch64) — FIQ (the Group-0 cadence taken while EL0 runs).
+    pub const LOWER_FIQ: u64 = 10;
     /// Lower EL (AArch64) — Synchronous (an EL0 `svc` or user fault).
     pub const LOWER_SYNC: u64 = 8;
     /// Lower EL (AArch64) — IRQ.
@@ -93,6 +101,18 @@ pub const fn is_irq(kind: u64) -> bool {
 #[must_use]
 pub const fn is_sync(kind: u64) -> bool {
     matches!(kind, kind::CUR_SPX_SYNC | kind::LOWER_SYNC)
+}
+
+/// `true` iff `kind` denotes an FIQ entry (from any EL). The debug
+/// watchdog's non-maskable Group-0 cadence self-sample is the only FIQ
+/// source this port routes (`plans/WATCHDOG.md`); on a shippable image no
+/// FIQ is ever routed, so an FIQ entry there is a spurious park.
+#[must_use]
+pub const fn is_fiq(kind: u64) -> bool {
+    matches!(
+        kind,
+        kind::CUR_SP0_FIQ | kind::CUR_SPX_FIQ | kind::LOWER_FIQ
+    )
 }
 
 // --- Device-IRQ dispatch hook -------------------------------------
@@ -438,6 +458,48 @@ unsafe fn user_register_frame(frame: *const u64) -> tairix_arch_api::backtrace::
     UserRegisterFrame::new(snapshot, crate::backtrace::Backtracer::LAYOUT, true)
 }
 
+/// Handle a **Group-0 FIQ** — the debug watchdog's non-maskable
+/// masked-section self-sample (`plans/WATCHDOG.md`), the only FIQ this port
+/// ever routes.
+///
+/// FIQ is masked by `DAIF.F`, a bit *separate* from the `DAIF.I` that an
+/// `IrqSafeSpinLock` / syscall body / fault resolver masks, so this fires
+/// inside exactly the IRQ-masked wedge the maskable cadence cannot observe.
+/// It acknowledges the Group-0 interrupt through the same `GICC_IAR`/
+/// `GICC_EOIR` handshake as the IRQ path (carrying the full IAR cookie end
+/// to end), records that an FIQ was actually taken (the deliverability
+/// probe reads this, `crate::watchdog::note_fiq_taken`), and for the
+/// cadence PPI runs the self-sample `on_watchdog_interrupt` — which
+/// re-arms the one-shot and, on a kernel-context sample, unwinds the *live*
+/// wedged PC. It is purely observational: it **never** clears `DAIF.F`
+/// (a nested FIQ inside the FIQ handler is unsafe) and **never** preempts
+/// (it may have interrupted an IRQ-masked critical section the kernel must
+/// not abandon).
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+fn handle_fiq(frame: *const u64) {
+    let iar = crate::gic::acknowledge();
+    let intid = iar & crate::gic::IAR_INTID_MASK;
+    if intid == crate::gic::SPURIOUS_INTID {
+        // Nothing pending (an FIQ that raced its own deactivation): the
+        // GIC requires no EOI for a spurious read.
+        return;
+    }
+    let cpu = crate::smp::current_cpu_index();
+    // Record the delivery for the boot probe before any other work, so a
+    // probe FIQ that fires on a bare cadence PPI is still observed.
+    crate::watchdog::note_fiq_taken();
+    if intid == crate::watchdog::WATCHDOG_PPI {
+        crate::watchdog::on_watchdog_interrupt(cpu, frame);
+    }
+    // Complete the interrupt with the full IAR cookie so the CPU interface
+    // does not wedge with an active Group-0 priority.
+    crate::gic::end_of_interrupt(iar);
+}
+
 /// Handle an IRQ: acknowledge the GIC, dispatch the timer PPI to the
 /// scheduler-tick path (or an IPI / device interrupt to its handler),
 /// complete the interrupt, then — for **any** interrupt taken from EL0 —
@@ -553,6 +615,16 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // EL0 user mode; `CUR_SP0_IRQ`/`CUR_SPX_IRQ` interrupted EL1
         // kernel code, which is never preempted (see [`handle_irq`]).
         handle_irq(kind == kind::LOWER_IRQ, frame);
+        return;
+    }
+
+    // The debug watchdog's non-maskable Group-0 cadence self-sample: only
+    // ever routed in a `watchdog-diagnostics` build, and observational (it
+    // never preempts). A shippable image routes no FIQ, so an FIQ entry
+    // there falls through to the park below (never silently `eret`-looped).
+    #[cfg(feature = "watchdog-diagnostics")]
+    if is_fiq(kind) {
+        handle_fiq(frame);
         return;
     }
 
@@ -733,6 +805,23 @@ mod tests {
         assert!(is_sync(kind::CUR_SPX_SYNC));
         assert!(is_sync(kind::LOWER_SYNC));
         assert!(!is_sync(kind::CUR_SPX_IRQ));
+    }
+
+    #[test]
+    fn fiq_kinds_are_classified_and_disjoint_from_irq_and_sync() {
+        // The three FIQ vector kinds (SP0/SPx/lower-EL) match; the vector
+        // immediates must stay disjoint from the IRQ and sync kinds so the
+        // Group-0 self-sample never shadows a real IRQ or fault.
+        assert!(is_fiq(kind::CUR_SP0_FIQ));
+        assert!(is_fiq(kind::CUR_SPX_FIQ));
+        assert!(is_fiq(kind::LOWER_FIQ));
+        assert!(!is_fiq(kind::CUR_SPX_IRQ));
+        assert!(!is_fiq(kind::LOWER_IRQ));
+        assert!(!is_fiq(kind::LOWER_SYNC));
+        for k in [kind::CUR_SP0_FIQ, kind::CUR_SPX_FIQ, kind::LOWER_FIQ] {
+            assert!(!is_irq(k));
+            assert!(!is_sync(k));
+        }
     }
 
     #[test]
