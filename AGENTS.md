@@ -1321,6 +1321,7 @@ You are not exempt from any rule above. In addition:
     | Syscall interruptibility / IRQ-on-entry (interruptible syscall bodies, non-preemptible kernel, reschedule-at-return) | `plans/FIX-SYSCALL.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
+    | Pre-boot Supervisor console (ESC-at-boot REPL, pre-mount diagnostics/control, the `lib/supervisor` engine, the `lib/vt` lone-ESC resolution) | `plans/NEW-SUPERVISOR.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
     | CPU feature detection + self-optimising routine selection: build-time target-cpu/feature floor, the `cpufeatures` Arch-HAL slice, the `lib/cpuops` ops-table dispatch/benchmark framework | `plans/FIX-HARDWARE-FEATURES.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |
