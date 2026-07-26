@@ -2013,7 +2013,15 @@ impl PeerTcpNet {
         tcb.poll_transmit(*now, |seg| {
             let mut out = StackOutput::default();
             if stack
-                .send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, *now, &mut out)
+                .send_tcp(
+                    dest,
+                    &seg.meta,
+                    seg.payload,
+                    seg.gso_size,
+                    seg.ecn,
+                    *now,
+                    &mut out,
+                )
                 .is_ok()
             {
                 for frame in &out.frames {
@@ -2057,6 +2065,7 @@ impl Net for PeerTcpNet {
                         if let StackEvent::TcpSegment {
                             source,
                             destination,
+                            ecn,
                             segment,
                         } = event
                         {
@@ -2066,7 +2075,7 @@ impl Net for PeerTcpNet {
                                     destination: *d,
                                 };
                                 if let Some(seg) = TcpSegment::parse(pseudo, segment) {
-                                    self.tcb.on_segment(&seg, self.now);
+                                    self.tcb.on_segment(&seg, *ecn, self.now);
                                 }
                             }
                         }
@@ -2155,9 +2164,11 @@ fn pump_client(
                 StackEvent::TcpSegment {
                     source,
                     destination,
+                    ecn,
                     segment,
                 } => {
-                    let io = svc.on_tcp_segment(ns, *source, *destination, segment, now, &secret);
+                    let io =
+                        svc.on_tcp_segment(ns, *source, *destination, *ecn, segment, now, &secret);
                     stage_batch(fs, &io.tx);
                     deliveries.extend(io.deliveries);
                 }

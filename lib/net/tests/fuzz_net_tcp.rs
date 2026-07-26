@@ -269,7 +269,7 @@ fn driver_drain(tcb: &mut Tcb, now: Duration64) -> Vec<Vec<u8>> {
 
 fn driver_feed(tcb: &mut Tcb, frame: &[u8], now: Duration64) {
     if let Some(seg) = TcpSegment::parse(DRIVER_PSEUDO, frame) {
-        tcb.on_segment(&seg, now);
+        tcb.on_segment(&seg, tairix_net::addr::Ecn::NotEct, now);
     }
 }
 
@@ -609,7 +609,7 @@ fn listener_drive_once(rng: &mut Lcg) {
                             let rn = tcp::write(listen_pseudo(p), &out.meta, out.payload, &mut rb)
                                 .expect("reply serialises");
                             if let Some(s) = TcpSegment::parse(ps, &rb[..rn]) {
-                                client.on_segment(&s, now);
+                                client.on_segment(&s, tairix_net::addr::Ecn::NotEct, now);
                             }
                             true
                         });

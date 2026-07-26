@@ -41,7 +41,7 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::time::Duration64;
 
 use crate::addr::{
-    is_unicast_link_local, solicited_node_multicast, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES,
+    is_unicast_link_local, solicited_node_multicast, Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES,
     ALL_ROUTERS,
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
@@ -219,6 +219,10 @@ pub enum StackEvent {
         source: IpAddr,
         /// Local address it was delivered to.
         destination: IpAddr,
+        /// The IP-layer ECN codepoint the datagram carried (RFC 3168 §5).
+        /// The service feeds it to the connection's [`crate::tcp::conn::Tcb`]
+        /// so a Congestion-Experienced mark drives the receiver's ECE echo.
+        ecn: Ecn,
         /// The checksum-valid TCP segment (header, options, payload).
         segment: Vec<u8>,
     },
@@ -1090,6 +1094,7 @@ impl Stack {
             out.events.push(StackEvent::TcpSegment {
                 source: IpAddr::V4(header.source),
                 destination: IpAddr::V4(header.destination),
+                ecn: header.ecn,
                 segment: payload.to_vec(),
             });
             return;
@@ -1343,6 +1348,7 @@ impl Stack {
             out.events.push(StackEvent::TcpSegment {
                 source: IpAddr::V6(header.source),
                 destination: IpAddr::V6(header.destination),
+                ecn: header.ecn(),
                 segment: payload.to_vec(),
             });
             return;
@@ -2012,6 +2018,7 @@ impl Stack {
             protocol,
             upper_message,
             None,
+            Ecn::NotEct,
             TxOffload::None,
             now,
         );
@@ -2033,6 +2040,7 @@ impl Stack {
         protocol: u8,
         upper_message: &[u8],
         ttl: Option<u8>,
+        ecn: Ecn,
         offload: TxOffload,
         now: Duration64,
     ) {
@@ -2053,6 +2061,7 @@ impl Stack {
         if let Some(ttl) = ttl {
             header.ttl = ttl;
         }
+        header.ecn = ecn;
         header.identification = self.next_ident;
         self.next_ident = self.next_ident.wrapping_add(1);
         // A segmentation-offload super-segment is emitted as one packet
@@ -2144,6 +2153,7 @@ impl Stack {
             upper_message,
             hop_limit,
             false,
+            Ecn::NotEct,
             TxOffload::None,
             now,
         );
@@ -2164,6 +2174,7 @@ impl Stack {
         upper_message: &[u8],
         hop_limit: u8,
         router_alert: bool,
+        ecn: Ecn,
         offload: TxOffload,
         now: Duration64,
     ) {
@@ -2180,12 +2191,14 @@ impl Stack {
             payload.extend_from_slice(upper_message);
             let mut header = Ipv6Header::new(source, dest, NEXT_HEADER_HOP_BY_HOP);
             header.hop_limit = hop_limit;
+            header.set_ecn(ecn);
             let packet = self.pooled_ipv6_packet(&header, &payload);
             self.bufs.give(payload);
             packet
         } else {
             let mut header = Ipv6Header::new(source, dest, next_header);
             header.hop_limit = hop_limit;
+            header.set_ecn(ecn);
             self.pooled_ipv6_packet(&header, upper_message)
         };
         let Some(packet) = packet else {
@@ -2575,6 +2588,7 @@ impl Stack {
                     PROTOCOL_UDP,
                     &message,
                     ttl,
+                    Ecn::NotEct,
                     TxOffload::None,
                     now,
                 );
@@ -2808,12 +2822,14 @@ impl Stack {
     /// segmentation offload and bounded `payload` so the single IP packet
     /// stays within the 16-bit length field. `None` is the ordinary
     /// per-segment path.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_tcp(
         &mut self,
         dest: IpAddr,
         meta: &TcpSegmentMeta,
         payload: &[u8],
         gso_size: Option<u16>,
+        ecn: Ecn,
         now: Duration64,
         out: &mut StackOutput,
     ) -> Result<(), SendError> {
@@ -2865,6 +2881,7 @@ impl Stack {
                     PROTOCOL_TCP,
                     &segment[..n],
                     None,
+                    ecn,
                     offload,
                     now,
                 );
@@ -2914,6 +2931,7 @@ impl Stack {
                     &segment[..n],
                     self.hop_limit,
                     false,
+                    ecn,
                     offload,
                     now,
                 );
@@ -3177,6 +3195,7 @@ impl Stack {
             &message,
             MEMBERSHIP_HOP_LIMIT,
             true,
+            Ecn::NotEct,
             TxOffload::None,
             now,
         );
@@ -3310,8 +3329,20 @@ impl Stack {
         gso_size: Option<u16>,
         now: Duration64,
     ) -> Result<StackOutput, SendError> {
+        self.send_tcp_ecn_collect(dest, meta, payload, gso_size, Ecn::NotEct, now)
+    }
+
+    pub(crate) fn send_tcp_ecn_collect(
+        &mut self,
+        dest: IpAddr,
+        meta: &TcpSegmentMeta,
+        payload: &[u8],
+        gso_size: Option<u16>,
+        ecn: Ecn,
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
         let mut out = StackOutput::default();
-        self.send_tcp(dest, meta, payload, gso_size, now, &mut out)?;
+        self.send_tcp(dest, meta, payload, gso_size, ecn, now, &mut out)?;
         Ok(out)
     }
 }

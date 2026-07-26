@@ -425,3 +425,28 @@ fn fragment_rejects_an_empty_datagram() {
         "there is nothing to fragment in a zero-length datagram"
     );
 }
+
+#[test]
+fn ecn_accessors_preserve_the_dscp() {
+    use crate::addr::Ecn;
+    let mut header = Ipv6Header::new(
+        Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 1),
+        Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 2),
+        NEXT_HEADER_ICMPV6,
+    );
+    // Set a DSCP (high six bits of the traffic class) and confirm setting
+    // the ECN codepoint leaves it intact.
+    header.traffic_class = 0b1011_0100; // DSCP 0x2D, ECN 0b00
+    for cp in [Ecn::NotEct, Ecn::Ect1, Ecn::Ect0, Ecn::Ce] {
+        header.set_ecn(cp);
+        assert_eq!(header.ecn(), cp);
+        assert_eq!(header.traffic_class >> 2, 0b10_1101, "DSCP preserved");
+    }
+    // The codepoint survives a serialise/parse round trip.
+    header.set_ecn(Ecn::Ect0);
+    let mut out = [0u8; IPV6_HEADER_LEN];
+    header.write(&mut out, 0).expect("fits");
+    let (parsed, _) = Ipv6Header::parse(&out).expect("parses");
+    assert_eq!(parsed.ecn(), Ecn::Ect0);
+    assert_eq!(parsed.traffic_class, header.traffic_class);
+}

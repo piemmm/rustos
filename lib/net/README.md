@@ -20,7 +20,8 @@ connection state machine, and the listener + SYN-cookie driver),
   first-party copy), plus what `core::net` does not carry: RFC 4007 scope
   classification (`Ipv6Scope`, fail-closed on reserved multicast scopes)
   and the scope/zone pairing rules (`ScopedIpv6Addr` — a link-local
-  address without a zone is unrepresentable).
+  address without a zone is unrepresentable). It also carries `Ecn`, the
+  shared RFC 3168 §5 ECN codepoint the IPv4 and IPv6 headers both express.
 - `checksum` — the one RFC 1071 Internet-checksum definition: a one-shot
   fold plus an incremental accumulator with byte-stream semantics and the
   IPv4 / IPv6 (RFC 8200 §8.1) pseudo-header seeds. Every checksummed
@@ -97,7 +98,9 @@ connection state machine, and the listener + SYN-cookie driver),
   length-0-pseudo partial checksum, `ChecksumMode::PartialGso`) the device
   splits into MTU-sized packets (TSO); every other frame keeps its full
   software checksum (`TxOffload::None`). `Stack::tso_max_payload` reports
-  the connection's super-segment bound.
+  the connection's super-segment bound. `send_tcp` also stamps the RFC 3168
+  ECN codepoint the connection chose into the IPv4 TOS / IPv6 Traffic Class,
+  and the receive path surfaces the codepoint on `StackEvent::TcpSegment`.
 - `udp` — the dual-stack UDP codec (RFC 768): one parse/emit core over
   the family-appropriate pseudo-header checksum, IPv4-optional /
   IPv6-mandatory checksum discipline.
@@ -147,7 +150,11 @@ connection state machine, and the listener + SYN-cookie driver),
   user timeout, and RFC 9293 §3.8.4 keepalive probing of an idle connection
   (off by default per RFC 1122 §4.2.3.6; when enabled, an idle connection is
   probed with a zero-length `snd_nxt - 1` ACK and torn down after a bounded
-  number of unanswered probes). The initial sequence number is a caller-supplied CSPRNG
+  number of unanswered probes), and RFC 3168 Explicit Congestion Notification
+  (off by default; when both ends negotiate it in the handshake, fresh data is
+  marked ECT(0), a received CE mark is echoed with ECE until the peer answers
+  with CWR, and an ECE-marked ACK reduces the window once per window and sets
+  CWR on the next fresh data). The initial sequence number is a caller-supplied CSPRNG
   draw (§22) so the engine stays deterministic and replayable; every buffer
   and the reassembly set are bounded (fail closed, never attacker-sized).
   The send path is bounded by both the peer's advertised window and the
@@ -160,7 +167,9 @@ connection state machine, and the listener + SYN-cookie driver),
   fixed-point, so the crate needs no floating point or libm. Loss (three
   duplicate ACKs) applies the multiplicative decrease once per window
   (RFC 6582 recover) and a timeout collapses to one segment; growth is slow
-  start below `ssthresh` and the policy's increase above it.
+  start below `ssthresh` and the policy's increase above it. `on_ecn` (RFC 3168
+  §6.1.2) applies the same decrease for an explicit congestion mark with no
+  retransmission, so every policy responds to ECN without a second code path.
 - `tcp::listen` — the demultiplexing server-side listener (`Listener`) that
   sits above `tcp::conn`. It demultiplexes inbound segments by peer, holds a
   bounded backlog of half-open (SYN-RECEIVED) handshakes with a timeout, and

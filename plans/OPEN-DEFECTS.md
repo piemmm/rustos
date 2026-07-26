@@ -117,6 +117,34 @@ The open items, in priority order:
   rather than fixed inline because it is a shared-tooling concurrency
   concern unrelated to that feature.
 
+- **D15 — `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage,
+  timing-perturbable by an unrelated binary-size change — OPEN (for the
+  PTY owner).** While landing the RFC 3168 TCP ECN engine (`plans/NETWORK.md`
+  N13 — pure `lib/net`/`netstack` changes, nothing on the terminal/pty/
+  shell/signal path, `enable_ecn` off by default so netstack behaviour is
+  byte-identical), this vertical began freezing at the **AW4 PTY Ctrl-C
+  job-control sub-stage** (`plans/PTY.md`): the guest emits `PTY ctrl-c
+  armed`, spawns the recovery tasks, then the single CPU stops advancing
+  (~60 s guest-time) with **no** kernel WARN/ERROR/panic/OOM — the desktop's
+  own IPC loop stops too. A/B confirmed: with the ECN change the vertical
+  freezes 4/4 runs (300 s **and** an 1800 s budget — a real freeze, not
+  slowness); with the ECN change `git stash`ed it **passes**. Because ECN
+  cannot reach the pty path, the correlation is a **timing perturbation**
+  (the slightly larger `netstack`/driver binaries shift load/spawn timing),
+  which points at a **D10-class fragile test-harness readiness gate** in the
+  Ctrl-C stage — the same failure mode D10 fixed for the terminal-focus
+  click (a gate keyed on a global window-endpoint `CallReplied`/occurrence
+  count rather than a monotonic creation event). D10 fixed the terminal
+  *focus* gate but the newer PTY Ctrl-C sub-stage appears to carry the same
+  fragility. The ECN change is otherwise fully green (host tests,
+  integration, `fuzz --secs 5`, clippy `-D warnings`, docs, fmt) and was
+  accepted with this recorded for the PTY owner. Recommended fix
+  (structural, per §7/§2.17): re-gate the Ctrl-C stage on a monotonic,
+  count-independent readiness marker (as D10 did with `sc=shm_map` window
+  creation), **not** a timeout bump or retry; reproduce with
+  `cargo xtask test --qemu --only autoload-input-qemu-aarch64` on this
+  branch.
+
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6

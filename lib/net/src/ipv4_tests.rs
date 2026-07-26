@@ -233,3 +233,21 @@ fn router_alert_header_carries_the_option() {
     // The header checksum still verifies over the whole 24-byte header.
     assert_eq!(internet_checksum(&out[..written]), 0);
 }
+
+#[test]
+fn ecn_codepoint_round_trips_in_the_tos_byte() {
+    use crate::addr::Ecn;
+    for cp in [Ecn::NotEct, Ecn::Ect1, Ecn::Ect0, Ecn::Ce] {
+        let mut out = [0u8; IPV4_HEADER_LEN];
+        let written = Ipv4Header {
+            ecn: cp,
+            ..header()
+        };
+        written.write(&mut out, 0).expect("fits");
+        // The DSCP (high six bits of the TOS byte) is unused and zero.
+        assert_eq!(out[1] & 0b1111_1100, 0, "DSCP is written zero");
+        assert_eq!(out[1] & 0b11, cp.bits(), "ECN in the low two bits");
+        let (parsed, _, _) = Ipv4Header::parse(&out).expect("parses");
+        assert_eq!(parsed.ecn, cp);
+    }
+}

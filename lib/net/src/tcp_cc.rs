@@ -60,6 +60,17 @@ pub trait CongestionControl: core::fmt::Debug + Send {
     /// per recovery episode.
     fn on_loss(&mut self, flight: u32, now_ns: u128);
 
+    /// An explicit congestion notification (RFC 3168 §6.1.2): a peer echoed
+    /// ECE, so a router marked one of our ECN-capable packets as Congestion
+    /// Experienced. The window response is identical to a single dropped
+    /// packet — the multiplicative decrease — but no retransmission follows,
+    /// because nothing was lost. The connection applies this at most once
+    /// per window of data, so the default deferring to [`Self::on_loss`]
+    /// gives every policy the correct decrease without a second code path.
+    fn on_ecn(&mut self, flight: u32, now_ns: u128) {
+        self.on_loss(flight, now_ns);
+    }
+
     /// A retransmission timeout fired: collapse `cwnd` to the loss window
     /// (one MSS) and drop `ssthresh` (RFC 5681 §3.1). Slow start restarts.
     fn on_rto(&mut self, flight: u32, now_ns: u128);

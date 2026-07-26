@@ -19,7 +19,7 @@
 //! never do — and [`write_fragment_header`] serialises each piece's
 //! Fragment extension header.
 
-use crate::addr::Ipv6Addr;
+use crate::addr::{Ecn, Ipv6Addr};
 
 /// Length of the fixed IPv6 header.
 pub const IPV6_HEADER_LEN: usize = 40;
@@ -171,6 +171,19 @@ impl Ipv6Header {
         header[8..24].copy_from_slice(&self.source.octets());
         header[24..40].copy_from_slice(&self.destination.octets());
         Some(IPV6_HEADER_LEN)
+    }
+
+    /// The ECN codepoint (RFC 3168 §5) carried in the low two bits of the
+    /// Traffic Class field.
+    #[must_use]
+    pub const fn ecn(&self) -> Ecn {
+        Ecn::from_bits(self.traffic_class)
+    }
+
+    /// Set the ECN codepoint, preserving the DSCP (high six bits) of the
+    /// Traffic Class.
+    pub fn set_ecn(&mut self, ecn: Ecn) {
+        self.traffic_class = (self.traffic_class & !0b11) | ecn.bits();
     }
 }
 

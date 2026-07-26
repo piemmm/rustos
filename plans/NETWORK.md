@@ -1871,6 +1871,41 @@ connection does not linger forever against a silently-dead peer.
   `netstack` (`listen_config` template) and `lib/sysconfig`/`devmgr`
   (registry + mapping).
 
+#### N13 — RFC 3168 Explicit Congestion Notification `[~]`
+
+The pure `lib/net` ECN engine and its full data-path threading are landed
+and host-gate-green; the operator toggle and a live QEMU vertical remain
+(staged below, the N5a/N6b-2-α engine-first precedent).
+
+- **Shared codepoint** (`addr::Ecn`, done): the RFC 3168 §5 two-bit
+  codepoint (`NotEct`/`Ect1`/`Ect0`/`Ce`), one definition both IP families
+  express — the IPv4 `Ipv4Header.ecn` field (low two bits of the TOS byte,
+  DSCP written zero) and the IPv6 `Ipv6Header::ecn()`/`set_ecn()` accessors
+  (low two bits of Traffic Class, DSCP preserved). Round-trip host-tested.
+- **Congestion response** (`tcp::cc`, done): a `CongestionControl::on_ecn`
+  signal whose default defers to `on_loss` (the same multiplicative
+  decrease with no retransmission), so CUBIC and NewReno both respond
+  without a second code path.
+- **Connection engine** (`tcp::conn`, done): `TcpConfig::enable_ecn` (off
+  by default). Negotiation (ECN-setup SYN with ECE+CWR; SYN-ACK with ECE
+  alone; `ecn_ok` set only on the exact exchange, falling back otherwise),
+  receiver CE→ECE echo until the peer's CWR (§6.1.3), sender ECE→once-per-
+  window `on_ecn` reduction + CWR on the next fresh data (§6.1.2), and
+  ECT(0) marking of fresh data only (never control, retransmissions, or
+  window probes, §5.2/§6.1.6). `OutSegment.ecn` carries the codepoint to
+  the framer; `on_segment` takes the received codepoint.
+- **Stack + service** (done): `Stack::send_tcp` stamps the codepoint into
+  the IP header and `StackEvent::TcpSegment` surfaces the received one; the
+  `netstack` `SocketService`/`Listener` thread it end to end. Host-tested
+  in `tcp_conn_tests` (negotiation, CE echo, ECE reduction + CWR, once-per-
+  window, fallback), `stack_tests` (ECT(0) on emit, CE surfaced on
+  receive), and `ipv4_tests`/`ipv6_tests`/`addr` (codepoint round trips).
+- **Remaining**: the stack-wide `net.tcp.ecn` operator policy (mirroring
+  `net.tcp.keepalive` N12 through `lib/sysconfig` → `NetworkSettings` →
+  `devmgr::netcfg` → `netstack` connect/listen seeding, plus the
+  `configure` Help locales and docs), and a live two-process QEMU vertical
+  asserting ECT(0)/CE on the wire.
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,
