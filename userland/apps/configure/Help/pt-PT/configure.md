@@ -68,6 +68,11 @@ afetado — nunca altera um resultado.
   nunca sonda nem fecha uma ligação inativa; `true` sonda um par
   inativo após o intervalo habitual e fecha a ligação se este deixar de
   responder.
+- `net.tcp.ecn` — `true` ou `false`: se as ligações TCP negoceiam a
+  notificação explícita de congestão (ECN). `false` (a predefinição)
+  deixa as ligações Not-ECT; `true` oferece ECN no aperto de mão e, a
+  seguir, trata uma marca de congestão como um sinal para abrandar em
+  vez de forçar a perda de um pacote.
 
 A pilha de rede lê as definições `net.*`; uma alteração produz efeito
 quando a pilha aplica novamente a sua configuração.

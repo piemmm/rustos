@@ -2374,6 +2374,7 @@ fn apply_network_settings_requires_cap_net_admin() {
         syncookies_always: true,
         ipv6_privacy: false,
         tcp_keepalive: false,
+        tcp_ecn: false,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     // A broker capability (introspect) is not admin authority.
@@ -2405,6 +2406,7 @@ fn apply_network_settings_is_applied_and_audited() {
         syncookies_always: true,
         ipv6_privacy: false,
         tcp_keepalive: true,
+        tcp_ecn: true,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     let len = serve(
@@ -2423,6 +2425,7 @@ fn apply_network_settings_is_applied_and_audited() {
     assert!(!settings.ipv4_enabled);
     assert!(settings.ipv6_enabled);
     assert!(settings.syncookies_always);
+    assert!(settings.tcp_ecn);
 }
 
 #[test]
@@ -2436,6 +2439,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
             syncookies_always: false,
             ipv6_privacy: false,
             tcp_keepalive: false,
+            tcp_ecn: false,
         },
         t(2),
     );
@@ -2503,6 +2507,7 @@ fn applying_settings_reconfigures_an_existing_interface() {
             syncookies_always: false,
             ipv6_privacy: false,
             tcp_keepalive: false,
+            tcp_ecn: false,
         },
         t(2),
     );
@@ -2878,36 +2883,47 @@ fn interface_config_rejects_an_alias_already_taken() {
 }
 
 #[test]
-fn listen_config_maps_the_syncookie_and_keepalive_policy() {
+fn listen_config_maps_the_syncookie_keepalive_and_ecn_policy() {
     use crate::socket::listen_config;
     use tairix_net::tcp::listen::ListenConfig;
     // `always` holds no half-open state (every SYN → stateless cookie); with
-    // keepalive on, accepted connections carry it in their template.
+    // keepalive and ECN on, accepted connections carry both in their template.
     let always = listen_config(NetworkSettings {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: true,
         ipv6_privacy: false,
         tcp_keepalive: true,
+        tcp_ecn: true,
     });
     assert_eq!(always.max_half_open, 0);
     assert!(
         always.template.enable_keepalive,
         "net.tcp.keepalive true enables keepalive on accepted connections"
     );
-    // `auto` keeps the bounded default backlog; keepalive off leaves the
-    // template's keepalive disabled (RFC 1122 §4.2.3.6 default).
+    assert!(
+        always.template.enable_ecn,
+        "net.tcp.ecn true negotiates ECN on accepted connections"
+    );
+    // `auto` keeps the bounded default backlog; keepalive and ECN off leave
+    // the template's keepalive disabled (RFC 1122 §4.2.3.6 default) and the
+    // connection Not-ECT.
     let auto = listen_config(NetworkSettings {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: false,
         ipv6_privacy: false,
         tcp_keepalive: false,
+        tcp_ecn: false,
     });
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
     assert!(
         !auto.template.enable_keepalive,
         "net.tcp.keepalive false leaves accepted connections unprobed"
+    );
+    assert!(
+        !auto.template.enable_ecn,
+        "net.tcp.ecn false leaves accepted connections Not-ECT"
     );
 }
 

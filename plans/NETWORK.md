@@ -1490,9 +1490,10 @@ the whole is too large for one change and each leaves the tree working.
 
 #### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[x]`
 - **ABI** (`lib/abi/src/net_ipc.rs`): `NetworkSettings { ipv4_enabled,
-  ipv6_enabled, syncookies_always, ipv6_privacy, tcp_keepalive }` (a
-  `Default` matching the sysconfig defaults; `tcp_keepalive` added by N12)
-  and `NetstackRequest::ApplyNetworkSettings` (op 10),
+  ipv6_enabled, syncookies_always, ipv6_privacy, tcp_keepalive, tcp_ecn }`
+  (a `Default` matching the sysconfig defaults; `tcp_keepalive` added by
+  N12, `tcp_ecn` by N13) and `NetstackRequest::ApplyNetworkSettings`
+  (op 10),
   fail-closed encode/decode (booleans are exactly 0/1) + round-trip tests.
   `net.ipv6.privacy` maps to `ipv6_privacy` and is enforced by the RFC 8981
   temporary-address engine (see N10).
@@ -1873,9 +1874,11 @@ connection does not linger forever against a silently-dead peer.
 
 #### N13 — RFC 3168 Explicit Congestion Notification `[~]`
 
-The pure `lib/net` ECN engine and its full data-path threading are landed
-and host-gate-green; the operator toggle and a live QEMU vertical remain
-(staged below, the N5a/N6b-2-α engine-first precedent).
+The pure `lib/net` ECN engine, its full data-path threading, and the
+stack-wide operator toggle are landed and host-gate-green; a live QEMU
+vertical asserting ECT(0)/CE on the wire remains staged (the N5a/N6b-2-α
+engine-first precedent; N12 keepalive likewise shipped without a bespoke
+live vertical, exercised by the existing autoload verticals' default path).
 
 - **Shared codepoint** (`addr::Ecn`, done): the RFC 3168 §5 two-bit
   codepoint (`NotEct`/`Ect1`/`Ect0`/`Ce`), one definition both IP families
@@ -1900,11 +1903,21 @@ and host-gate-green; the operator toggle and a live QEMU vertical remain
   in `tcp_conn_tests` (negotiation, CE echo, ECE reduction + CWR, once-per-
   window, fallback), `stack_tests` (ECT(0) on emit, CE surfaced on
   receive), and `ipv4_tests`/`ipv6_tests`/`addr` (codepoint round trips).
-- **Remaining**: the stack-wide `net.tcp.ecn` operator policy (mirroring
-  `net.tcp.keepalive` N12 through `lib/sysconfig` → `NetworkSettings` →
-  `devmgr::netcfg` → `netstack` connect/listen seeding, plus the
-  `configure` Help locales and docs), and a live two-process QEMU vertical
-  asserting ECT(0)/CE on the wire.
+- **Stack-wide policy** (done): the `net.tcp.ecn` operator toggle is wired
+  end to end exactly like `net.tcp.keepalive` (N12) — a `net.tcp.ecn`
+  `NetToggle` key in the `lib/sysconfig` `net.*` registry (§6.2, off by
+  default), the `tcp_ecn` boolean on `NetworkSettings`
+  (`lib/abi/src/net_ipc.rs`, wire byte 13, reserved tail from byte 14,
+  fail-closed encode/decode + round-trip/dirty-tail tests), the
+  `devmgr::netcfg::settings_from_config` mapping, and `netstack` seeding
+  `enable_ecn` on both connection paths — `socket.rs::connect_stream`
+  (outbound `TcpConfig`) and `listen_config` (the listener's
+  accepted-connection `template`) — from the delivered settings. Read at
+  connect/`listen` time like keepalive, so no per-interface re-application.
+  All 13 `configure` Help locales + README + docs/src updated.
+- **Remaining**: a live two-process QEMU vertical asserting ECT(0)/CE on
+  the wire (staged; the default ECN-off path is already covered by the
+  existing autoload verticals).
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
@@ -2007,6 +2020,12 @@ tree, exactly like `os.*`:
   probing on idle connections; off by default (RFC 1122 §4.2.3.6). When
   on, both actively-opened and accepted connections probe an idle peer
   and are torn down if it stops answering (N12).
+- `net.tcp.ecn` (`true`|`false`) — RFC 3168 Explicit Congestion
+  Notification negotiation; off by default (connections are Not-ECT).
+  When on, both actively-opened and accepted connections offer ECN in
+  the handshake and, once negotiated, mark eligible segments ECT(0) and
+  react to a CE mark as a congestion signal instead of forcing a drop
+  (N13).
 - Per-interface settings live in `network.conf` (6.1), never in
   `system.conf`; `configure net.<key> <value>` edits the stack-wide
   registry, and `configure` grows no interface sub-grammar — interface

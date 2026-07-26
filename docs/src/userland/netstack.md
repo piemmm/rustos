@@ -85,11 +85,11 @@ hardware identity — and state on `CAP_SYSINFO_GLOBAL`).
 capability (`plans/NETWORK.md` §0), so it never reads `system.conf`
 itself. The FS-capable device manager reads the `net.*` registry keys
 (`lib/sysconfig`, §6.2 — `net.ipv4.enabled`, `net.ipv6.enabled`,
-`net.tcp.syncookies`, `net.ipv6.privacy`, `net.tcp.keepalive`) after the
-root unlock and delivers them once over the `CAP_NET_ADMIN`
-`ApplyNetworkSettings` admin op (audited, fail-soft-retried;
+`net.tcp.syncookies`, `net.ipv6.privacy`, `net.tcp.keepalive`,
+`net.tcp.ecn`) after the root unlock and delivers them once over the
+`CAP_NET_ADMIN` `ApplyNetworkSettings` admin op (audited, fail-soft-retried;
 `plans/NETWORK.md` N9b-2). Until it arrives the stack holds safe defaults
-(both families enabled, SYN cookies `auto`, keepalive off).
+(both families enabled, SYN cookies `auto`, keepalive off, ECN off).
 
 The policy is enforced, not advisory:
 
@@ -113,6 +113,15 @@ The policy is enforced, not advisory:
   §4.2.3.6) never probes and never drops an idle connection for
   inactivity. Like the SYN-cookie mode it is read at connect/`listen`
   time, so it needs no per-interface re-application.
+- **`net.tcp.ecn true`** enables RFC 3168 Explicit Congestion
+  Notification on every new connection, actively opened and accepted
+  alike (the outbound `TcpConfig` and each listener's accepted-connection
+  template): the connection offers ECN in its SYN/SYN-ACK and, once
+  negotiated, marks eligible segments ECT(0) and treats a CE mark as a
+  congestion signal (a loss-equivalent window reduction with no
+  retransmission) instead of forcing a drop. `false` (the default)
+  leaves connections Not-ECT. Like keepalive it is read at
+  connect/`listen` time, so it needs no per-interface re-application.
 - **`net.ipv6.privacy true`** forms RFC 8981 temporary (privacy) IPv6
   addresses: alongside the stable SLAAC address of each autonomous
   prefix, the interface adds a short-lived address with a randomised

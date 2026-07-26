@@ -1012,6 +1012,9 @@ impl SocketService {
             // Probe an idle peer only when the stack-wide `net.tcp.keepalive`
             // policy is enabled (off by default, RFC 1122 §4.2.3.6).
             enable_keepalive: interfaces.settings().tcp_keepalive,
+            // Negotiate RFC 3168 ECN only when the stack-wide `net.tcp.ecn`
+            // policy is enabled (off by default; connections stay Not-ECT).
+            enable_ecn: interfaces.settings().tcp_ecn,
             ..TcpConfig::default()
         };
         let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
@@ -1814,7 +1817,9 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
 /// default backlog, falling back to cookies only once it overflows.
 /// `net.tcp.keepalive` sets the accepted-connection template's
 /// `enable_keepalive`, so an inbound connection is probed on an idle link
-/// exactly as an outbound one is.
+/// exactly as an outbound one is. `net.tcp.ecn` likewise sets the
+/// template's `enable_ecn`, so an accepted connection negotiates RFC 3168
+/// ECN exactly as an outbound one does.
 pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
     ListenConfig {
         max_half_open: if settings.syncookies_always {
@@ -1824,6 +1829,7 @@ pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
         },
         template: TcpConfig {
             enable_keepalive: settings.tcp_keepalive,
+            enable_ecn: settings.tcp_ecn,
             ..TcpConfig::default()
         },
         ..ListenConfig::default()

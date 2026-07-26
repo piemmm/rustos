@@ -57,6 +57,11 @@
 //!   enabled, every connection is probed after the standard idle interval and
 //!   torn down if the peer stops answering; `false` (RFC 1122 §4.2.3.6) never
 //!   probes and never tears an idle connection down for inactivity.
+//! * `net.tcp.ecn` — `true` or `false` (default): whether TCP connections
+//!   negotiate RFC 3168 Explicit Congestion Notification. When enabled, a
+//!   connection offers ECN in its SYN/SYN-ACK and, once negotiated, marks
+//!   eligible segments ECT(0) and treats a CE mark as a congestion signal
+//!   instead of forcing a drop; `false` leaves connections Not-ECT.
 //!
 //! # Security
 //!
@@ -369,6 +374,8 @@ pub enum Key {
     NetTcpSynCookies,
     /// `net.tcp.keepalive` — the stack-wide TCP keepalive switch.
     NetTcpKeepalive,
+    /// `net.tcp.ecn` — the stack-wide RFC 3168 TCP ECN switch.
+    NetTcpEcn,
 }
 
 impl Key {
@@ -385,6 +392,7 @@ impl Key {
         Self::NetIpv6Privacy,
         Self::NetTcpSynCookies,
         Self::NetTcpKeepalive,
+        Self::NetTcpEcn,
     ];
 
     /// The canonical key spelling.
@@ -402,6 +410,7 @@ impl Key {
             Self::NetIpv6Privacy => "net.ipv6.privacy",
             Self::NetTcpSynCookies => "net.tcp.syncookies",
             Self::NetTcpKeepalive => "net.tcp.keepalive",
+            Self::NetTcpEcn => "net.tcp.ecn",
         }
     }
 
@@ -427,7 +436,7 @@ impl Key {
                 &["true", "false"]
             }
             Self::NetTcpSynCookies => &["auto", "always"],
-            Self::NetTcpKeepalive => &["true", "false"],
+            Self::NetTcpKeepalive | Self::NetTcpEcn => &["true", "false"],
         }
     }
 }
@@ -502,6 +511,10 @@ pub struct SystemConfig {
     /// §4.2.3.6): an idle connection is never probed unless the operator opts
     /// in.
     pub net_tcp_keepalive: NetToggle,
+    /// Whether TCP connections negotiate RFC 3168 Explicit Congestion
+    /// Notification (`net.tcp.ecn`). Disabled by default: connections are
+    /// Not-ECT unless the operator opts in.
+    pub net_tcp_ecn: NetToggle,
 }
 
 impl Default for SystemConfig {
@@ -524,6 +537,7 @@ impl Default for SystemConfig {
             net_ipv6_privacy: NetToggle::Disabled,
             net_tcp_syncookies: SynCookies::default(),
             net_tcp_keepalive: NetToggle::Disabled,
+            net_tcp_ecn: NetToggle::Disabled,
         }
     }
 }
@@ -589,6 +603,7 @@ impl SystemConfig {
             Key::NetIpv6Privacy => self.net_ipv6_privacy.as_str(),
             Key::NetTcpSynCookies => self.net_tcp_syncookies.as_str(),
             Key::NetTcpKeepalive => self.net_tcp_keepalive.as_str(),
+            Key::NetTcpEcn => self.net_tcp_ecn.as_str(),
         }
     }
 
@@ -662,6 +677,9 @@ impl SystemConfig {
             Key::NetTcpKeepalive => {
                 self.net_tcp_keepalive =
                     NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::NetTcpEcn => {
+                self.net_tcp_ecn = NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
         }
         Ok(())
@@ -807,6 +825,7 @@ mod tests {
                                     net_ipv6_privacy: NetToggle::Enabled,
                                     net_tcp_syncookies: syncookies,
                                     net_tcp_keepalive: keepalive,
+                                    net_tcp_ecn: NetToggle::Enabled,
                                 };
                                 assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
                             }
@@ -831,6 +850,9 @@ mod tests {
         // Keepalive is off by default (RFC 1122 §4.2.3.6).
         assert_eq!(config.net_tcp_keepalive, NetToggle::Disabled);
         assert!(!config.net_tcp_keepalive.is_enabled());
+        // ECN is off by default (RFC 3168): connections are Not-ECT.
+        assert_eq!(config.net_tcp_ecn, NetToggle::Disabled);
+        assert!(!config.net_tcp_ecn.is_enabled());
     }
 
     #[test]
@@ -840,7 +862,8 @@ mod tests {
              net.ipv6.enabled true\n\
              net.ipv6.privacy true\n\
              net.tcp.syncookies always\n\
-             net.tcp.keepalive true\n",
+             net.tcp.keepalive true\n\
+             net.tcp.ecn true\n",
         )
         .expect("parses");
         assert_eq!(config.net_ipv4_enabled, NetToggle::Disabled);
@@ -848,6 +871,7 @@ mod tests {
         assert_eq!(config.net_ipv6_privacy, NetToggle::Enabled);
         assert_eq!(config.net_tcp_syncookies, SynCookies::Always);
         assert_eq!(config.net_tcp_keepalive, NetToggle::Enabled);
+        assert_eq!(config.net_tcp_ecn, NetToggle::Enabled);
     }
 
     #[test]

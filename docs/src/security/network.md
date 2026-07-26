@@ -59,14 +59,15 @@ one range test. The assigned identifiers:
 | `16_012` | `INBOUND_ECHO_SERVED` | Info | An inbound ICMP/ICMPv6 echo to a local interface was answered. |
 | `16_013` | `SOCKET_LISTENING` | Info | A stream socket entered the passive LISTEN state. |
 | `16_014` | `SOCKET_ACCEPTED` | Info | A passive connection was accepted onto a child stream socket. |
-| `16_015` | `NETWORK_SETTINGS_APPLIED` | Info | The stack-wide `net.*` policy (family enable, SYN-cookie mode, IPv6 privacy, TCP keepalive) was applied over the `ApplyNetworkSettings` admin op. |
+| `16_015` | `NETWORK_SETTINGS_APPLIED` | Info | The stack-wide `net.*` policy (family enable, SYN-cookie mode, IPv6 privacy, TCP keepalive, TCP ECN) was applied over the `ApplyNetworkSettings` admin op. |
 | `16_016` | `INTERFACE_CONFIG_APPLIED` | Info | A per-interface `network.conf` configuration (static addressing, MTU, family enable) was applied over the `NetInterfaceConfigMsg` admin message. |
 | `16_017` | `BOND_CONFIG_APPLIED` | Info | A bond (link-aggregation) interface was composed or reconfigured over the `NetBondConfigMsg` admin message (members, mode, primary, monitor interval). |
 | `16_018` | `BOND_CONFIG_REFUSED` | Warn | A bond-configuration request passed the capability check but was refused (a member not present yet, an alias clash, or validation) — the bond is left untouched (fail closed). |
 | `16_019` | `BOND_FAILOVER` | Info | A bond's transmit path changed member (failover or deliberate failback); the bond re-announced its presence so peers relearn the path — a dead member is a visible, audited fact. |
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
-`net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`) is read from
+`net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,
+`net.tcp.ecn`) is read from
 `system.conf` and delivered to
 `netstack` by the FS-capable device manager, which records the delivery
 in its own `devmgr` range: `13_012` `NETWORK_SETTINGS_DELIVERED` (Info,

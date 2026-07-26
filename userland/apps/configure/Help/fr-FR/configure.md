@@ -70,6 +70,11 @@ travail concerné — cela ne change jamais un résultat.
   défaut) ne sonde jamais et ne ferme jamais une connexion inactive ;
   `true` sonde un pair inactif après l'intervalle habituel et ferme la
   connexion s'il cesse de répondre.
+- `net.tcp.ecn` — `true` ou `false` : si les connexions TCP négocient
+  la notification explicite de congestion (ECN). `false` (par défaut)
+  laisse les connexions Not-ECT ; `true` propose ECN dans la poignée de
+  main puis traite une marque de congestion comme un signal de
+  ralentissement au lieu de forcer une perte de paquet.
 
 La pile réseau lit les réglages `net.*` ; une modification prend effet
 lorsque la pile applique de nouveau sa configuration.

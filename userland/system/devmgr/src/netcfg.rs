@@ -53,8 +53,9 @@ pub trait NetworkConfigSource {
 /// its tests use (`AGENTS.md` §2.2): `net.ipv4.enabled` / `net.ipv6.enabled`
 /// gate the families, `net.tcp.syncookies always` selects unconditional SYN
 /// cookies (`auto` leaves the bounded backlog), `net.ipv6.privacy` enables
-/// RFC 8981 temporary (privacy) IPv6 addresses, and `net.tcp.keepalive`
-/// enables RFC 9293 §3.8.4 TCP keepalive probing on idle connections.
+/// RFC 8981 temporary (privacy) IPv6 addresses, `net.tcp.keepalive`
+/// enables RFC 9293 §3.8.4 TCP keepalive probing on idle connections, and
+/// `net.tcp.ecn` enables RFC 3168 Explicit Congestion Notification.
 #[cfg(feature = "program")]
 #[must_use]
 pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkSettings {
@@ -67,6 +68,7 @@ pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkS
         ),
         ipv6_privacy: config.net_ipv6_privacy.is_enabled(),
         tcp_keepalive: config.net_tcp_keepalive.is_enabled(),
+        tcp_ecn: config.net_tcp_ecn.is_enabled(),
     }
 }
 
@@ -698,7 +700,7 @@ mod tests {
         }
     }
 
-    // A flat test builder mirroring the five independent wire flags of
+    // A flat test builder mirroring the six independent wire flags of
     // `NetworkSettings`; an enum would only obscure the mapping the test
     // is asserting.
     #[allow(clippy::fn_params_excessive_bools)]
@@ -708,6 +710,7 @@ mod tests {
         cookies: bool,
         privacy: bool,
         keepalive: bool,
+        ecn: bool,
     ) -> NetworkSettings {
         NetworkSettings {
             ipv4_enabled: v4,
@@ -715,6 +718,7 @@ mod tests {
             syncookies_always: cookies,
             ipv6_privacy: privacy,
             tcp_keepalive: keepalive,
+            tcp_ecn: ecn,
         }
     }
 
@@ -724,16 +728,17 @@ mod tests {
         let mut config = tairix_sysconfig::SystemConfig::default();
         assert_eq!(
             settings_from_config(&config),
-            settings(true, true, false, false, false),
-            "the registry defaults map to families-on, cookies-auto, privacy-off, keepalive-off"
+            settings(true, true, false, false, false, false),
+            "the registry defaults map to families-on, cookies-auto, privacy-off, keepalive-off, ecn-off"
         );
         config.net_ipv6_enabled = tairix_sysconfig::NetToggle::Disabled;
         config.net_tcp_syncookies = tairix_sysconfig::SynCookies::Always;
         config.net_ipv6_privacy = tairix_sysconfig::NetToggle::Enabled;
         config.net_tcp_keepalive = tairix_sysconfig::NetToggle::Enabled;
+        config.net_tcp_ecn = tairix_sysconfig::NetToggle::Enabled;
         assert_eq!(
             settings_from_config(&config),
-            settings(true, false, true, true, true)
+            settings(true, false, true, true, true, true)
         );
     }
 
@@ -754,7 +759,7 @@ mod tests {
 
     #[test]
     fn a_read_policy_is_delivered_once() {
-        let policy = settings(true, false, true, true, true);
+        let policy = settings(true, false, true, true, true, true);
         let mut source = ScriptedSource::new(alloc::vec![Some(policy), Some(policy)]);
         let mut state = NetConfigState::new();
         let mut netstack = RecordingNetstack::new(alloc::vec![Ok(()), Ok(())]);
@@ -773,7 +778,7 @@ mod tests {
 
     #[test]
     fn a_refused_delivery_is_retried() {
-        let policy = settings(false, true, false, false, false);
+        let policy = settings(false, true, false, false, false, false);
         let mut source = ScriptedSource::new(alloc::vec![Some(policy), Some(policy)]);
         let mut state = NetConfigState::new();
         // First apply refused (stack not up yet), second accepted.

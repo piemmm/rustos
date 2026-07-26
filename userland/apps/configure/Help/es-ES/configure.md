@@ -67,6 +67,11 @@ afectado — nunca cambia un resultado.
   predeterminada) nunca sondea ni cierra una conexión inactiva; `true`
   sondea a un par inactivo tras el intervalo habitual y cierra la
   conexión si deja de responder.
+- `net.tcp.ecn` — `true` o `false`: si las conexiones TCP negocian la
+  notificación explícita de congestión (ECN). `false` (la
+  predeterminada) deja las conexiones Not-ECT; `true` ofrece ECN en el
+  saludo y luego trata una marca de congestión como una señal para
+  reducir la velocidad en lugar de forzar la pérdida de un paquete.
 
 La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
 la pila vuelve a aplicar su configuración.

@@ -65,6 +65,11 @@ never changes a result.
   probes and never tears an idle connection down for inactivity;
   `true` probes an idle peer after the standard idle interval and
   drops the connection if the peer stops answering.
+- `net.tcp.ecn` — `true` or `false`: whether TCP connections negotiate
+  Explicit Congestion Notification. `false` (the default) leaves
+  connections Not-ECT; `true` offers ECN in the handshake and, once
+  negotiated, treats a congestion mark as a signal to slow down instead
+  of forcing a packet drop.
 
 The `net.*` settings are read by the network stack; a change takes
 effect when the stack next applies its configuration.
