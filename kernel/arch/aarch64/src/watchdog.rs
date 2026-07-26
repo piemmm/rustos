@@ -641,14 +641,14 @@ fn read_cntpct() -> u64 {
     feature = "watchdog-diagnostics"
 ))]
 unsafe fn route_watchdog_group0() {
-    // SAFETY: GIC up per this fn's contract; these configure only this
-    // CPU's banked group bit and CPU-interface control register.
+    // SAFETY: GIC up per this fn's contract; this moves every interrupt
+    // but the cadence PPI into Group 1 (IRQ), leaves the cadence PPI in
+    // Group 0, and enables both groups + AckCtl + FIQEn on this CPU. Only
+    // the cadence PPI is then delivered as an FIQ; the preemption timer and
+    // device SPIs stay ordinary IRQs (without this the global FIQEn would
+    // route them all to the unserviced FIQ vector and storm the core).
     unsafe {
-        crate::gic::set_group0(WATCHDOG_PPI);
-        let ctlr = crate::gic::read_gicc_ctlr();
-        crate::gic::write_gicc_ctlr(
-            ctlr | crate::gic::GICC_CTLR_ENABLE_GRP0 | crate::gic::GICC_CTLR_FIQEN,
-        );
+        crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
     }
 }
 
@@ -725,11 +725,7 @@ pub unsafe fn probe_fiq_deliverability(counter_hz: u64) -> FeatureSupport {
     // wait below discovers FIQ is undeliverable.
     unsafe {
         crate::gic::enable_ppi(WATCHDOG_PPI);
-        crate::gic::set_group0(WATCHDOG_PPI);
-        crate::gic::write_gicd_ctlr(saved_dist_ctlr | 0b11);
-        crate::gic::write_gicc_ctlr(
-            saved_cpu_ctlr | crate::gic::GICC_CTLR_ENABLE_GRP0 | crate::gic::GICC_CTLR_FIQEN,
-        );
+        crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
     }
 
     FIQ_TAKEN.store(false, Ordering::Relaxed);

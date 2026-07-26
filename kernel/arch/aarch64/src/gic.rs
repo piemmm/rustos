@@ -182,6 +182,17 @@ pub fn configure_from_fdt<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
 /// `GICD_CTLR` — distributor control (offset 0x000). Bit 0 enables
 /// forwarding of pending interrupts to the CPU interfaces.
 const GICD_CTLR: usize = 0x000;
+/// `GICD_TYPER` — distributor type (offset 0x004). Bits `[4:0]`
+/// (`ITLinesNumber`) give the implemented interrupt-line count as
+/// `32 * (ITLinesNumber + 1)`, i.e. `ITLinesNumber + 1` one-bit-per-
+/// interrupt group words. Read to bound the Group-1 sweep the debug FIQ
+/// self-sample performs to the lines this GIC actually implements.
+const GICD_TYPER: usize = 0x004;
+/// `ITLinesNumber` field mask within `GICD_TYPER` (bits `[4:0]`).
+const GICD_TYPER_ITLINES_MASK: u32 = 0x1F;
+/// The all-ones `IGROUPR` word placing every interrupt in **Group 1** (a
+/// set bit is Group 1; see [`GICD_IGROUPR`]).
+const GROUP1_ALL: u32 = 0xFFFF_FFFF;
 /// `GICD_ISENABLER<n>` — set-enable, one bit per interrupt (base 0x100).
 const GICD_ISENABLER: usize = 0x100;
 /// `GICD_ICENABLER<n>` — clear-enable, one bit per interrupt (base
@@ -251,6 +262,20 @@ pub const GICC_CTLR_ENABLE_GRP0: u32 = 1 << 0;
 /// `GICC_CTLR.FIQEn` (bit 3, single-Security-state view): route Group 0
 /// interrupts to the FIQ signal. See [`GICC_CTLR_ENABLE_GRP0`].
 pub const GICC_CTLR_FIQEN: u32 = 1 << 3;
+/// `GICC_CTLR.EnableGrp1` (bit 1, single-Security-state view): forward
+/// Group 1 interrupts to the CPU as IRQ. The debug FIQ self-sample moves
+/// every interrupt but its cadence PPI into Group 1 (so only that PPI is
+/// delivered as an FIQ), so Group 1 must be enabled for those ordinary IRQs
+/// to keep firing.
+pub const GICC_CTLR_ENABLE_GRP1: u32 = 1 << 1;
+/// `GICC_CTLR.AckCtl` (bit 2, single-Security-state view). With it clear a
+/// `GICC_IAR` read returns the reserved id 1022 for a Group 1 interrupt
+/// (which must instead be acknowledged through the aliased `GICC_AIAR`);
+/// with it **set**, `GICC_IAR` acknowledges Group 1 interrupts too. The
+/// debug FIQ self-sample sets it so the ordinary Group-1 IRQs it creates are
+/// still acknowledged through the one `GICC_IAR`/`GICC_EOIR` path the IRQ
+/// handler already uses, instead of storming as an unhandled id 1022.
+pub const GICC_CTLR_ACKCTL: u32 = 1 << 2;
 
 /// Highest addressable GICv2 INTID. INTIDs `1020..=1023` are reserved by
 /// the spec (1023 is [`SPURIOUS_INTID`]); a controller rejects anything
@@ -575,6 +600,54 @@ impl<M: GicMmio> Gicv2<M> {
         let off = igroupr_offset(intid);
         let word = self.mmio.gicd_read(off) | isenabler_bit(intid);
         self.mmio.gicd_write(off, word);
+    }
+
+    /// Number of implemented one-bit-per-interrupt group words
+    /// (`IGROUPR`), from `GICD_TYPER.ITLinesNumber` (`ITLinesNumber + 1`).
+    /// Bounds the Group-1 sweep to the lines this GIC implements.
+    fn igroupr_word_count(&self) -> usize {
+        let itlines = self.mmio.gicd_read(GICD_TYPER) & GICD_TYPER_ITLINES_MASK;
+        (itlines as usize) + 1
+    }
+
+    /// Route **only** `fiq_intid` to Group 0 (FIQ), keeping every other
+    /// interrupt on Group 1 (IRQ), and enable both groups so the two are
+    /// delivered on their separate signals.
+    ///
+    /// The debug watchdog's non-maskable self-sample needs its cadence PPI
+    /// delivered as an FIQ, but on the GICv2 CPU interface `GICC_CTLR.FIQEn`
+    /// is a *global* switch: it routes **every** Group-0 interrupt to the
+    /// FIQ signal. This board resets every interrupt to Group 0, so enabling
+    /// `FIQEn` alone would deliver the preemption-timer PPI and device SPIs
+    /// as FIQs the FIQ handler does not service — an interrupt storm that
+    /// wedges the core. To deliver a *single* line as FIQ, every other
+    /// interrupt is first moved to Group 1, so only `fiq_intid` stays Group 0
+    /// (FIQ) and the rest signal as ordinary IRQs. `GICC_CTLR.AckCtl` is set
+    /// so those Group-1 IRQs are still acknowledged through the one
+    /// `GICC_IAR`/`GICC_EOIR` path the IRQ handler uses (without it a Group-1
+    /// `GICC_IAR` read returns the reserved id 1022, which would itself
+    /// storm). `IGROUPR0` (INTIDs 0..32) is banked per CPU, so every CPU
+    /// calls this; the SPI words are distributor-global and idempotent.
+    ///
+    /// This leaves the ordinary `init` (single-group, everything as IRQ)
+    /// untouched for the shippable build; only the debug watchdog reaches
+    /// here (`plans/WATCHDOG.md`).
+    pub fn route_selfsample_fiq(&self, fiq_intid: u32) {
+        let words = self.igroupr_word_count();
+        for word in 0..words {
+            self.mmio.gicd_write(GICD_IGROUPR + word * 4, GROUP1_ALL);
+        }
+        self.set_group0(fiq_intid);
+        let cpu = self.mmio.gicc_read(GICC_CTLR)
+            | GICC_CTLR_ENABLE_GRP0
+            | GICC_CTLR_ENABLE_GRP1
+            | GICC_CTLR_ACKCTL
+            | GICC_CTLR_FIQEN;
+        self.mmio.gicc_write(GICC_CTLR, cpu);
+        // The distributor Group-enable bits share the CPU-interface bit
+        // positions (bit 0 = Group 0, bit 1 = Group 1).
+        let dist = self.mmio.gicd_read(GICD_CTLR) | GICC_CTLR_ENABLE_GRP0 | GICC_CTLR_ENABLE_GRP1;
+        self.mmio.gicd_write(GICD_CTLR, dist);
     }
 
     /// Read the CPU-interface control register `GICC_CTLR`.
@@ -936,6 +1009,24 @@ pub unsafe fn write_gicd_ctlr(val: u32) {
     unsafe { volatile_gic() }.write_gicd_ctlr(val);
 }
 
+/// Route only `fiq_intid` to Group 0 / FIQ on the calling CPU while keeping
+/// every other interrupt on Group 1 / IRQ ([`Gicv2::route_selfsample_fiq`]).
+/// Debug watchdog FIQ self-sample only.
+///
+/// # Safety
+///
+/// The distributor must be enabled ([`init`]); the fixed windows are mapped
+/// and owned by the kernel.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+pub unsafe fn route_selfsample_fiq(fiq_intid: u32) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.route_selfsample_fiq(fiq_intid);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1242,40 @@ mod tests {
         // its bit — the fail-closed revert of the probe.
         gic.set_group1(27);
         assert_eq!(gic.mmio.gicd_read(igroupr_offset(27)), 1 << 27);
+    }
+
+    #[test]
+    fn route_selfsample_fiq_isolates_one_line_to_group0_and_keeps_the_rest_irq() {
+        // The debug watchdog delivers its cadence PPI as a Group-0 FIQ by
+        // setting the *global* GICC_CTLR.FIQEn, which routes every Group-0
+        // interrupt to FIQ. To FIQ a single line without storming the
+        // (unserviced-as-FIQ) preemption timer, every other interrupt must
+        // be Group 1: only `fiq_intid` stays Group 0, the rest are Group 1
+        // (IRQ), both groups are enabled, and AckCtl is set so the Group-1
+        // IRQs still ACK through GICC_IAR instead of returning the reserved
+        // id 1022. The sweep is bounded by GICD_TYPER.ITLinesNumber.
+        let gic = Gicv2::new(MockGicMmio::new());
+        // Report 3 word-blocks (ITLinesNumber = 2 -> words 0..=2).
+        gic.mmio.gicd_write(GICD_TYPER, 2);
+        gic.route_selfsample_fiq(27);
+        // Word 0 is all Group 1 except the watchdog PPI (27), now Group 0.
+        assert_eq!(gic.mmio.gicd_read(GICD_IGROUPR), GROUP1_ALL & !(1u32 << 27));
+        // The remaining implemented words are all Group 1.
+        assert_eq!(gic.mmio.gicd_read(GICD_IGROUPR + 4), GROUP1_ALL);
+        assert_eq!(gic.mmio.gicd_read(GICD_IGROUPR + 8), GROUP1_ALL);
+        // A word beyond the implemented count is never touched.
+        assert_eq!(gic.mmio.gicd_read(GICD_IGROUPR + 12), 0);
+        // The CPU interface enables both groups + AckCtl + FIQEn.
+        let cpu = gic.mmio.gicc_read(GICC_CTLR);
+        assert_eq!(
+            cpu,
+            GICC_CTLR_ENABLE_GRP0 | GICC_CTLR_ENABLE_GRP1 | GICC_CTLR_ACKCTL | GICC_CTLR_FIQEN
+        );
+        // The distributor forwards both groups.
+        assert_eq!(
+            gic.mmio.gicd_read(GICD_CTLR),
+            GICC_CTLR_ENABLE_GRP0 | GICC_CTLR_ENABLE_GRP1
+        );
     }
 
     #[test]
