@@ -966,6 +966,7 @@ fn deliver_inbound_frame(
         if let StackEvent::TcpSegment {
             source,
             destination,
+            ecn,
             segment,
         } = event
         {
@@ -976,7 +977,7 @@ fn deliver_inbound_frame(
                         destination: *d,
                     };
                     if let Some(seg) = TcpSegment::parse(pseudo, segment) {
-                        tcb.on_segment(&seg, now);
+                        tcb.on_segment(&seg, *ecn, now);
                     }
                 }
             }
@@ -1006,7 +1007,15 @@ fn drive_tcp_egress(
     let dest = IpAddr::V6(guest_v6);
     tcb.poll_transmit(now, |seg| {
         let mut out = StackOutput::default();
-        match stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, now, &mut out) {
+        match stack.send_tcp(
+            dest,
+            &seg.meta,
+            seg.payload,
+            seg.gso_size,
+            seg.ecn,
+            now,
+            &mut out,
+        ) {
             Ok(()) => {
                 send_frames(socket, qemu_sock, &out.frames);
                 true

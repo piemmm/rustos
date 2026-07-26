@@ -39,7 +39,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 
-use crate::addr::IpAddr;
+use crate::addr::{Ecn, IpAddr};
 use crate::tcp::conn::{OutSegment, Tcb, TcpConfig};
 use crate::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use crate::timeutil::{nanos, NEVER};
@@ -295,7 +295,10 @@ impl Listener {
     ) where
         F: FnMut(Peer, OutSegment<'_>) -> bool,
     {
-        self.half_open[index].tcb.on_segment(seg, now);
+        // Handshake segments are never ECN-Capable Transport (RFC 3168
+        // §6.1.1), and the accepted connection's data ECN is handled by the
+        // socket layer, so the listener drives the handshake as Not-ECT.
+        self.half_open[index].tcb.on_segment(seg, Ecn::NotEct, now);
         if self.half_open[index].tcb.is_established() {
             let ho = self.half_open.swap_remove(index);
             if self.accept_queue.len() < self.cfg.max_accept {
@@ -346,7 +349,7 @@ impl Listener {
             let mss_idx = mss_index(seg.options.mss.unwrap_or(DEFAULT_COOKIE_MSS));
             let iss = encode_cookie(secret.mac(&tuple, counter), counter, mss_idx);
             let mut tcb = Tcb::listen(self.cfg.template, self.local_port, peer.port, iss);
-            tcb.on_segment(seg, now);
+            tcb.on_segment(seg, Ecn::NotEct, now);
             tcb.poll_transmit(now, |out| emit(peer, out));
             self.half_open.push(HalfOpen {
                 peer,
@@ -437,12 +440,12 @@ impl Listener {
             options,
             payload: &[],
         };
-        tcb.on_segment(&syn, now);
+        tcb.on_segment(&syn, Ecn::NotEct, now);
         // Commit the resulting SYN-ACK (discarded — the cookie SYN-ACK was
         // already sent) so `snd_nxt` advances to `iss + 1` and the returning
         // ACK is acceptable.
         tcb.poll_transmit(now, |_| true);
-        tcb.on_segment(seg, now);
+        tcb.on_segment(seg, Ecn::NotEct, now);
         if tcb.is_established() {
             Some(tcb)
         } else {
@@ -474,6 +477,7 @@ impl Listener {
                 meta,
                 payload: &[],
                 gso_size: None,
+                ecn: Ecn::NotEct,
             },
         );
     }
@@ -502,6 +506,7 @@ impl Listener {
                 meta,
                 payload: &[],
                 gso_size: None,
+                ecn: Ecn::NotEct,
             },
         ) {
             self.stats.resets_sent += 1;

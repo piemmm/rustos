@@ -2,7 +2,7 @@
 //!
 //! Each renders state an existing kernel subsystem already computes, through
 //! the [`SupervisorHost`](crate::SupervisorHost) seam, and returns
-//! [`Flow::Stay`]. None writes to storage or exposes an arbitrary
+//! `Flow::Stay`. None writes to storage or exposes an arbitrary
 //! physical-address read.
 
 use crate::commands::{arg_str, missing_arg};

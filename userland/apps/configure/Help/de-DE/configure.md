@@ -70,6 +70,11 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   Vorgabe) prüft nie und trennt eine inaktive Verbindung nie; `true`
   prüft einen inaktiven Gegenpart nach dem üblichen Intervall und
   trennt die Verbindung, wenn er nicht mehr antwortet.
+- `net.tcp.ecn` — `true` oder `false`: ob TCP-Verbindungen Explicit
+  Congestion Notification aushandeln. `false` (die Vorgabe) lässt
+  Verbindungen Not-ECT; `true` bietet ECN im Handshake an und behandelt
+  danach eine Überlastmarkierung als Signal zum Drosseln, statt einen
+  Paketverlust zu erzwingen.
 
 Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
 sobald der Stack seine Konfiguration das nächste Mal anwendet.

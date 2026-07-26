@@ -96,7 +96,7 @@ fn drain_to_newline(input: &mut dyn SupInput) {
 /// proceed.
 ///
 /// Entering the console is audited immediately. The loop then prompts, reads,
-/// and dispatches until a control command returns [`Flow::Exit`] (or the
+/// and dispatches until a control command returns `Flow::Exit` (or the
 /// console closes, which resumes the normal boot fail-safe). The line buffer
 /// is zeroed after each command so a typed argument does not linger.
 pub fn run_supervisor(

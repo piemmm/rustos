@@ -20,6 +20,67 @@ use core::num::NonZeroU32;
 
 pub use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// The two-bit ECN codepoint (RFC 3168 §5) carried in the low two bits of
+/// the IPv4 TOS byte and the IPv6 Traffic Class field.
+///
+/// It is one shared vocabulary for both IP versions (the charter's
+/// one-definition rule): the IPv4 header carries it as its own field and
+/// the IPv6 header derives it from its Traffic Class, but both parse and
+/// emit the same four codepoints, and the TCP engine reasons about ECN in
+/// these terms without knowing which family carried the packet.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Ecn {
+    /// `00` — Not ECN-Capable Transport: the packet opts out of ECN and a
+    /// congested router drops it rather than marking it.
+    #[default]
+    NotEct = 0b00,
+    /// `01` — ECN-Capable Transport (1). Equivalent to [`Ecn::Ect0`] for
+    /// transport purposes; RFC 3168 §5 defines both as ECT.
+    Ect1 = 0b01,
+    /// `10` — ECN-Capable Transport (0), the codepoint an ECN-capable
+    /// sender stamps on its data packets so a router may mark instead of
+    /// drop them.
+    Ect0 = 0b10,
+    /// `11` — Congestion Experienced: a router re-marked an ECT packet to
+    /// signal congestion to the receiver (RFC 3168 §5).
+    Ce = 0b11,
+}
+
+impl Ecn {
+    /// The two-bit wire value.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The codepoint encoded by the low two bits of `bits` (any higher
+    /// bits, e.g. the DSCP, are ignored). Total: every input maps to one
+    /// of the four codepoints, so a hostile header can never be rejected
+    /// for its ECN field alone.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        match bits & 0b11 {
+            0b00 => Self::NotEct,
+            0b01 => Self::Ect1,
+            0b10 => Self::Ect0,
+            _ => Self::Ce,
+        }
+    }
+
+    /// Whether this codepoint is ECN-Capable Transport (either ECT value).
+    #[must_use]
+    pub const fn is_ect(self) -> bool {
+        matches!(self, Self::Ect0 | Self::Ect1)
+    }
+
+    /// Whether this codepoint signals Congestion Experienced.
+    #[must_use]
+    pub const fn is_ce(self) -> bool {
+        matches!(self, Self::Ce)
+    }
+}
+
 /// An IPv6 scope per RFC 4007 §5 / RFC 4291 §2.7.
 ///
 /// Discriminants are the multicast `scop` field values, so the derived
@@ -196,6 +257,20 @@ mod tests {
 
     fn zone(index: u32) -> Option<NonZeroU32> {
         NonZeroU32::new(index)
+    }
+
+    #[test]
+    fn ecn_codepoint_round_trips_and_classifies() {
+        for cp in [Ecn::NotEct, Ecn::Ect1, Ecn::Ect0, Ecn::Ce] {
+            assert_eq!(Ecn::from_bits(cp.bits()), cp);
+        }
+        // Only the low two bits are read; DSCP (high bits) is ignored.
+        assert_eq!(Ecn::from_bits(0b1011_0110), Ecn::Ect0);
+        assert_eq!(Ecn::from_bits(0b1111_1111), Ecn::Ce);
+        assert!(Ecn::Ect0.is_ect() && Ecn::Ect1.is_ect());
+        assert!(!Ecn::NotEct.is_ect() && !Ecn::Ce.is_ect());
+        assert!(Ecn::Ce.is_ce() && !Ecn::Ect0.is_ce());
+        assert_eq!(Ecn::default(), Ecn::NotEct);
     }
 
     #[test]

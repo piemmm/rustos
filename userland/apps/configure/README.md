@@ -22,9 +22,10 @@ The registry spans three families: `os.*` (the login default), `cache.*`
 knobs: `net.ipv4.enabled` / `net.ipv6.enabled` (the address-family
 switches), `net.ipv6.privacy` (RFC 8981 temporary IPv6 addresses),
 `net.tcp.syncookies` (`auto` / `always`, the SYN-flood defence — never an
-`off`), and `net.tcp.keepalive` (RFC 9293 §3.8.4 TCP keepalive probing on
-idle connections, off by default). Per-interface network configuration is a
-separate declarative store
+`off`), `net.tcp.keepalive` (RFC 9293 §3.8.4 TCP keepalive probing on
+idle connections, off by default), and `net.tcp.ecn` (RFC 3168 Explicit
+Congestion Notification, off by default). Per-interface network
+configuration is a separate declarative store
 (`/System/Settings/Network/network.conf`, the `lib/netconfig` engine), not
 part of this command.
 

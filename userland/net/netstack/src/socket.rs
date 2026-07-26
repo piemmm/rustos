@@ -41,7 +41,7 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
-use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::stack::StackEvent;
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
@@ -53,11 +53,18 @@ use crate::iface::{FrameBatch, Netstack};
 use crate::service::Caller;
 
 /// One outbound TCP segment drained from a connection: its header, its
-/// owned payload, and the segmentation-offload super-segment size
+/// owned payload, the segmentation-offload super-segment size
 /// ([`OutSegment::gso_size`](tairix_net::tcp::conn::OutSegment::gso_size)) —
 /// `Some(mss)` for an over-size super-segment the device splits, `None`
-/// for an ordinary segment.
-type OutSeg = (TcpSegmentMeta, Vec<u8>, Option<u16>);
+/// for an ordinary segment — and the IP-layer ECN codepoint
+/// ([`OutSegment::ecn`](tairix_net::tcp::conn::OutSegment::ecn)) the
+/// engine asks be stamped on the datagram (RFC 3168 §5).
+type OutSeg = (TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
+
+/// An [`OutSeg`] tagged with the peer address it must be routed to — the
+/// shape a listener's `advance` yields (each retransmitted SYN-ACK may be
+/// destined for a different peer).
+type PeerOutSeg = (IpAddr, TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
 
 /// Largest number of sockets a single principal may hold at once.
 ///
@@ -1005,13 +1012,18 @@ impl SocketService {
             // Probe an idle peer only when the stack-wide `net.tcp.keepalive`
             // policy is enabled (off by default, RFC 1122 §4.2.3.6).
             enable_keepalive: interfaces.settings().tcp_keepalive,
+            // Negotiate RFC 3168 ECN only when the stack-wide `net.tcp.ecn`
+            // policy is enabled (off by default; connections stay Not-ECT).
+            enable_ecn: interfaces.settings().tcp_ecn,
             ..TcpConfig::default()
         };
         let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
         let segs = drain_segments(&mut tcb, now);
         let mut frames = Vec::new();
-        for (meta, payload, gso_size) in &segs {
-            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, now) {
+        for (meta, payload, gso_size, ecn) in &segs {
+            if let Ok(more) =
+                interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, *ecn, now)
+            {
                 frames.extend(more);
             }
         }
@@ -1082,8 +1094,10 @@ impl SocketService {
             segs = drain_segments(&mut conn.tcb, now);
         }
         let mut frames = Vec::new();
-        for (meta, payload, gso_size) in &segs {
-            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, now) {
+        for (meta, payload, gso_size, ecn) in &segs {
+            if let Ok(more) =
+                interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, *ecn, now)
+            {
                 frames.extend(more);
             }
         }
@@ -1105,11 +1119,13 @@ impl SocketService {
     /// authenticates SYN cookies. A segment matching neither is dropped.
     /// It never panics and returns bounded output.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn on_tcp_segment(
         &mut self,
         interfaces: &mut Netstack,
         source: IpAddr,
         destination: IpAddr,
+        ecn: Ecn,
         segment: &[u8],
         now: Duration64,
         secret: &dyn CookieSecret,
@@ -1129,7 +1145,7 @@ impl SocketService {
                     if c.peer.port == src_port && c.peer.addr == src_bytes)
         }) {
             if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
-                conn.tcb.on_segment(&seg, now);
+                conn.tcb.on_segment(&seg, ecn, now);
             }
             let tx = self.pump_stream(interfaces, index, now);
             let deliveries = self.collect_stream_events(index);
@@ -1167,7 +1183,7 @@ impl SocketService {
         let mut emitted: Vec<OutSeg> = Vec::new();
         if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
             listener.on_segment(destination, peer, seg, now, secret, |_peer, out| {
-                emitted.push((out.meta, out.payload.to_vec(), out.gso_size));
+                emitted.push((out.meta, out.payload.to_vec(), out.gso_size, out.ecn));
                 true
             });
         }
@@ -1188,18 +1204,24 @@ impl SocketService {
         lindex: usize,
         now: Duration64,
     ) -> FrameBatch {
-        let mut emitted: Vec<(IpAddr, TcpSegmentMeta, Vec<u8>, Option<u16>)> = Vec::new();
+        let mut emitted: Vec<PeerOutSeg> = Vec::new();
         if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
             listener.advance(now, |peer, out| {
-                emitted.push((peer.addr, out.meta, out.payload.to_vec(), out.gso_size));
+                emitted.push((
+                    peer.addr,
+                    out.meta,
+                    out.payload.to_vec(),
+                    out.gso_size,
+                    out.ecn,
+                ));
                 true
             });
         }
         let mut tx = FrameBatch::new();
-        for (peer_ip, meta, payload, gso_size) in &emitted {
+        for (peer_ip, meta, payload, gso_size, ecn) in &emitted {
             if let Ok((iface, _mss)) = interfaces.egress_mss_for(*peer_ip, now) {
                 if let Ok(frames) =
-                    interfaces.send_tcp_on(iface, *peer_ip, meta, payload, *gso_size, now)
+                    interfaces.send_tcp_on(iface, *peer_ip, meta, payload, *gso_size, *ecn, now)
                 {
                     if !frames.is_empty() {
                         tx.push((iface, frames));
@@ -1682,7 +1704,7 @@ impl SocketService {
 fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<OutSeg> {
     let mut segs = Vec::new();
     tcb.poll_transmit(now, |out| {
-        segs.push((out.meta, out.payload.to_vec(), out.gso_size));
+        segs.push((out.meta, out.payload.to_vec(), out.gso_size, out.ecn));
         true
     });
     segs
@@ -1706,8 +1728,10 @@ fn route_segments_to(
         return FrameBatch::new();
     };
     let mut frames = Vec::new();
-    for (meta, payload, gso_size) in segs {
-        if let Ok(more) = interfaces.send_tcp_on(iface, peer_ip, meta, payload, *gso_size, now) {
+    for (meta, payload, gso_size, ecn) in segs {
+        if let Ok(more) =
+            interfaces.send_tcp_on(iface, peer_ip, meta, payload, *gso_size, *ecn, now)
+        {
             frames.extend(more);
         }
     }
@@ -1793,7 +1817,9 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
 /// default backlog, falling back to cookies only once it overflows.
 /// `net.tcp.keepalive` sets the accepted-connection template's
 /// `enable_keepalive`, so an inbound connection is probed on an idle link
-/// exactly as an outbound one is.
+/// exactly as an outbound one is. `net.tcp.ecn` likewise sets the
+/// template's `enable_ecn`, so an accepted connection negotiates RFC 3168
+/// ECN exactly as an outbound one does.
 pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
     ListenConfig {
         max_half_open: if settings.syncookies_always {
@@ -1803,6 +1829,7 @@ pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
         },
         template: TcpConfig {
             enable_keepalive: settings.tcp_keepalive,
+            enable_ecn: settings.tcp_ecn,
             ..TcpConfig::default()
         },
         ..ListenConfig::default()

@@ -447,13 +447,48 @@ under a pure ACK stream):
   below `ssthresh`, one-MSS-per-RTT additive increase above it, halve on
   loss.
 
-The connection feeds the policy three signals: `on_ack` (new data
+The connection feeds the policy four signals: `on_ack` (new data
 acknowledged — grow), `on_loss` (loss detected by duplicate/selective
 ACKs — multiplicative decrease, applied once per loss window through the
 RFC 6582 `recover` high-water mark so a burst cannot halve the window
-repeatedly), and `on_rto` (a timeout — collapse to one segment and restart
-slow start). During recovery the send rate is governed by the RFC 6675
-`pipe` estimate against `cwnd`, not by window inflation.
+repeatedly), `on_rto` (a timeout — collapse to one segment and restart
+slow start), and `on_ecn` (an explicit congestion mark, RFC 3168 §6.1.2 —
+the same multiplicative decrease as a single loss but with no
+retransmission, since nothing was lost; the default defers to `on_loss` so
+every policy responds without a second code path). During recovery the send
+rate is governed by the RFC 6675 `pipe` estimate against `cwnd`, not by
+window inflation.
+
+### RFC 3168 Explicit Congestion Notification
+
+ECN lets a congested router *mark* an ECN-capable packet instead of
+dropping it, so the sender slows down without a loss. It spans the IP and
+TCP layers and is one shared codepoint vocabulary (`addr::Ecn`) both IP
+families express — the IPv4 TOS byte's low two bits and the IPv6 Traffic
+Class's low two bits — so the connection engine reasons about ECN without
+knowing which family carried a packet. It is negotiated in the handshake
+and off by default (`TcpConfig::enable_ecn`); a peer that did not opt in is
+never sent ECN-capable packets, so enabling it can only add ECN where both
+ends agree (RFC 3168 §6.1.1):
+
+- **Negotiation.** An active open sends an ECN-setup SYN (both ECE and CWR
+  set); a passive open that also enables ECN answers with a SYN-ACK
+  carrying ECE alone. The connection is ECN-capable only when this exact
+  exchange completes, and falls back to plain TCP otherwise.
+- **Marking.** An ECN-capable connection stamps ECT(0) on its fresh data
+  segments (never on control segments, retransmissions, or window probes,
+  RFC 3168 §5.2/§6.1.6); `send_tcp` writes the codepoint into the IP
+  header, and the receive path surfaces it on `StackEvent::TcpSegment`.
+- **Receiver echo (§6.1.3).** On a Congestion-Experienced (CE) datagram
+  the receiver sets ECE on every ACK until the peer answers with CWR.
+- **Sender response (§6.1.2).** An ECE-marked ACK triggers the same window
+  reduction as a single dropped packet (`cc.on_ecn`) — but no
+  retransmission — at most once per window of data, and the next fresh data
+  segment carries CWR to tell the peer the reduction happened.
+
+The stack-wide operator policy that turns ECN on for the live service is
+staged in `plans/NETWORK.md`; the engine and its full data-path threading
+are complete and host-tested here.
 
 ### RFC 6675 SACK-based loss recovery
 

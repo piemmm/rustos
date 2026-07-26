@@ -69,6 +69,11 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   diofyn) byth yn archwilio nac yn gollwng cysylltiad segur; mae `true`
   yn archwilio cymar segur ar ôl y cyfnod arferol ac yn gollwng y
   cysylltiad os yw'n peidio ag ateb.
+- `net.tcp.ecn` — `true` neu `false`: a yw cysylltiadau TCP yn negodi
+  Hysbysiad Tagfa Eglur (ECN). Mae `false` (y diofyn) yn gadael
+  cysylltiadau'n Not-ECT; mae `true` yn cynnig ECN yn yr ysgwyd llaw ac
+  yna'n trin marc tagfa fel arwydd i arafu yn hytrach na gorfodi colli
+  pecyn.
 
 Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
 rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.

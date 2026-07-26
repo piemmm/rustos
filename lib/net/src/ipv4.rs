@@ -7,7 +7,7 @@
 //! 20-byte headers are written. Fragmentation on emit is [`fragment`];
 //! reassembly of received fragments lives in [`crate::frag`].
 
-use crate::addr::Ipv4Addr;
+use crate::addr::{Ecn, Ipv4Addr};
 use crate::checksum::internet_checksum;
 
 /// Length of an option-free IPv4 header.
@@ -50,6 +50,10 @@ pub struct Ipv4Header {
     pub destination: Ipv4Addr,
     /// Upper-layer protocol number.
     pub protocol: u8,
+    /// The ECN codepoint carried in the low two bits of the TOS byte
+    /// (RFC 3168 §5). The DSCP (high six bits) is not used and is written
+    /// as zero; a parsed header reports only the ECN field.
+    pub ecn: Ecn,
     /// Datagram identification, shared by all fragments of one datagram.
     pub identification: u16,
     /// Remaining hop count.
@@ -71,6 +75,7 @@ impl Ipv4Header {
             source,
             destination,
             protocol,
+            ecn: Ecn::NotEct,
             identification: 0,
             ttl: DEFAULT_TTL,
             dont_fragment: false,
@@ -121,6 +126,7 @@ impl Ipv4Header {
             source: address(&header[12..16]),
             destination: address(&header[16..20]),
             protocol: header[9],
+            ecn: Ecn::from_bits(header[1]),
             identification: u16::from_be_bytes([header[4], header[5]]),
             ttl: header[8],
             dont_fragment: flags_offset & FLAG_DONT_FRAGMENT != 0,
@@ -185,7 +191,8 @@ impl Ipv4Header {
         let header = out.get_mut(..header_len)?;
         // IHL counts 32-bit words; header_len is always a multiple of 4.
         header[0] = 0x40 | u8::try_from(header_len / 4).ok()?;
-        header[1] = 0;
+        // DSCP (high six bits) unused; ECN in the low two bits (RFC 3168).
+        header[1] = self.ecn.bits();
         header[2..4].copy_from_slice(&total_length.to_be_bytes());
         header[4..6].copy_from_slice(&self.identification.to_be_bytes());
         header[6..8].copy_from_slice(&flags_offset.to_be_bytes());

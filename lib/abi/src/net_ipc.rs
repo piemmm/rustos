@@ -150,7 +150,7 @@ pub fn validate_if_name(name: &[u8; IF_NAME_LEN]) -> Result<usize, Errno> {
 /// admin op. The mapping from the `lib/sysconfig` registry is exact —
 /// `net.ipv4.enabled`, `net.ipv6.enabled`, and `net.tcp.syncookies`
 /// (`always` ⇒ [`Self::syncookies_always`]; `auto` ⇒ the bounded
-/// default), `net.ipv6.privacy`, and `net.tcp.keepalive`.
+/// default), `net.ipv6.privacy`, `net.tcp.keepalive`, and `net.tcp.ecn`.
 // These are independent stack-wide policy flags, each mapped one-to-one
 // to a wire byte and a distinct `system.conf` key — not a state that
 // enums would model better; grouping them into an enum would obscure the
@@ -183,6 +183,13 @@ pub struct NetworkSettings {
     /// `false` (the default, RFC 1122 §4.2.3.6) never probes and never
     /// tears an idle connection down for inactivity.
     pub tcp_keepalive: bool,
+    /// Whether TCP connections negotiate RFC 3168 Explicit Congestion
+    /// Notification (`net.tcp.ecn`). When `true`, every new connection
+    /// (actively opened and accepted alike) offers ECN in its SYN/SYN-ACK
+    /// and, once negotiated, marks eligible segments ECT(0) and reacts to a
+    /// CE mark as a congestion signal instead of forcing a drop. `false`
+    /// (the default) leaves connections Not-ECT.
+    pub tcp_ecn: bool,
 }
 
 impl Default for NetworkSettings {
@@ -198,6 +205,7 @@ impl Default for NetworkSettings {
             syncookies_always: false,
             ipv6_privacy: false,
             tcp_keepalive: false,
+            tcp_ecn: false,
         }
     }
 }
@@ -450,6 +458,7 @@ impl NetstackRequest {
                 out[10] = u8::from(settings.syncookies_always);
                 out[11] = u8::from(settings.ipv6_privacy);
                 out[12] = u8::from(settings.tcp_keepalive);
+                out[13] = u8::from(settings.tcp_ecn);
             }
         }
         out
@@ -614,16 +623,17 @@ fn decode_bind_driver(bytes: &[u8]) -> Result<NetstackRequest, Errno> {
     })
 }
 
-/// Decode the [`NetworkSettings`] operation block (five wire booleans at
-/// bytes 8..13) and enforce its zero reserved tail.
+/// Decode the [`NetworkSettings`] operation block (six wire booleans at
+/// bytes 8..14) and enforce its zero reserved tail.
 fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
-    reserved_zero(bytes, 13)?;
+    reserved_zero(bytes, 14)?;
     Ok(NetworkSettings {
         ipv4_enabled: decode_bool(bytes[8])?,
         ipv6_enabled: decode_bool(bytes[9])?,
         syncookies_always: decode_bool(bytes[10])?,
         ipv6_privacy: decode_bool(bytes[11])?,
         tcp_keepalive: decode_bool(bytes[12])?,
+        tcp_ecn: decode_bool(bytes[13])?,
     })
 }
 
@@ -2238,6 +2248,7 @@ mod tests {
                 syncookies_always: true,
                 ipv6_privacy: false,
                 tcp_keepalive: true,
+                tcp_ecn: false,
             }),
             NetstackRequest::ApplyNetworkSettings(NetworkSettings {
                 ipv4_enabled: false,
@@ -2245,6 +2256,7 @@ mod tests {
                 syncookies_always: false,
                 ipv6_privacy: true,
                 tcp_keepalive: false,
+                tcp_ecn: true,
             }),
             // Bind with no resolved hardware location.
             NetstackRequest::BindDriver {
@@ -2627,10 +2639,11 @@ mod tests {
             syncookies_always: false,
             ipv6_privacy: true,
             tcp_keepalive: true,
+            tcp_ecn: true,
         })
         .to_le_bytes();
         // A byte that is neither 0 nor 1 in any flag position fails closed.
-        for pos in 8..=12 {
+        for pos in 8..=13 {
             let mut smuggled = good;
             smuggled[pos] = 2;
             assert_eq!(
@@ -2640,7 +2653,7 @@ mod tests {
         }
         // A non-zero reserved tail byte is refused.
         let mut dirty_tail = good;
-        dirty_tail[13] = 1;
+        dirty_tail[14] = 1;
         assert_eq!(
             NetstackRequest::from_bytes(&dirty_tail),
             Err(Errno::BadMagic)

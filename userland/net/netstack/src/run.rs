@@ -1008,12 +1008,14 @@ mod program {
                     StackEvent::TcpSegment {
                         source,
                         destination,
+                        ecn,
                         segment,
                     } => {
                         let io = sockets.on_tcp_segment(
                             stack,
                             *source,
                             *destination,
+                            *ecn,
                             segment,
                             now,
                             secret,

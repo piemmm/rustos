@@ -437,10 +437,24 @@ both target builds clean).** The mechanism and its fail-closed capability:
 
 - **GIC Group-0 register layer (`gic.rs`).** `GICD_IGROUPR` (base 0x080,
   banked `IGROUPR0` for the SGIs/PPIs), `GICC_CTLR_ENABLE_GRP0`/
-  `GICC_CTLR_FIQEN` (single-Security-state bits 0/3), the `igroupr_offset`
-  helper, and `Gicv2::{set_group0,set_group1,read/write_gicc_ctlr,
+  `GICC_CTLR_ENABLE_GRP1`/`GICC_CTLR_ACKCTL`/`GICC_CTLR_FIQEN` (single-
+  Security-state bits 0/1/2/3), the `igroupr_offset` helper, and
+  `Gicv2::{set_group0,set_group1,route_selfsample_fiq,read/write_gicc_ctlr,
   read/write_gicd_ctlr}` with feature-gated freestanding wrappers. Host-tested
   against the mock distributor.
+- **Single-line FIQ routing (`Gicv2::route_selfsample_fiq`).** `GICC_CTLR.FIQEn`
+  is a *global* switch — it routes **every** Group-0 interrupt to the FIQ
+  signal, and this board resets every interrupt to Group 0. Enabling `FIQEn`
+  alone therefore delivers the preemption-timer PPI (INTID 30) and device SPIs
+  as FIQs the `handle_fiq` arm does not service, so they re-fire unbounded — a
+  timer-PPI FIQ storm that pegs every core and wedges the boot. To FIQ a single
+  line, `route_selfsample_fiq` moves **every interrupt but the cadence PPI**
+  into Group 1 (bounded by `GICD_TYPER.ITLinesNumber`), leaves the cadence PPI
+  in Group 0, and enables both groups + `AckCtl` + `FIQEn`; `AckCtl` keeps the
+  Group-1 IRQs acknowledgeable through the one `GICC_IAR`/`GICC_EOIR` path the
+  IRQ handler uses (without it a Group-1 `GICC_IAR` read returns the reserved id
+  1022, which itself storms). The shippable `init` stays single-group
+  (everything an ordinary IRQ); only the debug watchdog reaches this split.
 - **FIQ dispatcher arm (`exceptions.rs`).** `is_fiq(kind)` (vector kinds
   2/6/10, disjoint from IRQ/sync) and a `watchdog-diagnostics`-gated
   `handle_fiq` arm that acknowledges Group 0 through the same `GICC_IAR`/
@@ -449,7 +463,7 @@ both target builds clean).** The mechanism and its fail-closed capability:
   observational: it never clears `DAIF.F` (nested FIQ unsafe) and never
   preempts.
 - **Fail-closed capability (`watchdog.rs`).** `probe_fiq_deliverability`
-  routes the cadence PPI to Group 0, enables Group 0 as FIQ, arms a ~1 ms
+  applies the single-line FIQ split (`gic::route_selfsample_fiq`), arms a ~1 ms
   one-shot, masks `DAIF.I` (leaving `DAIF.F` clear), and waits a bounded
   interval (a `CNTPCT_EL0` deadline backed by a hard iteration cap) for an FIQ
   to actually be taken. On success it stays routed; on failure it restores the
@@ -458,8 +472,9 @@ both target builds clean).** The mechanism and its fail-closed capability:
   configuration) and reports `FeatureSupport::Unsupported`, leaving the buddy
   detector in place. The pure decision `fiq_support_from_probe` is
   always-compiled and host-tested; the boot path calls the probe once on the
-  boot CPU (`arm_preemption`), and `init_local_watchdog` routes each online
-  CPU's banked cadence PPI to Group 0 only when the capability is Supported.
+  boot CPU (`arm_preemption`), and `init_local_watchdog` applies the
+  `route_selfsample_fiq` split on each online CPU only when the capability is
+  Supported.
 
 The probe is `Supported` on a **single-Security-state** GIC and `Unsupported`
 on a **two-Security-state** GIC. Measured under QEMU: the `virt` default

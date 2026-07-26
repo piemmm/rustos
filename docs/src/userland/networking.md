@@ -132,8 +132,8 @@ managed interfaces beyond loopback"); the installer, or a future
 `configure`-class writer, fills in the operator's interfaces through the
 same engine. The stack-wide switches (`net.ipv4.enabled`,
 `net.ipv6.enabled`, `net.ipv6.privacy`, `net.tcp.syncookies`,
-`net.tcp.keepalive`) live separately in `system.conf` and are set with
-`configure` (§6.2). See
+`net.tcp.keepalive`, `net.tcp.ecn`) live separately in `system.conf` and
+are set with `configure` (§6.2). See
 [Network-stack service](./netstack.md) for how the configuration is
 delivered and enforced.
 

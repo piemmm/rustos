@@ -69,6 +69,11 @@ interessato — non cambia mai un risultato.
   predefinito) non sonda mai e non chiude mai una connessione inattiva;
   `true` sonda un pari inattivo dopo l'intervallo consueto e chiude la
   connessione se smette di rispondere.
+- `net.tcp.ecn` — `true` o `false`: se le connessioni TCP negoziano la
+  notifica esplicita di congestione (ECN). `false` (il valore
+  predefinito) lascia le connessioni Not-ECT; `true` offre ECN
+  nell'handshake e poi tratta un contrassegno di congestione come un
+  segnale di rallentamento invece di forzare la perdita di un pacchetto.
 
 Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
 quando lo stack applica di nuovo la sua configurazione.

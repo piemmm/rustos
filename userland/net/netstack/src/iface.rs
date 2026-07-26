@@ -22,7 +22,7 @@ use tairix_abi::net_ipc::{
     NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
-use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
 use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
 use tairix_net::internet_checksum;
@@ -707,6 +707,7 @@ impl Netstack {
     /// * [`Errno::NetworkUnreachable`] / [`Errno::MessageTooLarge`] — the
     ///   engine refused the segment (no route/source, link down, or a
     ///   segment past the path MTU).
+    #[allow(clippy::too_many_arguments)]
     pub fn send_tcp_on(
         &mut self,
         name: [u8; IF_NAME_LEN],
@@ -714,6 +715,7 @@ impl Netstack {
         meta: &TcpSegmentMeta,
         payload: &[u8],
         gso_size: Option<u16>,
+        ecn: Ecn,
         now: Duration64,
     ) -> Result<Vec<TxFrame>, Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
@@ -722,7 +724,7 @@ impl Netstack {
         } = self;
         match interfaces[index]
             .stack
-            .send_tcp(dest, meta, payload, gso_size, now, out)
+            .send_tcp(dest, meta, payload, gso_size, ecn, now, out)
         {
             Ok(()) => Ok(core::mem::take(&mut out.frames)),
             Err(SendError::TooLarge) => Err(Errno::MessageTooLarge),

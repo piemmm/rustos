@@ -1251,6 +1251,7 @@ impl TcpSide {
             if let StackEvent::TcpSegment {
                 source,
                 destination,
+                ecn,
                 segment,
             } = event
             {
@@ -1266,7 +1267,7 @@ impl TcpSide {
                     _ => continue,
                 };
                 if let Some(seg) = TcpSegment::parse(pseudo, segment) {
-                    self.tcb.on_segment(&seg, now);
+                    self.tcb.on_segment(&seg, *ecn, now);
                 }
             }
         }
@@ -1868,4 +1869,75 @@ fn set_mtu_overrides_the_link_mtu_used_for_egress() {
     // Raising it past the device value is honoured too (a jumbo link).
     a.set_mtu(9000);
     assert_eq!(a.tcp_local_mss(v4_dest, t(0)), Some(8960));
+}
+
+/// Engine-level RFC 3168 ECN carriage: a segment the caller marks ECT(0)
+/// is emitted with that codepoint in its IPv4 header, and a received
+/// CE-marked TCP datagram surfaces its codepoint to the service so the
+/// connection can echo ECE.
+#[test]
+fn tcp_v4_ecn_is_stamped_on_emit_and_surfaced_on_receive() {
+    use crate::addr::Ecn;
+    use crate::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegmentMeta};
+
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    a.set_ipv4_config(V4_A, 24, None).expect("cfg a");
+    b.set_ipv4_config(V4_B, 24, None).expect("cfg b");
+    // Resolve both neighbour caches with one echo round trip A <-> B, so a
+    // later `send_tcp` emits synchronously rather than parking on ARP.
+    let out = a
+        .send_echo_request_collect(IpAddr::V4(V4_B), 1, 1, b"x", t(2))
+        .expect("echo");
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
+    for _ in 0..8 {
+        let Some(f) = frames.pop_front() else { break };
+        let ob = b.on_frame_collect(&f, t(2));
+        for r in tx_bytes(ob.frames) {
+            frames.extend(tx_bytes(a.on_frame_collect(&r, t(2)).frames));
+        }
+    }
+
+    let meta = TcpSegmentMeta {
+        source_port: A_PORT,
+        destination_port: B_PORT,
+        seq: SeqNumber::new(1),
+        ack: SeqNumber::new(0),
+        flags: TcpFlags::SYN,
+        window: 1000,
+        urgent: 0,
+        options: TcpOptions::new(),
+    };
+
+    // Emit: the ECT(0) request lands in the IPv4 TOS byte.
+    let ect = a
+        .send_tcp_ecn_collect(IpAddr::V4(V4_B), &meta, b"d", None, Ecn::Ect0, t(3))
+        .expect("send ect");
+    assert_eq!(ect.frames.len(), 1);
+    let eth = EthernetFrame::parse(&ect.frames[0].bytes).expect("eth");
+    let (hdr, _o, _p) = Ipv4Header::parse(eth.payload).expect("ipv4");
+    assert_eq!(hdr.ecn, Ecn::Ect0, "the datagram carries ECT(0)");
+
+    // A Not-ECT send (the default path) stays Not-ECT.
+    let plain = a
+        .send_tcp_collect(IpAddr::V4(V4_B), &meta, b"d", None, t(3))
+        .expect("send plain");
+    let eth = EthernetFrame::parse(&plain.frames[0].bytes).expect("eth");
+    let (hdr, _o, _p) = Ipv4Header::parse(eth.payload).expect("ipv4");
+    assert_eq!(hdr.ecn, Ecn::NotEct, "an unmarked datagram is Not-ECT");
+
+    // Receive: a CE-marked TCP datagram from B surfaces its codepoint.
+    let ce = b
+        .send_tcp_ecn_collect(IpAddr::V4(V4_A), &meta, b"d", None, Ecn::Ce, t(3))
+        .expect("send ce");
+    let recv = a.on_frame_collect(&ce.frames[0].bytes, t(3));
+    let ecn = recv
+        .events
+        .iter()
+        .find_map(|e| match e {
+            StackEvent::TcpSegment { ecn, .. } => Some(*ecn),
+            _ => None,
+        })
+        .expect("a TCP segment event");
+    assert_eq!(ecn, Ecn::Ce, "the received CE mark is surfaced");
 }

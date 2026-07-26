@@ -1490,9 +1490,10 @@ the whole is too large for one change and each leaves the tree working.
 
 #### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[x]`
 - **ABI** (`lib/abi/src/net_ipc.rs`): `NetworkSettings { ipv4_enabled,
-  ipv6_enabled, syncookies_always, ipv6_privacy, tcp_keepalive }` (a
-  `Default` matching the sysconfig defaults; `tcp_keepalive` added by N12)
-  and `NetstackRequest::ApplyNetworkSettings` (op 10),
+  ipv6_enabled, syncookies_always, ipv6_privacy, tcp_keepalive, tcp_ecn }`
+  (a `Default` matching the sysconfig defaults; `tcp_keepalive` added by
+  N12, `tcp_ecn` by N13) and `NetstackRequest::ApplyNetworkSettings`
+  (op 10),
   fail-closed encode/decode (booleans are exactly 0/1) + round-trip tests.
   `net.ipv6.privacy` maps to `ipv6_privacy` and is enforced by the RFC 8981
   temporary-address engine (see N10).
@@ -1871,6 +1872,53 @@ connection does not linger forever against a silently-dead peer.
   `netstack` (`listen_config` template) and `lib/sysconfig`/`devmgr`
   (registry + mapping).
 
+#### N13 — RFC 3168 Explicit Congestion Notification `[~]`
+
+The pure `lib/net` ECN engine, its full data-path threading, and the
+stack-wide operator toggle are landed and host-gate-green; a live QEMU
+vertical asserting ECT(0)/CE on the wire remains staged (the N5a/N6b-2-α
+engine-first precedent; N12 keepalive likewise shipped without a bespoke
+live vertical, exercised by the existing autoload verticals' default path).
+
+- **Shared codepoint** (`addr::Ecn`, done): the RFC 3168 §5 two-bit
+  codepoint (`NotEct`/`Ect1`/`Ect0`/`Ce`), one definition both IP families
+  express — the IPv4 `Ipv4Header.ecn` field (low two bits of the TOS byte,
+  DSCP written zero) and the IPv6 `Ipv6Header::ecn()`/`set_ecn()` accessors
+  (low two bits of Traffic Class, DSCP preserved). Round-trip host-tested.
+- **Congestion response** (`tcp::cc`, done): a `CongestionControl::on_ecn`
+  signal whose default defers to `on_loss` (the same multiplicative
+  decrease with no retransmission), so CUBIC and NewReno both respond
+  without a second code path.
+- **Connection engine** (`tcp::conn`, done): `TcpConfig::enable_ecn` (off
+  by default). Negotiation (ECN-setup SYN with ECE+CWR; SYN-ACK with ECE
+  alone; `ecn_ok` set only on the exact exchange, falling back otherwise),
+  receiver CE→ECE echo until the peer's CWR (§6.1.3), sender ECE→once-per-
+  window `on_ecn` reduction + CWR on the next fresh data (§6.1.2), and
+  ECT(0) marking of fresh data only (never control, retransmissions, or
+  window probes, §5.2/§6.1.6). `OutSegment.ecn` carries the codepoint to
+  the framer; `on_segment` takes the received codepoint.
+- **Stack + service** (done): `Stack::send_tcp` stamps the codepoint into
+  the IP header and `StackEvent::TcpSegment` surfaces the received one; the
+  `netstack` `SocketService`/`Listener` thread it end to end. Host-tested
+  in `tcp_conn_tests` (negotiation, CE echo, ECE reduction + CWR, once-per-
+  window, fallback), `stack_tests` (ECT(0) on emit, CE surfaced on
+  receive), and `ipv4_tests`/`ipv6_tests`/`addr` (codepoint round trips).
+- **Stack-wide policy** (done): the `net.tcp.ecn` operator toggle is wired
+  end to end exactly like `net.tcp.keepalive` (N12) — a `net.tcp.ecn`
+  `NetToggle` key in the `lib/sysconfig` `net.*` registry (§6.2, off by
+  default), the `tcp_ecn` boolean on `NetworkSettings`
+  (`lib/abi/src/net_ipc.rs`, wire byte 13, reserved tail from byte 14,
+  fail-closed encode/decode + round-trip/dirty-tail tests), the
+  `devmgr::netcfg::settings_from_config` mapping, and `netstack` seeding
+  `enable_ecn` on both connection paths — `socket.rs::connect_stream`
+  (outbound `TcpConfig`) and `listen_config` (the listener's
+  accepted-connection `template`) — from the delivered settings. Read at
+  connect/`listen` time like keepalive, so no per-interface re-application.
+  All 13 `configure` Help locales + README + docs/src updated.
+- **Remaining**: a live two-process QEMU vertical asserting ECT(0)/CE on
+  the wire (staged; the default ECN-off path is already covered by the
+  existing autoload verticals).
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,
@@ -1972,6 +2020,12 @@ tree, exactly like `os.*`:
   probing on idle connections; off by default (RFC 1122 §4.2.3.6). When
   on, both actively-opened and accepted connections probe an idle peer
   and are torn down if it stops answering (N12).
+- `net.tcp.ecn` (`true`|`false`) — RFC 3168 Explicit Congestion
+  Notification negotiation; off by default (connections are Not-ECT).
+  When on, both actively-opened and accepted connections offer ECN in
+  the handshake and, once negotiated, mark eligible segments ECT(0) and
+  react to a CE mark as a congestion signal instead of forcing a drop
+  (N13).
 - Per-interface settings live in `network.conf` (6.1), never in
   `system.conf`; `configure net.<key> <value>` edits the stack-wide
   registry, and `configure` grows no interface sub-grammar — interface

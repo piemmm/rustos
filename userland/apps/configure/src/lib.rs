@@ -387,7 +387,8 @@ mod tests {
              net.ipv6.enabled true\n\
              net.ipv6.privacy false\n\
              net.tcp.syncookies auto\n\
-             net.tcp.keepalive false\n",
+             net.tcp.keepalive false\n\
+             net.tcp.ecn false\n",
         );
     }
 

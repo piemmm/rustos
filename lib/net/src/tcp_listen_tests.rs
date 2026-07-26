@@ -104,7 +104,7 @@ fn to_listener(
 
 fn feed_client(tcb: &mut Tcb, peer: Peer, frame: &[u8], now: Duration64) {
     let seg = TcpSegment::parse(pseudo(peer), frame).expect("frame parses");
-    tcb.on_segment(&seg, now);
+    tcb.on_segment(&seg, crate::addr::Ecn::NotEct, now);
 }
 
 fn listen_config(max_half_open: usize, max_accept: usize) -> ListenConfig {
@@ -450,7 +450,11 @@ fn ipv6_handshake_completes() {
         synack = ser(&o);
         true
     });
-    client.on_segment(&TcpSegment::parse(ps, &synack).unwrap(), now);
+    client.on_segment(
+        &TcpSegment::parse(ps, &synack).unwrap(),
+        crate::addr::Ecn::NotEct,
+        now,
+    );
     let mut ack = Vec::new();
     client.poll_transmit(now, |o| {
         ack = ser(&o);

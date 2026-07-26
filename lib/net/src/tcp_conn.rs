@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 
+use crate::addr::Ecn;
 use crate::tcp::cc::{CongestionAlgorithm, CongestionControl};
 use crate::tcp::{SackBlock, SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use crate::timeutil::{from_nanos, nanos, NEVER};
@@ -131,6 +132,7 @@ pub enum TcpError {
 /// (the stack sizes them from its per-principal budget, §24); nothing here
 /// is an attacker-influenced allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TcpConfig {
     /// The MSS this side advertises in its SYN (the largest segment it is
     /// willing to *receive*). Clamped to at least [`DEFAULT_SEND_MSS`].
@@ -200,6 +202,18 @@ pub struct TcpConfig {
     /// Number of unanswered probes tolerated before the connection is
     /// declared dead and aborted (RFC 9293 §3.8.4).
     pub keepalive_probes: u32,
+    /// Whether RFC 3168 Explicit Congestion Notification is offered. When
+    /// `true`, an active open sends an ECN-setup SYN (ECE + CWR) and a
+    /// passive open accepts one, so a congested router may mark this
+    /// connection's data packets instead of dropping them. When `false`
+    /// (the default) the connection never negotiates ECN and answers an
+    /// ECN-setup SYN as a non-ECN peer, so it always falls back safely.
+    ///
+    /// ECN is negotiated either way (RFC 3168 §6.1.1): a peer that did not
+    /// opt in is never sent ECN-capable packets, so enabling this can only
+    /// add ECN where both ends agree. The stack-wide operator policy that
+    /// flips it for the live service is staged in `plans/NETWORK.md`.
+    pub enable_ecn: bool,
 }
 
 impl Default for TcpConfig {
@@ -230,6 +244,10 @@ impl Default for TcpConfig {
             keepalive_idle: Duration64::from_secs(7200),
             keepalive_interval: Duration64::from_secs(75),
             keepalive_probes: 9,
+            // RFC 3168 §6.1.1: ECN is negotiated, and a peer that has not
+            // opted in is never sent ECN-capable packets. Off by default; a
+            // consumer opts a connection in.
+            enable_ecn: false,
         }
     }
 }
@@ -616,6 +634,11 @@ pub struct OutSegment<'a> {
     /// segmentation offload); the caller frames it as one packet and
     /// tags it accordingly. `None` is an ordinary single segment.
     pub gso_size: Option<u16>,
+    /// The IP-layer ECN codepoint the caller must stamp on this segment's
+    /// datagram (RFC 3168 §5). [`Ecn::Ect0`] on an ECN-capable
+    /// connection's fresh data segments, [`Ecn::NotEct`] on everything
+    /// else (control, retransmissions, window probes).
+    pub ecn: Ecn,
 }
 
 /// The transmission control block: one TCP connection's state machine.
@@ -746,6 +769,27 @@ pub struct Tcb {
     became_established: bool,
     /// Why the connection aborted, if it did.
     reset_reason: Option<ResetReason>,
+
+    // RFC 3168 Explicit Congestion Notification. `ecn_ok` is set only when
+    // both peers negotiated ECN in the handshake; when it is false the
+    // connection never marks a packet ECN-capable and never reacts to ECE,
+    // so a non-negotiating peer sees a plain TCP connection.
+    ecn_ok: bool,
+    /// Receiver role (RFC 3168 §6.1.3): a Congestion-Experienced packet was
+    /// received, so every ACK echoes ECE until the peer answers with CWR.
+    ecn_send_ece: bool,
+    /// Sender role (RFC 3168 §6.1.2): the congestion window has been reduced
+    /// in response to ECE, so the next new-data segment carries CWR to tell
+    /// the peer the reduction happened.
+    ecn_send_cwr: bool,
+    /// Sender role: a reduction is in progress and no further ECE will be
+    /// acted on until the window in which it was signalled is acknowledged,
+    /// so one round of congestion marks reduces the window at most once
+    /// (RFC 3168 §6.1.2). Mirrors the `NewReno` `recover`/`in_recovery` gate.
+    ecn_reacting: bool,
+    /// The send frontier (`snd_max`) captured when the reduction was made;
+    /// `ecn_reacting` clears once `snd_una` passes it.
+    ecn_react_recover: SeqNumber,
 }
 
 /// What the segmentizer decided to put on the wire next.
@@ -838,6 +882,11 @@ impl Tcb {
             challenged: false,
             became_established: false,
             reset_reason: None,
+            ecn_ok: false,
+            ecn_send_ece: false,
+            ecn_send_cwr: false,
+            ecn_reacting: false,
+            ecn_react_recover: zero,
         }
     }
 
@@ -1179,7 +1228,7 @@ impl Tcb {
     /// §3.10.7 SEGMENT ARRIVES). The segment is already parsed and
     /// checksum-verified by [`TcpSegment::parse`]; this drives the state
     /// machine and queues any response for [`Tcb::poll_transmit`].
-    pub fn on_segment(&mut self, seg: &TcpSegment<'_>, now: Duration64) {
+    pub fn on_segment(&mut self, seg: &TcpSegment<'_>, ecn: Ecn, now: Duration64) {
         let now_ns = nanos(now);
         match self.state {
             State::Closed => {
@@ -1187,7 +1236,7 @@ impl Tcb {
             }
             State::Listen => self.recv_in_listen(seg, now_ns),
             State::SynSent => self.recv_in_syn_sent(seg, now_ns),
-            _ => self.recv_synchronized(seg, now_ns),
+            _ => self.recv_synchronized(seg, ecn, now_ns),
         }
         // Any inbound segment is proof the peer is alive: re-arm the
         // keepalive idle timer (and arm it on the transition into
@@ -1214,6 +1263,9 @@ impl Tcb {
         self.irs = seg.seq;
         self.rcv_nxt = seg.seq.add(1);
         self.negotiate_from_syn(seg);
+        // RFC 3168 §6.1.1: accept ECN only for an ECN-setup SYN (ECE + CWR
+        // both set); our SYN-ACK then carries ECE alone to confirm it.
+        self.ecn_ok = self.config.enable_ecn && seg.flags.ece() && seg.flags.cwr();
         self.snd_una = self.iss;
         self.snd_nxt = self.iss;
         self.snd_max = self.iss;
@@ -1253,6 +1305,10 @@ impl Tcb {
         self.snd_wnd = u32::from(seg.window);
         self.snd_wl1 = seg.seq;
         if seg.flags.ack() {
+            // RFC 3168 §6.1.1: our ECN-setup SYN is confirmed only by a
+            // SYN-ACK carrying ECE with CWR clear. Any other combination
+            // (or a peer that stripped ECE) falls back to non-ECN.
+            self.ecn_ok = self.config.enable_ecn && seg.flags.ece() && !seg.flags.cwr();
             self.snd_una = seg.ack;
             self.drop_acked_data();
             self.snd_wl2 = seg.ack;
@@ -1278,7 +1334,9 @@ impl Tcb {
     }
 
     /// RFC 9293 §3.10.7.4: a segment arriving in a synchronised state.
-    fn recv_synchronized(&mut self, seg: &TcpSegment<'_>, now_ns: u128) {
+    /// `ecn` is the IP-layer ECN codepoint the datagram carried, used to
+    /// drive the RFC 3168 §6.1.3 receiver echo.
+    fn recv_synchronized(&mut self, seg: &TcpSegment<'_>, ecn: Ecn, now_ns: u128) {
         let seg_len = as_u32(seg.payload.len()) + u32::from(seg.flags.fin());
         let rcv_wnd = self.receive_window();
 
@@ -1381,6 +1439,20 @@ impl Tcb {
             return;
         }
 
+        // RFC 3168 §6.1.3 receiver echo: a peer's CWR clears our obligation
+        // to echo, then a Congestion-Experienced datagram (re-)latches it,
+        // so every ACK carries ECE until the peer confirms with CWR. A CE
+        // mark is acknowledged at once so the sender reacts promptly.
+        if self.ecn_ok {
+            if seg.flags.cwr() {
+                self.ecn_send_ece = false;
+            }
+            if ecn.is_ce() {
+                self.ecn_send_ece = true;
+                self.owe_ack(now_ns, true);
+            }
+        }
+
         // Segment text and FIN.
         let ack_now = self.accept_segment_text(seg, now_ns);
         if !seg.payload.is_empty() || seg.flags.fin() || ack_now {
@@ -1462,6 +1534,12 @@ impl Tcb {
             }
             self.dup_ack_count = 0;
             self.rtx_count = 0;
+            // RFC 3168 §6.1.2: once the window in which we reduced for an
+            // ECE is fully acknowledged, a fresh congestion mark may reduce
+            // the window again.
+            if self.ecn_reacting && self.ecn_react_recover.le(self.snd_una) {
+                self.ecn_reacting = false;
+            }
             // Congestion control: a loss episode ends once the cumulative
             // ACK passes the high-water mark recorded at the loss (RFC 6582
             // NewReno / RFC 6675). Grow the window only outside an episode;
@@ -1501,6 +1579,18 @@ impl Tcb {
                 self.persist_deadline = NEVER;
                 self.persist_shift = 0;
             }
+        }
+        // RFC 3168 §6.1.2: an ECE-marked ACK triggers the same window
+        // reduction as a single dropped packet — but no retransmission,
+        // since nothing was lost — at most once per window of data. The
+        // reduction is announced to the peer with CWR on the next fresh
+        // data segment.
+        if self.ecn_ok && seg.flags.ece() && !self.ecn_reacting {
+            let flight = self.snd_max.distance_from(self.snd_una);
+            self.cc.on_ecn(flight, now_ns);
+            self.ecn_send_cwr = true;
+            self.ecn_reacting = true;
+            self.ecn_react_recover = self.snd_max;
         }
         self.last_ack = ack;
         true
@@ -1840,6 +1930,7 @@ impl Tcb {
                 meta,
                 payload: &[],
                 gso_size: None,
+                ecn: Ecn::NotEct,
             }) {
                 count += 1;
             }
@@ -1853,10 +1944,12 @@ impl Tcb {
                 Plan::Data { gso_size, .. } if *gso_size > 0 => Some(*gso_size),
                 _ => None,
             };
+            let ecn = self.segment_ecn(&plan);
             if !emit(OutSegment {
                 meta,
                 payload: &payload,
                 gso_size,
+                ecn,
             }) {
                 break;
             }
@@ -1990,8 +2083,18 @@ impl Tcb {
                 let mut flags = TcpFlags::SYN;
                 let ack = if *with_ack {
                     flags = flags | TcpFlags::ACK;
+                    // RFC 3168 §6.1.1: an ECN-setup SYN-ACK carries ECE
+                    // alone; we send it only for a handshake we accepted.
+                    if self.ecn_ok {
+                        flags = flags | TcpFlags::ECE;
+                    }
                     self.rcv_nxt
                 } else {
+                    // RFC 3168 §6.1.1: request ECN with an ECN-setup SYN
+                    // (both ECE and CWR set).
+                    if self.config.enable_ecn {
+                        flags = flags | TcpFlags::ECE | TcpFlags::CWR;
+                    }
                     SeqNumber::new(0)
                 };
                 // The SYN's window field is always unscaled (scaling only
@@ -2010,17 +2113,26 @@ impl Tcb {
                 };
                 (meta, alloc::vec::Vec::new())
             }
-            Plan::Data { len, fin, .. } => {
+            Plan::Data {
+                len, fin, probe, ..
+            } => {
                 let offset = self.snd_nxt.distance_from(self.send_data_start) as usize;
                 let payload: alloc::vec::Vec<u8> =
                     self.tx.iter().skip(offset).take(*len).copied().collect();
-                let mut flags = TcpFlags::ACK;
+                let mut flags = TcpFlags::ACK | self.ecn_echo();
                 if *fin {
                     flags = flags | TcpFlags::FIN;
                 }
                 // Push when this segment sends the last currently-buffered byte.
                 if *len > 0 && offset + *len >= self.tx.len() {
                     flags = flags | TcpFlags::PSH;
+                }
+                // RFC 3168 §6.1.2: the first fresh-data segment sent after an
+                // ECE-driven window reduction carries CWR to tell the peer the
+                // reduction happened. A retransmit (`snd_nxt < snd_max`) or a
+                // window probe never carries it.
+                if self.ecn_send_cwr && !*probe && self.snd_nxt == self.snd_max {
+                    flags = flags | TcpFlags::CWR;
                 }
                 let meta = TcpSegmentMeta {
                     source_port: self.local_port,
@@ -2038,7 +2150,7 @@ impl Tcb {
                 let offset = seq.distance_from(self.send_data_start) as usize;
                 let payload: alloc::vec::Vec<u8> =
                     self.tx.iter().skip(offset).take(*len).copied().collect();
-                let mut flags = TcpFlags::ACK;
+                let mut flags = TcpFlags::ACK | self.ecn_echo();
                 if *len > 0 && offset + *len >= self.tx.len() {
                     flags = flags | TcpFlags::PSH;
                 }
@@ -2072,12 +2184,38 @@ impl Tcb {
             destination_port: self.remote_port,
             seq,
             ack: self.rcv_nxt,
-            flags: TcpFlags::ACK,
+            flags: TcpFlags::ACK | self.ecn_echo(),
             window: self.advertised_window(),
             urgent: 0,
             options: self.data_options(ts),
         };
         (meta, alloc::vec::Vec::new())
+    }
+
+    /// The ECE flag to set on an outbound ACK-bearing segment while a
+    /// received Congestion-Experienced mark is unacknowledged by the peer
+    /// (RFC 3168 §6.1.3), or no flags otherwise.
+    fn ecn_echo(&self) -> TcpFlags {
+        if self.ecn_send_ece {
+            TcpFlags::ECE
+        } else {
+            TcpFlags::empty()
+        }
+    }
+
+    /// The IP-layer ECN codepoint to stamp on the datagram carrying `plan`
+    /// (RFC 3168 §5). Only an ECN-capable connection's fresh data segments
+    /// (at the send frontier, not a retransmission or window probe) are
+    /// marked ECT(0); every control segment, retransmission, and probe is
+    /// Not-ECT (RFC 3168 §5.2, §6.1.6).
+    fn segment_ecn(&self, plan: &Plan) -> Ecn {
+        if !self.ecn_ok {
+            return Ecn::NotEct;
+        }
+        match plan {
+            Plan::Data { probe, .. } if !*probe && self.snd_nxt == self.snd_max => Ecn::Ect0,
+            _ => Ecn::NotEct,
+        }
     }
 
     /// Wire bytes a data segment's TCP options occupy (timestamps and any
@@ -2132,6 +2270,12 @@ impl Tcb {
             Plan::Data {
                 len, fin, probe, ..
             } => {
+                // A CWR set on this segment (fresh data at the frontier)
+                // has now been transmitted, so the reduction is announced
+                // and the flag is cleared before the frontier advances.
+                if self.ecn_send_cwr && !*probe && self.snd_nxt == self.snd_max {
+                    self.ecn_send_cwr = false;
+                }
                 let seqlen = as_u32(*len) + u32::from(*fin);
                 let new_nxt = self.snd_nxt.add(seqlen);
                 if *fin {
@@ -2342,6 +2486,21 @@ impl Tcb {
         } else {
             Some(from_nanos(earliest))
         }
+    }
+}
+
+#[cfg(test)]
+impl Tcb {
+    /// The current congestion window in bytes (the policy's `cwnd`), for
+    /// tests asserting a congestion response.
+    pub(crate) fn cwnd(&self) -> u32 {
+        self.cc.cwnd()
+    }
+
+    /// Whether ECN was negotiated for this connection (RFC 3168 §6.1.1),
+    /// for tests asserting the handshake outcome.
+    pub(crate) fn ecn_ok(&self) -> bool {
+        self.ecn_ok
     }
 }
 

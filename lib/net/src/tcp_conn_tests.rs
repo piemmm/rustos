@@ -45,8 +45,12 @@ fn drain(tcb: &mut Tcb, now: Duration64) -> Vec<Vec<u8>> {
 }
 
 fn feed(tcb: &mut Tcb, frame: &[u8], now: Duration64) {
+    feed_ecn(tcb, frame, crate::addr::Ecn::NotEct, now);
+}
+
+fn feed_ecn(tcb: &mut Tcb, frame: &[u8], ecn: crate::addr::Ecn, now: Duration64) {
     let seg = TcpSegment::parse(PSEUDO, frame).expect("a serialised segment parses");
-    tcb.on_segment(&seg, now);
+    tcb.on_segment(&seg, ecn, now);
 }
 
 /// Move every segment `src` wants to send into `dst`, returning the count.
@@ -921,4 +925,207 @@ fn sending_data_defers_keepalive() {
     // A probe only after a fresh full idle interval from the activity.
     client.advance(ms(1900));
     assert_eq!(drain(&mut client, ms(1900)).len(), 1);
+}
+
+// --- RFC 3168 Explicit Congestion Notification -------------------------
+
+use crate::addr::Ecn;
+use crate::tcp::TcpFlags;
+
+/// A [`TcpConfig`] that offers ECN (RFC 3168 §6.1.1).
+fn config_ecn() -> TcpConfig {
+    TcpConfig {
+        enable_ecn: true,
+        ..config()
+    }
+}
+
+/// The control-bit flags of a captured segment.
+fn flags_of(frame: &[u8]) -> TcpFlags {
+    TcpSegment::parse(PSEUDO, frame)
+        .expect("a serialised segment parses")
+        .flags
+}
+
+/// Drain captured segments together with the IP ECN codepoint the engine
+/// asked be stamped on each ([`OutSegment::ecn`]).
+fn drain_ecn(tcb: &mut Tcb, now: Duration64) -> Vec<(Vec<u8>, Ecn)> {
+    let mut out = Vec::new();
+    tcb.poll_transmit(now, |seg| {
+        let mut buf = vec![0u8; crate::tcp::MAX_HEADER_LEN + seg.payload.len()];
+        let n = crate::tcp::write(PSEUDO, &seg.meta, seg.payload, &mut buf)
+            .expect("a planned segment always fits and serialises");
+        buf.truncate(n);
+        out.push((buf, seg.ecn));
+        true
+    });
+    out
+}
+
+/// An ECN-capable client and server that completed the handshake with ECN
+/// negotiated on both sides.
+fn handshake_ecn(now: Duration64) -> (Tcb, Tcb) {
+    let mut client = Tcb::connect(config_ecn(), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(config_ecn(), 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    assert_eq!(client.state(), State::Established);
+    assert_eq!(server.state(), State::Established);
+    assert!(client.ecn_ok(), "client negotiated ECN");
+    assert!(server.ecn_ok(), "server negotiated ECN");
+    (client, server)
+}
+
+#[test]
+fn ecn_setup_syn_carries_ece_and_cwr() {
+    let now = ms(0);
+    let mut client = Tcb::connect(config_ecn(), 40000, 80, 1000, now);
+    let syn = drain(&mut client, now);
+    assert_eq!(syn.len(), 1, "one SYN");
+    let f = flags_of(&syn[0]);
+    assert!(f.syn() && !f.ack(), "the ECN-setup segment is a bare SYN");
+    assert!(f.ece() && f.cwr(), "an ECN-setup SYN sets both ECE and CWR");
+}
+
+#[test]
+fn syn_without_ecn_has_no_ece_or_cwr() {
+    let now = ms(0);
+    let mut client = Tcb::connect(config(), 40000, 80, 1000, now);
+    let syn = drain(&mut client, now);
+    let f = flags_of(&syn[0]);
+    assert!(!f.ece() && !f.cwr(), "a plain SYN offers no ECN");
+}
+
+#[test]
+fn synack_confirms_ecn_only_when_server_agrees() {
+    let now = ms(0);
+    // Server enabled: the SYN-ACK carries ECE alone and both sides agree.
+    let mut client = Tcb::connect(config_ecn(), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(config_ecn(), 80, 0, 5000);
+    let syn = drain(&mut client, now);
+    for fr in &syn {
+        feed(&mut server, fr, now);
+    }
+    let synack = drain(&mut server, now);
+    let f = flags_of(&synack[0]);
+    assert!(f.syn() && f.ack(), "SYN-ACK");
+    assert!(
+        f.ece() && !f.cwr(),
+        "an ECN-setup SYN-ACK sets ECE with CWR clear"
+    );
+    for fr in &synack {
+        feed(&mut client, fr, now);
+    }
+    assert!(client.ecn_ok(), "the client confirms ECN from the SYN-ACK");
+}
+
+#[test]
+fn no_ecn_when_server_disabled() {
+    let now = ms(0);
+    let mut client = Tcb::connect(config_ecn(), 40000, 80, 1000, now);
+    // Server does not offer ECN.
+    let mut server = Tcb::listen(config(), 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    assert_eq!(client.state(), State::Established);
+    assert!(!client.ecn_ok(), "no ECN when the peer did not agree");
+    assert!(!server.ecn_ok());
+    // The client, having not negotiated ECN, marks its data Not-ECT.
+    client.send(b"data").unwrap();
+    let segs = drain_ecn(&mut client, now);
+    assert!(
+        segs.iter().all(|(_, ecn)| *ecn == Ecn::NotEct),
+        "a non-ECN connection never marks a packet ECN-capable"
+    );
+}
+
+#[test]
+fn ecn_data_segment_is_marked_ect0() {
+    let now = ms(0);
+    let (mut client, _server) = handshake_ecn(now);
+    client.send(b"payload").unwrap();
+    let segs = drain_ecn(&mut client, now);
+    let data = segs
+        .iter()
+        .find(|(bytes, _)| !TcpSegment::parse(PSEUDO, bytes).unwrap().payload.is_empty())
+        .expect("a data segment");
+    assert_eq!(
+        data.1,
+        Ecn::Ect0,
+        "fresh data on an ECN connection is ECT(0)"
+    );
+}
+
+#[test]
+fn receiver_echoes_ece_after_a_ce_mark() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake_ecn(now);
+    client.send(b"hello").unwrap();
+    let data = drain(&mut client, now);
+    // The network marked the data Congestion Experienced.
+    for fr in &data {
+        feed_ecn(&mut server, fr, Ecn::Ce, now);
+    }
+    let acks = drain(&mut server, now);
+    assert!(
+        acks.iter().any(|f| flags_of(f).ece()),
+        "the receiver echoes ECE after a CE mark"
+    );
+}
+
+#[test]
+fn sender_reduces_cwnd_and_sets_cwr_on_ece_once_per_window() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake_ecn(now);
+    // Client sends a byte; the network marks it CE, so the server's ACK
+    // echoes ECE back.
+    client.send(b"a").unwrap();
+    let data = drain(&mut client, now);
+    for fr in &data {
+        feed_ecn(&mut server, fr, Ecn::Ce, now);
+    }
+    let ece_ack = drain(&mut server, now);
+    assert!(
+        ece_ack.iter().any(|f| flags_of(f).ece()),
+        "the ACK carries ECE"
+    );
+    let cwnd_before = client.cwnd();
+    for fr in &ece_ack {
+        feed(&mut client, fr, now);
+    }
+    let cwnd_after = client.cwnd();
+    assert!(
+        cwnd_after < cwnd_before,
+        "an ECE-marked ACK reduces the congestion window ({cwnd_before} -> {cwnd_after})"
+    );
+    // The next fresh data segment announces the reduction with CWR.
+    client.send(b"b").unwrap();
+    let d2 = drain(&mut client, now);
+    assert!(
+        d2.iter().any(|f| flags_of(f).cwr()),
+        "the next fresh data segment sets CWR"
+    );
+    // A second ECE-marked ACK within the same window does not reduce again.
+    for fr in &ece_ack {
+        feed(&mut client, fr, now);
+    }
+    assert_eq!(
+        client.cwnd(),
+        cwnd_after,
+        "the window is reduced at most once per window of data"
+    );
+}
+
+#[test]
+fn non_ecn_connection_ignores_a_ce_mark() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    client.send(b"hello").unwrap();
+    let data = drain(&mut client, now);
+    for fr in &data {
+        feed_ecn(&mut server, fr, Ecn::Ce, now);
+    }
+    let acks = drain(&mut server, now);
+    assert!(
+        acks.iter().all(|f| !flags_of(f).ece()),
+        "a connection that never negotiated ECN never echoes ECE"
+    );
 }
