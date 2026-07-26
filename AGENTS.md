@@ -458,6 +458,13 @@ These are absolute. They override any local convenience.
 
 ## 3. Repository Layout (authoritative)
 
+This is a directory *map* only: where files live, not what they do internally.
+Each entry gets a one-line "what it is" label — never a design spec. A crate's
+design, rationale, invariants, and cross-references live in its own
+`README.md` / rustdoc and its `docs/src/` page; the topic → plan jump-sheet
+is §15.18. (That is the one and only cross-reference this section carries;
+keep it that way.)
+
 ```
 tairix/
 ├── AGENTS.md            # This file. Binding.
@@ -465,527 +472,127 @@ tairix/
 ├── README.md            # Short orientation only. No tutorials here.
 ├── LICENSE
 ├── Cargo.toml           # Virtual workspace manifest.
-├── Cargo.lock           # Committed lockfile (§19.3 source-hash pinning).
+├── Cargo.lock           # Committed lockfile.
 ├── rust-toolchain.toml  # Pinned nightly + components.
-├── rustfmt.toml         # Formatting rules (§7).
-├── clippy.toml          # Lint configuration (§7).
-├── deny.toml            # License + advisory rules for `cargo deny` (§7).
-├── supply-chain.toml    # Supply-chain pin/audit policy (§19.3).
+├── rustfmt.toml         # Formatting rules.
+├── clippy.toml          # Lint configuration.
+├── deny.toml            # License + advisory rules for `cargo deny`.
+├── supply-chain.toml    # Supply-chain pin/audit policy.
 ├── .cargo/config.toml   # Per-target build settings.
 │
 ├── kernel/              # The microkernel. One crate per architecture-neutral
-│   ├── core/            #   subsystem. No driver code here.
+│   │                    #   subsystem. No driver code here.
+│   ├── core/            # The single arch/scheduler selection point.
 │   ├── mem/             # Allocator, paging, process isolation.
-│   ├── sched/           # SMP scheduler — pluggable (§17.1):
+│   ├── sched/           # SMP scheduler — pluggable:
 │   │   ├── api/         #   SchedulerPolicy contract + conformance suite.
-│   │   ├── cfq/         #   Default policy: non-tickless Linux-CFS-like
-│   │   │                #   fair queuing (the tickless carve-out, §17.1).
-│   │   ├── eevdf/       #   Concrete policy (sibling crate, §17.1).
-│   │   └── mlfq/        #   Concrete policy (sibling crate, §17.1).
+│   │   ├── cfq/         #   Default policy (non-tickless fair queuing).
+│   │   ├── eevdf/       #   Concrete policy (sibling crate).
+│   │   └── mlfq/        #   Concrete policy (sibling crate).
 │   ├── ipc/             # Capabilities, message ports.
-│   ├── irq/             # IRQ table + per-handle wait queue: capability-gated
-│   │                    #   user-space wake-up for the irq_bind/irq_wait pair.
+│   ├── irq/             # IRQ table + per-handle wait queue (irq_bind/irq_wait).
 │   ├── sec/             # Users, groups, capabilities, MAC.
 │   ├── syscall/         # Syscall dispatch + ABI definitions.
-│   ├── virtio/          # Arch-neutral kernel-side virtio: capability-
-│   │                    #   checked DMA/MMIO hosts, per-driver host
-│   │                    #   factory, transport-provisioning walks.
-│   ├── arch/            # Pluggable architecture backends (§17.2):
+│   ├── virtio/          # Arch-neutral kernel-side virtio hosts.
+│   ├── arch/            # Pluggable architecture backends:
 │   │   ├── api/         #   The closed Arch HAL trait surface.
 │   │   ├── x86_64/
 │   │   ├── aarch64/
 │   │   ├── riscv64/
 │   │   └── wasm32/
-│   └── tairix-kernel/   # The microkernel binary: wires a concrete arch port
-│                        #   to kernel/core (the single §17 selection point).
+│   └── tairix-kernel/   # The microkernel binary.
 │
 ├── drivers/             # Loadable modules. One folder per device class.
 │   ├── display/
 │   │   ├── vesa/
 │   │   ├── framebuffer/
 │   │   ├── gpu_virtio/
-│   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS hardware-layer
-│   │                    #   compositor (the GPU-accelerated path).
+│   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS compositor.
 │   ├── filesystem/
-│   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write: every
-│   │   │                #   format (S/M/L/D old map, E/F new map, E+/F+ big
-│   │   │                #   directories, hard discs), RISC OS metadata via
-│   │   │                #   the shared lib/fsmeta acorn.* keys.
+│   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.
 │   │   ├── ext4/
 │   │   ├── fat32/
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
-│   │                    #   v1 target (docs/src/filesystem/arxfs-spec.md, staged): COW,
-│   │                    #   encrypted, checksummed, compressed, dedup.
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # virtio, mmio, usb/ (the USB bus-class folder):
-│                        #   usb/xhci (generic xHCI host) + usb/vl805 (the Pi 4
-│                        #   VL805 USB bus-driver crate: binds the VL805 PCI node,
-│                        #   reloads its firmware over the vcmailbox IPC, emits
-│                        #   the usb,xhci node forwarding the BAR+DMA grants),
-│                        #   and pcie_brcm (the Pi 4 PCIe root-complex bus-driver
-│                        #   crate: trains the link, enumerates the VL805, emits
-│                        #   its xHCI node). PCI config-access mechanism logic is
-│                        #   lib/pci; each Pi-4 driver's own device logic (the
-│                        #   BCM2711 link-train engine + emit_vl805_node, and the
-│                        #   VL805 firmware-reload + reload-and-publish wiring)
-│                        #   is a host-testable lib target *in that driver crate*
-│                        #   — not lib/*, as it has no non-driver consumer
-│                        #   (§2.22 / §18.5).
+│   └── bus/             # Bus drivers: virtio, mmio, usb/ (xhci, vl805),
+│                        #   pcie_brcm.
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
-│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: the
-│   │                    #   export-name-pinned tairix_sys_<name> stubs over
-│   │                    #   lib/abi-trap, for NON-Rust programs (§9, §16.4).
-│   ├── abi-trap/        # The single per-arch user->kernel syscall trap
-│   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
-│   ├── appload/         # Application-bundle load gate: the one place a
-│   │                    #   <Name>.app bundle is judged (fixed layout, signed
-│   │                    #   AppInfo manifest + content-hash + interface-hash
-│   │                    #   verification, capability intersection, dynamic-
-│   │                    #   loader library policy), shared by the kernel boot-
-│   │                    #   floor spawn path and the user-space appmgr service
-│   │                    #   so it is never re-implemented (§2.2, §16.5, §17.4).
-│   ├── binfmt/          # Read-only executable-container decoder: typed,
-│   │                    #   fail-closed views of the rxe load image +
-│   │                    #   manifest summary (through the lib/abi types, so
-│   │                    #   inspection and the load path never diverge),
-│   │                    #   ELF64, and wasm module structure, for the
-│   │                    #   fstree disassembly viewer and objdump-class
-│   │                    #   tools. Never executes or loads; fuzzed (§19.6);
-│   │                    #   decode runs in the §19.5 parser sandbox.
-│   ├── bootload/        # Firmware-neutral boot-chain loader core
-│   │                    #   (plans/BOOTLOADER.md B1): the one pure, no_std,
-│   │                    #   alloc-free computation that turns the kernel ELF64
-│   │                    #   into a validated LoadPlan (PT_LOAD segments, entry,
-│   │                    #   physical span, W^X flags) over lib/binfmt, shared by
-│   │                    #   the per-firmware boot/* shells so two loaders never
-│   │                    #   disagree on the layout (§2.2). Places nothing,
-│   │                    #   touches no hardware; bounded + fail-closed (§5.4).
-│   ├── browse/          # Shared directory-browser engine (plans/APPWIN.md
-│   │                    #   AW5): the one transactional navigation model
-│   │                    #   (Browser over the DirectorySource seam), themed
-│   │                    #   listing renderer + row hit-test, and validated
-│   │                    #   path spelling that the files app's Run binary
-│   │                    #   and the desktop session's trusted file picker
-│   │                    #   both compose, so the file manager and the CU6
-│   │                    #   picker can never diverge (§2.2).
+│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime (non-Rust progs).
+│   ├── abi-trap/        # The single per-arch user->kernel syscall trap carve-out.
+│   ├── appload/         # Application-bundle load gate.
+│   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
+│   ├── bootload/        # Firmware-neutral boot-chain loader core.
+│   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.
-│   ├── cmdres/          # Shared command-word resolution policy (plans/
-│   │                    #   APPS.md §8–§9): the one pure definition of the
-│   │                    #   ordered bundle candidates a typed command word
-│   │                    #   names (system app store first, then the alias-
-│   │                    #   aware PATH split), imported by the shell's
-│   │                    #   launch path and the man command's bundle lookup
-│   │                    #   (§2.2). Spelling only — no I/O, no authority.
+│   ├── cmdres/          # Shared command-word resolution policy.
 │   ├── collections/     # no_std collections not in core/alloc.
-│   ├── complete/        # Shared filename-completion engine: the one
-│   │                    #   directory-part/leaf path-candidate policy
-│   │                    #   (dotfile rule, prefix filter, longest-common-
-│   │                    #   prefix Tab discipline) the shell's Tab
-│   │                    #   completion and fstree's destination prompts
-│   │                    #   import over an injected read-only listing
-│   │                    #   seam, never a second engine (§2.2). Fail
-│   │                    #   closed: a refused listing completes to
-│   │                    #   nothing, never a guess.
-│   ├── compress/        # First-party LZ codec; ARXFS compresses every record
-│   │                    #   with it, no external dependency (§2.12, §16.4).
-│   ├── controls/        # Shared Reactive Alloy GUI control behaviour
-│   │                    #   (plans/GUI-CONTROLS-DESIGN.md): the one
-│   │                    #   orientation-independent scroll geometry engine
-│   │                    #   (ScrollRange/ScrollModel/ScrollGeometry — validated
-│   │                    #   range, proportional thumb math, drag-anchor mapping,
-│   │                    #   line/page/home-end steps) the window-manager root
-│   │                    #   viewport and nested application content share,
-│   │                    #   never separate vertical/horizontal/WM/app recipes;
-│   │                    #   the typed control-state vocabulary (ControlKind/
-│   │                    #   Role, composed ControlState + the §13
-│   │                    #   ControlDisposition, window-furniture states); and
-│   │                    #   the drawn control families — Button/IconButton/
-│   │                    #   SplitButton, the boolean selectors Toggle/Checkbox/
-│   │                    #   Radio, the value controls Slider/Progress, the
-│   │                    #   text entries TextField/SearchField, the menu command
-│   │                    #   surface Menu/MenuItem, the Toolbar (composing icon/
-│   │                    #   split tools in groups with an active-tool seam), the
-│   │                    #   Tabs strip, the ComboBox (composing the Menu for
-│   │                    #   its popup), the collection controls ListRow/
-│   │                    #   TableRow/TableCell/Card/Panel (one shared row chrome
-│   │                    #   with a fixed rail gutter so columns stay aligned as
-│   │                    #   row state changes), and the one orientation-
-│   │                    #   parameterized ScrollBar (decrement/track/thumb/
-│   │                    #   increment over the shared scroll geometry, awake-
-│   │                    #   brightened thumb + end controls, preserved drag
-│   │                    #   anchor, one-shot-timer repeat seam, ScrollAction),
-│   │                    #   and the window-manager furniture family (WindowFrame
-│   │                    #   with its client/furniture hit map, TitleBar with the
-│   │                    #   compact WindowControl command buttons Close/Minimize/
-│   │                    #   PutToBack/SizeToggle, ResizeGrabber, ScrollCorner —
-│   │                    #   command glyphs that read without colour, drag/resize
-│   │                    #   capture, active/inactive/attention frame, the client
-│   │                    #   never receiving furniture input, and the resize corner
-│   │                    #   never overlapping a scrollbar thumb), the shell
-│   │                    #   surfaces (Notification composing a Card with a
-│   │                    #   source attribution, TaskbarItem with a
-│   │                    #   TaskVisibility state + activity/attention/recovery
-│   │                    #   beads, TraySignal stacking severity-ordered beads
-│   │                    #   with a hover/focus instrument readout), and the
-│   │                    #   decision surfaces (Dialog with honest Action
-│   │                    #   Warmth + §13 denial rendering, the short anchored
-│   │                    #   Tooltip, and HelpTip with one safe next step) —
-│   │                    #   over one
-│   │                    #   shared draw+interaction core —
-│   │                    #   resolving colour/metric/radius
-│   │                    #   from lib/theme+lib/geometry, rounding plates through
-│   │                    #   the one shared lib/raster fill, drawing via lib/font
-│   │                    #   /lib/icon, consuming lib/input. Selectors read by
-│   │                    #   shape as well as colour (thumb/square/bar/bead); the
-│   │                    #   slider commits through its owner (SliderAction) and
-│   │                    #   progress is a read-only instrument trace. Text fields
-│   │                    #   own a caret/selection editor with clipped horizontal
-│   │                    #   scroll; read-only reads distinct from disabled and
-│   │                    #   denied, and a SearchField's leading magnifier reads
-│   │                    #   active on a query (TextAction). A
-│   │                    #   control renders state and emits a typed action; the
-│   │                    #   service enforces authority. Fail closed, no panic
-│   │                    #   (§2.2, §17.4). The full drawn control set and the
-│   │                    #   Switchboard reference composition (spec §17,
-│   │                    #   module switchboard: WindowFrame/TitleBar/Tabs/
-│   │                    #   ListRow/Card/Panel/Button/ScrollBar from typed view
-│   │                    #   models, typed SwitchboardAction) are complete.
-│   ├── cpuops/          # Self-optimising CPU-dispatch framework
-│   │                    #   (plans/FIX-HARDWARE-FEATURES.md P2/P3): the one
-│   │                    #   generic, platform-neutral registry that selects, per
-│   │                    #   boot per distinct core type, the fastest *correct*,
-│   │                    #   feature-legal implementation of an accelerated op
-│   │                    #   (CRC32, checksum, memcpy/zero, blit, XOR, and the
-│   │                    #   crypto-backend availability decision) from a set of
-│   │                    #   candidates — a deterministic capability gate over
-│   │                    #   the shared lib/abi CpuFeatureSet, a mandatory self-
-│   │                    #   verify against a portable reference, and either
-│   │                    #   declared priority or a bounded median microbenchmark
-│   │                    #   over an injected CycleCounter — always falling
-│   │                    #   closed to a portable baseline. Crypto is availability
-│   │                    #   only, never benchmarked (§19.1/§2.12). no_std+alloc,
-│   │                    #   no cfg, no board/SoC name (§2.16/§2.20/§2.21/§27).
-│   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum
-│   │                    #   (plans/FIX-HARDWARE-FEATURES.md P2): the one first-
-│   │                    #   party definition of TAIRiX's fast, non-cryptographic
-│   │                    #   media-integrity checksum — a portable table baseline
-│   │                    #   plus per-arch hardware candidates (aarch64 crc32c*,
-│   │                    #   x86_64 SSE4.2 crc32; GPR-only, build.rs-emitted cfg
-│   │                    #   the lib/abi-trap way, no cfg(target_arch)) selected
-│   │                    #   once and self-verified against the baseline through
-│   │                    #   lib/cpuops, fail-closed to the baseline. Consumed by
-│   │                    #   ARXFS's physical_checksum; not the crypto carve-out —
-│   │                    #   an error-detecting checksum, so first-party is
-│   │                    #   permitted (§2.12/§2.16/§2.20). no_std, fuzzed (§19.6).
-│   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
-│   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
+│   ├── complete/        # Shared filename-completion engine.
+│   ├── compress/        # First-party LZ codec.
+│   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
+│   ├── cpuops/          # Self-optimising CPU-dispatch framework.
+│   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.
+│   ├── crt0/            # C-callable abi-v1 program startup object (non-Rust progs).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
-│   ├── curses/          # First-party curses / TUI screen-model library
-│   │                    #   (plans/CURSES.md C4) over lib/vt (§2.2): a curated
-│   │                    #   /System/Libraries/ class, fail closed (§2.9).
-│   ├── cursor/          # Shared pointer cursors rasterised onto a raster
-│   │                    #   Surface, keyed by the theme's CursorKind (§10, §17.4).
-│   ├── devids/          # PCI/USB ID-database engine (plans/DEVICES.md): the
-│   │                    #   one definition of the vetted pci.ids/usb.ids
-│   │                    #   snapshot grammar + fail-closed vetting filter, the
-│   │                    #   compact sorted table encoder, and the alloc-free
-│   │                    #   binary-search decoder lspci/lsusb read their
-│   │                    #   bundled tables through. Snapshots + generated
-│   │                    #   tables live in the crate; `cargo xtask devids`
-│   │                    #   imports (--fetch, developer-run only, §19.3),
-│   │                    #   regenerates (--write), and drift-checks in ci (§2.2).
-│   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
-│   │                    #   match policy (§18.3): the one definition shared by
-│   │                    #   userland devmgr and the kernel driver catalogue (§2.2).
-│   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs
-│   │                    #   (riscv64 RV64GC incl. C, aarch64 A64, wasm code
-│   │                    #   bodies, x86_64 prefixes/REX/ModRM/SIB over the
-│   │                    #   one- and two-byte maps), one shared Insn output
-│   │                    #   vocabulary: pure slice+address decoders that
-│   │                    #   always make forward progress and render
-│   │                    #   undecodable bytes honestly ((bad) / .inst),
-│   │                    #   never guessing — the fstree disassembly viewer
-│   │                    #   and objdump-class tools consume them over
-│   │                    #   lib/binfmt; fuzzed (§19.6), decode runs in the
-│   │                    #   §19.5 parser sandbox.
-│   ├── display/         # Display-service protocol engine (plans/DISPLAY.md
-│   │                    #   D7b): the one definition of the zero-copy,
-│   │                    #   lease-gated frame-presentation semantics over the
-│   │                    #   reserved DISPLAY_ENDPOINT — the DisplayServer
-│   │                    #   engine a display driver's Run binary hosts
-│   │                    #   (per-request call_peer_seat lease gate, lease-
-│   │                    #   generation-bound shm frame region, damage-aware
-│   │                    #   blits through the Display trait) and the
-│   │                    #   DisplayClient/RemoteDisplay halves a desktop
-│   │                    #   session presents through (§2.2).
-│   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers
-│   │                    #   (dma_wmb/dma_rmb): the single per-arch dsb/dmb (or
-│   │                    #   fence) carve-out ordering a driver's writes to
-│   │                    #   device-shared Normal-NC memory before the MMIO
-│   │                    #   doorbell, and reads of device-written ring entries,
-│   │                    #   on a non-coherent DMA master (§1/§2.2; the lib/usb
-│   │                    #   consumer, host/wasm32 no-op).
-│   ├── drvrt/           # User-space driver runtime host (plans/PI.md P10 5d):
-│   │                    #   the rt-backed DriverHost a driver process links,
-│   │                    #   mapping kernel-issued device-resource grants over the
-│   │                    #   mmio_map/dma_alloc syscalls (§4, §5.4, §2.2).
-│   ├── fbcon/           # Shared, arch-neutral framebuffer text-console engine:
-│   │                    #   the full ANSI/VT/xterm-256color terminal (Geometry/
-│   │                    #   TextConsole/DirtyBand, palette, glyph blit over
-│   │                    #   lib/font, scroll-up-at-bottom, and the alternate
-│   │                    #   screen — CSI ? 1049 h/l — that restores the primary
-│   │                    #   screen a full-screen program like top covered)
-│   │                    #   rendering the shared lib/vt Op stream onto a 32-bit
-│   │                    #   surface over a retained tairix_vt::Cell grid, so
-│   │                    #   every arch port drives its display console through
-│   │                    #   one definition instead of re-deriving it. The two
-│   │                    #   cell grids (primary+alternate) are borrowed &mut
-│   │                    #   [Cell] the caller owns (a static, or a heap buffer
-│   │                    #   leaked & sized to discovered geometry), so the
-│   │                    #   engine stays allocator-free (§2.2, §2.20, §2.21,
-│   │                    #   §17.4, §24.1).
-│   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
-│   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
-│   ├── font/            # Shared text rasterisation: monospace font + glyph
-│   │                    #   blitter onto a raster Surface. The text console
-│   │                    #   draws the generated native atlas; the desktop
-│   │                    #   rasterises resized glyphs from the outlines at the
-│   │                    #   requested size via lib/fontface, cached, so text is
-│   │                    #   crisp at any size, not a stretched bitmap (§16.4,
-│   │                    #   §17.4, §2.16).
-│   ├── fontface/        # Shared TrueType glyph-outline engine: the one parser
-│   │                    #   + anti-aliased non-zero-winding rasteriser turning a
-│   │                    #   committed face into 4-bit coverage at ANY requested
-│   │                    #   pixel size, plus the merged-family (repertoire +
-│   │                    #   earliest-face-wins) codepoint resolution. Shared by
-│   │                    #   the `cargo xtask font-atlas` generator and the
-│   │                    #   runtime lib/font, so the atlas and live resized text
-│   │                    #   can never diverge (§2.2). no_std+alloc, fail-closed.
-│   ├── fsmeta/          # Shared extended-file-metadata model: the namespaced
-│   │                    #   attribute-key grammar, the bounded AttrSet/AttrEntry
-│   │                    #   store + self-identifying encoding, and the closed
-│   │                    #   foreign-metadata preset registry (Acorn/Amiga/Atari/
-│   │                    #   Mac) with checked Time64 conversions — the one
-│   │                    #   definition ARXFS, the foreign-FS drivers, and the
-│   │                    #   copy/archive tools share (§2.2; arxfs-spec §21).
-│   ├── fsprobe/         # Shared filesystem signature/label/identity probe:
-│   │                    #   the one definition of how an extent head is
-│   │                    #   recognised as ARXFS/ext4/FAT32, the stable
-│   │                    #   identity each format carries, and the short
-│   │                    #   display fingerprint (ALIAS §3.8) — shared by the
-│   │                    #   volmgr policy driver's probe and the filesystem
-│   │                    #   drivers' own magic/identity definitions (§2.2).
-│   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb programming
-│   │                    #   helper: the one fw_cfg protocol definition the
-│   │                    #   aarch64 framebuffer boot console's QEMU virt ramfb
-│   │                    #   path and the display-class QEMU verticals share
-│   │                    #   (§2.2; the lib/vcmailbox analogue for QEMU).
-│   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
-│   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
-│   ├── glob/            # Shared filename-glob matcher: the one first-party
-│   │                    #   definition of shell wildcard patterns (*, ?, [...],
-│   │                    #   \\ escape) the shell's filename generation and
-│   │                    #   completion (and every other consumer) import, never
-│   │                    #   an in-shell matcher. no_std+alloc, fail-closed,
-│   │                    #   bounded, no catastrophic backtracking (§2.2, §2.9,
-│   │                    #   §24.4; plans/SHELL.md, .junie/PREREQUISITES2.md P6).
-│   ├── help/            # Shared command-help engine (plans/APPS.md): the
-│   │                    #   locale-fallback lookup over a bundle's Help/ tree,
-│   │                    #   the bounded structured-Markdown help-document
-│   │                    #   parser, and the short (-h) / full (man) renders
-│   │                    #   over lib/vt — the one engine `man`, every
-│   │                    #   command's short help, and any GUI help viewer
-│   │                    #   share (§2.2, §16.5). no_std+alloc, fail-closed.
-│   ├── hid/             # Arch-neutral HID boot-protocol decode (keyboard +
-│   │                    #   mouse), the console-input producer, and the xHCI
-│   │                    #   boot-keyboard orchestration, shared by the in-kernel
-│   │                    #   scaffold and the user-space keyboard driver (§2.2/§17.4).
-│   ├── icon/            # Shared desktop icons: themeable vector glyphs
-│   │                    #   rasterised via fill_polygon onto a Surface (§10).
-│   ├── input/           # Shared pointer input-event vocabulary
-│   │                    #   (PointerButton/InputEvent) routed by the WM and
-│   │                    #   taskbar (§17.4).
-│   ├── kalloc/          # Freeing kernel heap allocator (coalescing free-list)
-│   │                    #   shared by every freestanding bin's #[global_allocator]
-│   │                    #   (§4 — deterministic OOM, never a panic).
-│   ├── keymap/          # Shared terminal key map: the one Key+Modifiers ->
-│   │                    #   console (tty) byte encoder a keyboard driver's
-│   │                    #   console_input producer uses, over lib/vt (§2.2).
+│   ├── curses/          # First-party curses / TUI screen-model library.
+│   ├── cursor/          # Shared pointer cursors.
+│   ├── devids/          # PCI/USB ID-database engine.
+│   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table match.
+│   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs.
+│   ├── display/         # Display-service protocol engine.
+│   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers.
+│   ├── drvrt/           # User-space driver runtime host.
+│   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
+│   ├── fdt/             # Shared FDT/DTB reader.
+│   ├── font/            # Shared text rasterisation (monospace font + blitter).
+│   ├── fontface/        # Shared TrueType glyph-outline engine.
+│   ├── fsmeta/          # Shared extended-file-metadata model.
+│   ├── fsprobe/         # Shared filesystem signature/label/identity probe.
+│   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
+│   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
+│   ├── glob/            # Shared filename-glob matcher.
+│   ├── help/            # Shared command-help engine.
+│   ├── hid/             # Arch-neutral HID boot-protocol decode.
+│   ├── icon/            # Shared desktop icons.
+│   ├── input/           # Shared pointer input-event vocabulary.
+│   ├── kalloc/          # Freeing kernel heap allocator.
+│   ├── keymap/          # Shared terminal key map.
 │   ├── log/             # Structured logging.
-│   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout
-│   │                    #   (plans/BOOTLOADER.md B2): the one no_std definition
-│   │                    #   of the boot-loader→kernel tag stream both halves of
-│   │                    #   the boot handoff depend on — the kernel BootInfo
-│   │                    #   parser (borrow-only, fail-closed) and the loader's
-│   │                    #   InfoBuilder (assembles basic memory / memory map /
-│   │                    #   command line / RSDP / framebuffer tags into a
-│   │                    #   caller buffer) — so producer and consumer can never
-│   │                    #   drift (§2.2). Round-trip host-tested + fuzzed.
-│   ├── net/             # Network protocol engine (plans/NETWORK.md): the
-│   │                    #   pure, no_std, host-testable definition of the
-│   │                    #   wire protocols the user-space stack speaks —
-│   │                    #   dual-stack address vocabulary (v6 scope/zone),
-│   │                    #   the one RFC 1071 checksum (+ v4/v6 pseudo-
-│   │                    #   headers), Ethernet/ARP/IPv4/ICMP codecs, and
-│   │                    #   the bounded provider-agnostic RFC 4861
-│   │                    #   neighbour cache ARP and ND both drive (§2.2).
-│   │                    #   No I/O: the netstack service is the glue.
-│   ├── pagezero/        # Page/region zeroing (plans/FIX-HARDWARE-FEATURES.md
-│   │                    #   P3a): the one first-party definition of the fast
-│   │                    #   memory-clear the kernel uses to scrub freshly-
-│   │                    #   allocated frames (zero-before-map) and freed frames
-│   │                    #   (the zero-on-free secret scrub) — a portable byte-
-│   │                    #   fill baseline plus per-arch hardware candidates
-│   │                    #   (aarch64 DC ZVA cache-block zero, x86_64 ERMS rep
-│   │                    #   stosb; build.rs-emitted cfg, no cfg(target_arch))
-│   │                    #   selected once and self-verified bit-identical to the
-│   │                    #   baseline through lib/cpuops, fail-closed. Capability-
-│   │                    #   gated (ByPriority), never benchmarked: a block-zero
-│   │                    #   primitive is unconditionally better when present.
-│   │                    #   Consumed by the kernel/mem frame scrub. no_std,
-│   │                    #   fuzzed (§2.12/§2.16/§2.20; §19.6).
-│   ├── partition/       # Shared, scheme-neutral partition-table layer: MBR
-│   │                    #   encode + fail-closed MBR/GPT parse and a
-│   │                    #   bounds-checked PartitionBlock window, the one
-│   │                    #   definition the mkimage author and the kernel
-│   │                    #   root-mount reader share across MBR/GPT on every
-│   │                    #   arch (§2.2, §5.4, §24.4).
-│   ├── path/            # Shared filesystem path-spelling parser: the one
-│   │                    #   definition of how a TAIRiX path string (a
-│   │                    #   synthetic-view `/path`, an alias shorthand
-│   │                    #   `Alias:/path`, the expanded `alias::Name/path` form,
-│   │                    #   or a relative `path`) is lexed and normalised into a
-│   │                    #   typed root + components, fail-closed and bounded.
-│   │                    #   The shell (cd, prompt, expansion, completion) and
-│   │                    #   every other consumer import it, never a second path
-│   │                    #   parser (§2.2). Resource references (`namespace:sel`)
-│   │                    #   and durable/admin resolvers (`id::`/`fs::`/…) are
-│   │                    #   declined for their own future stages, not invented
-│   │                    #   here (§2.3/§2.4).
-│   ├── pci/             # PCI/PCIe configuration-access mechanism library
-│   │                    #   (mechanism #1 / ECAM / BCM2711-windowed) + the
-│   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams + the shared
-│   │                    #   find_function_by_class / assign_and_map_bar /
-│   │                    #   bus_to_cpu_phys locate primitives, so a user-space
-│   │                    #   bus driver enumerates/assigns BARs without a
-│   │                    #   drivers/*->drivers/* edge (§2.2/§17.4).
-│   ├── procinfo/        # Shared System Information API client helpers
-│   │                    #   (request seams, process-list paging + render) plus
-│   │                    #   the userspace info:/stats: resolver: maps a parsed
-│   │                    #   resref ResourceRef onto a SysinfoQueryId over the
-│   │                    #   sysinfod client seam and returns the ALIAS §14
-│   │                    #   resinfo response envelope, so info:/stats: resolve
-│   │                    #   through the System Information API, never a kernel
-│   │                    #   resource_open backing (§2.2, §16.6).
-│   ├── raster/          # Shared software rasterisation: premultiplied-alpha
-│   │                    #   Surface (fill_rect, fill_round_rect, fill_polygon,
-│   │                    #   blit) + round_rect_coverage, the one anti-aliased
-│   │                    #   rounded-rectangle definition the WM compositor's
-│   │                    #   window corners and the Reactive Alloy control plates
-│   │                    #   both round through (§2.2, §17.4).
-│   ├── resref/          # Shared resource-reference parser: the one definition
-│   │                    #   of how a TAIRiX resource reference
-│   │                    #   (namespace:selector[@guard][::facet][?params], e.g.
-│   │                    #   sys:random, disk:backup@7K2M, stats:net/wan/rx.pps?
-│   │                    #   window=1s) is lexed and validated into a typed
-│   │                    #   ResourceRef + closed namespace registry. The shell
-│   │                    #   (redirection, args, completion, typed values) and
-│   │                    #   the resolver services import it, never a second
-│   │                    #   reference parser (§2.2). no_std+alloc, fail-closed,
-│   │                    #   bounded; spelling only — no resolve/open/capability
-│   │                    #   check (plans/ALIAS.md, .junie/PREREQUISITES2.md P5).
-│   ├── rng/             # RNG: a NIST SP 800-90A HMAC-SHA256 CSPRNG over
-│   │                    #   lib/crypto (§2.12), an entropy seam (§19.2), and a
-│   │                    #   fast non-crypto xoshiro256++ generator.
-│   ├── rt/              # The pure-Rust userland runtime a first-party program
-│   │                    #   links (§1): _start, stack canary, panic handler,
-│   │                    #   syscall wrappers, entry! macro, over lib/abi-trap.
-│   ├── sandbox/         # The §19.5 parser-sandbox seam: the one typed
-│   │                    #   request/reply path a program runs a parser of
-│   │                    #   untrusted input through, over the kernel sandbox
-│   │                    #   spawn mode — length-framed protocol, worker serve
-│   │                    #   loop, crash containment (typed error, replaced
-│   │                    #   worker, stable log events), the in-process
-│   │                    #   loopback fake for host tests, the sandboxed
-│   │                    #   lib/binfmt + lib/disasm decode service, and the
-│   │                    #   sandboxed lib/help render service (helpdoc: the
-│   │                    #   whitelist-validated page `man` shows) (§2.2).
-│   ├── seat/            # Arch-neutral seat model (plans/DISPLAY.md): the
-│   │                    #   exclusive, owner-tracked, revocable lease on one
-│   │                    #   display + keyboard + pointer and its input-routing
-│   │                    #   decision — the one state machine the kernel seat
-│   │                    #   registry and the user-space seat manager share (§2.2).
-│   ├── svg/             # Shared fail-closed no_std SVG decoder for the
-│   │                    #   WM/desktop SVG-first assets (§2.2, §2.12, §10, §16.4).
+│   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
+│   ├── net/             # Network protocol engine (wire protocols).
+│   ├── pagezero/        # Page/region zeroing.
+│   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
+│   ├── path/            # Shared filesystem path-spelling parser.
+│   ├── pci/             # PCI/PCIe configuration-access mechanism library.
+│   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
+│   ├── raster/          # Shared software rasterisation.
+│   ├── resref/          # Shared resource-reference parser.
+│   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.
+│   ├── rt/              # The pure-Rust userland runtime.
+│   ├── sandbox/         # The parser-sandbox seam.
+│   ├── seat/            # Arch-neutral seat model.
+│   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
-│   ├── sysconfig/       # Boot-time system-configuration store engine: the
-│   │                    #   one definition of the
-│   │                    #   /System/Settings/Configuration/system.conf
-│   │                    #   grammar, its closed key registry (os.loginType),
-│   │                    #   the fail-closed parse, and the canonical render —
-│   │                    #   written by the `configure` command app and read by
-│   │                    #   every boot-time consumer (login's session-type
-│   │                    #   default) after the root unlock, so producer and
-│   │                    #   consumer can never diverge (§2.2).
-│   ├── termcap/         # Compiled-in TERM->capability database (plans/CURSES.md
-│   │                    #   C3): closed versioned TermType set in lib/vt terms,
-│   │                    #   fail-closed from_term (§2.2, §2.9, §16.1).
-│   ├── theme/           # Shared desktop theme definition: dark/light
-│   │                    #   palettes (incl. §6 semantic signal roles), control/
-│   │                    #   furniture metrics, motion timings + reduced-motion,
-│   │                    #   density/contrast variants, fonts, cursors (§10).
-│   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol: the
-│   │                    #   XhciHost register seam, the Xhci controller engine,
-│   │                    #   the TRB/ring vocabulary, and the multi-device
-│   │                    #   enumeration engine (up to MAX_DEVICES concurrently
-│   │                    #   served devices), shared by drivers/bus/usb/xhci and
-│   │                    #   an arch-neutral user-space keyboard driver (§2.2/§17.4).
-│   ├── users/           # User-account database: the /System/Security/Users
-│   │                    #   format, PBKDF2 password records over lib/crypto,
-│   │                    #   and timing-equalised authentication (§5.1).
+│   ├── sysconfig/       # Boot-time system-configuration store engine.
+│   ├── termcap/         # Compiled-in TERM->capability database.
+│   ├── theme/           # Shared desktop theme definition (dark/light).
+│   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
+│   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
-│   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox property-channel
-│   │                    #   client (framebuffer + display-size queries), shared
-│   │                    #   by the aarch64 framebuffer boot console and the
-│   │                    #   rpi_hvs display driver. A legitimate lib/* device-
-│   │                    #   support crate: its non-driver consumer (the boot
-│   │                    #   console) is a genuine early-boot need, so the §2.20
-│   │                    #   carve-out applies (§2.2 / §2.22).
-│   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
-│   │                    #   (Transport trait, queues, DMA slabs) + the
-│   │                    #   concrete virtio-MMIO transport, so a user-space
-│   │                    #   virtio driver builds it without a drivers/*→
-│   │                    #   drivers/* edge (§2.2/§17.4 — the lib/usb ↔
-│   │                    #   drivers/bus/usb precedent).
-│   ├── virtio_input/    # Arch-neutral virtio-input (keyboard/pointer)
-│   │                    #   open/poll/decode device logic over lib/virtio,
-│   │                    #   shared by the kernel verticals and the user-space
-│   │                    #   input driver (§2.2/§17.4 — the virtio analogue of
-│   │                    #   lib/hid ↔ drivers/input/usb_hid).
-│   ├── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
-│   │                    #   one control/SGR/colour/screen-op definition with an
-│   │                    #   emitter + streaming parser over the same tables (§2.2).
-│   └── window/          # Window-channel protocol engine (plans/APPWIN.md AW2):
-│                        #   the one definition of the zero-copy, owner-keyed
-│                        #   app-window semantics over the reserved
-│                        #   WINDOW_ENDPOINT — the WindowServer engine the
-│                        #   desktop session composes (call_peer_origin-attested
-│                        #   owners, map-once shm frame regions, per-client cap,
-│                        #   fail-closed teardown, validated app-ward event
-│                        #   routing) and the WindowClient/WindowEvents halves an
-│                        #   app's Run binary links (typed calls + parked event
-│                        #   wait) (§2.2).
+│   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox client.
+│   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
+│   ├── virtio_input/    # Arch-neutral virtio-input device logic.
+│   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
+│   └── window/          # Window-channel protocol engine.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.
 │   │   ├── init/        # PID 1.
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
-│   │   ├── appmgr/      # Application bundle loader: .app layout + AppInfo
-│   │   │                #   verification + dynamic-loader policy (§16.4/§16.5).
+│   │   ├── appmgr/      # Application bundle loader.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
 │   │   └── login/       # Text + graphical login (graphical falls back to text).
@@ -994,9 +601,7 @@ tairix/
 │   ├── gui/             # Graphical desktop components.
 │   │   ├── wm/          # Compositing window manager.
 │   │   ├── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
-│   │   └── session/     # Desktop session glue: owns the shared theme
-│   │                    #   registry + taskbar model, performs the runtime
-│   │                    #   light/dark switch, relays the active theme (§10).
+│   │   └── session/     # Desktop session glue (theme + taskbar model).
 │   ├── net/             # Userland networking services.
 │   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
 │   └── apps/            # Default apps. Each app is its own crate.
@@ -1014,48 +619,26 @@ tairix/
 │   │   └── userland/
 │   └── book.toml
 │
-├── include/             # Generated C development headers for the ABI, so a
-│   └── tairix/          #   non-Rust program (C, …) can call abi-v1. Emitted
-│                        #   from the lib/abi source of truth by
-│                        #   `cargo xtask c-header --write`; verified by
-│                        #   `cargo xtask c-header` in CI. Do not hand-edit.
+├── include/             # Generated C dev headers for the ABI. Do not hand-edit.
+│   └── tairix/
 │
 ├── tests/               # Cross-crate / integration tests only.
-│   ├── fuzzseed/        #   Shared host test-support: per-run PRNG seed, seed
-│   │                    #   logging, smoke/soak budget for the §19.6/§19.7
-│   │                    #   harnesses (§2.2); dev-dependency only, never shipped.
+│   ├── fuzzseed/        #   Shared host test-support (PRNG seed, budgets).
 │   ├── integration/     #   Cross-crate / end-to-end (QEMU) test crates.
-│   └── SECURITY.md      #   Binding adversarial-test charter (§19) for the
-│                        #   memory subsystem and CPU privilege boundary.
-│                        # Per-crate unit tests live in `src/` next to code
-│                        #   (see §7).
+│   └── SECURITY.md      #   Binding adversarial-test charter.
+│                        # Per-crate unit tests live in `src/` next to code.
 │
-├── plans/               # Staged sub-plans referenced by PLAN.md and this
-│                        #   charter. Binding under AGENTS.md; the topic →
-│                        #   plan jump-sheet every contributor checks first
-│                        #   is §15.18.
+├── plans/               # Staged sub-plans. Binding under AGENTS.md.
 │
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
-│   ├── mkimage/         # Image builders per platform (PLAN.md Stage 8).
-│   │                    #   aarch64-rpi is built; the rest are staged.
-│   ├── syshelp/         # Build-discovered system app-store Help payload:
-│   │                    #   scans the command-app bundles' on-disk Help/
-│   │                    #   trees and exposes them as data (no_std), so the
-│   │                    #   image builder + QEMU fixtures plant help without a
-│   │                    #   hand-maintained per-bundle list and no help is
-│   │                    #   hardcoded into an app (§16.5, §2.2).
-│   ├── cc/              # Audited, version-pinned, checksummed C toolchain
-│   │                    #   wrapper (clang + ld.lld) for the CCOMPAT C-ABI
-│   │                    #   end-to-end test. Host-only build glue (§12);
-│   │                    #   TAIRiX itself stays Rust-only (§1).
+│   ├── mkimage/         # Image builders per platform.
+│   ├── syshelp/         # Build-discovered system app-store Help payload.
+│   ├── cc/              # Host-only C toolchain wrapper for the C-ABI test.
 │   ├── qemu/            # QEMU run scripts.
-│   └── ci/              # CI/build-host orchestration: thin wrappers around
-│                        #   cargo xtask (scheduling, logging, parallel soaks).
-│                        #   No pipeline logic lives here (that is tools/xtask).
+│   └── ci/              # CI/build-host orchestration (thin xtask wrappers).
 │
-├── artwork/             # Design concept art/storyboards (reference, not
-│                        #   shipped or built). See docs/src/desktop/artwork.md.
+├── artwork/             # Design concept art/storyboards (reference, not shipped).
 │
 └── images/              # Output: .iso, .img, .wasm bundles. .gitignored.
 ```
