@@ -122,6 +122,13 @@ The policy is enforced, not advisory:
   retransmission) instead of forcing a drop. `false` (the default)
   leaves connections Not-ECT. Like keepalive it is read at
   connect/`listen` time, so it needs no per-interface re-application.
+  The whole switched-on path is proven live by the
+  `netstack_ecn_qemu_aarch64` two-process QEMU vertical
+  (`plans/NETWORK.md` N13): a guest whose planted `system.conf` set
+  `net.tcp.ecn true` negotiates ECN with an ECN-capable host peer, which
+  verifies on the wire that the guest offered ECN, marked its data
+  ECT(0), and set CWR after the peer echoed ECE for an injected
+  congestion mark.
 - **`net.ipv6.privacy true`** forms RFC 8981 temporary (privacy) IPv6
   addresses: alongside the stable SLAAC address of each autonomous
   prefix, the interface adds a short-lived address with a randomised

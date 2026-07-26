@@ -1872,13 +1872,11 @@ connection does not linger forever against a silently-dead peer.
   `netstack` (`listen_config` template) and `lib/sysconfig`/`devmgr`
   (registry + mapping).
 
-#### N13 — RFC 3168 Explicit Congestion Notification `[~]`
+#### N13 — RFC 3168 Explicit Congestion Notification `[x]`
 
-The pure `lib/net` ECN engine, its full data-path threading, and the
-stack-wide operator toggle are landed and host-gate-green; a live QEMU
-vertical asserting ECT(0)/CE on the wire remains staged (the N5a/N6b-2-α
-engine-first precedent; N12 keepalive likewise shipped without a bespoke
-live vertical, exercised by the existing autoload verticals' default path).
+The pure `lib/net` ECN engine, its full data-path threading, the
+stack-wide operator toggle, **and a live two-process QEMU vertical
+asserting the ECN handshake on the wire** are all landed and gate-green.
 
 - **Shared codepoint** (`addr::Ecn`, done): the RFC 3168 §5 two-bit
   codepoint (`NotEct`/`Ect1`/`Ect0`/`Ce`), one definition both IP families
@@ -1915,9 +1913,21 @@ live vertical, exercised by the existing autoload verticals' default path).
   accepted-connection `template`) — from the delivered settings. Read at
   connect/`listen` time like keepalive, so no per-interface re-application.
   All 13 `configure` Help locales + README + docs/src updated.
-- **Remaining**: a live two-process QEMU vertical asserting ECT(0)/CE on
-  the wire (staged; the default ECN-off path is already covered by the
-  existing autoload verticals).
+- **Live vertical** (done): `tests/integration/netstack_ecn_qemu_aarch64`
+  boots the production aarch64 pipeline against the stream vertical's
+  encrypted-root disk plus a planted `system.conf`
+  (`tairix_test_netstack_wire::ECN_SYSTEM_CONF`, `net.tcp.ecn true`), so
+  `devmgr` delivers `tcp_ecn = true` and the guest `tcpecho` client
+  negotiates ECN. The host peer (`netpeer::run_tcp_echo_ecn_peer`,
+  `NetPeerMode::V6TcpEchoEcn`) is ECN-capable and verifies on the live
+  wire that the guest's SYN offered ECN (ECE+CWR), its data carried
+  ECT(0), and — after the peer echoed ECE for a bounded injected CE — the
+  guest reduced its window and set CWR on a subsequent segment; its
+  verdict requires all three plus the full echoed transfer, so a stack
+  that ignored the toggle fails the run loud. The wire `system.conf` is
+  cross-checked against the real `lib/sysconfig` engine
+  (`ecn_system_conf_enables_only_ecn`), and the ECN store/disk/peer reuse
+  the stream vertical's one builder and delivery path (no duplication).
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

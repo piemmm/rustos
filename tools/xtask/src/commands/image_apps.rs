@@ -219,6 +219,47 @@ pub fn tcpecho_store_files(
     )
 }
 
+/// The composed store files the ECN vertical's disk plants: the stream
+/// vertical's `tcpecho`-augmented set (so the client fixture and the standard
+/// service bundles are on disk exactly as the stream vertical plants them)
+/// **plus** a planted `/System/Settings/Configuration/system.conf`
+/// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns `net.tcp.ecn`
+/// on stack-wide (`plans/NETWORK.md` N13). `devmgr` reads the planted store
+/// pre-unlock over the read-only `/System` endpoint and delivers `tcp_ecn =
+/// true` to `netstack`, so the guest's connection negotiates ECN. No new
+/// test-only *bundle* is added over the stream set — the config file is the
+/// only extra — so this is a thin wrapper over [`tcpecho_store_files`],
+/// memoised per arch like the shared set.
+///
+/// # Errors
+///
+/// As [`tcpecho_store_files`].
+pub fn ecn_net_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| {
+            let mut files = tcpecho_store_files(ctx, arch)?.to_vec();
+            files.push(AppStoreFile {
+                components: vec![
+                    b"Settings".to_vec(),
+                    b"Configuration".to_vec(),
+                    b"system.conf".to_vec(),
+                ],
+                bytes: tairix_test_netstack_wire::ECN_SYSTEM_CONF
+                    .as_bytes()
+                    .to_vec(),
+            });
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// The composed store files the listener vertical's disk plants: the shared
 /// [`app_store_files`] set plus the test-only `tcpserve` TCP-listener server
 /// fixture bundle (`plans/NETWORK.md` N6b-2-β-2), memoised per arch.

@@ -149,6 +149,16 @@ enum NetPeerMode {
     /// every received byte back, and injects bounded frame loss so the
     /// stream survives retransmission.
     V6TcpEcho,
+    /// A v6-link-local-only *ECN-verifying passive TCP echo server* (the N13
+    /// ECN vertical): same deterministic link-local addressing and echo
+    /// transfer as [`Self::V6TcpEcho`], but the peer's connection is
+    /// ECN-capable and it verifies RFC 3168 Explicit Congestion Notification
+    /// on the wire — the guest's SYN offers ECN (ECE+CWR), the guest's data
+    /// carries ECT(0), and, after the peer echoes ECE for an injected
+    /// congestion mark, the guest sets CWR on a subsequent segment. Its
+    /// verdict requires all three plus the full echoed transfer, so a stack
+    /// that ignored the `net.tcp.ecn` toggle fails the run loud.
+    V6TcpEchoEcn,
     /// A v6-link-local-only *active TCP client* (the N6b-2-β-2 listener
     /// vertical): same deterministic link-local addressing as
     /// [`Self::V6LinkLocal`], but the peer connects to the guest
@@ -243,6 +253,18 @@ enum FsDisk {
     /// live two-process network. Only this disk carries the fixtures; no
     /// production image ships them.
     StreamRootDisk,
+    /// The [`Self::StreamRootDisk`] layout **plus** a planted
+    /// `/System/Settings/Configuration/system.conf`
+    /// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns
+    /// `net.tcp.ecn` on stack-wide — the ECN vertical's backing
+    /// (`plans/NETWORK.md` N13). `devmgr` reads the planted store pre-unlock
+    /// and delivers `tcp_ecn = true` to `netstack`, so the guest `tcpecho`
+    /// client's connection negotiates RFC 3168 ECN with the ECN-verifying
+    /// host echo peer over the live two-process network. Same net-only driver
+    /// set as [`Self::StreamRootDisk`] (so the console stays the UART text
+    /// console the serial script drives); only this disk carries the
+    /// fixtures, no production image ships them.
+    EcnRootDisk,
     /// The [`Self::StreamRootDisk`] layout, but carrying the test-only
     /// `tcpserve` TCP-**listener** fixture bundle
     /// ([`super::image_apps::tcpserve_store_files`]) in place of the
@@ -4036,6 +4058,51 @@ const TESTS: &[QemuTest] = &[
             (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/NETWORK.md` N13: the RFC 3168 ECN vertical.
+    // `tairix-test-netstack-ecn-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the encrypted-root disk that carries the standard signed
+    // store bundles **plus** the signed virtio-net driver bundle and the
+    // test-only `tcpecho` fixture bundle **plus** a planted `system.conf` that
+    // turns `net.tcp.ecn` on stack-wide (`FsDisk::EcnRootDisk`), with a
+    // virtio-net device attached and the harness-side ECN-verifying passive
+    // TCP echo peer on its `dgram` netdev (`NetPeerMode::V6TcpEchoEcn`). It is
+    // the stream vertical with ECN switched on end to end: `devmgr` reads the
+    // planted store pre-unlock and delivers `tcp_ecn = true` to `netstack`, so
+    // the guest `tcpecho` client's connection negotiates ECN. The same 32 KiB
+    // deterministic transfer runs, but the host peer additionally verifies RFC
+    // 3168 on the live wire — the guest's SYN offers ECN (ECE+CWR), the
+    // guest's data segments carry ECT(0), and, after the peer echoes ECE for
+    // an injected congestion mark, the guest reduces its window and sets CWR
+    // on a subsequent segment. The peer's verdict requires all three plus the
+    // full echoed transfer, so a stack that ignored the toggle (never
+    // negotiating, marking, or responding) fails the run loud even though the
+    // bytes still flow. The guest PASS keys exactly like the stream vertical
+    // (client `exit` arms, the shell's next `exit` reports), and the harness
+    // requires the peer's ECN verdict too, so neither side can pass alone. A
+    // 300-second budget covers boot + bounded PBKDF2 + the two-process net
+    // bring-up + the transfer + the ECN choreography on QEMU TCG; single CPU.
+    QemuTest {
+        package: "tairix-test-netstack-ecn-qemu-aarch64",
+        binary: "tairix-test-netstack-ecn-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6TcpEchoEcn,
+        ramfb: false,
+        fs_disk: FsDisk::EcnRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "tcpecho\n"),
+            (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
     // `plans/NETWORK.md` N6b-2-β-2: the TCP-**listener** vertical — the
     // role-swapped mirror of the stream vertical above.
     // `tairix-test-netstack-listener-qemu-aarch64` boots the *production*
@@ -5685,6 +5752,10 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the stream vertical plants: the shared
     /// set plus the test-only `tcpecho` fixture bundle.
     apps_with_tcpecho: &'static [AppStoreFile],
+    /// The application/service bundles the ECN vertical plants: the stream
+    /// vertical's `tcpecho`-augmented set plus a planted `system.conf` that
+    /// turns `net.tcp.ecn` on stack-wide.
+    apps_with_tcpecho_ecn: &'static [AppStoreFile],
     /// The application/service bundles the listener vertical plants: the
     /// shared set plus the test-only `tcpserve` server fixture bundle.
     apps_with_tcpserve: &'static [AppStoreFile],
@@ -5735,12 +5806,17 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch)?,
         _ => EMPTY,
     };
+    let apps_with_tcpecho_ecn = match t.fs_disk {
+        FsDisk::EcnRootDisk => super::image_apps::ecn_net_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
     let apps_with_tcpserve = match t.fs_disk {
         FsDisk::ListenRootDisk => super::image_apps::tcpserve_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     let net_only_drivers = match t.fs_disk {
         FsDisk::StreamRootDisk
+        | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
         | FsDisk::PingRootDisk
         | FsDisk::StaticNetRootDisk
@@ -5760,6 +5836,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_memsoak,
         autoload_drivers,
         apps_with_tcpecho,
+        apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
         static_net_apps,
@@ -6861,6 +6938,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         apps_with_memsoak,
         autoload_drivers,
         apps_with_tcpecho,
+        apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
         static_net_apps,
@@ -6927,6 +7005,17 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
             apps_with_tcpecho,
             "stream-root.img",
             "stream-root",
+        )?),
+        // The ECN vertical: the same net-only driver set and whole-disk
+        // author as the stream vertical, differing only in the app set (the
+        // `tcpecho` client plus a planted `system.conf` that turns
+        // `net.tcp.ecn` on) — one builder, no copy.
+        FsDisk::EcnRootDisk => Some(net_root_image(
+            t,
+            net_only_drivers,
+            apps_with_tcpecho_ecn,
+            "ecn-root.img",
+            "ecn-root",
         )?),
         FsDisk::ListenRootDisk => Some(net_root_image(
             t,
@@ -7017,6 +7106,9 @@ fn spawn_net_peer(
         NetPeerMode::None => unreachable!("peer mode None is filtered above"),
         NetPeerMode::V6LinkLocal => super::netpeer::NetPeer::spawn(qemu_sock, peer_sock),
         NetPeerMode::V6TcpEcho => super::netpeer::NetPeer::spawn_tcp_echo(qemu_sock, peer_sock),
+        NetPeerMode::V6TcpEchoEcn => {
+            super::netpeer::NetPeer::spawn_tcp_echo_ecn(qemu_sock, peer_sock)
+        }
         NetPeerMode::V6TcpConnect => {
             super::netpeer::NetPeer::spawn_tcp_connect(qemu_sock, peer_sock)
         }

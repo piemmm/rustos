@@ -3128,6 +3128,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-ecn-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-tcpecho",
+]
+
+[[package]]
 name = "tairix-test-netstack-listener-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3207,6 +3219,7 @@ name = "tairix-test-netstack-wire"
 version = "0.0.0"
 dependencies = [
  "tairix-netconfig",
+ "tairix-sysconfig",
 ]
 
 [[package]]

@@ -486,9 +486,14 @@ ends agree (RFC 3168 §6.1.1):
   retransmission — at most once per window of data, and the next fresh data
   segment carries CWR to tell the peer the reduction happened.
 
-The stack-wide operator policy that turns ECN on for the live service is
-staged in `plans/NETWORK.md`; the engine and its full data-path threading
-are complete and host-tested here.
+The engine, its full data-path threading, the stack-wide `net.tcp.ecn`
+operator toggle (delivered to `netstack` by `devmgr`, off by default), and a
+live two-process QEMU vertical (`netstack_ecn_qemu_aarch64`) that asserts the
+negotiation → ECT(0) → CE → ECE → CWR exchange on the wire are all complete.
+The host peer verifies, over the real device, that a guest whose
+`system.conf` set `net.tcp.ecn true` offers ECN in its SYN, marks its data
+ECT(0), and sets CWR after the peer echoes ECE for an injected congestion
+mark.
 
 ### RFC 6675 SACK-based loss recovery
 

@@ -310,6 +310,35 @@ wan.ipv6.method static
 wan.ipv6.address fd00::2/64
 ";
 
+// --- ECN vertical (N13) -----------------------------------------------
+//
+// The ECN vertical proves RFC 3168 Explicit Congestion Notification end to
+// end on the wire. It reuses the stream vertical's `tcpecho` client and the
+// passive TCP echo peer, but plants a `system.conf` that turns `net.tcp.ecn`
+// on stack-wide, so `devmgr` delivers `tcp_ecn = true` to `netstack` and the
+// guest's connection negotiates ECN. The host peer (also ECN-capable)
+// verifies, on the live wire: the guest's SYN carries ECE+CWR (ECN setup),
+// the guest's data segments carry ECT(0) in the IP header (ECN-capable
+// transport), and — after the peer echoes ECE for an injected congestion
+// mark — the guest reduces its window and sets CWR on a subsequent segment
+// (the sender-side congestion response). Only when all three are witnessed,
+// alongside the full echoed transfer, does the peer report success.
+
+/// The `/System/Settings/Configuration/system.conf` the ECN vertical plants
+/// on its read-only `/System` volume. It differs from the absent-store
+/// default in exactly one setting — `net.tcp.ecn true` — so the vertical
+/// proves the operator toggle, and only that toggle, drives the live ECN
+/// negotiation. Cross-checked against the real `lib/sysconfig` engine (the
+/// same parser `devmgr` runs) by the `ecn_system_conf_enables_only_ecn` unit
+/// test, so the fixture and the setting it means can never drift.
+pub const ECN_SYSTEM_CONF: &str = "\
+# TAIRiX ECN QEMU vertical system.conf.
+# Enables RFC 3168 TCP ECN stack-wide (and nothing else) so the vertical
+# proves ECN negotiation and the ECT(0)/CE/ECE/CWR exchange end to end on
+# the wire.
+net.tcp.ecn true
+";
+
 // --- Bond-failover vertical (N9b-3-2-β-2-ii-b-bond) --------------------
 //
 // The bond vertical proves live link-aggregation failover end to end: the
@@ -644,5 +673,30 @@ mod tests {
             .expect("the bond carries a static IPv6 address");
         assert_eq!(v6.addr, GUEST_STATIC_V6);
         assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+    }
+
+    /// The planted ECN `system.conf` and the setting it means are one source
+    /// of truth: parse it through the real `lib/sysconfig` engine (the same
+    /// parser `devmgr` runs) and confirm it enables `net.tcp.ecn` and differs
+    /// from the absent-store default in exactly that one setting — so the
+    /// vertical proves the operator toggle, and only that toggle, drives the
+    /// live ECN negotiation. Drift (a stray extra key, or the ECN key left
+    /// off) fails here, long before a QEMU boot.
+    #[test]
+    fn ecn_system_conf_enables_only_ecn() {
+        let config = tairix_sysconfig::SystemConfig::parse(ECN_SYSTEM_CONF)
+            .expect("the planted system.conf parses");
+        assert!(
+            config.net_tcp_ecn.is_enabled(),
+            "the ECN vertical's system.conf turns net.tcp.ecn on"
+        );
+        assert_eq!(
+            config,
+            tairix_sysconfig::SystemConfig {
+                net_tcp_ecn: tairix_sysconfig::NetToggle::Enabled,
+                ..tairix_sysconfig::SystemConfig::default()
+            },
+            "the fixture changes exactly one setting from the absent-store default"
+        );
     }
 }

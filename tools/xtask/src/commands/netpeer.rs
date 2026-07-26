@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::Duration64;
-use tairix_net::addr::IpAddr;
+use tairix_net::addr::{Ecn, IpAddr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::iface::{eui64_interface_id, TempAddrSource};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
@@ -101,6 +101,23 @@ impl NetPeer {
     /// echoed the whole [`wire::STREAM_TRANSFER_BYTES`] transfer.
     pub fn spawn_tcp_echo(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
         Self::spawn_with(qemu_sock, peer_sock, run_tcp_echo_peer)
+    }
+
+    /// Bind `peer_sock` and start the **ECN-verifying passive TCP echo-server**
+    /// peer thread (the N13 ECN vertical): like [`Self::spawn_tcp_echo`] it
+    /// accepts the guest client's connection on [`wire::PEER_TCP_PORT`] and
+    /// echoes the whole transfer, but its connection is ECN-capable and it
+    /// verifies RFC 3168 Explicit Congestion Notification on the live wire —
+    /// the guest's SYN carries ECE+CWR (ECN setup), the guest's data segments
+    /// carry ECT(0) in the IP header, and, after the peer echoes ECE for an
+    /// injected congestion mark, the guest reduces its window and sets CWR on
+    /// a subsequent segment. Its verdict ([`Self::stop_and_join`]) is `Ok`
+    /// only once all three were witnessed **and** the whole
+    /// [`wire::STREAM_TRANSFER_BYTES`] transfer was received and echoed, so a
+    /// stack that silently ignored the toggle (never negotiating, never
+    /// marking, never responding) fails the run loud.
+    pub fn spawn_tcp_echo_ecn(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_tcp_echo_ecn_peer)
     }
 
     /// Bind `peer_sock` and start the **active TCP client** peer thread (the
@@ -611,10 +628,12 @@ const LOSS_EVERY: u64 = 5;
 const LOSS_DROPS: u32 = 8;
 
 /// Build the host peer's `lib/net` stack (from the shared device facts and
-/// wire topology) and the two link-local addresses both TCP peers use — the
-/// guest's EUI-64 address and the peer's own — so the echo-server and the
-/// active-client loops share one engine-construction definition, never two.
-fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr, core::net::Ipv6Addr), String> {
+/// wire topology) and the guest's EUI-64 link-local address the TCP peers
+/// send toward, so the echo-server and the active-client loops share one
+/// engine-construction definition, never two. (The peer's own link-local is
+/// the shared-IID constant `deliver_inbound_frame` derives itself, so it is
+/// not returned here.)
+fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
         mtu: 1500,
@@ -631,8 +650,7 @@ fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr, core::net::
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
     let guest_v6 = wire::link_local(eui64_interface_id(wire::GUEST_MAC));
-    let peer_v6 = wire::link_local(wire::PEER_IID);
-    Ok((stack, guest_v6, peer_v6))
+    Ok((stack, guest_v6))
 }
 
 /// Drain `tcb`'s in-order received bytes into `scratch`, verifying each run
@@ -675,7 +693,7 @@ fn run_tcp_echo_peer(
     let now = |t0: Instant| {
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
-    let (mut stack, guest_v6, peer_v6) = peer_stack(start)?;
+    let (mut stack, guest_v6) = peer_stack(start)?;
 
     // Passive open: the listener learns the guest's ephemeral port from the
     // SYN. The initial sequence number is a fixed value — the vertical needs
@@ -720,10 +738,13 @@ fn run_tcp_echo_peer(
                         &mut stack,
                         &mut tcb,
                         &buf[..len],
-                        peer_v6,
                         socket,
                         qemu_sock,
                         now(start),
+                        // No ECN observation or injection on the plain
+                        // echo/client wire: deliver the on-wire codepoint
+                        // unchanged.
+                        |_, ecn| ecn,
                     );
                 }
             }
@@ -774,6 +795,192 @@ fn run_tcp_echo_peer(
     }
 }
 
+// --- ECN-verifying passive TCP echo server (N13 ECN vertical) ----------
+
+/// Number of congestion marks (ECT(0)→CE rewrites on inbound guest data
+/// segments) the ECN peer injects once the connection is proven ECN-capable.
+/// A small, bounded nudge: each makes the peer echo ECE, and the guest's
+/// once-per-window sender reduction sets CWR on the next fresh data segment,
+/// so one is enough to witness the response; a few make the observation
+/// robust against a mark landing on a segment the guest happens to drop.
+const ECN_CE_INJECTIONS: u32 = 3;
+
+/// The ECN peer's live-wire observations, accumulated one guest segment at a
+/// time by [`EcnObservations::observe_and_mark`] and checked by
+/// [`EcnObservations::negotiated_and_responded`] for the run's verdict.
+#[derive(Default)]
+struct EcnObservations {
+    /// The guest's SYN offered ECN (both ECE and CWR set).
+    syn_ecn_setup: bool,
+    /// A guest data segment arrived IP-marked ECT(0).
+    ect0_data_seen: bool,
+    /// How many congestion marks the peer has injected so far.
+    ce_injected: u32,
+    /// The guest set CWR on a segment sent after a congestion mark.
+    cwr_after_ce: bool,
+}
+
+impl EcnObservations {
+    /// Observe one inbound guest segment (parsed, with the IP ECN codepoint
+    /// `ecn` it arrived carrying) and return the codepoint to deliver to the
+    /// peer connection. Records the SYN offer, ECT(0) data, and post-mark CWR,
+    /// and injects a bounded congestion mark ([`Ecn::Ce`]) on the guest's
+    /// ECT(0) data so the peer echoes ECE and the guest's once-per-window
+    /// reduction sets CWR on its next fresh data. `ect0_data_seen` only turns
+    /// true for a data segment past the handshake, so a mark never touches the
+    /// SYN or a pure ACK.
+    fn observe_and_mark(&mut self, seg: &TcpSegment<'_>, ecn: Ecn) -> Ecn {
+        if seg.flags.syn() && seg.flags.ece() && seg.flags.cwr() {
+            self.syn_ecn_setup = true;
+        }
+        if !seg.payload.is_empty() && ecn == Ecn::Ect0 {
+            self.ect0_data_seen = true;
+        }
+        if self.ce_injected > 0 && seg.flags.cwr() {
+            self.cwr_after_ce = true;
+        }
+        if self.ect0_data_seen && !seg.payload.is_empty() && self.ce_injected < ECN_CE_INJECTIONS {
+            self.ce_injected += 1;
+            return Ecn::Ce;
+        }
+        ecn
+    }
+
+    /// Whether the guest negotiated ECN, marked its data ECT(0), and responded
+    /// to a congestion mark with CWR — the three on-wire facts the vertical
+    /// requires.
+    fn negotiated_and_responded(&self) -> bool {
+        self.syn_ecn_setup && self.ect0_data_seen && self.cwr_after_ce
+    }
+}
+
+/// The ECN vertical's echo-server loop: an ECN-capable passive open that
+/// echoes the whole transfer (like [`run_tcp_echo_peer`]) while verifying RFC
+/// 3168 Explicit Congestion Notification on the live wire.
+///
+/// It observes three things on the guest's segments and injects one stimulus:
+///
+/// * the guest's SYN carries ECE+CWR — the ECN-setup handshake the guest only
+///   sends because its planted `system.conf` turned `net.tcp.ecn` on;
+/// * the guest's data segments carry ECT(0) in the IP header — it marks its
+///   packets ECN-capable rather than Not-ECT;
+/// * after the peer echoes ECE for an injected congestion mark (delivering the
+///   guest's data to the peer connection as [`Ecn::Ce`], so the receiver
+///   echoes ECE), the guest reduces its window and sets CWR on a subsequent
+///   segment — the sender-side congestion response.
+///
+/// The verdict requires all three **and** the full echoed transfer, so a
+/// stack that ignored the toggle — never negotiating, marking, or responding
+/// — fails the run loud rather than passing on a plain transfer.
+fn run_tcp_echo_ecn_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let (mut stack, guest_v6) = peer_stack(start)?;
+
+    // An ECN-capable passive open: the listener negotiates ECN in its
+    // SYN-ACK when the guest's SYN offers it, so the connection is ECN-capable
+    // end to end. The fixed ISN keeps runs replayable (this is only the far
+    // end of the wire; the live guest stack draws a real CSPRNG ISN).
+    let mut tcb = Tcb::listen(
+        TcpConfig {
+            enable_ecn: true,
+            ..TcpConfig::default()
+        },
+        wire::PEER_TCP_PORT,
+        0,
+        0x5EED_0000,
+    );
+
+    let target = wire::STREAM_TRANSFER_BYTES;
+    let mut received_total: usize = 0;
+    let mut echoed_total: usize = 0;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut closed_send = false;
+    let mut buf = [0u8; MAX_FRAME];
+    let mut scratch = [0u8; MAX_FRAME];
+
+    // Live-wire ECN observations, accumulated by the delivery closure below.
+    let mut ecn = EcnObservations::default();
+
+    while !stop.load(Ordering::Acquire) {
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
+        tcb.advance(now(start));
+        drive_tcp_egress(
+            &mut tcb,
+            &mut stack,
+            socket,
+            qemu_sock,
+            guest_v6,
+            now(start),
+        );
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                deliver_inbound_frame(
+                    &mut stack,
+                    &mut tcb,
+                    &buf[..len],
+                    socket,
+                    qemu_sock,
+                    now(start),
+                    |seg, cp| ecn.observe_and_mark(seg, cp),
+                );
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        // Drain received stream bytes and queue them straight back (echo).
+        loop {
+            let n = tcb.recv(&mut scratch);
+            if n == 0 {
+                break;
+            }
+            received_total += n;
+            pending.extend_from_slice(&scratch[..n]);
+        }
+        if !pending.is_empty() {
+            if let Ok(accepted) = tcb.send(&pending) {
+                echoed_total += accepted;
+                pending.drain(..accepted);
+            }
+        }
+        // Once the whole transfer is received and echoed, close our send side
+        // (FIN) so the connection tears down cleanly after the client's close.
+        if !closed_send && received_total >= target && pending.is_empty() {
+            let _ = tcb.close(now(start));
+            closed_send = true;
+        }
+        drive_tcp_egress(
+            &mut tcb,
+            &mut stack,
+            socket,
+            qemu_sock,
+            guest_v6,
+            now(start),
+        );
+    }
+
+    if ecn.negotiated_and_responded() && echoed_total >= target {
+        Ok(())
+    } else {
+        Err(format!(
+            "netstack peer: ECN verification incomplete: syn_ecn_setup={}, \
+             ect0_data_seen={}, cwr_after_ce={} (ce_injected={}), \
+             echoed {echoed_total} of {target} bytes",
+            ecn.syn_ecn_setup, ecn.ect0_data_seen, ecn.cwr_after_ce, ecn.ce_injected
+        ))
+    }
+}
+
 // --- Active TCP client (N6b-2-β-2 listener vertical) -------------------
 
 /// Ephemeral local TCP port the client peer opens its connection from. A
@@ -819,7 +1026,7 @@ fn run_tcp_connect_peer(
     let now = |t0: Instant| {
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
-    let (mut stack, guest_v6, peer_v6) = peer_stack(start)?;
+    let (mut stack, guest_v6) = peer_stack(start)?;
 
     // Clamp the connection's local MSS to what the v6 link's MTU can carry
     // (link MTU − IPv6 − TCP headers), exactly as the guest netstack does for
@@ -898,10 +1105,13 @@ fn run_tcp_connect_peer(
                         &mut stack,
                         &mut tcb,
                         &buf[..len],
-                        peer_v6,
                         socket,
                         qemu_sock,
                         now(start),
+                        // No ECN observation or injection on the plain
+                        // echo/client wire: deliver the on-wire codepoint
+                        // unchanged.
+                        |_, ecn| ecn,
                     );
                 }
             }
@@ -950,15 +1160,27 @@ fn run_tcp_connect_peer(
 
 /// Feed one received frame into the peer stack: answer the guest's neighbour
 /// queries and hand any TCP segment addressed to us to the echo connection.
+///
+/// `on_seg` is called for every TCP segment addressed to the peer, with the
+/// parsed segment and the on-wire IP ECN codepoint it arrived carrying; it
+/// returns the ECN codepoint to deliver to the connection. The plain echo/
+/// client peers pass it through unchanged (`|_, ecn| ecn`); the ECN vertical
+/// uses it both to *observe* the guest's negotiation/ECT(0)/CWR and to
+/// *inject* a congestion mark (returning [`Ecn::Ce`]) so the guest's
+/// sender-side response is exercised — one delivery path, no second copy.
 fn deliver_inbound_frame(
     stack: &mut Stack,
     tcb: &mut Tcb,
     frame: &[u8],
-    peer_v6: core::net::Ipv6Addr,
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     now: Duration64,
+    mut on_seg: impl FnMut(&TcpSegment<'_>, Ecn) -> Ecn,
 ) {
+    // The peer's own link-local address — the destination a TCP segment
+    // addressed to the connection carries. It is the one the peer stack forms
+    // from the shared wire IID, so it is derived here rather than threaded in.
+    let peer_v6 = wire::link_local(wire::PEER_IID);
     let mut out = StackOutput::default();
     stack.on_frame(frame, now, &mut out);
     send_frames(socket, qemu_sock, &out.frames);
@@ -977,7 +1199,8 @@ fn deliver_inbound_frame(
                         destination: *d,
                     };
                     if let Some(seg) = TcpSegment::parse(pseudo, segment) {
-                        tcb.on_segment(&seg, *ecn, now);
+                        let delivered_ecn = on_seg(&seg, *ecn);
+                        tcb.on_segment(&seg, delivered_ecn, now);
                     }
                 }
             }
