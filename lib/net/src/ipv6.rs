@@ -12,6 +12,12 @@
 //! *reassembled* datagram, so the caller feeds them to
 //! [`crate::frag::Reassembler`] and walks the reassembled payload again
 //! from the fragment header's next-header value.
+//!
+//! On the emit side, [`fragment`] plans the source fragmentation
+//! (RFC 8200 §4.5) of a datagram larger than the path MTU — the only
+//! entity that may fragment an IPv6 datagram is its source, since routers
+//! never do — and [`write_fragment_header`] serialises each piece's
+//! Fragment extension header.
 
 use crate::addr::Ipv6Addr;
 
@@ -20,6 +26,17 @@ pub const IPV6_HEADER_LEN: usize = 40;
 
 /// Smallest MTU every IPv6 link must carry (RFC 8200 §5).
 pub const IPV6_MIN_MTU: usize = 1280;
+
+/// Length of the Fragment extension header (RFC 8200 §4.5): the
+/// next-header byte, a reserved byte, the two-byte offset/flags word,
+/// and the four-byte identification.
+pub const FRAGMENT_HEADER_LEN: usize = 8;
+
+/// Largest byte offset the 13-bit fragment-offset field can express: it
+/// counts 8-octet units, so the last representable offset is
+/// `0x1FFF * 8` = 65528. A datagram whose fragmentable part would place
+/// a fragment past this cannot be fragmented and fails closed.
+const MAX_FRAGMENT_OFFSET: usize = 0x1FFF * 8;
 
 /// Most extension headers accepted in one chain — a fixed validation
 /// bound against extension-header flooding, not a growable capacity. A
@@ -155,6 +172,105 @@ impl Ipv6Header {
         header[24..40].copy_from_slice(&self.destination.octets());
         Some(IPV6_HEADER_LEN)
     }
+}
+
+/// One piece of an IPv6 source-fragmented datagram: the fragmentable
+/// payload range it carries and the Fragment-header fields that describe
+/// its place in the whole.
+///
+/// A receiving host reassembles the pieces (keyed by source, destination,
+/// and identification) back into the original fragmentable payload before
+/// interpreting the upper-layer protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FragmentPiece {
+    /// Offset of this piece within the fragmentable payload, in bytes
+    /// (always a multiple of 8 — the wire field counts 8-octet units).
+    pub offset: usize,
+    /// Whether more fragments follow (the More-Fragments flag).
+    pub more: bool,
+    /// Start of this piece's slice within the fragmentable payload.
+    pub payload_start: usize,
+    /// End (exclusive) of this piece's slice within the fragmentable
+    /// payload.
+    pub payload_end: usize,
+}
+
+/// Plan the source fragmentation of a `payload_len`-byte fragmentable
+/// part (the upper-layer message — IPv6 has no unfragmentable extension
+/// headers on this host's emit paths) onto a link of `mtu` bytes
+/// (RFC 8200 §4.5).
+///
+/// Unlike IPv4, only the source may fragment an IPv6 datagram: a router
+/// never does, so a host that originates a datagram larger than the path
+/// MTU must fragment it here. Each fragment carries the fixed header plus
+/// a Fragment extension header, so the per-fragment payload budget is
+/// `mtu - IPV6_HEADER_LEN - FRAGMENT_HEADER_LEN`, rounded down to a
+/// multiple of 8 for every non-final piece.
+///
+/// Returns the pieces in order. Fails closed (`None`) when `mtu` is below
+/// [`IPV6_MIN_MTU`] (an invalid IPv6 link), when there is nothing to
+/// fragment (`payload_len == 0`), when a single fragment cannot make 8
+/// bytes of progress, or when the datagram is too large for the 13-bit
+/// fragment-offset field (`MAX_FRAGMENT_OFFSET`). A caller only
+/// invokes this once the datagram exceeds the path MTU, so the result
+/// always holds at least two pieces (never a lone "atomic" fragment,
+/// RFC 6946).
+#[must_use]
+pub fn fragment(payload_len: usize, mtu: usize) -> Option<alloc::vec::Vec<FragmentPiece>> {
+    use alloc::vec::Vec;
+    if mtu < IPV6_MIN_MTU || payload_len == 0 {
+        return None;
+    }
+    // Every non-final fragment's payload is a multiple of 8 so its
+    // successor's offset is representable in 8-octet units.
+    let chunk = (mtu - IPV6_HEADER_LEN - FRAGMENT_HEADER_LEN) & !7;
+    if chunk == 0 {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    while start < payload_len {
+        if start > MAX_FRAGMENT_OFFSET {
+            return None;
+        }
+        let end = core::cmp::min(start + chunk, payload_len);
+        pieces.push(FragmentPiece {
+            offset: start,
+            more: end < payload_len,
+            payload_start: start,
+            payload_end: end,
+        });
+        start = end;
+    }
+    Some(pieces)
+}
+
+/// Write a Fragment extension header (RFC 8200 §4.5) into `out`.
+///
+/// `next_header` is the upper-layer protocol the reassembled payload
+/// begins with; `offset` (a byte multiple of 8) and `more` place this
+/// piece within the whole; `identification` ties every fragment of one
+/// datagram together. Returns the bytes written, or `None` when `out` is
+/// too small, `offset` is not a multiple of 8, or `offset` exceeds
+/// `MAX_FRAGMENT_OFFSET` (fail closed).
+#[must_use]
+pub fn write_fragment_header(
+    out: &mut [u8],
+    next_header: u8,
+    offset: usize,
+    more: bool,
+    identification: u32,
+) -> Option<usize> {
+    if offset % 8 != 0 || offset > MAX_FRAGMENT_OFFSET {
+        return None;
+    }
+    let header = out.get_mut(..FRAGMENT_HEADER_LEN)?;
+    let offset_flags = u16::try_from(offset / 8).ok()? << 3 | u16::from(more);
+    header[0] = next_header;
+    header[1] = 0;
+    header[2..4].copy_from_slice(&offset_flags.to_be_bytes());
+    header[4..8].copy_from_slice(&identification.to_be_bytes());
+    Some(FRAGMENT_HEADER_LEN)
 }
 
 /// Fragment-header facts recorded by [`walk`] (RFC 8200 §4.5).

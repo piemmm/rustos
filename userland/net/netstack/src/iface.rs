@@ -581,8 +581,10 @@ impl Netstack {
     ///
     /// # Errors
     ///
-    /// * [`Errno::MessageTooLarge`] — the datagram cannot fit the path
-    ///   (v6) or the length field, on an interface that otherwise matched.
+    /// * [`Errno::MessageTooLarge`] — the datagram is too large to fit or
+    ///   fragment onto the path (an oversize IPv6 datagram is
+    ///   source-fragmented) or overflows the length field, on an interface
+    ///   that otherwise matched.
     /// * [`Errno::NetworkUnreachable`] — no interface has a route to the
     ///   destination, a usable source address, or an up link.
     /// * [`Errno::OutOfRange`] — the destination is not a legal datagram
@@ -649,8 +651,9 @@ impl Netstack {
     ///
     /// # Errors
     ///
-    /// * [`Errno::MessageTooLarge`] — the payload cannot fit the path MTU on
-    ///   an interface that otherwise matched.
+    /// * [`Errno::MessageTooLarge`] — the payload is too large to fit or
+    ///   fragment onto the path (an oversize IPv6 request is
+    ///   source-fragmented) on an interface that otherwise matched.
     /// * [`Errno::OutOfRange`] — the destination is not a legal echo target
     ///   (multicast / unspecified).
     /// * [`Errno::NetworkUnreachable`] — no interface has a route to the

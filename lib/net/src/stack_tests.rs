@@ -532,14 +532,38 @@ fn send_refusals_are_typed() {
 }
 
 #[test]
-fn oversize_v6_echo_is_refused_too_large() {
+fn oversize_v6_echo_is_source_fragmented_and_round_trips() {
     let mut a = stack(MAC_A, IID_A);
     let mut b = stack(MAC_B, IID_B);
     bring_up(&mut a, &mut b);
-    let payload = vec![0u8; 1600];
-    assert_eq!(
-        a.send_echo_request_collect(IpAddr::V6(link_local(IID_B)), 1, 1, &payload, t(2)),
-        Err(SendError::TooLarge)
+    // 1600 bytes exceeds the 1500-byte link, so the request — and B's
+    // 1600-byte reply — are source-fragmented (RFC 8200 §4.5) and each
+    // reassembled at the far end into the whole datagram.
+    let payload = vec![0x5Au8; 1600];
+    let out = a
+        .send_echo_request_collect(IpAddr::V6(link_local(IID_B)), 0x33, 7, &payload, t(2))
+        .expect("fragmented send");
+    let mut events_a = out.events;
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
+    for _ in 0..32 {
+        let Some(frame) = frames.pop_front() else {
+            break;
+        };
+        let out_b = b.on_frame_collect(&frame, t(2));
+        for reply in tx_bytes(out_b.frames) {
+            let out_a = a.on_frame_collect(&reply, t(2));
+            events_a.extend(out_a.events);
+            frames.extend(tx_bytes(out_a.frames));
+        }
+    }
+    assert!(
+        events_a.contains(&StackEvent::EchoReply {
+            source: IpAddr::V6(link_local(IID_B)),
+            identifier: 0x33,
+            sequence: 7,
+            payload: payload.clone(),
+        }),
+        "the reassembled 1600-byte echo reply is delivered"
     );
 }
 
@@ -667,14 +691,38 @@ fn send_datagram_refusals_are_typed() {
 }
 
 #[test]
-fn oversize_v6_udp_is_refused_too_large() {
+fn oversize_v6_udp_is_source_fragmented_and_round_trips() {
     let mut a = stack(MAC_A, IID_A);
     let mut b = stack(MAC_B, IID_B);
     bring_up(&mut a, &mut b);
-    let payload = vec![0u8; 1600];
-    assert_eq!(
-        a.send_datagram_collect(IpAddr::V6(link_local(IID_B)), 1, 2, &payload, t(2)),
-        Err(SendError::TooLarge)
+    // A 1600-byte datagram exceeds the 1500-byte link and is
+    // source-fragmented (RFC 8200 §4.5); the receiver reassembles it.
+    let payload = vec![0xA5u8; 1600];
+    let out = a
+        .send_datagram_collect(IpAddr::V6(link_local(IID_B)), 6000, 9, &payload, t(2))
+        .expect("fragmented send");
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
+    let mut events_b = Vec::new();
+    for _ in 0..32 {
+        let Some(frame) = frames.pop_front() else {
+            break;
+        };
+        let out_b = b.on_frame_collect(&frame, t(2));
+        events_b.extend(out_b.events);
+        for reply in tx_bytes(out_b.frames) {
+            let out_a = a.on_frame_collect(&reply, t(2));
+            frames.extend(tx_bytes(out_a.frames));
+        }
+    }
+    assert!(
+        events_b.contains(&StackEvent::UdpDatagram {
+            source: IpAddr::V6(link_local(IID_A)),
+            destination: IpAddr::V6(link_local(IID_B)),
+            source_port: 6000,
+            destination_port: 9,
+            payload: payload.clone(),
+        }),
+        "the reassembled 1600-byte datagram is delivered"
     );
 }
 
@@ -1106,6 +1154,49 @@ fn ipv6_multicast_datagram_transmit_reaches_a_member() {
             payload,
             ..
         } if *d == GROUP_V6 && payload == b"mcast6"
+    )));
+}
+
+#[test]
+fn ipv6_multicast_datagram_source_fragments_when_oversize() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    bring_up(&mut a, &mut b);
+    b.join_multicast(IpAddr::V6(GROUP_V6), t(3)).expect("join");
+    // A multicast group needs no neighbour resolution, so an oversize
+    // datagram emits its fragments (RFC 8200 §4.5) directly and
+    // deterministically — no ND exchange to interleave.
+    let payload = vec![0x7Eu8; 2000];
+    let out = a
+        .send_datagram_collect(IpAddr::V6(GROUP_V6), 6000, 9000, &payload, t(3))
+        .expect("send");
+    assert!(
+        out.frames.len() >= 2,
+        "an oversize multicast datagram is fragmented"
+    );
+    // Every fragment is an IPv6 packet to the group MAC whose next header
+    // is the Fragment header, at hop limit 1.
+    for frame in &out.frames {
+        let eth = EthernetFrame::parse(&frame.bytes).expect("eth");
+        assert_eq!(eth.destination, ipv6_multicast_mac(&GROUP_V6));
+        let (header, frag_payload) = Ipv6Header::parse(eth.payload).expect("ipv6");
+        assert_eq!(header.destination, GROUP_V6);
+        assert_eq!(header.hop_limit, 1, "multicast data stays on the link");
+        assert_eq!(header.next_header, crate::ipv6::NEXT_HEADER_FRAGMENT);
+        assert!(frag_payload.len() >= crate::ipv6::FRAGMENT_HEADER_LEN);
+    }
+    // The member reassembles the fragments into the original datagram.
+    let mut events = Vec::new();
+    for frame in &out.frames {
+        events.extend(b.on_frame_collect(&frame.bytes, t(3)).events);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StackEvent::UdpDatagram {
+            destination: IpAddr::V6(d),
+            payload: delivered,
+            ..
+        } if *d == GROUP_V6 && *delivered == payload
     )));
 }
 

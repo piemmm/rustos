@@ -164,3 +164,54 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
         }
     }
 }
+
+/// Source fragmentation (RFC 8200 §4.5) is total and faithful: for any
+/// payload length and MTU the planner never panics; whenever it accepts,
+/// its pieces are contiguous, 8-byte-aligned (bar the last), fit the link,
+/// serialise, and cover the whole payload exactly once.
+#[test]
+fn fragmentation_is_total_and_pieces_reconstruct() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "fragmentation_is_total_and_pieces_reconstruct",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut scratch = [0u8; ipv6::FRAGMENT_HEADER_LEN];
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            // Straddle the 1280 floor and reach past the offset-field limit
+            // so both rejection paths and the accepted path are exercised.
+            let payload_len = (rng.next_u64() % 70_000) as usize;
+            let mtu = 1200 + (rng.next_u64() % 900) as usize;
+            let Some(pieces) = ipv6::fragment(payload_len, mtu) else {
+                continue;
+            };
+            assert!(!pieces.is_empty());
+            let mut expected = 0usize;
+            for (i, piece) in pieces.iter().enumerate() {
+                assert_eq!(piece.offset, expected);
+                assert_eq!(piece.payload_start, expected);
+                let len = piece.payload_end - piece.payload_start;
+                let last = i == pieces.len() - 1;
+                assert_eq!(piece.more, !last);
+                if !last {
+                    assert_eq!(len % 8, 0);
+                }
+                assert!(ipv6::IPV6_HEADER_LEN + ipv6::FRAGMENT_HEADER_LEN + len <= mtu);
+                ipv6::write_fragment_header(
+                    &mut scratch,
+                    ipv6::NEXT_HEADER_ICMPV6,
+                    piece.offset,
+                    piece.more,
+                    0xABCD_1234,
+                )
+                .expect("a planned piece always serialises");
+                expected = piece.payload_end;
+            }
+            assert_eq!(expected, payload_len, "pieces cover the payload exactly");
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}

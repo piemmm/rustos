@@ -1808,6 +1808,30 @@ address across sessions.
   per-interface CSPRNG-backed `TempAddrSource` (kernel `random_get`); host
   tests inject a deterministic one.
 
+#### N11 — RFC 8200 §4.5 IPv6 source fragmentation `[x]`
+An IPv6 datagram the host originates larger than the path MTU is
+source-fragmented — the only entity that may fragment an IPv6 datagram is
+its source, since routers never do — closing the dual-stack parity gap
+where IPv4 fragmented on emit but IPv6 refused with `SendError::TooLarge`.
+- **Engine** (`lib/net/src/ipv6.rs`): pure `fragment(payload_len, mtu)`
+  planner (mirroring `ipv4::fragment`) returning contiguous, 8-byte-aligned
+  (bar the last) `FragmentPiece`s that cover the payload exactly once, plus
+  `write_fragment_header` for the 8-byte Fragment extension header
+  (`FRAGMENT_HEADER_LEN`). Fails closed below the 1280-byte floor and beyond
+  the 13-bit offset field (`MAX_FRAGMENT_OFFSET`). Host-tested (sizing,
+  fail-closed cases, fragment→walk→`Reassembler` round-trip) and fuzzed
+  (`fuzz_net_ipv6`).
+- **Stack** (`lib/net/src/stack.rs`): a 32-bit `next_ipv6_ident`, an
+  `emit_ipv6_frame` refactor (multicast MAC vs. next-hop resolution shared
+  by the whole and fragmented paths, §2.2), and `send_ipv6_fragmented`. The
+  UDP and ICMPv6-echo v6 send paths compute the transport checksum over the
+  whole message first (so the first fragment carries it), then fragment
+  against the path MTU (unicast) / link MTU (multicast); `TooLarge` now
+  means only "cannot be fragmented at all". Host-tested: oversize v6 UDP and
+  echo round-trip end to end, and an oversize multicast datagram emits well-
+  formed fragments that a member reassembles. TCP is unaffected (segments
+  are MSS-sized, never IP-fragmented).
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,

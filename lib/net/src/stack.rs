@@ -607,6 +607,10 @@ pub struct Stack {
     ra_routes: usize,
     redirect_routes: usize,
     next_ident: u16,
+    /// IPv6 datagram identification for source fragmentation (RFC 8200
+    /// §4.5): a 32-bit counter, distinct from the 16-bit IPv4 one, tying
+    /// every fragment of one datagram together.
+    next_ipv6_ident: u32,
     /// IPv4 (IGMPv2) group membership.
     membership_v4: Membership<Igmp>,
     /// IPv6 (MLDv2) group membership.
@@ -687,6 +691,7 @@ impl Stack {
             ra_routes: 0,
             redirect_routes: 0,
             next_ident: config.ipv4_ident_seed,
+            next_ipv6_ident: u32::from(config.ipv4_ident_seed),
             membership_v4: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
             membership_v6: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
             rx_csum_offload: config
@@ -2186,6 +2191,22 @@ impl Stack {
         let Some(packet) = packet else {
             return;
         };
+        self.emit_ipv6_frame(out, dest, packet, offload, now);
+    }
+
+    /// Emit one built IPv6 packet: a multicast destination goes straight
+    /// to its group MAC (no neighbour resolution, RFC 2464 §7); a unicast
+    /// one resolves its next hop through the neighbour cache, parking the
+    /// packet until resolution completes. The pooled buffer is always
+    /// returned to the pool.
+    fn emit_ipv6_frame(
+        &mut self,
+        out: &mut StackOutput,
+        dest: Ipv6Addr,
+        packet: Vec<u8>,
+        offload: TxOffload,
+        now: Duration64,
+    ) {
         if dest.is_multicast() {
             self.push_frame_offloaded(
                 out,
@@ -2209,6 +2230,91 @@ impl Stack {
             offload,
             now,
         );
+    }
+
+    /// Source-fragment an oversize IPv6 datagram (RFC 8200 §4.5) and emit
+    /// each fragment.
+    ///
+    /// Only the source may fragment an IPv6 datagram, so a host that
+    /// originates one larger than `mtu` must split it here. The whole
+    /// upper-layer message (`upper_message`) is the fragmentable part —
+    /// its transport checksum, already computed over the entire message,
+    /// travels in the first fragment. Every fragment of the datagram
+    /// shares one identification. Returns `false` (having emitted nothing)
+    /// when the datagram cannot be fragmented onto `mtu` (fail closed);
+    /// the caller then reports [`SendError::TooLarge`].
+    #[allow(clippy::too_many_arguments)]
+    fn send_ipv6_fragmented(
+        &mut self,
+        out: &mut StackOutput,
+        source: Ipv6Addr,
+        dest: Ipv6Addr,
+        next_header: u8,
+        upper_message: &[u8],
+        hop_limit: u8,
+        mtu: usize,
+        now: Duration64,
+    ) -> bool {
+        if !self.link_up {
+            return false;
+        }
+        let Some(pieces) = crate::ipv6::fragment(upper_message.len(), mtu) else {
+            return false;
+        };
+        let identification = self.next_ipv6_ident;
+        self.next_ipv6_ident = self.next_ipv6_ident.wrapping_add(1);
+        for piece in pieces {
+            let data = &upper_message[piece.payload_start..piece.payload_end];
+            let Some(packet) = self.pooled_ipv6_fragment(
+                source,
+                dest,
+                hop_limit,
+                next_header,
+                identification,
+                &piece,
+                data,
+            ) else {
+                continue;
+            };
+            self.emit_ipv6_frame(out, dest, packet, TxOffload::None, now);
+        }
+        true
+    }
+
+    /// Assemble one IPv6 fragment — fixed header (next-header Fragment) +
+    /// Fragment extension header + this piece's payload — into a pooled
+    /// buffer. Returns the buffer to the pool and `None` if the headers
+    /// will not serialise.
+    #[allow(clippy::too_many_arguments)]
+    fn pooled_ipv6_fragment(
+        &mut self,
+        source: Ipv6Addr,
+        dest: Ipv6Addr,
+        hop_limit: u8,
+        upper_header: u8,
+        identification: u32,
+        piece: &crate::ipv6::FragmentPiece,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
+        let payload_len = crate::ipv6::FRAGMENT_HEADER_LEN + data.len();
+        let mut header = Ipv6Header::new(source, dest, crate::ipv6::NEXT_HEADER_FRAGMENT);
+        header.hop_limit = hop_limit;
+        let mut buf = self.bufs.take_zeroed(IPV6_HEADER_LEN + payload_len);
+        let ok = header.write(&mut buf, payload_len).is_some()
+            && crate::ipv6::write_fragment_header(
+                &mut buf[IPV6_HEADER_LEN..],
+                upper_header,
+                piece.offset,
+                piece.more,
+                identification,
+            )
+            .is_some();
+        if !ok {
+            self.bufs.give(buf);
+            return None;
+        }
+        buf[IPV6_HEADER_LEN + crate::ipv6::FRAGMENT_HEADER_LEN..].copy_from_slice(data);
+        Some(buf)
     }
 
     /// Assemble a fixed IPv6 header and payload into a **pooled** buffer
@@ -2307,7 +2413,8 @@ impl Stack {
     ///
     /// Typed [`SendError`] refusals: link down, non-unicast
     /// destination, no source address / v4 configuration, no route,
-    /// or a payload that cannot fit the path MTU.
+    /// or a payload too large to fit or fragment onto the path (an
+    /// oversize IPv6 request is source-fragmented, RFC 8200 §4.5).
     pub fn send_echo_request(
         &mut self,
         dest: IpAddr,
@@ -2359,26 +2466,45 @@ impl Stack {
                     sequence,
                     payload,
                 };
-                if IPV6_HEADER_LEN + echo.wire_len() > path_mtu {
-                    return Err(SendError::TooLarge);
-                }
                 let context = IcmpContext::V6 {
                     source,
                     destination: dest,
                 };
+                // The `ICMPv6` checksum spans the whole message and is
+                // computed here, before any fragmentation, so it travels
+                // (correctly) in the first fragment.
                 let mut message = self.bufs.take_zeroed(echo.wire_len());
-                echo.write(context, &mut message)
-                    .ok_or(SendError::TooLarge)?;
-                self.send_ipv6_packet(
-                    out,
-                    source,
-                    dest,
-                    NEXT_HEADER_ICMPV6,
-                    &message,
-                    self.hop_limit,
-                    now,
-                );
+                if echo.write(context, &mut message).is_none() {
+                    self.bufs.give(message);
+                    return Err(SendError::TooLarge);
+                }
+                let sent = if IPV6_HEADER_LEN + message.len() <= path_mtu {
+                    self.send_ipv6_packet(
+                        out,
+                        source,
+                        dest,
+                        NEXT_HEADER_ICMPV6,
+                        &message,
+                        self.hop_limit,
+                        now,
+                    );
+                    true
+                } else {
+                    self.send_ipv6_fragmented(
+                        out,
+                        source,
+                        dest,
+                        NEXT_HEADER_ICMPV6,
+                        &message,
+                        self.hop_limit,
+                        path_mtu,
+                        now,
+                    )
+                };
                 self.bufs.give(message);
+                if !sent {
+                    return Err(SendError::TooLarge);
+                }
             }
         }
         Ok(())
@@ -2392,17 +2518,19 @@ impl Stack {
     /// membership (a host may send to a group it has not joined,
     /// RFC 1112 §6.2). The limited broadcast (`255.255.255.255`) and the
     /// unspecified address are refused as [`SendError::NotUnicast`] (fail
-    /// closed): neither is a meaningful datagram destination here. Over
-    /// IPv4 an oversize datagram is fragmented on emit; over IPv6, which
-    /// never fragments on emit, a datagram past the path MTU (unicast) or
-    /// link MTU (multicast) is refused as [`SendError::TooLarge`].
+    /// closed): neither is a meaningful datagram destination here. An
+    /// oversize datagram is fragmented on emit for either family — IPv4
+    /// (RFC 791) and IPv6 source fragmentation (RFC 8200 §4.5) alike —
+    /// against the path MTU (unicast) or link MTU (multicast); it is
+    /// refused as [`SendError::TooLarge`] only when it cannot be
+    /// fragmented at all (a datagram beyond the fragmentation limits).
     ///
     /// # Errors
     ///
     /// Typed [`SendError`] refusals: link down, broadcast/unspecified
     /// destination, no usable source address / v4 configuration, no route
-    /// (unicast only), or a payload that cannot fit the path MTU (v6) or
-    /// the datagram-length field.
+    /// (unicast only), or a datagram too large to fragment onto the link
+    /// or to fit the datagram-length field.
     pub fn send_datagram(
         &mut self,
         dest: IpAddr,
@@ -2453,46 +2581,81 @@ impl Stack {
                 self.bufs.give(message);
             }
             IpAddr::V6(dest) => {
-                if dest.is_unspecified() {
-                    return Err(SendError::NotUnicast);
-                }
-                let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
-                if !dest.is_multicast() && self.next_hop_v6(dest, now).is_none() {
-                    return Err(SendError::NoRoute);
-                }
-                let total = udp::UDP_HEADER_LEN + payload.len();
-                // A group has no path-MTU state: bound multicast against
-                // the link MTU; unicast uses the cached path MTU.
-                let path_mtu = if dest.is_multicast() {
-                    self.mtu_v6_wire() as usize
-                } else {
-                    self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize
-                };
-                if IPV6_HEADER_LEN + total > path_mtu {
-                    return Err(SendError::TooLarge);
-                }
-                let mut message = self.bufs.take_zeroed(total);
-                udp::write(
-                    udp::Pseudo::V6 {
-                        source,
-                        destination: dest,
-                    },
-                    source_port,
-                    destination_port,
-                    payload,
-                    &mut message,
-                )
-                .map_err(|_| SendError::TooLarge)?;
-                let hop_limit = if dest.is_multicast() {
-                    MULTICAST_DATA_HOP_LIMIT
-                } else {
-                    self.hop_limit
-                };
-                self.send_ipv6_packet(out, source, dest, PROTOCOL_UDP, &message, hop_limit, now);
-                self.bufs.give(message);
+                self.send_datagram_v6(out, dest, source_port, destination_port, payload, now)?;
             }
         }
         Ok(())
+    }
+
+    /// The IPv6 UDP origination path: resolve the source and next hop,
+    /// fold the pseudo-header checksum, and emit the datagram whole when it
+    /// fits the path MTU or source-fragmented (RFC 8200 §4.5) when it does
+    /// not. A multicast group has no path-MTU state, so it is bounded by
+    /// (and fragments against) the link MTU.
+    fn send_datagram_v6(
+        &mut self,
+        out: &mut StackOutput,
+        dest: Ipv6Addr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<(), SendError> {
+        if dest.is_unspecified() {
+            return Err(SendError::NotUnicast);
+        }
+        let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
+        if !dest.is_multicast() && self.next_hop_v6(dest, now).is_none() {
+            return Err(SendError::NoRoute);
+        }
+        let total = udp::UDP_HEADER_LEN + payload.len();
+        let path_mtu = if dest.is_multicast() {
+            self.mtu_v6_wire() as usize
+        } else {
+            self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize
+        };
+        let mut message = self.bufs.take_zeroed(total);
+        if udp::write(
+            udp::Pseudo::V6 {
+                source,
+                destination: dest,
+            },
+            source_port,
+            destination_port,
+            payload,
+            &mut message,
+        )
+        .is_err()
+        {
+            self.bufs.give(message);
+            return Err(SendError::TooLarge);
+        }
+        let hop_limit = if dest.is_multicast() {
+            MULTICAST_DATA_HOP_LIMIT
+        } else {
+            self.hop_limit
+        };
+        let sent = if IPV6_HEADER_LEN + total <= path_mtu {
+            self.send_ipv6_packet(out, source, dest, PROTOCOL_UDP, &message, hop_limit, now);
+            true
+        } else {
+            self.send_ipv6_fragmented(
+                out,
+                source,
+                dest,
+                PROTOCOL_UDP,
+                &message,
+                hop_limit,
+                path_mtu,
+                now,
+            )
+        };
+        self.bufs.give(message);
+        if sent {
+            Ok(())
+        } else {
+            Err(SendError::TooLarge)
+        }
     }
 
     /// The effective TCP maximum segment size (data bytes) for a
@@ -2718,8 +2881,9 @@ impl Stack {
                 let offload = if let Some(mss) = gso_size {
                     Self::tcp_segment_offload(IPV6_HEADER_LEN, tcp_header_len, mss, true)
                 } else {
-                    // IPv6 never fragments on emit (an over-MTU segment is
-                    // refused below), so a negotiated offload always applies.
+                    // A TCP segment is never IP-fragmented — it is sized
+                    // to the path MSS, and an over-MTU segment is refused
+                    // below — so a negotiated offload always applies.
                     self.tcp_tx_offload(IPV6_HEADER_LEN, true)
                 };
                 let mut segment = self.bufs.take_zeroed(MAX_HEADER_LEN + payload.len());

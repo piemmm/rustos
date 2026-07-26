@@ -1,8 +1,11 @@
 //! Unit tests for the IPv6 codec and extension-header walk.
 
 use super::*;
+use crate::addr::IpAddr;
+use crate::frag::{FragKey, PushOutcome, Reassembler, ReassemblyConfig};
 use alloc::vec;
 use alloc::vec::Vec;
+use tairix_abi::time::Duration64;
 
 const SRC: Ipv6Addr = Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1);
 const DST: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 2);
@@ -296,4 +299,129 @@ fn hop_by_hop_router_alert_is_one_padded_unit() {
     assert_eq!(hbh[1], 0, "one 8-octet unit beyond the first");
     assert_eq!(&hbh[2..6], &[5, 2, 0, 0], "Router Alert option");
     assert_eq!(&hbh[6..8], &[1, 0], "PadN option");
+}
+
+// ---- Source fragmentation (RFC 8200 §4.5) ---------------------------
+
+#[test]
+fn fragment_pieces_are_contiguous_bounded_and_flagged() {
+    let payload_len = 4000;
+    let mtu = IPV6_MIN_MTU;
+    let pieces = fragment(payload_len, mtu).expect("fragmentable");
+    assert!(pieces.len() >= 2, "an oversize datagram is never one piece");
+    let mut expected = 0;
+    for (i, piece) in pieces.iter().enumerate() {
+        assert_eq!(piece.offset, expected, "offset follows the previous end");
+        assert_eq!(piece.payload_start, expected);
+        let last = i == pieces.len() - 1;
+        assert_eq!(piece.more, !last, "only the final piece clears More");
+        let len = piece.payload_end - piece.payload_start;
+        if !last {
+            assert_eq!(len % 8, 0, "a non-final fragment is a multiple of 8");
+        }
+        assert!(
+            IPV6_HEADER_LEN + FRAGMENT_HEADER_LEN + len <= mtu,
+            "every fragment fits the link MTU"
+        );
+        expected = piece.payload_end;
+    }
+    assert_eq!(expected, payload_len, "pieces cover the whole payload");
+}
+
+#[test]
+fn fragment_rejects_sub_minimum_mtu() {
+    assert!(
+        fragment(4000, IPV6_MIN_MTU - 1).is_none(),
+        "an MTU below the IPv6 minimum fails closed"
+    );
+}
+
+#[test]
+fn fragment_rejects_a_datagram_beyond_the_offset_field() {
+    // The 13-bit offset field (×8) cannot place a fragment past 65528, so
+    // a datagram this large cannot be fragmented at all.
+    assert!(fragment(100_000, IPV6_MIN_MTU).is_none());
+}
+
+#[test]
+fn write_fragment_header_rejects_unaligned_or_undersized() {
+    let mut out = [0u8; FRAGMENT_HEADER_LEN];
+    assert!(
+        write_fragment_header(&mut out, NEXT_HEADER_ICMPV6, 7, false, 1).is_none(),
+        "an offset that is not a multiple of 8 fails closed"
+    );
+    assert!(
+        write_fragment_header(
+            &mut out[..FRAGMENT_HEADER_LEN - 1],
+            NEXT_HEADER_ICMPV6,
+            0,
+            false,
+            1
+        )
+        .is_none(),
+        "a buffer too small for the header fails closed"
+    );
+}
+
+#[test]
+fn fragment_then_walk_then_reassemble_round_trips() {
+    // Fragment a datagram, serialise each piece's Fragment header, walk it
+    // as a receiver would, and reassemble: the original payload returns.
+    let payload: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+    let mtu = IPV6_MIN_MTU;
+    let pieces = fragment(payload.len(), mtu).expect("fragmentable");
+    assert!(pieces.len() >= 2);
+    let identification = 0xDEAD_BEEF;
+    let mut reassembler = Reassembler::new(ReassemblyConfig::default());
+    let key = FragKey {
+        source: IpAddr::V6(SRC),
+        destination: IpAddr::V6(DST),
+        identification,
+        protocol: 0,
+    };
+    let mut completed = None;
+    for piece in &pieces {
+        let data = &payload[piece.payload_start..piece.payload_end];
+        let mut frag_payload = vec![0u8; FRAGMENT_HEADER_LEN + data.len()];
+        write_fragment_header(
+            &mut frag_payload,
+            NEXT_HEADER_ICMPV6,
+            piece.offset,
+            piece.more,
+            identification,
+        )
+        .expect("writes");
+        frag_payload[FRAGMENT_HEADER_LEN..].copy_from_slice(data);
+        let WalkOutcome::Fragment {
+            info,
+            payload: piece_bytes,
+        } = walk(NEXT_HEADER_FRAGMENT, &frag_payload, false).expect("walks")
+        else {
+            panic!("expected a fragment outcome");
+        };
+        assert_eq!(info.identification, identification);
+        assert_eq!(usize::from(info.offset), piece.offset);
+        assert_eq!(info.more, piece.more);
+        assert_eq!(info.next_header, NEXT_HEADER_ICMPV6);
+        match reassembler.push(
+            key,
+            usize::from(info.offset),
+            info.more,
+            piece_bytes,
+            Duration64::from_secs(0),
+        ) {
+            PushOutcome::Complete(bytes) => completed = Some(bytes),
+            PushOutcome::Pending => {}
+            PushOutcome::Rejected(reason) => panic!("reassembly rejected: {reason:?}"),
+        }
+    }
+    assert_eq!(completed.expect("reassembled"), payload);
+}
+
+#[test]
+fn fragment_rejects_an_empty_datagram() {
+    assert!(
+        fragment(0, IPV6_MIN_MTU).is_none(),
+        "there is nothing to fragment in a zero-length datagram"
+    );
 }

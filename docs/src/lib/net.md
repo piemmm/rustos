@@ -88,7 +88,14 @@ Unrecognised options take their RFC 8200 §4.2 dispositions (skip /
 drop / drop + Parameter Problem, multicast-suppressed for `11`-typed
 options), expressed as typed `WalkRejection` values the caller turns
 into rate-limited ICMPv6 errors. A fragment header ends the walk: the
-caller reassembles first and walks the reassembled payload again.
+caller reassembles first and walks the reassembled payload again. On the
+emit side, `fragment` plans RFC 8200 §4.5 source fragmentation (the only
+entity that may fragment an IPv6 datagram is its source — routers never
+do): given the fragmentable payload and the path MTU it returns pieces
+that are contiguous, 8-byte-aligned (bar the last), and provably cover
+the payload exactly once, and `write_fragment_header` serialises each
+piece's 8-byte Fragment extension header. It fails closed below the
+1280-byte floor and beyond the 13-bit offset field.
 
 ### `icmp` — ICMP and ICMPv6 over one machinery
 
@@ -249,11 +256,14 @@ IPv4 accepts a zero (uncomputed) checksum but always emits one; IPv6
 requires it (RFC 8200 §8.1). Emit substitutes `0xFFFF` for a computed
 zero so it is never read as "no checksum". Every decode is total,
 bounded, and fail-closed. `Stack::send_datagram` originates a datagram
-to a **unicast** peer (resolving the next hop, parking on ARP/ND, IPv4
-fragmenting on emit) or a **multicast** group (straight to the group
-MAC with a link-local scope — TTL/hop-limit 1 — needing no route and no
-membership); the limited broadcast and the unspecified address are
-refused (`SendError::NotUnicast`).
+to a **unicast** peer (resolving the next hop, parking on ARP/ND) or a
+**multicast** group (straight to the group MAC with a link-local scope —
+TTL/hop-limit 1 — needing no route and no membership); an oversize
+datagram is fragmented on emit for either family — IPv4 (RFC 791) and
+IPv6 source fragmentation (RFC 8200 §4.5) alike, against the path MTU
+(unicast) or link MTU (multicast) — and refused as `SendError::TooLarge`
+only when it cannot be fragmented at all. The limited broadcast and the
+unspecified address are refused (`SendError::NotUnicast`).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 
