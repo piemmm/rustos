@@ -400,7 +400,15 @@ go-back-N when the peer negotiated SACK; go-back-N remains the fallback
 after a retransmission timeout and when SACK is absent), fast retransmit on
 three duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
 handling with rate-limited challenge ACKs (so a hostile peer cannot
-induce an ACK storm), delayed ACKs, and the RFC 9293 user timeout. Every
+induce an ACK storm), delayed ACKs, the RFC 9293 user timeout, and
+RFC 9293 §3.8.4 keepalive probing. Keepalive is off by default (RFC 1122
+§4.2.3.6); once enabled through `TcpConfig`, an *idle* established
+connection — one with no unacknowledged or queued data, since data in
+flight is already proven live by the retransmission timer — is probed
+after the idle interval with a zero-length `snd_nxt - 1` ACK the peer is
+obliged to acknowledge, and is aborted (with a RST) after a bounded number
+of unanswered probes; any inbound segment or fresh data send re-arms the
+idle timer. Every
 buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
 checksum through `tcp::write`), so it is address-family agnostic. The

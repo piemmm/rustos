@@ -775,3 +775,150 @@ fn sack_recovery_handles_multiple_holes_without_rto() {
     assert_eq!(got, data, "bytes after two-hole recovery");
     assert_eq!(client.reset_reason(), None, "recovery must not abort");
 }
+
+// ---- RFC 9293 §3.8.4 keepalive ------------------------------------------
+
+/// A keepalive-enabled config with short, test-sized intervals (the RFC 1122
+/// defaults are hours; here idle and probe spacing are one second and the
+/// budget is three probes).
+fn ka_config() -> TcpConfig {
+    TcpConfig {
+        enable_keepalive: true,
+        keepalive_idle: ms(1000),
+        keepalive_interval: ms(1000),
+        keepalive_probes: 3,
+        ..TcpConfig::default()
+    }
+}
+
+fn handshake_ka(now: Duration64) -> (Tcb, Tcb) {
+    let mut client = Tcb::connect(ka_config(), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(config(), 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    assert!(client.is_established() && server.is_established());
+    (client, server)
+}
+
+/// Whether `frame` is a keepalive probe: an empty ACK whose sequence is one
+/// below the send frontier (RFC 1122 §4.2.3.6).
+fn is_keepalive_probe(frame: &[u8], expected_seq: u32) -> bool {
+    let seg = TcpSegment::parse(PSEUDO, frame).expect("a serialised segment parses");
+    seg.flags.ack()
+        && !seg.flags.syn()
+        && !seg.flags.fin()
+        && !seg.flags.rst()
+        && seg.payload.is_empty()
+        && seg.seq.value() == expected_seq
+}
+
+#[test]
+fn keepalive_probes_an_idle_connection_and_a_reply_resets_it() {
+    let (mut client, mut server) = handshake_ka(ms(0));
+    // The client's send frontier is iss + 1 (the SYN), so a probe carries
+    // iss (1000).
+    let probe_seq = 1000;
+
+    // No probe before the idle interval elapses.
+    client.advance(ms(999));
+    assert!(drain(&mut client, ms(999)).is_empty());
+    assert_eq!(client.keepalive_unacked, 0);
+
+    // At the idle deadline exactly one probe is sent.
+    client.advance(ms(1000));
+    let probes = drain(&mut client, ms(1000));
+    assert_eq!(probes.len(), 1, "one keepalive probe at the idle deadline");
+    assert!(is_keepalive_probe(&probes[0], probe_seq));
+    assert_eq!(client.keepalive_unacked, 1);
+
+    // The peer answers the probe; delivering the reply resets the idle timer
+    // and clears the probe count.
+    for f in &probes {
+        feed(&mut server, f, ms(1000));
+    }
+    let replies = drain(&mut server, ms(1000));
+    assert!(!replies.is_empty(), "the peer answers a keepalive probe");
+    for f in &replies {
+        feed(&mut client, f, ms(1000));
+    }
+    assert_eq!(client.keepalive_unacked, 0);
+    assert_eq!(client.state(), State::Established);
+
+    // The next probe waits a fresh full idle interval from the reply.
+    client.advance(ms(1999));
+    assert!(drain(&mut client, ms(1999)).is_empty());
+    client.advance(ms(2000));
+    assert_eq!(drain(&mut client, ms(2000)).len(), 1);
+}
+
+#[test]
+fn keepalive_aborts_after_the_probe_budget_is_exhausted() {
+    let (mut client, mut server) = handshake_ka(ms(0));
+    // The peer is dead: nothing is ever delivered back to the client.
+    let _ = &mut server;
+
+    let mut probes = 0usize;
+    let mut saw_rst = false;
+    let mut t = 0u64;
+    while client.state() != State::Closed {
+        t += 1000;
+        assert!(t <= 10_000, "keepalive never aborted the dead connection");
+        client.advance(ms(t));
+        for f in &drain(&mut client, ms(t)) {
+            let seg = TcpSegment::parse(PSEUDO, f).expect("parse");
+            if seg.flags.rst() {
+                saw_rst = true;
+            } else if is_keepalive_probe(f, 1000) {
+                probes += 1;
+            }
+        }
+    }
+    assert_eq!(
+        probes, 3,
+        "exactly keepalive_probes probes before the abort"
+    );
+    assert!(saw_rst, "a keepalive abort sends a RST");
+    assert_eq!(client.reset_reason(), Some(ResetReason::TimedOut));
+}
+
+#[test]
+fn keepalive_is_disabled_by_default() {
+    let (mut client, mut server) = handshake(ms(0));
+    let _ = &mut server;
+    assert_eq!(
+        client.keepalive_deadline, NEVER,
+        "no idle timer when disabled"
+    );
+    assert_eq!(client.next_deadline(), None);
+
+    // Advance far past any plausible idle interval: no probe is ever sent and
+    // the connection is never torn down.
+    let far = Duration64::from_secs(100_000);
+    client.advance(far);
+    assert!(drain(&mut client, far).is_empty());
+    assert_eq!(client.state(), State::Established);
+}
+
+#[test]
+fn sending_data_defers_keepalive() {
+    let (mut client, mut server) = handshake_ka(ms(0));
+
+    // Just before the idle deadline, exchange data — activity that restarts
+    // the idle timer from the moment of the exchange.
+    client.advance(ms(900));
+    client.send(b"ping").unwrap();
+    for f in drain(&mut client, ms(900)) {
+        feed(&mut server, &f, ms(900));
+    }
+    for f in drain(&mut server, ms(900)) {
+        feed(&mut client, &f, ms(900));
+    }
+    assert_eq!(client.keepalive_unacked, 0);
+
+    // No probe at the original 1000 ms deadline: the timer restarted at 900.
+    client.advance(ms(1000));
+    assert!(drain(&mut client, ms(1000)).is_empty());
+
+    // A probe only after a fresh full idle interval from the activity.
+    client.advance(ms(1900));
+    assert_eq!(drain(&mut client, ms(1900)).len(), 1);
+}

@@ -143,8 +143,11 @@ connection state machine, and the listener + SYN-cookie driver),
   the fallback after an RTO and when SACK is absent), RFC 6298 retransmission
   with Karn's algorithm, fast retransmit on triple
   duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
-  handling with rate-limited challenge ACKs, delayed ACKs, and the RFC 9293
-  user timeout. The initial sequence number is a caller-supplied CSPRNG
+  handling with rate-limited challenge ACKs, delayed ACKs, the RFC 9293
+  user timeout, and RFC 9293 §3.8.4 keepalive probing of an idle connection
+  (off by default per RFC 1122 §4.2.3.6; when enabled, an idle connection is
+  probed with a zero-length `snd_nxt - 1` ACK and torn down after a bounded
+  number of unanswered probes). The initial sequence number is a caller-supplied CSPRNG
   draw (§22) so the engine stays deterministic and replayable; every buffer
   and the reassembly set are bounded (fail closed, never attacker-sized).
   The send path is bounded by both the peer's advertised window and the

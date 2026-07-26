@@ -1832,6 +1832,36 @@ where IPv4 fragmented on emit but IPv6 refused with `SendError::TooLarge`.
   formed fragments that a member reassembles. TCP is unaffected (segments
   are MSS-sized, never IP-fragmented).
 
+#### N12 — RFC 9293 §3.8.4 TCP keepalive `[~]`
+An established but idle TCP connection can be probed for peer liveness and
+torn down when the peer becomes unreachable, so a long-lived idle
+connection does not linger forever against a silently-dead peer.
+- **Engine** (`lib/net/src/tcp_conn.rs`, host-gate-green): `TcpConfig`
+  gains `enable_keepalive` (off by default per RFC 1122 §4.2.3.6),
+  `keepalive_idle`, `keepalive_interval`, and `keepalive_probes` (defaults
+  2 h / 75 s / 9, the BSD/Linux values). The `Tcb` carries a
+  `keepalive_deadline`/`keepalive_unacked`/`keepalive_pending` triple and a
+  `Plan::Keepalive` probe: an idle established connection — one with no
+  unacknowledged or queued data, since in-flight data is already proven live
+  by the retransmission timer — emits after the idle interval a zero-length
+  ACK carrying `snd_nxt - 1`, which a compliant peer must acknowledge
+  (RFC 1122 §4.2.3.6). Each unanswered probe spaces the next by
+  `keepalive_interval`; after `keepalive_probes` unanswered probes the
+  connection aborts with a RST and `ResetReason::TimedOut`, exactly as the
+  user timeout does. Any inbound segment or fresh data send re-arms the idle
+  timer; `next_deadline` folds the keepalive deadline so the service arms one
+  one-shot timer (never a poll loop, §2.23). Host-tested (probe-on-idle +
+  reply-resets, abort after the probe budget, disabled-by-default, and
+  data-send defers the probe).
+- **Remaining**: expose keepalive as a stack-wide policy through the
+  existing config chain — a `net.tcp.keepalive` key in the `lib/sysconfig`
+  `net.*` registry (§6.2), fields on `NetworkSettings`
+  (`lib/abi/src/net_ipc.rs`), the `devmgr::netcfg` mapping, and `netstack`
+  seeding each connection's `TcpConfig` (connect + listener template) from
+  it — so an operator can enable it. Until then the engine capability is
+  complete and consumed by the connection engine and its tests; enabling it
+  end to end is the next increment.
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,

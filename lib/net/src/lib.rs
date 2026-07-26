@@ -77,7 +77,8 @@
 //!   teardown, send/receive windows, RFC 7323 scaling + timestamps
 //!   (PAWS), RFC 2018 SACK, RFC 6298 retransmission with Karn's
 //!   algorithm, fast retransmit, zero-window probing, RFC 5961
-//!   challenge ACKs, and the user timeout — driven by injected time and
+//!   challenge ACKs, the user timeout, and RFC 9293 §3.8.4 keepalive
+//!   probing of an idle connection — driven by injected time and
 //!   a caller-supplied CSPRNG initial sequence number.
 //!   [`tcp::cc`] is the pluggable congestion-control policy the
 //!   connection consults for its send window: a [`tcp::cc::CongestionControl`]

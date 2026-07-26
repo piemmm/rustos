@@ -22,7 +22,8 @@
 //! fallback after a timeout and when SACK is absent), fast retransmit on
 //! duplicate ACKs, zero-window (persist) probing, RFC 5961 in-window
 //! RST/SYN/ACK checks with rate-limited challenge ACKs, delayed ACKs, the
-//! RFC 9293 user timeout, and pluggable congestion control
+//! RFC 9293 user timeout, RFC 9293 §3.8.4 keepalive probing of an idle
+//! connection, and pluggable congestion control
 //! ([`crate::tcp::cc`]): the send path is bounded by both the peer's
 //! advertised window and the congestion window.
 //! Listeners with an accept queue and stateless SYN cookies are the next
@@ -185,6 +186,20 @@ pub struct TcpConfig {
     /// one IP packet the super-segment forms stays within the 16-bit IP
     /// length field.
     pub tso_max_payload: u16,
+    /// Whether RFC 9293 §3.8.4 keepalive probing is enabled. When `false`
+    /// (the default, per RFC 1122 §4.2.3.6) an idle connection is never
+    /// probed and never torn down for inactivity.
+    pub enable_keepalive: bool,
+    /// Idle time before the first keepalive probe is sent. Only a
+    /// connection with no unacknowledged or queued data is considered
+    /// idle; data in flight is proven live by the retransmission timer
+    /// instead.
+    pub keepalive_idle: Duration64,
+    /// Spacing between successive unanswered keepalive probes.
+    pub keepalive_interval: Duration64,
+    /// Number of unanswered probes tolerated before the connection is
+    /// declared dead and aborted (RFC 9293 §3.8.4).
+    pub keepalive_probes: u32,
 }
 
 impl Default for TcpConfig {
@@ -207,6 +222,14 @@ impl Default for TcpConfig {
             challenge_ack_interval: millis(500),
             congestion: CongestionAlgorithm::Cubic,
             tso_max_payload: 0,
+            // RFC 1122 §4.2.3.6: keepalive is off unless explicitly enabled.
+            // The intervals mirror the long-standing BSD/Linux defaults
+            // (2 h idle, 75 s probe spacing, 9 probes) so an enabled
+            // connection does not probe a merely-quiet peer aggressively.
+            enable_keepalive: false,
+            keepalive_idle: Duration64::from_secs(7200),
+            keepalive_interval: Duration64::from_secs(75),
+            keepalive_probes: 9,
         }
     }
 }
@@ -703,6 +726,15 @@ pub struct Tcb {
     time_wait_deadline: u128,
     user_timeout_deadline: u128,
 
+    // RFC 9293 §3.8.4 keepalive. `keepalive_deadline` is when the next
+    // probe (or, when no probe is yet outstanding, the first probe after
+    // the idle interval) is due; `keepalive_unacked` counts probes sent
+    // without an answering segment; `keepalive_pending` marks a probe
+    // queued for emission by `plan_segment`.
+    keepalive_deadline: u128,
+    keepalive_unacked: u32,
+    keepalive_pending: bool,
+
     // RFC 5961 challenge-ACK rate limit: the last time a challenge ACK was
     // emitted, so a hostile in-window segment cannot induce an ACK storm.
     last_challenge: u128,
@@ -736,6 +768,10 @@ enum Plan {
     Retransmit { seq: SeqNumber, len: usize },
     /// A pure acknowledgement (no sequence-space consumption).
     Ack,
+    /// An RFC 9293 §3.8.4 keepalive probe: a zero-length ACK carrying
+    /// `snd_nxt - 1` as its sequence number so the idle peer is obliged to
+    /// acknowledge it (RFC 1122 §4.2.3.6). It consumes no sequence space.
+    Keepalive,
 }
 
 impl Tcb {
@@ -795,6 +831,9 @@ impl Tcb {
             delayed_ack_deadline: NEVER,
             time_wait_deadline: NEVER,
             user_timeout_deadline: NEVER,
+            keepalive_deadline: NEVER,
+            keepalive_unacked: 0,
+            keepalive_pending: false,
             last_challenge: 0,
             challenged: false,
             became_established: false,
@@ -1054,6 +1093,9 @@ impl Tcb {
         self.delayed_ack_deadline = NEVER;
         self.user_timeout_deadline = NEVER;
         self.time_wait_deadline = NEVER;
+        self.keepalive_deadline = NEVER;
+        self.keepalive_pending = false;
+        self.keepalive_unacked = 0;
         self.ack_pending = false;
     }
 
@@ -1147,6 +1189,10 @@ impl Tcb {
             State::SynSent => self.recv_in_syn_sent(seg, now_ns),
             _ => self.recv_synchronized(seg, now_ns),
         }
+        // Any inbound segment is proof the peer is alive: re-arm the
+        // keepalive idle timer (and arm it on the transition into
+        // Established). A non-established or closed connection disarms.
+        self.reset_keepalive(now_ns);
     }
 
     /// RFC 9293 §3.10.7.2: a segment arriving in LISTEN.
@@ -1918,6 +1964,11 @@ impl Tcb {
         {
             return Some(Plan::Ack);
         }
+
+        // A keepalive probe the idle timer in `advance` has queued.
+        if self.keepalive_pending {
+            return Some(Plan::Keepalive);
+        }
         None
     }
 
@@ -2003,20 +2054,30 @@ impl Tcb {
                 };
                 (meta, payload)
             }
-            Plan::Ack => {
-                let meta = TcpSegmentMeta {
-                    source_port: self.local_port,
-                    destination_port: self.remote_port,
-                    seq: self.snd_nxt,
-                    ack: self.rcv_nxt,
-                    flags: TcpFlags::ACK,
-                    window: self.advertised_window(),
-                    urgent: 0,
-                    options: self.data_options(ts),
-                };
-                (meta, alloc::vec::Vec::new())
-            }
+            Plan::Ack => self.bare_ack_segment(self.snd_nxt, ts),
+            // A keepalive probe deliberately carries `snd_nxt - 1`: a
+            // sequence number already acknowledged, so a compliant peer
+            // answers with an ACK for `snd_nxt` (RFC 1122 §4.2.3.6). It
+            // carries no data and never advances the send frontier.
+            Plan::Keepalive => self.bare_ack_segment(self.snd_nxt.sub(1), ts),
         }
+    }
+
+    /// A zero-length ACK carrying `seq`: the shared shape of a pure
+    /// acknowledgement ([`Plan::Ack`]) and a keepalive probe
+    /// ([`Plan::Keepalive`]), which differ only in the sequence number.
+    fn bare_ack_segment(&self, seq: SeqNumber, ts: u32) -> (TcpSegmentMeta, alloc::vec::Vec<u8>) {
+        let meta = TcpSegmentMeta {
+            source_port: self.local_port,
+            destination_port: self.remote_port,
+            seq,
+            ack: self.rcv_nxt,
+            flags: TcpFlags::ACK,
+            window: self.advertised_window(),
+            urgent: 0,
+            options: self.data_options(ts),
+        };
+        (meta, alloc::vec::Vec::new())
     }
 
     /// Wire bytes a data segment's TCP options occupy (timestamps and any
@@ -2096,6 +2157,11 @@ impl Tcb {
                     self.persist_shift = (self.persist_shift + 1).min(6);
                     self.persist_deadline =
                         now_ns.saturating_add(self.rto.current() << self.persist_shift);
+                } else if *len > 0 {
+                    // Sending fresh data is activity: re-arm the keepalive
+                    // idle timer so a probe is only sent after a genuine
+                    // lull.
+                    self.reset_keepalive(now_ns);
                 }
                 self.clear_ack_owed();
             }
@@ -2121,6 +2187,13 @@ impl Tcb {
                 self.clear_ack_owed();
             }
             Plan::Ack => self.clear_ack_owed(),
+            Plan::Keepalive => {
+                // The probe carries no acknowledgement obligation of its own;
+                // it only clears the pending flag so it is emitted once. The
+                // idle timer and probe counter were already advanced in
+                // `advance_keepalive`.
+                self.keepalive_pending = false;
+            }
         }
     }
 
@@ -2197,6 +2270,53 @@ impl Tcb {
         }
 
         self.maybe_arm_persist(now_ns);
+        self.advance_keepalive(now_ns);
+    }
+
+    /// Re-arm the keepalive idle timer after activity (data sent or a
+    /// segment received) on an established connection, clearing any probe
+    /// queued or already sent. Disarms when keepalive is disabled or the
+    /// connection has left [`State::Established`].
+    fn reset_keepalive(&mut self, now_ns: u128) {
+        self.keepalive_unacked = 0;
+        self.keepalive_pending = false;
+        if self.config.enable_keepalive && self.state == State::Established {
+            self.keepalive_deadline = now_ns.saturating_add(nanos(self.config.keepalive_idle));
+        } else {
+            self.keepalive_deadline = NEVER;
+        }
+    }
+
+    /// RFC 9293 §3.8.4 keepalive: probe an idle established connection and,
+    /// after [`TcpConfig::keepalive_probes`] unanswered probes, abort it.
+    fn advance_keepalive(&mut self, now_ns: u128) {
+        if !self.config.enable_keepalive || self.state != State::Established {
+            return;
+        }
+        // Keepalive governs only a truly idle connection: unacknowledged or
+        // queued data is already proven live by the retransmission and
+        // persist timers, so no probe is owed while any is outstanding.
+        let idle = self.snd_una == self.snd_max && self.tx.is_empty();
+        if !idle {
+            return;
+        }
+        if self.keepalive_deadline == NEVER {
+            self.keepalive_deadline = now_ns.saturating_add(nanos(self.config.keepalive_idle));
+            return;
+        }
+        if self.keepalive_pending || now_ns < self.keepalive_deadline {
+            return;
+        }
+        if self.keepalive_unacked >= self.config.keepalive_probes {
+            // The probe budget is spent with no answer: the peer is
+            // unreachable. Abort with a RST, as the user timeout does.
+            self.rst_pending = Some((self.snd_nxt, Some(self.rcv_nxt)));
+            self.abort_with(ResetReason::TimedOut);
+            return;
+        }
+        self.keepalive_unacked = self.keepalive_unacked.saturating_add(1);
+        self.keepalive_pending = true;
+        self.keepalive_deadline = now_ns.saturating_add(nanos(self.config.keepalive_interval));
     }
 
     /// The earliest instant a timed transition or a deferred ACK is due, for
@@ -2213,6 +2333,9 @@ impl Tcb {
         earliest = earliest.min(self.time_wait_deadline);
         if self.ack_pending && !self.ack_immediate {
             earliest = earliest.min(self.delayed_ack_deadline);
+        }
+        if self.config.enable_keepalive && self.state == State::Established {
+            earliest = earliest.min(self.keepalive_deadline);
         }
         if earliest == NEVER {
             None
