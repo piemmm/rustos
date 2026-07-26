@@ -65,6 +65,11 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   `always` beantwortet jede Verbindungsanfrage zustandslos. Es gibt
   kein `off` — eine ungeschützte Verbindungswarteschlange ist keine
   Einstellung.
+- `net.tcp.keepalive` — `true` oder `false`: ob TCP-Verbindungen auf
+  einer inaktiven Leitung Keepalive-Prüfungen senden. `false` (die
+  Vorgabe) prüft nie und trennt eine inaktive Verbindung nie; `true`
+  prüft einen inaktiven Gegenpart nach dem üblichen Intervall und
+  trennt die Verbindung, wenn er nicht mehr antwortet.
 
 Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
 sobald der Stack seine Konfiguration das nächste Mal anwendet.

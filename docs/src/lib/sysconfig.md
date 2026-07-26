@@ -43,6 +43,7 @@ account can read the settings but not change them.
 | `net.ipv6.enabled`| `true` \| `false`     | the network stack (`netstack`): the stack-wide IPv6 address-family switch |
 | `net.ipv6.privacy`| `true` \| `false`     | the network stack (`netstack`): RFC 8981 temporary (privacy) IPv6 addresses |
 | `net.tcp.syncookies` | `auto` \| `always` | the network stack (`netstack`): the TCP SYN-flood defence policy |
+| `net.tcp.keepalive` | `true` \| `false`   | the network stack (`netstack`): RFC 9293 §3.8.4 TCP keepalive probing on idle connections |
 
 Adding a key is adding a `Key` variant (plus its `SystemConfig` field and
 match arms) **and** its consumer in the same change — the compiler then
@@ -91,11 +92,13 @@ operation, dropping (and zeroing any decrypted plaintext) what it held.
 ## The network switches
 
 The `net.*` keys are the stack-wide network posture, typed as
-`NetToggle` (`true` / `false`) for the two address-family switches and the
-privacy switch, and `SynCookies` (`auto` / `always`) for the SYN-flood
-defence. Their defaults reproduce today's behaviour: both families
-enabled, IPv6 privacy addresses off, and the `auto` SYN-cookie policy
-(bounded half-open queue, stateless cookies on overflow). There is
+`NetToggle` (`true` / `false`) for the two address-family switches, the
+privacy switch, and the TCP keepalive switch, and `SynCookies`
+(`auto` / `always`) for the SYN-flood defence. Their defaults reproduce
+today's behaviour: both families enabled, IPv6 privacy addresses off, the
+`auto` SYN-cookie policy (bounded half-open queue, stateless cookies on
+overflow), and TCP keepalive off (RFC 1122 §4.2.3.6 — an idle connection
+is never probed unless the operator opts in). There is
 deliberately **no** `off` for `net.tcp.syncookies` — an undefended or
 unbounded connection queue is a security regression the charter forbids,
 not a configuration. A disabled address family binds no addresses, answers

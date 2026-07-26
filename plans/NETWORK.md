@@ -1490,8 +1490,9 @@ the whole is too large for one change and each leaves the tree working.
 
 #### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[x]`
 - **ABI** (`lib/abi/src/net_ipc.rs`): `NetworkSettings { ipv4_enabled,
-  ipv6_enabled, syncookies_always, ipv6_privacy }` (a `Default` matching the
-  sysconfig defaults) and `NetstackRequest::ApplyNetworkSettings` (op 10),
+  ipv6_enabled, syncookies_always, ipv6_privacy, tcp_keepalive }` (a
+  `Default` matching the sysconfig defaults; `tcp_keepalive` added by N12)
+  and `NetstackRequest::ApplyNetworkSettings` (op 10),
   fail-closed encode/decode (booleans are exactly 0/1) + round-trip tests.
   `net.ipv6.privacy` maps to `ipv6_privacy` and is enforced by the RFC 8981
   temporary-address engine (see N10).
@@ -1832,7 +1833,7 @@ where IPv4 fragmented on emit but IPv6 refused with `SendError::TooLarge`.
   formed fragments that a member reassembles. TCP is unaffected (segments
   are MSS-sized, never IP-fragmented).
 
-#### N12 — RFC 9293 §3.8.4 TCP keepalive `[~]`
+#### N12 — RFC 9293 §3.8.4 TCP keepalive `[x]`
 An established but idle TCP connection can be probed for peer liveness and
 torn down when the peer becomes unreachable, so a long-lived idle
 connection does not linger forever against a silently-dead peer.
@@ -1853,14 +1854,22 @@ connection does not linger forever against a silently-dead peer.
   one-shot timer (never a poll loop, §2.23). Host-tested (probe-on-idle +
   reply-resets, abort after the probe budget, disabled-by-default, and
   data-send defers the probe).
-- **Remaining**: expose keepalive as a stack-wide policy through the
-  existing config chain — a `net.tcp.keepalive` key in the `lib/sysconfig`
-  `net.*` registry (§6.2), fields on `NetworkSettings`
-  (`lib/abi/src/net_ipc.rs`), the `devmgr::netcfg` mapping, and `netstack`
-  seeding each connection's `TcpConfig` (connect + listener template) from
-  it — so an operator can enable it. Until then the engine capability is
-  complete and consumed by the connection engine and its tests; enabling it
-  end to end is the next increment.
+- **Stack-wide policy** (gate-green): keepalive is wired end to end through
+  the existing config chain — a `net.tcp.keepalive` `NetToggle` key in the
+  `lib/sysconfig` `net.*` registry (§6.2, off by default), the
+  `tcp_keepalive` boolean on `NetworkSettings` (`lib/abi/src/net_ipc.rs`,
+  wire byte 12, fail-closed encode/decode + round-trip tests), the
+  `devmgr::netcfg::settings_from_config` mapping, and `netstack` seeding
+  `enable_keepalive` on both connection paths — `socket.rs::connect_stream`
+  (outbound `TcpConfig`) and `listen_config` (the listener's
+  accepted-connection `template`) — from the delivered settings. Read at
+  connect/`listen` time like the SYN-cookie mode, so it needs no
+  per-interface re-application. The engine's `keepalive_idle`/`interval`/
+  `probes` keep their RFC-default timings; the stack-wide switch toggles
+  keepalive on or off (the config store models closed-set values only, so
+  numeric per-timing knobs are not a `system.conf` key). Host-tested in
+  `netstack` (`listen_config` template) and `lib/sysconfig`/`devmgr`
+  (registry + mapping).
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
@@ -1959,6 +1968,10 @@ tree, exactly like `os.*`:
   cookies on overflow) is the default; there is deliberately **no**
   `off`: an unbounded or undefended SYN queue is a §2.17 regression,
   not a configuration.
+- `net.tcp.keepalive` (`true`|`false`) — RFC 9293 §3.8.4 TCP keepalive
+  probing on idle connections; off by default (RFC 1122 §4.2.3.6). When
+  on, both actively-opened and accepted connections probe an idle peer
+  and are torn down if it stops answering (N12).
 - Per-interface settings live in `network.conf` (6.1), never in
   `system.conf`; `configure net.<key> <value>` edits the stack-wide
   registry, and `configure` grows no interface sub-grammar — interface

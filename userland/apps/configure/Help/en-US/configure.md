@@ -60,6 +60,11 @@ never changes a result.
   falls back to stateless cookies on overflow; `always` answers every
   connection request statelessly. There is no `off` — an undefended
   connection queue is never a setting.
+- `net.tcp.keepalive` — `true` or `false`: whether TCP connections
+  send keepalive probes on an idle link. `false` (the default) never
+  probes and never tears an idle connection down for inactivity;
+  `true` probes an idle peer after the standard idle interval and
+  drops the connection if the peer stops answering.
 
 The `net.*` settings are read by the network stack; a change takes
 effect when the stack next applies its configuration.

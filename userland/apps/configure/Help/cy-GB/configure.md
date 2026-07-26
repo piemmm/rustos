@@ -64,6 +64,11 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   ffiniedig ac yn cwympo'n ôl at gwcis di-wladwriaeth pan fo'n
   gorlifo; mae `always` yn ateb pob cais cysylltu heb wladwriaeth.
   Nid oes `off` — nid yw ciw cysylltiadau diamddiffyn yn osodiad.
+- `net.tcp.keepalive` — `true` neu `false`: a yw cysylltiadau TCP yn
+  anfon archwiliadau cadw'n-fyw ar gyswllt segur. Nid yw `false` (y
+  diofyn) byth yn archwilio nac yn gollwng cysylltiad segur; mae `true`
+  yn archwilio cymar segur ar ôl y cyfnod arferol ac yn gollwng y
+  cysylltiad os yw'n peidio ag ateb.
 
 Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
 rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.

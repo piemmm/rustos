@@ -1002,6 +1002,9 @@ impl SocketService {
             // Enable segmentation offload when the egress device negotiated
             // it (0 keeps the connection per-MSS).
             tso_max_payload: interfaces.tso_max_payload_on(iface),
+            // Probe an idle peer only when the stack-wide `net.tcp.keepalive`
+            // policy is enabled (off by default, RFC 1122 §4.2.3.6).
+            enable_keepalive: interfaces.settings().tcp_keepalive,
             ..TcpConfig::default()
         };
         let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
@@ -1788,12 +1791,19 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
 /// holds no half-open state and answers every SYN with a stateless RFC
 /// 4987 cookie (the unconditional-defence mode); `auto` keeps the bounded
 /// default backlog, falling back to cookies only once it overflows.
+/// `net.tcp.keepalive` sets the accepted-connection template's
+/// `enable_keepalive`, so an inbound connection is probed on an idle link
+/// exactly as an outbound one is.
 pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
     ListenConfig {
         max_half_open: if settings.syncookies_always {
             0
         } else {
             ListenConfig::default().max_half_open
+        },
+        template: TcpConfig {
+            enable_keepalive: settings.tcp_keepalive,
+            ..TcpConfig::default()
         },
         ..ListenConfig::default()
     }

@@ -62,6 +62,11 @@ afectado — nunca cambia un resultado.
   semiabierta acotada y recurre a cookies sin estado al desbordarse;
   `always` responde a cada solicitud de conexión sin estado. No hay
   `off` — una cola de conexiones indefensa no es una opción.
+- `net.tcp.keepalive` — `true` o `false`: si las conexiones TCP envían
+  sondas de mantenimiento en un enlace inactivo. `false` (la
+  predeterminada) nunca sondea ni cierra una conexión inactiva; `true`
+  sondea a un par inactivo tras el intervalo habitual y cierra la
+  conexión si deja de responder.
 
 La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
 la pila vuelve a aplicar su configuración.

@@ -64,6 +64,11 @@ interessato — non cambia mai un risultato.
   `always` risponde a ogni richiesta di connessione senza stato. Non
   esiste `off` — una coda di connessioni indifesa non è
   un'impostazione.
+- `net.tcp.keepalive` — `true` o `false`: se le connessioni TCP inviano
+  sonde keepalive su un collegamento inattivo. `false` (il valore
+  predefinito) non sonda mai e non chiude mai una connessione inattiva;
+  `true` sonda un pari inattivo dopo l'intervallo consueto e chiude la
+  connessione se smette di rispondere.
 
 Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
 quando lo stack applica di nuovo la sua configurazione.

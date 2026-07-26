@@ -2362,6 +2362,7 @@ fn apply_network_settings_requires_cap_net_admin() {
         ipv6_enabled: false,
         syncookies_always: true,
         ipv6_privacy: false,
+        tcp_keepalive: false,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     // A broker capability (introspect) is not admin authority.
@@ -2392,6 +2393,7 @@ fn apply_network_settings_is_applied_and_audited() {
         ipv6_enabled: true,
         syncookies_always: true,
         ipv6_privacy: false,
+        tcp_keepalive: true,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     let len = serve(
@@ -2422,6 +2424,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
             ipv6_enabled: false,
             syncookies_always: false,
             ipv6_privacy: false,
+            tcp_keepalive: false,
         },
         t(2),
     );
@@ -2488,6 +2491,7 @@ fn applying_settings_reconfigures_an_existing_interface() {
             ipv6_enabled: false,
             syncookies_always: false,
             ipv6_privacy: false,
+            tcp_keepalive: false,
         },
         t(2),
     );
@@ -2863,25 +2867,37 @@ fn interface_config_rejects_an_alias_already_taken() {
 }
 
 #[test]
-fn listen_config_maps_the_syncookie_policy() {
+fn listen_config_maps_the_syncookie_and_keepalive_policy() {
     use crate::socket::listen_config;
     use tairix_net::tcp::listen::ListenConfig;
-    // `always` holds no half-open state (every SYN → stateless cookie).
+    // `always` holds no half-open state (every SYN → stateless cookie); with
+    // keepalive on, accepted connections carry it in their template.
     let always = listen_config(NetworkSettings {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: true,
         ipv6_privacy: false,
+        tcp_keepalive: true,
     });
     assert_eq!(always.max_half_open, 0);
-    // `auto` keeps the bounded default backlog.
+    assert!(
+        always.template.enable_keepalive,
+        "net.tcp.keepalive true enables keepalive on accepted connections"
+    );
+    // `auto` keeps the bounded default backlog; keepalive off leaves the
+    // template's keepalive disabled (RFC 1122 §4.2.3.6 default).
     let auto = listen_config(NetworkSettings {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: false,
         ipv6_privacy: false,
+        tcp_keepalive: false,
     });
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
+    assert!(
+        !auto.template.enable_keepalive,
+        "net.tcp.keepalive false leaves accepted connections unprobed"
+    );
 }
 
 // --- Link aggregation (bonds) ---------------------------------------

@@ -63,6 +63,11 @@ afetado — nunca altera um resultado.
   limitada e recorre a cookies sem estado em caso de transbordo;
   `always` responde a cada pedido de ligação sem estado. Não há `off`
   — uma fila de ligações indefesa não é uma definição.
+- `net.tcp.keepalive` — `true` ou `false`: se as ligações TCP enviam
+  sondas de manutenção numa ligação inativa. `false` (a predefinição)
+  nunca sonda nem fecha uma ligação inativa; `true` sonda um par
+  inativo após o intervalo habitual e fecha a ligação se este deixar de
+  responder.
 
 A pilha de rede lê as definições `net.*`; uma alteração produz efeito
 quando a pilha aplica novamente a sua configuração.

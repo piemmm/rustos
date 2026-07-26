@@ -85,10 +85,11 @@ hardware identity — and state on `CAP_SYSINFO_GLOBAL`).
 capability (`plans/NETWORK.md` §0), so it never reads `system.conf`
 itself. The FS-capable device manager reads the `net.*` registry keys
 (`lib/sysconfig`, §6.2 — `net.ipv4.enabled`, `net.ipv6.enabled`,
-`net.tcp.syncookies`) after the root unlock and delivers them once over
-the `CAP_NET_ADMIN` `ApplyNetworkSettings` admin op (audited,
-fail-soft-retried; `plans/NETWORK.md` N9b-2). Until it arrives the stack
-holds safe defaults (both families enabled, SYN cookies `auto`).
+`net.tcp.syncookies`, `net.ipv6.privacy`, `net.tcp.keepalive`) after the
+root unlock and delivers them once over the `CAP_NET_ADMIN`
+`ApplyNetworkSettings` admin op (audited, fail-soft-retried;
+`plans/NETWORK.md` N9b-2). Until it arrives the stack holds safe defaults
+(both families enabled, SYN cookies `auto`, keepalive off).
 
 The policy is enforced, not advisory:
 
@@ -104,6 +105,14 @@ The policy is enforced, not advisory:
   `max_half_open = 0`, so it holds no half-open state and answers every
   SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default
   backlog, falling back to cookies only on overflow.
+- **`net.tcp.keepalive true`** enables RFC 9293 §3.8.4 keepalive probing
+  on every new connection, actively opened and accepted alike (the
+  outbound `TcpConfig` and each listener's accepted-connection template):
+  an idle connection is probed after the standard idle interval and torn
+  down if the peer stops answering. `false` (the default, RFC 1122
+  §4.2.3.6) never probes and never drops an idle connection for
+  inactivity. Like the SYN-cookie mode it is read at connect/`listen`
+  time, so it needs no per-interface re-application.
 - **`net.ipv6.privacy true`** forms RFC 8981 temporary (privacy) IPv6
   addresses: alongside the stable SLAAC address of each autonomous
   prefix, the interface adds a short-lived address with a randomised

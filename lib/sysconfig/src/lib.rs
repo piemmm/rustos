@@ -52,6 +52,11 @@
 //!   stateless cookies on overflow; `always` answers every SYN statelessly.
 //!   There is deliberately no `off`: an undefended SYN queue is a security
 //!   regression, never a configuration.
+//! * `net.tcp.keepalive` — `true` or `false` (default): whether TCP
+//!   connections send RFC 9293 §3.8.4 keepalive probes on an idle link. When
+//!   enabled, every connection is probed after the standard idle interval and
+//!   torn down if the peer stops answering; `false` (RFC 1122 §4.2.3.6) never
+//!   probes and never tears an idle connection down for inactivity.
 //!
 //! # Security
 //!
@@ -362,6 +367,8 @@ pub enum Key {
     NetIpv6Privacy,
     /// `net.tcp.syncookies` — the TCP SYN-flood defence policy.
     NetTcpSynCookies,
+    /// `net.tcp.keepalive` — the stack-wide TCP keepalive switch.
+    NetTcpKeepalive,
 }
 
 impl Key {
@@ -377,6 +384,7 @@ impl Key {
         Self::NetIpv6Enabled,
         Self::NetIpv6Privacy,
         Self::NetTcpSynCookies,
+        Self::NetTcpKeepalive,
     ];
 
     /// The canonical key spelling.
@@ -393,6 +401,7 @@ impl Key {
             Self::NetIpv6Enabled => "net.ipv6.enabled",
             Self::NetIpv6Privacy => "net.ipv6.privacy",
             Self::NetTcpSynCookies => "net.tcp.syncookies",
+            Self::NetTcpKeepalive => "net.tcp.keepalive",
         }
     }
 
@@ -418,6 +427,7 @@ impl Key {
                 &["true", "false"]
             }
             Self::NetTcpSynCookies => &["auto", "always"],
+            Self::NetTcpKeepalive => &["true", "false"],
         }
     }
 }
@@ -487,15 +497,20 @@ pub struct SystemConfig {
     pub net_ipv6_privacy: NetToggle,
     /// The TCP SYN-flood defence policy (`net.tcp.syncookies`).
     pub net_tcp_syncookies: SynCookies,
+    /// Whether TCP connections send RFC 9293 §3.8.4 keepalive probes on an
+    /// idle link (`net.tcp.keepalive`). Disabled by default (RFC 1122
+    /// §4.2.3.6): an idle connection is never probed unless the operator opts
+    /// in.
+    pub net_tcp_keepalive: NetToggle,
 }
 
 impl Default for SystemConfig {
     /// The configuration an **absent** store implies: text login, every
     /// cache enabled, both address families enabled, IPv6 privacy addresses
     /// off, and the `auto` SYN-cookie policy. Written by hand because the
-    /// per-field defaults are not uniform (IPv6 privacy defaults *off* while
-    /// the family switches default *on*), so a blanket derive would be
-    /// wrong.
+    /// per-field defaults are not uniform (IPv6 privacy and TCP keepalive
+    /// default *off* while the family switches default *on*), so a blanket
+    /// derive would be wrong.
     fn default() -> Self {
         Self {
             login_type: LoginType::default(),
@@ -508,6 +523,7 @@ impl Default for SystemConfig {
             net_ipv6_enabled: NetToggle::Enabled,
             net_ipv6_privacy: NetToggle::Disabled,
             net_tcp_syncookies: SynCookies::default(),
+            net_tcp_keepalive: NetToggle::Disabled,
         }
     }
 }
@@ -572,6 +588,7 @@ impl SystemConfig {
             Key::NetIpv6Enabled => self.net_ipv6_enabled.as_str(),
             Key::NetIpv6Privacy => self.net_ipv6_privacy.as_str(),
             Key::NetTcpSynCookies => self.net_tcp_syncookies.as_str(),
+            Key::NetTcpKeepalive => self.net_tcp_keepalive.as_str(),
         }
     }
 
@@ -641,6 +658,10 @@ impl SystemConfig {
             Key::NetTcpSynCookies => {
                 self.net_tcp_syncookies =
                     SynCookies::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::NetTcpKeepalive => {
+                self.net_tcp_keepalive =
+                    NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
         }
         Ok(())
@@ -773,19 +794,22 @@ mod tests {
                 for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
                     for net_ipv4_enabled in [NetToggle::Enabled, NetToggle::Disabled] {
                         for syncookies in [SynCookies::Auto, SynCookies::Always] {
-                            let config = SystemConfig {
-                                login_type,
-                                cache_all,
-                                cache_filesystem,
-                                cache_block: CacheMode::Off,
-                                cache_transform: CacheMode::Auto,
-                                cache_semantic: CacheMode::Off,
-                                net_ipv4_enabled,
-                                net_ipv6_enabled: NetToggle::Disabled,
-                                net_ipv6_privacy: NetToggle::Enabled,
-                                net_tcp_syncookies: syncookies,
-                            };
-                            assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                            for keepalive in [NetToggle::Enabled, NetToggle::Disabled] {
+                                let config = SystemConfig {
+                                    login_type,
+                                    cache_all,
+                                    cache_filesystem,
+                                    cache_block: CacheMode::Off,
+                                    cache_transform: CacheMode::Auto,
+                                    cache_semantic: CacheMode::Off,
+                                    net_ipv4_enabled,
+                                    net_ipv6_enabled: NetToggle::Disabled,
+                                    net_ipv6_privacy: NetToggle::Enabled,
+                                    net_tcp_syncookies: syncookies,
+                                    net_tcp_keepalive: keepalive,
+                                };
+                                assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                            }
                         }
                     }
                 }
@@ -804,6 +828,9 @@ mod tests {
         assert_eq!(config.net_ipv6_privacy, NetToggle::Disabled);
         assert!(!config.net_ipv6_privacy.is_enabled());
         assert_eq!(config.net_tcp_syncookies, SynCookies::Auto);
+        // Keepalive is off by default (RFC 1122 §4.2.3.6).
+        assert_eq!(config.net_tcp_keepalive, NetToggle::Disabled);
+        assert!(!config.net_tcp_keepalive.is_enabled());
     }
 
     #[test]
@@ -812,13 +839,15 @@ mod tests {
             "net.ipv4.enabled false\n\
              net.ipv6.enabled true\n\
              net.ipv6.privacy true\n\
-             net.tcp.syncookies always\n",
+             net.tcp.syncookies always\n\
+             net.tcp.keepalive true\n",
         )
         .expect("parses");
         assert_eq!(config.net_ipv4_enabled, NetToggle::Disabled);
         assert_eq!(config.net_ipv6_enabled, NetToggle::Enabled);
         assert_eq!(config.net_ipv6_privacy, NetToggle::Enabled);
         assert_eq!(config.net_tcp_syncookies, SynCookies::Always);
+        assert_eq!(config.net_tcp_keepalive, NetToggle::Enabled);
     }
 
     #[test]

@@ -65,6 +65,11 @@ travail concerné — cela ne change jamais un résultat.
   `always` répond à chaque demande de connexion sans état. Il n'y a
   pas de `off` — une file de connexions non défendue n'est pas un
   réglage.
+- `net.tcp.keepalive` — `true` ou `false` : si les connexions TCP
+  envoient des sondes de maintien sur un lien inactif. `false` (par
+  défaut) ne sonde jamais et ne ferme jamais une connexion inactive ;
+  `true` sonde un pair inactif après l'intervalle habituel et ferme la
+  connexion s'il cesse de répondre.
 
 La pile réseau lit les réglages `net.*` ; une modification prend effet
 lorsque la pile applique de nouveau sa configuration.

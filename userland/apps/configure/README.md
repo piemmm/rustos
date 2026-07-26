@@ -20,9 +20,11 @@ volume, so it is read only after the `ARXFS passphrase:` unlock.
 The registry spans three families: `os.*` (the login default), `cache.*`
 (the SMARTRAM caching switches), and `net.*` — the stack-wide network
 knobs: `net.ipv4.enabled` / `net.ipv6.enabled` (the address-family
-switches), `net.ipv6.privacy` (RFC 8981 temporary IPv6 addresses), and
+switches), `net.ipv6.privacy` (RFC 8981 temporary IPv6 addresses),
 `net.tcp.syncookies` (`auto` / `always`, the SYN-flood defence — never an
-`off`). Per-interface network configuration is a separate declarative store
+`off`), and `net.tcp.keepalive` (RFC 9293 §3.8.4 TCP keepalive probing on
+idle connections, off by default). Per-interface network configuration is a
+separate declarative store
 (`/System/Settings/Network/network.conf`, the `lib/netconfig` engine), not
 part of this command.
 
