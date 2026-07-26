@@ -1242,7 +1242,12 @@ fn read_passphrase_line(
             };
         }
         match editor.push(buf, &mut len, byte[0]) {
-            tairix_vt::line::LineFeed::Pending => {}
+            // The passphrase reader does not drive the reader-side lone-`ESC`
+            // re-poll (`LineEditor::resolve_escape`), so `push` never yields
+            // `Escape` here; a bare `ESC` is held exactly as before. Dropping
+            // into the Supervisor on `ESC` is handled ahead of the prompt by
+            // the boot-screen window, not inside this line read.
+            tairix_vt::line::LineFeed::Pending | tairix_vt::line::LineFeed::Escape => {}
             tairix_vt::line::LineFeed::Complete => return Ok(len),
             tairix_vt::line::LineFeed::TooLong => {
                 drain_to_newline(input);

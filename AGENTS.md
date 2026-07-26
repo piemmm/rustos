@@ -574,6 +574,7 @@ tairix/
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.
 │   ├── seat/            # Arch-neutral seat model.
+│   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── sysconfig/       # Boot-time system-configuration store engine.

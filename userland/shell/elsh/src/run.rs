@@ -674,7 +674,10 @@ mod program {
                     return Err(Errno::NotFound);
                 }
                 match editor.push(buf, &mut len, byte[0]) {
-                    tairix_vt::line::LineFeed::Pending => {}
+                    // This reader never drives `resolve_escape`, so a bare
+                    // `ESC` is only ever held, never surfaced as `Escape`;
+                    // either way a pending line reads on.
+                    tairix_vt::line::LineFeed::Pending | tairix_vt::line::LineFeed::Escape => {}
                     tairix_vt::line::LineFeed::Complete => return Ok(len),
                     tairix_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
                 }

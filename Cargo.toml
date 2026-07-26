@@ -86,6 +86,7 @@ members = [
     "lib/rt",
     "lib/sandbox",
     "lib/seat",
+    "lib/supervisor",
     "lib/svg",
     "lib/sync",
     "lib/sysconfig",

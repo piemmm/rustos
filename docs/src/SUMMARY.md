@@ -22,6 +22,7 @@
 - [Resource limits and scalability](./architecture/resource-limits.md)
 - [CPU feature detection and self-optimising dispatch](./architecture/cpu-feature-dispatch.md)
 - [Modularity contracts and enforcement](./architecture/modularity.md)
+- [The pre-boot Supervisor console](./architecture/supervisor.md)
 
 # Security
 
@@ -69,6 +70,7 @@
   - [`tairix-rng`](./lib/rng.md)
   - [`tairix-rt` I/O](./lib/rt-io.md)
   - [`tairix-sandbox`](./lib/sandbox.md)
+  - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
   - [`tairix-termcap`](./lib/termcap.md)
   - [`tairix-usb`](./lib/usb.md)

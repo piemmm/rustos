@@ -212,7 +212,12 @@ impl LineReader {
                     continue;
                 }
                 match self.editor.push(&mut self.line, &mut self.len, byte) {
-                    LineFeed::Pending => {}
+                    // A bare `ESC` is resolved only by a reader that drives
+                    // `resolve_escape`; the plain line reader does not, so
+                    // `push` never yields `Escape` here. Either way a still-
+                    // pending line just reads on, so a stray `ESC` byte is
+                    // simply held, never a command break.
+                    LineFeed::Pending | LineFeed::Escape => {}
                     LineFeed::Complete => {
                         self.skip_lf = byte == control::CR;
                         return LineEvent::Line(self.take_line());

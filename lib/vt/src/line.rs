@@ -44,6 +44,21 @@ pub enum LineFeed {
     /// fails closed rather than truncating a too-long line; the buffer is
     /// left holding the bytes accepted so far.
     TooLong,
+    /// A lone `ESC` (not the start of a CSI sequence) opened the line.
+    ///
+    /// `ESC` also introduces the editing CSI sequences (the Delete key's
+    /// `CSI 3 ~`, the arrow keys), so a bare `ESC` can only be told apart
+    /// from `ESC [ …` once the reader has looked for a follow-on `[` — a
+    /// bounded, timed re-poll it drives, since the buffer half moves no
+    /// bytes of its own. When that re-poll resolves the held `ESC` as lone
+    /// (no follow-on `[` arrives), the reader calls
+    /// [`LineEditor::resolve_escape`], which reports it here.
+    ///
+    /// A reader that has no meaning for a bare `ESC` never calls
+    /// [`resolve_escape`](LineEditor::resolve_escape), so it never sees this
+    /// outcome; the pre-boot unlock reader uses it to drop into the
+    /// Supervisor console when `ESC` opens the line.
+    Escape,
 }
 
 /// The escape sequence the Delete key sends (`CSI 3 ~`), spelled from the
@@ -103,6 +118,20 @@ impl EraseSeq {
     #[must_use]
     pub const fn new() -> Self {
         Self { matched: 0 }
+    }
+
+    /// Whether the recogniser is currently holding exactly a lone `ESC`
+    /// prefix — the one byte both the Delete/arrow CSI sequences and a bare
+    /// `ESC` keystroke begin with, not yet disambiguated by a follow-on byte.
+    #[must_use]
+    pub const fn holding_escape(&self) -> bool {
+        self.matched == 1
+    }
+
+    /// Drop any held prefix, returning to the fresh state. Used when a
+    /// reader has resolved a held lone `ESC` itself.
+    pub fn reset(&mut self) {
+        self.matched = 0;
     }
 
     /// Feed one input byte; see [`SeqFeed`] for what the caller must do.
@@ -190,6 +219,24 @@ impl LineEditor {
                 LineFeed::Pending => {}
                 terminal => return terminal,
             }
+        }
+        LineFeed::Pending
+    }
+
+    /// Resolve a currently-held lone `ESC` when the reader's bounded
+    /// re-poll for a follow-on byte timed out.
+    ///
+    /// After feeding `ESC` the discipline holds it, since it may still open
+    /// an editing CSI sequence (`ESC [ …`). A reader that wants to act on a
+    /// bare `ESC` does one short, bounded, timed re-poll for the next byte;
+    /// if none arrives it calls this. When a lone `ESC` is held on an
+    /// otherwise-empty line this clears the held state and reports
+    /// [`LineFeed::Escape`]; otherwise (no `ESC` held, or the line already
+    /// has content) it reports [`LineFeed::Pending`] and changes nothing.
+    pub fn resolve_escape(&mut self, len: usize) -> LineFeed {
+        if len == 0 && self.seq.holding_escape() {
+            self.seq.reset();
+            return LineFeed::Escape;
         }
         LineFeed::Pending
     }
@@ -384,6 +431,57 @@ mod tests {
         let mut seen = alloc::vec::Vec::new();
         parser.feed(&DELETE_SEQ, |op| seen.push(op));
         assert_eq!(seen, alloc::vec![crate::Op::Key(crate::Key::Delete)]);
+    }
+
+    #[test]
+    fn a_lone_esc_is_held_then_resolves_to_escape_on_timeout() {
+        // Feeding `ESC` alone holds it (it may still open `ESC [ …`); the
+        // reader's bounded re-poll then times out and resolves it as a lone
+        // ESC. No byte lands in the line.
+        let mut editor = LineEditor::new();
+        let mut buf = [0u8; 8];
+        let mut len = 0;
+        assert_eq!(
+            editor.push(&mut buf, &mut len, super::control::ESC),
+            LineFeed::Pending
+        );
+        assert!(editor.seq.holding_escape());
+        assert_eq!(editor.resolve_escape(len), LineFeed::Escape);
+        assert_eq!(len, 0);
+        // The held state is cleared, so a stray follow-up resolve is a no-op.
+        assert_eq!(editor.resolve_escape(len), LineFeed::Pending);
+    }
+
+    #[test]
+    fn esc_then_bracket_still_edits_and_never_resolves_to_escape() {
+        // `ESC [ 3 ~` (Delete) must keep erasing; the follow-on `[` means the
+        // held ESC was a CSI introducer, never a lone ESC.
+        let (outcome, line) = feed(b"roox\x1b[3~t\n", 16);
+        assert_eq!(outcome, LineFeed::Complete);
+        assert_eq!(line, b"root");
+    }
+
+    #[test]
+    fn resolve_escape_on_a_non_empty_line_changes_nothing() {
+        // A held ESC only means "lone ESC" when the line is empty; with
+        // content already typed, resolving is a no-op (the ESC stays held for
+        // the reader's next byte, exactly as before).
+        let mut editor = LineEditor::new();
+        let mut buf = [0u8; 8];
+        let mut len = 0;
+        assert_eq!(editor.push(&mut buf, &mut len, b'a'), LineFeed::Pending);
+        assert_eq!(
+            editor.push(&mut buf, &mut len, super::control::ESC),
+            LineFeed::Pending
+        );
+        assert_eq!(editor.resolve_escape(len), LineFeed::Pending);
+        assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn resolve_escape_without_a_held_esc_is_a_no_op() {
+        let mut editor = LineEditor::new();
+        assert_eq!(editor.resolve_escape(0), LineFeed::Pending);
     }
 
     #[test]

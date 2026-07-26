@@ -1,0 +1,23 @@
+[package]
+name = "tairix-supervisor"
+description = "TAIRiX pre-boot Supervisor console engine (NEW-SUPERVISOR.md): the arch-neutral, no_std REPL and built-in command set an operator drops into from the boot screen before the encrypted root is mounted. A presenter + control surface over data the kernel already computes, written entirely against object-safe console/report/host seams so it names no architecture, board, or device and is exhaustively host-tested (AGENTS.md §2.20, §17.4, §27)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-vt = { path = "../vt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# seam; the REPL line/command parser consumes untrusted console bytes.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

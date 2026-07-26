@@ -349,7 +349,46 @@ Land in the **same change**:
 
 ## 9. Status
 
-`planned`. No code written yet. Deliverables: the `lib/supervisor` crate,
-the `root_mount.rs` ESC trigger + seams, the `lib/vt` lone-ESC resolution,
-the audit event ids, the host + QEMU tests, and the docs — all in one
-change, all behind a green whole-project gate.
+`in progress`.
+
+**Done (the arch-neutral engine layer):**
+
+- `lib/vt` lone-ESC resolution — `LineFeed::Escape`,
+  `LineEditor::resolve_escape`, `EraseSeq::holding_escape`/`reset`, additive
+  and behaviour-preserving (`push` is byte-for-byte unchanged; escape only
+  surfaces via the reader-driven `resolve_escape`), with unit tests. The three
+  existing `LineFeed` consumers (both `elsh` readers, the `root_mount`
+  passphrase reader) handle the new arm inertly.
+- `lib/supervisor` — the complete crate: the `Report` / `SupInput` /
+  `SupervisorHost` seams and the `SupervisorExit` / `TestOutcome` /
+  `MountOutcome` / `SupervisorEvent` vocabulary (`src/lib.rs`); the `&'static`
+  command table + tokeniser + case-insensitive dispatcher + `help`
+  (`src/dispatch.rs`); the `* ` REPL + line reader/echo (`src/repl.rs`); every
+  built-in command over the seams (`src/commands/{control,info,diag}.rs`); and
+  full host tests via the in-memory mocks (`src/commands/test_support.rs`).
+  `no_std`, alloc-free, clippy-clean under `-D warnings`.
+- Registered in the workspace and `AGENTS.md` §3; `README.md`,
+  `docs/src/architecture/supervisor.md`, and the `docs/src/lib/supervisor.md`
+  page + SUMMARY entries; §15.18 jump-sheet row already present.
+
+**Remaining (the kernel consumer — the next chunk, one gated change):**
+
+- The ESC boot-screen window at the top of
+  `root_mount.rs :: unlock_root_disk_interactively_impl` (the byte-exact
+  `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
+  `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
+  including the timed-read/non-blocking-poll primitive it needs and the
+  ESC-vs-CSI re-poll driving `LineEditor::resolve_escape`.
+- A kernel `SupervisorHost` implementation wiring each command to the existing
+  sources (`introspect_source`, `tairix_kernel_mem::ramtest`, `lib/partition`,
+  the `lib/abi` hardware tree, the `lib/log` ring, the ARXFS descriptor read,
+  the real `mount_root_disk_and_load_users` for `mount`), plus the per-arch
+  `reboot`/`poweroff` reset seams, threaded from `unlock_orchestrate.rs`.
+- The stable `lib/log` audit event ids for `SupervisorEvent` (extend the
+  `41xx` root-unlock range).
+- The QEMU integration vertical driving ESC at both trigger points with the
+  byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
+
+The engine layer is complete and green on its own; the kernel wiring + QEMU
+vertical is the immediate next chunk, to land behind a green whole-project
+gate.

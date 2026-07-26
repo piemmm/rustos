@@ -2040,6 +2040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-supervisor"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-vt",
+]
+
+[[package]]
 name = "tairix-svg"
 version = "0.0.0"
 dependencies = [
