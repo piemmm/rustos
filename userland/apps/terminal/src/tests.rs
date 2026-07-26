@@ -559,18 +559,19 @@ fn emitter_output_is_parsed_identically_by_the_consumer() {
     assert_eq!(plain.attrs, tairix_vt::Attributes::PLAIN);
 }
 
-// --- The spawned shell's pipe wiring (`spawned`) -------------------------
+// --- The spawned shell's pty wiring (`spawned`) --------------------------
 
 #[test]
-fn shell_wires_route_input_output_and_diagnostics_onto_the_pipes() {
+fn shell_wires_route_input_output_and_diagnostics_onto_the_pty_slave() {
     use tairix_abi::{FdWire, SpawnAttach, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
 
-    let attach = crate::spawned::shell_wires(7, 9);
-    // The child's stdin is the keystroke pipe; stdout *and* stderr land on
-    // the one output pipe (a terminal shows both); stdinfo is closed.
+    let attach = crate::spawned::shell_wires(7);
+    // The child's stdin, stdout, *and* stderr are all the one pty slave (a
+    // terminal shows output and diagnostics on the same tty, and the shell
+    // sees one controlling terminal); stdinfo is closed.
     assert_eq!(attach.wires[0], FdWire::Handle(7));
-    assert_eq!(attach.wires[1], FdWire::Handle(9));
-    assert_eq!(attach.wires[2], FdWire::Handle(9));
+    assert_eq!(attach.wires[1], FdWire::Handle(7));
+    assert_eq!(attach.wires[2], FdWire::Handle(7));
     assert_eq!(attach.wires[3], FdWire::Closed);
     // Credential and console are inherited: the wires narrow, never widen.
     assert_eq!(attach.target_uid, SPAWN_UID_INHERIT);
@@ -581,10 +582,67 @@ fn shell_wires_route_input_output_and_diagnostics_onto_the_pipes() {
 }
 
 #[test]
+fn shell_env_forwards_the_inherited_environment_and_sets_term() {
+    use crate::spawned::shell_env;
+
+    // The logged-in user's identity and locale reach the shell unchanged, so
+    // its prompt shows the real user (never the "user@host" fallback), and
+    // the terminal's own TERM is appended.
+    let inherited: [&[u8]; 4] = [
+        b"USER=root",
+        b"HOME=/Users/root",
+        b"LOGNAME=root",
+        b"LANG=en-US",
+    ];
+    let env = shell_env("xterm-256color", inherited.iter().copied());
+    assert_eq!(
+        env,
+        alloc::vec![
+            b"USER=root".to_vec(),
+            b"HOME=/Users/root".to_vec(),
+            b"LOGNAME=root".to_vec(),
+            b"LANG=en-US".to_vec(),
+            b"TERM=xterm-256color".to_vec(),
+        ]
+    );
+}
+
+#[test]
+fn shell_env_replaces_any_inherited_term_with_the_emulators_own() {
+    use crate::spawned::shell_env;
+
+    // A stale inherited TERM (from the text console the session descended
+    // from) must never describe this graphical emulator: it is dropped and
+    // the terminal's own value is the only TERM the shell sees.
+    let inherited: [&[u8]; 3] = [b"TERM=vt100", b"USER=root", b"TERM=linux"];
+    let env = shell_env("xterm-256color", inherited.iter().copied());
+    assert_eq!(
+        env,
+        alloc::vec![b"USER=root".to_vec(), b"TERM=xterm-256color".to_vec()]
+    );
+    // Exactly one TERM entry, and it is the emulator's.
+    assert_eq!(
+        env.iter().filter(|e| e.starts_with(b"TERM=")).count(),
+        1,
+        "the shell must see exactly one TERM, naming this emulator",
+    );
+}
+
+#[test]
+fn shell_env_with_no_inherited_environment_still_sets_term() {
+    use crate::spawned::shell_env;
+
+    // A terminal spawned with an empty environment (no login ran) still hands
+    // the shell a valid TERM rather than nothing.
+    let env = shell_env("xterm-256color", core::iter::empty());
+    assert_eq!(env, alloc::vec![b"TERM=xterm-256color".to_vec()]);
+}
+
+#[test]
 fn pipe_source_read_drains_one_bounded_chunk() {
     let data: &[u8] = b"prompt$ ";
     let mut served = false;
-    let mut source = crate::spawned::PipeShellSource::new(
+    let mut source = crate::spawned::StreamShellSource::new(
         |out: &mut [u8]| {
             assert_eq!(out.len(), crate::spawned::READ_CHUNK);
             assert!(!served, "one wake drains exactly one chunk");
@@ -601,13 +659,13 @@ fn pipe_source_read_drains_one_bounded_chunk() {
 fn pipe_source_read_surfaces_eof_and_errors_as_refusals() {
     // End-of-stream (the shell exited, pipe drained) is the seam's typed
     // "shell has exited" refusal, never a fabricated empty read.
-    let mut source = crate::spawned::PipeShellSource::new(
+    let mut source = crate::spawned::StreamShellSource::new(
         |_: &mut [u8]| Ok(0),
         |_: &[u8]| -> Result<usize, Errno> { unreachable!() },
     );
     assert_eq!(source.read(), Err(Errno::NotFound));
     // A failing primitive propagates untouched.
-    let mut failing = crate::spawned::PipeShellSource::new(
+    let mut failing = crate::spawned::StreamShellSource::new(
         |_: &mut [u8]| Err(Errno::BadAddress),
         |_: &[u8]| -> Result<usize, Errno> { unreachable!() },
     );
@@ -619,7 +677,7 @@ fn pipe_source_write_loops_over_short_writes_until_delivered() {
     let mut delivered: Vec<u8> = Vec::new();
     let mut calls = 0usize;
     {
-        let mut source = crate::spawned::PipeShellSource::new(
+        let mut source = crate::spawned::StreamShellSource::new(
             |_: &mut [u8]| -> Result<usize, Errno> { unreachable!("write never reads") },
             |bytes: &[u8]| {
                 calls += 1;
@@ -640,19 +698,19 @@ fn pipe_source_write_loops_over_short_writes_until_delivered() {
 fn pipe_source_write_fails_closed_on_a_wedged_or_failing_channel() {
     // A zero-byte acceptance for a non-empty remainder can only mean a
     // broken channel: fail closed rather than spin.
-    let mut wedged = crate::spawned::PipeShellSource::new(
+    let mut wedged = crate::spawned::StreamShellSource::new(
         |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
         |_: &[u8]| Ok(0),
     );
     assert_eq!(wedged.write(b"x"), Err(Errno::BrokenPipe));
     // A failing primitive propagates untouched.
-    let mut failing = crate::spawned::PipeShellSource::new(
+    let mut failing = crate::spawned::StreamShellSource::new(
         |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
         |_: &[u8]| Err(Errno::BrokenPipe),
     );
     assert_eq!(failing.write(b"x"), Err(Errno::BrokenPipe));
     // A zero-length write is complete before the primitive is consulted.
-    let mut untouched = crate::spawned::PipeShellSource::new(
+    let mut untouched = crate::spawned::StreamShellSource::new(
         |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
         |_: &[u8]| -> Result<usize, Errno> { unreachable!("nothing to deliver") },
     );

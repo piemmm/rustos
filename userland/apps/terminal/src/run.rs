@@ -54,13 +54,13 @@ mod program {
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_terminal::render::render;
     use tairix_terminal::{
-        shell_load_failure, shell_wires, PipeShellSource, ShellSource, Terminal, COLS, ROWS, TERM,
-        WIN_HEIGHT, WIN_WIDTH,
+        shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, COLS,
+        ROWS, TERM, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{event_endpoint_for, WindowClient, WindowTransport};
 
-    /// Exit code when the shell could not be hosted (a pipe or the spawn
+    /// Exit code when the shell could not be hosted (the pty or the spawn
     /// itself was refused). A reserved, fail-closed value: the terminal
     /// never shows a window with no shell behind it.
     const EXIT_NO_SHELL: i32 = 80;
@@ -192,36 +192,46 @@ mod program {
     /// syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the teardown ordering.
     fn main() -> i32 {
-        // --- The hosted shell: two pipes, then the spawn wiring the
-        // child's standard streams onto their child-side ends.
-        let Ok((shell_out_read, shell_out_write)) = tairix_rt::pipe_create() else {
-            return fail(EXIT_NO_SHELL, "shell output pipe refused");
+        // --- The hosted shell: one pseudo-terminal, then the spawn wiring
+        // the child's standard streams onto the slave end. The terminal
+        // holds the master; the shell's fd 0/1/2 are the slave, a
+        // console-class tty, so the shell runs its full interactive editor
+        // (local echo, line editing, `Ctrl-C`/`Ctrl-Z`, `ONLCR`) exactly as
+        // on the hardware console (`plans/PTY.md`). The pty is created at the
+        // terminal's own grid geometry, so `terminal_size` reports it.
+        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(ROWS, COLS) else {
+            return fail(EXIT_NO_SHELL, "pty refused");
         };
-        let Ok((shell_in_read, shell_in_write)) = tairix_rt::pipe_create() else {
-            return fail(EXIT_NO_SHELL, "shell input pipe refused");
-        };
-        let attach = shell_wires(shell_in_read, shell_out_write);
-        let term_env = alloc::format!("TERM={TERM}");
-        let shell_pid = tairix_rt::spawn_attached(
-            DEFAULT_SHELL.as_bytes(),
-            &attach,
-            &[b"elsh"],
-            &[term_env.as_bytes()],
-        );
+        let attach = shell_wires(pty_slave);
+        // Forward this terminal's own inherited environment (USER, HOME,
+        // LOGNAME, PATH, LANG, ...) to the shell, exactly as the desktop
+        // session forwards it to every app it launches: the hosted shell is
+        // the logged-in user's shell, so its prompt and its children need the
+        // same identity and locale the session runs under — otherwise the
+        // prompt falls back to the anonymous "user@host" default. The one
+        // variable this terminal owns is TERM, naming the emulator it
+        // presents, so its own value replaces any inherited TERM (the shared
+        // `shell_env` rule, host-tested). The environment is data and carries
+        // no authority (§4, §5.4).
+        let env_owned = shell_env(TERM, (0..tairix_rt::env_count()).filter_map(tairix_rt::env));
+        let env: alloc::vec::Vec<&[u8]> = env_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+        let shell_pid =
+            tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
         if shell_pid < 0 {
             return fail(EXIT_NO_SHELL, "shell spawn refused");
         }
-        // Close the child-side ends this process no longer needs: the
-        // spawn cloned them into the shell, and keeping them here would
-        // mask the shell's exit (this process's own write end would keep
-        // the output pipe's end-of-stream from ever arriving).
-        let _ = tairix_rt::fs_close(shell_in_read);
-        let _ = tairix_rt::fs_close(shell_out_write);
+        // Close this process's own slave end: the spawn cloned it into the
+        // shell (behind its fd 0/1/2), and keeping it here would mask the
+        // shell's exit — a live slave end would keep the master read's
+        // end-of-stream from ever arriving.
+        let _ = tairix_rt::fs_close(pty_slave);
 
-        // --- The screen model over the live pipe primitives.
-        let source = PipeShellSource::new(
-            |buf: &mut [u8]| tairix_rt::fs_read(shell_out_read, 0, buf).map_err(errno_from),
-            |bytes: &[u8]| tairix_rt::fs_write(shell_in_write, 0, bytes).map_err(errno_from),
+        // --- The screen model over the live pty master. Reads drain the
+        // shell's cooked output; writes feed keystrokes through the input
+        // discipline.
+        let source = StreamShellSource::new(
+            |buf: &mut [u8]| tairix_rt::fs_read(pty_master, 0, buf).map_err(errno_from),
+            |bytes: &[u8]| tairix_rt::fs_write(pty_master, 0, bytes).map_err(errno_from),
         );
         let Some(mut terminal) = Terminal::new(COLS, ROWS, source) else {
             return fail(EXIT_NO_SHELL, "screen grid refused");
@@ -283,11 +293,7 @@ mod program {
         let set = set as u64;
         let members = [
             (WaitSourceKind::Port, event_endpoint, EVENT_TOKEN),
-            (
-                WaitSourceKind::Stream,
-                u64::from(shell_out_read),
-                SHELL_TOKEN,
-            ),
+            (WaitSourceKind::Stream, u64::from(pty_master), SHELL_TOKEN),
             (
                 WaitSourceKind::Child,
                 #[allow(clippy::cast_sign_loss)] // `shell_pid >= 0` checked above; it is a PID.

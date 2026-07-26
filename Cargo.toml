@@ -91,6 +91,7 @@ members = [
     "lib/sysconfig",
     "lib/termcap",
     "lib/theme",
+    "lib/tty",
     "lib/usb",
     "lib/users",
     "lib/util",

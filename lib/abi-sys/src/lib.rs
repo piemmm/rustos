@@ -157,6 +157,7 @@ const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
+const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 
@@ -499,6 +500,34 @@ pub extern "C" fn sys_pipe_create(out: *mut c_void) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `out` against the
     // caller's address space before writing the two descriptors.
     unsafe { ret_i32(raw_syscall(NUM_PIPE_CREATE, [ptr_arg(out), 0, 0, 0, 0, 0])) }
+}
+
+/// `pty_create`: create a pseudo-terminal — one kernel object joining a
+/// **master** end and a **slave** end whose slave carries a console-class
+/// line discipline — and write its two new descriptors through `out` (the
+/// master end first, then the slave end, two `uint32_t`s), at the initial
+/// geometry `rows`×`cols` (`SyscallNumber::PTY_CREATE`, `plans/PTY.md`).
+/// Returns a `TAIRIX_E_*` code.
+///
+/// Unprivileged, like `tairix_sys_pipe_create`: both descriptors land in the
+/// caller's own open table and are read, written, and closed through
+/// `tairix_sys_fs_read` / `tairix_sys_fs_write` / `tairix_sys_fs_close` (a pty
+/// ignores the file offset). Each dimension must be non-zero and fit a
+/// `uint16_t`, else the call fails closed with `TAIRIX_E_OUT_OF_RANGE`. The
+/// slave end is handed to a child by naming its descriptor in the spawn
+/// attach block (`tairix_sys_spawn`); it is a tty for `tairix_sys_stream_input_mode`,
+/// `tairix_sys_terminal_size`, and `tairix_sys_console_foreground`.
+#[must_use]
+#[export_name = "tairix_sys_pty_create"]
+pub extern "C" fn sys_pty_create(out: *mut c_void, rows: u32, cols: u32) -> i32 {
+    // SAFETY: see `sys_pipe_create`; the kernel validates `out` against the
+    // caller's address space before writing the two descriptors.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_PTY_CREATE,
+            [ptr_arg(out), u64::from(rows), u64::from(cols), 0, 0, 0],
+        ))
+    }
 }
 
 /// `console_count`: report how many system text consoles are installed
@@ -2437,6 +2466,7 @@ mod tests {
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
+        (NUM_PTY_CREATE, "pty_create", 3),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
         (NUM_FS_SET_OWNER, "fs_set_owner", 4),
         (NUM_FS_ATTR_GET, "fs_attr_get", 6),

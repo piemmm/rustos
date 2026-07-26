@@ -1515,6 +1515,7 @@ dependencies = [
  "tairix-seat",
  "tairix-sync",
  "tairix-sysconfig",
+ "tairix-tty",
  "tairix-users",
  "tairix-util",
  "tairix-vt",
@@ -4249,6 +4250,14 @@ version = "0.0.0"
 dependencies = [
  "tairix-help",
  "tairix-rt",
+]
+
+[[package]]
+name = "tairix-tty"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-vt",
 ]
 
 [[package]]

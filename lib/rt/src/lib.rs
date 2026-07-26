@@ -102,6 +102,9 @@ const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 
+/// `pty_create` syscall number (as above).
+const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
+
 /// `mem_map` syscall number (as above).
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 
@@ -1260,6 +1263,55 @@ pub fn pipe_create() -> Result<(u32, u32), i64> {
         raw_syscall(
             NUM_PIPE_CREATE,
             [fds.as_mut_ptr() as usize as u64, 0, 0, 0, 0, 0],
+        )
+    };
+    #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno encoding.
+    let signed = ret as i64;
+    if signed < 0 {
+        return Err(signed);
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Create a pseudo-terminal — one kernel object joining a **master** end
+/// and a **slave** end whose slave carries a console-class line discipline
+/// — returning `(master_fd, slave_fd)`, two descriptors of the calling
+/// process's **own** open table, at the initial geometry `rows`×`cols`
+/// (`SyscallNumber::PTY_CREATE`, `plans/PTY.md`).
+///
+/// The graphical terminal hosts its shell over a pty instead of two raw
+/// pipes, so the shell sees a real tty: local echo, canonical line editing,
+/// `Ctrl-C`/`Ctrl-Z` job control, the raw/cooked/secret mode switch, a
+/// queryable window size, and `ONLCR` newline cooking. Both ends are opened
+/// read/write and served by [`fs_read`] / [`fs_write`] (a pty ignores the
+/// file offset) and closed through [`fs_close`]; a read on an empty ring
+/// blocks until bytes arrive or the peer closes, and a write with no peer
+/// left fails with [`tairix_abi::Errno::BrokenPipe`]. The slave is handed to
+/// a spawned shell through a [`tairix_abi::FdWire::Handle`] wire in
+/// [`spawn_attached`]'s attach block. Unprivileged: a pty reaches only the
+/// caller's own table.
+///
+/// # Errors
+///
+/// The raw negative `-errno` register on refusal (recover the
+/// [`tairix_abi::Errno`] as `-ret`): a zero or oversized `rows`/`cols` is
+/// [`tairix_abi::Errno::OutOfRange`].
+pub fn pty_create(rows: u16, cols: u16) -> Result<(u32, u32), i64> {
+    let mut fds = [0u32; 2];
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the out-pointer against the caller's address space before writing
+    // the two descriptors. `fds` is live exclusive memory for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PTY_CREATE,
+            [
+                fds.as_mut_ptr() as usize as u64,
+                u64::from(rows),
+                u64::from(cols),
+                0,
+                0,
+                0,
+            ],
         )
     };
     #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno encoding.

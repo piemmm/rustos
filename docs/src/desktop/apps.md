@@ -1194,6 +1194,14 @@ control are the shell's responsibility, exactly as on a real tty — and a
 failing seam call surfaces the boundary `Errno` while leaving the screen
 unchanged (`AGENTS.md` §5.4).
 
+Because "echo, line editing, and job control are the shell's responsibility"
+presumes a real tty *between* the emulator and the shell, the correct shell
+channel is a **pseudo-terminal** whose slave carries the kernel's tty line
+discipline (local echo, cooked line editing, `CR`/`LF`→`CR LF` on both
+directions, `Ctrl-C`/`Ctrl-Z` job control), reusing the same discipline the
+hardware console runs — never a second copy (`AGENTS.md` §2.2). That pty is
+staged in `plans/PTY.md`; the environment-forwarding half (below) has landed.
+
 ### Rendering
 
 `render(terminal, theme, viewport)` paints the grid into a `tairix-raster`
@@ -1218,9 +1226,15 @@ than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
 ### The `Run` bundle
 
 `terminal.app`'s entry point creates the two pipes, spawns the user's default
-shell (`tairix_users::policy::DEFAULT_SHELL`) with `TERM` exported and the
-child-side pipe ends closed after the spawn (so each side observes the
-other's end-of-file honestly), creates and grants the zero-copy window frame
+shell (`tairix_users::policy::DEFAULT_SHELL`) forwarding its own **inherited
+environment** to the shell (`USER`, `HOME`, `LOGNAME`, `PATH`, `LANG`, …, with
+the emulator's own `TERM` replacing any inherited one — the shared,
+host-tested `spawned::shell_env` rule), so the shell's prompt and its children
+run under the logged-in user's identity and locale instead of the anonymous
+`user@host` fallback, exactly as the desktop session forwards the environment
+to every app it launches. The child-side pipe ends are closed after the spawn
+(so each side observes the other's end-of-file honestly). It then creates and
+grants the zero-copy window frame
 region, and **parks** on one wait-set with three members — its window-event
 mailbox (`Port`), the shell-output pipe's read end (`Stream`, the AW4 kernel
 addition: ready on buffered bytes or end-of-stream), and the shell child

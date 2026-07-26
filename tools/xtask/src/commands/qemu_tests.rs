@@ -414,10 +414,26 @@ const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
     tairix_test_autoload_input_qemu_aarch64::TERMINAL_TYPE_DELIVERIES;
 
 /// The shell command the autoload vertical types into the focused
-/// terminal at the seat keyboard — the shared contract (`true` plus
-/// Enter): the shell resolving and spawning it is the guest's AW4
-/// round-trip witness.
+/// terminal at the seat keyboard — the shared contract (`sleep 3600`
+/// plus Enter): the shell resolving and spawning it is the guest's AW4
+/// round-trip witness, and the blocking foreground job the Ctrl-C step
+/// then interrupts.
 const AUTOLOAD_TERMINAL_COMMAND: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
+
+/// Serial marker after which the vertical injects the pty Ctrl-C recovery
+/// step: the test kernel prints it once it has witnessed the foreground
+/// `sleep` spawn (`plans/PTY.md`), so the `Ctrl-C` lands against a live,
+/// parked foreground job — never before one exists.
+const AUTOLOAD_CTRL_C_ARM_MARKER: &str = tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER;
+
+/// The pty Ctrl-C recovery keys the vertical types once the `sleep` spawn
+/// has armed the step (the shared contract): a `Ctrl-C` (the `\u{3}` ETX
+/// byte the runner sends as the QEMU `ctrl-c` chord, which the terminal
+/// encodes as the `0x03` interrupt byte) then `true` + Enter. The shell,
+/// unblocked from its `wait` on the interrupted `sleep`, spawns `true` —
+/// the guest's pty job-control witness.
+const AUTOLOAD_TERMINAL_CTRL_C_RECOVERY: &str =
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_CTRL_C_RECOVERY;
 
 // --- FM9-a file-manager stage gates (`plans/NEW-FILEMANAGER.md` FM9-a):
 // the window-event delivery counts at which each appended click / typed
@@ -4624,25 +4640,37 @@ const TESTS: &[QemuTest] = &[
     // AW4 then takes the run into the windowed terminal: held behind the
     // verified light dump, the script reopens the menu and clicks its
     // "Terminal" row (spawning the terminal bundle, which spawns the
-    // user's shell over pipes and serves its window at the second cascade
-    // slot); the window endpoint's fourth reply (the terminal's create +
-    // first present) gates the terminal-window click (deliveries 5–7:
-    // the files window's unfocus, the terminal's focus, and the press),
-    // after which the runner types `true` + Enter at the seat keyboard.
-    // The guest PASS gate latches a kernel `ProcessSpawned` record
-    // observed once the delivery count has reached the Enter press — the
-    // only spawn possible at that point is the shell executing the typed
-    // command, so PASS proves the whole keyboard → session → terminal →
-    // pipe → shell → spawn round trip and can neither fire under a
-    // pending dump nor without the served windows; the runner fails any
-    // run whose script or dumps did not complete.
+    // user's shell over one kernel pseudo-terminal — `plans/PTY.md` — and
+    // serves its window at the second cascade slot); the window endpoint's
+    // fourth reply (the terminal's create + first present) gates the
+    // terminal-window click (deliveries 5–7: the files window's unfocus,
+    // the terminal's focus, and the press), after which the runner types
+    // `sleep 3600` + Enter at the seat keyboard. The guest PASS gate
+    // latches a kernel `ProcessSpawned` record observed once the delivery
+    // count has reached the Enter press — the only spawn possible at that
+    // point is the shell executing the typed command, so PASS proves the
+    // whole keyboard → session → terminal → pty → shell → spawn round
+    // trip and can neither fire under a pending dump nor without the
+    // served windows; the runner fails any run whose script or dumps did
+    // not complete.
+    //
+    // The pty stage then proves the cooked-mode line discipline end to end
+    // (`plans/PTY.md`): `sleep 3600` is a *blocking* foreground job, so
+    // once the guest witnesses its spawn it emits a marker gating a
+    // `Ctrl-C` injection (the ETX byte the terminal encodes as `0x03`);
+    // the pty's cooked `^C` signals the foreground `sleep` dead, the shell
+    // — unblocked from its `wait` — reads and spawns a recovered `true`,
+    // and that second spawn is the guest's job-control witness. A failed
+    // interrupt leaves `sleep` blocking past the budget, so the run times
+    // out (fail loud).
     // Every click coordinate is computed from the production shell's own
     // layout code (`autoload_desktop_pointer_script`), and the pin move
     // also delivers the `kind=pointer` witness, so the pointer decode path
     // stays separately proven. A 300-second budget covers the boot +
     // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
     // ~1 s login typing + session bring-up + the paced click script +
-    // both app spawns + the typed command + the FM9-a file-manager
+    // both app spawns + the typed command + the pty Ctrl-C job-control
+    // round trip + the FM9-a file-manager
     // New-Folder + inline-rename click-through, the FM9-b Viewer launch +
     // trusted-picker open-a-file, the FM9-c right-click delete (which, the
     // folder being on the user's Trash volume, is the FM10 recoverable move
@@ -4674,6 +4702,16 @@ const TESTS: &[QemuTest] = &[
                 AUTOLOAD_WINDOW_EVENT_MARKER,
                 AUTOLOAD_TERMINAL_TYPE_OCCURRENCES,
                 AUTOLOAD_TERMINAL_COMMAND,
+            ),
+            // The pty Ctrl-C job-control step (`plans/PTY.md`): held behind
+            // the guest's sleep-spawn marker so the `Ctrl-C` lands against a
+            // live, parked foreground job. It interrupts the foreground
+            // `sleep` and types `true` — the recovered spawn is the guest's
+            // pty job-control witness.
+            (
+                AUTOLOAD_CTRL_C_ARM_MARKER,
+                1,
+                AUTOLOAD_TERMINAL_CTRL_C_RECOVERY,
             ),
             // The FM9-a file-manager stage's seat-keyboard steps, interleaved
             // between the pointer clicks by their delivery-count gates: the

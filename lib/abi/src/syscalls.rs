@@ -2381,6 +2381,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::FS_ACCESS),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::PTY_CREATE,
+        name: "pty_create",
+        arg_count: 3,
+        args: [
+            // The out-pointer the kernel writes the two new descriptors
+            // into: the master end first, then the slave end (two `u32`s).
+            AbiType::UserPtr,
+            // The pty's initial row count; non-zero and `u16`-bounded, else
+            // `OutOfRange` before any state is touched.
+            AbiType::U32,
+            // The pty's initial column count; same bounds.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Unprivileged, exactly like `pipe_create`: a pty mints two
+        // descriptors of the caller's own open table and reaches nothing
+        // else, so there is no cross-principal authority to gate. Handing
+        // the slave to a child rides the `CAP_PROC_SPAWN`-gated spawn. Not
+        // audited: creating a pty is a security-neutral allocation (a
+        // terminal mints one per shell), and the spawn that transfers the
+        // slave IS audited.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

@@ -579,6 +579,7 @@ tairix/
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
+│   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
 │   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
@@ -1303,6 +1304,7 @@ You are not exempt from any rule above. In addition:
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, user-pinned app shortcuts (pin/drag), the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
+    | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |

@@ -152,6 +152,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn pty_create(
+        &self,
+        _c: &CallerContext<'_>,
+        _out: u64,
+        _rows: u32,
+        _cols: u32,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

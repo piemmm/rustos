@@ -1,24 +1,26 @@
-//! The spawned shell's pipe wiring: the production [`ShellSource`]
-//! (`plans/APPWIN.md` AW4).
+//! The spawned shell's pty wiring: the production [`ShellSource`]
+//! (`plans/APPWIN.md` AW4, `plans/PTY.md`).
 //!
-//! The terminal hosts the user's shell as its own child process over two
-//! kernel pipes: one carries the user's keystrokes to the shell's standard
-//! input, the other carries everything the shell writes (standard output
-//! *and* standard error — a terminal shows both) back to the screen model.
-//! The elsh `wireplan` machinery is the precedent: the child's standard
-//! descriptors are wired at spawn through the attach block's
+//! The terminal hosts the user's shell as its own child process over one
+//! kernel **pseudo-terminal**: the terminal holds the pty master, and the
+//! shell's fd 0/1/2 are all wired to the one pty slave — the slave carries
+//! a console-class line discipline, so the shell runs its full interactive
+//! editor with local echo, canonical line editing, `Ctrl-C`/`Ctrl-Z` job
+//! control, and `ONLCR` newline cooking, exactly as on the hardware
+//! console. The elsh `wireplan` machinery is the precedent: the child's
+//! standard descriptors are wired at spawn through the attach block's
 //! [`FdWire::Handle`] entries, each owner-checked kernel-side against the
 //! spawning terminal's own open table.
 //!
 //! Everything with behaviour lives here, host-tested over injected
 //! closures; the `Run` binary only supplies the live syscalls
-//! (`pipe_create`, `spawn_attached`, `fs_read`, `fs_write`) exactly as the
+//! (`pty_create`, `spawn_attached`, `fs_read`, `fs_write`) exactly as the
 //! file browser's binary supplies its directory fetcher:
 //!
 //! * [`shell_wires`] is the one definition of the child's descriptor
 //!   layout, so the spawn call and the tests can never disagree about
 //!   which end lands where.
-//! * [`PipeShellSource`] adapts a read/write primitive pair onto the
+//! * [`StreamShellSource`] adapts a read/write primitive pair onto the
 //!   [`ShellSource`] seam: reads drain one bounded chunk (the caller only
 //!   reads after its wait-set reported the descriptor readable, so a read
 //!   never parks the event loop), and writes loop over short writes until
@@ -59,35 +61,74 @@ pub fn shell_load_failure(status: WaitStatus) -> Option<&'static str> {
 /// event loop — a bound, not a capacity.
 pub const READ_CHUNK: usize = 4096;
 
-/// The spawned shell's standard-descriptor wires: its input is the
-/// terminal's keystroke pipe (`shell_stdin`), and both its output *and*
-/// its diagnostics land on the terminal's one output pipe
-/// (`shell_output`) — a terminal renders stderr beside stdout, exactly as
-/// a console-backed shell interleaves them. fd 3 (`stdinfo`) is closed:
+/// The spawned shell's standard-descriptor wires: fd 0 (stdin), fd 1
+/// (stdout), and fd 2 (stderr) are all the one pty `slave` descriptor. The
+/// slave is opened read/write, so it serves the shell's input read *and*
+/// its interleaved output/diagnostic writes — a terminal renders stderr
+/// beside stdout, exactly as a console-backed shell interleaves them, and
+/// the shell sees a single controlling tty. fd 3 (`stdinfo`) is closed:
 /// the terminal consumes no advisory records from its shell, and a closed
 /// slot fails those writes harmlessly (best-effort by contract).
 #[must_use]
-pub fn shell_wires(shell_stdin: u32, shell_output: u32) -> SpawnAttach {
+pub fn shell_wires(slave: u32) -> SpawnAttach {
     let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
-    wires[0] = FdWire::Handle(shell_stdin);
-    wires[1] = FdWire::Handle(shell_output);
-    wires[2] = FdWire::Handle(shell_output);
+    wires[0] = FdWire::Handle(slave);
+    wires[1] = FdWire::Handle(slave);
+    wires[2] = FdWire::Handle(slave);
     SpawnAttach {
         wires,
         ..SpawnAttach::INHERIT
     }
 }
 
+/// Build the environment handed to the hosted shell: this terminal's own
+/// inherited environment (`inherited`, the `NAME=value` byte entries the
+/// desktop session forwarded — `USER`, `HOME`, `LOGNAME`, `PATH`, `LANG`,
+/// …), with `TERM` replaced by `term` (the emulator this terminal presents).
+///
+/// The shell is the logged-in user's shell, so its prompt and its children
+/// need the same identity and locale the session runs under; forwarding the
+/// whole environment rather than a hand-picked subset keeps the terminal from
+/// having to know which variables the shell cares about (the shell's prompt
+/// reads `USER`/`HOSTNAME`/`HOME`, apps read `LANG`, and so on). Any inherited
+/// `TERM` is dropped so the terminal's own `TERM` is authoritative — a stale
+/// inherited value must never describe a different emulator. The environment
+/// is data and carries no authority.
+///
+/// Returned owned so the caller (the `Run` binary reading `tairix_rt::env`,
+/// or a test) can borrow the entries into the `&[&[u8]]` the spawn takes; the
+/// logic is pure so it is host-tested without a kernel, exactly as
+/// [`shell_wires`] is.
+#[must_use]
+pub fn shell_env<'a>(
+    term: &str,
+    inherited: impl IntoIterator<Item = &'a [u8]>,
+) -> Vec<alloc::vec::Vec<u8>> {
+    let mut env: Vec<alloc::vec::Vec<u8>> = Vec::new();
+    for entry in inherited {
+        if entry.starts_with(b"TERM=") {
+            continue;
+        }
+        env.push(entry.to_vec());
+    }
+    let mut term_entry = alloc::vec::Vec::from(&b"TERM="[..]);
+    term_entry.extend_from_slice(term.as_bytes());
+    env.push(term_entry);
+    env
+}
+
 /// The production [`ShellSource`]: the shell's byte channel over an
 /// injected read/write primitive pair.
 ///
-/// `read` is the positional-free read on the output pipe's read end (the
-/// `Run` binary passes `fs_read`); `write` is its keystroke-pipe sibling.
-/// Both follow the kernel convention: `Ok(n)` bytes transferred, `Ok(0)`
-/// from `read` meaning end-of-stream (every shell-side write end closed
-/// — the shell exited). Injection keeps the seam host-testable without a
-/// kernel, exactly as the file browser injects its directory fetcher.
-pub struct PipeShellSource<R, W>
+/// `read` is the positional-free read on the pty master end (the `Run`
+/// binary passes `fs_read` — it drains the shell's cooked output); `write`
+/// is its master-end sibling (it feeds keystrokes through the input
+/// discipline). Both follow the kernel convention: `Ok(n)` bytes
+/// transferred, `Ok(0)` from `read` meaning end-of-stream (every slave end
+/// closed — the shell exited). Injection keeps the seam host-testable
+/// without a kernel, exactly as the file browser injects its directory
+/// fetcher.
+pub struct StreamShellSource<R, W>
 where
     R: FnMut(&mut [u8]) -> Result<usize, Errno>,
     W: FnMut(&[u8]) -> Result<usize, Errno>,
@@ -96,7 +137,7 @@ where
     write: W,
 }
 
-impl<R, W> PipeShellSource<R, W>
+impl<R, W> StreamShellSource<R, W>
 where
     R: FnMut(&mut [u8]) -> Result<usize, Errno>,
     W: FnMut(&[u8]) -> Result<usize, Errno>,
@@ -107,7 +148,7 @@ where
     }
 }
 
-impl<R, W> ShellSource for PipeShellSource<R, W>
+impl<R, W> ShellSource for StreamShellSource<R, W>
 where
     R: FnMut(&mut [u8]) -> Result<usize, Errno>,
     W: FnMut(&[u8]) -> Result<usize, Errno>,
@@ -132,9 +173,9 @@ where
 
     /// Deliver every keystroke byte, looping over short writes.
     ///
-    /// A pipe accepts up to its free space per write, so a burst paste can
-    /// land short; the loop resumes at the undelivered tail. A `0`-byte
-    /// acceptance for a non-empty remainder can only mean a broken
+    /// A pty input ring accepts up to its free space per write, so a burst
+    /// paste can land short; the loop resumes at the undelivered tail. A
+    /// `0`-byte acceptance for a non-empty remainder can only mean a broken
     /// channel, and fails closed rather than spinning.
     fn write(&mut self, bytes: &[u8]) -> Result<(), Errno> {
         let mut sent = 0;

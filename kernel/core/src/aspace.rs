@@ -56,6 +56,7 @@ use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_S
 use tairix_kernel_sec::TaskId;
 
 use crate::pipe::PipeEnd;
+use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
 
@@ -487,6 +488,32 @@ pub enum OpenBacking {
     /// `fd_grant` accepts only [`OpenBacking::Path`], so a delegation
     /// chain cannot form and delegated authority never widens.
     Delegated(DelegatedFile),
+    /// The master end of a kernel pseudo-terminal (`plans/PTY.md`): the
+    /// terminal emulator's handle. A read drains the slave's cooked output;
+    /// a write feeds the input discipline. Cloning the entry registers one
+    /// more live master end; dropping it releases it and wakes the peer —
+    /// the [`PtyMasterEnd`] handle owns that bookkeeping, exactly as
+    /// [`OpenBacking::Pipe`].
+    PtyMaster(PtyMasterEnd),
+    /// The slave end of a kernel pseudo-terminal (`plans/PTY.md`): wired as
+    /// a child shell's fd 0/1/2. A read drains the input (echoing in cooked
+    /// mode); a write is cooked (`ONLCR`) onto the output. The slave is a
+    /// *tty* for `stream_input_mode`/`terminal_size`/`console_foreground`.
+    PtySlave(PtySlaveEnd),
+}
+
+/// A readable stream end borrowed in place for the wait-set readiness peek:
+/// a pipe read end, a pty master, or a pty slave. The one shape
+/// [`AddressSpaceRegistry::stream_read_member`] and
+/// [`AddressSpaceRegistry::stream_readable`] resolve to, so the readiness
+/// check has a single definition across every stream kind.
+enum ReadStreamEnd<'a> {
+    /// A pipe read end.
+    Pipe(&'a PipeEnd),
+    /// A pty master end (drains the slave's cooked output).
+    PtyMaster(&'a PtyMasterEnd),
+    /// A pty slave end (drains the input).
+    PtySlave(&'a PtySlaveEnd),
 }
 
 /// One open descriptor: what it resolves to and the [`OpenFlags`] it was
@@ -548,6 +575,24 @@ impl OpenFile {
         }
     }
 
+    /// The pty master end this descriptor holds, or `None` otherwise.
+    #[must_use]
+    pub fn pty_master(&self) -> Option<&PtyMasterEnd> {
+        match &self.backing {
+            OpenBacking::PtyMaster(end) => Some(end),
+            _ => None,
+        }
+    }
+
+    /// The pty slave end this descriptor holds, or `None` otherwise.
+    #[must_use]
+    pub fn pty_slave(&self) -> Option<&PtySlaveEnd> {
+        match &self.backing {
+            OpenBacking::PtySlave(end) => Some(end),
+            _ => None,
+        }
+    }
+
     /// The description's current sequential-stream position.
     #[must_use]
     pub fn cursor(&self) -> u64 {
@@ -572,7 +617,11 @@ impl OpenFile {
     pub fn path(&self) -> Option<&str> {
         match &self.backing {
             OpenBacking::Path(path) => Some(path),
-            OpenBacking::Resource(_) | OpenBacking::Pipe(_) | OpenBacking::Delegated(_) => None,
+            OpenBacking::Resource(_)
+            | OpenBacking::Pipe(_)
+            | OpenBacking::Delegated(_)
+            | OpenBacking::PtyMaster(_)
+            | OpenBacking::PtySlave(_) => None,
         }
     }
 
@@ -580,9 +629,13 @@ impl OpenFile {
     /// by a filesystem path or pipe.
     #[must_use]
     pub fn resource(&self) -> Option<ResourceBacking> {
-        match self.backing {
-            OpenBacking::Resource(backing) => Some(backing),
-            OpenBacking::Path(_) | OpenBacking::Pipe(_) | OpenBacking::Delegated(_) => None,
+        match &self.backing {
+            OpenBacking::Resource(backing) => Some(*backing),
+            OpenBacking::Path(_)
+            | OpenBacking::Pipe(_)
+            | OpenBacking::Delegated(_)
+            | OpenBacking::PtyMaster(_)
+            | OpenBacking::PtySlave(_) => None,
         }
     }
 }
@@ -1660,6 +1713,42 @@ impl AddressSpaceRegistry {
         }
     }
 
+    /// Create a pseudo-terminal of geometry `size` for `task`, allocating a
+    /// master-end and a slave-end descriptor in its open table, and return
+    /// `(master_fd, slave_fd)` (`plans/PTY.md`).
+    ///
+    /// Both descriptors are opened `READ | WRITE`: the master both writes
+    /// keystrokes and reads the slave's output, and the slave both reads
+    /// input and writes program output (so the one slave descriptor can be
+    /// wired behind a child's fd 0, 1, and 2). Both draw from the same
+    /// allocator [`Self::open_pipe`] uses. All-or-nothing: if the second
+    /// descriptor cannot be allocated the first is released (its dropped
+    /// end closes the side, so the pty never leaks a half-open pair). The
+    /// `task` argument is the kernel-trusted caller id.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] only on genuine descriptor-space exhaustion
+    /// (fail closed).
+    pub fn open_pty(
+        &mut self,
+        task: TaskId,
+        size: tairix_abi::TerminalSize,
+    ) -> Result<(u32, u32), Errno> {
+        let (master, slave) = crate::pty::Pty::create(size);
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let master_fd = self.open_backed(task, OpenBacking::PtyMaster(master), rw)?;
+        match self.open_backed(task, OpenBacking::PtySlave(slave), rw) {
+            Ok(slave_fd) => Ok((master_fd, slave_fd)),
+            Err(err) => {
+                // Unwind the half-built pair: dropping the master entry
+                // closes its end through the handle's own release path.
+                self.close_file(task, master_fd);
+                Err(err)
+            }
+        }
+    }
+
     /// Install `file` as `task`'s **standard-stream** open entry at `fd`
     /// (one of fd 0–3) — the spawn wiring path placing a cloned parent
     /// descriptor behind a child's standard stream (`plans/SPAWN.md`
@@ -1706,46 +1795,75 @@ impl AddressSpaceRegistry {
         self.open_files.get(&task)?.by_fd.get(&fd).cloned()
     }
 
-    /// Whether `task`'s open descriptor `fd` is a pipe end opened for
-    /// reading — the wait-set `Stream` member's add-time owner/descriptor
-    /// check (`plans/APPWIN.md` AW4). `false` covers an unopened number,
-    /// a descriptor of a different task, a path- or resource-backed
-    /// descriptor, a write end, and an entry opened without read access
+    /// Whether `task`'s open descriptor `fd` is a readable stream end — a
+    /// pipe read end, a pty master, or a pty slave, each opened for reading
+    /// — the wait-set `Stream` member's add-time owner/descriptor check
+    /// (`plans/APPWIN.md` AW4, `plans/PTY.md`). `false` covers an unopened
+    /// number, a descriptor of a different task, a path- or resource-backed
+    /// descriptor, a pipe write end, and an entry opened without read access
     /// (fail closed — the caller cannot distinguish which). The `task`
     /// argument is the kernel-trusted caller id. Borrows the entry in
-    /// place — never a clone, so the peek can never touch the pipe's
+    /// place — never a clone, so the peek can never touch a stream's
     /// live-end counts.
     #[must_use]
-    pub fn pipe_read_member(&self, task: TaskId, fd: u32) -> bool {
-        self.borrow_pipe_read_end(task, fd).is_some()
+    pub fn stream_read_member(&self, task: TaskId, fd: u32) -> bool {
+        self.borrow_read_stream_end(task, fd).is_some()
     }
 
     /// Non-consuming readiness peek on `task`'s open descriptor `fd` for
-    /// the wait-set `Stream` scan: `true` when the descriptor is a pipe
-    /// read end whose read would complete without parking (buffered bytes,
-    /// or end-of-stream). Anything [`Self::pipe_read_member`] refuses is
-    /// simply not ready — a member whose descriptor was closed or replaced
-    /// mid-wait stops reporting rather than erring. Borrows in place, so
-    /// the per-scan peek never clones a pipe end (a clone/drop pair would
-    /// spuriously wake every pipe waiter).
+    /// the wait-set `Stream` scan: `true` when the descriptor is a readable
+    /// stream end whose read would complete without parking (buffered
+    /// bytes, or end-of-stream). Anything [`Self::stream_read_member`]
+    /// refuses is simply not ready — a member whose descriptor was closed
+    /// or replaced mid-wait stops reporting rather than erring. Borrows in
+    /// place, so the per-scan peek never clones a stream end (a clone/drop
+    /// pair would spuriously wake every stream waiter).
     #[must_use]
     pub fn stream_readable(&self, task: TaskId, fd: u32) -> bool {
-        self.borrow_pipe_read_end(task, fd)
-            .is_some_and(PipeEnd::readable)
+        match self.borrow_read_stream_end(task, fd) {
+            Some(ReadStreamEnd::Pipe(end)) => end.readable(),
+            Some(ReadStreamEnd::PtyMaster(end)) => end.readable(),
+            Some(ReadStreamEnd::PtySlave(end)) => end.readable(),
+            None => false,
+        }
     }
 
-    /// Resolve `task`'s `fd` to its pipe end **borrowed in place**, only
-    /// when the entry is a pipe end opened for reading — the one
-    /// resolution [`Self::pipe_read_member`] and [`Self::stream_readable`]
-    /// share.
-    fn borrow_pipe_read_end(&self, task: TaskId, fd: u32) -> Option<&PipeEnd> {
+    /// Resolve `task`'s `fd` to its readable stream end **borrowed in
+    /// place**, only when the entry is opened for reading and backed by a
+    /// pipe read end, a pty master, or a pty slave — the one resolution
+    /// [`Self::stream_read_member`] and [`Self::stream_readable`] share.
+    fn borrow_read_stream_end(&self, task: TaskId, fd: u32) -> Option<ReadStreamEnd<'_>> {
         let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
         if !entry.flags.contains(OpenFlags::READ) {
             return None;
         }
-        entry
-            .pipe()
-            .filter(|end| end.role() == crate::pipe::PipeRole::Read)
+        match &entry.backing {
+            OpenBacking::Pipe(end) if end.role() == crate::pipe::PipeRole::Read => {
+                Some(ReadStreamEnd::Pipe(end))
+            }
+            OpenBacking::PtyMaster(end) => Some(ReadStreamEnd::PtyMaster(end)),
+            OpenBacking::PtySlave(end) => Some(ReadStreamEnd::PtySlave(end)),
+            _ => None,
+        }
+    }
+
+    /// Resolve `task`'s open descriptor `fd` to the pseudo-terminal it is a
+    /// **slave** end of, **borrowed in place**, or `None` when `fd` is not a
+    /// pty-slave descriptor of `task` (`plans/PTY.md`).
+    ///
+    /// The one resolution the pty-aware `stream_input_mode` / `terminal_size`
+    /// / `console_foreground` handlers share: a pty slave is a *tty* for
+    /// those terminal-control calls, and its discipline lives on the [`Pty`]
+    /// (not in the static console list). Borrows the entry in place — never
+    /// a clone — so the lookup never touches the pty's live-end counts. The
+    /// `task` argument is the kernel-trusted caller id, so one process
+    /// cannot reach another's pty by guessing a number.
+    ///
+    /// [`Pty`]: crate::pty::Pty
+    #[must_use]
+    pub fn pty_slave(&self, task: TaskId, fd: u32) -> Option<&crate::pty::Pty> {
+        let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
+        entry.pty_slave().map(PtySlaveEnd::pty)
     }
 
     /// Release `task`'s open descriptor `fd`, returning `true` if it was
@@ -2037,23 +2155,23 @@ mod tests {
     }
 
     #[test]
-    fn pipe_read_member_admits_only_the_owners_pipe_read_end() {
+    fn stream_read_member_admits_only_the_owners_pipe_read_end() {
         let mut reg = AddressSpaceRegistry::new();
         let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pipe minted");
         let file_fd = reg
             .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
             .expect("file opened");
         // Only the caller's own pipe read end qualifies.
-        assert!(reg.pipe_read_member(TaskId(2), read_fd));
+        assert!(reg.stream_read_member(TaskId(2), read_fd));
         // A write end, a path-backed descriptor, an unopened number, and
         // another task's descriptor all refuse identically.
-        assert!(!reg.pipe_read_member(TaskId(2), write_fd));
-        assert!(!reg.pipe_read_member(TaskId(2), file_fd));
-        assert!(!reg.pipe_read_member(TaskId(2), 999));
-        assert!(!reg.pipe_read_member(TaskId(3), read_fd));
+        assert!(!reg.stream_read_member(TaskId(2), write_fd));
+        assert!(!reg.stream_read_member(TaskId(2), file_fd));
+        assert!(!reg.stream_read_member(TaskId(2), 999));
+        assert!(!reg.stream_read_member(TaskId(3), read_fd));
         // A closed descriptor stops qualifying.
         assert!(reg.close_file(TaskId(2), read_fd));
-        assert!(!reg.pipe_read_member(TaskId(2), read_fd));
+        assert!(!reg.stream_read_member(TaskId(2), read_fd));
     }
 
     #[test]

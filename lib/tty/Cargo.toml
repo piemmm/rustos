@@ -1,0 +1,21 @@
+[package]
+name = "tairix-tty"
+description = "TAIRiX shared tty line discipline (PTY.md PTY1): the one, sink-agnostic definition of terminal cooking — ONLCR output translation, the local-echo state machine (CR/LF -> CR LF, bounded rub-out, Delete CSI-3~ recognition), and the cooked-mode ^C/^Z -> signal classifier. Assembled over the `lib/vt` control/EraseSeq vocabulary (never a second copy, AGENTS.md §2.2); driven by both the kernel console device and the coming pseudo-terminal. no_std, fail-closed, never panics (§2.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen error set the output-cooking sink reports through, and the
+# job-control signal vocabulary the input classifier emits.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The single control-byte and Delete-escape (`EraseSeq`) vocabulary the
+# discipline is assembled over — this crate is the assembly, not a second
+# definition of those primitives (`AGENTS.md` §2.2).
+tairix-vt = { path = "../vt", version = "=0.0.0" }
+
+[lints]
+workspace = true

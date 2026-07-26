@@ -1825,6 +1825,47 @@ impl SyscallNumber {
     /// escalation. Fail closed: a refused change leaves the node untouched.
     pub const FS_SET_OWNER: Self = Self(96);
 
+    /// Create a pseudo-terminal (PTY): one kernel object joining a
+    /// **master** end (held by a terminal emulator) and a **slave** end
+    /// (wired as a child's fd 0/1/2), whose slave carries the same
+    /// console-class line discipline a hardware-console-backed shell gets
+    /// (`plans/PTY.md`). This is the primitive the graphical terminal hosts
+    /// its shell over, in place of two raw pipes with no discipline.
+    ///
+    /// Arguments: `out: *mut u32` (a non-null user pointer the kernel
+    /// writes two `u32` descriptors into — the master end first, then the
+    /// slave end), and `rows: u32` / `cols: u32`, the pty's initial
+    /// character-cell geometry (the emulator's own `COLS`×`ROWS`). Each
+    /// dimension must be non-zero and fit a `u16`; a zero or oversized
+    /// dimension fails closed with [`crate::Errno::OutOfRange`] before any
+    /// state is touched.
+    ///
+    /// Both descriptors draw from the same per-process allocator
+    /// [`Self::FS_OPEN`] and [`Self::PIPE_CREATE`] use, are read/written
+    /// through [`Self::FS_READ`] / [`Self::FS_WRITE`] (the file offset is
+    /// meaningless and ignored), and are closed through [`Self::FS_CLOSE`].
+    /// A **master write** is the terminal's keystrokes fed through the input
+    /// discipline (cooked-mode local echo onto the master's read side,
+    /// `^C`/`^Z` delivered as [`crate::Signal::Interrupt`] /
+    /// [`crate::Signal::Stop`] to the slave's foreground job); a **master
+    /// read** drains the slave's (cooked) program output; a **slave read**
+    /// drains the input; a **slave write** is cooked (`ONLCR`) onto the
+    /// output. A read on an empty ring **parks** the caller until bytes
+    /// arrive or every peer end is closed (then end-of-stream, `0`); a
+    /// write to a full ring parks until space frees, and a write with every
+    /// peer end closed fails closed with [`crate::Errno::BrokenPipe`].
+    ///
+    /// The slave is a *tty*: [`Self::STREAM_INPUT_MODE`],
+    /// [`Self::TERMINAL_SIZE`], and [`Self::CONSOLE_FOREGROUND`] all
+    /// recognise a slave descriptor and route to the pty's own discipline,
+    /// exactly as they do for a console-backed stream. An end is handed to a
+    /// child by naming its descriptor in a [`crate::SpawnAttach`] wire
+    /// ([`SyscallNumber::SPAWN`]). Unprivileged, like [`Self::PIPE_CREATE`]:
+    /// a pty reaches only the caller's own table and carries no authority of
+    /// its own — transferring the slave rides the `CAP_PROC_SPAWN`-gated
+    /// spawn.
+    pub const PTY_CREATE: Self = Self(97);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

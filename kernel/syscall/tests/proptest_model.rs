@@ -153,6 +153,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn pty_create(
+        &self,
+        _c: &CallerContext<'_>,
+        _out: u64,
+        _rows: u32,
+        _cols: u32,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
         self.bump();
         Ok(0)

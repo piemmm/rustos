@@ -1593,10 +1593,13 @@ fn drain_join_result(
 /// The QEMU `QKeyCode` (or `shift-` combination) that types `c`.
 ///
 /// Covers the full printable-ASCII set on the default (US) keymap QEMU
-/// translates `sendkey` names through, plus `\n` (`ret`) and `\t`
-/// (`tab`). Every other character is refused with an error naming it —
-/// the run then fails rather than silently typing a corrupted script
-/// (fail closed, never a skipped or guessed key).
+/// translates `sendkey` names through, plus `\n` (`ret`), `\t` (`tab`),
+/// and the `\u{3}` ETX byte as the `ctrl-c` chord (so a script can type a
+/// job-control interrupt at the seat keyboard; the guest terminal encodes
+/// the resulting Ctrl-C key event back to the `0x03` byte). Every other
+/// character is refused with an error naming it — the run then fails
+/// rather than silently typing a corrupted script (fail closed, never a
+/// skipped or guessed key).
 fn qkeycode_for(c: char) -> Result<String, String> {
     // The base (unshifted) names for the non-alphanumeric keys.
     let plain = |name: &str| Ok(name.to_string());
@@ -1606,6 +1609,11 @@ fn qkeycode_for(c: char) -> Result<String, String> {
         'A'..='Z' => Ok(format!("shift-{}", c.to_ascii_lowercase())),
         '\n' => plain("ret"),
         '\t' => plain("tab"),
+        // The ETX control byte types the Ctrl-C chord: QEMU emits the
+        // ctrl-down, c-down, c-up, ctrl-up scancodes, so the guest sees
+        // `c` pressed with Ctrl held (a modifier-only edge produces no key
+        // record — the chord is one delivered key press/release pair).
+        '\u{3}' => plain("ctrl-c"),
         ' ' => plain("spc"),
         '-' => plain("minus"),
         '=' => plain("equal"),
@@ -2396,6 +2404,8 @@ mod tests {
         assert_eq!(qkeycode_for('-').as_deref(), Ok("minus"));
         assert_eq!(qkeycode_for('\n').as_deref(), Ok("ret"));
         assert_eq!(qkeycode_for('\t').as_deref(), Ok("tab"));
+        // The ETX byte types the Ctrl-C job-control chord (`plans/PTY.md`).
+        assert_eq!(qkeycode_for('\u{3}').as_deref(), Ok("ctrl-c"));
     }
 
     #[test]

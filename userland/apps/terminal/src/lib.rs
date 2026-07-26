@@ -27,8 +27,8 @@
 //! * [`Terminal`] ties the model to the shell: [`Terminal::pump`] reads the
 //!   bytes the shell has produced and feeds them to the grid, and
 //!   [`Terminal::send`] forwards keystrokes to the shell. Neither side echoes
-//!   on the terminal's behalf — echo is the shell's job, exactly as on a real
-//!   tty.
+//!   on the terminal's behalf — echo is the pty slave's line discipline, the
+//!   shell's tty, exactly as on the hardware console.
 //! * [`render()`] paints the grid into a `lib/raster`
 //!   [`Surface`](tairix_raster::Surface) using the active theme's palette and
 //!   the shared `lib/font` monospace face — the same surface the compositor
@@ -38,9 +38,11 @@
 //!
 //! [`ShellSource`] is the one thing the terminal needs from outside: a way to
 //! read the shell's output bytes and write the user's input bytes. On a
-//! running system it is [`spawned::PipeShellSource`] — two kernel pipes to a
-//! shell child the terminal spawned under its own `CAP_PROC_SPAWN`, wired at
-//! spawn through [`spawned::shell_wires`] (`plans/APPWIN.md` AW4); tests wire
+//! running system it is [`spawned::StreamShellSource`] over the master end of
+//! one kernel pseudo-terminal — the shell child the terminal spawned under
+//! its own `CAP_PROC_SPAWN` runs over the pty slave (a console-class tty),
+//! wired at spawn through [`spawned::shell_wires`] (`plans/APPWIN.md` AW4,
+//! `plans/PTY.md`); tests wire
 //! an in-memory queue, so the screen model and the renderer are exhaustively
 //! testable without a kernel. The `Run` binary (`src/run.rs`) composes the
 //! live syscalls under the seam and parks on its wait-set for window events,
@@ -60,7 +62,7 @@
 //! * [`grid`] — the [`Grid`] character-cell screen of [`Cell`]s.
 //! * [`parser`] — the [`Parser`] adapter onto `lib/vt`'s shared parser.
 //! * [`shell`] — the [`ShellSource`] seam.
-//! * [`spawned`] — the production seam: the spawned shell's pipe wiring.
+//! * [`spawned`] — the production seam: the spawned shell's pty wiring.
 //! * [`terminal`] — the [`Terminal`] model gluing the grid to the shell.
 //! * [`render`](mod@render) — painting the grid into a `Surface`.
 //!
@@ -88,7 +90,7 @@ pub use grid::Grid;
 pub use parser::Parser;
 pub use render::render;
 pub use shell::ShellSource;
-pub use spawned::{shell_load_failure, shell_wires, PipeShellSource};
+pub use spawned::{shell_env, shell_load_failure, shell_wires, StreamShellSource};
 pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.

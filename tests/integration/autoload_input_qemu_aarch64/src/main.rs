@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on eleven witnesses
+//! ## Why the PASS keys on twelve witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -158,8 +158,28 @@
 //!     boot/login rmdir — can satisfy it (fail closed). The empty clicks are
 //!     held behind the `FM11_TRASH_FILLED_MARKER` the test kernel emits once
 //!     the move latches, so they land only after the folder is in the Trash.
+//! 12. `AuditEvent::ProcessSpawned` observed with the delivery counter at
+//!     or beyond [`CTRL_C_RECOVERY_DELIVERIES`] — the pty `Ctrl-C`
+//!     job-control round trip (`plans/PTY.md`). Temporally this fires
+//!     right after witness 5, before the FM9 stage; it is listed last only
+//!     to keep the numbering above stable. Witness 5's shell command is
+//!     now the blocking foreground `sleep`; once its spawn latched the
+//!     guest emitted [`CTRL_C_ARM_MARKER`], the runner injected a `Ctrl-C`
+//!     (which the terminal encodes as the `0x03` interrupt byte through the
+//!     shared `lib/keymap` rule) and then [`TERMINAL_CTRL_C_RECOVERY`]'s
+//!     `true` + Enter. The shell is parked in `wait` on `sleep`, so it can
+//!     read and spawn `true` only once the pty's cooked-mode line
+//!     discipline signalled the foreground `sleep` dead — making this later
+//!     spawn an end-to-end witness of keyboard → session → terminal → pty
+//!     cooked `^C` → foreground `Signal::Interrupt` → job death → shell
+//!     recovery, every hop kernel-attested. A failed interrupt leaves
+//!     `sleep` blocking past the run budget, so the witness never latches
+//!     and the run times out (fail loud).
 //!
 //! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+//! [`CTRL_C_RECOVERY_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_DELIVERIES
+//! [`CTRL_C_ARM_MARKER`]: tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER
+//! [`TERMINAL_CTRL_C_RECOVERY`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_CTRL_C_RECOVERY
 //!
 //! Reaching them requires every preceding step to have succeeded: the
 //! `/System` volume mounted and served, the store listed, each signed
@@ -173,7 +193,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all eleven witnesses, so the harness times out — the documented
+//! reaches all twelve witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -241,7 +261,7 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all eleven witnesses have appeared: the per-kind
+    /// to QEMU once all twelve witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
@@ -267,9 +287,13 @@ mod kernel {
     /// (`FsNodeMutated op=rmdir` under `<home>/Library/Trash/` after the move —
     /// the manager navigating to the Trash via the Go-to-Trash tool, clicking
     /// Empty Trash, and confirming the *Delete Permanently* dialog, so the
-    /// trashed folder is permanently removed). The guest exits only after the
-    /// host has everything it needs (`plans/APPWIN.md` AW3 + AW4,
-    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/FM10/FM11).
+    /// trashed folder is permanently removed), and the pty `Ctrl-C`
+    /// job-control round trip (a second `ProcessSpawned` at or beyond
+    /// [`CTRL_C_RECOVERY_DELIVERIES`] — the recovered `true` the shell could
+    /// only spawn once `Ctrl-C` interrupted the parked foreground `sleep`,
+    /// `plans/PTY.md`). The guest exits only after the host has everything
+    /// it needs (`plans/APPWIN.md` AW3 + AW4,
+    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/FM10/FM11, `plans/PTY.md`).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
@@ -277,6 +301,7 @@ mod kernel {
         display_endpoint_bound: AtomicBool,
         window_events_delivered: AtomicU32,
         shell_round_trip: AtomicBool,
+        ctrl_c_recovered: AtomicBool,
         fs_folder_created: AtomicBool,
         fs_folder_renamed: AtomicBool,
         fd_delegation_granted: AtomicBool,
@@ -295,6 +320,7 @@ mod kernel {
                 display_endpoint_bound: AtomicBool::new(false),
                 window_events_delivered: AtomicU32::new(0),
                 shell_round_trip: AtomicBool::new(false),
+                ctrl_c_recovered: AtomicBool::new(false),
                 fs_folder_created: AtomicBool::new(false),
                 fs_folder_renamed: AtomicBool::new(false),
                 fd_delegation_granted: AtomicBool::new(false),
@@ -322,6 +348,42 @@ mod kernel {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        /// Latch the terminal round-trip and the pty `Ctrl-C` job-control
+        /// witnesses from a `ProcessSpawned` record, keyed on the window-event
+        /// delivery counter (every other spawn in the image precedes the
+        /// typing gate):
+        ///
+        /// * the **first** spawn at or beyond
+        ///   [`TERMINAL_ROUND_TRIP_DELIVERIES`] is the foreground `sleep` the
+        ///   shell ran for the typed command — the AW4 round trip. On that
+        ///   first latch the guest emits [`CTRL_C_ARM_MARKER`] so the host
+        ///   runner injects its `Ctrl-C` recovery step against a live, parked
+        ///   foreground job (never before one exists).
+        /// * a spawn at or beyond [`CTRL_C_RECOVERY_DELIVERIES`] is the
+        ///   recovered `true`, reachable only once `Ctrl-C` interrupted the
+        ///   parked `sleep` (the shell is blocked in `wait` until then), so it
+        ///   witnesses the pty cooked-mode job-control path end to end
+        ///   (`plans/PTY.md`).
+        fn note_process_spawned(&self) {
+            let delivered = self.window_events_delivered.load(Ordering::Acquire);
+            if delivered >= tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_DELIVERIES {
+                self.ctrl_c_recovered.store(true, Ordering::Release);
+            }
+            if delivered >= tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+                && !self.shell_round_trip.swap(true, Ordering::AcqRel)
+            {
+                // First shell-command spawn (the foreground `sleep`): arm the
+                // runner's Ctrl-C injection now that a parked foreground job
+                // exists to interrupt.
+                SerialSink::new().write_event(&Event {
+                    level: tairix_log::Level::Info,
+                    id: tairix_log::EventId(0),
+                    message: tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER,
+                    fields: &[],
+                });
             }
         }
 
@@ -516,15 +578,12 @@ mod kernel {
                 self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
             } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
                 // Attributable by ordering, not by name: every other spawn
-                // in the image happens strictly before the typing gate, so
-                // a spawn observed at or beyond the Enter press's delivery
-                // count can only be the shell executing the typed command
-                // (the contract crate's rationale).
-                if self.window_events_delivered.load(Ordering::Acquire)
-                    >= tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
-                {
-                    self.shell_round_trip.store(true, Ordering::Release);
-                }
+                // in the image happens strictly before the typing gate, so a
+                // spawn observed at or beyond the sleep round-trip / true
+                // recovery delivery counts can only be the shell executing
+                // the typed command, then the Ctrl-C recovery (the contract
+                // crate's rationale).
+                self.note_process_spawned();
             } else {
                 return;
             }
@@ -533,6 +592,7 @@ mod kernel {
                 && self.users_db_loaded.load(Ordering::Acquire)
                 && self.display_endpoint_bound.load(Ordering::Acquire)
                 && self.shell_round_trip.load(Ordering::Acquire)
+                && self.ctrl_c_recovered.load(Ordering::Acquire)
                 && self.fs_folder_created.load(Ordering::Acquire)
                 && self.fs_folder_renamed.load(Ordering::Acquire)
                 && self.fd_delegation_granted.load(Ordering::Acquire)

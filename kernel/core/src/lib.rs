@@ -85,6 +85,7 @@ pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
 pub mod filemap;
+pub mod foreground;
 pub mod fs;
 pub mod fswatch;
 pub mod groups;
@@ -107,6 +108,7 @@ pub mod preempt;
 pub mod proc_id;
 pub mod procsignal;
 pub mod procwait;
+pub mod pty;
 pub mod random;
 pub mod resource;
 pub mod rlimit;
@@ -230,6 +232,9 @@ pub use procsignal::{
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,
     NULL_PROCESS_WAIT,
+};
+pub use pty::{
+    MasterWriteStep, Pty, PtyMasterEnd, PtyReadStep, PtyRole, PtySlaveEnd, PtyWriteStep,
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use rlimit::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};

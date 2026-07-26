@@ -85,10 +85,10 @@ use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
     Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
     OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SignalIntakeOp,
-    SpawnAttach, StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
-    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
-    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    SpawnAttach, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags,
+    WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
     RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
     TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
@@ -487,6 +487,35 @@ where
     /// it. Held `'static` because the leaked table lives for the running
     /// kernel's lifetime.
     identity: &'static LateIdentity,
+}
+
+/// The outcome of one non-blocking read step over a byte-stream backing
+/// (a pipe read end or a pty end), normalised so the one parking read loop
+/// [`KernelSyscallHandlers::parked_stream_read`] drives every stream kind
+/// through one definition of the park discipline. The per-backing step
+/// object ([`crate::pipe::ReadStep`], [`crate::pty::PtyReadStep`]) maps into
+/// this at the call site.
+enum StreamReadStep {
+    /// `n` bytes were copied into the staging buffer (`0..=len`).
+    Read(usize),
+    /// The ring is empty and every peer end is closed: end-of-stream.
+    Eof,
+    /// The ring is empty but a peer is still live: park and retry.
+    Empty,
+}
+
+/// The outcome of one non-blocking write step over a byte-stream backing,
+/// the write counterpart of [`StreamReadStep`] — so
+/// [`KernelSyscallHandlers::parked_stream_write`] is the one parking write
+/// loop every stream kind shares.
+enum StreamWriteStep {
+    /// `n` input bytes were accepted (`0..=len`); a short count is valid and
+    /// the caller loops.
+    Wrote(usize),
+    /// Every peer end is closed: the bytes can never be read.
+    Broken,
+    /// The ring is full but a peer is still live: park and retry.
+    Full,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -2288,22 +2317,35 @@ where
     }
 
     /// The one console foreground-owner gate `stream_read` and
-    /// `stream_input_mode` share (`plans/DISPLAY.md` D5).
-    ///
-    /// Admits the caller when the console is unowned or the caller is the
-    /// recorded controlling owner. A different **live** owner refuses the
-    /// caller with the typed [`Errno::NotForeground`]; an owner the
-    /// process bookkeeping proves dead is cleared in place (task ids are
-    /// never reused, so a console is never wedged behind a vanished
-    /// owner) and the caller proceeds. The inert bookkeeping default
-    /// reports every task live, so an unproven death keeps denying — the
-    /// gate can heal, never widen.
+    /// `stream_input_mode` share (`plans/DISPLAY.md` D5), delegating to the
+    /// terminal-neutral [`Self::check_terminal_foreground`] against the
+    /// console's shared ownership object.
     fn check_console_foreground(
         &self,
         caller: &CallerContext<'_>,
         device: &ConsoleDevice,
     ) -> Result<(), Errno> {
-        let Some(owner) = device.foreground() else {
+        self.check_terminal_foreground(caller, device.foreground_ownership())
+    }
+
+    /// The one controlling-terminal owner gate every terminal — the console
+    /// and the pseudo-terminal — shares (`plans/DISPLAY.md` D5,
+    /// `plans/PTY.md`).
+    ///
+    /// Admits the caller when the terminal is unowned or the caller is the
+    /// recorded controlling owner. A different **live** owner refuses the
+    /// caller with the typed [`Errno::NotForeground`]; an owner the process
+    /// bookkeeping proves dead is cleared in place (task ids are never
+    /// reused, so a terminal is never wedged behind a vanished owner) and
+    /// the caller proceeds. The inert bookkeeping default reports every task
+    /// live, so an unproven death keeps denying — the gate can heal, never
+    /// widen.
+    fn check_terminal_foreground(
+        &self,
+        caller: &CallerContext<'_>,
+        fg: &crate::foreground::ForegroundOwnership,
+    ) -> Result<(), Errno> {
+        let Some(owner) = fg.current() else {
             return Ok(());
         };
         if owner == caller.task_id {
@@ -2312,7 +2354,7 @@ where
         if self.process_wait.is_live(owner) {
             return Err(Errno::NotForeground);
         }
-        device.clear_dead_foreground(owner);
+        fg.clear_dead(owner);
         Ok(())
     }
 
@@ -2462,25 +2504,28 @@ where
         }
     }
 
-    /// Serve a read from a pipe-backed descriptor into the caller's buffer,
-    /// **parking** the caller while the pipe is empty with a live writer
-    /// (`plans/SPAWN.md` SP10 — never a busy loop).
+    /// The one parking read loop every byte-stream backing shares: drain a
+    /// step into the caller's buffer, **parking** off the run queue while
+    /// the stream is empty with a live peer (`plans/SPAWN.md` SP10,
+    /// `plans/PTY.md` — never a busy loop).
     ///
-    /// The one pipe-read definition `fs_read` and a wired `stream_read`
-    /// share. End-of-stream (every write end closed, ring drained) is a
-    /// zero-length read. `timeout_ns` bounds the wait (`0` = indefinite,
-    /// the `stream_read` convention); an elapsed bound is `TimedOut`. A
-    /// build with no resumable user kthread published (a park that cannot
-    /// happen) fails closed with `NotImplemented` rather than spinning.
-    fn pipe_read(
+    /// `step` runs the backing's own non-blocking read into the staging
+    /// buffer and reports a normalised [`StreamReadStep`]; this loop owns
+    /// the stage/wake/deadline/park discipline so a pipe end and a pty end
+    /// never carry a second copy of it. End-of-stream (every peer end
+    /// closed, ring drained) is a zero-length read. `timeout_ns` bounds the
+    /// wait (`0` = indefinite, the `stream_read` convention); an elapsed
+    /// bound is `TimedOut`. A build with no resumable user kthread published
+    /// (a park that cannot happen) fails closed with `NotImplemented`
+    /// rather than spinning.
+    fn parked_stream_read(
         &self,
         caller: &CallerContext<'_>,
-        end: &crate::pipe::PipeEnd,
         buf: u64,
         len: usize,
         timeout_ns: u64,
+        mut step: impl FnMut(&mut [u8]) -> StreamReadStep,
     ) -> SyscallResult {
-        use crate::pipe::ReadStep;
         // Cap the per-call transfer at the staging bound (short reads are
         // valid; the caller loops). A zero-length read is inert.
         let len = len.min(FS_IO_MAX);
@@ -2499,8 +2544,8 @@ where
             })
         };
         loop {
-            match end.try_read(&mut data) {
-                ReadStep::Read(n) => {
+            match step(&mut data) {
+                StreamReadStep::Read(n) => {
                     // Space freed: a writer parked on the full ring can
                     // proceed. Wake before the copy-out so the producer
                     // overlaps with the consumer's copy.
@@ -2513,8 +2558,8 @@ where
                         None => Err(Errno::BadAddress),
                     };
                 }
-                ReadStep::Eof => return Ok(0),
-                ReadStep::Empty => {
+                StreamReadStep::Eof => return Ok(0),
+                StreamReadStep::Empty => {
                     // A bounded wait that has elapsed reports `TimedOut`
                     // only after the re-check above found nothing, so a
                     // byte racing the deadline is still delivered.
@@ -2524,7 +2569,7 @@ where
                             _ => return Err(Errno::TimedOut),
                         }
                     }
-                    // Park off the run queue until a writer produces bytes
+                    // Park off the run queue until a peer produces bytes
                     // or closes (the `wait`/`irq_wait` interlock: register
                     // before the park so a racing wake is never lost).
                     let cpu = SchedulerArch::current_cpu(self.arch);
@@ -2552,40 +2597,41 @@ where
         }
     }
 
-    /// Serve a write to a pipe-backed descriptor from the caller's buffer,
-    /// **parking** the caller while the ring is full with a live reader
-    /// (`plans/SPAWN.md` SP10 — never a busy loop).
+    /// The one parking write loop every byte-stream backing shares: stage
+    /// the caller's bytes once, then drive a step, **parking** while the
+    /// ring is full with a live peer (`plans/SPAWN.md` SP10, `plans/PTY.md`
+    /// — never a busy loop).
     ///
-    /// The one pipe-write definition `fs_write` and a wired `stream_write`
-    /// share. A short write (the free space) is valid; the caller loops. A
-    /// pipe with no read end left fails closed with `BrokenPipe`, so a
-    /// producer whose consumer exited learns to stop.
-    fn pipe_write(
+    /// `step` runs the backing's own non-blocking write over the staged
+    /// bytes and reports a normalised [`StreamWriteStep`]; this loop owns
+    /// the stage/wake/park discipline. A short write (the free space) is
+    /// valid; the caller loops. A stream with no peer left fails closed with
+    /// `BrokenPipe`, so a producer whose consumer exited learns to stop.
+    fn parked_stream_write(
         &self,
         caller: &CallerContext<'_>,
-        end: &crate::pipe::PipeEnd,
         buf: u64,
         len: usize,
+        mut step: impl FnMut(&[u8]) -> StreamWriteStep,
     ) -> SyscallResult {
-        use crate::pipe::WriteStep;
         let len = len.min(FS_IO_MAX);
         if len == 0 {
             return Ok(0);
         }
-        // Stage the caller's bytes in once, before any pipe state is
+        // Stage the caller's bytes in once, before any stream state is
         // touched (a faulting buffer writes nothing).
         let mut data = alloc::vec![0u8; len];
         self.copy_in_user(caller, buf, &mut data)?;
         loop {
-            match end.try_write(&data) {
-                WriteStep::Wrote(n) => {
+            match step(&data) {
+                StreamWriteStep::Wrote(n) => {
                     // Bytes arrived: a reader parked on the empty ring can
                     // proceed.
                     crate::waitq::pipe_wake();
                     return Ok(n as u64);
                 }
-                WriteStep::Broken => return Err(Errno::BrokenPipe),
-                WriteStep::Full => {
+                StreamWriteStep::Broken => return Err(Errno::BrokenPipe),
+                StreamWriteStep::Full => {
                     let cpu = SchedulerArch::current_cpu(self.arch);
                     crate::waitq::PIPE_WAITQ.register(caller.task_id.0, crate::waitq::NO_DEADLINE);
                     let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
@@ -2603,6 +2649,139 @@ where
                 }
             }
         }
+    }
+
+    /// Serve a read from a pipe-backed descriptor — the pipe backing driven
+    /// through the one shared [`Self::parked_stream_read`] loop. Shared by
+    /// `fs_read` and a wired `stream_read`.
+    fn pipe_read(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pipe::PipeEnd,
+        buf: u64,
+        len: usize,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        use crate::pipe::ReadStep;
+        self.parked_stream_read(caller, buf, len, timeout_ns, |data| {
+            match end.try_read(data) {
+                ReadStep::Read(n) => StreamReadStep::Read(n),
+                ReadStep::Eof => StreamReadStep::Eof,
+                ReadStep::Empty => StreamReadStep::Empty,
+            }
+        })
+    }
+
+    /// Serve a write to a pipe-backed descriptor — the pipe backing driven
+    /// through the one shared [`Self::parked_stream_write`] loop. Shared by
+    /// `fs_write` and a wired `stream_write`.
+    fn pipe_write(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pipe::PipeEnd,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use crate::pipe::WriteStep;
+        self.parked_stream_write(caller, buf, len, |data| match end.try_write(data) {
+            WriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
+            WriteStep::Broken => StreamWriteStep::Broken,
+            WriteStep::Full => StreamWriteStep::Full,
+        })
+    }
+
+    /// Serve a read from a pty **master** descriptor: drain the slave's
+    /// cooked output through the shared park loop (`plans/PTY.md`). The
+    /// terminal emulator reads its shell's rendered output here.
+    fn pty_master_read(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pty::PtyMasterEnd,
+        buf: u64,
+        len: usize,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        use crate::pty::PtyReadStep;
+        self.parked_stream_read(caller, buf, len, timeout_ns, |data| match end.read(data) {
+            PtyReadStep::Read(n) => StreamReadStep::Read(n),
+            PtyReadStep::Eof => StreamReadStep::Eof,
+            PtyReadStep::Empty => StreamReadStep::Empty,
+        })
+    }
+
+    /// Serve a write to a pty **master** descriptor: feed the terminal's
+    /// keystrokes through the input discipline (`plans/PTY.md`). In cooked
+    /// mode with a foreground job and signal delivery installed, `^C`/`^Z`
+    /// are consumed and delivered to that job through the shared
+    /// [`crate::procsignal`] path (the same delivery the console input
+    /// filter uses); every other byte is buffered for the slave to read.
+    /// The object returns the signals so it stays pure (no scheduler call
+    /// under its lock); this handler performs the delivery.
+    fn pty_master_write(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pty::PtyMasterEnd,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use crate::pty::MasterWriteStep;
+        // The interception gate matches the console's: only swallow a
+        // job-control byte into a signal when a producer that will actually
+        // deliver it is installed (never consume a byte no one will act on).
+        let intercept = crate::procsignal::foreground_signal_installed();
+        self.parked_stream_write(caller, buf, len, |data| match end.write(data, intercept) {
+            MasterWriteStep::Wrote { consumed, signals } => {
+                for (target, signal) in signals {
+                    crate::procsignal::queue_foreground_signal(target, signal);
+                }
+                // Nudge the dispatch loop out of its idle park so a deferred
+                // signal delivery drains promptly even with every task
+                // parked (mirrors the console input filter).
+                crate::waitq::console_wake();
+                StreamWriteStep::Wrote(consumed)
+            }
+            MasterWriteStep::Broken => StreamWriteStep::Broken,
+            MasterWriteStep::Full => StreamWriteStep::Full,
+        })
+    }
+
+    /// Serve a read from a pty **slave** descriptor: drain the input ring
+    /// (echoing the consumed bytes onto the output in cooked mode) through
+    /// the shared park loop (`plans/PTY.md`). The shell reads its stdin
+    /// here.
+    fn pty_slave_read(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pty::PtySlaveEnd,
+        buf: u64,
+        len: usize,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        use crate::pty::PtyReadStep;
+        self.parked_stream_read(caller, buf, len, timeout_ns, |data| match end.read(data) {
+            PtyReadStep::Read(n) => StreamReadStep::Read(n),
+            PtyReadStep::Eof => StreamReadStep::Eof,
+            PtyReadStep::Empty => StreamReadStep::Empty,
+        })
+    }
+
+    /// Serve a write to a pty **slave** descriptor: cook program output
+    /// (`ONLCR`) onto the output ring through the shared park loop
+    /// (`plans/PTY.md`). The shell and the programs it runs write their
+    /// stdout/stderr here.
+    fn pty_slave_write(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pty::PtySlaveEnd,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use crate::pty::PtyWriteStep;
+        self.parked_stream_write(caller, buf, len, |data| match end.write(data) {
+            PtyWriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
+            PtyWriteStep::Broken => StreamWriteStep::Broken,
+            PtyWriteStep::Full => StreamWriteStep::Full,
+        })
     }
 
     /// Serve a `stream_read` against a **wired** standard-stream open entry
@@ -2656,6 +2835,8 @@ where
             }
             OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
+            OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, timeout_ns),
+            OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, timeout_ns),
             // A delegated descriptor wired behind a standard stream reads
             // under the *grantor's* captured identity at the shared
             // description cursor — the same authority rule as the
@@ -2727,6 +2908,8 @@ where
             }
             OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
+            OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
+            OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
             // Unreachable by construction — a delegation is minted
             // read-only, so the `is_write` gate above already refused —
             // but fail closed rather than trust the construction.
@@ -3548,6 +3731,29 @@ where
         out: u64,
         out_cap: usize,
     ) -> SyscallResult {
+        // The caller's buffer must hold the whole reading; a short buffer
+        // fails closed rather than truncating it. Checked before any
+        // resolution so the bound is enforced for a pty slave and a console
+        // alike.
+        if out_cap < TERMINAL_SIZE_WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A pty slave is a *tty* whose geometry is always known (its master
+        // set it at create/resize), so route there first if `fd` is a
+        // pty-slave descriptor of the caller.
+        {
+            let aspaces = self.aspaces.read();
+            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+                let bytes = pty.geometry().to_le_bytes();
+                return match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(out), &bytes)
+                }) {
+                    Some(Ok(())) => Ok(bytes.len() as u64),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                };
+            }
+        }
         // Resolve `fd` against the caller's per-process descriptor table
         // first: only an open standard stream names a console. A descriptor
         // that is not open (an out-of-range fd, a closed one, or an opened
@@ -3571,11 +3777,7 @@ where
         let Some(geometry) = device.geometry() else {
             return Err(Errno::NotImplemented);
         };
-        // The caller's buffer must hold the whole reading; a short buffer
-        // fails closed rather than truncating it.
-        if out_cap < TERMINAL_SIZE_WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
+        // The buffer bound was already enforced at the top of the handler.
         let bytes = geometry.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(out), &bytes)
@@ -4192,6 +4394,19 @@ where
         // reserved `0` and every unknown value are rejected rather than
         // interpreted as a discipline the caller did not name.
         let mode = InputMode::from_u32(mode)?;
+        // A pty slave is a *tty* too: if `fd` is a pty-slave descriptor of
+        // the caller, its discipline lives on the `Pty` rather than in the
+        // static console list, so route there — owner-checked exactly as the
+        // console path (a background task must not flip the foreground
+        // program's echo/raw mode under it).
+        {
+            let aspaces = self.aspaces.read();
+            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+                self.check_terminal_foreground(caller, pty.foreground())?;
+                pty.set_input_mode(mode);
+                return Ok(0);
+            }
+        }
         // Resolve `fd` against the caller's per-process descriptor table:
         // the discipline is a property of an *input* stream's console, so
         // `fd` must be a readable inherited stream — anything else fails
@@ -4253,7 +4468,65 @@ where
         }
     }
 
+    fn pty_create(
+        &self,
+        caller: &CallerContext<'_>,
+        out: u64,
+        rows: u32,
+        cols: u32,
+    ) -> SyscallResult {
+        // Validate the geometry before touching any state: each dimension
+        // must be non-zero and fit a `u16` (the terminal wire width). A
+        // zero or oversized dimension fails closed with `OutOfRange`,
+        // never silently clamped to a size the caller did not ask for.
+        let rows = u16::try_from(rows).map_err(|_| Errno::OutOfRange)?;
+        let cols = u16::try_from(cols).map_err(|_| Errno::OutOfRange)?;
+        let size = TerminalSize::new(rows, cols)?;
+        // Unprivileged by design, exactly like `pipe_create`: both
+        // descriptors land in the caller's own open table and reach nothing
+        // else. The dispatcher already checked `out` is non-null (`UserPtr`).
+        let (master_fd, slave_fd) = self.aspaces.write().open_pty(caller.task_id, size)?;
+        // Two `u32`s, master end first — native byte order, exactly as the
+        // `pipe_create` out-parameter (crosses only the user/kernel
+        // boundary, never the machine).
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&master_fd.to_ne_bytes());
+        bytes[4..].copy_from_slice(&slave_fd.to_ne_bytes());
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(0),
+            outcome => {
+                // The caller can never learn the descriptor numbers, so
+                // unwind the pair whole (fail closed — the dropped entries
+                // close both ends through their handles).
+                let mut aspaces = self.aspaces.write();
+                aspaces.close_file(caller.task_id, master_fd);
+                aspaces.close_file(caller.task_id, slave_fd);
+                match outcome {
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    _ => Err(Errno::BadAddress),
+                }
+            }
+        }
+    }
+
     fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i32) -> SyscallResult {
+        // A pty slave is a *tty*: if `fd` is a pty-slave descriptor of the
+        // caller, its controlling ownership lives on the `Pty`. The
+        // transition rules are the shared `ForegroundOwnership`'s, so the
+        // grant/release below is identical to the console path — only the
+        // slot's home differs.
+        {
+            let aspaces = self.aspaces.read();
+            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+                if pid == 0 {
+                    return pty.foreground().release(caller.task_id).map(|()| 0);
+                }
+                let child = self.process_wait.authorise_child(caller.task_id, pid)?;
+                return pty.foreground().grant(caller.task_id, child).map(|()| 0);
+            }
+        }
         // Resolve `fd` against the caller's per-process descriptor table
         // exactly as `stream_input_mode` does: the foreground slot is a
         // property of an *input* stream's console, so `fd` must be a
@@ -6722,7 +6995,7 @@ where
                         // all collapse to the same `NotFound` the other
                         // kinds use (no existence oracle).
                         let owned = u32::try_from(id).is_ok_and(|fd| {
-                            self.aspaces.read().pipe_read_member(caller.task_id, fd)
+                            self.aspaces.read().stream_read_member(caller.task_id, fd)
                         });
                         if !owned {
                             return Err(Errno::NotFound);
@@ -7228,6 +7501,8 @@ where
             // pipe is empty with a live writer (no timeout on the handle
             // path — the reader waits for its producer).
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, 0),
+            OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, 0),
+            OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, 0),
             // A delegated descriptor reads under the *grantor's* captured
             // identity — the delegation is the authority, established by
             // the grantor's user-mediated choice — so the holder needs no
@@ -7308,6 +7583,10 @@ where
             // is full with a live reader and fails closed with `BrokenPipe`
             // when none remains.
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
+            // A pty end ignores the offset too: a master write feeds the
+            // input discipline, a slave write cooks program output.
+            OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
+            OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
             // Unreachable by construction — a delegation is minted
             // read-only, so the `is_write` gate above already refused —
             // but fail closed rather than trust the construction.
@@ -15028,6 +15307,105 @@ mod tests {
         assert_eq!(h.fs_close(&ctx, read_fd2), Ok(0));
         assert_eq!(
             h.fs_write(&ctx, write_fd2, 0, 0x1000, 4),
+            Err(Errno::BrokenPipe)
+        );
+    }
+
+    /// `pty_create` mints a master/slave descriptor pair in the caller's own
+    /// open table; input flows master → slave, cooked program output flows
+    /// slave → master with `ONLCR`, the slave is a *tty* for
+    /// `terminal_size`/`stream_input_mode`, and closing the slave makes a
+    /// master read end-of-stream and a master write break (`plans/PTY.md`).
+    #[test]
+    fn pty_create_mints_a_tty_pair_that_cooks_and_round_trips() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Unprivileged: a pty and its I/O need no capability at all.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A zero dimension fails closed before any descriptor is minted.
+        assert_eq!(h.pty_create(&ctx, 0x1800, 0, 80), Err(Errno::OutOfRange));
+
+        // The two new descriptors land at 0x1800 (master end first).
+        assert_eq!(h.pty_create(&ctx, 0x1800, 24, 80), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let master_fd = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        let slave_fd = u32::from_ne_bytes([fds[4], fds[5], fds[6], fds[7]]);
+        assert_eq!((master_fd, slave_fd), (4, 5));
+
+        // The slave is a tty: its geometry is what the master set at create.
+        assert_eq!(h.terminal_size(&ctx, slave_fd, 0x1900, 4), Ok(4));
+        let mut size = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1900), &mut size).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(
+            TerminalSize::from_bytes(&size),
+            Ok(TerminalSize::new(24, 80).unwrap())
+        );
+
+        // Put the slave in raw mode (routed to the pty) so master input
+        // flows straight through without echo, then round-trip a keystroke.
+        assert_eq!(
+            h.stream_input_mode(&ctx, slave_fd, InputMode::Raw.as_u32()),
+            Ok(0)
+        );
+        assert_eq!(h.fs_write(&ctx, master_fd, 0, 0x1000, 4), Ok(4));
+        assert_eq!(h.fs_read(&ctx, slave_fd, 0, 0x1100, 4), Ok(4));
+        let mut out = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut out).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(&out, b"ping");
+
+        // Stage a bare-LF program line and prove the slave write cooks it to
+        // CR LF (ONLCR) on the master's read side.
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(0x1200), b"a\nb").expect("writable");
+        })
+        .expect("caller has a space");
+        assert_eq!(h.fs_write(&ctx, slave_fd, 0, 0x1200, 3), Ok(3));
+        assert_eq!(h.fs_read(&ctx, master_fd, 0, 0x1100, 8), Ok(4));
+        let mut cooked = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut cooked).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(&cooked, b"a\r\nb");
+
+        // Close the slave: the drained master read is end-of-stream, and a
+        // master write breaks — fail closed, exactly like a pipe.
+        assert_eq!(h.fs_close(&ctx, slave_fd), Ok(0));
+        assert_eq!(h.fs_read(&ctx, master_fd, 0, 0x1100, 4), Ok(0));
+        assert_eq!(
+            h.fs_write(&ctx, master_fd, 0, 0x1000, 4),
             Err(Errno::BrokenPipe)
         );
     }

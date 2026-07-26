@@ -351,6 +351,32 @@ pub trait SyscallHandlers {
         let _ = (caller, out);
         Err(Errno::NotImplemented)
     }
+    /// Create a pseudo-terminal — a kernel object joining a master end and a
+    /// slave end whose slave carries a console-class line discipline —
+    /// writing its two new descriptors (the master end first, then the slave
+    /// end, two `u32`s) through the user pointer `out`, at the initial
+    /// geometry `rows`×`cols` (`plans/PTY.md`). Returns `Ok(0)` on success.
+    ///
+    /// The dispatcher has already checked that `out` is non-null. Each
+    /// dimension must be non-zero and fit a `u16`, else the call fails
+    /// closed with [`Errno::OutOfRange`] before any state is touched. Both
+    /// descriptors land in the **caller's own** open table (the same
+    /// allocator [`SyscallHandlers::pipe_create`] draws from) and are served
+    /// by [`SyscallHandlers::fs_read`] / [`SyscallHandlers::fs_write`] /
+    /// [`SyscallHandlers::fs_close`]. The default body fails closed with
+    /// [`Errno::NotImplemented`] so a build without the pty facility
+    /// announces the inert interface rather than minting descriptors it
+    /// cannot serve.
+    fn pty_create(
+        &self,
+        caller: &CallerContext<'_>,
+        out: u64,
+        rows: u32,
+        cols: u32,
+    ) -> SyscallResult {
+        let _ = (caller, out, rows, cols);
+        Err(Errno::NotImplemented)
+    }
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
     /// read.
@@ -2516,6 +2542,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // the handler writes the two new descriptors through.
                 self.handlers.pipe_create(caller, args.0[0])
             }
+            SyscallNumber::PTY_CREATE => {
+                // args[0] is the non-null `UserPtr` (dispatcher-checked) the
+                // handler writes the two new descriptors through; args[1] and
+                // args[2] are the initial row/column geometry (bounds
+                // validated in the handler).
+                self.handlers.pty_create(
+                    caller,
+                    args.0[0],
+                    decode_u32(args.0[1]),
+                    decode_u32(args.0[2]),
+                )
+            }
             SyscallNumber::KEY_INJECT => {
                 // args[0] is the seat id; `validate_arg` guarantees args[1]
                 // is a non-null `UserPtr`; args[2] is the record length.
@@ -3400,6 +3438,19 @@ mod tests {
         fn pipe_create(&self, _c: &CallerContext<'_>, _out: u64) -> SyscallResult {
             self.record("pipe_create");
             Ok(0)
+        }
+        fn pty_create(
+            &self,
+            _c: &CallerContext<'_>,
+            _out: u64,
+            rows: u32,
+            _cols: u32,
+        ) -> SyscallResult {
+            self.record("pty_create");
+            // Echo the row count back so the reachability test can assert
+            // the dispatcher decoded the `(out, rows, cols)` arguments
+            // without wiring a real pty facility here.
+            Ok(u64::from(rows))
         }
         fn stream_read(
             &self,

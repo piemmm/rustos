@@ -27,9 +27,9 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use tairix_abi::{Errno, InputMode, Signal, TerminalSize};
+use tairix_abi::{Errno, InputMode, TerminalSize};
 use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sec::TaskId;
 use tairix_sync::SpinLock;
@@ -86,49 +86,7 @@ pub trait ConsoleWrite: Sync {
     /// Once some input has been consumed, a later device error is reported as
     /// a short write so retrying cannot duplicate bytes.
     fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
-        let mut consumed = 0usize;
-        let mut index = 0usize;
-        while index < bytes.len() {
-            let run_start = index;
-            while index < bytes.len() && bytes[index] != control::LF {
-                index += 1;
-            }
-            if index > run_start {
-                let run = &bytes[run_start..index];
-                match self.write(run) {
-                    Ok(0) => return Ok(consumed),
-                    Ok(written) => {
-                        let written = written.min(run.len());
-                        consumed += written;
-                        if written < run.len() {
-                            return Ok(consumed);
-                        }
-                    }
-                    Err(err) if consumed == 0 => return Err(err),
-                    Err(_) => return Ok(consumed),
-                }
-            }
-            if index < bytes.len() {
-                match self.write(b"\r\n") {
-                    Ok(0) => return Ok(consumed),
-                    Ok(written) if written >= 2 => {
-                        consumed += 1;
-                        index += 1;
-                    }
-                    Ok(written) => {
-                        if write_all_bytes(self, &b"\r\n"[written.min(2)..]) {
-                            consumed += 1;
-                            index += 1;
-                        } else {
-                            return Ok(consumed);
-                        }
-                    }
-                    Err(err) if consumed == 0 => return Err(err),
-                    Err(_) => return Ok(consumed),
-                }
-            }
-        }
-        Ok(consumed)
+        tairix_tty::write_cooked(bytes, |run| self.write(run))
     }
 
     /// This console's character-cell grid, when the device knows it
@@ -516,12 +474,13 @@ pub struct ConsoleDevice {
     /// Interior mutability because the single
     /// installed console is shared `&'static`.
     echo: AtomicBool,
-    /// The echo half's per-line editing state (see [`EchoLine`]): the
-    /// rendered-column bound for the erase rub-out and the held Delete
-    /// escape-sequence prefix. One lock per console; a single console
-    /// carries a single session (`plans/PI.md` P11), so the lock is
-    /// uncontended and held only across one `echo_bytes` call.
-    line: SpinLock<EchoLine>,
+    /// The echo half's per-line editing state (the shared
+    /// [`tairix_tty::EchoLine`]): the rendered-column bound for the erase
+    /// rub-out and the held Delete escape-sequence prefix. One lock per
+    /// console; a single console carries a single session (`plans/PI.md`
+    /// P11), so the lock is uncontended and held only across one
+    /// `echo_bytes` call.
+    line: SpinLock<tairix_tty::EchoLine>,
     /// The secret-entry activity feedback for this console
     /// ([`SecretFeedback`]), armed while echo is suppressed so a password
     /// read still gives the operator visible progress. [`None`] on a
@@ -534,56 +493,17 @@ pub struct ConsoleDevice {
     /// [`Self::set_input_mode`] installed; atomic for the same shared
     /// `&'static` reason as `echo`.
     mode: AtomicU32,
-    /// The console's controlling (foreground) owner (`console_foreground`,
-    /// `plans/DISPLAY.md` D5): the scheduler task id that alone may drain
-    /// this console's input queue and change its line discipline, and the
-    /// target the cooked-mode input filter delivers `^C`/`^Z` to instead of
-    /// queueing the byte. [`FOREGROUND_NONE`] means no owner — the default,
-    /// and what the granting shell restores at its prompt — under which
-    /// reads are open and every control byte passes through unchanged. An
-    /// atomic, not a lock: the input filter reads it from the UART RX
-    /// interrupt handler, where spinning on a lock held by the interrupted
-    /// task would deadlock a single CPU. Mutated only under [`Self::fg`]
-    /// through the checked transitions ([`Self::grant_foreground`],
-    /// [`Self::release_foreground`], [`Self::clear_dead_foreground`]).
-    foreground: AtomicU64,
-    /// The task that granted the current foreground ownership (the parent
-    /// that handed the console to [`Self::foreground`]), or
-    /// [`FOREGROUND_NONE`] while the console is unowned. Only this task or
-    /// the owner itself may release or re-target the ownership, so a
-    /// background task can never steal the drain right by clearing the
-    /// slot. Read and written only under [`Self::fg`].
-    granter: AtomicU64,
-    /// Serialises the compound foreground transitions (read owner + granter,
-    /// decide, write both). The input filter never takes this lock — it
-    /// reads the [`Self::foreground`] atomic alone — so the interrupt-path
-    /// constraint above still holds.
-    fg: SpinLock<()>,
-}
-
-/// The [`ConsoleDevice::foreground`] sentinel for "no foreground job".
-///
-/// Scheduler task ids are small monotonically increasing values that can
-/// never reach `u64::MAX`, so the sentinel is unambiguous.
-const FOREGROUND_NONE: u64 = u64::MAX;
-
-/// The kernel echo half's per-line editing state.
-///
-/// `col` is the column of the line-discipline cursor since the last line
-/// terminator (or echo toggle): the count of characters the user has typed
-/// and the echo has rendered on the current input line. It bounds the
-/// **erase** (rub-out): an erase rubs out one rendered character only while
-/// this is non-zero, so a Backspace at the start of the input line never
-/// walks the cursor back into the prompt the program wrote. Reset on a
-/// `CR`/`LF` echo and on every [`ConsoleDevice::set_input_mode`] change (each
-/// starts a fresh edited line).
-///
-/// `seq` is the held Delete escape-sequence prefix ([`EraseSeq`]) — the
-/// echo half of the same recogniser every reader's `LineEditor` runs, so
-/// screen and buffer agree about what the Delete key erased.
-struct EchoLine {
-    col: usize,
-    seq: EraseSeq,
+    /// This console's controlling (foreground) ownership
+    /// (`console_foreground`, `plans/DISPLAY.md` D5): the task that alone may
+    /// drain the input queue and change the line discipline, and the target
+    /// the cooked-mode input filter delivers `^C`/`^Z` to. The shared
+    /// [`crate::foreground::ForegroundOwnership`] the pseudo-terminal slave
+    /// also uses (one definition of the ownership rules); its lock-free
+    /// [`current`] read is what the UART RX interrupt handler calls, so the
+    /// filter never spins on a lock the interrupted task holds.
+    ///
+    /// [`current`]: crate::foreground::ForegroundOwnership::current
+    fg: crate::foreground::ForegroundOwnership,
 }
 
 impl ConsoleDevice {
@@ -621,15 +541,10 @@ impl ConsoleDevice {
             read,
             input,
             echo: AtomicBool::new(true),
-            line: SpinLock::new(EchoLine {
-                col: 0,
-                seq: EraseSeq::new(),
-            }),
+            line: SpinLock::new(tairix_tty::EchoLine::new()),
             secret: None,
             mode: AtomicU32::new(InputMode::Cooked.as_u32()),
-            foreground: AtomicU64::new(FOREGROUND_NONE),
-            granter: AtomicU64::new(FOREGROUND_NONE),
-            fg: SpinLock::new(()),
+            fg: crate::foreground::ForegroundOwnership::new(),
         }
     }
 
@@ -680,11 +595,7 @@ impl ConsoleDevice {
     pub fn set_input_mode(&self, mode: InputMode) {
         self.echo.store(mode.echoes(), Ordering::Relaxed);
         self.mode.store(mode.as_u32(), Ordering::Relaxed);
-        {
-            let mut line = self.line.lock();
-            line.col = 0;
-            line.seq = EraseSeq::new();
-        }
+        self.line.lock().reset();
         if let Some(secret) = self.secret {
             if mode == InputMode::Secret {
                 secret.arm();
@@ -722,17 +633,7 @@ impl ConsoleDevice {
     /// [`Errno::NotForeground`] when another task's ownership is in place
     /// and `caller` is neither its granter nor the owner.
     pub fn grant_foreground(&self, caller: TaskId, owner: TaskId) -> Result<(), Errno> {
-        let _guard = self.fg.lock();
-        let current = self.foreground.load(Ordering::Acquire);
-        let permitted = current == FOREGROUND_NONE
-            || current == caller.0
-            || self.granter.load(Ordering::Acquire) == caller.0;
-        if !permitted {
-            return Err(Errno::NotForeground);
-        }
-        self.granter.store(caller.0, Ordering::Release);
-        self.foreground.store(owner.0, Ordering::Release);
-        Ok(())
+        self.fg.grant(caller, owner)
     }
 
     /// Release this console's foreground ownership (the granting shell back
@@ -750,17 +651,7 @@ impl ConsoleDevice {
     /// [`Errno::NotForeground`] when another task's ownership is in place
     /// and `caller` is neither its granter nor the owner.
     pub fn release_foreground(&self, caller: TaskId) -> Result<(), Errno> {
-        let _guard = self.fg.lock();
-        let current = self.foreground.load(Ordering::Acquire);
-        if current == FOREGROUND_NONE {
-            return Ok(());
-        }
-        if current != caller.0 && self.granter.load(Ordering::Acquire) != caller.0 {
-            return Err(Errno::NotForeground);
-        }
-        self.foreground.store(FOREGROUND_NONE, Ordering::Release);
-        self.granter.store(FOREGROUND_NONE, Ordering::Release);
-        Ok(())
+        self.fg.release(caller)
     }
 
     /// Clear the foreground slot if `dead` is its recorded owner.
@@ -772,43 +663,37 @@ impl ConsoleDevice {
     /// never displace a live one. A slot naming any other task is left
     /// untouched (idempotent).
     pub fn clear_dead_foreground(&self, dead: TaskId) {
-        let _guard = self.fg.lock();
-        if self.foreground.load(Ordering::Acquire) == dead.0 {
-            self.foreground.store(FOREGROUND_NONE, Ordering::Release);
-            self.granter.store(FOREGROUND_NONE, Ordering::Release);
-        }
+        self.fg.clear_dead(dead);
     }
 
     /// This console's current controlling (foreground) owner, if any.
     #[must_use]
     pub fn foreground(&self) -> Option<TaskId> {
-        match self.foreground.load(Ordering::Acquire) {
-            FOREGROUND_NONE => None,
-            raw => Some(TaskId(raw)),
-        }
+        self.fg.current()
+    }
+
+    /// This console's shared controlling-ownership object, so the one
+    /// foreground-owner gate the console and the pseudo-terminal share can
+    /// operate on either terminal through a single definition.
+    #[must_use]
+    pub fn foreground_ownership(&self) -> &crate::foreground::ForegroundOwnership {
+        &self.fg
     }
 
     /// Echo `bytes` (the bytes a `stream_read` just consumed) back to the
     /// console output when echo is enabled, so an interactive user sees
     /// what they type (terminal local echo).
     ///
-    /// A carriage return or line feed is echoed as the CR-LF pair so the
-    /// cursor both returns to column zero *and* advances a line — a bare
-    /// CR (what a serial terminal sends for the Return key) would
-    /// otherwise overwrite the current line. An **erase** (rub-out) — the
-    /// single-byte Backspace/Delete ([`control::is_line_erase`]) or the
-    /// Delete key's `CSI 3 ~` escape sequence (the shared [`EraseSeq`]
-    /// recogniser, so a Delete keypress never paints raw escape glyphs) —
-    /// is *not* echoed verbatim; instead it rubs out the previous character
-    /// with the `BS SP BS` [`control::ERASE_ECHO`] sequence, but only while
-    /// a character on the current input line remains to erase (the
-    /// per-console line-state column). An erase at the start of the line
-    /// is a no-op, so it never walks the cursor back over the prompt. This
-    /// is the echo half of the read line discipline; the reader's line
-    /// buffer (`tairix_vt::line::LineEditor`) applies the matching erase to
-    /// the bytes it keeps (`plans/PI.md` P11). Echo is part of the kernel's
-    /// read line discipline, so it does not require the reader to also hold
-    /// `CAP_CONSOLE_WRITE`.
+    /// The cooking itself — `CR`/`LF` echoed as the `CR LF` pair, the
+    /// Backspace/Delete single-byte and `CSI 3 ~` rub-out bounded by the
+    /// current input column — is the shared [`tairix_tty::EchoLine`]
+    /// discipline, the one definition the pseudo-terminal slave also runs;
+    /// this method only supplies the enable gate, the per-console line lock,
+    /// and the device sink. The line state persists across calls because the
+    /// reader drains the console a byte (or a few) at a time, so one logical
+    /// input line — and one split Delete sequence — spans many `echo_bytes`
+    /// calls. Echo is part of the kernel's read line discipline, so it does
+    /// not require the reader to also hold `CAP_CONSOLE_WRITE`.
     ///
     /// Echo is purely cosmetic, so it is **best-effort**: a short write or
     /// a device error is swallowed rather than failing the read the user
@@ -819,50 +704,8 @@ impl ConsoleDevice {
         if !self.echo_enabled() {
             return;
         }
-        // The line state persists across calls because the reader drains
-        // the console a byte (or a few) at a time: one logical input line —
-        // and one Delete escape sequence — spans many `echo_bytes` calls,
-        // so the rub-out bound and the held sequence prefix are carried in
-        // the console, not recomputed per call.
         let mut line = self.line.lock();
-        // Batch consecutive printable bytes into one device write (fewer
-        // device round-trips); flush the pending run when a control needs
-        // separate handling. The run buffer also carries a released
-        // sequence prefix, which is not contiguous with `bytes`.
-        let mut run = [0u8; 64];
-        let mut run_len = 0usize;
-        for &byte in bytes {
-            let step = line.seq.feed(byte);
-            if step.erase() {
-                flush_run(self.write, &run, &mut run_len);
-                if line.col > 0 {
-                    write_best_effort(self.write, &control::ERASE_ECHO);
-                    line.col -= 1;
-                }
-                continue;
-            }
-            for &literal in step.literal() {
-                if literal == control::CR || literal == control::LF {
-                    flush_run(self.write, &run, &mut run_len);
-                    write_best_effort(self.write, b"\r\n");
-                    line.col = 0;
-                } else if control::is_line_erase(literal) {
-                    flush_run(self.write, &run, &mut run_len);
-                    if line.col > 0 {
-                        write_best_effort(self.write, &control::ERASE_ECHO);
-                        line.col -= 1;
-                    }
-                } else {
-                    if run_len == run.len() {
-                        flush_run(self.write, &run, &mut run_len);
-                    }
-                    run[run_len] = literal;
-                    run_len += 1;
-                    line.col += 1;
-                }
-            }
-        }
-        flush_run(self.write, &run, &mut run_len);
+        line.echo(bytes, |echoed| write_best_effort(self.write, echoed));
     }
 
     /// Write program `bytes` to the console output, cooking output line
@@ -897,19 +740,11 @@ impl ConsoleDevice {
     }
 }
 
-/// The `^C` interrupt byte (ETX) the cooked line discipline maps to
-/// [`Signal::Interrupt`] while a foreground job is set.
-const INTERRUPT_BYTE: u8 = 0x03;
-
-/// The `^Z` stop byte (SUB) the cooked line discipline maps to
-/// [`Signal::Stop`] while a foreground job is set.
-const STOP_BYTE: u8 = 0x1A;
-
 impl ConsoleInput for ConsoleDevice {
     /// Push produced input through this console's line discipline
     /// (`plans/SPAWN.md` SP9): in the **cooked** mode, with a foreground
     /// job set and the delivery producer installed, `^C`/`^Z` are consumed
-    /// and queued as [`Signal::Interrupt`]/[`Signal::Stop`] for the
+    /// and queued as [`tairix_abi::Signal::Interrupt`]/[`tairix_abi::Signal::Stop`] for the
     /// foreground task; every other byte — and every byte in the raw or
     /// secret modes, or with no foreground — flows to the underlying input
     /// sink unchanged. Every input producer (a UART RX handler, the seat
@@ -939,12 +774,26 @@ impl ConsoleInput for ConsoleDevice {
         let mut accepted = 0usize;
         let mut rest = bytes;
         while !rest.is_empty() {
-            let ctl = rest
-                .iter()
-                .position(|&b| b == INTERRUPT_BYTE || b == STOP_BYTE);
-            let run = ctl.unwrap_or(rest.len());
-            if run > 0 {
-                // Forward the verbatim run ahead of the next control byte.
+            // The shared discipline classifies the leading byte; the kernel
+            // owns the policy (only here, in cooked mode with a foreground
+            // job) and the delivery (queue the signal, nudge the dispatcher).
+            if let Some(signal) = tairix_tty::job_control_signal(rest[0]) {
+                // Consume the job-control byte and queue the signal for
+                // the foreground task instead of buffering it.
+                crate::procsignal::queue_foreground_signal(target, signal);
+                // Nudge the dispatch loop out of its idle park so the
+                // deferred delivery drain runs promptly even with every
+                // task parked.
+                crate::waitq::console_wake();
+                accepted += 1;
+                rest = &rest[1..];
+            } else {
+                // Forward the verbatim run up to the next control byte
+                // (at least `rest[0]`, so progress is guaranteed).
+                let run = rest
+                    .iter()
+                    .position(|&b| tairix_tty::job_control_signal(b).is_some())
+                    .unwrap_or(rest.len());
                 match self.input.push(&rest[..run]) {
                     Ok(pushed) => {
                         accepted += pushed;
@@ -954,59 +803,29 @@ impl ConsoleInput for ConsoleDevice {
                             return Ok(accepted);
                         }
                     }
-                    // An inner error with bytes already accepted is a short
-                    // push; with nothing accepted it propagates unchanged.
+                    // An inner error with bytes already accepted is a
+                    // short push; with nothing accepted it propagates.
                     Err(err) if accepted == 0 => return Err(err),
                     Err(_) => return Ok(accepted),
                 }
                 rest = &rest[run..];
-                continue;
             }
-            // `rest[0]` is a job-control byte: consume it and queue the
-            // signal for the foreground task instead of buffering it.
-            let signal = if rest[0] == INTERRUPT_BYTE {
-                Signal::Interrupt
-            } else {
-                Signal::Stop
-            };
-            crate::procsignal::queue_foreground_signal(target, signal);
-            // Nudge the dispatch loop out of its idle park so the deferred
-            // delivery drain runs promptly even with every task parked.
-            crate::waitq::console_wake();
-            accepted += 1;
-            rest = &rest[1..];
         }
         Ok(accepted)
     }
 }
 
-/// Write the accumulated printable run (if any) and reset its length.
-/// Best-effort, for the echo half.
-fn flush_run(write: &dyn ConsoleWrite, run: &[u8], run_len: &mut usize) {
-    if *run_len > 0 {
-        write_best_effort(write, &run[..*run_len]);
-        *run_len = 0;
-    }
-}
-
-/// Write every byte of `bytes` to the console output, looping over short
-/// writes and stopping on a closed/erroring device (never spin). Returns
-/// whether every byte reached the device.
-fn write_all_bytes<W: ConsoleWrite + ?Sized>(write: &W, mut bytes: &[u8]) -> bool {
+/// Write every byte of `bytes` to the console output, best-effort: echo and
+/// secret feedback are cosmetic, so a short write or device error is
+/// swallowed rather than failing the read the user asked for. Loops over
+/// short writes and stops on a closed/erroring device (never spin).
+fn write_best_effort(write: &dyn ConsoleWrite, mut bytes: &[u8]) {
     while !bytes.is_empty() {
         match write.write(bytes) {
-            Ok(0) | Err(_) => return false,
+            Ok(0) | Err(_) => return,
             Ok(n) => bytes = &bytes[n.min(bytes.len())..],
         }
     }
-    true
-}
-
-/// Write every byte of `bytes` to the console output, best-effort: echo and
-/// secret feedback are cosmetic, so a short write or device error is
-/// swallowed rather than failing the read the user asked for.
-fn write_best_effort(write: &dyn ConsoleWrite, bytes: &[u8]) {
-    let _ = write_all_bytes(write, bytes);
 }
 
 /// The secret-entry activity feedback of one console: the kernel-side host
@@ -1392,6 +1211,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tairix_abi::Signal;
+
     use super::*;
 
     #[test]

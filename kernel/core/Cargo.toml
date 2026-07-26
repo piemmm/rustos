@@ -103,6 +103,12 @@ tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
+# The single tty line discipline (`AGENTS.md` §2.2, `plans/PTY.md`): the
+# console device (`src/console.rs`) cooks output (`ONLCR`), echoes input, and
+# classifies cooked-mode `^C`/`^Z` through `tairix_tty` — the one definition
+# the coming pseudo-terminal slave shares — rather than a second copy of the
+# discipline.
+tairix-tty = { path = "../../lib/tty", version = "=0.0.0" }
 # The single boot-time system-configuration store engine (`AGENTS.md` §2.2):
 # the `cache_control` module reuses `tairix_sysconfig::{CacheClass, CacheMode}`
 # (the closed cache-switch vocabulary) so the kernel's live cache-admission

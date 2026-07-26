@@ -27,11 +27,25 @@
 //!    (delivery 5), `Focus { focused: true }` to the terminal (6), and
 //!    the activating `Pressed` (7) — the gate after which the runner
 //!    types the shell command.
-//! 6. The typed [`TERMINAL_COMMAND`] (five characters, Enter last) is
-//!    deliveries 8–17: the session delivers both edges of every key to
-//!    the focused terminal, one `Key` event per edge. The Enter *press*
-//!    — the edge that makes the terminal write the completed line to
-//!    the shell — is delivery 16.
+//! 6. The typed [`TERMINAL_COMMAND`] (`sleep 3600` + Enter, eleven keys)
+//!    is deliveries 8–29, one `Key` event per edge. Its Enter *press*
+//!    (delivery 28) makes the terminal write the line to the shell, which
+//!    spawns the blocking foreground `sleep` — the round-trip witness
+//!    ([`TERMINAL_ROUND_TRIP_DELIVERIES`]).
+//! 7. The pty job-control (`Ctrl-C`) witness (`plans/PTY.md`): once the
+//!    guest sees the `sleep` spawn it emits [`CTRL_C_ARM_MARKER`], gating
+//!    the runner's [`TERMINAL_CTRL_C_RECOVERY`] step — a `Ctrl-C`
+//!    (deliveries 30–31, which the terminal encodes as the `0x03`
+//!    interrupt byte) whose cooked-mode line discipline signals the
+//!    foreground `sleep` dead, then `true` + Enter (deliveries 32–41).
+//!    Because the shell is parked in `wait` on `sleep` until it dies, the
+//!    recovered `true` spawn (Enter press, delivery 40, at or beyond
+//!    [`CTRL_C_RECOVERY_DELIVERIES`]) is reachable **only** if `Ctrl-C`
+//!    interrupted `sleep`: keyboard → session → terminal → pty cooked
+//!    `^C` → foreground signal → job death → shell recovery, every hop
+//!    kernel-attested. A failed interrupt leaves `sleep` blocking past the
+//!    run budget, so the witness never latches and the run times out
+//!    (fail loud).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -88,40 +102,76 @@ pub const TERMINAL_WINDOW_FRAME_MAPS: u32 = 3;
 pub const TERMINAL_TYPE_DELIVERIES: u32 = 7;
 
 /// The command the runner types into the focused terminal: a real store
-/// bundle the shell resolves and spawns. `true` is the smallest such
-/// program — it starts, does nothing, and exits `0` — so the spawn is
-/// the whole observable effect.
-pub const TERMINAL_COMMAND: &str = "true\n";
+/// bundle the shell resolves and spawns as a **blocking foreground job**.
+/// `sleep 3600` parks off-CPU far past the run budget, so its spawn is the
+/// round-trip witness *and* it stays alive as the foreground job the
+/// [`TERMINAL_CTRL_C_RECOVERY`] step then interrupts — proving the pty
+/// cooked-mode `Ctrl-C` line discipline end to end (`plans/PTY.md`).
+pub const TERMINAL_COMMAND: &str = "sleep 3600\n";
 
 /// Deliveries at (or beyond) which a kernel `ProcessSpawned` audit
 /// record witnesses the shell round trip — the guest PASS gate. The
-/// Enter **press** is delivery 16 (7 from [`TERMINAL_TYPE_DELIVERIES`]
-/// plus both edges of `t`/`r`/`u`/`e` and the Enter press), and only
+/// [`TERMINAL_COMMAND`] Enter **press** is delivery 28 (7 from
+/// [`TERMINAL_TYPE_DELIVERIES`] plus both edges of the eleven
+/// `sleep 3600` + Enter keys, the Enter press being the 21st), and only
 /// that press makes the terminal write the completed command line to
-/// the shell's pipe. Every other spawn in the image (services, login,
-/// the session, the two menu-launched apps, the terminal's own shell)
-/// happens strictly before the typing gate, so a spawn observed with
-/// the delivery counter at 16 or more can only be the shell executing
-/// the typed command: keyboard → session → terminal → pipe → shell →
-/// `spawn`, every hop kernel-attested.
-pub const TERMINAL_ROUND_TRIP_DELIVERIES: u32 = 16;
+/// the shell over the pty master. Every other spawn in the image
+/// (services, login, the session, the two menu-launched apps, the
+/// terminal's own shell) happens strictly before the typing gate, so a
+/// spawn observed with the delivery counter at 28 or more can only be
+/// the shell executing the typed command: keyboard → session → terminal
+/// → pty → shell → `spawn`, every hop kernel-attested.
+pub const TERMINAL_ROUND_TRIP_DELIVERIES: u32 = 28;
+
+/// The follow-on the runner types once the `sleep` spawn has latched (the
+/// [`CTRL_C_ARM_MARKER`] gate): a `Ctrl-C` (the `\u{3}` ETX byte the
+/// runner injects as the QEMU `ctrl-c` chord, which the terminal encodes
+/// through the shared `lib/keymap` rule as the `0x03` interrupt byte) then
+/// `true` + Enter. The `Ctrl-C` drives the pty cooked-mode line discipline
+/// to signal the foreground `sleep` dead; the shell, unblocked from its
+/// `wait`, then reads and spawns `true`. Modifier edges emit no key
+/// record, so the chord contributes exactly the `c` press/release pair —
+/// two deliveries — keeping the counts exact.
+pub const TERMINAL_CTRL_C_RECOVERY: &str = "\u{3}true\n";
+
+/// Deliveries at (or beyond) which a kernel `ProcessSpawned` audit record
+/// witnesses the **pty `Ctrl-C` job-control round trip** — the recovered
+/// `true` the shell spawns only after `Ctrl-C` interrupted the foreground
+/// `sleep`. The recovery Enter **press** is delivery 40 (28 for the
+/// `sleep` command, +2 for the `Ctrl-C` chord's `c` edges, +10 for both
+/// edges of `t`/`r`/`u`/`e`/Enter, the Enter press being the 12th of
+/// those). The shell is parked in `wait` on `sleep` until it dies, so no
+/// spawn can reach this count unless `Ctrl-C` killed `sleep`; a failed
+/// interrupt leaves `sleep` blocking and the run times out (fail loud).
+pub const CTRL_C_RECOVERY_DELIVERIES: u32 = 40;
+
+/// The deterministic serial marker the guest kernel emits once it has
+/// witnessed the foreground `sleep` spawn (the [`TERMINAL_COMMAND`] round
+/// trip), so the host runner injects [`TERMINAL_CTRL_C_RECOVERY`] in a
+/// later wake — strictly after `sleep` is the live, parked foreground job.
+/// Mirrors the FM9-b/FM11 marker handshakes: a guest-observed readiness
+/// point the script cannot otherwise time.
+pub const CTRL_C_ARM_MARKER: &str = "PTY ctrl-c armed";
 
 // --- FM9-a: the file-manager New-Folder + inline-rename stage
 // (`plans/NEW-FILEMANAGER.md` FM9-a), appended after the AW4 terminal
 // round trip. The same window-event delivery counter is the sequencing
-// clock: after the terminal command's five keys (both edges) the counter
-// stands at [`FM9_TYPING_DONE_DELIVERIES`], and each appended input action
+// clock: after the terminal stage (the `sleep` round trip, the `Ctrl-C`
+// interrupt, and the recovered `true`) the counter stands at
+// [`FM9_TYPING_DONE_DELIVERIES`], and each appended input action
 // advances it deterministically (a focus-changing click delivers three
 // events — the old window's unfocus, the new window's focus, and the
 // press — a click on the already-focused window delivers one press, and a
 // typed key delivers both of its edges). The guest applies the injected
 // events strictly in order, so these counts are exact, not racy.
 
-/// The delivery counter once the terminal command has been fully typed:
-/// [`TERMINAL_TYPE_DELIVERIES`] (7) plus both edges of the five
-/// [`TERMINAL_COMMAND`] keys (`t r u e` + Enter = 10) — the base the
+/// The delivery counter once the terminal stage has fully run: the
+/// [`TERMINAL_COMMAND`] round trip (`sleep 3600` + Enter, ending the
+/// counter at 29) followed by the [`TERMINAL_CTRL_C_RECOVERY`] step (the
+/// `Ctrl-C` chord's two `c` edges, then `true` + Enter — twelve more
+/// deliveries), i.e. [`TERMINAL_TYPE_DELIVERIES`] (7) + 34 — the base the
 /// file-manager stage's gates are measured from.
-pub const FM9_TYPING_DONE_DELIVERIES: u32 = 17;
+pub const FM9_TYPING_DONE_DELIVERIES: u32 = 41;
 
 /// Gate for the click that refocuses the files window **and** selects the
 /// **`Users`** row in one action — the first file-manager click, fired once

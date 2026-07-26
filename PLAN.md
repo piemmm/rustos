@@ -3136,8 +3136,19 @@ Shipped (headless-testable, model + renderer over injected seams):
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).
 - Two default apps (filesystem browser, terminal emulator) — each a
   host-tested model + renderer plus a live store bundle served over the
-  window channel (`plans/APPWIN.md` AW3/AW4; the terminal hosts the user's
-  shell over pipes and the AW4 `Stream` wait source).
+  window channel (`plans/APPWIN.md` AW3/AW4; the AW4 `Stream` wait source).
+  The terminal forwards the logged-in user's environment to the shell (so the
+  prompt shows the real user, `tairix_terminal::spawned::shell_env`) and hosts
+  the shell over a proper **pseudo-terminal** — a real tty line discipline
+  (echo, cooked line editing, `ONLCR`, `Ctrl-C`/`Ctrl-Z` job control,
+  queryable window size) so the shell runs as it does on the hardware console
+  (`plans/PTY.md`). PTY0–PTY4 code is landed: the shared `lib/tty` discipline
+  the console is rewritten onto, the kernel `Pty` object + shared
+  `ForegroundOwnership`, the unprivileged `pty_create` ABI (no. 97) with its
+  `OpenBacking::PtyMaster/PtySlave` backings + shared parked read/write loop +
+  pty-slave `stream_input_mode`/`terminal_size`/`console_foreground`, and the
+  terminal rewritten onto one pty. The PTY4 QEMU vertical extension
+  (echo/`ONLCR`/`Ctrl-C` witnesses) is the one remaining item.
 - `kernel/ipc::PortRegistry` named-port registry composed into `KernelState`;
   `ipc_send`/`ipc_recv` resolve endpoints against it. User space resolves a
   published `PortName` to its endpoint through the unprivileged
