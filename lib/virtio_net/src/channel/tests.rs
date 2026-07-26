@@ -54,7 +54,8 @@ impl Net for LoopbackNet {
             match rings.tx.pop(&mut frame) {
                 Ok(Some(len)) => {
                     report.transmitted += 1;
-                    match rings.rx.push(&frame[..len]) {
+                    let rx0 = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
+                    match rx0.push(&frame[..len]) {
                         Ok(()) => report.received += 1,
                         Err(Errno::NoSpace) => {
                             report.rx_ring_full = true;
@@ -76,7 +77,7 @@ impl Net for LoopbackNet {
 /// derives it from the facts reply.
 fn geometry() -> RingGeometry {
     let cap = MTU + ETHERNET_HEADER_LEN;
-    RingGeometry::new(8, cap, cap).expect("valid geometry")
+    RingGeometry::new(8, cap, cap, 1).expect("valid geometry")
 }
 
 fn attach_params(geometry: RingGeometry) -> AttachParams {
@@ -141,7 +142,7 @@ fn attach_stores_state_and_service_round_trips_a_frame() {
     // The frame looped back onto RX.
     let mut rings = FrameRings::bind(&mut region, geom, BufferClass::NonSensitive).expect("bind");
     let mut out = [0u8; 2048];
-    assert_eq!(rings.rx.pop(&mut out), Ok(Some(64)));
+    assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut out), Ok(Some(64)));
     assert_eq!(&out[..64], &[0xAB; 64]);
 }
 
@@ -149,7 +150,7 @@ fn attach_stores_state_and_service_round_trips_a_frame() {
 fn attach_rejects_a_geometry_too_small_for_the_device() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
     // A ring whose slots cannot carry the device's full frame (MTU+header).
-    let small = RingGeometry::new(8, MTU, MTU).expect("valid but too small");
+    let small = RingGeometry::new(8, MTU, MTU, 1).expect("valid but too small");
     assert_eq!(
         decode_status_reply(&server.attach(attach_params(small))),
         Err(Errno::OutOfRange)

@@ -1265,11 +1265,51 @@ the whole is too large for one change and each leaves the tree working.
   virtio-net offers `MRG_RXBUF` (its default); the host reassembly tests
   are the authoritative multi-buffer proof (the N7a/N7b precedent).
 
-#### N7c-2 — multiqueue receive (`VIRTIO_NET_F_MQ` / RSS) `[ ]`
-- Multiqueue receive plumbed where the device offers it: per-queue frame
-  rings, the virtio control-queue (`VIRTIO_NET_CTRL_MQ`) to set the queue
-  pair count, and receive steering. `DeviceFacts.rx_queues` already
-  carries the count. Landed only when a real second consumer needs it.
+#### N7c-2 — multiqueue receive (`VIRTIO_NET_F_MQ` / RSS) `[x]`
+- **The transport carries one receive ring per device receive queue.**
+  `RingGeometry` gained `rx_queues` (bounded by `MAX_RX_QUEUES` = 8, a
+  pinned-memory resource bound), so a region is `rx_queues` receive rings
+  followed by one transmit ring; `FrameRings` exposes `rx_queues()` /
+  `rx_ring(i)` accessors (no-alloc fixed array, fail-closed on a bad
+  index) in place of the old single `rx` field. `for_device` derives the
+  count from `DeviceFacts.rx_queues` clamped to the ceiling; the
+  `net_channel` Attach wire carries it. Transmit stays a single queue —
+  the stack serialises its own egress, so a second transmit ring would be
+  pinned memory without a consumer (§2.4).
+- **`lib/virtio_net` enables and services N receive queues.** It
+  negotiates `VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ` when both are
+  offered and the device advertises more than one pair, reads
+  `max_virtqueue_pairs` from device config, brings up one receive + one
+  transmit virtqueue per enabled pair (the idle transmit queues are held
+  alive to satisfy the virtio "configure before enable" rule), sets up the
+  control virtqueue, and issues `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` after
+  `DRIVER_OK`. Each receive queue is an `RxQueue` owning its own buffer
+  pool + reassembly buffer + back-pressure `pending`; `service` harvests
+  every queue into its matching shared receive ring, so a busy link's
+  receive work is spread rather than serialised. `device_facts.rx_queues`
+  reports the enabled count. The single-queue path (one `RxQueue` at index
+  0) is unchanged behaviourally.
+- **Host-tested end to end.** `multiqueue_enables_queues_and_steers_receive_per_queue`
+  drives a real two-pair mock device: the driver negotiates MQ, completes
+  the control-queue pair-count handshake (via a new QEMU-accurate
+  `MockTransport::set_synchronous_notify` seam — a notify processes the
+  queue inline, as a real vmexit does), reports `rx_queues == 2`, and each
+  queue's frame lands in its own ring (queue 0 → ring 0, queue 1 → ring
+  1). The ABI multi-ring geometry/accessor + fail-closed index checks are
+  unit-tested in `net_ring`. The existing 39 driver tests and 336 netstack
+  tests pass unchanged over the multi-RX API.
+- **No live QEMU vertical is possible with the current harness — a
+  backend limitation, not deferred work.** The net verticals use
+  `-netdev dgram` (a unix-socket backend); QEMU multiqueue needs a netdev
+  with `queues=N`, which `dgram` rejects, and `virtio-net-device,mq=on`
+  over a one-queue dgram peer advertises `max_virtqueue_pairs = 1`, so a
+  dgram-backed guest correctly stays single-queue. Only a `tap` netdev
+  offers `queues=N` (host root/networking the sandbox lacks). Per the
+  N7a/N7b/N7c-1 precedent, the host tests are the authoritative proof and
+  the live verticals exercise the wiring only when the backend offers the
+  feature; the multiqueue-capable driver runs safely single-queue on the
+  existing dgram verticals. A `tap`-backed multiqueue vertical is the
+  future consumer if the harness ever gains privileged networking.
 
 #### N7c-3 — measured budgets + per-arch offload matrix `[x]`
 - The engine's data-plane hot path is **allocation-free in steady state**,

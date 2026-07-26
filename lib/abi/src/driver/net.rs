@@ -299,8 +299,9 @@ mod tests {
         assert_eq!(no_queue.validate(), Err(Errno::OutOfRange));
     }
 
-    /// Test geometry: 4 slots of 128 bytes per ring (equal RX/TX).
-    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128, 128) {
+    /// Test geometry: 4 slots of 128 bytes per ring (equal RX/TX), one
+    /// receive queue.
+    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128, 128, 1) {
         Ok(g) => g,
         Err(_) => panic!("valid test geometry"),
     };
@@ -366,11 +367,12 @@ mod tests {
                     Err(_) => return Err(DriverError::BadMagic),
                 }
             }
-            // Loop the pending frames back through the RX ring.
+            // Loop the pending frames back through the (single) RX ring.
             let mut delivered = 0;
+            let rx0 = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
             for i in 0..self.pending_len {
                 let (frame, len) = &self.pending[i];
-                match rings.rx.push(&frame[..*len]) {
+                match rx0.push(&frame[..*len]) {
                     Ok(()) => {
                         report.received += 1;
                         delivered += 1;
@@ -404,9 +406,9 @@ mod tests {
         assert_eq!(report.received, 1);
         assert!(!report.rx_ring_full);
         let mut buf = [0u8; 128];
-        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(16)));
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut buf), Ok(Some(16)));
         assert_eq!(&buf[..16], &[0xAA; 16]);
-        assert_eq!(rings.rx.pop(&mut buf), Ok(None));
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut buf), Ok(None));
     }
 
     #[test]
@@ -422,7 +424,7 @@ mod tests {
         assert_eq!(report.transmitted, 1);
         assert_eq!(report.received, 1);
         let mut buf = [0u8; 128];
-        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut buf), Ok(Some(20)));
         assert_eq!(buf[0], 0x02);
     }
 
@@ -446,11 +448,11 @@ mod tests {
         // Drain and pump again: the fifth frame arrives, nothing lost.
         let mut buf = [0u8; 128];
         for _ in 0..4 {
-            assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+            assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut buf), Ok(Some(20)));
         }
         let report = n.service(&mut rings).expect("service");
         assert_eq!(report.received, 1);
-        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut buf), Ok(Some(20)));
         assert_eq!(buf[0], 0x44);
     }
 

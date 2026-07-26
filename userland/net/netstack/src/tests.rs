@@ -89,7 +89,7 @@ fn test_temp_factory() -> crate::iface::TempAddrFactory {
 }
 
 /// Ring geometry ample for the control-plane exchanges the tests run.
-const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514) {
+const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514, 1) {
     Ok(g) => g,
     Err(_) => panic!("valid test geometry"),
 };
@@ -160,7 +160,7 @@ impl Net for PeerNet {
         let mut out = StackOutput::default();
         self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
-            if rings.rx.push(&frame.bytes).is_ok() {
+            if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
                 report.received += 1;
             }
         }
@@ -172,7 +172,7 @@ impl Net for PeerNet {
                     self.stack
                         .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
-                        if rings.rx.push(&frame.bytes).is_ok() {
+                        if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
                             report.received += 1;
                         }
                     }
@@ -1815,7 +1815,8 @@ impl Net for EchoNet {
             match rings.tx.pop(&mut frame) {
                 Ok(Some(len)) => {
                     report.transmitted += 1;
-                    match rings.rx.push(&frame[..len]) {
+                    let rx0 = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
+                    match rx0.push(&frame[..len]) {
                         Ok(()) => report.received += 1,
                         Err(Errno::NoSpace) => {
                             report.rx_ring_full = true;
@@ -1917,7 +1918,7 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
         let mut rings =
             FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
         let mut out = vec![0u8; GEOMETRY.rx_slot_capacity() as usize];
-        assert_eq!(rings.rx.pop(&mut out), Ok(Some(128)));
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut out), Ok(Some(128)));
         assert_eq!(&out[..128], &[0xEE; 128]);
     }
 
@@ -2016,7 +2017,7 @@ impl PeerTcpNet {
                 .is_ok()
             {
                 for frame in &out.frames {
-                    if rings.rx.push(&frame.bytes).is_ok() {
+                    if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
                         report.received += 1;
                     }
                 }
@@ -2036,7 +2037,7 @@ impl Net for PeerTcpNet {
         let mut out = StackOutput::default();
         self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
-            if rings.rx.push(&frame.bytes).is_ok() {
+            if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
                 report.received += 1;
             }
         }
@@ -2048,7 +2049,7 @@ impl Net for PeerTcpNet {
                     self.stack
                         .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
-                        if rings.rx.push(&frame.bytes).is_ok() {
+                        if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
                             report.received += 1;
                         }
                     }

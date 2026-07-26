@@ -999,30 +999,37 @@ impl Netstack {
         let mut reported_link = fs.service()?.link;
 
         // Feed delivered frames through the engine; its replies join
-        // the TX ring. Bounded by the ring's slot count per pass — a
-        // hostile flood cannot pin this loop.
+        // the TX ring. A multiqueue device (`plans/NETWORK.md` N7c-2)
+        // steers received frames across several receive rings, so drain
+        // every one — the engine is a single stack, so all queues feed it
+        // and its replies share the one transmit ring. Bounded by each
+        // ring's slot count per pass, so a hostile flood cannot pin this
+        // loop.
         let mut replied = false;
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
-            loop {
-                let mut offload = FrameOffload::None;
-                match rings.rx.pop_with(&mut offload, scratch) {
-                    Ok(Some(len)) => {
-                        // Resolve the device's per-frame checksum offload:
-                        // complete a partial checksum in place, or report a
-                        // device-validated one so the engine can skip the
-                        // redundant fold. A bogus offset fails closed to the
-                        // software path (the engine then drops the frame).
-                        let rx = resolve_rx_offload(offload, &mut scratch[..len]);
-                        iface.stack.on_frame_meta(&scratch[..len], rx, now, out);
-                        events.append(&mut out.events);
-                        replied |= !out.frames.is_empty();
-                        queue_frames(&mut rings, &out.frames);
+            for q in 0..rings.rx_queues() {
+                loop {
+                    let mut offload = FrameOffload::None;
+                    let popped = rings.rx_ring(q)?.pop_with(&mut offload, scratch);
+                    match popped {
+                        Ok(Some(len)) => {
+                            // Resolve the device's per-frame checksum offload:
+                            // complete a partial checksum in place, or report a
+                            // device-validated one so the engine can skip the
+                            // redundant fold. A bogus offset fails closed to the
+                            // software path (the engine then drops the frame).
+                            let rx = resolve_rx_offload(offload, &mut scratch[..len]);
+                            iface.stack.on_frame_meta(&scratch[..len], rx, now, out);
+                            events.append(&mut out.events);
+                            replied |= !out.frames.is_empty();
+                            queue_frames(&mut rings, &out.frames);
+                        }
+                        Ok(None) => break,
+                        // A corrupt slot was consumed; skip it and go on.
+                        Err(Errno::LengthOutOfRange) => {}
+                        Err(err) => return Err(err),
                     }
-                    Ok(None) => break,
-                    // A corrupt slot was consumed; skip it and go on.
-                    Err(Errno::LengthOutOfRange) => {}
-                    Err(err) => return Err(err),
                 }
             }
         }

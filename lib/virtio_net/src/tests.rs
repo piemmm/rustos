@@ -202,7 +202,7 @@ fn arp_frame() -> Vec<u8> {
 /// a deliberately over-MTU frame *into* the ring so the driver-side
 /// drop policy is what the test exercises.
 fn test_geometry() -> RingGeometry {
-    RingGeometry::new(4, 2048, 2048).expect("test geometry")
+    RingGeometry::new(4, 2048, 2048, 1).expect("test geometry")
 }
 
 fn rings_region() -> Vec<u8> {
@@ -359,6 +359,104 @@ fn tagged_frame(tag: u8) -> Frame {
     f
 }
 
+/// Build a multiqueue virtio-net `MockTransport`: `pairs` receive/transmit
+/// queue pairs plus the control queue, `VIRTIO_NET_F_MQ | CTRL_VQ` offered,
+/// `max_virtqueue_pairs` planted in device config, and synchronous notify so
+/// the driver's inline control-queue handshake completes at open. Each
+/// receive queue gets its own frame source (`rx_sources[pair]`); the control
+/// queue acks every command `VIRTIO_NET_OK`.
+fn build_multiqueue_device(pairs: u16, rx_sources: Vec<RxQueue>) -> MockTransport {
+    assert_eq!(
+        rx_sources.len(),
+        pairs as usize,
+        "one source per receive queue"
+    );
+    let num_queues = pairs * wire::QUEUE_PAIR_STRIDE + 1;
+    let mut t = MockTransport::new(
+        num_queues,
+        8,
+        wire::VIRTIO_NET_F_MQ | wire::VIRTIO_NET_F_CTRL_VQ,
+        wire::CONFIG_MAX_VQ_PAIRS_OFFSET + 2,
+    );
+    t.set_config(0, &DEVICE_MAC);
+    t.set_config(wire::CONFIG_MAX_VQ_PAIRS_OFFSET, &pairs.to_le_bytes());
+    // The driver polls the control-queue completion inline at open, so the
+    // device must process that notify synchronously, as a real vmexit does.
+    t.set_synchronous_notify(true);
+    for (pair, source) in (0u16..).zip(rx_sources) {
+        let rx_index = wire::RX_QUEUE + pair * wire::QUEUE_PAIR_STRIDE;
+        t.install_shim(
+            rx_index,
+            Box::new(move |chain: &mut ChainView<'_>| {
+                single_buffer_rx(chain, &source, wire::HEADER_LEN, |_| {})
+            }),
+        );
+    }
+    let ctrl_index = pairs * wire::QUEUE_PAIR_STRIDE;
+    t.install_shim(
+        ctrl_index,
+        Box::new(|chain: &mut ChainView<'_>| {
+            // Acknowledge the CTRL_MQ command: write VIRTIO_NET_OK into the
+            // device-write ack byte.
+            let Some(ack) = chain.device_write.first_mut() else {
+                return Err(VirtioError::DeviceFault);
+            };
+            if ack.is_empty() {
+                return Err(VirtioError::DeviceFault);
+            }
+            ack[0] = wire::VIRTIO_NET_OK;
+            Ok(1)
+        }),
+    );
+    t
+}
+
+#[test]
+fn multiqueue_enables_queues_and_steers_receive_per_queue() {
+    // A two-pair device: the driver negotiates VIRTIO_NET_F_MQ, selects two
+    // queue pairs through the control queue, and reports two receive queues.
+    let src0: RxQueue = Rc::new(RefCell::new(VecDeque::new()));
+    let src1: RxQueue = Rc::new(RefCell::new(VecDeque::new()));
+    let frame0 = tagged_frame(0xA0);
+    let frame1 = tagged_frame(0xB1);
+    src0.borrow_mut().push_back(frame0.clone());
+    src1.borrow_mut().push_back(frame1.clone());
+    let t = build_multiqueue_device(2, vec![Rc::clone(&src0), Rc::clone(&src1)]);
+    // The frames are delivered into the posted buffers by the synchronous
+    // notify at open; a plain non-waiting host suffices.
+    let mut net = open_net_no_wait(t);
+    assert_eq!(net.device_facts().expect("facts").rx_queues, 2);
+
+    // Two receive rings, sized for the device, one transmit ring.
+    let geom = RingGeometry::new(4, 2048, 2048, 2).expect("geometry");
+    let mut region = vec![0u8; geom.region_len()];
+    let mut rings = FrameRings::bind(&mut region, geom, BufferClass::NonSensitive).expect("bind");
+    assert_eq!(rings.rx_queues(), 2);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(
+        report.received, 2,
+        "one frame harvested from each receive queue"
+    );
+
+    // Each queue's frame lands in its own ring: queue 0 → ring 0, queue 1 →
+    // ring 1. The device steered them; the driver kept them apart.
+    let mut buf = vec![0u8; 2048];
+    let n0 = rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop(&mut buf)
+        .expect("pop")
+        .expect("frame");
+    assert_eq!(&buf[..n0], frame0.as_slice());
+    let n1 = rings
+        .rx_ring(1)
+        .expect("rx1")
+        .pop(&mut buf)
+        .expect("pop")
+        .expect("frame");
+    assert_eq!(&buf[..n1], frame1.as_slice());
+}
+
 /// Regression (D11): a burst of frames queued before a single `service`
 /// all egress in that one call, without waiting for any device completion
 /// in between. The device is never driven here (no `drain_queue`) and the
@@ -464,7 +562,12 @@ fn service_delivers_a_queued_frame_into_the_rx_ring() {
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
-    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+    let n = rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop(&mut buf)
+        .expect("pop")
+        .expect("frame");
     assert_eq!(n, payload.len());
     assert_eq!(&buf[..n], payload.as_slice());
 }
@@ -520,7 +623,12 @@ fn sensitive_class_round_trip_scrubs_staging() {
     let report = net.service(&mut rings).expect("service rx");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
-    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+    let n = rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop(&mut buf)
+        .expect("pop")
+        .expect("frame");
     assert_eq!(&buf[..n], rx_frame.as_slice());
 }
 
@@ -554,7 +662,13 @@ fn steady_state_traffic_allocates_no_new_dma() {
         deliver_rx(&mut net);
         let report = net.service(&mut rings).expect("service rx");
         assert_eq!(report.received, 1);
-        while rings.rx.pop(&mut buf).expect("pop").is_some() {}
+        while rings
+            .rx_ring(0)
+            .expect("rx0")
+            .pop(&mut buf)
+            .expect("pop")
+            .is_some()
+        {}
     }
     assert_eq!(tx_log.borrow().len(), 8);
     assert_eq!(
@@ -631,7 +745,8 @@ fn deliver_and_pop_offload(
     let mut buf = vec![0u8; 2048];
     let mut offload = FrameOffload::None;
     let n = rings
-        .rx
+        .rx_ring(0)
+        .expect("rx0")
         .pop_with(&mut offload, &mut buf)
         .expect("pop")
         .expect("frame");
@@ -1006,7 +1121,12 @@ fn deliver_merged(net: &mut VirtioNet<'static, MockTransport>) -> Option<Vec<u8>
     }
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
-    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+    let n = rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop(&mut buf)
+        .expect("pop")
+        .expect("frame");
     Some(buf[..n].to_vec())
 }
 
@@ -1096,7 +1216,7 @@ fn receive_pool_captures_a_burst_in_one_service() {
     // services the ring — the single-outstanding-buffer predecessor could
     // hold only one. A wider ring lets the whole burst land in one call.
     let slots = u32::try_from(RX_POOL).expect("pool fits u32");
-    let geometry = RingGeometry::new(slots, 2048, 2048).expect("geometry");
+    let geometry = RingGeometry::new(slots, 2048, 2048, 1).expect("geometry");
     let (t, _tx, rx_queue) = build_device();
     let mut net = open_net(t);
     let frames: Vec<Frame> = (0..RX_POOL)
@@ -1116,7 +1236,12 @@ fn receive_pool_captures_a_burst_in_one_service() {
     );
     let mut buf = vec![0u8; 2048];
     for expected in &frames {
-        let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
+        let n = rings
+            .rx_ring(0)
+            .expect("rx0")
+            .pop(&mut buf)
+            .expect("pop")
+            .expect("frame");
         assert_eq!(&buf[..n], expected.as_slice());
     }
 }

@@ -114,7 +114,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`) |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -192,6 +192,38 @@ exceed one link frame drops the frame (never a fabricated one, never an
 out-of-bounds access) and the driver keeps flowing. Buffers are re-posted
 to the device once their frame is delivered, and scrubbed first when the
 ring class is sensitive (`plans/NETWORK.md` N7c).
+
+### Multiqueue receive (`VIRTIO_NET_F_MQ`)
+
+When the device offers both `VIRTIO_NET_F_MQ` and `VIRTIO_NET_F_CTRL_VQ`
+and advertises more than one queue pair, the driver enables multiqueue
+receive: it reads `max_virtqueue_pairs` from device config, brings up one
+receive + one transmit virtqueue per enabled pair (bounded by the
+transport's `MAX_RX_QUEUES` = 8), sets up the control virtqueue, and
+issues `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` after `DRIVER_OK` to select the
+pair count. The shared frame region then carries one receive ring per
+enabled queue (`RingGeometry::rx_queues`, `FrameRings::rx_ring(i)`)
+followed by a single transmit ring — the stack serialises its own egress,
+so transmit stays one queue. The device steers each received frame into
+one of its receive queues; `service` harvests every queue into its own
+receive ring, and `netstack` drains all of them into its single stack, so
+a busy link's receive work is spread rather than serialised behind one
+queue. Each queue owns an independent buffer pool + reassembly buffer, so
+queues never share device-visible memory; the idle transmit queues of the
+enabled pairs are configured (virtio requires every queue of an enabled
+pair to be set up before the count is selected) and then held. A
+single-queue device uses exactly one receive ring at index 0 and is
+unchanged. `device_facts.rx_queues` reports the enabled count.
+
+The path is guest-driven and proved by the `lib/virtio_net`
+`multiqueue_enables_queues_and_steers_receive_per_queue` host test (a
+two-pair device: control-queue handshake, per-queue steering into its own
+ring). No live QEMU vertical presents multiqueue: the net verticals use
+the `-netdev dgram` socket backend, which QEMU restricts to a single
+queue (multiqueue needs a `tap` netdev with `queues=N`), so a dgram-backed
+guest sees `max_virtqueue_pairs = 1` and correctly stays single-queue —
+the host test is the authoritative proof, exactly as for the other
+offloads (`plans/NETWORK.md` N7c-2).
 
 ### Per-architecture offload state
 

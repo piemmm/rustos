@@ -37,6 +37,16 @@ crate, which re-exports `VirtioNet` from here.
   single outstanding buffer), and it reassembles a frame the device split
   across several buffers — bounded to one link frame, fail-closed on an
   over-long or corrupt `num_buffers`.
+- **Multiqueue receive** (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`):
+  when both are offered and the device advertises more than one pair, the
+  driver reads `max_virtqueue_pairs`, brings up one receive + one transmit
+  virtqueue per enabled pair (bounded by `RingGeometry::MAX_RX_QUEUES`),
+  and selects the pair count through the control-queue
+  `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` command after `DRIVER_OK`. Each
+  receive queue is an `RxQueue` with its own buffer pool; `service`
+  harvests every queue into its own shared receive ring. Transmit stays a
+  single queue (the stack serialises egress). A single-queue device uses
+  one `RxQueue` at index 0, unchanged.
 - `no_std`, allocation-free steady state (staging carved once at `open`).
 - Fail-closed: a runt/oversize/corrupt TX slot is dropped without wedging
   the queue; a device fault is a typed `DriverError`, never a panic
@@ -55,4 +65,6 @@ no-per-packet-DMA steady-state invariant, and mergeable receive buffers
 (negotiation on/off, single-buffer over the 12-byte header, in-order
 multi-buffer reassembly, the three fail-closed drops — zero /
 out-of-range `num_buffers`, over-link-frame merge — and the pool
-capturing a burst in one service).
+capturing a burst in one service), and multiqueue receive (a two-pair
+device: `VIRTIO_NET_F_MQ` negotiation, the control-queue pair-count
+handshake, and per-queue steering into each queue's own ring).

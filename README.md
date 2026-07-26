@@ -66,7 +66,7 @@ for filesystems, the feature section below.
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
-| Network offloads (RX/TX csum, TSO, mergeable RX) | ✓ virtio | ✓ virtio | ✓ virtio | — |
+| Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio | ✓ virtio | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
@@ -89,17 +89,21 @@ the stack skips the redundant fold for a device-validated frame; TCP
 transmit-checksum offload (`VIRTIO_NET_F_CSUM`), handing the device a
 segment with only the partial pseudo-header checksum to complete; TCP
 segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6`), handing the device
-one over-size super-segment to split; and mergeable receive buffers
+one over-size super-segment to split; mergeable receive buffers
 (`VIRTIO_NET_F_MRG_RXBUF`), posting a pool of receive buffers and
-reassembling a device-merged frame — the software path stays the
+reassembling a device-merged frame; and multiqueue receive
+(`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`), enabling one receive ring per
+device receive queue via the control-queue pair-count command and
+harvesting each into its own ring — the software path stays the
 byte-for-byte conformance oracle for each (N7a, N7b, N7c). The engine's
 receive and transmit fast paths allocate nothing on the heap in steady
 state (a reused output recycles frame and payload buffers through a bounded
 pool), enforced by a counting-allocator regression test (N7c-3). UDP
 transmit-checksum offload is a settled software-path decision (virtio's
 partial-checksum contract cannot honour RFC 768's zero-checksum rule).
-Multiqueue receive (deferred until a device presents more than one queue)
-and interface configuration / bonding (N9) remain, hence still `◐`.
+Multiqueue receive is host-test-proven; a live multiqueue vertical awaits a
+`tap`-backed harness (the `dgram` test backend QEMU restricts to one
+queue). Interface configuration / bonding (N9) remains, hence still `◐`.
 
 ## Filesystem feature support
 

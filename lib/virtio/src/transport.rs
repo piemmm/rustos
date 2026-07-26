@@ -304,6 +304,9 @@ pub struct MockTransport {
     /// Number of [`Transport::ack_interrupt`] calls, for assertions that
     /// a driver acknowledges the device once per wait + drain cycle.
     pub ack_interrupts: u32,
+    /// When set, [`Transport::notify`] drains the notified queue inline
+    /// (QEMU-accurate synchronous notify); see [`Self::set_synchronous_notify`].
+    synchronous_notify: bool,
 }
 
 impl MockTransport {
@@ -330,7 +333,18 @@ impl MockTransport {
             config: alloc::vec![0u8; config_len],
             notify_log: RefCell::new(Vec::new()),
             ack_interrupts: 0,
+            synchronous_notify: false,
         }
+    }
+
+    /// Make [`Transport::notify`] process the notified queue synchronously
+    /// (drain its shim on the notifying call), modelling QEMU/real
+    /// hardware where a notify vmexit processes the queue inline. Off by
+    /// default so most tests keep explicit control of when the device
+    /// runs; a driver that polls for a completion inline (the multiqueue
+    /// control-queue handshake) turns it on.
+    pub fn set_synchronous_notify(&mut self, on: bool) {
+        self.synchronous_notify = on;
     }
 
     /// Overwrite the device-configuration window. Used by `virtio_blk`
@@ -580,8 +594,16 @@ impl Transport for MockTransport {
     }
     fn notify(&mut self, queue: u16) {
         self.notify_log.borrow_mut().push(queue);
-        // The unit tests choose when to drain (so they can assert
-        // intermediate state); we therefore do NOT auto-drain here.
+        // By default the unit tests choose when to drain (so they can
+        // assert intermediate state), so we do NOT auto-drain here. A test
+        // that needs the QEMU-accurate *synchronous* notify (the device
+        // processes the queue on the notifying vmexit) — e.g. the
+        // multiqueue control-queue handshake, which the driver polls for
+        // inline rather than waiting on the host — opts in through
+        // [`Self::set_synchronous_notify`].
+        if self.synchronous_notify {
+            let _ = self.drain_queue(queue);
+        }
     }
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         let end = offset + buf.len();

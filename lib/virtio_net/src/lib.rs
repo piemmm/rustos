@@ -132,7 +132,9 @@ use core::convert::TryFrom;
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
-use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::net_ring::{
+    FrameOffload, FrameRing, FrameRings, RingGeometry, ServiceReport, MAX_RX_QUEUES,
+};
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
 use tairix_virtio::{
@@ -248,16 +250,49 @@ mod wire {
     pub const LINK_MTU: usize = 1500;
     /// Largest frame moved: the link MTU plus the Ethernet header.
     pub const MAX_FRAME_LEN: usize = LINK_MTU + MIN_ETHERNET_FRAME;
-    /// Receive queue index (virtio-net §5.1.2).
+    /// Receive queue index (virtio-net §5.1.2). For a multiqueue device
+    /// (`VIRTIO_NET_F_MQ`) the receive queue of pair `i` is
+    /// `RX_QUEUE + i * QUEUE_PAIR_STRIDE`.
     pub const RX_QUEUE: u16 = 0;
-    /// Transmit queue index (virtio-net §5.1.2).
+    /// Transmit queue index (virtio-net §5.1.2). For a multiqueue device
+    /// the transmit queue of pair `i` is `TX_QUEUE + i * QUEUE_PAIR_STRIDE`.
     pub const TX_QUEUE: u16 = 1;
+    /// Virtqueue-index stride between successive queue pairs: each pair
+    /// occupies a receive then a transmit queue (virtio 1.1 §5.1.2).
+    pub const QUEUE_PAIR_STRIDE: u16 = 2;
     /// Receive queue size (descriptors). Power-of-two per virtio §2.6.
     pub const RX_QUEUE_SIZE: u16 = 8;
     /// Transmit queue size (descriptors). Power-of-two per virtio §2.6.
     pub const TX_QUEUE_SIZE: u16 = 8;
+    /// Control queue size (descriptors). Power-of-two per virtio §2.6; a
+    /// small ring, since control commands are one-at-a-time handshakes.
+    pub const CTRL_QUEUE_SIZE: u16 = 4;
     /// MAC address byte offset in the device-configuration window.
     pub const CONFIG_MAC_OFFSET: usize = 0;
+    /// `max_virtqueue_pairs` (`le16`) byte offset in the device-config
+    /// window: it follows the 6-byte MAC and the 2-byte `status` word
+    /// (virtio 1.1 §5.1.4). Valid only when [`VIRTIO_NET_F_MQ`] was
+    /// negotiated.
+    pub const CONFIG_MAX_VQ_PAIRS_OFFSET: usize = 8;
+    /// `VIRTIO_NET_F_CTRL_VQ` (virtio 1.1 §5.1.4, feature bit 17): the
+    /// device exposes a control virtqueue. Required to issue any control
+    /// command, including [`VIRTIO_NET_CTRL_MQ`] queue-pair selection.
+    pub const VIRTIO_NET_F_CTRL_VQ: u64 = 1 << 17;
+    /// `VIRTIO_NET_F_MQ` (virtio 1.1 §5.1.4, feature bit 22): the device
+    /// supports multiple receive/transmit queue pairs and steers received
+    /// frames across the enabled receive queues. Requires
+    /// [`VIRTIO_NET_F_CTRL_VQ`] to select the pair count at runtime.
+    pub const VIRTIO_NET_F_MQ: u64 = 1 << 22;
+    /// `VIRTIO_NET_CTRL_MQ` (virtio 1.1 §5.1.6.5): the control-command
+    /// class for multiqueue configuration.
+    pub const VIRTIO_NET_CTRL_MQ: u8 = 4;
+    /// `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` (virtio 1.1 §5.1.6.5): the
+    /// command selecting how many receive/transmit queue pairs the device
+    /// uses (`struct virtio_net_ctrl_mq { le16 virtqueue_pairs; }`).
+    pub const VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET: u8 = 0;
+    /// `VIRTIO_NET_OK` (virtio 1.1 §5.1.6): the ack byte a successful
+    /// control command writes back.
+    pub const VIRTIO_NET_OK: u8 = 0;
 }
 
 /// Transmit frames the driver keeps in flight at once.
@@ -397,6 +432,446 @@ struct PendingRx {
     consumed: [Option<usize>; RX_POOL],
 }
 
+/// One device receive queue: its virtqueue, its own pool of posted
+/// receive buffers, a reassembly buffer for a merged frame, and any
+/// reassembled frame held while its shared RX ring is full.
+///
+/// A single-queue device has exactly one of these (`plans/NETWORK.md`
+/// N7c-1). A multiqueue device (`VIRTIO_NET_F_MQ`, N7c-2) has one per
+/// enabled receive queue: the device steers each received frame into one
+/// of them, and the driver harvests each into that queue's own shared RX
+/// ring, so a busy link's receive work is spread rather than serialised
+/// behind a single queue. Every queue owns an independent buffer pool and
+/// reassembly buffer, so the queues never share device-visible memory.
+struct RxQueue {
+    /// The receive virtqueue this queue's buffers are posted to.
+    queue: SplitQueue,
+    /// This queue's receive-buffer pool (carved once at open, reused for
+    /// the driver's whole life). Each buffer is either posted to the
+    /// device or held by the driver between completion and re-post.
+    buffers: [Option<RxBuffer>; RX_POOL],
+    /// Reassembly buffer for a frame the device merged across several of
+    /// this queue's receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); touched
+    /// only when `num_buffers` > 1.
+    reasm: Option<DmaSlab>,
+    /// A reassembled frame awaiting a free slot in this queue's shared RX
+    /// ring (back-pressure): the next service retries it before harvesting
+    /// further completions, so nothing the device handed over is dropped.
+    pending: Option<PendingRx>,
+}
+
+impl RxQueue {
+    /// Bring one receive virtqueue online and carve its buffer pool +
+    /// reassembly buffer.
+    fn new<T: Transport>(
+        transport: &mut T,
+        host: &dyn VirtioHost,
+        queue_index: u16,
+        rx_buf_len: usize,
+    ) -> Result<Self, VirtioError> {
+        let queue = SplitQueue::new(transport, host, queue_index, wire::RX_QUEUE_SIZE)?;
+        let mut buffers: [Option<RxBuffer>; RX_POOL] = core::array::from_fn(|_| None);
+        for slot in &mut buffers {
+            let slab = host
+                .alloc_dma_zeroed(rx_buf_len)
+                .map_err(|_| VirtioError::DeviceFault)?;
+            *slot = Some(RxBuffer {
+                slab,
+                posted_head: None,
+            });
+        }
+        let reasm = host
+            .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        Ok(Self {
+            queue,
+            buffers,
+            reasm: Some(reasm),
+            pending: None,
+        })
+    }
+
+    /// Post every held receive buffer to the device as one device-write
+    /// descriptor, then notify the device once.
+    fn post_all<T: Transport>(&mut self, transport: &mut T) -> Result<(), DriverError> {
+        let mut posted = false;
+        for index in 0..RX_POOL {
+            if self
+                .buffers
+                .get(index)
+                .and_then(|b| b.as_ref())
+                .is_some_and(|b| b.posted_head.is_none())
+            {
+                self.post_buffer(index)?;
+                posted = true;
+            }
+        }
+        if posted {
+            self.queue.kick(transport);
+        }
+        Ok(())
+    }
+
+    /// Post the held receive buffer at `index` as one device-write
+    /// descriptor, recording the descriptor head it is queued under.
+    /// Does not notify the device (the caller batches the kick).
+    fn post_buffer(&mut self, index: usize) -> Result<(), DriverError> {
+        let Some(Some(buffer)) = self.buffers.get(index) else {
+            return Err(DriverError::DeviceFault);
+        };
+        let len = u32::try_from(buffer.slab.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+        let segments = [ChainSegment {
+            phys: buffer.slab.phys(),
+            len,
+            direction: Direction::DeviceWrite,
+        }];
+        let head = self
+            .queue
+            .add_chain(&segments)
+            .map_err(VirtioError::as_driver_error)?;
+        // Record the head only after the successful post: an add_chain
+        // failure leaves the buffer held (posted_head stays None) so it is
+        // retried, never leaked to the device untracked.
+        if let Some(Some(buffer)) = self.buffers.get_mut(index) {
+            buffer.posted_head = Some(head);
+        }
+        Ok(())
+    }
+
+    /// Move delivered frames from this queue into its RX `ring` until the
+    /// device is drained or the ring is full.
+    ///
+    /// Each iteration first delivers any frame held from a previous
+    /// ring-full call (back-pressure: a frame the device already handed
+    /// over is never dropped, and RX-ring order is preserved), then
+    /// reassembles the next completed frame from the buffer pool.
+    // The receive-offload parameters (header length, frame cap, negotiated
+    // feature flags, sensitivity) are the device-wide facts threaded in
+    // from the one `VirtioNet` that owns them, rather than duplicated onto
+    // each queue; passing them keeps a queue's state to its own rings.
+    #[allow(clippy::too_many_arguments)]
+    fn harvest<T: Transport>(
+        &mut self,
+        ring: &mut FrameRing<'_>,
+        transport: &mut T,
+        hdr_len: usize,
+        max_frame_len: usize,
+        guest_csum: bool,
+        mergeable: bool,
+        sensitive: bool,
+        report: &mut ServiceReport,
+    ) -> Result<(), DriverError> {
+        loop {
+            if self.pending.is_some() {
+                if !self.deliver_pending(ring, transport, hdr_len, sensitive, report)? {
+                    // Ring still full: keep the frame held, stop.
+                    return Ok(());
+                }
+                continue;
+            }
+            // A produced frame is pending; loop to deliver it. Otherwise
+            // no completion remains: re-post the pool and stop.
+            if !self.collect_frame(hdr_len, max_frame_len, guest_csum, mergeable)? {
+                self.post_all(transport)?;
+                return Ok(());
+            }
+        }
+    }
+
+    /// Deliver the held reassembled frame into `ring`, returning whether
+    /// it was delivered (`false` = the ring is full, keep it).
+    fn deliver_pending<T: Transport>(
+        &mut self,
+        ring: &mut FrameRing<'_>,
+        transport: &mut T,
+        hdr_len: usize,
+        sensitive: bool,
+        report: &mut ServiceReport,
+    ) -> Result<bool, DriverError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(true);
+        };
+        let len = pending.len;
+        let push = if let Some(index) = pending.single_index {
+            let buffer = self
+                .buffers
+                .get(index)
+                .and_then(|b| b.as_ref())
+                .ok_or(DriverError::DeviceFault)?;
+            ring.push_with(
+                pending.offload,
+                &buffer.slab.as_bytes()[hdr_len..hdr_len + len],
+            )
+        } else {
+            let reasm = self.reasm.as_ref().ok_or(DriverError::DeviceFault)?;
+            ring.push_with(pending.offload, &reasm.as_bytes()[..len])
+        };
+        match push {
+            Ok(()) => {
+                report.received += 1;
+                if sensitive && pending.single_index.is_none() {
+                    self.scrub_reasm();
+                }
+                for index in pending.consumed.iter().flatten() {
+                    if sensitive {
+                        self.scrub_buffer(*index);
+                    }
+                    self.post_buffer(*index)?;
+                }
+                self.queue.kick(transport);
+                Ok(true)
+            }
+            Err(Errno::NoSpace) => {
+                report.rx_ring_full = true;
+                self.pending = Some(pending);
+                Ok(false)
+            }
+            Err(_) => Err(DriverError::BadMagic),
+        }
+    }
+
+    /// Reassemble the next completed frame from the buffer pool into
+    /// `pending`, returning whether one was produced.
+    fn collect_frame(
+        &mut self,
+        hdr_len: usize,
+        max_frame_len: usize,
+        guest_csum: bool,
+        mergeable: bool,
+    ) -> Result<bool, DriverError> {
+        loop {
+            let token = match self.queue.poll_used() {
+                Ok(token) => token,
+                Err(VirtioError::NoCompletion) => return Ok(false),
+                // A device-fabricated completion: its used slot is
+                // consumed; harvest the genuine completions behind it.
+                Err(VirtioError::MalformedCompletion) => continue,
+                Err(e) => return Err(e.as_driver_error()),
+            };
+            let Some(index) = self.consume_completed(token.head) else {
+                // The completion names no buffer the driver posted: skip.
+                continue;
+            };
+            let written = (token.written as usize).min(self.buffer_len(index));
+            if written < hdr_len {
+                // A runt completion carries no frame: re-post and go on.
+                continue;
+            }
+            let num_buffers = self.read_num_buffers(index, mergeable);
+            if num_buffers == 0 || num_buffers > RX_POOL {
+                // A corrupt buffer count: drop this buffer, fail closed.
+                continue;
+            }
+            let offload = self.rx_offload_from_header(index, guest_csum);
+            let first_data = written - hdr_len;
+            if num_buffers == 1 {
+                let len = first_data.min(max_frame_len);
+                let mut consumed = [None; RX_POOL];
+                consumed[0] = Some(index);
+                self.pending = Some(PendingRx {
+                    len,
+                    offload,
+                    single_index: Some(index),
+                    consumed,
+                });
+                return Ok(true);
+            }
+            // A merged frame is pending; otherwise the merge failed
+            // closed (short/over-long) and its buffers are left held for
+            // re-posting, so harvesting continues.
+            if self.collect_merged(
+                index,
+                hdr_len,
+                first_data,
+                num_buffers,
+                offload,
+                max_frame_len,
+            )? {
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Reassemble a `num_buffers`-buffer merged frame beginning at
+    /// `first_index` into the reassembly buffer and stage it as
+    /// `pending`, returning whether it was produced.
+    fn collect_merged(
+        &mut self,
+        first_index: usize,
+        hdr_len: usize,
+        first_data: usize,
+        num_buffers: usize,
+        offload: FrameOffload,
+        max_frame_len: usize,
+    ) -> Result<bool, DriverError> {
+        let cap = max_frame_len;
+        let mut consumed = [None; RX_POOL];
+        consumed[0] = Some(first_index);
+        // The first buffer's data follows its inline header.
+        let Some(mut len) = self.copy_into_reasm(first_index, hdr_len, first_data, 0, cap)? else {
+            return Ok(false);
+        };
+        for slot in consumed.iter_mut().take(num_buffers).skip(1) {
+            // The device promised more buffers than it delivered: a
+            // protocol violation. Drop the partial frame fail-closed; its
+            // buffers are left held for re-posting.
+            let Ok(token) = self.queue.poll_used() else {
+                return Ok(false);
+            };
+            let Some(index) = self.consume_completed(token.head) else {
+                return Ok(false);
+            };
+            *slot = Some(index);
+            let written = (token.written as usize).min(self.buffer_len(index));
+            // A trailing buffer carries pure frame bytes (no header).
+            match self.copy_into_reasm(index, 0, written, len, cap)? {
+                Some(new_len) => len = new_len,
+                None => return Ok(false),
+            }
+        }
+        self.pending = Some(PendingRx {
+            len,
+            offload,
+            single_index: None,
+            consumed,
+        });
+        Ok(true)
+    }
+
+    /// Copy `count` bytes starting at `src_offset` of the buffer at
+    /// `index` into the reassembly buffer at `dst_offset`, returning the
+    /// new total length or `None` when it would exceed `cap`.
+    fn copy_into_reasm(
+        &mut self,
+        index: usize,
+        src_offset: usize,
+        count: usize,
+        dst_offset: usize,
+        cap: usize,
+    ) -> Result<Option<usize>, DriverError> {
+        let end = match dst_offset.checked_add(count) {
+            Some(end) if end <= cap => end,
+            _ => return Ok(None),
+        };
+        // Borrow the source buffer and the reassembly buffer as disjoint
+        // fields: the copy reads one and writes the other in one step.
+        let src_slab = self
+            .buffers
+            .get(index)
+            .and_then(|b| b.as_ref())
+            .ok_or(DriverError::DeviceFault)?;
+        let src = src_slab.slab.as_bytes();
+        if src_offset
+            .checked_add(count)
+            .map_or(true, |e| e > src.len())
+        {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let src_span = &src[src_offset..src_offset + count];
+        let reasm = self.reasm.as_mut().ok_or(DriverError::DeviceFault)?;
+        let dst = reasm.as_bytes_mut();
+        if end > dst.len() {
+            return Ok(None);
+        }
+        dst[dst_offset..end].copy_from_slice(src_span);
+        Ok(Some(end))
+    }
+
+    /// The byte length of the receive buffer at `index` (0 when absent).
+    fn buffer_len(&self, index: usize) -> usize {
+        self.buffers
+            .get(index)
+            .and_then(|b| b.as_ref())
+            .map_or(0, |b| b.slab.len())
+    }
+
+    /// Mark the posted buffer whose descriptor head is `head` as consumed
+    /// and return its pool index, or `None` when no posted buffer matches.
+    fn consume_completed(&mut self, head: u16) -> Option<usize> {
+        let index = self
+            .buffers
+            .iter()
+            .position(|b| b.as_ref().is_some_and(|b| b.posted_head == Some(head)))?;
+        if let Some(Some(buffer)) = self.buffers.get_mut(index) {
+            buffer.posted_head = None;
+        }
+        Some(index)
+    }
+
+    /// The `num_buffers` count in the buffer at `index`'s inline header,
+    /// or 1 when mergeable buffers were not negotiated.
+    fn read_num_buffers(&self, index: usize, mergeable: bool) -> usize {
+        if !mergeable {
+            return 1;
+        }
+        let Some(buffer) = self.buffers.get(index).and_then(|b| b.as_ref()) else {
+            return 0;
+        };
+        let hdr = buffer.slab.as_bytes();
+        if hdr.len() < wire::MRG_HEADER_LEN {
+            return 0;
+        }
+        usize::from(u16::from_le_bytes([
+            hdr[wire::HDR_NUM_BUFFERS_OFFSET],
+            hdr[wire::HDR_NUM_BUFFERS_OFFSET + 1],
+        ]))
+    }
+
+    /// Derive the offload tag for a just-completed receive frame from the
+    /// device's `virtio_net_hdr` flags in the buffer at `index`.
+    ///
+    /// Honoured only when `VIRTIO_NET_F_GUEST_CSUM` was negotiated; the
+    /// offsets are validated against the frame length by the consumer, not
+    /// trusted here.
+    fn rx_offload_from_header(&self, index: usize, guest_csum: bool) -> FrameOffload {
+        if !guest_csum {
+            return FrameOffload::None;
+        }
+        let Some(buffer) = self.buffers.get(index).and_then(|b| b.as_ref()) else {
+            return FrameOffload::None;
+        };
+        let hdr = buffer.slab.as_bytes();
+        if hdr.len() < wire::HEADER_LEN {
+            return FrameOffload::None;
+        }
+        let flags = hdr[wire::HDR_FLAGS_OFFSET];
+        if flags & wire::VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+            let csum_start = u16::from_le_bytes([
+                hdr[wire::HDR_CSUM_START_OFFSET],
+                hdr[wire::HDR_CSUM_START_OFFSET + 1],
+            ]);
+            let csum_offset = u16::from_le_bytes([
+                hdr[wire::HDR_CSUM_OFFSET_OFFSET],
+                hdr[wire::HDR_CSUM_OFFSET_OFFSET + 1],
+            ]);
+            FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            }
+        } else if flags & wire::VIRTIO_NET_HDR_F_DATA_VALID != 0 {
+            FrameOffload::Validated
+        } else {
+            FrameOffload::None
+        }
+    }
+
+    /// Zero the receive buffer at `index` (a sensitive-class frame just
+    /// left it, before it is re-posted to the device).
+    fn scrub_buffer(&mut self, index: usize) {
+        if let Some(Some(buffer)) = self.buffers.get_mut(index) {
+            buffer.slab.as_bytes_mut().fill(0);
+        }
+    }
+
+    /// Zero the reassembly buffer (a sensitive-class merged frame just
+    /// left it).
+    fn scrub_reasm(&mut self) {
+        if let Some(reasm) = self.reasm.as_mut() {
+            reasm.as_bytes_mut().fill(0);
+        }
+    }
+}
+
 /// Network device backed by a cross-arch virtio transport.
 ///
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
@@ -407,8 +882,27 @@ struct PendingRx {
 /// mirrors [`VirtioBlk`](../tairix_drv_storage_virtio_blk/struct.VirtioBlk.html).
 pub struct VirtioNet<'h, T: Transport> {
     transport: T,
-    rx_queue: SplitQueue,
+    /// The device's receive queues, one per enabled receive queue pair
+    /// (`plans/NETWORK.md` N7c-2). Index `0..rx_queue_count` are `Some`;
+    /// a single-queue device uses only index 0. The device steers each
+    /// received frame into one of these, and [`Self::service`] harvests
+    /// every one into its matching shared RX ring.
+    rx: [Option<RxQueue>; MAX_RX_QUEUES as usize],
+    /// Number of enabled receive queues (`1..=`[`MAX_RX_QUEUES`]).
+    rx_queue_count: usize,
     tx_queue: SplitQueue,
+    /// The idle transmit queues of a multiqueue device's pairs `1..N`.
+    /// The stack serialises its own egress, so the driver transmits only
+    /// on `tx_queue` (pair 0); but virtio requires every queue of an
+    /// enabled pair to be configured before the pair count is set, so
+    /// these are set up and then held (never used) to keep their
+    /// device-visible rings alive. Empty on a single-queue device.
+    _idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize],
+    /// The control virtqueue, present only when `VIRTIO_NET_F_MQ` +
+    /// `VIRTIO_NET_F_CTRL_VQ` were negotiated. Used once at open to select
+    /// the receive/transmit queue-pair count, then held alive (its ring
+    /// stays device-visible). `None` on a single-queue device.
+    _ctrl_queue: Option<SplitQueue>,
     /// The [`VirtioHost`] the DMA staging was allocated through. Held only
     /// to bind the driver's lifetime to the host for `'h`: the staging
     /// slabs free through the host's pool on drop, so the host must outlive
@@ -423,21 +917,6 @@ pub struct VirtioNet<'h, T: Transport> {
     /// segmentation-offload super-frame (up to the ring's transmit slot
     /// capacity) when [`Self::host_tso`] is set.
     max_tx_frame_len: usize,
-    /// The receive-buffer pool: a fixed set of single-descriptor buffers
-    /// (carved once at open, reused for the driver's whole life), each
-    /// posted to the device or held by the driver between completion and
-    /// re-post. Posting a pool — rather than a single outstanding buffer
-    /// — is what lets a burst of received frames be captured before the
-    /// stack next services the ring (`plans/NETWORK.md` N7c).
-    rx_buffers: [Option<RxBuffer>; RX_POOL],
-    /// Reassembly buffer for a frame the device merged across several
-    /// receive buffers (`VIRTIO_NET_F_MRG_RXBUF`). Carved once at open,
-    /// sized to `max_frame_len`, and touched only when `num_buffers` > 1
-    /// (the single-buffer common path delivers straight from its source
-    /// buffer, so the hot path copies once — into the RX ring — as before).
-    rx_reasm: Option<DmaSlab>,
-    /// A reassembled frame awaiting a free RX-ring slot (back-pressure).
-    rx_pending: Option<PendingRx>,
     /// Length of the `virtio_net_hdr` prefixing every chain: 12 bytes
     /// (`virtio_net_hdr_mrg_rxbuf`) when `VIRTIO_NET_F_MRG_RXBUF` was
     /// negotiated, else 10 (`virtio_net_hdr`). Used for both rings, since
@@ -477,6 +956,12 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// Returns [`VirtioError::FeaturesRejected`] if the device
     /// clears [`Status::FEATURES_OK`] after the driver completed
     /// negotiation.
+    // The virtio 1.1 §3.1 init sequence is one linear procedure —
+    // reset, feature negotiation, per-queue setup, DRIVER_OK, the
+    // multiqueue control command, staging carve-out — that reads far more
+    // clearly as one flow than split across helpers that would each take
+    // (and return) the half-built device.
+    #[allow(clippy::too_many_lines)]
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, VirtioError> {
         transport.reset();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
@@ -507,6 +992,13 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // reassemble a multi-buffer frame. It also grows every chain's
         // header to 12 bytes on both rings.
         let mergeable = device_features & wire::VIRTIO_NET_F_MRG_RXBUF != 0;
+        // Multiqueue receive: the device steers received frames across
+        // several receive queues (`VIRTIO_NET_F_MQ`), selected at runtime
+        // through the control virtqueue (`VIRTIO_NET_F_CTRL_VQ`). Negotiate
+        // it only when both are offered and the device advertises more than
+        // one queue pair; otherwise stay single-queue.
+        let ctrl_vq = device_features & wire::VIRTIO_NET_F_CTRL_VQ != 0;
+        let multiqueue = ctrl_vq && device_features & wire::VIRTIO_NET_F_MQ != 0;
         // Link-status sensing: with it the device exposes a live `status`
         // word and raises a config-change interrupt on a link change, so
         // the driver reports a real link state instead of a permanent
@@ -525,6 +1017,9 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if mergeable {
             driver_features |= wire::VIRTIO_NET_F_MRG_RXBUF;
         }
+        if multiqueue {
+            driver_features |= wire::VIRTIO_NET_F_MQ | wire::VIRTIO_NET_F_CTRL_VQ;
+        }
         if status_feature {
             driver_features |= wire::VIRTIO_NET_F_STATUS;
         }
@@ -534,16 +1029,10 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if !transport.status().contains(Status::FEATURES_OK) {
             return Err(VirtioError::FeaturesRejected);
         }
-        let rx_queue = SplitQueue::new(&mut transport, host, wire::RX_QUEUE, wire::RX_QUEUE_SIZE)?;
-        let tx_queue = SplitQueue::new(&mut transport, host, wire::TX_QUEUE, wire::TX_QUEUE_SIZE)?;
-        status = status.with(Status::DRIVER_OK);
-        transport.set_status(status);
-        // Read MAC from device-config.
-        let mut mac = [0u8; MAC_ADDRESS_LEN];
-        transport.read_config(wire::CONFIG_MAC_OFFSET, &mut mac);
-        // The virtio_net_hdr grows to 12 bytes on both rings once
-        // mergeable receive buffers are negotiated (a transitional device
-        // sizes the header uniformly), else it is the legacy 10.
+        // Header + buffer sizing, shared by every receive queue. The
+        // virtio_net_hdr grows to 12 bytes on both rings once mergeable
+        // receive buffers are negotiated (a transitional device sizes the
+        // header uniformly), else it is the legacy 10.
         let rx_hdr_len = if mergeable {
             wire::MRG_HEADER_LEN
         } else {
@@ -562,30 +1051,77 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         } else {
             wire::MAX_FRAME_LEN
         };
-        // Carve the receive-buffer pool once: a fixed set of
-        // single-descriptor buffers reused for the driver's whole life, so
-        // the polled receive path never touches the allocator.
-        let mut rx_buffers: [Option<RxBuffer>; RX_POOL] = core::array::from_fn(|_| None);
-        for slot in &mut rx_buffers {
-            let slab = host
-                .alloc_dma_zeroed(rx_buf_len)
-                .map_err(|_| VirtioError::DeviceFault)?;
-            *slot = Some(RxBuffer {
-                slab,
-                posted_head: None,
-            });
+        // How many receive queue pairs to enable. A multiqueue device
+        // advertises its maximum in the device-config `max_virtqueue_pairs`
+        // field; the driver enables the smaller of that and the transport's
+        // `MAX_RX_QUEUES` bound, so a device advertising an over-large count
+        // never sizes an unbounded number of pinned rings.
+        let max_pairs = if multiqueue {
+            let mut buf = [0u8; 2];
+            transport.read_config(wire::CONFIG_MAX_VQ_PAIRS_OFFSET, &mut buf);
+            u16::from_le_bytes(buf)
+        } else {
+            1
+        };
+        let pairs: u16 = if multiqueue {
+            max_pairs.clamp(1, MAX_RX_QUEUES)
+        } else {
+            1
+        };
+        let rx_queue_count = usize::from(pairs);
+        // Bring up one receive + one transmit virtqueue per enabled pair.
+        // The driver only transmits on pair 0's queue; the other transmit
+        // queues are configured (virtio requires every queue of an enabled
+        // pair to be set up before the pair count is selected) and then
+        // held idle to keep their rings device-visible.
+        let mut rx: [Option<RxQueue>; MAX_RX_QUEUES as usize] = core::array::from_fn(|_| None);
+        let mut idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize] =
+            core::array::from_fn(|_| None);
+        for pair in 0..pairs {
+            let rx_index = wire::RX_QUEUE + pair * wire::QUEUE_PAIR_STRIDE;
+            rx[usize::from(pair)] = Some(RxQueue::new(&mut transport, host, rx_index, rx_buf_len)?);
         }
-        // The reassembly buffer holds a frame the device merged across
-        // several buffers; sized to one link frame so an over-MTU merge
-        // fails closed (dropped) rather than growing an attacker-sized
-        // copy.
-        let rx_reasm = host
-            .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
-        // Carve the transmit staging pool once: one header + one
-        // frame buffer per concurrently in-flight transmission, sized to
-        // the transmit ring so the driver can keep it full without ever
-        // waiting on the device.
+        let tx_queue = SplitQueue::new(&mut transport, host, wire::TX_QUEUE, wire::TX_QUEUE_SIZE)?;
+        for pair in 1..pairs {
+            let tx_index = wire::TX_QUEUE + pair * wire::QUEUE_PAIR_STRIDE;
+            idle_tx[usize::from(pair)] = Some(SplitQueue::new(
+                &mut transport,
+                host,
+                tx_index,
+                wire::TX_QUEUE_SIZE,
+            )?);
+        }
+        // The control queue is the last virtqueue, at index
+        // `2 * max_virtqueue_pairs` (virtio 1.1 §5.1.2), present only when
+        // multiqueue was negotiated.
+        let mut ctrl_queue = if multiqueue {
+            let ctrl_index = max_pairs.max(1) * wire::QUEUE_PAIR_STRIDE;
+            Some(SplitQueue::new(
+                &mut transport,
+                host,
+                ctrl_index,
+                wire::CTRL_QUEUE_SIZE,
+            )?)
+        } else {
+            None
+        };
+        status = status.with(Status::DRIVER_OK);
+        transport.set_status(status);
+        // Select the enabled queue-pair count through the control queue (a
+        // runtime command issued after DRIVER_OK). A single enabled pair is
+        // already the device default, so the command is only issued for more.
+        if let Some(ctrl) = ctrl_queue.as_mut() {
+            if pairs > 1 {
+                set_virtqueue_pairs(&mut transport, host, ctrl, pairs)?;
+            }
+        }
+        // Read MAC from device-config.
+        let mut mac = [0u8; MAC_ADDRESS_LEN];
+        transport.read_config(wire::CONFIG_MAC_OFFSET, &mut mac);
+        // Carve the transmit staging pool once: one header + one frame
+        // buffer per concurrently in-flight transmission, sized to the
+        // transmit ring so the driver can keep it full without ever waiting
+        // on the device.
         let mut tx_free: [Option<(DmaSlab, DmaSlab)>; TX_INFLIGHT_MAX] =
             core::array::from_fn(|_| None);
         for slot in &mut tx_free {
@@ -599,78 +1135,29 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         }
         let mut net = Self {
             transport,
-            rx_queue,
+            rx,
+            rx_queue_count,
             tx_queue,
+            _idle_tx: idle_tx,
+            _ctrl_queue: ctrl_queue,
             _host: host,
             mac: MacAddress::new(mac),
             max_frame_len: wire::MAX_FRAME_LEN,
             max_tx_frame_len,
-            rx_buffers,
-            rx_reasm: Some(rx_reasm),
-            rx_pending: None,
             rx_hdr_len,
             tx: TxStaging::new(tx_free),
             features: driver_features,
         };
-        // Arm the receive path: the device owns the whole posted pool from
-        // DRIVER_OK onward, so a burst arriving before the first `service`
-        // call is captured rather than dropped.
-        net.post_all_receive()
-            .map_err(|_| VirtioError::DeviceFault)?;
-        Ok(net)
-    }
-
-    /// Post every held receive buffer to the device as a single
-    /// device-write descriptor, then notify the device once.
-    ///
-    /// Called at open and after every delivered frame, so the whole pool
-    /// is outstanding whenever the driver is idle — the buffers stay owned
-    /// by the driver for its whole life, never freed while the device can
-    /// still write to them.
-    fn post_all_receive(&mut self) -> Result<(), DriverError> {
-        let mut posted = false;
-        for index in 0..RX_POOL {
-            if self
-                .rx_buffers
-                .get(index)
-                .and_then(|b| b.as_ref())
-                .is_some_and(|b| b.posted_head.is_none())
-            {
-                self.post_buffer(index)?;
-                posted = true;
+        // Arm every receive queue: the device owns each posted pool from
+        // DRIVER_OK onward, so a burst arriving before the first service is
+        // captured rather than dropped.
+        for pair in 0..net.rx_queue_count {
+            if let Some(q) = net.rx[pair].as_mut() {
+                q.post_all(&mut net.transport)
+                    .map_err(|_| VirtioError::DeviceFault)?;
             }
         }
-        if posted {
-            self.rx_queue.kick(&mut self.transport);
-        }
-        Ok(())
-    }
-
-    /// Post the held receive buffer at `index` as one device-write
-    /// descriptor, recording the descriptor head it is queued under so a
-    /// later completion maps back to exactly this buffer. Does not notify
-    /// the device (the caller batches the kick).
-    fn post_buffer(&mut self, index: usize) -> Result<(), DriverError> {
-        let Some(Some(buffer)) = self.rx_buffers.get(index) else {
-            return Err(DriverError::DeviceFault);
-        };
-        let len = u32::try_from(buffer.slab.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-        let segments = [ChainSegment {
-            phys: buffer.slab.phys(),
-            len,
-            direction: Direction::DeviceWrite,
-        }];
-        let head = self
-            .rx_queue
-            .add_chain(&segments)
-            .map_err(VirtioError::as_driver_error)?;
-        // Record the head only after the successful post: an add_chain
-        // failure leaves the buffer held (posted_head stays None) so it is
-        // retried, never leaked to the device untracked.
-        if let Some(Some(buffer)) = self.rx_buffers.get_mut(index) {
-            buffer.posted_head = Some(head);
-        }
-        Ok(())
+        Ok(net)
     }
 
     /// Tear the device down for unload (sets the status byte to 0).
@@ -949,334 +1436,113 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         Ok(TxOutcome::Sent(head))
     }
 
-    /// Move delivered frames from the device into the RX ring until
-    /// the device is drained or the ring is full.
+    /// Move delivered frames from every receive queue into their RX rings
+    /// until each device queue is drained or its ring is full.
     ///
-    /// Each iteration first delivers any frame held from a previous
-    /// ring-full call (back-pressure: a frame the device already handed
-    /// over is never dropped, and RX-ring order is preserved), then
-    /// reassembles the next completed frame from the buffer pool. When no
-    /// frame can be delivered because the ring is full the held frame
-    /// stays in `rx_pending` and the call returns; when the device has no
-    /// further completion the pool is topped back up and the call returns.
+    /// A multiqueue device (`plans/NETWORK.md` N7c-2) steers received
+    /// frames across several receive queues; each is harvested into its
+    /// own shared RX ring, so a busy link's receive work is spread rather
+    /// than serialised behind one queue. Per-queue back-pressure holds a
+    /// reassembled frame in that queue when its ring is full and retries
+    /// it before the next completion, so nothing the device handed over is
+    /// dropped and each ring's order is preserved.
     fn harvest_rx(
         &mut self,
         rings: &mut FrameRings<'_>,
         report: &mut ServiceReport,
     ) -> Result<(), DriverError> {
-        loop {
-            if self.rx_pending.is_some() {
-                if !self.deliver_pending(rings, report)? {
-                    // Ring still full: keep the frame held, stop.
-                    return Ok(());
-                }
-                continue;
-            }
-            // A produced frame is pending; loop to deliver it. Otherwise
-            // no completion remains: re-post the pool and stop.
-            if !self.collect_frame()? {
-                self.post_all_receive()?;
-                return Ok(());
-            }
-        }
-    }
-
-    /// Deliver the held reassembled frame into the RX ring, returning
-    /// whether it was delivered (`false` = the ring is full, keep it).
-    ///
-    /// On delivery the buffers that built the frame are scrubbed (when the
-    /// ring class is sensitive) and re-posted to the device.
-    fn deliver_pending(
-        &mut self,
-        rings: &mut FrameRings<'_>,
-        report: &mut ServiceReport,
-    ) -> Result<bool, DriverError> {
-        let Some(pending) = self.rx_pending.take() else {
-            return Ok(true);
-        };
         let hdr_len = self.rx_hdr_len;
-        let len = pending.len;
-        let push = if let Some(index) = pending.single_index {
-            let buffer = self
-                .rx_buffers
-                .get(index)
-                .and_then(|b| b.as_ref())
-                .ok_or(DriverError::DeviceFault)?;
-            rings.rx.push_with(
-                pending.offload,
-                &buffer.slab.as_bytes()[hdr_len..hdr_len + len],
-            )
-        } else {
-            let reasm = self.rx_reasm.as_ref().ok_or(DriverError::DeviceFault)?;
-            rings
-                .rx
-                .push_with(pending.offload, &reasm.as_bytes()[..len])
-        };
-        match push {
-            Ok(()) => {
-                report.received += 1;
-                let sensitive = rings.class.is_sensitive();
-                if sensitive && pending.single_index.is_none() {
-                    self.scrub_reasm();
-                }
-                for index in pending.consumed.iter().flatten() {
-                    if sensitive {
-                        self.scrub_buffer(*index);
-                    }
-                    self.post_buffer(*index)?;
-                }
-                self.rx_queue.kick(&mut self.transport);
-                Ok(true)
-            }
-            Err(Errno::NoSpace) => {
-                report.rx_ring_full = true;
-                self.rx_pending = Some(pending);
-                Ok(false)
-            }
-            Err(_) => Err(DriverError::BadMagic),
-        }
-    }
-
-    /// Reassemble the next completed frame from the buffer pool into
-    /// `rx_pending`, returning whether one was produced.
-    ///
-    /// Returns `Ok(false)` once the device has no further completion. A
-    /// completion the driver cannot trust (a head naming no posted buffer,
-    /// a runt shorter than the header, a corrupt or out-of-range
-    /// `num_buffers`, a merge exceeding one link frame, a short merge) is
-    /// dropped fail-closed — its buffers are left held for re-posting and
-    /// harvesting continues — never a fabricated frame or an out-of-bounds
-    /// access.
-    fn collect_frame(&mut self) -> Result<bool, DriverError> {
-        loop {
-            let token = match self.rx_queue.poll_used() {
-                Ok(token) => token,
-                Err(VirtioError::NoCompletion) => return Ok(false),
-                // A device-fabricated completion: its used slot is
-                // consumed; harvest the genuine completions behind it.
-                Err(VirtioError::MalformedCompletion) => continue,
-                Err(e) => return Err(e.as_driver_error()),
-            };
-            let Some(index) = self.consume_completed(token.head) else {
-                // The completion names no buffer the driver posted: skip.
-                continue;
-            };
-            let hdr_len = self.rx_hdr_len;
-            let written = (token.written as usize).min(self.buffer_len(index));
-            if written < hdr_len {
-                // A runt completion carries no frame: re-post and go on.
-                continue;
-            }
-            let num_buffers = self.read_num_buffers(index);
-            if num_buffers == 0 || num_buffers > RX_POOL {
-                // A corrupt buffer count: drop this buffer, fail closed.
-                continue;
-            }
-            let offload = self.rx_offload_from_header(index);
-            let first_data = written - hdr_len;
-            if num_buffers == 1 {
-                let len = first_data.min(self.max_frame_len);
-                let mut consumed = [None; RX_POOL];
-                consumed[0] = Some(index);
-                self.rx_pending = Some(PendingRx {
-                    len,
-                    offload,
-                    single_index: Some(index),
-                    consumed,
-                });
-                return Ok(true);
-            }
-            // A merged frame is pending; otherwise the merge failed
-            // closed (short/over-long) and its buffers are left held for
-            // re-posting, so harvesting continues.
-            if self.collect_merged(index, hdr_len, first_data, num_buffers, offload)? {
-                return Ok(true);
+        let max_frame_len = self.max_frame_len;
+        let guest_csum = self.guest_csum();
+        let mergeable = self.mergeable();
+        let sensitive = rings.class.is_sensitive();
+        for pair in 0..self.rx_queue_count {
+            // Each queue drains into its own shared RX ring; a geometry
+            // that provides fewer rings than the device has queues fails
+            // closed rather than silently dropping a queue's traffic.
+            let ring = rings.rx_ring(pair).map_err(|_| DriverError::BadMagic)?;
+            if let Some(queue) = self.rx[pair].as_mut() {
+                queue.harvest(
+                    ring,
+                    &mut self.transport,
+                    hdr_len,
+                    max_frame_len,
+                    guest_csum,
+                    mergeable,
+                    sensitive,
+                    report,
+                )?;
             }
         }
+        Ok(())
     }
+}
 
-    /// Reassemble a `num_buffers`-buffer merged frame beginning at
-    /// `first_index` into the reassembly buffer and stage it as
-    /// `rx_pending`, returning whether it was produced (`false` = the
-    /// merge failed closed and its buffers are left held for re-posting).
-    fn collect_merged(
-        &mut self,
-        first_index: usize,
-        hdr_len: usize,
-        first_data: usize,
-        num_buffers: usize,
-        offload: FrameOffload,
-    ) -> Result<bool, DriverError> {
-        let cap = self.max_frame_len;
-        let mut consumed = [None; RX_POOL];
-        consumed[0] = Some(first_index);
-        // The first buffer's data follows its inline header.
-        let Some(mut len) = self.copy_into_reasm(first_index, hdr_len, first_data, 0, cap)? else {
-            return Ok(false);
-        };
-        for slot in consumed.iter_mut().take(num_buffers).skip(1) {
-            // The device promised more buffers than it delivered: a
-            // protocol violation. Drop the partial frame fail-closed; its
-            // buffers are left held for re-posting.
-            let Ok(token) = self.rx_queue.poll_used() else {
-                return Ok(false);
-            };
-            let Some(index) = self.consume_completed(token.head) else {
-                return Ok(false);
-            };
-            *slot = Some(index);
-            let written = (token.written as usize).min(self.buffer_len(index));
-            // A trailing buffer carries pure frame bytes (no header).
-            match self.copy_into_reasm(index, 0, written, len, cap)? {
-                Some(new_len) => len = new_len,
-                None => return Ok(false),
+/// Bounded poll budget for a control-queue command completion.
+///
+/// The device processes a virtqueue notify synchronously on the
+/// triggering vmexit (a real QEMU / hardware handshake), so the ack is
+/// ready on the first poll; the budget is only a fail-closed ceiling on a
+/// device that never answers. This is a one-shot control handshake run
+/// once at open, before any frame flow — never a steady-state spin.
+const CTRL_POLL_BUDGET: usize = 1 << 20;
+
+/// Issue the `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` control command, selecting
+/// how many receive/transmit queue pairs the device uses.
+///
+/// The command chain is one device-read segment (the
+/// `virtio_net_ctrl_hdr` `{class, cmd}` plus the `le16` pair count) and
+/// one device-write segment (the ack byte). Fails closed on a non-`OK`
+/// ack or a device that never completes the command.
+fn set_virtqueue_pairs<T: Transport>(
+    transport: &mut T,
+    host: &dyn VirtioHost,
+    ctrl: &mut SplitQueue,
+    pairs: u16,
+) -> Result<(), VirtioError> {
+    let mut cmd = host
+        .alloc_dma_zeroed(8)
+        .map_err(|_| VirtioError::DeviceFault)?;
+    {
+        let bytes = cmd.as_bytes_mut();
+        bytes[0] = wire::VIRTIO_NET_CTRL_MQ;
+        bytes[1] = wire::VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET;
+        bytes[2..4].copy_from_slice(&pairs.to_le_bytes());
+        // Ack sentinel: the device overwrites it with VIRTIO_NET_OK on
+        // success, so a device that ignores the command fails closed.
+        bytes[4] = 0xFF;
+    }
+    let phys = cmd.phys();
+    let segments = [
+        ChainSegment {
+            phys,
+            len: 4,
+            direction: Direction::DeviceRead,
+        },
+        ChainSegment {
+            phys: phys + 4,
+            len: 1,
+            direction: Direction::DeviceWrite,
+        },
+    ];
+    ctrl.add_chain(&segments)?;
+    ctrl.kick(transport);
+    for _ in 0..CTRL_POLL_BUDGET {
+        match ctrl.poll_used() {
+            Ok(_) => {
+                // Acquire the device's ack write before reading it.
+                cmd.sync_range(0, 5);
+                return if cmd.as_bytes()[4] == wire::VIRTIO_NET_OK {
+                    Ok(())
+                } else {
+                    Err(VirtioError::DeviceFault)
+                };
             }
-        }
-        self.rx_pending = Some(PendingRx {
-            len,
-            offload,
-            single_index: None,
-            consumed,
-        });
-        Ok(true)
-    }
-
-    /// Copy `count` bytes starting at `src_offset` of the buffer at
-    /// `index` into the reassembly buffer at `dst_offset`, returning the
-    /// new total length or `None` when it would exceed `cap` (fail closed).
-    fn copy_into_reasm(
-        &mut self,
-        index: usize,
-        src_offset: usize,
-        count: usize,
-        dst_offset: usize,
-        cap: usize,
-    ) -> Result<Option<usize>, DriverError> {
-        let end = match dst_offset.checked_add(count) {
-            Some(end) if end <= cap => end,
-            _ => return Ok(None),
-        };
-        // Borrow the source buffer and the reassembly buffer as disjoint
-        // fields: the copy reads one and writes the other in one step.
-        let src_slab = self
-            .rx_buffers
-            .get(index)
-            .and_then(|b| b.as_ref())
-            .ok_or(DriverError::DeviceFault)?;
-        let src = src_slab.slab.as_bytes();
-        if src_offset
-            .checked_add(count)
-            .map_or(true, |e| e > src.len())
-        {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        let src_span = &src[src_offset..src_offset + count];
-        let reasm = self.rx_reasm.as_mut().ok_or(DriverError::DeviceFault)?;
-        let dst = reasm.as_bytes_mut();
-        if end > dst.len() {
-            return Ok(None);
-        }
-        dst[dst_offset..end].copy_from_slice(src_span);
-        Ok(Some(end))
-    }
-
-    /// The byte length of the receive buffer at `index` (0 when absent).
-    fn buffer_len(&self, index: usize) -> usize {
-        self.rx_buffers
-            .get(index)
-            .and_then(|b| b.as_ref())
-            .map_or(0, |b| b.slab.len())
-    }
-
-    /// Mark the posted buffer whose descriptor head is `head` as consumed
-    /// (held by the driver) and return its pool index, or `None` when no
-    /// posted buffer matches (a device-fabricated completion).
-    fn consume_completed(&mut self, head: u16) -> Option<usize> {
-        let index = self
-            .rx_buffers
-            .iter()
-            .position(|b| b.as_ref().is_some_and(|b| b.posted_head == Some(head)))?;
-        if let Some(Some(buffer)) = self.rx_buffers.get_mut(index) {
-            buffer.posted_head = None;
-        }
-        Some(index)
-    }
-
-    /// The `num_buffers` count in the buffer at `index`'s inline header,
-    /// or 1 when mergeable buffers were not negotiated.
-    fn read_num_buffers(&self, index: usize) -> usize {
-        if !self.mergeable() {
-            return 1;
-        }
-        let Some(buffer) = self.rx_buffers.get(index).and_then(|b| b.as_ref()) else {
-            return 0;
-        };
-        let hdr = buffer.slab.as_bytes();
-        if hdr.len() < wire::MRG_HEADER_LEN {
-            return 0;
-        }
-        usize::from(u16::from_le_bytes([
-            hdr[wire::HDR_NUM_BUFFERS_OFFSET],
-            hdr[wire::HDR_NUM_BUFFERS_OFFSET + 1],
-        ]))
-    }
-
-    /// Derive the offload tag for a just-completed receive frame from the
-    /// device's `virtio_net_hdr` flags in the buffer at `index`.
-    ///
-    /// Honoured only when `VIRTIO_NET_F_GUEST_CSUM` was negotiated: a
-    /// `NEEDS_CSUM` frame carries the device's `csum_start`/`csum_offset`
-    /// through to the stack (which completes the fold), a `DATA_VALID`
-    /// frame is reported checksum-validated, and anything else is the
-    /// plain software path. The offsets are validated against the frame
-    /// length by the consumer, not trusted here.
-    fn rx_offload_from_header(&self, index: usize) -> FrameOffload {
-        if !self.guest_csum() {
-            return FrameOffload::None;
-        }
-        let Some(buffer) = self.rx_buffers.get(index).and_then(|b| b.as_ref()) else {
-            return FrameOffload::None;
-        };
-        let hdr = buffer.slab.as_bytes();
-        if hdr.len() < wire::HEADER_LEN {
-            return FrameOffload::None;
-        }
-        let flags = hdr[wire::HDR_FLAGS_OFFSET];
-        if flags & wire::VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-            let csum_start = u16::from_le_bytes([
-                hdr[wire::HDR_CSUM_START_OFFSET],
-                hdr[wire::HDR_CSUM_START_OFFSET + 1],
-            ]);
-            let csum_offset = u16::from_le_bytes([
-                hdr[wire::HDR_CSUM_OFFSET_OFFSET],
-                hdr[wire::HDR_CSUM_OFFSET_OFFSET + 1],
-            ]);
-            FrameOffload::NeedsChecksum {
-                csum_start,
-                csum_offset,
-            }
-        } else if flags & wire::VIRTIO_NET_HDR_F_DATA_VALID != 0 {
-            FrameOffload::Validated
-        } else {
-            FrameOffload::None
+            Err(VirtioError::NoCompletion | VirtioError::MalformedCompletion) => {}
+            Err(e) => return Err(e),
         }
     }
-
-    /// Zero the receive buffer at `index` (a sensitive-class frame just
-    /// left it, before it is re-posted to the device).
-    fn scrub_buffer(&mut self, index: usize) {
-        if let Some(Some(buffer)) = self.rx_buffers.get_mut(index) {
-            buffer.slab.as_bytes_mut().fill(0);
-        }
-    }
-
-    /// Zero the reassembly buffer (a sensitive-class merged frame just
-    /// left it).
-    fn scrub_reasm(&mut self) {
-        if let Some(reasm) = self.rx_reasm.as_mut() {
-            reasm.as_bytes_mut().fill(0);
-        }
-    }
+    Err(VirtioError::DeviceFault)
 }
 
 /// Outcome of one TX-frame staging in [`VirtioNet::stage_and_post`].
@@ -1292,8 +1558,10 @@ enum TxOutcome {
 
 impl<T: Transport> Net for VirtioNet<'_, T> {
     fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
-        // No VIRTIO_NET_F_STATUS is negotiated (an operational device
-        // reports its link up) and one receive queue is used. Offloads are
+        // The link state comes from the device (VIRTIO_NET_F_STATUS) when
+        // negotiated, else an operational device reports its link up. The
+        // receive-queue count is the number of queues actually enabled
+        // (one unless VIRTIO_NET_F_MQ was negotiated). Offloads are
         // advertised, each only when its virtio feature was negotiated:
         // receive-checksum validation (`VIRTIO_NET_F_GUEST_CSUM`), TCP
         // transmit-checksum offload (`VIRTIO_NET_F_CSUM`), and TCP
@@ -1321,7 +1589,7 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
                 .map_err(|_| DriverError::LengthOutOfRange)?,
             link: self.read_link(),
             offloads,
-            rx_queues: 1,
+            rx_queues: u16::try_from(self.rx_queue_count.max(1)).unwrap_or(1),
         })
     }
 
