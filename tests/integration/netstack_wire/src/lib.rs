@@ -203,6 +203,21 @@ pub const GUEST_NIC_NODE_LOCATION_AARCH64: u64 = 0x0A00_3C00;
 /// rather than silently mis-binding.
 pub const GUEST_NIC_NODE_LOCATION_X86_64: u64 = 0xFE00_4000;
 
+/// The register-window base the QEMU riscv64 `virt` board places the (single)
+/// `virtio-net-device` at: virtio-mmio transport slot 6 of the board's eight
+/// `0x1000_1000`-based transports (stride `0x1000`). QEMU fills the transports
+/// from the top slot down in device-creation order, and the runner attaches
+/// the root virtio-blk disk *before* the NIC — so the disk takes the top slot
+/// (`0x1000_8000`) and the NIC the next one down (`0x1000_7000`). This is the
+/// riscv64 `<iface>.match.node` hardware location the static-addressing
+/// vertical's `network.conf` names — `devmgr` resolves the same value from the
+/// matched node and threads it to `netstack` (its `NETSTACK_BOUND` audit
+/// record's `node` field), and the guest test asserts the two agree, so a QEMU
+/// layout change fails loud rather than silently mis-binding. It is the
+/// virtio-**MMIO** sibling of [`GUEST_NIC_NODE_LOCATION_AARCH64`] (a different
+/// board's mmio slot, not the x86_64 virtio-PCI BAR base).
+pub const GUEST_NIC_NODE_LOCATION_RISCV64: u64 = 0x1000_7000;
+
 /// The admin alias the static-addressing vertical's `network.conf` binds the
 /// NIC to (a stable, admin-chosen name, never a discovery-order one).
 pub const STATIC_IFACE_ALIAS: &str = "wan";
@@ -265,6 +280,31 @@ pub const STATIC_NETWORK_CONF_X86_64: &str = "\
 # the vertical proves match.node + static addressing end to end over PCI.
 wan.kind ethernet
 wan.match.node 0xfe004000
+wan.ipv4.method disabled
+wan.ipv6.method static
+wan.ipv6.address fd00::2/64
+";
+
+/// The `/System/Settings/Network/network.conf` the **riscv64** static-addressing
+/// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
+/// of [`STATIC_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on the QEMU riscv64 `virt` board is the NIC's virtio-mmio transport
+/// slot base [`GUEST_NIC_NODE_LOCATION_RISCV64`] (`0x10007000`) rather than the
+/// aarch64 board's slot base. It binds the alias [`STATIC_IFACE_ALIAS`] to that
+/// NIC, disables IPv4, and assigns the same static IPv6
+/// [`GUEST_STATIC_V6`]`/`[`STATIC_PREFIX_LEN`] the other verticals use (the
+/// peer's on-link `/64` is shared). The literals are cross-checked against the
+/// constants by the `riscv64_static_network_conf_matches_the_wire_constants`
+/// unit test, so the config and the addresses the peer uses can never drift.
+pub const STATIC_NETWORK_CONF_RISCV64: &str = "\
+# TAIRiX static-addressing (match.node) QEMU vertical network.conf (riscv64).
+# Binds the `wan` alias to the virtio-net-device NIC by its stable bus location
+# (its virtio-mmio transport slot base) and assigns a static IPv6 address, so
+# the vertical proves match.node + static addressing end to end over mmio.
+wan.kind ethernet
+wan.match.node 0x10007000
 wan.ipv4.method disabled
 wan.ipv6.method static
 wan.ipv6.address fd00::2/64
@@ -503,6 +543,43 @@ mod tests {
         assert_ne!(
             GUEST_NIC_NODE_LOCATION_X86_64, GUEST_NIC_NODE_LOCATION_AARCH64,
             "the two arch NIC locations are distinct"
+        );
+    }
+
+    /// The riscv64 static `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the riscv64 NIC's virtio-mmio
+    /// transport slot base while carrying the identical alias, IPv4/IPv6
+    /// methods, and static address the shared peer reaches. Drift fails here,
+    /// long before a QEMU boot.
+    #[test]
+    fn riscv64_static_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(STATIC_NETWORK_CONF_RISCV64)
+            .expect("the planted riscv64 network.conf parses and validates");
+        let iface = config
+            .interface(STATIC_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_RISCV64),
+            "the config's match.node names the riscv64 virtio-mmio NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Static);
+        let v6 = iface.ipv6_address.expect("a static IPv6 address is set");
+        assert_eq!(v6.addr, GUEST_STATIC_V6);
+        assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+        // The riscv64 location is distinct from both siblings: the three
+        // arch confs differ *only* in the bus location line.
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_RISCV64, GUEST_NIC_NODE_LOCATION_AARCH64,
+            "the riscv64 and aarch64 NIC locations are distinct"
+        );
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_RISCV64, GUEST_NIC_NODE_LOCATION_X86_64,
+            "the riscv64 and x86_64 NIC locations are distinct"
         );
     }
 

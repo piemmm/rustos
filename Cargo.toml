@@ -382,6 +382,8 @@ members = [
     "tests/integration/netstack_autoload_qemu_x86_64",
     "tests/integration/netstack_static_qemu_x86_64",
     "tests/integration/netstack_bond_qemu_x86_64",
+    "tests/integration/netstack_static_qemu_riscv64",
+    "tests/integration/netstack_bond_qemu_riscv64",
 ]
 
 # Settings that apply to every crate in the workspace.

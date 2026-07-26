@@ -271,9 +271,8 @@ pub fn static_net_store_files(
             // silently mis-bind on the wrong arch.
             let conf = match arch {
                 PieArch::X86_64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_X86_64,
-                PieArch::Aarch64 | PieArch::Riscv64 => {
-                    tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64
-                }
+                PieArch::Riscv64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_RISCV64,
+                PieArch::Aarch64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64,
             };
             files.push(AppStoreFile {
                 components: vec![
