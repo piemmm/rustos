@@ -1,6 +1,7 @@
 //! Unit tests for the interface address engine.
 
 use super::*;
+use crate::test_support::{temp_source, SeqTempSource};
 
 const IID: [u8; 8] = [0x02, 0xCA, 0xFE, 0xFF, 0xFE, 0xBA, 0xBE, 0x01];
 
@@ -39,7 +40,7 @@ fn prefix_info(valid: u32, preferred: u32) -> PrefixInformation {
 /// DAD completion one retransmission interval later — which, with no
 /// start jitter, also emits the first Router Solicitation.
 fn ready_iface() -> Iface {
-    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    let mut iface = Iface::new(&IfaceConfig::new(IID), temp_source(), t(0));
     let actions = iface.advance(t(0));
     assert_eq!(
         actions,
@@ -88,7 +89,7 @@ fn start_delay_defers_first_dad_transmit() {
         start_delay: Duration64::from_secs(1),
         ..IfaceConfig::new(IID)
     };
-    let mut iface = Iface::new(&config, t(0));
+    let mut iface = Iface::new(&config, temp_source(), t(0));
     assert!(iface.advance(t(0)).is_empty());
     assert_eq!(iface.next_deadline(), Some(t(1)));
     let actions = iface.advance(t(1));
@@ -102,7 +103,7 @@ fn start_delay_defers_first_dad_transmit() {
 
 #[test]
 fn tentative_address_is_not_a_candidate() {
-    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    let mut iface = Iface::new(&IfaceConfig::new(IID), temp_source(), t(0));
     assert!(iface.candidates().is_empty());
     assert!(!iface.is_assigned(link_local_addr()));
     assert!(iface.is_tentative(link_local_addr()));
@@ -114,7 +115,7 @@ fn tentative_address_is_not_a_candidate() {
 
 #[test]
 fn dad_conflict_on_link_local_disables_ipv6() {
-    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    let mut iface = Iface::new(&IfaceConfig::new(IID), temp_source(), t(0));
     iface.advance(t(0));
     let action = iface.on_dad_evidence(link_local_addr());
     assert_eq!(
@@ -347,7 +348,7 @@ fn dad_disabled_makes_addresses_immediately_usable() {
         dad_transmits: 0,
         ..IfaceConfig::new(IID)
     };
-    let mut iface = Iface::new(&config, t(0));
+    let mut iface = Iface::new(&config, temp_source(), t(0));
     assert!(iface.is_assigned(link_local_addr()));
     // Router solicitation is scheduled straight away.
     let actions = iface.advance(t(0));
@@ -361,7 +362,7 @@ fn dad_disabled_makes_addresses_immediately_usable() {
 
 #[test]
 fn next_deadline_tracks_earliest_pending_work() {
-    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    let mut iface = Iface::new(&IfaceConfig::new(IID), temp_source(), t(0));
     assert_eq!(iface.next_deadline(), Some(t(0)));
     iface.advance(t(0));
     assert_eq!(iface.next_deadline(), Some(t(1)));
@@ -373,7 +374,7 @@ fn ipv6_disabled_by_policy_forms_no_link_local() {
         ipv6_enabled: false,
         ..IfaceConfig::new(IID)
     };
-    let mut iface = Iface::new(&config, t(0));
+    let mut iface = Iface::new(&config, temp_source(), t(0));
     assert!(iface.v6_admin_disabled());
     assert!(iface.ipv6_addresses().is_empty());
     // No DAD/RS activity is ever scheduled for a disabled family.
@@ -392,7 +393,7 @@ fn re_enabling_ipv6_reforms_the_link_local() {
         ipv6_enabled: false,
         ..IfaceConfig::new(IID)
     };
-    let mut iface = Iface::new(&config, t(0));
+    let mut iface = Iface::new(&config, temp_source(), t(0));
     iface.set_ipv6_enabled(true, t(0));
     assert!(!iface.v6_admin_disabled());
     // Bring-up proceeds exactly as a fresh interface would.
@@ -434,7 +435,7 @@ fn set_ipv6_enabled_is_idempotent() {
 
 #[test]
 fn re_enabling_after_dad_failure_does_not_reform_link_local() {
-    let mut iface = Iface::new(&IfaceConfig::new(IID), t(0));
+    let mut iface = Iface::new(&IfaceConfig::new(IID), temp_source(), t(0));
     iface.advance(t(0));
     iface.on_dad_evidence(link_local_addr());
     assert!(iface.v6_disabled());
@@ -442,6 +443,209 @@ fn re_enabling_after_dad_failure_does_not_reform_link_local() {
     iface.set_ipv6_enabled(false, t(1));
     iface.set_ipv6_enabled(true, t(1));
     assert!(iface.ipv6_addresses().is_empty());
+}
+
+// ---- RFC 8981 temporary (privacy) addresses -------------------------
+
+/// A privacy configuration with DAD disabled (addresses immediately
+/// usable) and short temporary lifetimes, so regeneration is reachable
+/// in a few seconds of simulated time.
+fn privacy_config() -> IfaceConfig {
+    IfaceConfig {
+        privacy: true,
+        dad_transmits: 0,
+        temp_preferred_lifetime: t(20),
+        temp_valid_lifetime: t(40),
+        ..IfaceConfig::new(IID)
+    }
+}
+
+/// A prefix advertising infinite lifetimes, so the temporary address's
+/// own (short) lifetimes govern regeneration, not the prefix's.
+fn infinite_prefix() -> PrefixInformation {
+    prefix_info(u32::MAX, u32::MAX)
+}
+
+fn temp_addrs(iface: &Iface) -> alloc::vec::Vec<Ipv6AddrInfo> {
+    iface
+        .ipv6_addresses()
+        .into_iter()
+        .filter(|info| info.origin == AddrOrigin::Temporary)
+        .collect()
+}
+
+/// A scripted [`TempAddrSource`] yielding queued 8-byte words in order
+/// (then a fixed non-reserved fallback), so a test can force a reserved
+/// draw or a specific identifier.
+#[derive(Debug)]
+struct ScriptedTempSource {
+    words: alloc::collections::VecDeque<[u8; 8]>,
+}
+
+impl ScriptedTempSource {
+    fn new(words: &[[u8; 8]]) -> Self {
+        Self {
+            words: words.iter().copied().collect(),
+        }
+    }
+}
+
+impl TempAddrSource for ScriptedTempSource {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        let word = self.words.pop_front().unwrap_or([0xAB; 8]);
+        for chunk in out.chunks_mut(8) {
+            let len = chunk.len();
+            chunk.copy_from_slice(&word[..len]);
+        }
+    }
+}
+
+#[test]
+fn privacy_off_forms_no_temporary_address() {
+    let config = IfaceConfig {
+        dad_transmits: 0,
+        ..IfaceConfig::new(IID)
+    };
+    let mut iface = Iface::new(&config, temp_source(), t(0));
+    iface.on_router_advertisement(&[infinite_prefix()], t(0));
+    iface.advance(t(0));
+    // The stable SLAAC address is present; no temporary one is.
+    assert!(iface.is_assigned(slaac_addr()));
+    assert!(temp_addrs(&iface).is_empty());
+}
+
+#[test]
+fn privacy_on_forms_one_distinct_nonreserved_temporary_address() {
+    let mut iface = Iface::new(&privacy_config(), Box::new(SeqTempSource::new()), t(0));
+    iface.on_router_advertisement(&[infinite_prefix()], t(0));
+    let actions = iface.advance(t(0));
+    let temps = temp_addrs(&iface);
+    assert_eq!(temps.len(), 1, "exactly one temporary address forms");
+    let temp = temps[0];
+    // DAD disabled: it is immediately usable and announced.
+    assert!(!temp.tentative);
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, IfaceAction::AddressPreferred { addr } if *addr == temp.addr)));
+    // It shares the /64 prefix but uses a distinct, non-reserved
+    // interface identifier (not the stable EUI-64 one).
+    assert_eq!(temp.prefix_len, 64);
+    assert_eq!(&temp.addr.octets()[..8], &slaac_addr().octets()[..8]);
+    assert_ne!(temp.addr, slaac_addr());
+    assert_ne!(&temp.addr.octets()[8..], &IID);
+    assert_ne!(temp.addr.octets()[8..], [0u8; 8]);
+    // The stable address remains alongside the temporary one.
+    assert!(iface.is_assigned(slaac_addr()));
+}
+
+#[test]
+fn a_reserved_temporary_identifier_is_skipped_and_redrawn() {
+    // The desync draw (first 8 bytes) is any value; the first identifier
+    // draw is the all-zero subnet-router anycast (reserved) and must be
+    // rejected; the second is a good identifier.
+    let good = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    let source = ScriptedTempSource::new(&[[0; 8], [0; 8], good]);
+    let mut iface = Iface::new(&privacy_config(), Box::new(source), t(0));
+    iface.on_router_advertisement(&[infinite_prefix()], t(0));
+    iface.advance(t(0));
+    let temps = temp_addrs(&iface);
+    assert_eq!(temps.len(), 1);
+    assert_eq!(&temps[0].addr.octets()[8..], &good);
+}
+
+#[test]
+fn a_temporary_address_regenerates_before_it_deprecates() {
+    let mut iface = Iface::new(&privacy_config(), Box::new(SeqTempSource::new()), t(0));
+    iface.on_router_advertisement(&[infinite_prefix()], t(0));
+    // Drive the engine forward at each deadline; the successor must be
+    // formed while the predecessor is still preferred (two coexist), and
+    // the table must never exceed its bound.
+    let mut saw_two_preferred = false;
+    let mut now = t(0);
+    for _ in 0..200 {
+        let out = iface.advance(now);
+        let _ = out;
+        let temps = temp_addrs(&iface);
+        assert!(temps.len() <= MAX_IPV6_ADDRS);
+        let preferred = temps
+            .iter()
+            .filter(|t| !t.tentative && !t.deprecated)
+            .count();
+        if temps.len() >= 2 && preferred >= 1 {
+            saw_two_preferred = true;
+        }
+        match iface.next_deadline() {
+            Some(d) => now = d,
+            None => break,
+        }
+        if now.secs() > 300 {
+            break;
+        }
+    }
+    assert!(
+        saw_two_preferred,
+        "a fresh temporary address overlaps its predecessor at regeneration"
+    );
+}
+
+#[test]
+fn runtime_privacy_enable_forms_temporaries_and_disable_removes_them() {
+    let config = IfaceConfig {
+        dad_transmits: 0,
+        ..IfaceConfig::new(IID)
+    };
+    let mut iface = Iface::new(&config, Box::new(SeqTempSource::new()), t(0));
+    iface.on_router_advertisement(&[infinite_prefix()], t(0));
+    iface.advance(t(0));
+    assert!(temp_addrs(&iface).is_empty(), "privacy off: no temporary");
+
+    // Enabling schedules an immediate maintenance pass.
+    iface.set_privacy(true, t(1));
+    assert_eq!(iface.next_deadline(), Some(t(1)));
+    iface.advance(t(1));
+    assert_eq!(temp_addrs(&iface).len(), 1, "enable forms a temporary");
+
+    // Disabling removes every temporary but keeps the stable address.
+    iface.set_privacy(false, t(2));
+    assert!(temp_addrs(&iface).is_empty());
+    assert!(iface.is_assigned(slaac_addr()));
+}
+
+#[test]
+fn temporary_dad_failures_retry_a_bounded_number_of_times() {
+    // Long temporary lifetimes so regeneration never interferes; DAD on
+    // (so each temporary is tentative and can be failed).
+    let config = IfaceConfig {
+        privacy: true,
+        dad_transmits: 1,
+        temp_preferred_lifetime: t(10_000),
+        temp_valid_lifetime: t(20_000),
+        ..IfaceConfig::new(IID)
+    };
+    let mut iface = Iface::new(&config, Box::new(SeqTempSource::new()), t(0));
+    iface.advance(t(0)); // link-local DAD solicit
+    iface.advance(t(1)); // link-local preferred + RS
+    iface.on_router_advertisement(&[infinite_prefix()], t(1));
+
+    // Each maintenance pass forms one tentative temporary; fail its DAD.
+    // After TEMP_IDGEN_RETRIES consecutive failures no more are formed.
+    let mut now = t(1);
+    let mut failures = 0u8;
+    for _ in 0..(TEMP_IDGEN_RETRIES + 3) {
+        iface.advance(now);
+        let tentative_temp = temp_addrs(&iface).into_iter().find(|t| t.tentative);
+        if let Some(temp) = tentative_temp {
+            assert!(failures < TEMP_IDGEN_RETRIES, "no temporary past the cap");
+            iface.on_dad_evidence(temp.addr);
+            failures += 1;
+        }
+        now = Duration64::from_secs(now.secs() + 1);
+    }
+    assert_eq!(failures, TEMP_IDGEN_RETRIES, "retried exactly the cap");
+    // No temporary address survives, and none is being formed anymore.
+    assert!(temp_addrs(&iface).is_empty());
+    iface.advance(Duration64::from_secs(now.secs() + 10));
+    assert!(temp_addrs(&iface).is_empty(), "generation stays disabled");
 }
 
 #[test]

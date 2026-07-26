@@ -126,6 +126,8 @@ pub mod rate;
 pub mod route;
 pub mod stack;
 pub mod tcp;
+#[cfg(test)]
+mod test_support;
 mod timeutil;
 pub mod udp;
 

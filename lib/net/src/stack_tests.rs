@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::ipv6::HBH_ROUTER_ALERT_LEN;
+use crate::test_support::temp_source;
 use alloc::collections::VecDeque;
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -29,7 +30,12 @@ fn facts(mac: MacAddress) -> DeviceFacts {
 }
 
 fn stack(mac: MacAddress, iid: [u8; 8]) -> Stack {
-    Stack::new(&StackConfig::new(facts(mac), iid, 0x1234), t(0)).expect("valid facts")
+    Stack::new(
+        &StackConfig::new(facts(mac), iid, 0x1234),
+        temp_source(),
+        t(0),
+    )
+    .expect("valid facts")
 }
 
 fn link_local(iid: [u8; 8]) -> Ipv6Addr {
@@ -108,7 +114,7 @@ fn construction_refuses_bad_device_facts() {
     let mut bad = facts(MAC_A);
     bad.mtu = 0;
     assert_eq!(
-        Stack::new(&StackConfig::new(bad, IID_A, 0), t(0)).err(),
+        Stack::new(&StackConfig::new(bad, IID_A, 0), temp_source(), t(0)).err(),
         Some(StackError::BadDeviceFacts)
     );
 }
@@ -710,7 +716,7 @@ fn corrupt_udp_checksum_is_dropped() {
 fn stack_with_rx_csum(mac: MacAddress, iid: [u8; 8]) -> Stack {
     let mut f = facts(mac);
     f.offloads = tairix_abi::driver::net::NetOffloads::RX_CSUM_VALIDATED;
-    Stack::new(&StackConfig::new(f, iid, 0x1234), t(0)).expect("valid facts")
+    Stack::new(&StackConfig::new(f, iid, 0x1234), temp_source(), t(0)).expect("valid facts")
 }
 
 /// A UDP/IPv4 datagram from `V4_B` to `V4_A` (Ethernet destination
@@ -1461,7 +1467,12 @@ fn tcp_v4_tx_checksum_offload_matches_the_software_path() {
 
     let mut off_facts = facts(MAC_A);
     off_facts.offloads = tairix_abi::driver::net::NetOffloads::TX_CSUM_TCP;
-    let mut off = Stack::new(&StackConfig::new(off_facts, IID_A, 0x1234), t(0)).expect("valid");
+    let mut off = Stack::new(
+        &StackConfig::new(off_facts, IID_A, 0x1234),
+        temp_source(),
+        t(0),
+    )
+    .expect("valid");
     let mut soft = stack(MAC_A, IID_A);
     off.set_ipv4_config(V4_A, 24, None).expect("cfg off");
     soft.set_ipv4_config(V4_A, 24, None).expect("cfg soft");
@@ -1547,7 +1558,12 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
             | tairix_abi::driver::net::NetOffloads::TX_SEGMENT_TCP.bits(),
     )
     .expect("defined bits");
-    let mut off = Stack::new(&StackConfig::new(facts_off, IID_A, 0x4321), t(0)).expect("valid");
+    let mut off = Stack::new(
+        &StackConfig::new(facts_off, IID_A, 0x4321),
+        temp_source(),
+        t(0),
+    )
+    .expect("valid");
     let mut soft = stack(MAC_A, IID_A);
     off.set_ipv4_config(V4_A, 24, None).expect("cfg off");
     soft.set_ipv4_config(V4_A, 24, None).expect("cfg soft");
@@ -1670,7 +1686,7 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
 fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
     let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
     config.iface.ipv6_enabled = false;
-    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     assert!(a.iface().ipv6_addresses().is_empty());
     // No DAD NS is emitted at bring-up for a disabled family.
     assert!(a.advance_collect(t(0)).frames.is_empty());
@@ -1688,7 +1704,7 @@ fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
 fn re_enabling_ipv6_on_a_stack_brings_the_link_local_up() {
     let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
     config.iface.ipv6_enabled = false;
-    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     a.set_ipv6_enabled(true, t(0));
     // Bring-up proceeds exactly as for a natively-enabled interface.
     assert!(!a.advance_collect(t(0)).frames.is_empty()); // DAD NS
@@ -1721,7 +1737,7 @@ fn disabling_ipv6_at_runtime_flushes_addresses_and_clears_routes() {
 fn ipv4_disabled_stack_refuses_assignment() {
     let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
     config.ipv4_enabled = false;
-    let mut a = Stack::new(&config, t(0)).expect("valid facts");
+    let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     assert_eq!(
         a.set_ipv4_config(V4_A, 24, None),
         Err(crate::iface::AddrError::V4Disabled)

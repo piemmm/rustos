@@ -1450,11 +1450,11 @@ the whole is too large for one change and each leaves the tree working.
 
 #### N9b-2 — deliver + enforce the `net.*` settings in `netstack` `[x]`
 - **ABI** (`lib/abi/src/net_ipc.rs`): `NetworkSettings { ipv4_enabled,
-  ipv6_enabled, syncookies_always }` (a `Default` matching the sysconfig
-  defaults) and `NetstackRequest::ApplyNetworkSettings` (op 10), fail-closed
-  encode/decode (booleans are exactly 0/1) + round-trip tests.
-  `net.ipv6.privacy` is deliberately **not** carried — no enforcement
-  consumer until RFC 8981 (§2.4).
+  ipv6_enabled, syncookies_always, ipv6_privacy }` (a `Default` matching the
+  sysconfig defaults) and `NetstackRequest::ApplyNetworkSettings` (op 10),
+  fail-closed encode/decode (booleans are exactly 0/1) + round-trip tests.
+  `net.ipv6.privacy` maps to `ipv6_privacy` and is enforced by the RFC 8981
+  temporary-address engine (see N10).
 - **Engine** (`lib/net`): admin family-enable is engine state, not just
   service policy. `IfaceConfig.ipv6_enabled` skips link-local formation;
   `Iface::set_ipv6_enabled` flushes/reforms; `Stack.ipv4_enabled` +
@@ -1740,6 +1740,33 @@ trigger. The bond binds by `match.mac`, so `BOND_NETWORK_CONF` is arch-neutral
 and reused verbatim; the two NICs and the failover live on the board's
 virtio-mmio transports. No production code changed. With it all three Tier-1
 targets carry both declarative-config verticals.
+
+#### N10 — RFC 8981 IPv6 temporary (privacy) addresses `[x]`
+The `net.ipv6.privacy` policy is enforced end to end: in addition to the
+stable SLAAC address of each autonomous prefix, the interface forms a
+short-lived temporary address with a randomised interface identifier,
+regenerated before it deprecates, so a host is not tracked by a stable
+address across sessions.
+- **Engine** (`lib/net/src/iface.rs`): `AddrOrigin::Temporary`, per-prefix
+  temporary-address maintenance driven from `Iface::advance` — form one per
+  stable SLAAC prefix, cap its preferred/valid lifetimes by the prefix's own
+  and a random DESYNC_FACTOR, regenerate `REGEN_ADVANCE` before the preferred
+  lifetime expires (so a fresh one is preferred before the old deprecates),
+  and bound duplicate-IID DAD failures to `TEMP_IDGEN_RETRIES` per prefix.
+  Reserved identifiers (RFC 5453) are rejected and re-drawn. Entropy is the
+  injected `TempAddrSource` seam (the engine stays pure/`now`-driven); the
+  temporary lifetimes are `IfaceConfig` knobs (RFC 8981 defaults). RFC 6724
+  rule 7 (`route::CandidateAddr.temporary`) prefers a temporary source for
+  outbound flows. `Iface::set_privacy`/`Stack::set_privacy` toggle it at
+  runtime (enable forms them promptly; disable removes them, keeps the stable
+  address). Host-tested (formation, distinct/non-reserved IID, reserved skip,
+  regeneration overlap, retry cap, runtime toggle, source preference) and
+  fuzzed against hostile RAs (`fuzz_net_stack` runs with privacy on).
+- **ABI/config/service**: `NetworkSettings.ipv6_privacy` (N9b-2), mapped from
+  `net.ipv6.privacy` by `devmgr::netcfg::settings_from_config` and applied by
+  `Netstack::apply_settings` → `Stack::set_privacy`. The `Run` glue injects a
+  per-interface CSPRNG-backed `TempAddrSource` (kernel `random_get`); host
+  tests inject a deterministic one.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 

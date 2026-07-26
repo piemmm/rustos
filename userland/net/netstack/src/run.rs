@@ -47,6 +47,7 @@ extern crate alloc;
 
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use alloc::boxed::Box;
     use alloc::vec::Vec;
 
     use tairix_abi::driver::net::LinkState;
@@ -65,7 +66,7 @@ mod program {
     use tairix_abi::{CapabilityId, Duration64, Errno, Origin, RandomFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
-    use tairix_net::iface::eui64_interface_id;
+    use tairix_net::iface::{eui64_interface_id, TempAddrSource};
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
         events, queue_tx, serve, Caller, CryptoCookieSecret, Delivery, FrameBatch,
@@ -137,6 +138,26 @@ mod program {
     impl NetChannelTransport for RtNetChannelTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::ipc_call(self.endpoint, request, reply).map_err(errno_from)
+        }
+    }
+
+    /// The RFC 8981 temporary-address randomness source: a blocking draw
+    /// from the platform CSPRNG for each randomised interface identifier
+    /// and desync jitter. A blocking draw is safe here because a
+    /// temporary address is formed only off the data path (interface
+    /// bring-up and infrequent regeneration), and the identifier must be
+    /// unpredictable to off-path observers. Fail-closed: a short draw
+    /// leaves the tail zero, which the engine rejects as reserved and
+    /// re-draws, never emitting a predictable identifier.
+    #[derive(Debug)]
+    struct RandomTempSource;
+
+    impl TempAddrSource for RandomTempSource {
+        fn fill_random(&mut self, out: &mut [u8]) {
+            for byte in out.iter_mut() {
+                *byte = 0;
+            }
+            let _ = tairix_rt::random_get(out, RandomFlags::empty());
         }
     }
 
@@ -265,7 +286,11 @@ mod program {
         let _ = tairix_rt::random_get(&mut cookie_key, RandomFlags::empty());
         let secret = CryptoCookieSecret::new(cookie_key);
 
-        let mut stack = Netstack::new();
+        // Each managed interface's Stack draws its RFC 8981 privacy
+        // identifiers from the platform CSPRNG through this factory; the
+        // engine consults it only while net.ipv6.privacy is enabled.
+        let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
+        let mut stack = Netstack::new(temp_factory);
         let mut sockets = SocketService::new();
         // The bound NIC channels, one per slot in the reserved endpoint
         // block. A fixed table (not a growable capacity): the channel count

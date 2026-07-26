@@ -20,7 +20,19 @@ use tairix_abi::{
     CapabilityId, CapabilitySummary, Duration64, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
 };
 use tairix_log::{Event, Sink};
+use tairix_net::iface::TempAddrSource;
 use tairix_netstack::{Caller, Netstack, SocketService};
+
+/// A fixed temporary-address source: this harness exercises the socket
+/// serve path, not privacy addresses, so the engine never consults it.
+#[derive(Debug)]
+struct FixedTempSource;
+
+impl TempAddrSource for FixedTempSource {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        out.fill(0xA5);
+    }
+}
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -67,7 +79,9 @@ fn caller(net: bool, proc_byte: u8) -> Caller {
 }
 
 fn routed_stack() -> Netstack {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(Box::new(|| {
+        Box::new(FixedTempSource) as Box<dyn TempAddrSource>
+    }));
     let now = Duration64::from_secs(0);
     stack
         .add_interface(if_name(), NetIfKind::Ethernet, facts(), [0; 8], 7, 0, now)

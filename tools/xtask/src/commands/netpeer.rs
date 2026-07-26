@@ -29,11 +29,23 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::Duration64;
 use tairix_net::addr::IpAddr;
 use tairix_net::checksum::Pseudo;
-use tairix_net::iface::eui64_interface_id;
+use tairix_net::iface::{eui64_interface_id, TempAddrSource};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::TcpSegment;
 use tairix_test_netstack_wire as wire;
+
+/// A fixed temporary-address source for the harness peer stacks: they
+/// do not exercise RFC 8981 privacy addresses, so the engine never
+/// consults it.
+#[derive(Debug)]
+struct FixedTempSource;
+
+impl TempAddrSource for FixedTempSource {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        out.fill(0xA5);
+    }
+}
 
 /// Blocking-receive slice per loop pass; the wire is otherwise idle, so
 /// this also paces the peer's timer advancement.
@@ -234,6 +246,7 @@ fn run_bond_peer(primary: &Wire, backup: &Wire, stop: &AtomicBool) -> Result<(),
     };
     let mut stack = Stack::new(
         &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
         now(start),
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
@@ -380,6 +393,7 @@ fn run_v6_campaign(
     };
     let mut stack = Stack::new(
         &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
         now(start),
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
@@ -472,6 +486,7 @@ fn run_ping_responder(
     };
     let mut stack = Stack::new(
         &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
         now(start),
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
@@ -611,6 +626,7 @@ fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr, core::net::
         Duration64::from_nanos(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
     let stack = Stack::new(
         &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
         now0,
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;

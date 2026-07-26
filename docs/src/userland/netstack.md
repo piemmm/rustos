@@ -103,8 +103,15 @@ The policy is enforced, not advisory:
 - **`net.tcp.syncookies always`** sets each new listener's
   `max_half_open = 0`, so it holds no half-open state and answers every
   SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default
-  backlog, falling back to cookies only on overflow. (`net.ipv6.privacy`
-  has no enforcement consumer yet and is deliberately not delivered.)
+  backlog, falling back to cookies only on overflow.
+- **`net.ipv6.privacy true`** forms RFC 8981 temporary (privacy) IPv6
+  addresses: alongside the stable SLAAC address of each autonomous
+  prefix, the interface adds a short-lived address with a randomised
+  interface identifier, regenerated before it deprecates, and prefers it
+  as the source for outbound flows (RFC 6724 rule 7). Disabled by
+  default; toggling it re-applies to every managed interface (enabling
+  forms them promptly, disabling removes them and keeps the stable
+  address).
 
 ## Per-interface configuration (`network.conf`)
 

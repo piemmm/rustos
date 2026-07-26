@@ -150,9 +150,12 @@ pub fn validate_if_name(name: &[u8; IF_NAME_LEN]) -> Result<usize, Errno> {
 /// admin op. The mapping from the `lib/sysconfig` registry is exact —
 /// `net.ipv4.enabled`, `net.ipv6.enabled`, and `net.tcp.syncookies`
 /// (`always` ⇒ [`Self::syncookies_always`]; `auto` ⇒ the bounded
-/// default). `net.ipv6.privacy` is deliberately absent: it has no
-/// enforcement consumer until RFC 8981 temporary addresses land, so
-/// carrying it now would be speculative interface.
+/// default), and `net.ipv6.privacy`.
+// These are independent stack-wide policy flags, each mapped one-to-one
+// to a wire byte and a distinct `system.conf` key — not a state that
+// enums would model better; grouping them into an enum would obscure the
+// exact wire layout and the exact registry mapping.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetworkSettings {
     /// Whether the IPv4 family is enabled stack-wide. When `false` an
@@ -168,6 +171,11 @@ pub struct NetworkSettings {
     /// state and answers every SYN with a stateless cookie. `false`
     /// selects the bounded half-open backlog (`auto`).
     pub syncookies_always: bool,
+    /// Whether the stack forms RFC 8981 temporary (privacy) IPv6
+    /// addresses in addition to the stable SLAAC address of each
+    /// autonomous prefix (`net.ipv6.privacy`). `false` (the default)
+    /// leaves only the stable address.
+    pub ipv6_privacy: bool,
 }
 
 impl Default for NetworkSettings {
@@ -181,6 +189,7 @@ impl Default for NetworkSettings {
             ipv4_enabled: true,
             ipv6_enabled: true,
             syncookies_always: false,
+            ipv6_privacy: false,
         }
     }
 }
@@ -431,6 +440,7 @@ impl NetstackRequest {
                 out[8] = u8::from(settings.ipv4_enabled);
                 out[9] = u8::from(settings.ipv6_enabled);
                 out[10] = u8::from(settings.syncookies_always);
+                out[11] = u8::from(settings.ipv6_privacy);
             }
         }
         out
@@ -595,14 +605,15 @@ fn decode_bind_driver(bytes: &[u8]) -> Result<NetstackRequest, Errno> {
     })
 }
 
-/// Decode the [`NetworkSettings`] operation block (three wire booleans at
-/// bytes 8..11) and enforce its zero reserved tail.
+/// Decode the [`NetworkSettings`] operation block (four wire booleans at
+/// bytes 8..12) and enforce its zero reserved tail.
 fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
-    reserved_zero(bytes, 11)?;
+    reserved_zero(bytes, 12)?;
     Ok(NetworkSettings {
         ipv4_enabled: decode_bool(bytes[8])?,
         ipv6_enabled: decode_bool(bytes[9])?,
         syncookies_always: decode_bool(bytes[10])?,
+        ipv6_privacy: decode_bool(bytes[11])?,
     })
 }
 
@@ -2215,11 +2226,13 @@ mod tests {
                 ipv4_enabled: true,
                 ipv6_enabled: false,
                 syncookies_always: true,
+                ipv6_privacy: false,
             }),
             NetstackRequest::ApplyNetworkSettings(NetworkSettings {
                 ipv4_enabled: false,
                 ipv6_enabled: true,
                 syncookies_always: false,
+                ipv6_privacy: true,
             }),
             // Bind with no resolved hardware location.
             NetstackRequest::BindDriver {
@@ -2600,10 +2613,11 @@ mod tests {
             ipv4_enabled: true,
             ipv6_enabled: true,
             syncookies_always: false,
+            ipv6_privacy: true,
         })
         .to_le_bytes();
         // A byte that is neither 0 nor 1 in any flag position fails closed.
-        for pos in 8..=10 {
+        for pos in 8..=11 {
             let mut smuggled = good;
             smuggled[pos] = 2;
             assert_eq!(
@@ -2613,7 +2627,7 @@ mod tests {
         }
         // A non-zero reserved tail byte is refused.
         let mut dirty_tail = good;
-        dirty_tail[11] = 1;
+        dirty_tail[12] = 1;
         assert_eq!(
             NetstackRequest::from_bytes(&dirty_tail),
             Err(Errno::BadMagic)

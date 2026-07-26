@@ -51,9 +51,9 @@ pub trait NetworkConfigSource {
 ///
 /// The mapping is exact and the single definition both the service binary and
 /// its tests use (`AGENTS.md` §2.2): `net.ipv4.enabled` / `net.ipv6.enabled`
-/// gate the families, and `net.tcp.syncookies always` selects unconditional
-/// SYN cookies (`auto` leaves the bounded backlog). `net.ipv6.privacy` has no
-/// enforcement consumer yet, so it is deliberately not carried.
+/// gate the families, `net.tcp.syncookies always` selects unconditional SYN
+/// cookies (`auto` leaves the bounded backlog), and `net.ipv6.privacy` enables
+/// RFC 8981 temporary (privacy) IPv6 addresses.
 #[cfg(feature = "program")]
 #[must_use]
 pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkSettings {
@@ -64,6 +64,7 @@ pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkS
             config.net_tcp_syncookies,
             tairix_sysconfig::SynCookies::Always
         ),
+        ipv6_privacy: config.net_ipv6_privacy.is_enabled(),
     }
 }
 
@@ -695,11 +696,16 @@ mod tests {
         }
     }
 
-    fn settings(v4: bool, v6: bool, cookies: bool) -> NetworkSettings {
+    // A flat test builder mirroring the four independent wire flags of
+    // `NetworkSettings`; an enum would only obscure the mapping the test
+    // is asserting.
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn settings(v4: bool, v6: bool, cookies: bool, privacy: bool) -> NetworkSettings {
         NetworkSettings {
             ipv4_enabled: v4,
             ipv6_enabled: v6,
             syncookies_always: cookies,
+            ipv6_privacy: privacy,
         }
     }
 
@@ -709,12 +715,16 @@ mod tests {
         let mut config = tairix_sysconfig::SystemConfig::default();
         assert_eq!(
             settings_from_config(&config),
-            settings(true, true, false),
-            "the registry defaults map to families-on, cookies-auto"
+            settings(true, true, false, false),
+            "the registry defaults map to families-on, cookies-auto, privacy-off"
         );
         config.net_ipv6_enabled = tairix_sysconfig::NetToggle::Disabled;
         config.net_tcp_syncookies = tairix_sysconfig::SynCookies::Always;
-        assert_eq!(settings_from_config(&config), settings(true, false, true));
+        config.net_ipv6_privacy = tairix_sysconfig::NetToggle::Enabled;
+        assert_eq!(
+            settings_from_config(&config),
+            settings(true, false, true, true)
+        );
     }
 
     #[test]
@@ -734,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_read_policy_is_delivered_once() {
-        let policy = settings(true, false, true);
+        let policy = settings(true, false, true, true);
         let mut source = ScriptedSource::new(alloc::vec![Some(policy), Some(policy)]);
         let mut state = NetConfigState::new();
         let mut netstack = RecordingNetstack::new(alloc::vec![Ok(()), Ok(())]);
@@ -753,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_refused_delivery_is_retried() {
-        let policy = settings(false, true, false);
+        let policy = settings(false, true, false, false);
         let mut source = ScriptedSource::new(alloc::vec![Some(policy), Some(policy)]);
         let mut state = NetConfigState::new();
         // First apply refused (stack not up yet), second accepted.

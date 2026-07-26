@@ -58,6 +58,36 @@ fn name(text: &str) -> [u8; IF_NAME_LEN] {
     out
 }
 
+/// A deterministic RFC 8981 temporary-address randomness source for the
+/// tests (splitmix64): distinct identifiers, reproducible run to run.
+/// The service normally injects a CSPRNG-backed one; the engine consults
+/// it only while `net.ipv6.privacy` is enabled.
+#[derive(Debug)]
+struct TestTempSource(u64);
+
+impl tairix_net::iface::TempAddrSource for TestTempSource {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        for chunk in out.chunks_mut(8) {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let bytes = z.to_le_bytes();
+            let len = chunk.len();
+            chunk.copy_from_slice(&bytes[..len]);
+        }
+    }
+}
+
+fn test_temp_source() -> alloc::boxed::Box<dyn tairix_net::iface::TempAddrSource> {
+    alloc::boxed::Box::new(TestTempSource(0x1234_5678))
+}
+
+fn test_temp_factory() -> crate::iface::TempAddrFactory {
+    alloc::boxed::Box::new(|| test_temp_source())
+}
+
 /// Ring geometry ample for the control-plane exchanges the tests run.
 const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514) {
     Ok(g) => g,
@@ -104,8 +134,12 @@ struct PeerNet {
 
 impl PeerNet {
     fn new(now: Duration64) -> Self {
-        let mut stack =
-            Stack::new(&StackConfig::new(facts(MAC_B), IID_B, 0x4242), now).expect("peer stack");
+        let mut stack = Stack::new(
+            &StackConfig::new(facts(MAC_B), IID_B, 0x4242),
+            test_temp_source(),
+            now,
+        )
+        .expect("peer stack");
         stack.set_ipv4_config(V4_B, 24, None).expect("peer v4");
         Self {
             stack,
@@ -194,7 +228,7 @@ impl Net for LinkNet {
 /// the interface's own stack (no bond, so no announcement).
 #[test]
 fn service_interface_surfaces_a_device_link_change() {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("eth0"),
@@ -298,7 +332,7 @@ fn broker() -> Caller {
 
 /// A `Netstack` managing one Ethernet interface named `wan`.
 fn managed_stack() -> Netstack {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("wan"),
@@ -1951,8 +1985,12 @@ struct PeerTcpNet {
 
 impl PeerTcpNet {
     fn new(now: Duration64) -> Self {
-        let mut stack =
-            Stack::new(&StackConfig::new(facts(MAC_B), IID_B, 0x4242), now).expect("peer stack");
+        let mut stack = Stack::new(
+            &StackConfig::new(facts(MAC_B), IID_B, 0x4242),
+            test_temp_source(),
+            now,
+        )
+        .expect("peer stack");
         stack.set_ipv4_config(V4_B, 24, None).expect("peer v4");
         Self {
             stack,
@@ -2322,6 +2360,7 @@ fn apply_network_settings_requires_cap_net_admin() {
         ipv4_enabled: true,
         ipv6_enabled: false,
         syncookies_always: true,
+        ipv6_privacy: false,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     // A broker capability (introspect) is not admin authority.
@@ -2351,6 +2390,7 @@ fn apply_network_settings_is_applied_and_audited() {
         ipv4_enabled: false,
         ipv6_enabled: true,
         syncookies_always: true,
+        ipv6_privacy: false,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     let len = serve(
@@ -2380,6 +2420,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
             ipv4_enabled: true,
             ipv6_enabled: false,
             syncookies_always: false,
+            ipv6_privacy: false,
         },
         t(2),
     );
@@ -2445,6 +2486,7 @@ fn applying_settings_reconfigures_an_existing_interface() {
             ipv4_enabled: true,
             ipv6_enabled: false,
             syncookies_always: false,
+            ipv6_privacy: false,
         },
         t(2),
     );
@@ -2500,7 +2542,7 @@ fn interface_config_matches_by_hardware_node_and_renames() {
     // An interface bound at a known hardware location (its register-window
     // base), auto-named `net0` at bind, is renamed by a `match.node`
     // configuration that names that same location — independent of MAC.
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("net0"),
@@ -2604,7 +2646,7 @@ fn interface_config_reports_the_rename_it_performs() {
     // layer must learn of a rename to retarget it — otherwise the renamed
     // interface can never be pumped again. The engine reports the rename;
     // this is the regression guard for that contract.
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("net0"),
@@ -2778,7 +2820,7 @@ fn interface_config_is_idempotent() {
 
 #[test]
 fn interface_config_rejects_an_alias_already_taken() {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("wan"),
@@ -2828,6 +2870,7 @@ fn listen_config_maps_the_syncookie_policy() {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: true,
+        ipv6_privacy: false,
     });
     assert_eq!(always.max_half_open, 0);
     // `auto` keeps the bounded default backlog.
@@ -2835,6 +2878,7 @@ fn listen_config_maps_the_syncookie_policy() {
         ipv4_enabled: true,
         ipv6_enabled: true,
         syncookies_always: false,
+        ipv6_privacy: false,
     });
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
 }
@@ -2869,7 +2913,7 @@ fn bond_cfg(
 /// (primary `eth0`, 1 s monitor), a static IPv4 address on the bond, and
 /// both members admitted past the up-delay.
 fn two_member_bond() -> Netstack {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("eth0"),
@@ -2927,7 +2971,7 @@ fn two_member_bond() -> Netstack {
 
 #[test]
 fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("eth0"),
@@ -2975,7 +3019,7 @@ fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
 
 #[test]
 fn a_bond_config_defers_until_all_members_are_present() {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     stack
         .add_interface(
             name("eth0"),
@@ -3233,7 +3277,7 @@ fn a_bond_reload_changes_primary_and_membership() {
 
 #[test]
 fn a_bond_alias_cannot_shadow_a_non_bond_interface() {
-    let mut stack = Netstack::new();
+    let mut stack = Netstack::new(test_temp_factory());
     for (alias, mac, iid) in [
         ("bond0", MAC_A, IID_A),
         ("eth1", MAC_B, IID_B),

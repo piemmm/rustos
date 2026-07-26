@@ -276,6 +276,7 @@ fn candidate(addr: Ipv6Addr) -> CandidateAddr {
         addr,
         deprecated: false,
         prefix_len: 64,
+        temporary: false,
     }
 }
 
@@ -325,6 +326,31 @@ fn source_selection_prefers_matching_label() {
     let ula = candidate(Ipv6Addr::new(0xFD00, 0xBEEF, 0, 0, 0, 0, 0, 1));
     let global = candidate(Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 1));
     assert_eq!(select_source(&[global, ula], ula_dest), Some(ula.addr));
+}
+
+#[test]
+fn source_selection_prefers_temporary_over_public() {
+    // Same prefix and standing: rule 7 prefers the temporary address,
+    // so an outbound flow uses the short-lived privacy identifier.
+    let public = candidate(Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 1));
+    let temporary = CandidateAddr {
+        temporary: true,
+        ..candidate(Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0xBEEF, 2))
+    };
+    assert_eq!(
+        select_source(&[public, temporary], DEST),
+        Some(temporary.addr)
+    );
+    // A deprecated temporary loses to a preferred public one (rule 3
+    // outranks rule 7).
+    let deprecated_temp = CandidateAddr {
+        deprecated: true,
+        ..temporary
+    };
+    assert_eq!(
+        select_source(&[deprecated_temp, public], DEST),
+        Some(public.addr)
+    );
 }
 
 #[test]

@@ -32,7 +32,20 @@ use std::alloc::System;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::addr::{IpAddr, Ipv4Addr};
+use tairix_net::iface::TempAddrSource;
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput};
+
+/// A fixed [`TempAddrSource`]: this test keeps privacy addresses off, so
+/// the engine never consults it; it exists only to satisfy the
+/// constructor without allocating on the measured data path.
+#[derive(Debug)]
+struct FixedTempSource;
+
+impl TempAddrSource for FixedTempSource {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        out.fill(0xA5);
+    }
+}
 
 /// A pass-through allocator that counts every allocation, reallocation,
 /// and zeroed allocation while counting is armed, so the test can assert
@@ -93,7 +106,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
 
 fn stack(mac: MacAddress, iid: u8, addr: Ipv4Addr) -> Stack {
     let config = StackConfig::new(facts(mac), [0, 0, 0, 0, 0, 0, 0, iid], 1);
-    let mut s = Stack::new(&config, Duration64::ZERO).expect("stack");
+    let mut s = Stack::new(&config, Box::new(FixedTempSource), Duration64::ZERO).expect("stack");
     s.set_ipv4_config(addr, 24, None).expect("addr");
     s
 }

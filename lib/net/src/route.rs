@@ -531,6 +531,10 @@ pub struct CandidateAddr {
     pub deprecated: bool,
     /// The prefix length of the subnet the address was formed from.
     pub prefix_len: u8,
+    /// The address is an RFC 8981 temporary (privacy) address. Rule 7
+    /// prefers it over a stable public address of the same standing,
+    /// so outbound flows use the short-lived identifier.
+    pub temporary: bool,
 }
 
 /// RFC 6724 §2.1 default policy-table labels, for rule 6. The
@@ -574,10 +578,10 @@ fn common_prefix_len(a: Ipv6Addr, b: Ipv6Addr, cap: u8) -> u8 {
 /// (rule 5 — prefer addresses on the outgoing interface — is thereby
 /// the caller's pre-filter). Implemented rules, in order: 1 (same
 /// address), 2 (appropriate scope), 3 (avoid deprecated), 6 (matching
-/// label), 8 (longest matching prefix). Rules 4 and 7 (home and
-/// temporary addresses) read attributes this host does not have yet;
-/// they slot in here when it does. Returns `None` for an empty
-/// candidate set (fail closed: no fabricated source).
+/// label), 7 (prefer temporary/privacy addresses), 8 (longest matching
+/// prefix). Rule 4 (home addresses) reads an attribute this host does
+/// not have yet; it slots in here when it does. Returns `None` for an
+/// empty candidate set (fail closed: no fabricated source).
 #[must_use]
 pub fn select_source(candidates: &[CandidateAddr], destination: Ipv6Addr) -> Option<Ipv6Addr> {
     let dest_scope = Ipv6Scope::of(&destination);
@@ -647,6 +651,11 @@ fn better_source(
     let label_b = policy_label(b.addr) == dest_label;
     if label_a != label_b {
         return label_a;
+    }
+    // Rule 7: prefer temporary (privacy) addresses over public ones,
+    // the RFC 6724 default when privacy addresses are configured.
+    if a.temporary != b.temporary {
+        return a.temporary;
     }
     // Rule 8: longest matching prefix.
     common_prefix_len(a.addr, destination, a.prefix_len)

@@ -39,6 +39,7 @@
 //! RFC 4862 §5.5.3(e) two-hour rule prevents a spoofed RA from
 //! instantly invalidating an established address.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
@@ -56,6 +57,26 @@ pub const MAX_IPV6_ADDRS: usize = 16;
 /// RFC 4861 §10 `MAX_RTR_SOLICITATIONS`.
 pub const MAX_RTR_SOLICITATIONS: u8 = 3;
 
+/// RFC 8981 §3.8 `TEMP_PREFERRED_LIFETIME` default (1 day): the ceiling
+/// preferred lifetime of a temporary (privacy) address before a
+/// successor is generated.
+pub const TEMP_PREFERRED_LIFETIME: Duration64 = Duration64::from_secs(86_400);
+
+/// RFC 8981 §3.8 `TEMP_VALID_LIFETIME` default (2 days): the ceiling
+/// valid lifetime of a temporary address.
+pub const TEMP_VALID_LIFETIME: Duration64 = Duration64::from_secs(172_800);
+
+/// RFC 8981 §3.8 `TEMP_IDGEN_RETRIES` default: how many times a fresh
+/// randomised interface identifier is tried against DAD for one prefix
+/// before the engine stops forming temporary addresses there.
+pub const TEMP_IDGEN_RETRIES: u8 = 3;
+
+/// The numerator/denominator of RFC 8981 §3.8 `MAX_DESYNC_FACTOR`
+/// (`0.4 * TEMP_PREFERRED_LIFETIME`), expressed as an exact fraction so
+/// the computation stays integer-only.
+const MAX_DESYNC_NUM: u128 = 2;
+const MAX_DESYNC_DEN: u128 = 5;
+
 /// RFC 4861 §10 `RTR_SOLICITATION_INTERVAL`.
 pub const RTR_SOLICITATION_INTERVAL: Duration64 = Duration64::from_secs(4);
 
@@ -64,6 +85,27 @@ const TWO_HOURS_NANOS: u128 = 7_200 * NANOS_PER_SEC_U128;
 
 /// Nanoseconds per second, widened for deadline arithmetic.
 const NANOS_PER_SEC_U128: u128 = 1_000_000_000;
+
+/// The injected source of unpredictable material RFC 8981 temporary
+/// (privacy) addresses require.
+///
+/// Entropy lives at this seam so the [`Iface`] engine stays pure and
+/// `now`-driven (NETWORK.md §0 "injected seams: time, RNG, frame
+/// I/O"): the engine calls it only while forming a temporary interface
+/// identifier or its desync jitter, and a deterministic implementation
+/// makes the engine fully reproducible in tests. The service layer
+/// backs it with the kernel CSPRNG.
+pub trait TempAddrSource: core::fmt::Debug {
+    /// Fill `out` with unpredictable bytes.
+    ///
+    /// Used for the temporary interface identifier — which **must** be
+    /// unpredictable to off-path observers, the entire point of a
+    /// privacy address — and for the `DESYNC_FACTOR` jitter. The engine
+    /// discards and re-draws a reserved or colliding identifier, so an
+    /// implementation need not filter; it must, however, draw from a
+    /// cryptographically strong generator.
+    fn fill_random(&mut self, out: &mut [u8]);
+}
 
 /// Static configuration of one interface's address engine.
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +134,23 @@ pub struct IfaceConfig {
     /// traffic (the `net.ipv6.enabled` policy). Enable it later with
     /// [`Iface::set_ipv6_enabled`].
     pub ipv6_enabled: bool,
+    /// Whether the interface forms RFC 8981 temporary (privacy) IPv6
+    /// addresses in addition to the stable SLAAC address of each
+    /// autonomous prefix (the `net.ipv6.privacy` policy). Disabled by
+    /// default: the stable address is always present, and privacy
+    /// addresses are opt-in. Toggle it later with
+    /// [`Iface::set_privacy`].
+    pub privacy: bool,
+    /// RFC 8981 `TEMP_PREFERRED_LIFETIME`: the ceiling preferred
+    /// lifetime of a temporary address before a successor is generated
+    /// (defaults to [`TEMP_PREFERRED_LIFETIME`]). Capped further by
+    /// each prefix's advertised preferred lifetime and shortened by a
+    /// random `DESYNC_FACTOR`.
+    pub temp_preferred_lifetime: Duration64,
+    /// RFC 8981 `TEMP_VALID_LIFETIME`: the ceiling valid lifetime of a
+    /// temporary address (defaults to [`TEMP_VALID_LIFETIME`]), capped
+    /// further by each prefix's advertised valid lifetime.
+    pub temp_valid_lifetime: Duration64,
 }
 
 impl IfaceConfig {
@@ -106,6 +165,9 @@ impl IfaceConfig {
             retrans_timer: Duration64::from_secs(1),
             start_delay: Duration64::from_secs(0),
             ipv6_enabled: true,
+            privacy: false,
+            temp_preferred_lifetime: TEMP_PREFERRED_LIFETIME,
+            temp_valid_lifetime: TEMP_VALID_LIFETIME,
         }
     }
 }
@@ -142,6 +204,12 @@ pub enum AddrOrigin {
     Static,
     /// Formed from a Router Advertisement prefix (RFC 4862).
     Slaac,
+    /// An RFC 8981 temporary (privacy) address: a stable SLAAC
+    /// prefix combined with a randomised interface identifier, formed
+    /// only when the `net.ipv6.privacy` policy is enabled and
+    /// regenerated periodically so a host is not tracked by a stable
+    /// address across sessions.
+    Temporary,
 }
 
 /// Typed outputs of the engine: send-intents the caller turns into
@@ -228,6 +296,16 @@ struct V6Addr {
     valid_until: u128,
     /// End of the preferred lifetime; [`NEVER`] for infinite/static.
     preferred_until: u128,
+    /// For an [`AddrOrigin::Temporary`] address: when its successor is
+    /// generated (`preferred_until - REGEN_ADVANCE`), so a fresh
+    /// privacy address is preferred before this one deprecates.
+    /// [`NEVER`] for every other origin.
+    regen_at: u128,
+    /// For a temporary address: whether its successor has already been
+    /// generated (or the attempt was made). Prevents re-firing at
+    /// `regen_at` — without it the past `regen_at` deadline would spin
+    /// the caller's timer.
+    regen_done: bool,
 }
 
 /// Read-only view of one IPv6 address for observers.
@@ -256,6 +334,17 @@ enum RsState {
     Done,
 }
 
+/// Per-prefix RFC 8981 §3.4 duplicate-IID retry guard. Counts
+/// consecutive DAD failures of temporary addresses on one prefix so
+/// the engine stops forming them there after [`TEMP_IDGEN_RETRIES`]
+/// (a badly misconfigured or hostile link must not spin re-drawing
+/// identifiers forever).
+#[derive(Copy, Clone, Debug)]
+struct TempGuard {
+    prefix: [u8; 8],
+    failures: u8,
+}
+
 /// The per-interface address engine. See the module docs.
 #[derive(Debug)]
 pub struct Iface {
@@ -272,6 +361,29 @@ pub struct Iface {
     /// policy and is reversible through [`Iface::set_ipv6_enabled`].
     v6_admin_disabled: bool,
     rs: RsState,
+    /// Whether RFC 8981 temporary (privacy) addresses are formed
+    /// (`net.ipv6.privacy`). See [`Iface::set_privacy`].
+    privacy: bool,
+    /// RFC 8981 `TEMP_PREFERRED_LIFETIME` in nanoseconds.
+    temp_preferred: u128,
+    /// RFC 8981 `TEMP_VALID_LIFETIME` in nanoseconds.
+    temp_valid: u128,
+    /// RFC 8981 `MAX_DESYNC_FACTOR` in nanoseconds (`0.4 *
+    /// TEMP_PREFERRED_LIFETIME`); the desync jitter is drawn below it.
+    max_desync: u128,
+    /// RFC 8981 `REGEN_ADVANCE` in nanoseconds.
+    regen_advance: u128,
+    /// The injected CSPRNG seam for temporary identifiers/jitter.
+    temp_source: Box<dyn TempAddrSource>,
+    /// Per-prefix duplicate-IID retry guards (bounded by the address
+    /// table size).
+    temp_guards: Vec<TempGuard>,
+    /// When a one-off temporary-address maintenance pass is owed
+    /// regardless of any address deadline — set to `now` when privacy
+    /// is enabled at runtime so temporary addresses form promptly for
+    /// prefixes already configured. [`NEVER`] otherwise; cleared by
+    /// the next maintenance pass.
+    temp_maintenance_at: u128,
 }
 
 impl Iface {
@@ -279,18 +391,43 @@ impl Iface {
     /// address enters DAD (its first solicitation due after
     /// [`IfaceConfig::start_delay`]), and Router Solicitations follow
     /// once it is usable.
+    /// `temp_source` is the injected CSPRNG seam RFC 8981 temporary
+    /// addresses draw their randomised identifiers and desync jitter
+    /// from; it is consulted only while [`IfaceConfig::privacy`] is on.
     #[must_use]
-    pub fn new(config: &IfaceConfig, now: Duration64) -> Self {
+    pub fn new(
+        config: &IfaceConfig,
+        temp_source: Box<dyn TempAddrSource>,
+        now: Duration64,
+    ) -> Self {
+        let temp_preferred = nanos(config.temp_preferred_lifetime);
+        let retrans = nanos(config.retrans_timer);
+        // RFC 8981 §3.8: REGEN_ADVANCE = 2s + (TEMP_IDGEN_RETRIES *
+        // DupAddrDetectTransmits * RetransTimer), so the successor's DAD
+        // always completes before the current address deprecates.
+        let regen_advance = nanos(Duration64::from_secs(2)).saturating_add(
+            u128::from(TEMP_IDGEN_RETRIES)
+                .saturating_mul(u128::from(config.dad_transmits))
+                .saturating_mul(retrans),
+        );
         let mut iface = Self {
             interface_id: config.interface_id,
             dad_transmits: config.dad_transmits,
-            retrans_timer: nanos(config.retrans_timer),
+            retrans_timer: retrans,
             start_delay: nanos(config.start_delay),
             v4: None,
             v6: Vec::new(),
             v6_disabled: false,
             v6_admin_disabled: !config.ipv6_enabled,
             rs: RsState::NotStarted,
+            privacy: config.privacy,
+            temp_preferred,
+            temp_valid: nanos(config.temp_valid_lifetime),
+            max_desync: temp_preferred / MAX_DESYNC_DEN * MAX_DESYNC_NUM,
+            regen_advance,
+            temp_source,
+            temp_guards: Vec::new(),
+            temp_maintenance_at: NEVER,
         };
         if !iface.v6_admin_disabled {
             iface.start_link_local(now);
@@ -307,7 +444,15 @@ impl Iface {
             return;
         }
         let start = nanos(now).saturating_add(self.start_delay);
-        self.push_v6(link_local, 64, AddrOrigin::LinkLocal, NEVER, NEVER, start);
+        self.push_v6(
+            link_local,
+            64,
+            AddrOrigin::LinkLocal,
+            NEVER,
+            NEVER,
+            NEVER,
+            start,
+        );
     }
 
     /// Administratively enable or disable IPv6 on this interface
@@ -333,7 +478,33 @@ impl Iface {
         } else if !self.v6_admin_disabled {
             self.v6_admin_disabled = true;
             self.v6.clear();
+            self.temp_guards.clear();
+            self.temp_maintenance_at = NEVER;
             self.rs = RsState::NotStarted;
+        }
+    }
+
+    /// Enable or disable RFC 8981 temporary (privacy) addresses at
+    /// runtime (`net.ipv6.privacy`). Idempotent.
+    ///
+    /// Enabling schedules an immediate maintenance pass at `now`, so a
+    /// temporary address forms for every autonomous prefix already
+    /// configured (a fresh one is also formed as each future Router
+    /// Advertisement adds a prefix). Disabling removes every temporary
+    /// address and clears the per-prefix retry guards; the stable
+    /// SLAAC address of each prefix is untouched.
+    pub fn set_privacy(&mut self, enabled: bool, now: Duration64) {
+        if self.privacy == enabled {
+            return;
+        }
+        self.privacy = enabled;
+        if enabled {
+            self.temp_maintenance_at = nanos(now);
+        } else {
+            self.v6
+                .retain(|entry| entry.origin != AddrOrigin::Temporary);
+            self.temp_guards.clear();
+            self.temp_maintenance_at = NEVER;
         }
     }
 
@@ -401,6 +572,7 @@ impl Iface {
             addr,
             prefix_len,
             AddrOrigin::Static,
+            NEVER,
             NEVER,
             NEVER,
             nanos(now),
@@ -479,6 +651,7 @@ impl Iface {
                 AddrOrigin::Slaac,
                 valid_until,
                 preferred_until,
+                NEVER,
                 now,
             );
         }
@@ -497,13 +670,221 @@ impl Iface {
             return None;
         }
         let origin = self.v6[index].origin;
+        let prefix = prefix_bits(target);
         self.v6.swap_remove(index);
         if origin == AddrOrigin::LinkLocal {
             self.v6_disabled = true;
             self.v6.clear();
+            self.temp_guards.clear();
             self.rs = RsState::Done;
+        } else if origin == AddrOrigin::Temporary {
+            // RFC 8981 §3.4: a duplicate temporary identifier is
+            // retried with a fresh one up to TEMP_IDGEN_RETRIES times,
+            // after which the engine stops forming them for the prefix.
+            self.bump_temp_guard(prefix);
         }
         Some(IfaceAction::DadFailed { addr: target })
+    }
+
+    /// RFC 8981 temporary-address maintenance, run at the tail of
+    /// [`Self::advance`]: form a temporary (privacy) address for every
+    /// stable SLAAC prefix that lacks a fresh one, and regenerate one
+    /// whose preferred lifetime is within `REGEN_ADVANCE` of expiry so
+    /// a fresh randomised address is always preferred before the
+    /// current one deprecates. Drives each new address's first DAD
+    /// solicitation, appending its send-intent to `actions`. A no-op
+    /// unless privacy is enabled and IPv6 is up.
+    fn maintain_temp_addresses(&mut self, now: u128, actions: &mut Vec<IfaceAction>) {
+        // Consume the one-off runtime-enable trigger unconditionally,
+        // so a disabled or torn-down interface never re-fires it.
+        self.temp_maintenance_at = NEVER;
+        if !self.privacy || self.v6_disabled || self.v6_admin_disabled {
+            return;
+        }
+        // Snapshot each stable SLAAC prefix and the lifetimes a
+        // temporary address inherits (capped) from it. Collected first
+        // so the address table is not borrowed while it is mutated.
+        let mut prefixes: Vec<([u8; 8], u128, u128)> = Vec::new();
+        for entry in &self.v6 {
+            if entry.origin != AddrOrigin::Slaac {
+                continue;
+            }
+            let prefix = prefix_bits(entry.addr);
+            if !prefixes.iter().any(|(bits, _, _)| *bits == prefix) {
+                prefixes.push((prefix, entry.valid_until, entry.preferred_until));
+            }
+        }
+        for (prefix, stable_valid, stable_preferred) in prefixes {
+            if self.temp_guard_disabled(prefix) || self.has_fresh_temp(prefix, now) {
+                continue;
+            }
+            // The outgoing temporary address (if any) has reached its
+            // regeneration point: stop its `regen_at` from re-firing.
+            self.mark_temp_regen_done(prefix);
+            if self.v6.len() >= MAX_IPV6_ADDRS {
+                continue;
+            }
+            if let Some(action) = self.generate_temp(prefix, stable_valid, stable_preferred, now) {
+                actions.push(action);
+            }
+        }
+        self.prune_temp_guards();
+    }
+
+    /// Whether `prefix` already has a temporary address that need not
+    /// be (re)generated: a tentative one, or a preferred one whose
+    /// successor is not yet due.
+    fn has_fresh_temp(&self, prefix: [u8; 8], now: u128) -> bool {
+        self.v6.iter().any(|entry| {
+            entry.origin == AddrOrigin::Temporary
+                && prefix_bits(entry.addr) == prefix
+                && match entry.state {
+                    AddrState::Tentative { .. } => true,
+                    AddrState::Preferred => !entry.regen_done && now < entry.regen_at,
+                    AddrState::Deprecated => false,
+                }
+        })
+    }
+
+    /// Mark every preferred temporary address of `prefix` as having had
+    /// its successor generated, so its (now-past) `regen_at` deadline
+    /// stops scheduling maintenance.
+    fn mark_temp_regen_done(&mut self, prefix: [u8; 8]) {
+        for entry in &mut self.v6 {
+            if entry.origin == AddrOrigin::Temporary
+                && prefix_bits(entry.addr) == prefix
+                && entry.state == AddrState::Preferred
+                && !entry.regen_done
+            {
+                entry.regen_done = true;
+                entry.rearm();
+            }
+        }
+    }
+
+    /// Form one temporary address for `prefix`, its lifetimes capped by
+    /// the stable prefix's advertised `stable_valid`/`stable_preferred`
+    /// and shortened by a random `DESYNC_FACTOR`, and start its DAD.
+    /// Returns the first send-intent, or `None` when no usable
+    /// identifier could be drawn or the prefix's remaining preferred
+    /// lifetime is too short to be worth a privacy address.
+    fn generate_temp(
+        &mut self,
+        prefix: [u8; 8],
+        stable_valid: u128,
+        stable_preferred: u128,
+        now: u128,
+    ) -> Option<IfaceAction> {
+        // RFC 8981 §3.4: preferred = min(prefix preferred,
+        // TEMP_PREFERRED_LIFETIME - DESYNC_FACTOR); valid =
+        // min(prefix valid, TEMP_VALID_LIFETIME).
+        let desync = self.draw_desync();
+        let mut preferred_until = now.saturating_add(self.temp_preferred.saturating_sub(desync));
+        if stable_preferred != NEVER {
+            preferred_until = preferred_until.min(stable_preferred);
+        }
+        let mut valid_until = now.saturating_add(self.temp_valid);
+        if stable_valid != NEVER {
+            valid_until = valid_until.min(stable_valid);
+        }
+        preferred_until = preferred_until.min(valid_until);
+        // Not worth forming (and would churn) if the successor would be
+        // due at or before birth: require a preferred span beyond
+        // REGEN_ADVANCE.
+        if preferred_until <= now.saturating_add(self.regen_advance) {
+            return None;
+        }
+        let addr = self.draw_temp_iid(prefix)?;
+        let regen_at = preferred_until.saturating_sub(self.regen_advance);
+        self.push_v6(
+            addr,
+            64,
+            AddrOrigin::Temporary,
+            valid_until,
+            preferred_until,
+            regen_at,
+            now,
+        );
+        let index = self.v6.len() - 1;
+        if self.dad_transmits == 0 {
+            // DAD disabled: push_v6 made it immediately preferred.
+            return Some(IfaceAction::AddressPreferred { addr });
+        }
+        // Drive the first DAD solicitation now (mirrors the tentative
+        // handling in `advance`, so no tick is wasted).
+        self.v6[index].state = AddrState::Tentative { sent: 1 };
+        self.v6[index].deadline = now.saturating_add(self.retrans_timer);
+        Some(IfaceAction::SendDadSolicit { target: addr })
+    }
+
+    /// Draw a fresh, unpredictable, non-reserved temporary interface
+    /// identifier for `prefix` and return the resulting address, or
+    /// `None` if every bounded attempt was reserved or already present.
+    fn draw_temp_iid(&mut self, prefix: [u8; 8]) -> Option<Ipv6Addr> {
+        // A handful of draws is ample: a CSPRNG collision with a
+        // reserved value or an existing address is astronomically
+        // unlikely, and the bound keeps this total.
+        const DRAW_ATTEMPTS: u8 = 4;
+        for _ in 0..DRAW_ATTEMPTS {
+            let mut iid = [0u8; 8];
+            self.temp_source.fill_random(&mut iid);
+            if is_reserved_iid(iid) || iid == self.interface_id {
+                continue;
+            }
+            let addr = address_with_iid(prefix, iid);
+            if self.find_v6(addr).is_none() {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// Draw the RFC 8981 §3.8 `DESYNC_FACTOR`: a value in
+    /// `0..MAX_DESYNC_FACTOR` nanoseconds, used to shorten a temporary
+    /// address's preferred lifetime so peers do not regenerate in
+    /// lock-step.
+    fn draw_desync(&mut self) -> u128 {
+        if self.max_desync == 0 {
+            return 0;
+        }
+        let mut bytes = [0u8; 8];
+        self.temp_source.fill_random(&mut bytes);
+        u128::from(u64::from_le_bytes(bytes)) % self.max_desync
+    }
+
+    /// Whether the duplicate-IID retry budget for `prefix` is spent.
+    fn temp_guard_disabled(&self, prefix: [u8; 8]) -> bool {
+        self.temp_guards
+            .iter()
+            .any(|guard| guard.prefix == prefix && guard.failures >= TEMP_IDGEN_RETRIES)
+    }
+
+    /// Record one duplicate-IID DAD failure for `prefix`.
+    fn bump_temp_guard(&mut self, prefix: [u8; 8]) {
+        if let Some(guard) = self.temp_guards.iter_mut().find(|g| g.prefix == prefix) {
+            guard.failures = guard.failures.saturating_add(1);
+        } else if self.temp_guards.len() < MAX_IPV6_ADDRS {
+            self.temp_guards.push(TempGuard {
+                prefix,
+                failures: 1,
+            });
+        }
+    }
+
+    /// Clear the retry budget for `prefix` after a temporary address
+    /// there survives DAD.
+    fn reset_temp_guard(&mut self, prefix: [u8; 8]) {
+        self.temp_guards.retain(|guard| guard.prefix != prefix);
+    }
+
+    /// Drop retry guards for prefixes whose stable SLAAC address is
+    /// gone, so a re-advertised prefix starts with a fresh budget.
+    fn prune_temp_guards(&mut self) {
+        let v6 = &self.v6;
+        self.temp_guards.retain(|guard| {
+            v6.iter()
+                .any(|e| e.origin == AddrOrigin::Slaac && prefix_bits(e.addr) == guard.prefix)
+        });
     }
 
     /// Perform every timed transition due at `now`: DAD transmits and
@@ -531,11 +912,18 @@ impl Iface {
                         // full retransmission interval: unique.
                         entry.state = AddrState::Preferred;
                         entry.refresh_lifetime_state(now);
-                        actions.push(IfaceAction::AddressPreferred { addr: entry.addr });
-                        if entry.origin == AddrOrigin::LinkLocal {
+                        let origin = entry.origin;
+                        let addr = entry.addr;
+                        actions.push(IfaceAction::AddressPreferred { addr });
+                        if origin == AddrOrigin::LinkLocal {
                             link_local_ready = true;
                         }
                         entry.rearm();
+                        // A temporary address that survives DAD clears
+                        // its prefix's duplicate-IID retry count.
+                        if origin == AddrOrigin::Temporary {
+                            self.reset_temp_guard(prefix_bits(addr));
+                        }
                         index += 1;
                     }
                 }
@@ -552,6 +940,7 @@ impl Iface {
                 }
             }
         }
+        self.maintain_temp_addresses(now, &mut actions);
         if link_local_ready && self.rs == RsState::NotStarted {
             self.rs = RsState::Soliciting {
                 sent: 0,
@@ -587,6 +976,7 @@ impl Iface {
         };
         let earliest = addr_deadlines
             .chain(core::iter::once(rs_deadline))
+            .chain(core::iter::once(self.temp_maintenance_at))
             .filter(|&deadline| deadline != NEVER)
             .min()?;
         Some(from_nanos(earliest))
@@ -627,6 +1017,7 @@ impl Iface {
                     addr: entry.addr,
                     deprecated: entry.state == AddrState::Deprecated,
                     prefix_len: entry.prefix_len,
+                    temporary: entry.origin == AddrOrigin::Temporary,
                 }),
             })
             .collect()
@@ -661,12 +1052,10 @@ impl Iface {
             .is_some_and(|index| matches!(self.v6[index].state, AddrState::Tentative { .. }))
     }
 
-    /// Form this interface's address inside the /64 `prefix` bits.
+    /// Form this interface's address inside the /64 `prefix` bits
+    /// using the stable interface identifier.
     fn address_in(&self, prefix: [u8; 8]) -> Ipv6Addr {
-        let mut octets = [0u8; 16];
-        octets[..8].copy_from_slice(&prefix);
-        octets[8..].copy_from_slice(&self.interface_id);
-        Ipv6Addr::from(octets)
+        address_with_iid(prefix, self.interface_id)
     }
 
     fn find_v6(&self, addr: Ipv6Addr) -> Option<usize> {
@@ -675,6 +1064,12 @@ impl Iface {
 
     /// Insert a new record entering DAD, with its first solicitation
     /// due at `start` (immediately preferred when DAD is disabled).
+    // Each argument is an independent field of the record being
+    // inserted (address, prefix length, origin, the two lifetime
+    // deadlines, the regeneration time, and the start time); bundling
+    // them into a throwaway struct would only obscure the four call
+    // sites, so the list is deliberately flat.
+    #[allow(clippy::too_many_arguments)]
     fn push_v6(
         &mut self,
         addr: Ipv6Addr,
@@ -682,6 +1077,7 @@ impl Iface {
         origin: AddrOrigin,
         valid_until: u128,
         preferred_until: u128,
+        regen_at: u128,
         start: u128,
     ) {
         let mut entry = V6Addr {
@@ -692,6 +1088,8 @@ impl Iface {
             deadline: start,
             valid_until,
             preferred_until,
+            regen_at,
+            regen_done: false,
         };
         if self.dad_transmits == 0 {
             entry.state = if preferred_until <= start && preferred_until != NEVER {
@@ -725,12 +1123,21 @@ impl V6Addr {
         };
     }
 
-    /// Re-arm [`Self::deadline`] to the earlier pending lifetime
-    /// transition of a usable address.
+    /// Re-arm [`Self::deadline`] to the earliest pending transition of
+    /// a usable address. For a still-to-be-regenerated temporary
+    /// address that includes its `regen_at` successor-generation time,
+    /// so [`Iface::advance`] runs then; once regeneration is done the
+    /// deadline falls back to the lifetime transitions.
     fn rearm(&mut self) {
         self.deadline = match self.state {
             AddrState::Tentative { .. } => self.deadline,
-            AddrState::Preferred => self.preferred_until.min(self.valid_until),
+            AddrState::Preferred => {
+                let mut deadline = self.preferred_until.min(self.valid_until);
+                if self.origin == AddrOrigin::Temporary && !self.regen_done {
+                    deadline = deadline.min(self.regen_at);
+                }
+                deadline
+            }
             AddrState::Deprecated => self.valid_until,
         };
     }
@@ -744,6 +1151,36 @@ fn prefix_bits(prefix: Ipv6Addr) -> [u8; 8] {
     let mut bits = [0u8; 8];
     bits.copy_from_slice(&prefix.octets()[..8]);
     bits
+}
+
+/// Combine the leading 64 `prefix` bits with a 64-bit interface
+/// identifier into a full address.
+fn address_with_iid(prefix: [u8; 8], iid: [u8; 8]) -> Ipv6Addr {
+    let mut octets = [0u8; 16];
+    octets[..8].copy_from_slice(&prefix);
+    octets[8..].copy_from_slice(&iid);
+    Ipv6Addr::from(octets)
+}
+
+/// Whether a 64-bit interface identifier is reserved and so must not be
+/// used for a temporary address (RFC 8981 §3.3.2, RFC 5453).
+///
+/// Rejects the Subnet-Router Anycast identifier (all zeros), the
+/// RFC 2526 Reserved Subnet Anycast range (`fdff:ffff:ffff:ff80` …
+/// `…ffff`), and the IANA Ethernet-block identifiers
+/// (`0200:5eff:fe00:0000` … `0200:5eff:feff:ffff`) that a modified
+/// EUI-64 address would use. A CSPRNG draw hits one of these only
+/// astronomically rarely; rejecting keeps a temporary address from
+/// masquerading as a reserved or vendor-derived one.
+fn is_reserved_iid(iid: [u8; 8]) -> bool {
+    if iid == [0; 8] {
+        return true;
+    }
+    let reserved_anycast_prefix = [0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+    if iid[..7] == reserved_anycast_prefix && iid[7] >= 0x80 {
+        return true;
+    }
+    iid[..5] == [0x02, 0x00, 0x5E, 0xFF, 0xFE]
 }
 
 /// Deadline for a RA lifetime in seconds; `u32::MAX` means no expiry

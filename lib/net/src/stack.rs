@@ -33,6 +33,7 @@
 //! names; multicast echo requests are refused (an amplification
 //! vector — deliberate divergence from RFC 4443's MAY).
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -54,7 +55,7 @@ use crate::icmp::{
     error_allowed, ErrorContext, ErrorRateLimiter, IcmpContext, IcmpEcho, IcmpError, IcmpErrorKind,
     IcmpMessage,
 };
-use crate::iface::{Iface, IfaceAction, IfaceConfig};
+use crate::iface::{Iface, IfaceAction, IfaceConfig, TempAddrSource};
 use crate::igmp::{IgmpMessage, PROTOCOL_IGMP};
 use crate::ipv4::{Ipv4Header, IPV4_HEADER_LEN, PROTOCOL_ICMP};
 use crate::ipv6::{
@@ -654,7 +655,15 @@ impl Stack {
     /// [`StackError::BadDeviceFacts`] when `config.facts` fails
     /// validation — a stack is never built over a report it cannot
     /// trust the shape of.
-    pub fn new(config: &StackConfig, now: Duration64) -> Result<Self, StackError> {
+    ///
+    /// `temp_source` is the injected CSPRNG seam RFC 8981 temporary
+    /// (privacy) addresses draw from; it is consulted only while the
+    /// `net.ipv6.privacy` policy is enabled.
+    pub fn new(
+        config: &StackConfig,
+        temp_source: Box<dyn TempAddrSource>,
+        now: Duration64,
+    ) -> Result<Self, StackError> {
         if config.facts.validate().is_err() {
             return Err(StackError::BadDeviceFacts);
         }
@@ -664,7 +673,7 @@ impl Stack {
             mtu_v6: config.facts.mtu as usize,
             link_up: config.facts.link == LinkState::Up,
             hop_limit: crate::ipv6::DEFAULT_HOP_LIMIT,
-            iface: Iface::new(&config.iface, now),
+            iface: Iface::new(&config.iface, temp_source, now),
             ipv4_enabled: config.ipv4_enabled,
             neighbors: NeighborTable::new(config.neighbor_capacity, config.neighbor),
             routes_v4: RoutingTable::new(),
@@ -869,6 +878,15 @@ impl Stack {
             self.ra_routes = 0;
             self.redirect_routes = 0;
         }
+    }
+
+    /// Enable or disable RFC 8981 temporary (privacy) IPv6 addresses
+    /// (`net.ipv6.privacy`). Delegates to the interface engine: enabling
+    /// forms a temporary address for every autonomous prefix, disabling
+    /// removes them and leaves the stable SLAAC addresses in place. The
+    /// resulting DAD/lifecycle frames flow from [`Stack::advance`].
+    pub fn set_privacy(&mut self, enabled: bool, now: Duration64) {
+        self.iface.set_privacy(enabled, now);
     }
 }
 

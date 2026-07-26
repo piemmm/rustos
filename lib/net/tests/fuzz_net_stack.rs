@@ -17,7 +17,7 @@
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
-use tairix_net::iface::MAX_IPV6_ADDRS;
+use tairix_net::iface::{TempAddrSource, MAX_IPV6_ADDRS};
 use tairix_net::stack::{Stack, StackConfig, StackOutput};
 use tairix_net::{IpAddr, Ipv4Addr};
 
@@ -29,6 +29,7 @@ const PEER_MAC: MacAddress = MacAddress([0x02, 0xBB, 0, 0, 0, 0x02]);
 
 /// Lehmer-style LCG — deterministic, no allocator. Identical to the
 /// generator in the sibling harnesses so failures reproduce one way.
+#[derive(Debug)]
 struct Lcg(u64);
 
 impl Lcg {
@@ -59,6 +60,12 @@ impl Lcg {
     }
 }
 
+impl TempAddrSource for Lcg {
+    fn fill_random(&mut self, out: &mut [u8]) {
+        self.fill(out);
+    }
+}
+
 fn fresh_stack() -> Stack {
     let facts = DeviceFacts {
         mac: OUR_MAC,
@@ -67,8 +74,14 @@ fn fresh_stack() -> Stack {
         offloads: NetOffloads::empty(),
         rx_queues: 1,
     };
+    let mut config = StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242);
+    // Exercise the RFC 8981 privacy-address path against the hostile RAs
+    // this harness crafts: temporary addresses must never breach the
+    // address-table bound (invariant 2) no matter what the peer sends.
+    config.iface.privacy = true;
     let mut stack = Stack::new(
-        &StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242),
+        &config,
+        Box::new(Lcg::new(0xF00D_C0DE)),
         Duration64::from_secs(0),
     )
     .expect("valid facts");

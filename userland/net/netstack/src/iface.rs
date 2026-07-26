@@ -9,6 +9,7 @@
 //! `netstack-v1` protocol defines. All protocol behaviour lives in the
 //! pure engine; this module only owns, names, and feeds it.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
@@ -23,7 +24,7 @@ use tairix_abi::net_ipc::{
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
-use tairix_net::iface::{eui64_interface_id, AddrError};
+use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
 use tairix_net::internet_checksum;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{
@@ -129,12 +130,21 @@ impl Interface {
     }
 }
 
+/// A factory for per-interface RFC 8981 temporary-address randomness
+/// sources (`net.ipv6.privacy`).
+///
+/// Entropy lives at the service seam: the `Run` glue injects a factory
+/// backed by the kernel CSPRNG, host tests a deterministic one, and the
+/// pure `lib/net` engine consults the source it is handed only while
+/// privacy addresses are enabled. Each managed [`Stack`] is given a
+/// fresh source drawn from this factory at construction.
+pub type TempAddrFactory = Box<dyn FnMut() -> Box<dyn TempAddrSource>>;
+
 /// The service's interface table and the engine glue around it.
 ///
 /// Grows on demand — an interface is added per discovered NIC, never
 /// from a compile-time ceiling. Reply paging bounds what one IPC
 /// answer carries; it never bounds how many interfaces exist.
-#[derive(Default)]
 pub struct Netstack {
     interfaces: Vec<Interface>,
     /// Stack-wide `net.*` policy (`plans/NETWORK.md` §6.2). Its safe
@@ -152,13 +162,24 @@ pub struct Netstack {
     /// of allocating a fresh output per call — the allocation-free hot
     /// path the engine's [`StackOutput`] contract provides.
     out: StackOutput,
+    /// Injected source of RFC 8981 temporary-address randomness (see
+    /// [`TempAddrFactory`]). Each managed [`Stack`] draws a fresh
+    /// source from it at construction.
+    temp_factory: TempAddrFactory,
 }
 
 impl Netstack {
-    /// An empty table.
+    /// An empty table with the injected temporary-address randomness
+    /// factory (`net.ipv6.privacy`; the service layer owns entropy).
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(temp_factory: TempAddrFactory) -> Self {
+        Self {
+            interfaces: Vec::new(),
+            settings: NetworkSettings::default(),
+            scratch: Vec::new(),
+            out: StackOutput::default(),
+            temp_factory,
+        }
     }
 
     /// Number of managed interfaces.
@@ -212,7 +233,9 @@ impl Netstack {
         let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
         config.ipv4_enabled = self.settings.ipv4_enabled;
         config.iface.ipv6_enabled = self.settings.ipv6_enabled;
-        let stack = Stack::new(&config, now).map_err(|_| Errno::OutOfRange)?;
+        config.iface.privacy = self.settings.ipv6_privacy;
+        let temp_source = (self.temp_factory)();
+        let stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
         self.interfaces.push(Interface {
             name,
             kind,
@@ -250,6 +273,7 @@ impl Netstack {
         for interface in &mut self.interfaces {
             interface.stack.set_ipv4_enabled(settings.ipv4_enabled);
             interface.stack.set_ipv6_enabled(settings.ipv6_enabled, now);
+            interface.stack.set_privacy(settings.ipv6_privacy, now);
         }
     }
 
@@ -957,6 +981,7 @@ impl Netstack {
             scratch,
             out,
             settings: _,
+            temp_factory: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
@@ -1173,7 +1198,9 @@ impl Netstack {
         let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
         config.ipv4_enabled = self.settings.ipv4_enabled;
         config.iface.ipv6_enabled = self.settings.ipv6_enabled;
-        let mut stack = Stack::new(&config, now).map_err(|_| Errno::OutOfRange)?;
+        config.iface.privacy = self.settings.ipv6_privacy;
+        let temp_source = (self.temp_factory)();
+        let mut stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
         // The bond has no admitted member yet, so its aggregate link is
         // down until the failover monitor admits one.
         stack.set_link(LinkState::Down);
