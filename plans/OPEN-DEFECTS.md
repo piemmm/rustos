@@ -719,6 +719,40 @@ and fabricating an SMP-deadlock fix is a hack (§2.1).
   a dead task's state" precursor) or a `BTreeMap::remove` did not take —
   i.e. the map is corrupt, the leading D13 hypothesis. Host-tested; compiled
   out of shippable images.
+- **Named kernel-internal stuck lines (always-on, not debug-gated)** — the
+  hard-lockup summary's `stuck_owner` now names a stuck line the kernel
+  services *itself* through a chained/bespoke handler (no `irq_wait`
+  binding) instead of reporting a bare `unbound`. A new arch-neutral
+  `watchdog::KernelInternalLines` seam (installed from
+  `KernelArch::watchdog_line_names`, mirroring `watchdog_recovery`) is
+  consulted after the task-owner lookup returns no binding; aarch64 maps its
+  discovered `BRCM_MSI_SPI` → `stuck_owner=pcie-msi` and `UART_RX_INTID` →
+  `stuck_owner=console-uart` (interrupt numbers from the device tree, never
+  board constants). This turned the near-every-boot Pi 4 report
+  `stuck_irq=153 stuck_owner=unbound` into `stuck_owner=console-uart` — the
+  BCM2711 PL011 console UART receive SPI (GIC SPI 153) a wedged cpu 0 could
+  not service — confirming 153 is a *bystander* of an IRQ-masked wedge, not
+  its cause. (The resolver checks `BRCM_MSI_SPI` before `UART_RX_INTID` and
+  still returns `console-uart`, so 153 is the UART line, not the MSI SPI as
+  an earlier note guessed before the resolver existed.) The wedge itself is
+  the D13-class masked-section freeze, which the FIQ self-sample is blind to
+  on the real Pi 4 GIC-400 where Group 0 is secure. Host-tested
+  (`resolve_stuck_owner_with` task-wins/named/unbound; the `console-uart` and
+  `pcie-msi` renders).
+- **Finer dispatch breadcrumb `switch_return` (debug-gated).** The
+  boot-deterministic Pi 4 report (`k_site=user_switch`, `console-uart`
+  bystander, ~10.27 s right after USB HID bring-up) wedges in the masked
+  span the coarse `user_switch` crumb conflated — the arch context switch,
+  or the dispatcher-side teardown after it. `KernelBreadcrumb::SwitchReturn`
+  (`kernel/core`) now splits that span: stamped in `kthread::dispatch_step`
+  immediately after `ContextSwitch::switch` returns, it attributes the
+  post-switch teardown (resume-handle retire, live-space clear, the user-root
+  translation-register **park**, guard check — all IRQ-masked) to
+  `switch_return`, distinct from the switch-in / EL0 (`user_switch`). So the
+  next metal boot tells a wedge coming *back* from a task (notably the
+  user-root park) from one going *into* it. Arch-neutral, feature-gated (zero
+  shippable cost), host-tested (round-trip, distinct tags, the
+  `k_site=switch_return` render).
 
 **Latest evidence (trustworthy tools):** a fresh `--cpu` repro
 (`cpu=2 stalled_ms=10218 k_site=task_body k_lock=cfq/scheduler.rs:753 held
@@ -770,9 +804,99 @@ probe, never guessed (§2.1/§2.16/§2.19).
 
 The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
 for `plans/FIX-HARDWARE-FEATURES.md`.
-**Done when:** the FIQ sampler names the wedge, the root cause is fixed with
-evidence and a regression test, and `stress --cpu 20` no longer wedges on
-metal + the QEMU stress vertical.
+
+**CoreSight external-debug (EDPCSR) cross-core sampler — the GIC-400 observer
+the FIQ path cannot be.** On the real Pi 4 the FIQ self-sample is `Unsupported`
+(Group 0 secure), so the near-every-boot masked-section wedge shows only a
+stale `sampled=pre_silence` PC. The one live observation that survives there is
+a read of the wedged core's PC by *another* core over the memory-mapped ARMv8
+external-debug interface (`EDPCSR`, DDI 0487 H9): it does not halt the target
+and rides no interrupt `DAIF` can mask. Landed:
+- `WatchdogArch::remote_pc_sample(target) -> RemotePcSample`
+  (`Sampled{pc,context}` / `Unavailable` / `Unsupported`), default `Unsupported`
+  + conformance (`kernel/arch/api`). The hard-lockup `scan` reads it and renders
+  a fresh `live_pc=+0x…` (image-relative) + `live_ctx` in the debug detail,
+  alongside — never replacing — the stale `pc` (feature-gated).
+- aarch64 `coresight` module: host-tested pure `sample_from` (EDLAR unlock →
+  EDDEVID capability → EDPRSR validity → EDPCSR capture-first → assemble), a
+  scale-sized set-once per-cpu debug-base registry, and the freestanding
+  `VolatileDebugMmio`; `Watchdog::remote_pc_sample` delegates to it.
+- Discovery: `fdt::debug_component_bases` parses the Linux
+  `arm,coresight-cpu-debug` binding (translated `reg` + `cpu`-phandle→dense-id),
+  host-tested; boot installs each base **only** when its gigapage is already
+  Device-mapped (a read can never fault), else nothing (fail closed →
+  `Unsupported`, buddy detector unchanged). QEMU `virt` and the stock Pi 4
+  firmware DTB describe no debug nodes, so this is dormant there and validated
+  by the fail-closed path; **enabling it on Pi 4 hardware requires the firmware
+  DTB (or a supplied overlay) to carry the `arm,coresight-cpu-debug` nodes** —
+  a provisioning step, not a code change. The live `EDPCSR` read itself is
+  metal-confirmable only (QEMU models no EDPCSR), mirroring the FIQ-probe
+  precedent.
+
+**Fail-open `DAIF.F` discipline fixed — the leading suspect for the
+near-every-boot Pi 4 masked-section wedge.** The debug (`watchdog-diagnostics`)
+build left FIQ (`DAIF.F`) unmasked **gated on the compile-time feature alone**,
+never on the runtime deliverability probe: the lock critical-section mask was a
+`const` I-only immediate (`daif::critical_section_mask(cfg!(...))`) and
+`enable_fiq_delivery()` fired on *every* `svc`/fault sync entry unconditionally.
+On the real Pi 4 GIC-400 the probe returns `Unsupported` (Group 0 secure), yet
+the kernel still ran with `DAIF.F` clear pervasively — a **fail-open** exposure
+to secure-world Group-0 FIQs the non-secure kernel cannot service (and with no
+self-sample benefit, since none is delivered there). This matches every trait
+of the wedge: debug-build-only, real-Pi-4-only (QEMU `virt,secure=off` is
+single-Security-state, so it never reproduces), masked-section, intermittent,
+any CPU, ~10 s in after heavy `svc`/fault (USB HID) activity. **Fix:** both
+`DAIF.F`-unmask sites now consult the runtime probe (`fiq_cadence_enabled()`)
+and fail closed — the base lock mask is unconditionally I+F and F is re-cleared
+only when the probe proved FIQ deliverable; the obsolete compile-time
+`critical_section_mask` helper is deleted. Host-tested; the metal confirmation
+(no boot wedge on the Pi 4 debug image) is pending a user boot. **This fix did
+not resolve the wedge** — a later Pi 4 boot on a build carrying it wedged
+identically, so it was a real robustness fix but not the root cause.
+
+**Root cause found and fixed — the kernel heap allocator lock was not
+interrupt-safe (§23.2).** Resolving a fresh near-every-boot Pi 4 report's stale
+`pre_silence` `k_bt` against the debug ELF gave a fully coherent chain: cpu 0
+was in `tairix_kalloc::FreeListAllocator::{carve,insert_hole}` via `alloc` ←
+`BlockCache::populate` ← ARXFS `open_data_block`/`read_cluster_frame` (the
+root-unlock eMMC read path). The allocator guarded its state with a **plain
+`AtomicBool` spinlock that never masked interrupts**. TAIRiX takes interrupts
+while in-kernel code runs, so an interrupt taken on a CPU already holding that
+lock (e.g. the eMMC completion IRQ during the `BlockCache::populate`
+allocation) whose handler allocates reenters `alloc`/`dealloc` and spins
+forever on the lock its own interrupted mainline holds — a single-CPU
+self-deadlock, IRQ-masked (exception entry masks `DAIF.I`), so the watchdog
+cannot sample it → the observed hard lockup. This matches every trait: any CPU,
+~10 s in under heavy concurrent boot allocation (ARXFS reads + USB bring-up),
+`sampled=pre_silence` (the stale sample *is* the last watchdog tick before the
+handler wedged), `k_site=user_switch` (the arch IRQ handler stamps no
+breadcrumb), and real-Pi-4-only (the interrupt-vs-lock interleaving under heavy
+allocation rarely arises in QEMU). The watchdog/detector machinery was verified
+sound (physical-`CNTPCT` cross-CPU clock; idle CPUs marked `Idle`; a running
+EL0 task's liveness refreshed by the maskable watchdog IRQ), so this is a
+genuine wedge, not a false positive.
+
+**Fix.** `tairix_kalloc::FreeListAllocator` now takes an installable
+interrupt-control seam (`install_irq_control(disable, restore)`, two set-once
+`fn`-pointer atomics read outside the lock); `with_inner` masks the current
+CPU's interrupts *before* acquiring the lock and restores them *after*
+releasing — foreclosing the reentrant self-deadlock. Each freestanding bin
+installs its arch primitive at `boot()` entry, before interrupts are ever
+enabled and before any secondary CPU/hart starts (one process-global install
+covers every core; the hooks mask the *current* CPU): aarch64 via
+`DaifIrqControl`, x86_64 via `RflagsIrqControl`, riscv64 via `sstatus.SIE`
+(`csrrci`/`csrs`); the interrupt-free `wasm32` port and the host test build
+install nothing (that window is single-CPU with interrupts already masked).
+Regression test `the_lock_masks_interrupts_via_the_installed_control`
+(`lib/kalloc`) asserts the lock masks then restores interrupts, balanced, once
+a control is installed and not before. Host-tested and all four Tier-1 kernels
+build clean; the metal confirmation (no boot wedge on the Pi 4 debug image) is
+pending a user boot.
+
+**Done when:** the near-every-boot Pi 4 boot wedge no longer reproduces on
+metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer
+wedges on metal + the QEMU stress vertical. (The FIQ and EDPCSR samplers remain
+the standing masked-section observers for any *future* wedge.)
 
 ---
 

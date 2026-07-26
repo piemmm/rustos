@@ -58,6 +58,28 @@ pub fn register_global_heap(heap: &'static FreeListAllocator) {
     );
 }
 
+/// Make the registered kernel heap's lock **interrupt-safe** by installing
+/// the arch's per-CPU interrupt mask/restore primitives into it.
+///
+/// TAIRiX takes interrupts while in-kernel code runs, so an interrupt
+/// service routine can fire on a CPU that is mid-allocation holding the
+/// allocator lock; without masking, an ISR that allocates would spin
+/// forever on the lock its own interrupted mainline holds — a single-CPU
+/// self-deadlock. Each arch bin calls this once from `boot`, **before**
+/// interrupts are first enabled and before any secondary CPU is started,
+/// passing its `InterruptControl` primitives (`msr daifset` on AArch64,
+/// `cli`/`pushf` on x86_64, `csrrci sstatus` on RISC-V) adapted to the
+/// opaque-token `fn` shape [`FreeListAllocator::install_irq_control`] takes.
+/// A no-op when no bin registered a heap (a host harness); the
+/// interrupt-free `wasm32` port installs nothing (fail-safe: that window is
+/// single-CPU with interrupts already masked).
+pub fn install_kheap_irq_control(disable: fn() -> usize, restore: fn(usize)) {
+    let Some(heap) = global_heap() else {
+        return;
+    };
+    heap.install_irq_control(disable, restore);
+}
+
 /// Borrow the registered heap, or `None` when no bin published one (a host
 /// harness, or an early call before registration).
 fn global_heap() -> Option<&'static FreeListAllocator> {

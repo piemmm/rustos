@@ -333,6 +333,25 @@ impl KernelArch for Aarch64BinArch {
             None
         }
     }
+
+    fn watchdog_line_names(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::KernelInternalLines + Sync)> {
+        // Name the kernel-internal GIC SPIs this port enables without a task
+        // binding — the discovered PCIe root-complex MSI multiplexer SPI and
+        // the console UART receive line — so a hard-lockup report attributes
+        // a stuck one (`stuck_owner=pcie-msi` / `console-uart`) rather than a
+        // bare `unbound`. Only meaningful on the freestanding target where
+        // those lines are discovered and enabled; a host build has neither.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            Some(&crate::aarch64::gic_irq::KERNEL_INTERNAL_LINE_NAMES)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            None
+        }
+    }
 }
 
 // SAFETY-INVARIANT: `Aarch64BinArch::halt` returns the bottom type. The

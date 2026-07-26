@@ -579,15 +579,29 @@ pub fn fiq_deliverability() -> FeatureSupport {
     }
 }
 
-/// `true` iff the boot probe confirmed the cadence can be delivered as a
-/// non-maskable FIQ, so [`init_local_watchdog`] should route the cadence
-/// PPI to Group 0 on the calling CPU.
+/// `true` iff the boot probe *proved* a non-maskable FIQ is deliverable to
+/// the non-secure kernel on this hardware (`FIQ_DELIVERABLE == 1`).
+///
+/// This is the single predicate that gates the debug build's entire
+/// `DAIF.F`-unmask discipline, and it must be consulted at **run time**, not
+/// approximated by the compile-time feature. Three consumers ask it:
+/// [`init_local_watchdog`] (whether to route the cadence PPI to Group 0),
+/// the syscall/fault handler (whether to leave `DAIF.F` clear for the
+/// self-sample), and the `IrqSafeSpinLock` critical-section mask (likewise).
+///
+/// The feature being compiled in means the self-sample *code* exists; it does
+/// **not** mean FIQ is the kernel's to take. On a two-Security-state GIC-400
+/// (a Raspberry Pi 4, where Group 0 belongs to the secure world) the probe
+/// returns `Unsupported` and this stays `false`, so the kernel keeps FIQ
+/// masked exactly like a shippable build rather than exposing itself to
+/// secure-world Group-0 FIQs it cannot service (fail closed). `false` until
+/// the probe has run.
 #[cfg(all(
     target_arch = "aarch64",
     target_os = "none",
     feature = "watchdog-diagnostics"
 ))]
-fn fiq_cadence_enabled() -> bool {
+pub fn fiq_cadence_enabled() -> bool {
     FIQ_DELIVERABLE.load(Ordering::Relaxed) == 1
 }
 
@@ -833,6 +847,18 @@ impl WatchdogArch for Watchdog {
         {
             None
         }
+    }
+
+    fn remote_pc_sample(&self, target: CpuId) -> tairix_arch_api::RemotePcSample {
+        // The *code*-side "why" the stale pre-silence sample cannot give: a
+        // read of the wedged core's PC over its discovered CoreSight
+        // external-debug component (`EDPCSR`), which the victim cannot mask
+        // and which does not halt it. Fails closed to `Unsupported` when no
+        // debug base was discovered for `target` (the common case on a tree
+        // that does not describe the debug components), so the detector keeps
+        // the stale sample rather than a fabricated PC. The read is a pure
+        // MMIO sequence (no lock, no block), safe from the sample path.
+        crate::coresight::remote_pc_sample(target)
     }
 }
 

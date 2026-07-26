@@ -730,7 +730,9 @@ with `[<secs>.<millis>]`, a monotonic `CNTPCT_EL0`-derived stamp
 (`kernel_arch::uptime_ms`, scaled by `CNTFRQ_EL0` — the same counter/rate
 `busy_delay_us` spins against; epoch unspecified, only differences
 matter), and `build.rs` emits a `KERNEL_BUILD_ID` (git short hash +
-`+dirty` + a `SOURCE_DATE_EPOCH`-aware build epoch for §19.3) logged as
+`+dirty.<fp>` when dirty (`<fp>` a content fingerprint of the uncommitted
+changes so two different dirty trees never collide) + a
+`SOURCE_DATE_EPOCH`-aware build epoch for §19.3) logged as
 the `build_id` field on the `4097` boot line so a capture proves which
 build is running. The timestamped capture (with `build_id` confirming the
 current image) was **decisive** and corrected the earlier, un-timestamped
@@ -2343,6 +2345,31 @@ The `route_spi` register arithmetic, the `MIN_SPI_INTID` boundary, and
 the fail-closed set-once dispatch slot are host-tested; the
 `tairix-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
 EL1 → dispatcher → `IrqTable::fire` path end-to-end under QEMU.
+
+### External-debug PC sampling (CoreSight EDPCSR)
+
+The Pi 4's GIC-400 keeps Group 0 (FIQ) in the secure world, so a core wedged
+with `DAIF.I` masked cannot be sampled by the maskable watchdog IRQ *or* a
+non-maskable FIQ — its lockup report shows only a stale `sampled=pre_silence`
+PC. `kernel/arch/aarch64::coresight` adds the one live observation that
+survives: another core reads the wedged PE's PC over the memory-mapped ARMv8
+**external-debug** interface (`EDPCSR`, Arm ARM DDI 0487 H9), which neither
+halts the target nor rides any interrupt. It backs the Arch HAL
+`WatchdogArch::remote_pc_sample`, so the buddy observer renders a fresh
+`live_pc=+0x…` beside the stale `pc` (see
+[the kernel watchdog](../architecture/kernel.md)). The unlock (`EDLAR`),
+capability (`EDDEVID`), validity (`EDPRSR`), and capture-first (`EDPCSR` low
+then high/`EDVIDSR`) sequence is a pure function host-tested over a `DebugMmio`
+seam; the real MMIO is the freestanding `VolatileDebugMmio`. Per-CPU debug
+bases are **discovered**, never board constants: `fdt::debug_component_bases`
+reads the Linux `arm,coresight-cpu-debug` binding (translated `reg` +
+`cpu`-phandle → dense id) and the boot path installs a base only when its
+gigapage is already Device-mapped, so a read on the lockup path can never
+fault. A tree that describes no debug components (QEMU `virt`, and the stock Pi
+4 firmware DTB) installs none and the sampler reports `Unsupported` (fail
+closed, the cross-CPU buddy detector runs unchanged). Firing it on a Pi 4
+therefore requires the debug nodes supplied in the DTB (or an overlay), and the
+live `EDPCSR` read is confirmable only on hardware (QEMU models no `EDPCSR`).
 
 ## SMP secondary-core bring-up (PSCI + GICv2 IPI)
 

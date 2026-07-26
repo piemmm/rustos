@@ -2017,6 +2017,17 @@ fn run_phases<A: KernelArch>(
         crate::watchdog::install_recovery(recovery);
     }
 
+    // Give the watchdog the port's kernel-internal line-name resolver, when
+    // it has one: a hard-lockup report then attributes a stuck line the
+    // kernel services itself (the platform MSI multiplexer, the console UART)
+    // to a stable category name (`stuck_owner=<name>`) instead of a bare
+    // `unbound`, so a reader can tell the USB/PCIe MSI line a wedged CPU
+    // could not service from a genuinely spurious line. A port without one
+    // leaves such a line rendering `unbound` exactly as before.
+    if let Some(names) = state.arch.watchdog_line_names() {
+        crate::watchdog::install_kernel_line_names(names);
+    }
+
     // Wrap every boot-installed console's input half in the blocking
     // adapter (the stream backing owns blocking, never
     // the program): a `stream_read` finding its device empty parks the

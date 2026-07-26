@@ -777,6 +777,16 @@ pub fn boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> ! {
+    // Make the global kernel-heap lock interrupt-safe before anything can be
+    // interrupted while holding it: install this port's per-hart `sstatus.SIE`
+    // mask/restore into the (already-registered) heap. Done at boot entry —
+    // before interrupts are ever enabled and before any secondary hart is
+    // started — so an interrupt can never fire on a hart mid-allocation and
+    // reenter the allocator, spinning forever on the lock its own interrupted
+    // mainline holds (a single-CPU self-deadlock). One process-global install
+    // covers every hart: the hooks mask the *current* hart's interrupts.
+    tairix_kernel_core::kheap::install_kheap_irq_control(kalloc_irq_disable, kalloc_irq_restore);
+
     // RV-P2: enable the Sv39 identity MMU + S-mode trap vector before
     // any allocator/scheduler work, then install the production `ecall`
     // dispatch callback. The arch port's `ecall` trap path fails closed
@@ -808,6 +818,37 @@ pub fn boot(
         Err(err) => {
             log_init_failure(log_sink, err);
             halt_current_hart()
+        }
+    }
+}
+
+/// Mask this hart's supervisor interrupts for a kernel-heap-allocator
+/// critical section, returning the prior `sstatus.SIE` as an opaque token.
+///
+/// The `fn`-pointer adapter the boot path installs into the global heap so
+/// the allocator's lock is interrupt-safe: an interrupt taken on a hart
+/// already holding the lock can no longer reenter `alloc`/`dealloc` and spin
+/// forever on the lock its own interrupted mainline holds. The riscv64
+/// sibling of aarch64's `kalloc_irq_disable`.
+fn kalloc_irq_disable() -> usize {
+    let prev: usize;
+    // SAFETY: `csrrci sstatus, 2` atomically clears `sstatus.SIE` (bit 1) —
+    // masking S-mode interrupts on this hart — and reads the prior `sstatus`
+    // into `prev`; it touches only the interrupt-enable bit.
+    unsafe {
+        core::arch::asm!("csrrci {0}, sstatus, 2", out(reg) prev, options(nomem, nostack));
+    }
+    prev & (trap::SSTATUS_SIE as usize)
+}
+
+/// Restore this hart's supervisor interrupt state from a token
+/// [`kalloc_irq_disable`] returned, closing the allocator critical section.
+fn kalloc_irq_restore(token: usize) {
+    if token & (trap::SSTATUS_SIE as usize) != 0 {
+        // SAFETY: `csrs sstatus` sets only `sstatus.SIE`, re-enabling S-mode
+        // interrupts exactly as they were before the paired disable.
+        unsafe {
+            core::arch::asm!("csrs sstatus, {0}", in(reg) trap::SSTATUS_SIE, options(nomem, nostack));
         }
     }
 }

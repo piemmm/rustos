@@ -309,13 +309,22 @@ The `stuck_state=<active|pending>` flag then distinguishes a live storm
 (`active`, a handler in flight) from an enabled line asserted but not yet
 taken (`pending`) — both genuine, deliverable suspects. The raw id still
 does not say *whose* device the line is, so the
-record also attributes it against the live kernel IRQ table
+record attributes it two ways. First against the live kernel IRQ table
 (`IrqTable::owner_of_line`): `stuck_owner=<task>` names the driver that bound
-the line, while `stuck_owner=unbound` marks a line no driver owns — a
-spurious or kernel-contained line, so the wedge is elsewhere (this is what
-tells a raw `stuck_irq=111` apart from the USB path). `stuck_owner` is
-omitted when the owner cannot be resolved (no resolver installed), so a
-record never claims an attribution it could not make. `stuck_irq` /
+the line. A line with no driver binding is then offered to the port's
+kernel-internal line-name resolver (`KernelArch::watchdog_line_names`), so a
+line the kernel services *itself* through a chained or bespoke handler —
+which by construction has no `irq_wait` binding — is **named** rather than
+dismissed: aarch64 reports `stuck_owner=pcie-msi` for the BCM2711 PCIe
+root-complex MSI multiplexer's shared SPI (the USB/PCIe MSI line a wedged CPU
+could not service) and `stuck_owner=console-uart` for the console UART
+receive line, both matched against interrupt numbers discovered from the
+device tree, never board constants. Only a line neither a driver nor the
+kernel owns is `stuck_owner=unbound` — a genuinely spurious or contained
+line, so the wedge is elsewhere (this is what tells a raw `stuck_irq=111`
+apart from the USB path). `stuck_owner` is omitted when the owner cannot be
+resolved (no resolver installed), so a record never claims an attribution it
+could not make. `stuck_irq` /
 `stuck_state` / `stuck_owner` are omitted when no line is stuck (a pure
 IRQ-masked in-kernel spin), and a soft lockup — whose sample is live —
 carries none of them. Every episode is reported **once**, never once per
@@ -364,16 +373,23 @@ CPU is actually stuck in, where the stale sampled `pc` cannot. The
 wedge otherwise reports only the coarse `dispatch`: the scheduler's own
 pick/steal machinery keeps `dispatch`; the task-body shim hand-off (a user
 kthread's `pre_resume` address-space reactivation, resume/live publication)
-is `task_body`; the arch context switch and the task's execution up to its
-first trap is `user_switch`; and the post-run accounting tail (which runs
-with device interrupts still masked, inherited from the suspending task's
-exception entry) is `dispatch_tail`. The full `k_site` set is `dispatch` /
-`task_body` / `user_switch` / `dispatch_tail` / `syscall` (before any
-handler work) / `fault_entry` / `fault_reclaim` / `fault_stack` /
-`fault_ramzip` / `fault_anon` / `fault_file` / `fault_fatal`; `k_detail` is
-the syscall number, the faulting virtual address for a fault phase, or the
-dispatched task id for `task_body` / `dispatch_tail` (`0` for `user_switch`,
-whose task id is carried by the preceding `task_body` crumb); and `k_seq` is
+is `task_body`; the arch context switch into the task and its execution up
+to its first trap is `user_switch`; the dispatcher-side teardown *after* the
+switch returns — retiring the resume handle and, for a user kthread, parking
+this CPU's translation off the task's user root (a translation-register
+write) and checking the guard, all with device interrupts still masked — is
+`switch_return`; and the post-run accounting tail (also masked, inherited
+from the suspending task's exception entry) is `dispatch_tail`. Splitting
+`switch_return` from `user_switch` tells a wedge coming *back* from a task
+(notably the user-root translation park) apart from one going *into* it —
+both otherwise-invisible IRQ-masked sections on a GICv2 board. The full
+`k_site` set is `dispatch` / `task_body` / `user_switch` / `switch_return` /
+`dispatch_tail` / `syscall` (before any handler work) / `fault_entry` /
+`fault_reclaim` / `fault_stack` / `fault_ramzip` / `fault_anon` /
+`fault_file` / `fault_fatal`; `k_detail` is the syscall number, the faulting
+virtual address for a fault phase, or the dispatched task id for `task_body`
+/ `dispatch_tail` (`0` for `user_switch` and `switch_return`, whose task id
+is carried by the preceding `task_body` crumb); and `k_seq` is
 a per-CPU sequence, so two successive reports tell a frozen breadcrumb —
 stuck in exactly this region — from an advancing one. The breadcrumb is
 three relaxed stores plus one release bump, the same order of cost as the
@@ -431,6 +447,25 @@ whole facility out (the `lock-diagnostics` feature, off), so a production lock
 is a bare compare-and-swap. `RwLock`/`McsLock` are not instrumented: they do
 not mask interrupts, so a wedge there is a soft lockup the live `pc`/`k_bt`
 already localise.
+
+The record also carries a **fresh cross-core PC** `live_pc` when the port can
+read one. A hard lockup's own `pc`/`k_bt` are stale (`pre_silence`), and on a
+GIC whose non-maskable interrupt belongs to the secure world (the Raspberry Pi
+4 GIC-400) no interrupt can even reach the wedged core. Where the silicon
+exposes the ARMv8 external-debug PC Sample Register (`EDPCSR`), the buddy
+observer reads the victim's PC over that memory-mapped debug interface —
+without halting it and over a channel `DAIF` cannot mask — through
+`WatchdogArch::remote_pc_sample`, and renders it image-relative as
+`live_pc=+0x…` (plus `live_ctx`, the sampled context register) *alongside* the
+stale `pc`, so a reader sees the instruction the core is actually wedged on.
+The aarch64 port implements it in `coresight` (host-tested unlock/validity/
+capture logic over a `DebugMmio` seam; per-cpu debug bases discovered from the
+device tree's `arm,coresight-cpu-debug` binding and installed only for an
+already-Device-mapped window, so the read never faults). A port with no such
+channel — or a tree that describes no debug components — answers
+`RemotePcSample::Unsupported` and the report keeps the stale sample (fail
+closed, never a fabricated PC). `live_pc` is a debug-only field; a user-EL
+sample (not a kernel-image address) is omitted rather than disclosed raw.
 
 `CPU_LOCKUP_RECOVERY` (a `Warn`) records the best-effort recovery the
 watchdog asked the architecture port for after a detection

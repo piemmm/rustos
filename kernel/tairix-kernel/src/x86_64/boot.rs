@@ -360,6 +360,18 @@ pub fn boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> ! {
+    // Make the global kernel-heap lock interrupt-safe before anything can be
+    // interrupted while holding it: install this port's per-CPU `RFLAGS.IF`
+    // mask/restore (`cli`/`sti`) into the (already-registered) heap. Done at
+    // boot entry — before any interrupt is enabled and before any AP is
+    // started — so an interrupt can never fire on a CPU mid-allocation and
+    // reenter the allocator, spinning forever on the lock its own interrupted
+    // mainline holds (a single-CPU self-deadlock). One process-global install
+    // covers every core: the hooks mask the *current* CPU's interrupts.
+    tairix_kernel_core::kheap::install_kheap_irq_control(
+        crate::x86_64::com1_rx::kalloc_irq_disable,
+        crate::x86_64::com1_rx::kalloc_irq_restore,
+    );
     match try_boot(boot_info, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {

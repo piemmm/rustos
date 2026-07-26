@@ -48,6 +48,20 @@
 //! `#[global_allocator]` is `const`-constructed; the bootstrap region is
 //! planted lazily on the first allocation.
 //!
+//! # Interrupt-safe lock
+//!
+//! TAIRiX takes interrupts while in-kernel code runs, so an interrupt
+//! service routine can fire on a CPU that is mid-allocation holding the
+//! lock. Were the lock left plain, an ISR that allocated or freed would spin
+//! forever on the lock its own interrupted mainline holds — a single-CPU
+//! self-deadlock. The lock is therefore **interrupt-safe**: it masks the
+//! current CPU's interrupts for the whole hold. The masking primitive is
+//! architecture-specific, so the freestanding bin installs it once at boot
+//! ([`FreeListAllocator::install_irq_control`]) before interrupts are ever
+//! enabled; until then — and on the hosted test build and the interrupt-free
+//! `wasm32` port — the lock does not mask, and that window is single-CPU with
+//! interrupts already masked, so no ISR can reenter.
+//!
 //! # Deterministic OOM
 //!
 //! A forward-only bump allocator (this crate's original design) never
@@ -71,7 +85,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Size of the kernel heap's **bootstrap** region.
 ///
@@ -238,6 +252,13 @@ pub struct FreeListAllocator {
     heap_base: *mut u8,
     heap_len: usize,
     lock: AtomicBool,
+    /// Installed per-CPU interrupt-mask hook (a `fn() -> usize` stored as a
+    /// `usize`, `0` = none), read *outside* the lock to make the critical
+    /// section interrupt-safe. See [`FreeListAllocator::install_irq_control`].
+    irq_disable: AtomicUsize,
+    /// Installed per-CPU interrupt-restore hook (a `fn(usize)` stored as a
+    /// `usize`, `0` = none), paired with [`Self::irq_disable`].
+    irq_restore: AtomicUsize,
     inner: UnsafeCell<Inner>,
 }
 
@@ -265,6 +286,8 @@ impl FreeListAllocator {
             heap_base,
             heap_len,
             lock: AtomicBool::new(false),
+            irq_disable: AtomicUsize::new(0),
+            irq_restore: AtomicUsize::new(0),
             inner: UnsafeCell::new(Inner {
                 initialised: false,
                 head: None,
@@ -292,13 +315,63 @@ impl FreeListAllocator {
         }
     }
 
+    /// Install the per-CPU interrupt mask/restore hooks that make the
+    /// allocator's lock **interrupt-safe**, foreclosing a single-CPU
+    /// self-deadlock.
+    ///
+    /// TAIRiX takes interrupts while in-kernel code runs, so an interrupt
+    /// service routine can fire on a CPU that is mid-allocation holding this
+    /// lock; if that ISR (or anything it calls) allocates or frees, it would
+    /// spin forever on the lock its own interrupted mainline holds. To
+    /// foreclose it, the allocator's lock masks interrupts on the current CPU
+    /// for the duration of every hold: `disable` masks them and returns an
+    /// opaque token of the prior state, `restore` puts that state back.
+    ///
+    /// The primitives are architecture-specific (`msr daifset` on AArch64,
+    /// `cli`/`pushf` on x86_64, `csrrci sstatus` on RISC-V), so the
+    /// freestanding bin installs them once during boot, **before** interrupts
+    /// are first enabled and before any secondary CPU is started. Until then —
+    /// and on the hosted test build and the interrupt-free `wasm32` port — no
+    /// hooks are installed and the lock does not mask; that window is
+    /// single-CPU with interrupts already masked, so no ISR can reenter.
+    ///
+    /// Set once per boot; a later install simply retargets the hooks.
+    pub fn install_irq_control(&self, disable: fn() -> usize, restore: fn(usize)) {
+        // Publish `restore` first, then `disable` with Release, so any reader
+        // that observes a non-zero `disable` (Acquire in `with_inner`) also
+        // observes the matching `restore`.
+        self.irq_restore.store(restore as usize, Ordering::Relaxed);
+        self.irq_disable.store(disable as usize, Ordering::Release);
+    }
+
     /// Acquire the spin lock, run `f` over the mutable state, release it.
+    ///
+    /// Interrupt-safe: interrupts on the current CPU are masked *before* the
+    /// lock is taken and restored *after* it is released, whenever an
+    /// interrupt-control hook is installed ([`Self::install_irq_control`]) —
+    /// so an interrupt service routine can never fire on a CPU holding this
+    /// lock and reenter the allocator, self-deadlocking on it. Before a hook
+    /// is installed (early boot), on the hosted test build, and on the
+    /// interrupt-free `wasm32` port, no masking is done: those contexts are
+    /// single-CPU with interrupts already masked, so no ISR can reenter.
     ///
     /// # Safety
     ///
     /// The caller must not re-enter (the lock is not reentrant); the
     /// allocator only ever calls this from its own non-nested methods.
     unsafe fn with_inner<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
+        // Mask interrupts on this CPU for the whole hold, *before* taking the
+        // lock (fail-safe: no hook installed means the context is already
+        // non-reentrant, so masking is unnecessary).
+        let disable = self.irq_disable.load(Ordering::Acquire);
+        let irq_token = if disable == 0 {
+            None
+        } else {
+            // SAFETY: `irq_disable` only ever holds a `fn() -> usize` pointer
+            // round-tripped through `install_irq_control`.
+            let disable = unsafe { core::mem::transmute::<usize, fn() -> usize>(disable) };
+            Some(disable())
+        };
         while self
             .lock
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -311,6 +384,17 @@ impl FreeListAllocator {
         let inner = unsafe { &mut *self.inner.get() };
         let out = f(inner);
         self.lock.store(false, Ordering::Release);
+        // Restore the prior interrupt state only *after* the lock is released,
+        // so the whole critical section ran with interrupts masked.
+        if let Some(token) = irq_token {
+            let restore = self.irq_restore.load(Ordering::Relaxed);
+            // SAFETY: a non-zero `irq_token` was produced by the installed
+            // `disable`, whose paired `restore` (published before `disable`
+            // with Release/Acquire) is visible here; `token` is this CPU's
+            // saved state, restored exactly once.
+            let restore = unsafe { core::mem::transmute::<usize, fn(usize)>(restore) };
+            restore(token);
+        }
         out
     }
 

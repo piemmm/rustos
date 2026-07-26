@@ -535,8 +535,10 @@ fn emit_byte_slice(out: &mut String, name: &str, bytes: &[u8]) {
 /// guessing.
 ///
 /// The id combines the source identity (`git rev-parse --short HEAD`, plus
-/// a `+dirty` marker when the working tree carries uncommitted changes —
-/// best-effort, `nogit` when git or the checkout is unavailable) with a
+/// a `+dirty.<fp>` marker when the working tree carries uncommitted changes,
+/// where `<fp>` fingerprints that uncommitted content so two different dirty
+/// trees never collide — best-effort, `nogit` when git or the checkout is
+/// unavailable) with a
 /// build epoch in seconds. The epoch honours `SOURCE_DATE_EPOCH` when set
 /// (the standard reproducible-build input, so a pinned build stays
 /// bit-reproducible), falling back to the current
@@ -566,9 +568,17 @@ fn emit_build_id() {
     fs::write(&path, fixture).expect("write build_id fixture");
 }
 
-/// `git rev-parse --short HEAD` with a `+dirty` suffix when the working
+/// `git rev-parse --short HEAD` with a `+dirty.<fp>` suffix when the working
 /// tree is not clean; `nogit` when git or the checkout is unavailable
 /// (the build must never fail for a missing VCS).
+///
+/// The `<fp>` is a short content fingerprint of the uncommitted changes
+/// ([`dirty_content_fingerprint`]), so two *different* dirty trees no longer
+/// report the same `<hash>+dirty` id. That collision was the concrete failure
+/// this closes: a metal reflash could not be told apart from the previous one
+/// on the id alone — the operator had no way to confirm the image on the SD
+/// card actually carried the source change under test. A distinct `<fp>`
+/// proves a distinct tree; the same `<fp>` proves the same content.
 fn git_source_id() -> String {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let head = Command::new("git")
@@ -582,15 +592,73 @@ fn git_source_id() -> String {
         return "nogit".to_string();
     }
     let hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    let dirty = Command::new("git")
-        .current_dir(&manifest_dir)
-        .args(["status", "--porcelain"])
+    match dirty_content_fingerprint(&manifest_dir) {
+        Some(fp) => format!("{hash}+dirty.{fp}"),
+        None => hash,
+    }
+}
+
+/// A short content fingerprint of the working tree's uncommitted changes, or
+/// `None` when the tree is clean (a committed build needs no marker).
+///
+/// The fingerprint covers both channels of "not committed": every tracked
+/// modification since `HEAD` (`git diff HEAD`, which folds in staged and
+/// unstaged edits alike) and the full contents of every untracked,
+/// non-ignored file (`git ls-files --others --exclude-standard`, so a brand
+/// new source file that no diff would show still moves the fingerprint).
+/// `.gitignore` is honoured, so build outputs under `images/` and `target/`
+/// never enter it. The bytes are hashed with the host-tested, fast
+/// non-cryptographic [`build_support::short_content_hash`] — this only has to
+/// tell developer working trees apart, never resist an adversary. Any git
+/// hiccup collapses to "no fingerprint" (the bare `<hash>` id) rather than
+/// failing the build, matching the surrounding fail-safe VCS handling.
+fn dirty_content_fingerprint(manifest_dir: &str) -> Option<String> {
+    let diff = Command::new("git")
+        .current_dir(manifest_dir)
+        .args(["diff", "HEAD"])
         .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
-    if dirty {
-        format!("{hash}+dirty")
+        .ok()?;
+    if !diff.status.success() {
+        return None;
+    }
+    let untracked = Command::new("git")
+        .current_dir(manifest_dir)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .ok()?;
+    if !untracked.status.success() {
+        return None;
+    }
+
+    let mut material = diff.stdout;
+    // `git ls-files` prints paths relative to its working directory (here
+    // `manifest_dir`), so resolve each against that base — an untracked file
+    // elsewhere in the repo comes through as a `../…`-prefixed relative path
+    // that still resolves correctly.
+    let base = PathBuf::from(manifest_dir);
+    for name in untracked.stdout.split(|&b| b == 0) {
+        if name.is_empty() {
+            continue;
+        }
+        let path = base.join(String::from_utf8_lossy(name).as_ref());
+        // The path came straight from git and names an existing untracked
+        // file; a read that nonetheless fails (a race with a concurrent
+        // delete) folds the path name in instead, so the fingerprint still
+        // moves rather than silently dropping the change.
+        match fs::read(&path) {
+            Ok(bytes) => material.extend_from_slice(&bytes),
+            Err(_) => material.extend_from_slice(name),
+        }
+    }
+
+    // A dirty `git status` with an empty diff and no untracked files cannot
+    // occur, but fold the emptiness to `None` so the id degrades to the bare
+    // committed hash rather than fingerprinting nothing.
+    if material.is_empty() {
+        None
     } else {
-        hash
+        let mut buf = [0u8; 12];
+        Some(build_support::short_content_hash(&material, &mut buf).to_string())
     }
 }
 

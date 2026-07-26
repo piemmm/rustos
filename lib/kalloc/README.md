@@ -15,8 +15,18 @@ allocate/free traffic runs in bounded memory and exhaustion is a
 `null` return, never a panic (`AGENTS.md` §4). See the crate-level
 rustdoc for the design and bounds-checking invariants.
 
+Its lock is **interrupt-safe**: TAIRiX takes interrupts while in-kernel
+code runs, so an interrupt handler can fire on a CPU already mid-allocation
+holding the lock; without masking, an ISR that allocated would spin forever
+on the lock its own interrupted mainline holds — a single-CPU self-deadlock
+(`AGENTS.md` §23.2). The masking primitive is architecture-specific, so the
+freestanding bin installs it once at boot via `install_irq_control`, before
+interrupts are ever enabled; the hosted test build and the interrupt-free
+`wasm32` port install nothing and the lock does not mask (that window is
+single-CPU with interrupts already masked, so no ISR can reenter).
+
 ## Stability tier
 
-`stable` — the public surface (`FreeListAllocator`, `Heap`, `HEAP_BYTES`)
-is the kernel-heap contract consumed across the kernel and test trees. It
-is `no_std` and depends only on `core`.
+`stable` — the public surface (`FreeListAllocator`, `Heap`, `HEAP_BYTES`,
+`install_irq_control`) is the kernel-heap contract consumed across the
+kernel and test trees. It is `no_std` and depends only on `core`.

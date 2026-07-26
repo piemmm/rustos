@@ -96,6 +96,34 @@ unsafe impl InterruptControl for RflagsIrqControl {
     }
 }
 
+/// Mask this CPU's interrupts for a kernel-heap-allocator critical section,
+/// returning the prior `RFLAGS.IF` as an opaque token (`1` = were enabled).
+///
+/// The `fn`-pointer adapter the boot path installs into the global heap
+/// (`tairix_kalloc::FreeListAllocator::install_irq_control`) so the
+/// allocator's lock is interrupt-safe: an interrupt taken on a CPU already
+/// holding the lock can no longer reenter `alloc`/`dealloc` and spin forever
+/// on the lock its own interrupted mainline holds. Delegates to the same
+/// [`RflagsIrqControl`] every IRQ-safe spinlock uses, so the masking
+/// discipline is defined once. The x86_64 sibling of aarch64's
+/// `kalloc_irq_disable`.
+pub fn kalloc_irq_disable() -> usize {
+    usize::from(<RflagsIrqControl as InterruptControl>::disable().irqs_were_enabled)
+}
+
+/// Restore this CPU's interrupt state from a token
+/// [`kalloc_irq_disable`] returned, closing the allocator critical section.
+pub fn kalloc_irq_restore(token: usize) {
+    // SAFETY: `token` is the `RFLAGS.IF` state a paired `kalloc_irq_disable`
+    // captured on this CPU; restoring it re-enables interrupts only if they
+    // were enabled before.
+    unsafe {
+        <RflagsIrqControl as InterruptControl>::restore(RflagsState {
+            irqs_were_enabled: token != 0,
+        });
+    }
+}
+
 /// COM1's receive type-ahead queue — the software RX ring the
 /// interrupt-driven receive path fills and the console read half drains.
 ///

@@ -275,8 +275,8 @@ pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_C
 pub use watchdog::{
     check_stall, install_recovery as install_watchdog_recovery,
     install_report_sink as install_watchdog_sink, note_progress, on_watchdog_tick,
-    set_activity as set_watchdog_activity, WatchdogActivity, DEFAULT_HARD_LOCKUP_THRESHOLD_NS,
-    DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
+    set_activity as set_watchdog_activity, KernelInternalLines, WatchdogActivity,
+    DEFAULT_HARD_LOCKUP_THRESHOLD_NS, DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
 };
 // The pre-silence backtrace surface and the kernel-image-base seam are part
 // of the debug-diagnostics facility (`plans/WATCHDOG.md`): the port fills

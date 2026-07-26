@@ -162,6 +162,23 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// The port's resolver that names a stuck controller line belonging to a
+    /// kernel-internal source with no task binding — a chained/bespoke line
+    /// the kernel services itself (the platform MSI multiplexer, the console
+    /// UART) whose interrupt numbers the port discovered at runtime.
+    ///
+    /// [`crate::kernel_main`] installs it into the watchdog once at boot so a
+    /// hard-lockup report can render `stuck_owner=<name>` for such a line
+    /// instead of a bare `unbound`, which would hide that the pending line is
+    /// (for example) the USB/PCIe MSI line a wedged CPU could not service.
+    /// The default is `None` — a port with no kernel-internal enabled lines
+    /// to name simply leaves such a line rendering as `unbound`.
+    fn watchdog_line_names(
+        &self,
+    ) -> Option<&'static (dyn crate::watchdog::KernelInternalLines + Sync)> {
+        None
+    }
+
     /// The port's CPU-feature detector (the Arch HAL `cpufeatures` slice),
     /// when it can read its ISA-extension capability from the silicon.
     ///

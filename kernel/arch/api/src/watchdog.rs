@@ -165,6 +165,61 @@ pub struct StuckInterrupt {
     pub active: bool,
 }
 
+/// A cross-core program-counter sample of a wedged CPU, read from a
+/// **non-maskable, halt-free** external-debug channel (the aarch64
+/// CoreSight external-debug PC Sample Register, `EDPCSR`).
+///
+/// A hard lockup's own last-known sample is stale: the victim went silent
+/// with maskable interrupts off, so its recorded `pc` names the innocent
+/// code it last returned to, not the instruction wedging it now
+/// ([`WatchdogArch::stuck_interrupt`] gives the *device* "why"; this gives
+/// the *code* "why"). The one observation that survives such a core is a
+/// read of its PC by *another* master over a channel the victim cannot
+/// mask and that does not halt it — on ARMv8 the memory-mapped external
+/// debug interface's `EDPCSR`. This enum is the honest outcome of that
+/// read, held to the same fail-closed discipline as the rest of the HAL:
+/// a port that cannot make the observation says so rather than fabricating
+/// a PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePcSample {
+    /// The observer read a live PC of the target without halting it — a
+    /// **fresh** sample, unlike the target's stale pre-silence one, that
+    /// names the instruction the wedged core is actually stuck on.
+    /// `context` is one port-defined auxiliary word describing the sampled
+    /// execution context (aarch64 `EDVIDSR`: security state / exception
+    /// level / mode), `0` when the port supplies none.
+    Sampled {
+        /// The sampled program counter.
+        pc: u64,
+        /// A port-defined auxiliary context word (`0` = none).
+        context: u64,
+    },
+    /// The channel exists and is reachable, but could not produce a valid
+    /// sample this read — the target PE is in a low-power or reset state,
+    /// or the sample register was not valid. An honest transient, never a
+    /// claim that the observation is impossible.
+    Unavailable(&'static str),
+    /// This port has no external-debug PC-sampling channel wired for the
+    /// target: no debug component was discovered for it, the feature is not
+    /// implemented by the silicon, or the port exposes no such surface at
+    /// all. Fail closed — the caller keeps the stale sample rather than a
+    /// fabricated one.
+    Unsupported(&'static str),
+}
+
+impl RemotePcSample {
+    /// The fresh PC when this is a [`Self::Sampled`] reading, else `None`.
+    /// A convenience for a caller that only wants the address and treats
+    /// both non-sampled variants identically (keep the stale sample).
+    #[must_use]
+    pub const fn pc(self) -> Option<u64> {
+        match self {
+            Self::Sampled { pc, .. } => Some(pc),
+            Self::Unavailable(_) | Self::Unsupported(_) => None,
+        }
+    }
+}
+
 /// The per-architecture non-maskable-recovery handle the watchdog reaches
 /// through.
 ///
@@ -218,6 +273,33 @@ pub trait WatchdogArch: Send + Sync {
     fn stuck_interrupt(&self) -> Option<StuckInterrupt> {
         None
     }
+
+    /// Read a **fresh** program-counter sample of the hard-locked `target`
+    /// over a non-maskable, halt-free external-debug channel, or say why it
+    /// could not.
+    ///
+    /// This is the *code*-side counterpart of [`Self::stuck_interrupt`]'s
+    /// *device*-side "why". A hard-locked core's own recorded sample is
+    /// stale (taken before it went silent), so it cannot name the
+    /// instruction wedging it. Where the silicon exposes a memory-mapped
+    /// external-debug PC sample (ARMv8 `EDPCSR`), another CPU can read the
+    /// victim's PC *without halting it and over a channel the victim cannot
+    /// mask* — the one live observation that survives a `DAIF.I`-masked
+    /// wedge on a GIC whose non-maskable interrupt belongs to the secure
+    /// world. Called by the detector on a hard lockup, from the observer's
+    /// non-maskable sample path, so the implementation must be non-blocking,
+    /// take no ordinary-code lock, and never panic — exactly as
+    /// [`Self::request_recovery`].
+    ///
+    /// The default is [`RemotePcSample::Unsupported`]: a port with no such
+    /// channel (or none discovered for `target`) reports so, and the caller
+    /// keeps the stale sample rather than a fabricated one (fail closed),
+    /// exactly as a port without shared-interrupt introspection defaults
+    /// [`Self::stuck_interrupt`] to `None`.
+    fn remote_pc_sample(&self, target: CpuId) -> RemotePcSample {
+        let _ = target;
+        RemotePcSample::Unsupported("this port exposes no external-debug PC sampling")
+    }
 }
 
 /// Host-run conformance vertical every port drives over its
@@ -229,7 +311,7 @@ pub trait WatchdogArch: Send + Sync {
 /// never panics. A port with no recovery channel legitimately answers
 /// [`RecoveryOutcome::Unsupported`]; the check accepts that.
 pub mod conformance {
-    use super::{CpuId, RecoveryOutcome, WatchdogArch, WatchdogKind};
+    use super::{CpuId, RecoveryOutcome, RemotePcSample, WatchdogArch, WatchdogKind};
 
     /// Run the full [`WatchdogArch`] conformance suite over `arch`.
     ///
@@ -250,6 +332,32 @@ pub mod conformance {
             // either no line or a well-formed id; a port with no shared
             // interrupt introspection legitimately answers `None`.
             let _ = arch.stuck_interrupt();
+            // A remote-PC sample must never panic and must answer with one
+            // of the three honest variants for any target; a port with no
+            // external-debug channel legitimately answers `Unsupported`. A
+            // non-sampled read must carry a non-empty reason (never a bare
+            // fail), and a `Sampled` read's convenience accessor must agree
+            // it carries a PC, so the variant and the accessor never drift.
+            for probe in [self_cpu, self_cpu.wrapping_add(1)] {
+                let sample = arch.remote_pc_sample(probe);
+                match sample {
+                    RemotePcSample::Sampled { pc, .. } => {
+                        if sample.pc() != Some(pc) {
+                            return Err("remote_pc_sample pc() disagrees with the Sampled reading");
+                        }
+                    }
+                    RemotePcSample::Unavailable(reason) | RemotePcSample::Unsupported(reason) => {
+                        if reason.trim().is_empty() {
+                            return Err("remote_pc_sample returned an empty reason");
+                        }
+                        if sample.pc().is_some() {
+                            return Err(
+                                "remote_pc_sample pc() fabricated a PC for a non-sampled read",
+                            );
+                        }
+                    }
+                }
+            }
             let outcome = arch.request_recovery(self_cpu.wrapping_add(1), kind);
             match outcome {
                 RecoveryOutcome::Rescheduled
@@ -263,7 +371,9 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind};
+        use super::super::{
+            RecoveryOutcome, RemotePcSample, StuckInterrupt, WatchdogArch, WatchdogKind,
+        };
         use super::run_all;
         use crate::CpuId;
 
@@ -317,6 +427,62 @@ pub mod conformance {
                     active: true,
                 })
             );
+        }
+
+        #[test]
+        fn a_handle_that_samples_a_remote_pc_passes_conformance() {
+            // A port that can read a target's external-debug PC answers a
+            // concrete `Sampled` reading; conformance accepts it (a real
+            // sampler may even sample the caller's own CPU) as long as the
+            // accessor agrees.
+            struct SamplerArch;
+            impl WatchdogArch for SamplerArch {
+                fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                    RecoveryOutcome::AttentionRaised
+                }
+                fn remote_pc_sample(&self, target: CpuId) -> RemotePcSample {
+                    RemotePcSample::Sampled {
+                        pc: 0x1000 + u64::from(target),
+                        context: 0,
+                    }
+                }
+            }
+            assert_eq!(run_all(&SamplerArch, 0), Ok(()));
+            assert_eq!(SamplerArch.remote_pc_sample(2).pc(), Some(0x1002));
+        }
+
+        #[test]
+        fn a_handle_with_an_empty_sample_reason_fails_conformance() {
+            // A non-sampled read must justify itself; an empty reason is the
+            // bare-fail this rejects (a caller cannot tell "no channel" from
+            // "transiently unavailable" without one).
+            struct MuteArch;
+            impl WatchdogArch for MuteArch {
+                fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                    RecoveryOutcome::Unsupported
+                }
+                fn remote_pc_sample(&self, _target: CpuId) -> RemotePcSample {
+                    RemotePcSample::Unsupported("")
+                }
+            }
+            assert!(run_all(&MuteArch, 0).is_err());
+        }
+
+        #[test]
+        fn the_default_remote_sample_is_unsupported_with_a_reason() {
+            // The trait default (a port that wires no external-debug
+            // channel) fails closed with a non-empty reason and no PC.
+            let sample = StubArch.remote_pc_sample(1);
+            assert!(matches!(sample, RemotePcSample::Unsupported(_)));
+            assert_eq!(sample.pc(), None);
+            assert!(sample_reason(sample).is_some_and(|r| !r.trim().is_empty()));
+        }
+
+        fn sample_reason(sample: RemotePcSample) -> Option<&'static str> {
+            match sample {
+                RemotePcSample::Unavailable(r) | RemotePcSample::Unsupported(r) => Some(r),
+                RemotePcSample::Sampled { .. } => None,
+            }
         }
     }
 }

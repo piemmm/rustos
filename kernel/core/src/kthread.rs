@@ -1217,6 +1217,24 @@ where
         );
     }
 
+    // Kernel-activity breadcrumb: the task switched back and we are now in
+    // the dispatcher-side post-switch teardown below — retiring the resume
+    // handle, clearing the live-space publication, and (for a user kthread)
+    // parking this CPU's translation off the task's user root and checking
+    // the guard. That teardown runs with device interrupts still masked
+    // (inherited from the suspending task's exception entry), so a wedge in
+    // it — notably the user-root translation-register park — is an
+    // IRQ-masked section the maskable liveness sample cannot see. Attribute
+    // it to `switch_return`, distinct from the arch switch / EL0 execution
+    // above (`user_switch`) and the post-run accounting tail that follows
+    // once this returns (`dispatch_tail`) (`crate::watchdog`). The task id
+    // is carried by the preceding `task_body` crumb, so the datum is `0`.
+    crate::watchdog::note_kernel_breadcrumb(
+        cpu,
+        crate::watchdog::KernelBreadcrumb::SwitchReturn,
+        0,
+    );
+
     // The task switched back to us. Retire the resume handle immediately:
     // the task is no longer the one running on `cpu` (it yielded, parked,
     // or exited), so its trap/body path must no longer reach this control

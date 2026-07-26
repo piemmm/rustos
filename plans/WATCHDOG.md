@@ -84,22 +84,32 @@ neither the PCIe-MSI line nor any device in the pinned Pi 4 DTB — the lowest
 latched-but-masked SPI on the QEMU `virt` / Pi 4 GICv2) was blamed for a hard
 lockup it physically could not have caused. Skipping masked lines removes that
 false lead at the source; the `enabled`/`masked` state no longer needs
-recording because a reported line is always deliverable. The report still
-attributes the (now always deliverable) id against the live kernel IRQ table
-to say *whose* device the line is: the observer resolves the stuck id through
+recording because a reported line is always deliverable. The report attributes
+the (now always deliverable) id **two ways** to say *whose* line it is. First
+against the live kernel IRQ table: the observer resolves the stuck id through
 `IrqTable::owner_of_line` (a read-only, owner-agnostic lookup) via the
 arch-neutral `watchdog::StuckOwnerResolver` seam the boot path installs over
-`&KernelState.irq`. It renders `stuck_owner=<task>` for a line a driver bound,
-or `stuck_owner=unbound` for a line no driver owns — a spurious or
-kernel-contained line (the kernel-owned MSI-demux SPI included, since no user
-task binds it), which says the wedge is elsewhere, not this line. Because the
-GIC scan only reports real SPIs (≤ `MAX_INTID`) and a directly-bound SPI uses
-`line == INTID` in the table (MSI virtual lines live *above* `MAX_INTID` and
-are never scanned), the lookup by id is exact. `stuck_owner` is omitted when
-no resolver is installed, so a record never claims an attribution it could not
-make. Mapping host-tested via the pure `resolve_stuck_owner_with` and
-`IrqTable::owner_of_line`; the render (bound/`unbound`/omitted) is host-tested
-against the recording sink.
+`&KernelState.irq`, rendering `stuck_owner=<task>` for a line a driver bound.
+A line with no task binding is then offered to the port's kernel-internal
+line-name resolver (`watchdog::KernelInternalLines`, installed from
+`KernelArch::watchdog_line_names`), so a line the kernel services *itself*
+through a chained/bespoke handler — which by construction has no `irq_wait`
+binding — is **named** instead of dismissed. aarch64 names its two such lines
+against the interrupt numbers discovered from the device tree (never board
+constants): the BCM2711 PCIe root-complex MSI multiplexer's shared SPI is
+`stuck_owner=pcie-msi` (the USB/PCIe MSI line a wedged CPU could not service —
+this replaced a misleading bare `unbound` for exactly that line, the observed
+`stuck_irq=153` boot report), and the console UART receive line is
+`stuck_owner=console-uart`. Only a line neither a driver nor the kernel owns is
+`stuck_owner=unbound` — a genuinely spurious/contained line, so the wedge is
+elsewhere. Because the GIC scan only reports real SPIs (≤ `MAX_INTID`) and a
+directly-bound SPI uses `line == INTID` in the table (MSI virtual lines live
+*above* `MAX_INTID` and are never scanned), the lookup by id is exact.
+`stuck_owner` is omitted when no owner resolver is installed, so a record never
+claims an attribution it could not make. Mapping host-tested via the pure
+`resolve_stuck_owner_with` (task-binding wins over a kernel name; a
+kernel-internal line is named; a line neither owns is `unbound`); the render
+(task/name/`unbound`/omitted) is host-tested against the recording sink.
 
 ## Debug diagnostics: a compile-time gate, address-safe, off the audit log (done)
 
@@ -171,17 +181,22 @@ crumbs: CFQ's own pick/steal/prologue keeps `dispatch` (set in
 `run_dispatch_loop` before the body closure runs); the shim hand-off
 (`pending_upgrade` install and, for a user kthread, the `pre_resume`
 address-space reactivation + resume/live publication) is `task_body`
-(detail = dispatched task id); the arch context switch and the task's
+(detail = dispatched task id); the arch context switch into the task and its
 execution up to its first trap is `user_switch` (detail `0`, the task id
-carried by the preceding `task_body` crumb); and CFQ's post-run accounting
-tail — which runs with device interrupts still masked, inherited from the
-suspending task's exception entry — is `dispatch_tail` (detail = task id).
-This is what tells a genuine CFQ-internal scheduler wedge (`dispatch`)
-apart from one in the address-space reactivation (`task_body`), the context
-switch/early task (`user_switch`), or the masked accounting tail
-(`dispatch_tail`).
+carried by the preceding `task_body` crumb); the dispatcher-side teardown
+*after* `ContextSwitch::switch` returns — retiring the resume handle and,
+for a user kthread, parking this CPU's translation off the task's user root
+(a translation-register write) and checking the guard, all with device
+interrupts still masked — is `switch_return` (detail `0`); and CFQ's
+post-run accounting tail — also masked, inherited from the suspending task's
+exception entry — is `dispatch_tail` (detail = task id). This is what tells a
+genuine CFQ-internal scheduler wedge (`dispatch`) apart from one in the
+address-space reactivation (`task_body`), the context switch / early task
+(`user_switch`), the post-switch user-root translation park (`switch_return`
+— a wedge coming *back* from a task, distinct from `user_switch` going
+*into* it), or the masked accounting tail (`dispatch_tail`).
 
-The full set: `k_site` (`dispatch`/`task_body`/`user_switch`/
+The full set: `k_site` (`dispatch`/`task_body`/`user_switch`/`switch_return`/
 `dispatch_tail`/`syscall`/`fault_entry`/`fault_reclaim`/`fault_stack`/
 `fault_ramzip`/`fault_anon`/`fault_file`/`fault_fatal`), `k_detail`
 (syscall number, faulting VA, or dispatched task id per the sites above),
@@ -391,17 +406,31 @@ a deliberately `DAIF.I`-masked test window (metal armstub routing, GIC group
 semantics), it reverts to the IRQ cadence + buddy detector with no broken
 channel (fail closed).
 
-**B1 — `DAIF.F`-clear execution discipline — DONE (QEMU-validated).** Exception
-entry masks `DAIF.F` in hardware, `enable_irq` clears I-only, and
-`IrqSafeSpinLock`'s `DaifIrqControl` classically masks I+F, so a wedge lives
-with FIQ masked and a Group-0 cadence could never reach it. In a
-`watchdog-diagnostics` build the port clears `DAIF.F` where the wedge lives:
-`exceptions::daif::critical_section_mask` is the single definition of the lock
-mask (I-only in debug, I+F shippable) that `DaifIrqControl` consumes via a
-`const` asm operand; `exceptions::enable_fiq_delivery()` (the sibling of
-`enable_irq`) clears F on the `svc`/fault sync-handler entry and per-CPU at
-boot. `halt_current_cpu` (`#0xf`) and the EL0 `SPSR` stay F-masked
-(nested-FIQ-unsafe), and the FIQ trap arm never re-clears F.
+**B1 — `DAIF.F`-clear execution discipline — DONE (QEMU-validated), now
+runtime-gated on the probe (fail-closed).** Exception entry masks `DAIF.F` in
+hardware, `enable_irq` clears I-only, and `IrqSafeSpinLock`'s `DaifIrqControl`
+masks I+F, so a wedge lives with FIQ masked and a Group-0 cadence could never
+reach it. In a `watchdog-diagnostics` build the port clears `DAIF.F` where the
+wedge lives — **but only when the boot probe (`fiq_cadence_enabled()`) proved a
+non-maskable FIQ is genuinely deliverable to the non-secure kernel.** The lock
+critical-section base mask is unconditionally I+F (the shippable discipline);
+`DaifIrqControl::disable` re-clears F *inside* the section, and
+`exceptions::enable_fiq_delivery()` clears F on the `svc`/fault sync-handler
+entry, **only** under that runtime predicate. `halt_current_cpu` (`#0xf`) and
+the EL0 `SPSR` stay F-masked (nested-FIQ-unsafe), and the FIQ trap arm never
+re-clears F.
+
+*Defect fixed here (Pi 4 boot lockup):* the discipline was originally gated on
+the **compile-time** feature alone (`daif::critical_section_mask(cfg!(...))`,
+I-only in debug; an unconditional `enable_fiq_delivery()` on every sync entry),
+so on a two-Security-state GIC-400 — where the probe returns `Unsupported`
+because Group 0 belongs to the secure world — the debug kernel still ran with
+`DAIF.F` clear everywhere. That is fail-**open**: it exposes the non-secure
+kernel to secure-world Group-0 FIQs it cannot service, with no self-sample
+benefit (none is delivered there). Both sites now consult the runtime probe and
+fail closed (keep FIQ masked, exactly as a shippable build) when it is not
+`Supported`; the obsolete compile-time `critical_section_mask` helper is
+removed. The leading suspect for the near-every-boot Pi 4 masked-section wedge.
 
 **B2 — Group-0 routing + FIQ dispatcher + empirical probe — DONE (host-tested,
 both target builds clean).** The mechanism and its fail-closed capability:
@@ -461,6 +490,41 @@ QEMU) and fix the underlying SMP defect structurally with a regression test.
 Metal delivery on a real Pi 4B stays a boot-time hardware capability
 (`plans/FIX-HARDWARE-FEATURES.md`) — there the probe returns `Unsupported` and
 the buddy detector runs — and is not claimed until a Pi 4B confirms it.
+
+## CoreSight external-debug (EDPCSR) cross-core PC sample (done, metal enablement pending)
+
+The FIQ self-sample above needs Group 0 / FIQ to reach non-secure EL1, which a
+**two-Security-state GIC** (the real Pi 4 GIC-400) denies — there the probe is
+`Unsupported` and the masked-section wedge shows only a stale
+`sampled=pre_silence` PC. The observer for *that* case is the ARMv8
+**external-debug PC Sample Register** (`EDPCSR`, DDI 0487 H9): one core reads
+another's sampled PC over the memory-mapped debug interface **without halting
+it** and over a channel `DAIF` cannot mask.
+
+Surface (arch-neutral): `WatchdogArch::remote_pc_sample(target) ->
+RemotePcSample` (`Sampled{pc,context}` / `Unavailable(reason)` /
+`Unsupported(reason)`), default `Unsupported` + conformance, alongside
+`stuck_interrupt` (device "why") — this is the *code* "why". The hard-lockup
+`scan` reads it and the debug detail renders a fresh `live_pc=+0x…`
+(image-relative) + `live_ctx` beside — never replacing — the stale `pc`.
+
+aarch64 (`coresight.rs`): host-tested pure `sample_from` — EDLAR unlock →
+EDDEVID capability → EDPRSR validity → EDPCSR **capture-first** (low word
+latches high/context) → assemble — over a `DebugMmio` seam; a scale-sized
+set-once per-cpu debug-base registry; the freestanding `VolatileDebugMmio`;
+`Watchdog::remote_pc_sample` delegates. Discovery (`fdt::debug_component_bases`,
+host-tested): the Linux `arm,coresight-cpu-debug` binding (translated `reg` +
+`cpu`-phandle → dense id), installed at boot **only** for a base whose gigapage
+is already Device-mapped, so a read on the lockup path can never fault; a
+component elsewhere, or a tree with no debug nodes (QEMU `virt`, the stock Pi 4
+firmware DTB), installs nothing → `Unsupported`, buddy detector unchanged.
+
+Metal enablement: the live `EDPCSR` read is confirmable only on hardware (QEMU
+models no EDPCSR), and the stock Pi 4 firmware DTB carries no
+`arm,coresight-cpu-debug` nodes, so **firing it on a Pi 4 needs those nodes
+supplied in the DTB (or an overlay)** — a provisioning step, not a code change.
+Until then the code path is exercised by the fail-closed (`Unsupported`)
+vertical, mirroring the FIQ-probe precedent.
 
 ## Other architectures (staged)
 

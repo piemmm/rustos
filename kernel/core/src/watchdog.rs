@@ -80,6 +80,10 @@ use core::sync::atomic::AtomicU64;
 use tairix_arch_api::{
     CpuId, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind, WatchdogSample,
 };
+// The fresh cross-core PC sample is rendered only into the debug-only
+// detail record, so its type is imported only with that facility.
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_arch_api::RemotePcSample;
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
 use tairix_util::fmt::format_hex_u64;
@@ -202,8 +206,35 @@ pub trait StuckOwnerResolver: Sync {
     fn owner_of_line(&self, line: u32) -> Option<u64>;
 }
 
+/// Names a stuck controller line that belongs to a kernel-internal source
+/// rather than to a task's `irq_wait` binding.
+///
+/// Some enabled interrupt lines have no task owner by construction: the
+/// kernel services them itself through a chained handler (the platform
+/// message-signalled-interrupt multiplexer) or a bespoke path (the console
+/// UART). The task-owner resolver ([`StuckOwnerResolver`]) rightly finds
+/// no binding for these, so a hard-lockup report would render them as a bare
+/// `unbound` — hiding that the pending line is, say, the USB/PCIe MSI line a
+/// wedged CPU cannot service. This seam lets the port that *discovered* those
+/// lines at runtime attribute one to a short, stable category name — turning
+/// `stuck_irq=<id> stuck_owner=unbound` into `stuck_owner=<name>` — without
+/// the arch-neutral watchdog naming any board, device, or line number itself:
+/// it renders only whatever `&'static str` the port returns.
+pub trait KernelInternalLines: Sync {
+    /// A stable category name for the kernel-internal source that owns
+    /// `line` (for example the platform MSI multiplexer or the console
+    /// UART), or `None` when `line` is not a kernel-internal line this port
+    /// recognises. A read-only lookup: it grants no authority and mutates
+    /// nothing.
+    fn name_of_line(&self, line: u32) -> Option<&'static str>;
+}
+
 /// The installed stuck-line owner resolver, or `None` before boot wires it.
 static IRQ_OWNER: OnceCell<&'static (dyn StuckOwnerResolver + Sync)> = OnceCell::new();
+
+/// The installed kernel-internal line-name resolver, or `None` before boot
+/// wires it (or on a port with no kernel-internal enabled lines to name).
+static KERNEL_LINE_NAMES: OnceCell<&'static (dyn KernelInternalLines + Sync)> = OnceCell::new();
 
 /// Install the sink the watchdog reports lockups through. Idempotent by
 /// policy: the boot path installs exactly one; a later call is a benign
@@ -381,6 +412,19 @@ fn irq_owner() -> Option<&'static (dyn StuckOwnerResolver + Sync)> {
     IRQ_OWNER.get().ok().flatten().copied()
 }
 
+/// Install the resolver that names a stuck line belonging to a
+/// kernel-internal source (see [`KernelInternalLines`]). Idempotent; a port
+/// with no kernel-internal enabled lines simply never installs one and such
+/// a line keeps rendering as `unbound`.
+pub fn install_kernel_line_names(names: &'static (dyn KernelInternalLines + Sync)) {
+    let _ = KERNEL_LINE_NAMES.set(names);
+}
+
+/// The installed kernel-internal line-name resolver, if any.
+fn kernel_line_names() -> Option<&'static (dyn KernelInternalLines + Sync)> {
+    KERNEL_LINE_NAMES.get().ok().flatten().copied()
+}
+
 /// A coarse tag for the in-kernel region a CPU last entered, published by
 /// the CPU *itself* (through [`note_kernel_breadcrumb`]) as it runs.
 ///
@@ -436,20 +480,41 @@ pub enum KernelBreadcrumb {
     /// set before the body closure runs).
     TaskBody = 10,
     /// The context switch into the task ([`crate::kthread`] `dispatch_step`,
-    /// immediately before `ContextSwitch::switch`) and the task's execution
-    /// up to its first syscall/fault (which re-stamps the breadcrumb).
-    /// Distinguishes a wedge in the arch switch / early user-entry from one
-    /// in the shim prologue ([`Self::TaskBody`]) (detail: unused, `0` — the
+    /// immediately before `ContextSwitch::switch`), the task's EL0 execution
+    /// up to its first syscall/fault (which re-stamps the breadcrumb), and
+    /// the arch switch *back* to the dispatcher — the crumb held for the
+    /// whole `ContextSwitch::switch` call. Distinguishes a wedge in the arch
+    /// switch or early user-entry from one in the shim prologue
+    /// ([`Self::TaskBody`]) below it, or in the post-switch dispatcher
+    /// teardown ([`Self::SwitchReturn`]) above it (detail: unused, `0` — the
     /// task id is carried by the preceding [`Self::TaskBody`] crumb).
     UserSwitch = 11,
+    /// The dispatcher-side teardown that runs immediately after
+    /// `ContextSwitch::switch` returns control from the task
+    /// ([`crate::kthread`] `dispatch_step`): retiring the task's resume
+    /// handle, clearing its live-space publication, and — for a user
+    /// kthread — parking this CPU's translation off the task's user root (a
+    /// translation-register write) and checking the kernel-stack guard. It
+    /// runs with device interrupts still masked (inherited from the
+    /// suspending task's exception entry), so a wedge here sits in an
+    /// IRQ-masked section the maskable liveness sample cannot observe.
+    /// Distinguishes such a wedge — notably in the user-root translation
+    /// park — from one in the arch context switch or EL0 execution
+    /// ([`Self::UserSwitch`]) that precedes it, before the post-run
+    /// accounting tail ([`Self::DispatchTail`]) that follows once the body
+    /// shim returns (detail: unused, `0` — the task id is carried by the
+    /// preceding [`Self::TaskBody`] crumb).
+    SwitchReturn = 12,
     /// The CFQ post-run accounting tail that runs after the task body
     /// returned to the shim ([`crate::kthread`] `dispatch_step` returned):
     /// run-accounting, vruntime charge, and re-enqueue/retire — the section
     /// that runs with device interrupts still masked (inherited from the
     /// suspending task's exception entry) until the dispatch loop restores
-    /// them. Distinguishes a wedge in that accounting from one inside the
-    /// task body ([`Self::UserSwitch`]) (detail: the dispatched task id).
-    DispatchTail = 12,
+    /// them. Distinguishes a wedge in that accounting from one in the arch
+    /// switch ([`Self::UserSwitch`]) or the post-switch dispatcher teardown
+    /// ([`Self::SwitchReturn`]) that precede it (detail: the dispatched task
+    /// id).
+    DispatchTail = 13,
 }
 
 // These decode/render helpers are consumed only by the debug-diagnostics
@@ -475,7 +540,8 @@ impl KernelBreadcrumb {
             9 => Self::FaultFatal,
             10 => Self::TaskBody,
             11 => Self::UserSwitch,
-            12 => Self::DispatchTail,
+            12 => Self::SwitchReturn,
+            13 => Self::DispatchTail,
             _ => Self::None,
         }
     }
@@ -496,6 +562,7 @@ impl KernelBreadcrumb {
             Self::FaultFatal => "fault_fatal",
             Self::TaskBody => "task_body",
             Self::UserSwitch => "user_switch",
+            Self::SwitchReturn => "switch_return",
             Self::DispatchTail => "dispatch_tail",
         }
     }
@@ -876,6 +943,20 @@ fn scan(observer: CpuId, now_ns: u64) {
                 diag.sample_stale = true;
                 diag.stuck = recovery().and_then(WatchdogArch::stuck_interrupt);
                 diag.stuck_owner = resolve_stuck_owner(diag.stuck);
+                // The observer reads the wedged core's PC over the port's
+                // non-maskable external-debug channel — the fresh "why" the
+                // stale pre-silence sample cannot give. A port with no such
+                // channel (or none discovered for the target) answers
+                // `Unsupported`, leaving `live_pc` empty so the report falls
+                // back to the stale sample. Debug-diagnostics only: the field
+                // is rendered solely into the address-bearing detail record.
+                #[cfg(feature = "watchdog-diagnostics")]
+                if let Some(RemotePcSample::Sampled { pc, context }) =
+                    recovery().map(|r| r.remote_pc_sample(target))
+                {
+                    diag.live_pc = Some(pc);
+                    diag.live_context = context;
+                }
                 report_lockup(
                     AuditEvent::CpuHardLockupDetected,
                     Level::Error,
@@ -1081,6 +1162,24 @@ struct Diag {
     /// section). Rendered as the `k_lock_state` tag.
     #[cfg(feature = "watchdog-diagnostics")]
     lock_acquiring: bool,
+    /// A **fresh** program counter of the hard-locked CPU, read by the
+    /// observer over the port's non-maskable external-debug channel
+    /// ([`WatchdogArch::remote_pc_sample`], aarch64 CoreSight `EDPCSR`).
+    /// `None` when no such channel is wired/discovered for the target or the
+    /// read produced no valid sample — the ordinary case, in which the
+    /// report falls back to the stale [`Self::pc`]. Unlike that stale value
+    /// this names the instruction the core is *actually* wedged on, so it is
+    /// rendered as its own `live_pc=+0x…` field (image-relative) in the
+    /// debug detail. Set on the hard-lockup path after the snapshot; the
+    /// observer's cross-CPU read, not a self-sample.
+    #[cfg(feature = "watchdog-diagnostics")]
+    live_pc: Option<u64>,
+    /// The port-defined context word sampled with [`Self::live_pc`]
+    /// (aarch64 `EDVIDSR`: security state / exception level / mode), `0`
+    /// when none. A register value, not an address, so it is rendered
+    /// verbatim as `live_ctx`.
+    #[cfg(feature = "watchdog-diagnostics")]
+    live_context: u64,
 }
 
 /// Attribution of a stuck controller line to the task that owns its IRQ
@@ -1097,6 +1196,12 @@ enum StuckOwner {
     /// The stuck line is bound to this task (rendered `stuck_owner=<hex>`) —
     /// the driver whose device is asserting it.
     Task(u64),
+    /// The stuck line belongs to a kernel-internal source with no task
+    /// binding (rendered `stuck_owner=<name>`) — a chained/bespoke line the
+    /// kernel services itself (the platform MSI multiplexer, the console
+    /// UART), named by the port that discovered it so a reader is not left
+    /// with a bare `unbound` for a line the kernel does in fact own.
+    Named(&'static str),
 }
 
 impl Diag {
@@ -1124,6 +1229,10 @@ impl Diag {
         lock_site: 0,
         #[cfg(feature = "watchdog-diagnostics")]
         lock_acquiring: false,
+        #[cfg(feature = "watchdog-diagnostics")]
+        live_pc: None,
+        #[cfg(feature = "watchdog-diagnostics")]
+        live_context: 0,
     };
 
     /// Whether this diagnosis carries a real captured sample (as opposed to
@@ -1209,26 +1318,50 @@ impl Diag {
             lock_site,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring,
+            // A fresh cross-core sample is an observer action, not part of a
+            // CPU's self-recorded context, so the snapshot leaves it empty;
+            // the hard-lockup path fills it after this (like `stuck`).
+            #[cfg(feature = "watchdog-diagnostics")]
+            live_pc: None,
+            #[cfg(feature = "watchdog-diagnostics")]
+            live_context: 0,
         }
     }
 }
 
-/// Attribute a stuck line to the driver that bound it, via the installed
-/// owner resolver. `None` (no stuck line) or an uninstalled resolver yields
-/// [`StuckOwner::Unknown`] so nothing is rendered — a report never claims an
-/// attribution it could not make. A stuck line the resolver finds unbound is
+/// Attribute a stuck line to the driver that bound it (via the installed
+/// owner resolver) or to a kernel-internal source (via the installed
+/// name resolver). `None` (no stuck line) or an uninstalled owner resolver
+/// yields [`StuckOwner::Unknown`] so nothing is rendered — a report never
+/// claims an attribution it could not make. A bound line names its owning
+/// task; an otherwise-unowned line the kernel services itself is named
+/// ([`StuckOwner::Named`]); only a line neither owns is
 /// [`StuckOwner::Unbound`] (a spurious/contained line, so the wedge is
-/// elsewhere); a bound line names its owning task.
+/// elsewhere).
 fn resolve_stuck_owner(stuck: Option<StuckInterrupt>) -> StuckOwner {
-    resolve_stuck_owner_with(stuck, irq_owner().map(|r| r as &dyn StuckOwnerResolver))
+    resolve_stuck_owner_with(
+        stuck,
+        irq_owner().map(|r| r as &dyn StuckOwnerResolver),
+        kernel_line_names().map(|r| r as &dyn KernelInternalLines),
+    )
 }
 
 /// The pure core of [`resolve_stuck_owner`]: attribute `stuck` against the
-/// given `resolver`, split out so the mapping is host-tested with a fake
-/// resolver rather than the process-global install seam.
+/// given `resolver` and kernel-internal `names`, split out so the mapping is
+/// host-tested with fakes rather than the process-global install seams.
+///
+/// A task binding wins: a line a driver bound is attributed to that task. A
+/// line with no task binding is then offered to the kernel-internal name
+/// resolver — so a chained/bespoke line the kernel owns (the platform MSI
+/// multiplexer, the console UART) is *named* rather than dismissed as
+/// `unbound`. Only a line neither a task nor the kernel owns is `Unbound`
+/// (a genuinely spurious/contained line, so the wedge is elsewhere). An
+/// uninstalled owner resolver still yields `Unknown` so a report never
+/// claims an attribution it could not make.
 fn resolve_stuck_owner_with(
     stuck: Option<StuckInterrupt>,
     resolver: Option<&dyn StuckOwnerResolver>,
+    names: Option<&dyn KernelInternalLines>,
 ) -> StuckOwner {
     let Some(stuck) = stuck else {
         return StuckOwner::Unknown;
@@ -1237,7 +1370,10 @@ fn resolve_stuck_owner_with(
         None => StuckOwner::Unknown,
         Some(resolver) => match resolver.owner_of_line(stuck.intid) {
             Some(task) => StuckOwner::Task(task),
-            None => StuckOwner::Unbound,
+            None => match names.and_then(|n| n.name_of_line(stuck.intid)) {
+                Some(name) => StuckOwner::Named(name),
+                None => StuckOwner::Unbound,
+            },
         },
     }
 }
@@ -1394,6 +1530,13 @@ fn report_summary_to(
                 };
                 n += 1;
             }
+            StuckOwner::Named(name) => {
+                fields[n] = tairix_log::Field {
+                    key: "stuck_owner",
+                    value: tairix_log::FieldValue::Str(name),
+                };
+                n += 1;
+            }
             StuckOwner::Unbound => {
                 fields[n] = tairix_log::Field {
                     key: "stuck_owner",
@@ -1419,7 +1562,8 @@ fn report_diagnostic_detail(level: Level, cpu: CpuId, observer: Option<CpuId>, d
     let has_detail = diag.pc != 0
         || diag.breadcrumb != KernelBreadcrumb::None
         || diag.bt_len != 0
-        || diag.lock_site != 0;
+        || diag.lock_site != 0
+        || diag.live_pc.is_some();
     if !has_detail {
         return;
     }
@@ -1460,14 +1604,16 @@ fn report_detail_to(
     diag: &Diag,
 ) {
     let mut pc_buf = [0u8; 19];
+    let mut live_pc_buf = [0u8; 19];
+    let mut live_ctx_buf = [0u8; 18];
     let mut aux_buf = [0u8; 18];
     let mut kdetail_buf = [0u8; 18];
     let mut bt_buf = [0u8; BT_RENDER_BYTES];
 
-    let mut fields: [tairix_log::Field<'_>; 12] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 14] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 12];
+    }; 14];
     let mut n = 1;
     // `observer` correlates this detail line with its summary line on the
     // audit trail (both carry the same `cpu`/`observer`).
@@ -1487,6 +1633,29 @@ fn report_detail_to(
             value: tairix_log::FieldValue::Str(hex_off(off, &mut pc_buf)),
         };
         n += 1;
+    }
+    // The **fresh** cross-core PC the observer read over the port's
+    // non-maskable external-debug channel (CoreSight `EDPCSR`) — the
+    // instruction the wedged core is *actually* on, unlike the stale `pc`
+    // above. Image-relative like `pc` (a kernel wedge resolves against the
+    // debug ELF; a user-EL sample is not a kernel-image address and is
+    // omitted, fail closed). `live_ctx` is the sampled context register
+    // (aarch64 `EDVIDSR`), a value not an address, rendered verbatim.
+    if let Some(live) = diag.live_pc {
+        if let Some(off) = image_relative(live) {
+            fields[n] = tairix_log::Field {
+                key: "live_pc",
+                value: tairix_log::FieldValue::Str(hex_off(off, &mut live_pc_buf)),
+            };
+            n += 1;
+        }
+        if diag.live_context != 0 {
+            fields[n] = tairix_log::Field {
+                key: "live_ctx",
+                value: tairix_log::FieldValue::Str(hex0x(diag.live_context, &mut live_ctx_buf)),
+            };
+            n += 1;
+        }
     }
     // The raw processor-state word (aarch64 `SPSR_EL1`): a register value,
     // not an address, so it is rendered verbatim.
@@ -1697,6 +1866,10 @@ mod tests {
             lock_site: 0,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            live_pc: None,
+            #[cfg(feature = "watchdog-diagnostics")]
+            live_context: 0,
         }
     }
 
@@ -2157,6 +2330,8 @@ mod tests {
             bt_len: 3,
             lock_site: 0,
             lock_acquiring: false,
+            live_pc: Some(TEST_IMAGE_BASE + 0x0018_1dc0),
+            live_context: 0x0000_2000,
         };
         report_detail_to(sink, Level::Error, 2, Some(0), &d);
         let events = sink.snapshot();
@@ -2168,6 +2343,12 @@ mod tests {
         // The pc renders as an image-relative offset with the unmistakable
         // `+` marker — never the absolute runtime address.
         assert_eq!(field(ev, "pc"), Some("+0x0000000012345678"));
+        // The fresh cross-core sample renders as its own image-relative
+        // `live_pc` — the instruction the wedged core is actually on — with
+        // the sampled context word verbatim, alongside (never replacing) the
+        // stale `pc`.
+        assert_eq!(field(ev, "live_pc"), Some("+0x0000000000181dc0"));
+        assert_eq!(field(ev, "live_ctx"), Some("0x0000000000002000"));
         assert_eq!(field(ev, "pstate"), Some("0x00000000000003c5"));
         assert_eq!(field(ev, "k_site"), Some("fault_anon"));
         // `k_detail` is a faulting VA (not a kernel-image address), rendered
@@ -2211,6 +2392,8 @@ mod tests {
             bt_len: 1,
             lock_site: 0,
             lock_acquiring: false,
+            live_pc: None,
+            live_context: 0,
         };
         report_detail_to(sink, Level::Error, 1, None, &d);
         let ev = &sink.snapshot()[0];
@@ -2304,6 +2487,8 @@ mod tests {
             bt_len: 0,
             lock_site: site as *const core::panic::Location<'static> as usize,
             lock_acquiring: true,
+            live_pc: None,
+            live_context: 0,
         };
         report_detail_to(sink, Level::Error, 3, Some(0), &d);
         let ev = &sink.snapshot()[0];
@@ -2344,6 +2529,8 @@ mod tests {
             bt_len: 0,
             lock_site: ptr,
             lock_acquiring: false,
+            live_pc: None,
+            live_context: 0,
         };
         report_detail_to(sink, Level::Error, 3, None, &d);
         let ev = &sink.snapshot()[0];
@@ -2427,6 +2614,39 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_named_stuck_line_renders_the_kernel_internal_name() {
+        // A pending, enabled line that no driver bound but the kernel does
+        // service itself (a chained MSI multiplexer, the console UART) is
+        // named rather than dismissed as `unbound`, so a reader sees which
+        // kernel-internal source a wedged CPU could not service.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = diag(
+            0x0021_d5f0,
+            WatchdogSample::NO_TASK,
+            true,
+            true,
+            Some(StuckInterrupt {
+                intid: 153,
+                active: false,
+            }),
+            StuckOwner::Named("usb-msi"),
+        );
+        report_summary_to(
+            sink,
+            AuditEvent::CpuHardLockupDetected,
+            Level::Error,
+            1,
+            Some(0),
+            10_000_000_000,
+            &d,
+        );
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "stuck_irq"), Some("153"));
+        assert_eq!(field(ev, "stuck_state"), Some("pending"));
+        assert_eq!(field(ev, "stuck_owner"), Some("usb-msi"));
+    }
+
+    #[test]
     fn a_user_context_record_says_user() {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let d = diag(0x4000_0000, 15, false, false, None, StuckOwner::Unknown);
@@ -2485,8 +2705,22 @@ mod tests {
                 (line == 42).then_some(7)
             }
         }
+        // A fake kernel-internal name table: line 153 is the platform MSI
+        // multiplexer, line 33 the console UART, every other line unknown.
+        struct FakeNames;
+        impl KernelInternalLines for FakeNames {
+            fn name_of_line(&self, line: u32) -> Option<&'static str> {
+                match line {
+                    153 => Some("usb-msi"),
+                    33 => Some("console-uart"),
+                    _ => None,
+                }
+            }
+        }
         let fake = FakeOwner;
         let resolver: Option<&dyn StuckOwnerResolver> = Some(&fake);
+        let fake_names = FakeNames;
+        let names: Option<&dyn KernelInternalLines> = Some(&fake_names);
 
         let si = |intid| {
             Some(StuckInterrupt {
@@ -2496,21 +2730,43 @@ mod tests {
         };
         // No stuck line: nothing to attribute (renders no owner).
         assert_eq!(
-            resolve_stuck_owner_with(None, resolver),
+            resolve_stuck_owner_with(None, resolver, names),
             StuckOwner::Unknown
         );
-        // A stuck line bound to a driver names its task.
+        // A stuck line bound to a driver names its task — a task binding
+        // wins over any kernel-internal name.
         assert_eq!(
-            resolve_stuck_owner_with(si(42), resolver),
+            resolve_stuck_owner_with(si(42), resolver, names),
             StuckOwner::Task(7)
         );
-        // A stuck line no driver owns is unbound — the wedge is elsewhere.
+        // An otherwise-unowned line the kernel services itself is *named*
+        // rather than dismissed as unbound.
         assert_eq!(
-            resolve_stuck_owner_with(si(111), resolver),
+            resolve_stuck_owner_with(si(153), resolver, names),
+            StuckOwner::Named("usb-msi")
+        );
+        assert_eq!(
+            resolve_stuck_owner_with(si(33), resolver, names),
+            StuckOwner::Named("console-uart")
+        );
+        // A stuck line neither a driver nor the kernel owns is unbound — the
+        // wedge is elsewhere.
+        assert_eq!(
+            resolve_stuck_owner_with(si(111), resolver, names),
             StuckOwner::Unbound
         );
-        // With no resolver installed at all, nothing is claimed.
-        assert_eq!(resolve_stuck_owner_with(si(42), None), StuckOwner::Unknown);
+        // With no name resolver installed, a kernel-internal line falls back
+        // to unbound (never a fabricated name).
+        assert_eq!(
+            resolve_stuck_owner_with(si(153), resolver, None),
+            StuckOwner::Unbound
+        );
+        // With no owner resolver installed at all, nothing is claimed — even
+        // when a name resolver is present, since attribution needs the table.
+        assert_eq!(
+            resolve_stuck_owner_with(si(42), None, names),
+            StuckOwner::Unknown
+        );
     }
 
     #[test]
@@ -2549,6 +2805,7 @@ mod tests {
             KernelBreadcrumb::FaultFatal,
             KernelBreadcrumb::TaskBody,
             KernelBreadcrumb::UserSwitch,
+            KernelBreadcrumb::SwitchReturn,
             KernelBreadcrumb::DispatchTail,
         ] {
             assert_eq!(KernelBreadcrumb::from_u8(site as u8), site);
@@ -2556,13 +2813,60 @@ mod tests {
             // aliasing of the finer dispatch sub-sites onto an existing one).
             assert!(!site.tag().is_empty());
         }
-        // The finer dispatch sub-sites render distinct `k_site` tags.
+        // The finer dispatch sub-sites render distinct `k_site` tags, in the
+        // chronological order a task hand-off walks them.
         assert_eq!(KernelBreadcrumb::TaskBody.tag(), "task_body");
         assert_eq!(KernelBreadcrumb::UserSwitch.tag(), "user_switch");
+        assert_eq!(KernelBreadcrumb::SwitchReturn.tag(), "switch_return");
         assert_eq!(KernelBreadcrumb::DispatchTail.tag(), "dispatch_tail");
+        // The dispatch sub-sites carry the four distinct `u8` encodings the
+        // hand-off stamps in order; a renumber must keep them disjoint.
+        assert_eq!(
+            [
+                KernelBreadcrumb::TaskBody as u8,
+                KernelBreadcrumb::UserSwitch as u8,
+                KernelBreadcrumb::SwitchReturn as u8,
+                KernelBreadcrumb::DispatchTail as u8,
+            ],
+            [10, 11, 12, 13],
+        );
         // A corrupt/unknown tag decodes to `None` rather than fabricating a
         // region (fail closed).
         assert_eq!(KernelBreadcrumb::from_u8(200), KernelBreadcrumb::None);
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn a_switch_return_breadcrumb_renders_the_post_switch_teardown_site() {
+        // The finer post-`cs.switch` teardown crumb renders `switch_return`,
+        // telling a wedge coming *back* from a task (the IRQ-masked
+        // user-root translation park) apart from one going *into* it
+        // (`user_switch`) on a board with no non-maskable sample.
+        set_kernel_image_base(TEST_IMAGE_BASE);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = Diag {
+            pc: TEST_IMAGE_BASE + 0x1c_7524,
+            task: WatchdogSample::NO_TASK,
+            aux: 0x6000_0305,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: None,
+            stuck_owner: StuckOwner::Unknown,
+            breadcrumb: KernelBreadcrumb::SwitchReturn,
+            breadcrumb_detail: 0,
+            breadcrumb_seq: 87_196,
+            bt: [0u64; cpu_state::WD_BT_MAX],
+            bt_len: 0,
+            lock_site: 0,
+            lock_acquiring: false,
+            live_pc: None,
+            live_context: 0,
+        };
+        report_detail_to(sink, Level::Error, 1, Some(0), &d);
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "k_site"), Some("switch_return"));
+        assert_eq!(field(ev, "k_detail"), Some("0x0000000000000000"));
+        assert_eq!(field(ev, "k_seq"), Some("87196"));
     }
 
     #[cfg(feature = "watchdog-diagnostics")]

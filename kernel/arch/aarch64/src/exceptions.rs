@@ -320,43 +320,23 @@ pub unsafe fn wait_for_interrupt() {
     }
 }
 
-/// `DAIF` asynchronous-exception mask immediates and the debug
-/// watchdog's `DAIF.F` (FIQ) execution discipline.
+/// `DAIF` asynchronous-exception mask immediate bits.
 ///
 /// `DAIFSet`/`DAIFClr` take a 4-bit immediate selecting the
-/// Debug/SError/IRQ/FIQ mask bits `D A I F` (bits 3..0). The port masks
-/// **IRQ** (`I`, bit 1) around an interrupt-safe critical section. The
-/// debug watchdog's non-maskable FIQ self-sample (`plans/WATCHDOG.md`,
-/// staged) additionally needs **FIQ** (`F`, bit 0) left *unmasked*
-/// wherever a wedge can occur, so a Group-0/FIQ cadence can fire inside a
-/// `DAIF.I`-masked section that the maskable IRQ cadence cannot observe.
-///
-/// The immediate an interrupt-safe critical section masks with therefore
-/// depends on the build, and [`daif::critical_section_mask`] is the single
-/// definition of it that the lock primitive consumes, so the value can
-/// never be transcribed inconsistently.
+/// Debug/SError/IRQ/FIQ mask bits `D A I F` (bits 3..0). An interrupt-safe
+/// critical section masks **IRQ + FIQ** (`I | F`) — the classic shippable
+/// discipline. The debug watchdog build additionally re-clears **FIQ** (`F`)
+/// inside such a section so a non-maskable Group-0/FIQ cadence can fire and
+/// observe a core wedged in a `DAIF.I`-masked span the maskable IRQ cadence
+/// cannot — but only when the boot probe proved FIQ is genuinely deliverable
+/// to the non-secure kernel (`crate::watchdog::fiq_cadence_enabled`); that
+/// re-clear lives beside each masking site rather than in a shared immediate,
+/// because it is a run-time property of the hardware, not the build.
 pub mod daif {
     /// `DAIF` FIQ-mask immediate bit (`F`).
     pub const F: u64 = 1 << 0;
     /// `DAIF` IRQ-mask immediate bit (`I`).
     pub const I: u64 = 1 << 1;
-
-    /// The `DAIFSet` immediate an interrupt-safe critical section masks
-    /// with.
-    ///
-    /// When the debug watchdog's FIQ self-sample is compiled in
-    /// (`diagnostics = true`) it masks **IRQ only**, leaving `DAIF.F`
-    /// clear so a Group-0/FIQ cadence can still fire inside the section
-    /// and observe a core wedged there; otherwise it masks **IRQ + FIQ**,
-    /// the classic shippable discipline.
-    #[must_use]
-    pub const fn critical_section_mask(diagnostics: bool) -> u64 {
-        if diagnostics {
-            I
-        } else {
-            I | F
-        }
-    }
 }
 
 /// Unmask **FIQ** taking at the PE (`DAIF.F`) so the debug watchdog's
@@ -369,13 +349,19 @@ pub mod daif {
 /// thread-mode kernel code — would keep FIQ masked and a Group-0 cadence
 /// could never reach a core wedged in a `DAIF.I`-masked section.
 ///
-/// Compiled only into the debug (`watchdog-diagnostics`) image, and inert
-/// until a Group-0/FIQ source is actually routed (staged separately): with
-/// no Group-0 interrupt enabled, clearing `DAIF.F` raises nothing, so on
-/// its own this changes no observable behaviour. It is deliberately never
-/// called from the FIQ handler's own entry or from
-/// [`crate::kernel_arch::halt_current_cpu`] (`msr DAIFSet, #0xf`), where a
-/// nested FIQ would be unsafe.
+/// Compiled only into the debug (`watchdog-diagnostics`) image. It must be
+/// called **only** where a non-maskable FIQ is genuinely the non-secure
+/// kernel's to take — the boot probe ([`crate::watchdog::probe_fiq_deliverability`]),
+/// which is establishing that fact, and, once the probe has confirmed it
+/// (`crate::watchdog::fiq_cadence_enabled`), the syscall/fault handler.
+/// Clearing `DAIF.F` is **not** unconditionally inert: on a two-Security-state
+/// GIC-400 (a Raspberry Pi 4, where Group 0 belongs to the secure world) a
+/// secure Group-0 source the non-secure kernel never routed can still be
+/// pending, so unmasking FIQ there exposes the caller to an interrupt it
+/// cannot service — which is why the callers gate on the probe result rather
+/// than the compile-time feature. It is deliberately never called from the
+/// FIQ handler's own entry or from [`crate::kernel_arch::halt_current_cpu`]
+/// (`msr DAIFSet, #0xf`), where a nested FIQ would be unsafe.
 ///
 /// # Safety
 ///
@@ -634,15 +620,24 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // Debug watchdog FIQ self-sample discipline: run the syscall body
         // and the user-fault resolver with `DAIF.F` clear so a Group-0/FIQ
         // cadence can observe a core wedged in this (IRQ-masked) section
-        // (`plans/WATCHDOG.md`). Exception entry masked `DAIF.F` in
-        // hardware; re-clear it for the handler. Inert until a Group-0
-        // source is routed, and compiled out of shippable images.
+        // (`plans/WATCHDOG.md`). Exception entry masked `DAIF.F` in hardware;
+        // re-clear it for the handler — but **only** when the boot probe
+        // proved a non-maskable FIQ is actually deliverable to the non-secure
+        // kernel. On a two-Security-state GIC-400 (a Raspberry Pi 4, where
+        // Group 0 belongs to the secure world) the probe returns
+        // `Unsupported`, and unmasking `DAIF.F` there would expose this
+        // handler to secure-world Group-0 FIQs the non-secure kernel cannot
+        // service — so FIQ stays masked exactly as in a shippable build (fail
+        // closed). Compiled out of shippable images entirely.
         #[cfg(feature = "watchdog-diagnostics")]
-        // SAFETY: the vector table is installed before any exception can be
-        // taken, so a taken FIQ dispatches through a real slot; clearing
-        // `DAIF.F` only changes the FIQ mask.
-        unsafe {
-            enable_fiq_delivery();
+        if crate::watchdog::fiq_cadence_enabled() {
+            // SAFETY: the vector table is installed before any exception can
+            // be taken, so a taken FIQ dispatches through a real slot;
+            // clearing `DAIF.F` only changes the FIQ mask, and the probe has
+            // confirmed a taken FIQ reaches this kernel.
+            unsafe {
+                enable_fiq_delivery();
+            }
         }
 
         // An `svc` from a lower EL (AArch64) is the EL0 syscall path:
@@ -832,12 +827,15 @@ mod tests {
     }
 
     #[test]
-    fn critical_section_masks_irq_only_in_the_diagnostics_build() {
-        // The debug watchdog build masks IRQ only, leaving FIQ deliverable
-        // for the non-maskable self-sample; a shippable build masks
-        // IRQ+FIQ, the classic discipline.
-        assert_eq!(daif::critical_section_mask(true), daif::I);
-        assert_eq!(daif::critical_section_mask(false), daif::I | daif::F);
+    fn interrupt_safe_critical_section_masks_irq_and_fiq() {
+        // Every interrupt-safe critical section masks IRQ+FIQ (the classic,
+        // fail-closed discipline). The debug watchdog build re-clears FIQ
+        // *inside* the section only when the boot probe proved FIQ
+        // deliverable to this kernel — a run-time decision beside each
+        // masking site, no longer a compile-time immediate — so the base
+        // mask is unconditionally IRQ+FIQ and never leaves FIQ deliverable
+        // on a GIC where Group 0 is secure (a Raspberry Pi 4).
+        assert_eq!(daif::I | daif::F, 0b11);
     }
 
     #[test]

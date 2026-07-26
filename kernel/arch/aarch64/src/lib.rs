@@ -100,6 +100,14 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// ARMv8-A CoreSight external-debug cross-core PC sampling: the memory-
+/// mapped `EDPCSR` read that observes a hard-locked core's PC without
+/// halting it and over a channel `DAIF` cannot mask — the one live datum a
+/// GIC-400 (secure-world FIQ) leaves reachable. Host-testable unlock /
+/// validity / capture logic over a [`coresight::DebugMmio`] seam; the real
+/// MMIO is the freestanding `coresight::VolatileDebugMmio` over per-CPU
+/// debug bases discovered from the device tree.
+pub mod coresight;
 /// aarch64 implementation of the Arch HAL CPU-feature-detection and
 /// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
 /// [`tairix_arch_api::CpuCycles`]): the `ID_AA64ISAR0_EL1`/

@@ -99,6 +99,75 @@ fn adjacent_frees_coalesce_into_one_large_hole() {
 }
 
 #[test]
+fn the_lock_masks_interrupts_via_the_installed_control() {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // Recording interrupt-control hooks. `disable` returns a sentinel token
+    // that `restore` asserts it received back; both bump a counter and toggle
+    // a "masked" flag. A completed allocation then proves the allocator masks
+    // interrupts around its lock (`disable` before, `restore` after, balanced)
+    // — the property that forecloses the single-CPU self-deadlock a plain,
+    // non-interrupt-safe allocator lock would suffer when an interrupt handler
+    // reenters `alloc` on a CPU already holding the lock.
+    static DISABLES: AtomicUsize = AtomicUsize::new(0);
+    static RESTORES: AtomicUsize = AtomicUsize::new(0);
+    static MASKED: AtomicBool = AtomicBool::new(false);
+    const TOKEN: usize = 0xC0FF_EE00;
+
+    fn rec_disable() -> usize {
+        MASKED.store(true, Ordering::Relaxed);
+        DISABLES.fetch_add(1, Ordering::Relaxed);
+        TOKEN
+    }
+    fn rec_restore(token: usize) {
+        assert_eq!(token, TOKEN, "restore receives the token disable returned");
+        assert!(
+            MASKED.swap(false, Ordering::Relaxed),
+            "restore is only ever called after a matching disable"
+        );
+        RESTORES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut backing = Backing([0u8; 4096]);
+    let alloc = fixture(&mut backing);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+
+    // Before any hook is installed the lock does not mask (the early-boot /
+    // host / wasm32 window, which is single-CPU with interrupts already
+    // masked, so no ISR can reenter).
+    // SAFETY: non-zero layout, fresh allocator.
+    let p0 = unsafe { alloc.alloc(layout) };
+    assert!(!p0.is_null());
+    // SAFETY: `p0` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(p0, layout) };
+    assert_eq!(
+        DISABLES.load(Ordering::Relaxed),
+        0,
+        "no hook installed: the lock does not mask"
+    );
+
+    // Once installed, every lock hold masks then restores interrupts.
+    alloc.install_irq_control(rec_disable, rec_restore);
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(layout) };
+    assert!(!p.is_null());
+    // SAFETY: `p` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(p, layout) };
+
+    let disables = DISABLES.load(Ordering::Relaxed);
+    let restores = RESTORES.load(Ordering::Relaxed);
+    assert!(
+        disables >= 2,
+        "the alloc and the dealloc each mask interrupts around the lock"
+    );
+    assert_eq!(disables, restores, "every mask is balanced by a restore");
+    assert!(
+        !MASKED.load(Ordering::Relaxed),
+        "interrupts are restored after the final hold"
+    );
+}
+
+#[test]
 fn alloc_returns_null_when_exhausted_then_recovers_after_free() {
     // Small heap: a handful of blocks, then exhaustion → null (never a
     // panic). Freeing one block lets the next alloc succeed.

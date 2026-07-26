@@ -413,6 +413,93 @@ pub fn scan_translated<'a, T>(
     None
 }
 
+/// The `compatible` string identifying a per-PE external-debug component
+/// in the device tree (the Linux `arm,coresight-cpu-debug` binding).
+///
+/// A node bearing it exposes that CPU's memory-mapped external-debug
+/// registers (`EDPCSR`, …) at its `reg` window and names the CPU it
+/// belongs to through its `cpu` phandle — the two facts the cross-core PC
+/// sampler ([`crate::coresight`]) needs to read a wedged core's PC.
+pub const CORESIGHT_CPU_DEBUG_COMPATIBLE: &str = "arm,coresight-cpu-debug";
+
+/// Discover each CPU's CoreSight external-debug component base from the
+/// device tree, writing the CPU-physical base of the debug node bound to
+/// dense CPU `i` into `out[i]`.
+///
+/// `cpu_affinities[i]` is the MPIDR affinity of dense `CpuId` `i` (the boot
+/// path's ordered `/cpus` map); `out` must be the same length and is left
+/// untouched — the caller's "no component" sentinel — for a CPU with no
+/// described debug node. For every `arm,coresight-cpu-debug` node the walk
+/// translates its `reg` base through the ancestor buses' `ranges`
+/// ([`translated_reg`]) and resolves its `cpu` phandle to that CPU's
+/// affinity (`cpu_affinity_for_phandle`), recording the base under the
+/// matching dense id. A node whose base cannot be translated, whose phandle
+/// names no known CPU, or whose CPU is not in `cpu_affinities` is skipped
+/// (fail closed — never a fabricated base).
+///
+/// Alloc-free: it writes directly into `out` and resolves phandles with
+/// nested tree lookups, so it runs in the freestanding kernel with no heap.
+/// It walks the whole tree, so it must be called with the MMU on (the
+/// early-returning discovery queries are the MMU-off ones).
+pub fn debug_component_bases(fdt: &Fdt<'_>, cpu_affinities: &[u64], out: &mut [usize]) {
+    let _: Option<()> = scan_translated(fdt, |node, levels, depth| {
+        if node.is_compatible(CORESIGHT_CPU_DEBUG_COMPATIBLE) {
+            if let Some((idx, phys)) =
+                debug_node_dense_base(fdt, node, levels, depth, cpu_affinities)
+            {
+                if let Some(slot) = out.get_mut(idx) {
+                    *slot = phys;
+                }
+            }
+        }
+        // Never early-return: visit every node so *every* CPU's component
+        // is found, not just the first.
+        None
+    });
+}
+
+/// Resolve one `arm,coresight-cpu-debug` `node` to
+/// `(dense_cpu_id, cpu_physical_base)`, or `None` when any step fails
+/// closed (untranslatable base, missing/unknown `cpu` phandle, or a CPU
+/// not present in `cpu_affinities`).
+fn debug_node_dense_base(
+    fdt: &Fdt<'_>,
+    node: &Node<'_>,
+    levels: &[BusLevel<'_>],
+    depth: usize,
+    cpu_affinities: &[u64],
+) -> Option<(usize, usize)> {
+    let (base, _len) = translated_reg(node, depth, levels, 0)?;
+    let phandle = node.property("cpu")?.read_be_u32(0).ok()?;
+    let affinity = cpu_affinity_for_phandle(fdt, phandle)?;
+    let idx = cpu_affinities.iter().position(|&a| a == affinity)?;
+    Some((idx, usize::try_from(base).ok()?))
+}
+
+/// Resolve a CPU-node phandle to that CPU's MPIDR affinity (its `reg`), or
+/// `None` when no node carries the phandle or it has no readable `reg`.
+///
+/// Phandles are unique within a device tree, so the first node whose
+/// `phandle` (or the legacy `linux,phandle`) matches is the referenced CPU;
+/// its `reg` is the affinity, read in the `/cpus` `#address-cells` width
+/// (one cell on the common binding, two where the upper affinity bits are
+/// used — size cells are zero, so there is no window to translate).
+fn cpu_affinity_for_phandle(fdt: &Fdt<'_>, phandle: u32) -> Option<u64> {
+    fdt.nodes().flatten().find_map(|node| {
+        let node_phandle = node
+            .property("phandle")
+            .or_else(|| node.property("linux,phandle"))?
+            .read_be_u32(0)
+            .ok()?;
+        if node_phandle != phandle {
+            return None;
+        }
+        let reg = node.property("reg")?.value();
+        let cells = if reg.len() >= 8 { 2 } else { 1 };
+        read_cells(reg, 0, cells)
+    })
+}
+
 /// The PSCI conduit a platform uses to call firmware (
 /// `plans/WIRING.md` W6).
 ///
@@ -593,12 +680,101 @@ pub fn gic_device_intid(node: &Node<'_>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dma_ranges_aperture, effective_timer_hz, gic_device_intid, gic_intid_from_cells,
-        outbound_mmio_window, psci_method, timer_clock_frequency, Fdt, PsciMethod, GIC_TYPE_PPI,
-        GIC_TYPE_SPI,
+        debug_component_bases, dma_ranges_aperture, effective_timer_hz, gic_device_intid,
+        gic_intid_from_cells, outbound_mmio_window, psci_method, timer_clock_frequency, Fdt,
+        PsciMethod, GIC_TYPE_PPI, GIC_TYPE_SPI,
     };
     use crate::gic::{MAX_INTID, MIN_SPI_INTID};
     use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
+
+    /// Build a tree with two CPUs and, optionally, a per-CPU
+    /// `arm,coresight-cpu-debug` node under a `/soc` bus, so
+    /// [`debug_component_bases`] discovery is exercised end to end. Each
+    /// entry of `debug` is `(cpu_phandle, base)`; a `soc` bus (address/size
+    /// cells 2, identity `ranges`) holds the debug nodes so their `reg` is
+    /// translated like a real board's peripheral. CPU affinities are `0` and
+    /// `1` with phandles `1` and `2`.
+    fn tree_with_debug_nodes(debug: &[(u32, u64)]) -> std::vec::Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+
+        b.begin_node("cpus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        for (i, phandle) in [1u32, 2u32].into_iter().enumerate() {
+            b.begin_node(if i == 0 { "cpu@0" } else { "cpu@1" });
+            b.prop_str("device_type", "cpu");
+            b.prop("reg", &u32::try_from(i).unwrap().to_be_bytes());
+            b.prop_u32("phandle", phandle);
+            b.end_node();
+        }
+        b.end_node(); // cpus
+
+        b.begin_node("soc");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.prop("ranges", &[]); // identity: child == parent address space
+        for (n, &(cpu_phandle, base)) in debug.iter().enumerate() {
+            b.begin_node(if n == 0 { "debug@a" } else { "debug@b" });
+            b.prop_str("compatible", "arm,coresight-cpu-debug");
+            let mut reg = std::vec::Vec::new();
+            reg.extend_from_slice(&base.to_be_bytes()); // 2 address cells
+            reg.extend_from_slice(&0x1000u64.to_be_bytes()); // 2 size cells
+            b.prop("reg", &reg);
+            b.prop_u32("cpu", cpu_phandle);
+            b.end_node();
+        }
+        b.end_node(); // soc
+
+        b.end_node(); // root
+        b.build()
+    }
+
+    #[test]
+    fn discovers_a_per_cpu_debug_base_bound_to_its_cpu() {
+        // cpu0 (phandle 1) → debug base A, cpu1 (phandle 2) → debug base B.
+        let blob = tree_with_debug_nodes(&[(1, 0xf651_0000), (2, 0xf653_0000)]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut out = [0usize; 2];
+        debug_component_bases(&fdt, &[0, 1], &mut out);
+        assert_eq!(out, [0xf651_0000, 0xf653_0000]);
+    }
+
+    #[test]
+    fn a_cpu_without_a_debug_node_keeps_its_sentinel() {
+        // Only cpu1 (phandle 2) has a debug node; cpu0's slot is left as the
+        // caller's "no component" sentinel (0), never fabricated.
+        let blob = tree_with_debug_nodes(&[(2, 0xf653_0000)]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut out = [0usize; 2];
+        debug_component_bases(&fdt, &[0, 1], &mut out);
+        assert_eq!(out, [0, 0xf653_0000]);
+    }
+
+    #[test]
+    fn a_debug_node_for_an_unknown_cpu_is_skipped() {
+        // A debug node whose `cpu` phandle names no known CPU (3) writes
+        // nothing — fail closed, never a wrong-CPU attribution.
+        let blob = tree_with_debug_nodes(&[(3, 0xf651_0000)]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut out = [0usize; 2];
+        debug_component_bases(&fdt, &[0, 1], &mut out);
+        assert_eq!(out, [0, 0]);
+    }
+
+    #[test]
+    fn a_tree_with_no_debug_nodes_installs_nothing() {
+        // The QEMU `virt` / stock Pi 4 shape: no debug components described,
+        // so discovery leaves every slot at the sentinel (the sampler then
+        // reports Unsupported and the buddy detector runs unchanged).
+        let blob = tree_with_debug_nodes(&[]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut out = [0usize; 2];
+        debug_component_bases(&fdt, &[0, 1], &mut out);
+        assert_eq!(out, [0, 0]);
+    }
 
     /// Build a single-node tree whose `pcie` node carries `dma-ranges`,
     /// then hand that node to `f`. The `PCIe` binding's cells are fixed:

@@ -179,6 +179,53 @@ pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
+/// A short, stable content fingerprint of arbitrary build-provenance bytes,
+/// rendered as 12 lowercase hex digits.
+///
+/// The build provenance id ([`crate`]'s `build.rs`) appends this over a
+/// working tree's uncommitted content so two *different* dirty trees no
+/// longer collapse to the same `+dirty` marker — the recurring "is my change
+/// actually in this image?" ambiguity, where a bare `<hash>+dirty` was
+/// identical whether or not a given edit was present. A distinct fingerprint
+/// proves a distinct tree; an identical one proves the same content.
+///
+/// This is a build-provenance fingerprint, not a security digest: a fast,
+/// non-cryptographic hash (FNV-1a-64) is the right tool because it only has
+/// to distinguish developer working trees, never resist an adversary — the
+/// image's real integrity guarantee is the reproducible build + source-hash
+/// pinning + signed SBOM, not this id (the driver-signing trust model in
+/// [`KERNEL_DRIVER_SIGNING_SEED`] spells that out). Rolling the 8 bytes out
+/// as 16 hex and keeping the low 12 (the low 48 bits) gives a marker short
+/// enough to read off a UART line while collision-free across any realistic
+/// set of dev trees. Alloc-free — it renders into the caller's `out` buffer
+/// and returns a borrow of it — so it compiles into the `no_std` crate's host
+/// test build as well as the `std` build script (like
+/// [`parse_source_date_epoch`]).
+pub fn short_content_hash<'a>(bytes: &[u8], out: &'a mut [u8; 12]) -> &'a str {
+    // FNV-1a-64: offset basis and prime are the algorithm's fixed constants
+    // (Fowler–Noll–Vo), not tunables.
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    // The low 48 bits as 12 lowercase hex nibbles, most-significant first —
+    // identical to taking the last 12 chars of the full 16-hex rendering.
+    for (i, slot) in out.iter_mut().enumerate() {
+        let nibble = ((hash >> ((11 - i) * 4)) & 0xf) as u8;
+        *slot = match nibble {
+            0..=9 => b'0' + nibble,
+            _ => b'a' + (nibble - 10),
+        };
+    }
+    // Every byte written above is an ASCII hex digit, so the buffer is valid
+    // UTF-8; fall back to the empty string rather than panicking if that
+    // invariant were ever broken.
+    core::str::from_utf8(out).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +322,45 @@ mod tests {
         assert_eq!(parse_source_date_epoch("not-a-number"), None);
         assert_eq!(parse_source_date_epoch("-1"), None);
         assert_eq!(parse_source_date_epoch("12.5"), None);
+    }
+
+    #[test]
+    fn short_content_hash_is_stable_distinct_and_well_formed() {
+        let mut a = [0u8; 12];
+        let mut b = [0u8; 12];
+        // Deterministic: the same bytes always fingerprint identically, so a
+        // rebuild of the same dirty tree reports the same id.
+        assert_eq!(
+            short_content_hash(b"the same tree", &mut a),
+            short_content_hash(b"the same tree", &mut b)
+        );
+        // Distinct trees fingerprint differently — the whole point: a metal
+        // reflash of a *changed* tree reports a different `+dirty.<fp>`.
+        assert_ne!(
+            short_content_hash(b"tree A", &mut a),
+            short_content_hash(b"tree B", &mut b)
+        );
+        // A single-byte change moves the fingerprint (avalanche), so a tiny
+        // edit under test is never conflated with the tree it replaced.
+        assert_ne!(
+            short_content_hash(b"switch_return crumb present", &mut a),
+            short_content_hash(b"switch_return crumb present.", &mut b)
+        );
+        // Always exactly 12 lowercase hex digits — short enough to read off a
+        // UART line, fixed-width so two ids compare by eye.
+        for sample in [&b""[..], b"x", b"a longer body of build material"] {
+            let mut buf = [0u8; 12];
+            let fp = short_content_hash(sample, &mut buf);
+            assert_eq!(fp.len(), 12);
+            assert!(fp
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        }
+        // The empty input hashes to the bare FNV-1a-64 offset basis
+        // (0xcbf29ce484222325); its low 12 hex digits pin the exact bytes so
+        // a refactor cannot silently shift the id.
+        let mut buf = [0u8; 12];
+        assert_eq!(short_content_hash(b"", &mut buf), "9ce484222325");
     }
 
     #[test]

@@ -285,6 +285,21 @@ pub fn boot(
         enable_fp_el1();
     }
 
+    // Make the global kernel-heap lock interrupt-safe before anything can be
+    // interrupted while holding it: install this port's per-CPU DAIF
+    // mask/restore into the (already-registered) heap. Done here, at boot
+    // entry — before the first heap allocation, before interrupts are ever
+    // enabled, and before any secondary CPU is started — so no interrupt can
+    // ever fire on a CPU mid-allocation and reenter the allocator, spinning
+    // forever on the lock its own interrupted mainline holds (a single-CPU
+    // self-deadlock). One process-global install covers every core: the hooks
+    // mask the *current* CPU's interrupts. It stores two `fn` pointers and
+    // does not allocate, so it is safe before the heap has grown.
+    tairix_kernel_core::kheap::install_kheap_irq_control(
+        crate::aarch64::gic_irq::kalloc_irq_disable,
+        crate::aarch64::gic_irq::kalloc_irq_restore,
+    );
+
     // P2 + P3, *before* the MMU comes on: point the console at the UART
     // and the GICv2 driver at the GICD/GICC bases the firmware tree
     // describes. Both walks early-return at their matched node
@@ -571,6 +586,21 @@ pub fn boot(
             if let Some(seed) = fdt.chosen_rng_seed() {
                 tairix_kernel_core::random::capture_boot_entropy_seed(seed);
             }
+            // Discover each CPU's CoreSight external-debug component
+            // (`arm,coresight-cpu-debug`) so the lockup watchdog can read a
+            // hard-wedged core's PC over that non-maskable channel — the one
+            // live observation a GIC-400 (secure-world FIQ) leaves reachable
+            // (`plans/WATCHDOG.md`). The debug bases are discovered from the
+            // tree, never a board constant. A base is installed only when its
+            // window is *already* device-mapped, so a read on the lockup path
+            // can never fault; a component in an unmapped gigapage, or a tree
+            // with no debug nodes (QEMU `virt`, the stock Pi 4 firmware DTB),
+            // installs nothing and the sampler reports `Unsupported` (fail
+            // closed, the buddy detector runs unchanged). Debug-diagnostics
+            // only: the sole reader is the feature-gated hard-lockup `live_pc`
+            // capture, so a shippable image does no debug-store discovery.
+            #[cfg(feature = "watchdog-diagnostics")]
+            install_debug_component_bases(&fdt, &cpu_mpidrs);
         }
     }
     // Install the secondary-start mechanism the firmware tree declares
@@ -967,6 +997,51 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
         return false;
     }
     smp::set_secondary_entry(production_secondary_entry).is_ok()
+}
+
+/// Discover each CPU's CoreSight external-debug component base from the
+/// firmware tree and install the per-CPU registry the lockup watchdog's
+/// cross-core PC sampler reads ([`tairix_arch_aarch64::coresight`]).
+///
+/// Runs post-MMU (it walks the whole tree) with the dense `cpu_mpidrs` map
+/// and the device-gigapage mask already resolved. A discovered base is
+/// installed **only** when its window sits in an already-Device-mapped
+/// gigapage, so a read on the lockup path can never fault; a component in
+/// an unmapped gigapage — or a tree that describes no debug components
+/// (QEMU `virt`, the stock Pi 4 firmware DTB) — installs nothing, and the
+/// sampler reports `Unsupported` (fail closed, the buddy detector runs
+/// unchanged). Allocation failure or a table with no reachable component is
+/// a silent no-op — a diagnostic aid never aborts the boot.
+#[cfg(feature = "watchdog-diagnostics")]
+fn install_debug_component_bases(fdt: &Fdt<'_>, cpu_mpidrs: &[u64]) {
+    use tairix_arch_aarch64::coresight;
+    use tairix_arch_aarch64::paging::{device_gigapages, gigapage_is_device};
+
+    let mut bases = Vec::new();
+    if bases.try_reserve_exact(cpu_mpidrs.len()).is_err() {
+        return;
+    }
+    bases.resize(cpu_mpidrs.len(), coresight::NO_BASE);
+    fdt::debug_component_bases(fdt, cpu_mpidrs, &mut bases);
+
+    // Only keep a base whose gigapage is already Device-typed in the live
+    // identity map; a component elsewhere is dropped rather than read
+    // through an unmapped (or Normal, cacheable) window.
+    let mask = device_gigapages();
+    for base in &mut bases {
+        if *base == coresight::NO_BASE {
+            continue;
+        }
+        let gigapage = *base >> 30;
+        if !gigapage_is_device(&mask, gigapage) {
+            *base = coresight::NO_BASE;
+        }
+    }
+
+    if bases.iter().any(|&b| b != coresight::NO_BASE) {
+        let bases: &'static [usize] = Box::leak(bases.into_boxed_slice());
+        coresight::install_debug_bases(bases);
+    }
 }
 
 /// The entry every started secondary core runs (via the `smp.s`
