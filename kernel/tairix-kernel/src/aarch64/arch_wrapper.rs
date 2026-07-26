@@ -27,7 +27,8 @@
 
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
-use tairix_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
+use tairix_arch_aarch64::fdt::PsciMethod;
+use tairix_arch_aarch64::{halt_current_cpu, psci, serial, Aarch64Arch};
 use tairix_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
 use tairix_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch, SeatRegistry};
 use tairix_kernel_irq::IrqTable;
@@ -43,19 +44,69 @@ use tairix_kernel_irq::IrqTable;
 #[derive(Debug)]
 pub struct Aarch64BinArch {
     arch: Aarch64Arch,
+    /// The firmware power-control conduit the boot path discovered from the
+    /// `/psci` device-tree node (`hvc` or `smc`), or [`None`] when the tree
+    /// declares none. It is the same discovered method the secondary-core
+    /// bring-up uses; carrying it here lets [`KernelArch::reboot`] /
+    /// [`KernelArch::poweroff`] drive PSCI `SYSTEM_RESET` / `SYSTEM_OFF`
+    /// through the discovered conduit rather than assuming one. `None` leaves
+    /// both fail-safe unsupported (they return).
+    psci: Option<PsciMethod>,
 }
 
 impl Aarch64BinArch {
     /// Wrap `arch` so it can be handed to `kernel_core::kernel_main`.
+    ///
+    /// The firmware power-control conduit is left unset; a boot path that
+    /// discovered a `/psci` method installs it with [`Self::with_psci_method`]
+    /// so `reboot`/`poweroff` can drive it. Until then both fail safe
+    /// (unsupported → they return).
     #[must_use]
     pub const fn new(arch: Aarch64Arch) -> Self {
-        Self { arch }
+        Self { arch, psci: None }
+    }
+
+    /// Install the firmware power-control conduit the boot path discovered
+    /// from the `/psci` node, so `reboot`/`poweroff` drive PSCI
+    /// `SYSTEM_RESET` / `SYSTEM_OFF` through it. `None` (no `/psci` node)
+    /// leaves both unsupported (fail safe).
+    #[must_use]
+    pub const fn with_psci_method(mut self, method: Option<PsciMethod>) -> Self {
+        self.psci = method;
+        self
     }
 
     /// Borrow the wrapped [`Aarch64Arch`].
     #[must_use]
     pub const fn arch(&self) -> &Aarch64Arch {
         &self.arch
+    }
+
+    /// Issue a no-argument PSCI power-control call (`SYSTEM_RESET` /
+    /// `SYSTEM_OFF`) through the discovered conduit. Returns on failure or
+    /// when no conduit was discovered (fail safe); on success the firmware
+    /// stops the machine and this never returns.
+    fn psci_power_control(&self, function_id: u32) {
+        let Some(method) = self.psci else {
+            // No `/psci` node was discovered, so there is no conduit to call:
+            // the operation is unsupported. Return so the caller reports it.
+            return;
+        };
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            // SAFETY: `function_id` is one of the two no-argument PSCI
+            // power-control ids this method is only ever called with, and
+            // `method` is the conduit the firmware declared. On success the
+            // call does not return; on failure it yields a status we drop
+            // (the caller treats any return as "unsupported / refused").
+            let _ = unsafe { psci::system_control(method, function_id) };
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            // No PSCI conduit off the freestanding target (host build):
+            // silence the unused binding and return unsupported.
+            let _ = (method, function_id);
+        }
     }
 }
 
@@ -104,6 +155,23 @@ impl KernelArch for Aarch64BinArch {
 
     fn halt(&self) -> ! {
         halt_current_cpu()
+    }
+
+    fn reboot(&self) {
+        // Drive PSCI `SYSTEM_RESET` through the discovered conduit; on
+        // success the firmware resets the board and this never returns. A
+        // return means the tree declared no `/psci` method (nothing to
+        // call) or the firmware refused — either way fail safe: report
+        // nothing here and let the caller surface the failure.
+        self.psci_power_control(psci::PSCI_SYSTEM_RESET);
+    }
+
+    fn poweroff(&self) {
+        // Drive PSCI `SYSTEM_OFF` through the discovered conduit; on success
+        // the firmware powers the board off and this never returns. A
+        // return means power-off is unsupported (no `/psci` method or a
+        // firmware refusal); fail safe and let the caller decide.
+        self.psci_power_control(psci::PSCI_SYSTEM_OFF);
     }
 
     fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {

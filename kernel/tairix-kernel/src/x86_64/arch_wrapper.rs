@@ -379,6 +379,18 @@ impl KernelArch for BinArch {
         arch_halt()
     }
 
+    fn reboot(&self) {
+        // Warm-reboot through the legacy PC reset hardware (the 8042
+        // controller's pulse-reset, then the `0xCF9` reset-control
+        // register). On success the platform resets and this never returns;
+        // a return means neither channel exists, so the caller reports the
+        // reboot as unsupported and carries on (fail safe). Power-off is left
+        // as the trait default (unsupported) until an ACPI power-management
+        // subsystem can drive the FADT/DSDT `\_S5` PM1a control register —
+        // guessing a chipset control port from here would be a hack.
+        tairix_arch_x86_64::reset::reboot();
+    }
+
     fn cpu_features(&self) -> Option<&dyn tairix_arch_api::CpuFeatures> {
         // The x86_64 `CPUID` leaf 1 / leaf 7 detector; each core folds its own
         // detected set into the migration-safe common set delivered to every

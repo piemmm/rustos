@@ -57,7 +57,7 @@ mod repl;
 
 pub mod commands;
 
-pub use dispatch::{Command, COMMANDS};
+pub use dispatch::{Command, Flow, Session, COMMANDS};
 pub use repl::{run_supervisor, PROMPT};
 
 /// The longest command line, in bytes, the Supervisor accepts.

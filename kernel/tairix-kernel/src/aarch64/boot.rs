@@ -1309,7 +1309,16 @@ fn enter_kernel_core(
     // The discovered dense CPU count sizes the scheduler's run queues
     // and names how many cores `kernel_main`'s SMP phase brings online.
     let cpu_count = arch.cpu_count();
-    let arch = Arc::new(Aarch64BinArch::new(arch));
+    // Recover the firmware power-control conduit the boot path discovered
+    // from the `/psci` node (the same method the secondary-core bring-up
+    // uses) so the Supervisor's `reboot`/`poweroff` can drive PSCI
+    // `SYSTEM_RESET` / `SYSTEM_OFF` through it. A tree with no `/psci` node
+    // (spin-table bring-up) leaves it `None`, so both fail safe (unsupported).
+    let psci_method = match arch.secondary_start() {
+        Some(SecondaryStart::Psci(method)) => Some(method),
+        _ => None,
+    };
+    let arch = Arc::new(Aarch64BinArch::new(arch).with_psci_method(psci_method));
     // Publish the arch handle for the panic-handler bridge before it is
     // moved into `BootInfo` (a panic after this point carries registers +
     // a backtrace; before it, the pre-init serial path runs).

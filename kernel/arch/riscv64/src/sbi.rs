@@ -58,6 +58,22 @@ pub const SBI_EXT_RFENCE: usize = 0x5246_4E43;
 /// `remote_sfence_vma` function id within the RFENCE extension.
 pub const SBI_FID_REMOTE_SFENCE_VMA: usize = 1;
 
+/// SBI v0.2 System Reset (SRST) extension id (ASCII `"SRST"`).
+pub const SBI_EXT_SRST: usize = 0x5352_5354;
+
+/// `system_reset` function id within the SRST extension.
+pub const SBI_FID_SYSTEM_RESET: usize = 0;
+
+/// SRST `reset_type` selecting an orderly shutdown / power-off.
+pub const SBI_SRST_TYPE_SHUTDOWN: u32 = 0x0000_0000;
+
+/// SRST `reset_type` selecting a cold reboot (a full platform reset).
+pub const SBI_SRST_TYPE_COLD_REBOOT: u32 = 0x0000_0001;
+
+/// SRST `reset_reason` denoting no specific reason (an operator-requested
+/// reset, not a failure).
+pub const SBI_SRST_REASON_NONE: u32 = 0x0000_0000;
+
 /// `SbiRet` — the two-register return of every SBI v0.2 call.
 ///
 /// `error` is `0` ([`SbiRet::SUCCESS`]) on success and a negative SBI
@@ -209,6 +225,27 @@ pub fn remote_sfence_vma(
     )
 }
 
+/// Request a whole-platform reset via the SBI v0.2 System Reset (SRST)
+/// extension: `reset_type` selects [`SBI_SRST_TYPE_SHUTDOWN`] (power off)
+/// or [`SBI_SRST_TYPE_COLD_REBOOT`] (restart), and `reset_reason` is
+/// [`SBI_SRST_REASON_NONE`] for an operator-requested reset.
+///
+/// On success the firmware powers the platform down or resets it and the
+/// call **does not return**; a return therefore always carries a failure
+/// [`SbiRet`] (the SRST extension is absent, or the firmware refused the
+/// requested type), which the caller reports and recovers from rather than
+/// assuming the machine stopped.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[must_use]
+pub fn system_reset(reset_type: u32, reset_reason: u32) -> SbiRet {
+    sbi_call2(
+        SBI_EXT_SRST,
+        SBI_FID_SYSTEM_RESET,
+        reset_type as usize,
+        reset_reason as usize,
+    )
+}
+
 /// Issue an SBI v0.2 `ecall` with two argument registers (`a0`, `a1`).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 fn sbi_call2(eid: usize, fid: usize, arg0: usize, arg1: usize) -> SbiRet {
@@ -296,6 +333,14 @@ mod tests {
         // `remote_sfence_vma` is function id 1 in the RFENCE extension
         // (function id 0 is `remote_fence_i`).
         assert_eq!(SBI_FID_REMOTE_SFENCE_VMA, 1);
+        // The System-Reset extension id is the ASCII bytes of "SRST",
+        // `system_reset` is its function id 0, and the two reset types the
+        // Supervisor drives are shutdown (0) and cold reboot (1).
+        assert_eq!(SBI_EXT_SRST, 0x5352_5354);
+        assert_eq!(SBI_FID_SYSTEM_RESET, 0);
+        assert_eq!(SBI_SRST_TYPE_SHUTDOWN, 0);
+        assert_eq!(SBI_SRST_TYPE_COLD_REBOOT, 1);
+        assert_eq!(SBI_SRST_REASON_NONE, 0);
     }
 
     #[test]

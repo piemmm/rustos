@@ -38,6 +38,17 @@ use crate::fdt::PsciMethod;
 /// `context_id` are passed as full 64-bit values in `x1`/`x2`/`x3`.
 pub const PSCI_CPU_ON: u32 = 0xC400_0003;
 
+/// PSCI `SYSTEM_OFF` function id (SMC32 calling convention / PSCI spec
+/// §5.1.8). Takes no arguments and, on success, powers the system down and
+/// never returns; the SMC32 (`0x8400_0000`) service space is used because
+/// the call has no 64-bit operands.
+pub const PSCI_SYSTEM_OFF: u32 = 0x8400_0008;
+
+/// PSCI `SYSTEM_RESET` function id (SMC32 calling convention / PSCI spec
+/// §5.1.9). Takes no arguments and, on success, resets the whole system and
+/// never returns.
+pub const PSCI_SYSTEM_RESET: u32 = 0x8400_0009;
+
 /// PSCI status codes (PSCI spec table 5-3). Success is `0`; every defined
 /// error is negative.
 pub mod error {
@@ -165,9 +176,69 @@ pub unsafe fn cpu_on(
     }
 }
 
+/// Issue a no-argument PSCI power-control call (`SYSTEM_OFF` /
+/// `SYSTEM_RESET`) through the conduit `method` names.
+///
+/// On success the firmware powers the system down or resets it and this
+/// **never returns**; a return therefore always carries a failure
+/// [`PsciRet`] (the firmware refused or does not implement the call), which
+/// the caller reports and recovers from rather than assuming the machine
+/// stopped. The status is read from `x0` per SMCCC exactly as [`cpu_on`].
+///
+/// # Safety
+///
+/// `function_id` must be a valid no-argument PSCI power-control function id
+/// ([`PSCI_SYSTEM_OFF`] or [`PSCI_SYSTEM_RESET`]). The call mutates
+/// firmware-owned system power state and is otherwise side-effect-free to
+/// this core; on success control does not come back.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub unsafe fn system_control(method: PsciMethod, function_id: u32) -> PsciRet {
+    let status: i64;
+    macro_rules! psci_smccc {
+        ($conduit:literal) => {
+            core::arch::asm!(
+                $conduit,
+                inout("x0") u64::from(function_id) => status,
+                lateout("x1") _, lateout("x2") _, lateout("x3") _,
+                lateout("x4") _, lateout("x5") _, lateout("x6") _, lateout("x7") _,
+                lateout("x8") _, lateout("x9") _, lateout("x10") _, lateout("x11") _,
+                lateout("x12") _, lateout("x13") _, lateout("x14") _, lateout("x15") _,
+                lateout("x16") _, lateout("x17") _,
+                options(nostack),
+            )
+        };
+    }
+    match method {
+        // SAFETY: `hvc #0` / `smc #0` trap to the PSCI implementation
+        // (QEMU `virt` PSCI emulation or EL3 secure-monitor firmware),
+        // following the SMCCC convention the macro encodes. The call touches
+        // no guest memory of ours and clobbers only the declared registers;
+        // on success it does not return.
+        PsciMethod::Hvc => unsafe { psci_smccc!("hvc #0") },
+        PsciMethod::Smc => unsafe { psci_smccc!("smc #0") },
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    PsciRet {
+        status: status as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_off_and_reset_encode_the_smc32_convention() {
+        // Bit 31 (fast call) set, bit 30 (SMC64) clear — these no-argument
+        // power-control calls use the SMC32 service space — service 0
+        // (PSCI), function numbers 8 (SYSTEM_OFF) and 9 (SYSTEM_RESET).
+        assert_eq!(PSCI_SYSTEM_OFF, 0x8400_0008);
+        assert_eq!(PSCI_SYSTEM_RESET, 0x8400_0009);
+        assert_eq!(PSCI_SYSTEM_OFF & (1 << 31), 1 << 31, "fast-call bit");
+        assert_eq!(PSCI_SYSTEM_OFF & (1 << 30), 0, "SMC32 convention");
+        assert_eq!(PSCI_SYSTEM_RESET & (1 << 30), 0, "SMC32 convention");
+    }
 
     #[test]
     fn cpu_on_function_id_encodes_the_smc64_convention() {

@@ -173,6 +173,7 @@ pub mod platform;
 pub mod preempt;
 pub mod pvh;
 pub mod qemu_exit;
+pub mod reset;
 pub mod serial;
 /// x86_64 implementation of the Arch HAL side-channel mitigation
 /// surface ([`tairix_arch_api::SideChannelMitigation`]).

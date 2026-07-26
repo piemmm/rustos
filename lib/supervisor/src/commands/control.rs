@@ -1,6 +1,6 @@
 //! Control commands: the ones that change boot state.
 //!
-//! Each audits its intent through [`SupervisorHost::audit`] before acting and
+//! Each audits its intent through [`crate::SupervisorHost::audit`] before acting and
 //! fails closed. `mount` performs the *real* passphrase unlock — there is no
 //! command that bypasses the passphrase or reveals key material.
 

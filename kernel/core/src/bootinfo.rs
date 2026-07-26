@@ -104,6 +104,41 @@ pub trait KernelArch: SchedulerArch {
     /// — the compiler-enforced bottom type is the contract.
     fn halt(&self) -> !;
 
+    /// Reset the whole machine now (a warm reboot).
+    ///
+    /// Invoked by an explicit, audited operator control action (the
+    /// pre-boot Supervisor console's `reboot` command), never on an error
+    /// path. On a port that can drive a firmware reset (PSCI `SYSTEM_RESET`
+    /// on aarch64, the SBI System-Reset extension on riscv64, the x86 reset
+    /// path) this **does not return** — the platform restarts. It is typed
+    /// `()` rather than `!` precisely because a reset can *fail* or be
+    /// *unsupported*: the default, and any port whose firmware refuses,
+    /// **returns**, so the caller can report the failure and carry on (fail
+    /// safe — a machine that cannot reset stays running rather than wedging).
+    ///
+    /// The default is unsupported: it returns immediately without touching
+    /// hardware, so a port that has no reset channel (the host test arch)
+    /// honestly reports "not supported" rather than silently pretending.
+    fn reboot(&self) {}
+
+    /// Power the machine off now (an orderly shutdown / halt of the
+    /// platform).
+    ///
+    /// Invoked by an explicit, audited operator control action (the
+    /// pre-boot Supervisor console's `poweroff` command), never on an error
+    /// path. On a port that can drive a firmware power-off (PSCI
+    /// `SYSTEM_OFF` on aarch64, the SBI System-Reset extension's shutdown on
+    /// riscv64, the ACPI/QEMU power-off path on x86_64) this **does not
+    /// return** — the platform powers down. Like [`Self::reboot`] it is
+    /// typed `()` because power-off can be unsupported: the default, and any
+    /// port whose firmware refuses, **returns** so the caller can report the
+    /// failure and stay in control (fail safe).
+    ///
+    /// The default is unsupported: it returns immediately without touching
+    /// hardware. A caller that must guarantee the CPU stops after an
+    /// unsupported power-off falls back to [`Self::halt`] itself.
+    fn poweroff(&self) {}
+
     /// Nanoseconds elapsed since the kernel began running, as observed
     /// by `cpu`.
     ///

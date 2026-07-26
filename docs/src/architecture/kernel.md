@@ -774,6 +774,52 @@ only, observing `KERNEL_BOOT_COMPLETED` to flip the QEMU
 New events take the next free identifier and require an update to this
 table and the event catalogue in `kernel/core/src/audit.rs`.
 
+## Retained boot audit ring
+
+The audit events above are emitted to the `audit_sink`, which a production
+kernel wires to the serial console. That sink is *write-through*: once a line
+is on the wire it is gone. Before `/System/Logs` is writable there is no
+durable place to read boot history back from, yet the pre-boot **Supervisor**
+console (`plans/NEW-SUPERVISOR.md`) needs to `log`-tail exactly those early
+records when a boot goes wrong. `tairix_log::BootRing` retains records too but
+is a *drain-once* FIFO — importing it empties it — so it cannot serve a viewer
+that reads repeatedly.
+
+`kernel/core::boot_audit_ring::BootAuditRing<N, I>` is the retained,
+tail-able store that fills the gap. It is a `tairix_log::Sink` composed
+*alongside* the serial audit sink (never instead of it), so every record the
+kernel already emits is teed into a bounded ring of the most recent `N`
+entries and can be read back **non-destructively** any number of times. It
+re-derives nothing: it copies only what an audit line already carries — the
+`Level`, the stable `EventId`, the message, and the monotonic time it reads
+from an injected `MonotonicClock` (a `Sink` receives no timestamp).
+
+* **SMP-/ISR-safe.** The ring guards its state with the shared
+  `IrqSafeSpinLock` (generic over the architecture's `InterruptControl`,
+  supplied by the bin crate's `static`), which masks interrupts on the
+  current CPU for the short, allocation- and I/O-free duration of a record
+  copy. The lock is never held across rendering: a viewer fetches one record
+  per lock acquisition, so a slow console write cannot keep interrupts masked.
+* **Consistent under a live writer.** Each record takes a strictly-increasing
+  global sequence; a viewer discovers the retained range with `seq_range` and
+  fetches each with `record(seq)`. A sequence names the same record for as
+  long as it is retained, so a concurrent eviction can only make a later fetch
+  return `None` (the record aged out), never a different record. `total`
+  counts every record ever written, so a viewer can show "the last `k` of `N`".
+* **Bounded, never allocating, never panicking.** A fixed-capacity inline
+  array; a full ring overwrites the oldest (a tail keeps *recent* history). A
+  message longer than `TAIL_MESSAGE_MAX` is truncated on a UTF-8 boundary, so
+  a stored message is always valid UTF-8 and no input can make a read panic.
+
+It lives in `kernel/core` rather than `lib/log` because it needs the IRQ-safe
+lock from `lib/sync`, whose epoch-reclamation module is that crate's only
+`alloc` user; pulling `lib/sync` into `tairix-log` would force a global
+allocator into the minimal, allocator-free QEMU fault-test binaries that link
+`tairix-log`. `kernel/core` already depends on `lib/sync`, `lib/log`, and
+`alloc`, and is never linked by those minimal binaries, so the ring lands
+where its producer (the audit-sink composition) and its consumer (the
+Supervisor host) both live.
+
 ## Testing
 
 The crate is fully host-testable. `kernel/core/tests/kernel_main.rs`

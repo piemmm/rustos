@@ -371,24 +371,84 @@ Land in the **same change**:
   `docs/src/architecture/supervisor.md`, and the `docs/src/lib/supervisor.md`
   page + SUMMARY entries; §15.18 jump-sheet row already present.
 
-**Remaining (the kernel consumer — the next chunk, one gated change):**
+**Done (the per-arch machine-control seam):**
 
-- The ESC boot-screen window at the top of
-  `root_mount.rs :: unlock_root_disk_interactively_impl` (the byte-exact
-  `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
-  `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
-  including the timed-read/non-blocking-poll primitive it needs and the
-  ESC-vs-CSI re-poll driving `LineEditor::resolve_escape`.
-- A kernel `SupervisorHost` implementation wiring each command to the existing
-  sources (`introspect_source`, `tairix_kernel_mem::ramtest`, `lib/partition`,
-  the `lib/abi` hardware tree, the `lib/log` ring, the ARXFS descriptor read,
-  the real `mount_root_disk_and_load_users` for `mount`), plus the per-arch
-  `reboot`/`poweroff` reset seams, threaded from `unlock_orchestrate.rs`.
-- The stable `lib/log` audit event ids for `SupervisorEvent` (extend the
-  `41xx` root-unlock range).
-- The QEMU integration vertical driving ESC at both trigger points with the
-  byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
+- `KernelArch::reboot()` / `poweroff()` (`kernel/core::bootinfo`) — the
+  arch-neutral control seam the Supervisor's `reboot`/`poweroff` drive, typed
+  `()` (never `!`) so an unsupported/refused platform **returns** and the
+  caller reports it fail-safe rather than wedging. Fail-safe defaults
+  (unsupported → return), overridden per port:
+  - aarch64: PSCI `SYSTEM_RESET` / `SYSTEM_OFF` (`psci::system_control`) over
+    the conduit discovered from `/psci`, threaded into `Aarch64BinArch` via
+    `with_psci_method` (recovered from `secondary_start()`).
+  - riscv64: SBI System-Reset (SRST) extension (`sbi::system_reset`, cold
+    reboot / shutdown).
+  - x86_64: `reset::reboot` (8042 pulse then `0xCF9`); power-off is left the
+    honest default-unsupported until an ACPI S5 subsystem exists (documented,
+    not a guessed control-port write).
+  - Host unit tests + compile-time id asserts; builds clean on all four
+    Tier-1 targets. The seam has no caller yet — its consumer is the
+    `SupervisorHost` below (do not land these alone once past this staging).
 
-The engine layer is complete and green on its own; the kernel wiring + QEMU
-vertical is the immediate next chunk, to land behind a green whole-project
-gate.
+**Done (the retained tail-able boot audit-log ring — the item-1 prerequisite):**
+
+- `kernel/core::boot_audit_ring::BootAuditRing<N, I>` — a bounded, SMP-/ISR-safe
+  `tairix_log::Sink` that keeps the most recent `N` boot events (level, id,
+  monotonic time via an injected `MonotonicClock`, message) readable
+  **non-destructively**. `kernel/core::audit` is only the id catalogue and
+  `lib/log::BootRing` is a drain-once FIFO, so neither serves the
+  Supervisor's `log`: this ring is that missing store.
+  - **Home is `kernel/core`, not `lib/log` (deliberate).** The ring needs the
+    IRQ-safe lock from `lib/sync`, but `lib/sync`'s `epoch` module is the sync
+    crate's only `alloc` user, and the multi-crate `--target …-none` build
+    unifies features — so any crate depending on `lib/sync` forces `alloc`
+    into *every* binary in that build, including the minimal no-allocator
+    QEMU fault-test binaries that link `tairix-log`. Putting the ring in
+    `kernel/core` (which already depends on `lib/sync`+`lib/log`+`alloc` and
+    is never linked by those minimal binaries) keeps `tairix-log` allocator-
+    free while landing the ring where its producer (audit-sink composition)
+    and consumer (the `SupervisorHost`) both live. It is a `tairix_log::Sink`,
+    exactly as the seam requires.
+  - Guarded by the shared `IrqSafeSpinLock` (generic over the arch's
+    `InterruptControl`, supplied by the bin crate's `static`); the lock is
+    held only for one record copy, never across rendering, so a slow console
+    write never masks interrupts.
+  - Records carry a strictly-increasing global sequence; a viewer walks
+    `seq_range()` and fetches each by `record(seq)` (one lock hold each), so
+    a tail read stays consistent under a live writer (an evicted sequence
+    reads back `None`, never a different record). `total()` counts every
+    record ever written for a "last k of N" view.
+  - Fixed-capacity inline array (no alloc); a full ring overwrites the
+    oldest; an over-long message truncates on a UTF-8 boundary, so no input
+    makes a read panic. Full host tests, rustdoc, and `const`-constructible
+    for a `static`.
+
+**Remaining (the kernel consumer):**
+
+1. Compose the `BootAuditRing` into the boot audit path (a tee alongside the
+   per-arch serial audit sink) with the kernel's monotonic since-boot clock,
+   and wire the reader into `SupervisorHost::log_tail`. The ring primitive
+   above is landed; this is its kernel producer + reader wiring, which needs
+   the per-arch monotonic-clock seam (the serial sink notes none is wired on
+   x86_64 yet) threaded through. `panic-log` reads the `WATCHDOG.md` /
+   `FIX-PANICS.md` records, not this ring.
+2. A kernel `SupervisorHost` wiring each command to its existing source
+   (introspect/version/mem/uptime/date, `tairix_kernel_mem::ram_selftest`
+   for `memtest`, `lib/partition`, the `lib/abi` hardware tree, the boot
+   audit ring above, the ARXFS descriptor read, the `/System` `FilesystemRead`
+   for `ls`, `KernelArch::reboot`/`poweroff` for control, and the real
+   `mount_root_disk_and_load_users` for `mount`), plus the `41xx`
+   `SupervisorEvent` audit ids.
+3. The ESC boot-screen window at the top of
+   `root_mount.rs :: unlock_root_disk_interactively_impl` (byte-exact
+   `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
+   `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
+   including the timed-read/non-blocking-poll primitive and the ESC-vs-CSI
+   re-poll driving `LineEditor::resolve_escape`, threading the
+   `SupervisorHost` through the unlock path from `unlock_orchestrate.rs`.
+4. The QEMU integration vertical driving ESC at both trigger points with the
+   byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
+
+The engine layer and the machine-control seam are complete and green; items
+1–4 are the remaining kernel wiring, to land behind a green whole-project
+gate (item 1 first, as items 2–3 depend on it).

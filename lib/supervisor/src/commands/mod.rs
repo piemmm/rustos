@@ -9,7 +9,7 @@
 //!   `test disk`.
 //!
 //! Every handler has the signature the dispatch table expects
-//! (`fn(&[&[u8]], &mut Session) -> Flow`) and returns [`Flow::Stay`] unless
+//! (`fn(&[&[u8]], &mut Session) -> Flow`) and returns [`crate::Flow::Stay`] unless
 //! it is a control command that leaves the REPL. None panics on any input.
 
 pub mod control;

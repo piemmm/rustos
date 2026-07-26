@@ -230,6 +230,31 @@ impl KernelArch for RiscvBinArch {
         halt_current_hart()
     }
 
+    fn reboot(&self) {
+        // Request a cold reboot through the SBI System-Reset extension; on
+        // success the firmware resets the platform and this never returns. A
+        // return means SRST is unimplemented or the firmware refused (fail
+        // safe): the caller reports it and carries on. Off the freestanding
+        // target there is no SBI, so power control is unsupported.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            use tairix_arch_riscv64::sbi;
+            let _ = sbi::system_reset(sbi::SBI_SRST_TYPE_COLD_REBOOT, sbi::SBI_SRST_REASON_NONE);
+        }
+    }
+
+    fn poweroff(&self) {
+        // Request an orderly shutdown through the SBI System-Reset
+        // extension; on success the firmware powers the platform down and
+        // this never returns. A return means SRST is unimplemented or
+        // refused (fail safe). Off the freestanding target there is no SBI.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            use tairix_arch_riscv64::sbi;
+            let _ = sbi::system_reset(sbi::SBI_SRST_TYPE_SHUTDOWN, sbi::SBI_SRST_REASON_NONE);
+        }
+    }
+
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
         self.arch.monotonic_ns()
     }
