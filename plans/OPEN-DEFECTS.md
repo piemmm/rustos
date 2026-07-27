@@ -175,7 +175,22 @@ The open items, in priority order:
      last-loaded drivers). Fix: a no-default `PhysMap::sync_instruction_cache`
      (aarch64 `dc cvau`+`dsb ish`+`ic ivau`+`dsb ish`+`isb`; coherent/host
      impls a documented no-op), called by the loader for `MapFlags::EXEC`
-     segments only.
+     segments only. The maintenance lives on `ConfiguredIdentityPhysMap`
+     (the aarch64 physmap that carries the arch cache primitives), and **both
+     aarch64 spawn producers — PID 1 `init_spawn.rs` and the runtime `spawn`
+     `spawn_producer.rs` — load through it**; a `DirectPhysMap` (whose
+     `sync_instruction_cache`/`clean_invalidate` are the I/O-coherent no-op)
+     threaded into either loader silently defeats the guarantee and reproduces
+     the fault as a `write=false fault_class=wild` data abort (the stale bytes
+     now decode to a valid-but-wrong instruction that loads through a wild
+     pointer) — the terminate path (fix 2) then kills the driver instead of
+     halting, so the keyboard never comes up. The stored `BuiltImage.physmap`
+     is the same map, so its `clean_invalidate` (the shared-memory zero-on-free
+     scrub) is real on the Pi too. Regression coverage: the `kernel/mem` loader
+     test proves `sync_instruction_cache` is called for EXEC segments only; the
+     wiring is single-sourced (both loaders name `ConfiguredIdentityPhysMap`)
+     and metal-only (QEMU `virt` is I-cache-coherent, so no host/QEMU vertical
+     can exercise it — like fix 2 it is confirmed on metal).
   2. **The trap handler parked the whole CPU on that user exception.** An
      EL0 sync exception the specific handlers did not resolve (the `EC=0`
      here) fell through to `halt_current_cpu()` (`msr DAIFSet,#0xf` + `wfi`
@@ -187,6 +202,24 @@ The open items, in priority order:
      only a same-EL kernel fault or an unattributable one halts. Regression
      tests: the loader syncs code (and only code); the terminate path never
      returns "retry".
+
+- **D17 — riscv64 loader has no instruction-cache maintenance for
+  freshly-loaded code — OPEN (latent, real-hardware only).** Noticed while
+  fixing D16's aarch64 wiring: the riscv64 spawn producers
+  (`kernel/tairix-kernel/src/riscv64/{spawn_producer,init_spawn}.rs`) fill and
+  map code through `DirectPhysMap`, whose `sync_instruction_cache` is the
+  no-op, and RISC-V has **no** `ConfiguredIdentityPhysMap` equivalent — there
+  is no `FENCE.I` maintenance anywhere on the load path. RISC-V instruction
+  fetch is not required to be coherent with stores, so a real SiFive board can
+  fetch stale code exactly as the Pi 4 did (D16). It does not reproduce on the
+  QEMU `virt` target (TCG invalidates its translation cache on writes), so no
+  vertical catches it. The proper fix is an Arch-HAL `sync_instruction_cache`
+  slice for riscv64 (a `FENCE.I` broadcast to the executing harts, cross-hart
+  via IPI) plus a riscv64 physmap that carries it, threaded into both riscv64
+  spawn loaders — the same shape as the aarch64 fix, not a copy (§2.21). Left
+  as a separate item because it is an Arch-HAL addition, not the reported
+  aarch64 boot fault, and riscv64 metal is not the platform in play; it must
+  not ship to real riscv hardware unfixed.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL

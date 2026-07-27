@@ -38,8 +38,7 @@ use tairix_kernel_core::{
     spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack,
-    VirtAddr,
+    AddressSpace, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
@@ -176,7 +175,17 @@ impl InitSpawn for Aarch64InitSpawn {
         unsafe { arch.switch() };
 
         let mut space = AddressSpace::new(arch);
-        let physmap = DirectPhysMap::identity((identity_gib as u64) << 30);
+        // Fill PID 1's segment pages through the physmap whose cache
+        // maintenance is *real*: on the Cortex-A72 the I-cache is not coherent
+        // with the loader's cacheable data-side writes, so an executable
+        // segment must be made instruction-fetch-coherent through
+        // `ConfiguredIdentityPhysMap::sync_instruction_cache` (clean-to-PoU +
+        // I-cache invalidate). A plain `DirectPhysMap`'s is a no-op (correct
+        // only for I/O-coherent targets), which would let PID 1 fetch stale
+        // code. The identity translation is the same live window; only the
+        // maintenance becomes real (also for the stored physmap's
+        // `clean_invalidate`, per the runtime spawn producer's rationale).
+        let physmap = ConfiguredIdentityPhysMap;
 
         // Parse the build-time `init` `rxe` blob against the kernel's own
         // compiled-in syscall CFI tag. A mismatch fails closed.

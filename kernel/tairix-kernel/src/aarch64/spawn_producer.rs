@@ -296,7 +296,21 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         }
 
         let mut space = AddressSpace::new(arch);
-        let physmap = DirectPhysMap::identity((identity_gib as u64) << 30);
+        // The loader fills the child's segment pages through this physmap and,
+        // for an executable segment, makes them instruction-fetch-coherent
+        // through its `sync_instruction_cache`. On the Cortex-A72 the I-cache
+        // is not coherent with those cacheable data-side writes, so this must
+        // be the physmap whose cache maintenance is *real*
+        // (`ConfiguredIdentityPhysMap`: clean-to-PoU + I-cache invalidate), not
+        // a plain `DirectPhysMap` whose `sync_instruction_cache` /
+        // `clean_invalidate` are no-ops for I/O-coherent targets — otherwise a
+        // freshly-loaded driver fetches stale bytes and dies on a wild fault.
+        // Its identity translation is the same live window
+        // `DirectPhysMap::identity((identity_gib) << 30)` gave (both re-derive
+        // the configured gigapages), so only the maintenance changes. It also
+        // backs the stored `BuiltImage.physmap` below, whose `clean_invalidate`
+        // the shared-memory zero-on-free scrub relies on being real here too.
+        let physmap = ConfiguredIdentityPhysMap;
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag. A mismatch fails closed.
