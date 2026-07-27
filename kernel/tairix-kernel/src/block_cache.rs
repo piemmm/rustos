@@ -96,6 +96,27 @@ const OWNER_SUBSYSTEM: &str = "boot_block_device";
 /// flush the hot working set. Mirrors `CachedFs`'s large-read bypass.
 pub const LARGE_READ_BYPASS_BLOCKS: u64 = 64;
 
+/// Readahead only drives off *small* requests: a request already this
+/// many blocks wide amortises its own device round-trip, so speculating
+/// past it wins nothing and only risks pulling in blocks the caller
+/// never asked for. The filesystem's per-block content read (one
+/// `data_capacity()`-sized block per iteration) is the request this
+/// bound is sized for.
+const READAHEAD_TRIGGER_BLOCKS: u64 = 8;
+
+/// The first readahead window opened when a sequential access pattern is
+/// detected, in device blocks. The window then doubles on each further
+/// sequential miss up to [`READAHEAD_MAX_BLOCKS`], the same ramp Linux's
+/// page-cache readahead uses so an isolated read pays no speculation and
+/// a long sequential stream quickly reaches the widest coalesced I/O.
+const READAHEAD_INIT_BLOCKS: u64 = 8;
+
+/// The widest readahead window, in device blocks. Held at
+/// [`LARGE_READ_BYPASS_BLOCKS`] so a coalesced prefetch never retains
+/// more of the working set than a single non-bypassed request could,
+/// and one prefetch is always one device round-trip.
+const READAHEAD_MAX_BLOCKS: u64 = LARGE_READ_BYPASS_BLOCKS;
+
 /// The widest device block the cache will retain. A device reporting
 /// a larger (or zero) block size is served uncached: per-block entries
 /// must stay individually bounded.
@@ -143,6 +164,18 @@ pub struct BlockCache<B: Block> {
     entries: BTreeMap<u64, Entry>,
     /// LRU index: tick (oldest first) to entry key.
     lru: BTreeMap<u64, u64>,
+    /// The LBA the next read is *expected* at if the caller is streaming
+    /// sequentially: the block just past the previous request's span.
+    /// A request whose start matches it is a sequential continuation and
+    /// arms readahead; any other start is random access and disarms it.
+    /// `None` before the first read and after a bypass breaks the run.
+    readahead_next: Option<u64>,
+    /// The current readahead window in device blocks: `0` while the
+    /// pattern looks random, ramping [`READAHEAD_INIT_BLOCKS`] →
+    /// [`READAHEAD_MAX_BLOCKS`] (doubling) across a sustained sequential
+    /// stream. Only ever a hint — a wrong guess costs at most one
+    /// bounded, budget-gated over-read, never a wrong result.
+    readahead_window: u64,
 }
 
 impl<B: Block> BlockCache<B> {
@@ -198,6 +231,8 @@ impl<B: Block> BlockCache<B> {
             tick: 0,
             entries: BTreeMap::new(),
             lru: BTreeMap::new(),
+            readahead_next: None,
+            readahead_window: 0,
         };
         if geometry.block_size == 0 || geometry.block_size > MAX_BLOCK_SIZE {
             cache.poison("uncacheable_geometry");
@@ -498,27 +533,110 @@ impl<B: Block> BlockCache<B> {
         Some(blocks)
     }
 
+    /// Reset the sequential-readahead tracker: the next small read
+    /// starts a fresh pattern with no speculation. Called when a bypass
+    /// or a poisoned pass-through breaks the run.
+    fn readahead_reset(&mut self) {
+        self.readahead_next = None;
+        self.readahead_window = 0;
+    }
+
+    /// How many contiguous device blocks to fetch for a miss at `lba`
+    /// that wants `blocks` blocks: `blocks` (no speculation) unless a
+    /// sequential stream is detected, in which case a bounded readahead
+    /// window is opened and doubled up to [`READAHEAD_MAX_BLOCKS`],
+    /// clamped to the end of the device. Never returns fewer than
+    /// `blocks`.
+    ///
+    /// Readahead is a pure performance hint: it turns one device
+    /// round-trip per block of a sequential read (the filesystem's
+    /// per-block content path) into one round-trip per window, so a
+    /// cold sequential load — a program image, a bundle, a
+    /// driver-store scan — pays a small fraction of the round-trips.
+    /// A wrong guess (random access, or a stream that ends early)
+    /// over-reads at most one bounded, budget-gated window and never
+    /// changes a result.
+    fn plan_readahead(&mut self, lba: u64, blocks: u64, sequential: bool) -> u64 {
+        if blocks > READAHEAD_TRIGGER_BLOCKS || !sequential {
+            self.readahead_window = 0;
+            return blocks;
+        }
+        let window = if self.readahead_window == 0 {
+            READAHEAD_INIT_BLOCKS
+        } else {
+            self.readahead_window
+                .saturating_mul(2)
+                .min(READAHEAD_MAX_BLOCKS)
+        };
+        self.readahead_window = window;
+        let remaining = self.geometry.block_count.saturating_sub(lba);
+        window.min(remaining).max(blocks)
+    }
+
     /// The shared read path: serve from cache when the whole span is
     /// retained, else read the device through `forward` and retain the
-    /// result. Bypassed spans go straight to the device.
+    /// result. A sequential miss reads a bounded readahead window ahead
+    /// in one device request and retains it, so the following blocks of
+    /// a streaming read are served from cache. Bypassed spans go
+    /// straight to the device.
     fn cached_read(
         &mut self,
         lba: u64,
         buf: &mut [u8],
-        forward: impl FnOnce(&mut B, u64, &mut [u8]) -> Result<(), DriverError>,
+        forward: impl Fn(&mut B, u64, &mut [u8]) -> Result<(), DriverError>,
     ) -> Result<(), DriverError> {
         self.enforce_pressure();
         let Some(blocks) = self.cacheable_span(lba, buf.len()) else {
+            // A bypassed (uncacheable or bulk) read breaks the tracked
+            // sequential run; the next small read starts cold.
+            self.readahead_reset();
             return forward(&mut self.device, lba, buf);
         };
+        // A request that begins exactly where the previous one ended is a
+        // sequential continuation. Recorded before serving so both a hit
+        // and a miss advance the expectation to the block past this span.
+        let sequential = self.readahead_next == Some(lba);
+        self.readahead_next = Some(lba.saturating_add(blocks));
         if self.try_serve(lba, blocks, buf) {
             self.accounting.record_hit(ReclaimClass::CleanFileData);
             return Ok(());
         }
         if self.poisoned {
+            self.readahead_reset();
             return forward(&mut self.device, lba, buf);
         }
         self.accounting.record_miss(ReclaimClass::CleanFileData);
+        let prefetch = self.plan_readahead(lba, blocks, sequential);
+        let want_bytes = usize::try_from(prefetch)
+            .unwrap_or(0)
+            .saturating_mul(self.block_size());
+        if want_bytes > buf.len() {
+            // A fallible, zeroed staging buffer for the one coalesced
+            // readahead device read. `vec![0; want_bytes]` would abort on
+            // allocation failure; the kernel must instead fail closed and
+            // fall back to the exact read, so the buffer is grown through
+            // `try_reserve_exact` and then zeroed — deterministic OOM, no
+            // panic.
+            #[allow(clippy::slow_vector_initialization)]
+            let mut scratch = Vec::new();
+            if scratch.try_reserve_exact(want_bytes).is_ok() {
+                scratch.resize(want_bytes, 0);
+                if forward(&mut self.device, lba, &mut scratch).is_ok() {
+                    buf.copy_from_slice(&scratch[..buf.len()]);
+                    self.populate(lba, prefetch, &scratch);
+                    Self::wipe(&mut scratch);
+                    return Ok(());
+                }
+                // The coalesced read faulted: fall through to the
+                // exact-span read so a genuine device fault is reported
+                // for the requested blocks alone — a speculative
+                // over-read never widens a caller's fault.
+                Self::wipe(&mut scratch);
+            }
+            // Reservation failed under memory pressure: fall through to
+            // the exact-span read (never fail a real read for want of a
+            // speculative buffer).
+        }
         forward(&mut self.device, lba, buf)?;
         self.populate(lba, blocks, buf);
         Ok(())

@@ -1117,6 +1117,23 @@ ordering as every other class:
   device state is unknown), a discard invalidates its range, and
   reads wider than the large-read bound stream through uncached so a
   bulk bundle/driver-store load cannot flush the hot working set.
+- Sequential readahead: the filesystem's per-block content path
+  reads a file one `data_capacity()` block per iteration, so a cold
+  sequential load (a program image, a bundle, the users database)
+  would cost one device round-trip — one submit/park/wake on virtio
+  or EMMC2 — per block. The cache detects a sequential stream (a miss
+  whose LBA continues exactly where the previous request ended) and
+  reads a bounded readahead window ahead in a single coalesced device
+  request, retaining the window so the following blocks are cache
+  hits. The window ramps 8→16→32→64 blocks (doubling per sustained
+  sequential miss, capped at the large-read bound so a prefetch never
+  retains more than one non-bypassed request could) and is clamped to
+  the end of the device. It is a pure hint: a random access disarms
+  the ramp (so scattered reads never over-read), a coalesced read
+  that faults falls back to the exact requested span (a speculative
+  over-read never widens a caller's fault), and a scratch reservation
+  refused under pressure falls back to the exact read. Admission of
+  the prefetched blocks still passes the SMART2 pressure/budget gate.
 - Secret hygiene: `BufferClass::Sensitive` reads and writes bypass
   the cache entirely *and* evict any cached copy of their range, so
   no key-slot or credential-bearing block is ever retained; every
@@ -1132,7 +1149,11 @@ that a hit never reaches the device, multi-block partial-hit
 behaviour, write-through coherence, failed-write and discard
 invalidation, sensitive-class scrubbing on both directions,
 non-sensitive classified reads cached normally, large-read bypass,
-unaligned passthrough, LRU eviction with hysteresis, per-band
+sequential readahead coalescing a streaming read into a handful of
+device round-trips (byte-correctness, prefetch-served-from-cache,
+no-speculation-on-random-access, bypass-resets-the-run, and
+coalesced-fault fallback), unaligned passthrough, LRU eviction with
+hysteresis, per-band
 growth/shrink/drain enforcement with recovery, zero-backing refusal,
 uncacheable-geometry poisoning with the device still serving,
 geometry-fault refusal to wrap, forwarding of geometry/discard

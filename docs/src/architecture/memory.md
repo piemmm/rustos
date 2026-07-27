@@ -1405,6 +1405,22 @@ calling task across a completion interrupt.
   invalidates its range. Reads spanning more than
   `LARGE_READ_BYPASS_BLOCKS` stream through uncached so a bulk bundle
   or driver-store load cannot flush the hot working set.
+- **Sequential readahead.** The filesystem serves file content one
+  block per iteration, so a cold sequential load (a program image, a
+  bundle, the users database) would otherwise cost one device
+  round-trip — one submit/park/wake on virtio or EMMC2 — per block.
+  The cache detects a sequential stream (a miss whose LBA continues
+  exactly where the previous request ended) and reads a bounded
+  window ahead in a single coalesced device request, retaining it so
+  the following blocks are hits; the window ramps 8→16→32→64 blocks
+  (doubling per sustained sequential miss, capped at
+  `LARGE_READ_BYPASS_BLOCKS`) and is clamped to the device end. It is
+  a pure hint: random access disarms the ramp (scattered reads never
+  over-read), a coalesced read that faults falls back to the exact
+  requested span (a speculative over-read never widens a caller's
+  fault), and a scratch reservation refused under pressure falls back
+  to the exact read. Prefetched blocks still pass the pressure/budget
+  admission gate.
 - **Secret hygiene.** `BufferClass::Sensitive` reads and writes (key
   slots, credentials) bypass the cache entirely *and* evict any cached
   copy of their range, so no credential-bearing block is ever
@@ -1419,7 +1435,11 @@ The host suite (`kernel/tairix-kernel/src/block_cache_tests.rs`)
 proves classification, hit/miss/insertion accounting (a hit is shown
 never to reach the device by corrupting the backing store),
 write-through coherence, failed-write and discard invalidation,
-sensitive-class scrubbing, the large-read bypass, LRU eviction with
+sensitive-class scrubbing, the large-read bypass, sequential
+readahead (a streaming read collapsing to a handful of device
+round-trips, byte-correctness, prefetch-served-from-cache,
+no-speculation-on-random-access, bypass-resets-the-run, and
+coalesced-fault fallback), LRU eviction with
 hysteresis, per-band growth/shrink/drain enforcement with recovery,
 zero-backing refusal, uncacheable-geometry poisoning with the device
 still serving, the closed audit field shape, and wipe-in-place.

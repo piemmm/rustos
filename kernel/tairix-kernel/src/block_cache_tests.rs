@@ -199,6 +199,22 @@ fn block_of(fill: u8) -> Vec<u8> {
     vec![fill; BS as usize]
 }
 
+/// A budget large enough to retain a full readahead window (and then
+/// some), so a readahead test observes the coalescing effect rather
+/// than the eviction gate the small [`budget`] exercises elsewhere.
+fn roomy_budget() -> CacheBudget {
+    CacheBudget::from_backing(4 * 1024 * 1024)
+}
+
+/// A cache over a 256-block test disk with a roomy budget: the fixture
+/// the readahead tests stream a long sequential run through.
+fn roomy_cached() -> (Rc<RefCell<Store>>, BlockCache<MemDisk>) {
+    let (store, disk) = MemDisk::with_geometry(BS, 256);
+    let cache =
+        BlockCache::new(disk, roomy_budget(), unpressured(), sink()).expect("geometry queried");
+    (store, cache)
+}
+
 #[test]
 fn classification_admits_and_charges_the_block_device_subsystem() {
     let (_store, cache) = cached();
@@ -402,9 +418,11 @@ fn an_unaligned_request_takes_the_device_error_surface() {
 fn eviction_takes_the_least_recently_used_block_first() {
     // Six 608-byte blocks fit under the 4096 hard limit (3648); a
     // seventh evicts down past the 3072 low watermark, taking the
-    // oldest untouched block.
+    // oldest untouched block. The LBAs are spaced apart so this tests
+    // pure LRU eviction, never the sequential-readahead path (which a
+    // 0,1,2,… run would arm).
     let (store, mut cache) = cached();
-    for lba in 0..6u64 {
+    for lba in [0u64, 2, 4, 6, 8, 10] {
         let mut buf = block_of(0);
         cache.read_blocks(lba, &mut buf).unwrap();
     }
@@ -413,20 +431,20 @@ fn eviction_takes_the_least_recently_used_block_first() {
     cache.read_blocks(0, &mut touch).unwrap();
 
     let mut seventh = block_of(0);
-    cache.read_blocks(6, &mut seventh).unwrap();
+    cache.read_blocks(12, &mut seventh).unwrap();
     assert!(cache.accounting().evictions() >= 1);
     assert!(
         cache.accounting().total_bytes() <= budget().hard(),
         "the ledger respects the hard limit"
     );
 
-    // Block 1 (the least recently used) went; block 0 survived.
+    // Block 2 (the least recently used) went; block 0 survived.
     let reads_before = store.borrow().reads;
     let mut hit = block_of(0);
     cache.read_blocks(0, &mut hit).unwrap();
     assert_eq!(store.borrow().reads, reads_before, "the touched block held");
     let mut miss = block_of(0);
-    cache.read_blocks(1, &mut miss).unwrap();
+    cache.read_blocks(2, &mut miss).unwrap();
     assert_eq!(
         store.borrow().reads,
         reads_before + 1,
@@ -448,8 +466,10 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
     gauge_source
         .free
         .store(free_for(PressureBand::Mild), Ordering::Relaxed);
+    // Block 2 (not the adjacent block 1) so the read is random, not a
+    // sequential continuation that would arm readahead.
     let mut other = block_of(0);
-    cache.read_blocks(1, &mut other).unwrap();
+    cache.read_blocks(2, &mut other).unwrap();
     assert_eq!(cache.accounting().refusals(), 1, "no growth at mild");
     let reads_before = store.borrow().reads;
     cache.read_blocks(0, &mut buf).unwrap();
@@ -481,7 +501,8 @@ fn mild_pressure_shrinks_a_full_cache_to_the_low_watermark() {
     let (gauge_source, pressure) = pressured(free_for(PressureBand::Normal));
     let (_store, disk) = MemDisk::new();
     let mut cache = BlockCache::new(disk, budget(), pressure, sink()).unwrap();
-    for lba in 0..6u64 {
+    // Spaced LBAs: fill the cache without arming sequential readahead.
+    for lba in [0u64, 2, 4, 6, 8, 10] {
         let mut buf = block_of(0);
         cache.read_blocks(lba, &mut buf).unwrap();
     }
@@ -639,6 +660,195 @@ fn the_wipe_zeroes_the_payload_in_place() {
     BlockCache::<MemDisk>::wipe(&mut data);
     assert_eq!(data.len(), BS as usize, "the wipe keeps the length");
     assert!(data.iter().all(|&b| b == 0), "every byte is wiped");
+}
+
+#[test]
+fn a_sequential_stream_coalesces_into_far_fewer_device_reads() {
+    // The measurement that motivates readahead: the filesystem serves a
+    // file (a program image, a bundle) one content block per iteration,
+    // so a cold sequential read of N blocks would, block-for-block, cost
+    // N device round-trips — each a full submit/park/wake on virtio or
+    // emmc2. The adaptive window (8 → 16 → 32 → 64) collapses those into
+    // a handful of coalesced reads.
+    let (store, mut cache) = roomy_cached();
+    for lba in 0..64u64 {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+    }
+    let reads = store.borrow().reads;
+    assert!(
+        reads < 64,
+        "readahead must cut device round-trips below one-per-block, got {reads}"
+    );
+    // 1 (cold block 0) + windows 8,16,32,64 cover blocks 0..121, so the
+    // 64-block stream costs five device reads, not sixty-four.
+    assert_eq!(reads, 5, "the adaptive window ramps 8→16→32→64");
+    // Every miss admitted a hit for the following blocks: the stream is
+    // mostly cache hits after the first block of each window.
+    assert!(cache.accounting().hits() >= 59);
+}
+
+#[test]
+fn a_sequential_stream_returns_exactly_the_device_bytes() {
+    // Coalescing must not corrupt or misorder data: each served block
+    // equals the device's bytes for that block.
+    let (store, mut cache) = roomy_cached();
+    for lba in 0..40u64 {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+        let at = usize::try_from(lba).unwrap() * BS as usize;
+        assert_eq!(
+            &buf[..],
+            &store.borrow().data[at..at + BS as usize],
+            "block {lba} served wrong bytes"
+        );
+    }
+}
+
+#[test]
+fn a_prefetched_block_is_served_from_cache_not_the_device() {
+    // A sequential miss retains the whole window, so the *next* blocks
+    // of the stream are genuine cache hits — proven by corrupting the
+    // device copy of a prefetched block and still reading the retained
+    // bytes without touching the device.
+    let (store, mut cache) = roomy_cached();
+    let mut b0 = block_of(0);
+    cache.read_blocks(0, &mut b0).unwrap();
+    // Block 1 continues the stream: this miss prefetches the window
+    // [1, 1 + READAHEAD_INIT_BLOCKS), retaining block 2 among others.
+    let mut b1 = block_of(0);
+    cache.read_blocks(1, &mut b1).unwrap();
+
+    let expected2 = store.borrow().data[2 * BS as usize..3 * BS as usize].to_vec();
+    store.borrow_mut().data[2 * BS as usize] ^= 0xFF;
+    let reads_before = store.borrow().reads;
+    let mut b2 = block_of(0);
+    cache.read_blocks(2, &mut b2).unwrap();
+    assert_eq!(
+        store.borrow().reads,
+        reads_before,
+        "the prefetched block was served from cache"
+    );
+    assert_eq!(b2, expected2, "the retained (pre-corruption) bytes served");
+}
+
+#[test]
+fn random_access_never_speculates() {
+    // Readahead arms only on a sequential continuation; scattered reads
+    // each cost exactly one single-block device read and admit exactly
+    // one block, so a random workload is never penalised by speculative
+    // over-reads.
+    let (store, mut cache) = roomy_cached();
+    let pattern = [10u64, 3, 40, 1, 99];
+    for lba in pattern {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+    }
+    assert_eq!(
+        store.borrow().reads,
+        pattern.len() as u64,
+        "each random read issued exactly one device read"
+    );
+    assert_eq!(
+        cache.accounting().total_bytes(),
+        pattern.len() * COST,
+        "random access admitted exactly the requested blocks"
+    );
+}
+
+#[test]
+fn a_bulk_bypass_breaks_the_sequential_run() {
+    // A bulk (bypassed) read must not leave a stale sequential
+    // expectation that mis-fires readahead on the next small read.
+    let (store, mut cache) = roomy_cached();
+    let mut b0 = block_of(0);
+    cache.read_blocks(0, &mut b0).unwrap();
+    // A large read past the bypass bound streams uncached and resets the
+    // tracker.
+    let bulk_blocks = usize::try_from(LARGE_READ_BYPASS_BLOCKS + 1).unwrap();
+    let mut bulk = vec![0u8; bulk_blocks * BS as usize];
+    cache.read_blocks(1, &mut bulk).unwrap();
+    let reads_after_bulk = store.borrow().reads;
+    // Block 1 begins a fresh, cold pattern: no speculation yet (the run
+    // was broken), so this is a single-block device read.
+    let mut b1 = block_of(0);
+    cache.read_blocks(1, &mut b1).unwrap();
+    assert_eq!(
+        store.borrow().reads,
+        reads_after_bulk + 1,
+        "the reset run reads exactly the requested block"
+    );
+}
+
+/// A device that rejects any read wider than one block: a coalesced
+/// readahead read fails against it, but a single-block read succeeds.
+/// Proves readahead's fallback keeps a real read correct — a
+/// speculative over-read never widens or invents a fault.
+struct SingleBlockOnly {
+    store: Rc<RefCell<Store>>,
+    geo: BlockGeometry,
+}
+
+impl Block for SingleBlockOnly {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(self.geo)
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let bs = self.geo.block_size as usize;
+        if buf.len() != bs {
+            // The device (or its transport) cannot service a multi-block
+            // request: the coalesced readahead read must fall back.
+            return Err(DriverError::Unsupported);
+        }
+        let start = usize::try_from(lba).unwrap() * bs;
+        let mut store = self.store.borrow_mut();
+        store.reads += 1;
+        buf.copy_from_slice(&store.data[start..start + bs]);
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn readahead_falls_back_to_the_exact_span_when_the_coalesced_read_faults() {
+    let len = BS as usize * 64;
+    let store = Rc::new(RefCell::new(Store {
+        data: (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect(),
+        reads: 0,
+        writes: 0,
+        flushes: 0,
+        discards: Vec::new(),
+        fail_writes: false,
+    }));
+    let disk = SingleBlockOnly {
+        store: Rc::clone(&store),
+        geo: BlockGeometry {
+            block_size: BS,
+            block_count: 64,
+        },
+    };
+    let mut cache = BlockCache::new(disk, roomy_budget(), unpressured(), sink()).unwrap();
+    // Stream sequentially: block 1 onward would coalesce, but the device
+    // refuses the wide read, so each such miss falls back to the exact
+    // single-block read. Correctness is preserved throughout.
+    for lba in 0..16u64 {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+        let at = usize::try_from(lba).unwrap() * BS as usize;
+        assert_eq!(
+            &buf[..],
+            &store.borrow().data[at..at + BS as usize],
+            "block {lba} served wrong bytes through the fallback"
+        );
+    }
 }
 
 /// A leaked cache-admission control with the block class disabled
