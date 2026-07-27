@@ -27,12 +27,17 @@ use std::time::{Duration, Instant};
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads, MAC_ADDRESS_LEN};
 use tairix_abi::Duration64;
-use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr};
+use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES};
 use tairix_net::checksum::Pseudo;
 use tairix_net::dhcp::{self, MessageType};
-use tairix_net::eth::{self, BROADCAST, ETHERNET_HEADER_LEN, ETHERTYPE_IPV4};
+use tairix_net::dhcpv6::{self, Duid, MessageType as Dhcp6MessageType};
+use tairix_net::eth::{
+    self, ipv6_multicast_mac, BROADCAST, ETHERNET_HEADER_LEN, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
+};
 use tairix_net::iface::{eui64_interface_id, TempAddrSource};
 use tairix_net::ipv4::{Ipv4Header, IPV4_HEADER_LEN};
+use tairix_net::ipv6::{Ipv6Header, IPV6_HEADER_LEN, NEXT_HEADER_ICMPV6};
+use tairix_net::nd::{ND_HOP_LIMIT, TYPE_ROUTER_ADVERTISEMENT};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::TcpSegment;
@@ -161,6 +166,28 @@ impl NetPeer {
     /// reachability can pass alone.
     pub fn spawn_dhcp(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
         Self::spawn_with(qemu_sock, peer_sock, run_dhcp_peer)
+    }
+
+    /// Bind `peer_sock` and start the **DHCPv6-server** peer thread (the
+    /// DHCP D4c vertical): the peer answers the guest's DHCPv6 `Solicit`
+    /// with an `Advertise` and its `Request` with a `Reply`, leasing it
+    /// [`wire::DHCP6_LEASED_V6`] (RFC 8415 stateful IA_NA). Because DHCPv6
+    /// grants no on-link prefix, the peer also acts as the on-link router:
+    /// it periodically emits a Router Advertisement naming
+    /// [`wire::DHCP6_PREFIX`] on-link (non-autonomous, so the guest forms no
+    /// SLAAC address) and itself a default router, so the guest can reach
+    /// it. It then — from its own [`wire::DHCP6_SERVER_V6`] in that `/64` —
+    /// pings the guest at the *leased* address. The guest holds that address
+    /// only if its DHCPv6 client completed the exchange (its `network.conf`
+    /// selects `ipv6.method dhcp` and disables IPv4, so it forms no global
+    /// address itself), so a broken lease leaves the campaign unanswered and
+    /// the run fails loud. Its verdict ([`Self::stop_and_join`]) is `Ok`
+    /// only once it has sent both the Advertise and the Reply **and**
+    /// received the guest's echo reply at the leased address, so neither the
+    /// addressing nor the reachability can pass alone. The IPv6 analogue of
+    /// [`Self::spawn_dhcp`].
+    pub fn spawn_dhcp6(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_dhcp6_peer)
     }
 
     /// Bind **both** wires' peer sockets and start the **bond-failover**
@@ -914,6 +941,638 @@ mod dhcp_server {
             // A truncated / empty frame is not a DHCP request.
             assert!(parse_frame(&[]).is_none());
             assert!(parse_message(&[0u8; 4]).is_none());
+        }
+    }
+}
+
+/// Interval between the DHCPv6 peer's unsolicited Router Advertisements.
+/// DHCPv6 grants no on-link prefix, so the guest learns the leased address's
+/// `/64` is on-link (and the peer is a default router) only from an RA; the
+/// peer re-emits one on this cadence so the guest picks it up regardless of
+/// when its link-local came up. Paced, never a spin (the receive timeout
+/// bounds the loop).
+const RA_INTERVAL: Duration = Duration::from_millis(300);
+
+/// The DHCPv6-server peer loop (the DHCP D4c vertical): lease the guest an
+/// IPv6 address (RFC 8415 stateful IA_NA), advertise the on-link prefix so
+/// it can be reached, then prove reachability at that leased address.
+///
+/// The peer takes its own [`wire::DHCP6_SERVER_V6`] in the shared on-link
+/// `/64` and runs a minimal DHCPv6 server — it answers the guest's `Solicit`
+/// with an `Advertise` of [`wire::DHCP6_LEASED_V6`] and its `Request` (or a
+/// Renew/Rebind) with a `Reply`, both to the client's link-local. Because
+/// DHCPv6 conveys no on-link prefix (RFC 8415 leaves that to Router
+/// Advertisements), the peer also acts as the on-link router: it periodically
+/// emits an RA naming [`wire::DHCP6_PREFIX`] on-link and non-autonomous (so
+/// the guest forms no SLAAC address, only the DHCPv6 one) and itself a default
+/// router, giving the guest the route it needs to answer. Once the lease is
+/// granted the peer pings the guest at the leased address until the reply
+/// arrives. The guest's planted `network.conf` selects `ipv6.method dhcp` and
+/// disables IPv4, so it forms *no* global address itself: the leased address
+/// is its only reachable one, and a broken lease leaves the campaign
+/// unanswered (fail loud). DHCPv6 request frames are handled by the server and
+/// never fed to the peer's own `lib/net` engine (which holds no DHCPv6 server);
+/// every other frame (the guest's neighbour queries, its echo replies) is fed
+/// to the engine, which resolves and answers it. Its verdict is `Ok` only once
+/// it advertised, replied, **and** saw the guest's echo reply at the leased
+/// address, so neither the addressing nor the reachability can pass alone.
+fn run_dhcp6_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let facts = DeviceFacts {
+        mac: MacAddress(wire::PEER_MAC),
+        mtu: 1500,
+        link: LinkState::Up,
+        offloads: NetOffloads::empty(),
+        rx_queues: 1,
+    };
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let mut stack = Stack::new(
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
+        now(start),
+    )
+    .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
+    // The peer's own global address in the shared /64: this both gives the
+    // campaign an on-link global source for the leased address and installs
+    // the connected route the peer resolves the guest over.
+    stack
+        .add_ipv6_static(wire::DHCP6_SERVER_V6, wire::DHCP6_PREFIX_LEN, now(start))
+        .map_err(|e| format!("netstack peer: server address assignment: {e:?}"))?;
+
+    let server_duid = Duid::ll_ethernet(MacAddress(wire::PEER_MAC));
+    let peer_ll = wire::link_local(wire::PEER_IID);
+    let leased = IpAddr::V6(wire::DHCP6_LEASED_V6);
+    let mut advertised = false;
+    let mut replied = false;
+    let mut reply = false;
+    let mut sequence: u16 = 0;
+    let mut next_send = Instant::now();
+    let mut next_ra = Instant::now();
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        // Timer-due engine output (the peer's own DAD probes, NS retransmits
+        // for the leased address the campaign is resolving).
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
+        note_reply(&out, leased, &mut reply);
+        send_frames(socket, qemu_sock, &out.frames);
+
+        // Re-emit the on-link/default-router RA on its cadence, so the guest
+        // learns the route back regardless of when its link-local came up.
+        if Instant::now() >= next_ra {
+            next_ra = Instant::now() + RA_INTERVAL;
+            let frame = dhcp6_server::build_router_advertisement(peer_ll);
+            let _ = socket.send_to(&frame, qemu_sock);
+        }
+
+        // Once the guest has been leased its address, ping it there until the
+        // reply arrives. Refusals (the server's NS for the guest still
+        // pending) are transient; the cadence retries them.
+        if replied && !reply && Instant::now() >= next_send {
+            next_send = Instant::now() + RESEND_INTERVAL;
+            sequence = sequence.wrapping_add(1);
+            campaign_ping(&mut stack, socket, qemu_sock, leased, sequence, now(start));
+        }
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                if let Some(request) = dhcp6_server::parse_frame(&buf[..len]) {
+                    // A DHCPv6 client request: answer it, and never feed it to
+                    // the engine (which has no DHCPv6 server).
+                    let reply_kind = match request.message_type {
+                        Dhcp6MessageType::Solicit => Some(Dhcp6MessageType::Advertise),
+                        Dhcp6MessageType::Request
+                        | Dhcp6MessageType::Renew
+                        | Dhcp6MessageType::Rebind => Some(Dhcp6MessageType::Reply),
+                        _ => None,
+                    };
+                    if let Some(kind) = reply_kind {
+                        let frame =
+                            dhcp6_server::build_frame(kind, &request, &server_duid, peer_ll);
+                        let _ = socket.send_to(&frame, qemu_sock);
+                        match kind {
+                            Dhcp6MessageType::Advertise => advertised = true,
+                            Dhcp6MessageType::Reply => replied = true,
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Not DHCPv6: the guest's neighbour queries, or its echo
+                    // reply — let the engine resolve/answer it.
+                    let mut out = StackOutput::default();
+                    stack.on_frame(&buf[..len], now(start), &mut out);
+                    note_reply(&out, leased, &mut reply);
+                    send_frames(socket, qemu_sock, &out.frames);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+    }
+
+    if advertised && replied && reply {
+        Ok(())
+    } else {
+        Err(format!(
+            "netstack peer: DHCPv6 exchange incomplete (advertised={advertised}, replied={replied}, reply={reply})"
+        ))
+    }
+}
+
+/// A minimal DHCPv6 **server** codec for the harness peer, plus the
+/// on-link Router Advertisement the guest needs to reach its lease.
+///
+/// TAIRiX ships no DHCPv6 server — only the RFC 8415 *client*
+/// ([`tairix_net::dhcpv6`]) — so the server side of the exchange lives here,
+/// in the test peer that is its only consumer. It encodes and decodes the
+/// *same* wire layout the production client codec exposes (that module's
+/// public option registry, message types, and DUID), never a second copy of
+/// the format; the round-trip unit tests additionally parse every reply this
+/// module builds back through the real [`tairix_net::dhcpv6::Dhcp6Reply::parse`],
+/// so the two sides cannot drift. The Router Advertisement is likewise the
+/// router half of ND (the engine is a host and refuses to emit one), built
+/// here and checked against the production [`tairix_net::nd::NdMessage::parse`].
+mod dhcp6_server {
+    use super::{
+        dhcpv6, eth, ipv6_multicast_mac, udp, wire, Dhcp6MessageType, Duid, Ipv6Addr, Ipv6Header,
+        MacAddress, Pseudo, ALL_NODES, ETHERNET_HEADER_LEN, ETHERTYPE_IPV6, ND_HOP_LIMIT,
+        NEXT_HEADER_ICMPV6, PROTOCOL_UDP, TYPE_ROUTER_ADVERTISEMENT,
+    };
+
+    /// The parts of a client Solicit / Request the server acts on.
+    pub struct Request {
+        /// The DHCPv6 message type.
+        pub message_type: Dhcp6MessageType,
+        /// The 24-bit transaction id to echo in the reply.
+        pub xid: u32,
+        /// The client Identifier DUID to echo in the reply.
+        pub client_duid: Duid,
+        /// The IAID from the client's IA_NA, echoed in the reply's IA_NA.
+        pub iaid: u32,
+        /// The client's source address (its link-local) — the reply's
+        /// destination.
+        pub client_addr: Ipv6Addr,
+        /// The client's source MAC — the reply frame's link-layer
+        /// destination (the reply is unicast back to the requester).
+        pub client_mac: MacAddress,
+    }
+
+    /// Decode the DHCPv6 client message an Ethernet frame carries, or
+    /// `None` if the frame is not a client→server DHCPv6 request (fail
+    /// closed). Every layer is parsed with the production `lib/net`
+    /// decoders, so the server accepts exactly the frames a real client
+    /// emits.
+    pub fn parse_frame(frame: &[u8]) -> Option<Request> {
+        let eth_frame = eth::EthernetFrame::parse(frame)?;
+        if eth_frame.ethertype != ETHERTYPE_IPV6 {
+            return None;
+        }
+        let (ip, payload) = Ipv6Header::parse(eth_frame.payload)?;
+        if ip.next_header != PROTOCOL_UDP {
+            return None;
+        }
+        let datagram = udp::UdpDatagram::parse(
+            Pseudo::V6 {
+                source: ip.source,
+                destination: ip.destination,
+            },
+            payload,
+        )?;
+        if datagram.destination_port != dhcpv6::SERVER_PORT
+            || datagram.source_port != dhcpv6::CLIENT_PORT
+        {
+            return None;
+        }
+        parse_message(datagram.payload, ip.source, eth_frame.source)
+    }
+
+    /// Decode a client→server DHCPv6 message (the UDP payload). Total,
+    /// bounded, and fail-closed: a truncated header, an unknown message
+    /// type, or a missing Client Identifier / IA_NA yields `None`.
+    pub fn parse_message(
+        payload: &[u8],
+        client_addr: Ipv6Addr,
+        client_mac: MacAddress,
+    ) -> Option<Request> {
+        let header = payload.get(..dhcpv6::MESSAGE_HEADER_LEN)?;
+        let message_type = Dhcp6MessageType::from_code(header[0])?;
+        let xid = u32::from_be_bytes([0, header[1], header[2], header[3]]);
+        let mut client_duid = None;
+        let mut iaid = None;
+        walk_options(
+            &payload[dhcpv6::MESSAGE_HEADER_LEN..],
+            |code, data| match code {
+                // First of each option wins; a duplicate is ignored (bounded,
+                // deterministic), mirroring the production reply decoder.
+                dhcpv6::opt::CLIENT_ID if client_duid.is_none() => {
+                    client_duid = Duid::from_bytes(data);
+                }
+                // The IA_NA body opens with the 4-octet IAID; a truncated option
+                // leaves `iaid` unset (fail closed) and a later IA_NA may still
+                // supply it.
+                dhcpv6::opt::IA_NA if iaid.is_none() => {
+                    iaid = data
+                        .get(0..4)
+                        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                }
+                _ => {}
+            },
+        );
+        Some(Request {
+            message_type,
+            xid,
+            client_duid: client_duid?,
+            iaid: iaid?,
+            client_addr,
+            client_mac,
+        })
+    }
+
+    /// A total, bounded walk over a DHCPv6 option region (mirrors the
+    /// production decoder), invoking `visit` for each well-formed
+    /// `(code, data)` TLV and stopping at the first truncation.
+    fn walk_options(region: &[u8], mut visit: impl FnMut(u16, &[u8])) {
+        let mut i = 0usize;
+        while i + 4 <= region.len() {
+            let code = u16::from_be_bytes([region[i], region[i + 1]]);
+            let len = usize::from(u16::from_be_bytes([region[i + 2], region[i + 3]]));
+            i += 4;
+            let Some(data) = region.get(i..i + len) else {
+                break;
+            };
+            visit(code, data);
+            i += len;
+        }
+    }
+
+    /// Append one DHCPv6 option `(2-octet code, 2-octet length, body)` to
+    /// `out`, the wire shape RFC 8415 §21.1 defines.
+    fn put_option(out: &mut Vec<u8>, code: u16, data: &[u8]) {
+        out.extend_from_slice(&code.to_be_bytes());
+        out.extend_from_slice(
+            &u16::try_from(data.len())
+                .expect("a DHCPv6 option body never exceeds 65535 bytes")
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(data);
+    }
+
+    /// Encode the server→client DHCPv6 message body (the 4-octet header plus
+    /// the options) for an `Advertise` or `Reply`: the echoed Client
+    /// Identifier, the server's Server Identifier, and an `IA_NA` (with the
+    /// echoed IAID and T1/T2 left to the client) carrying one IA Address —
+    /// [`wire::DHCP6_LEASED_V6`] with the [`wire::DHCP6_LEASE_SECS`] preferred
+    /// and valid lifetimes. A success status is implicit (no Status Code
+    /// option), which the client reads as [`dhcpv6::status::SUCCESS`].
+    fn write_message(kind: Dhcp6MessageType, request: &Request, server_duid: &Duid) -> Vec<u8> {
+        let xid = request.xid & 0x00FF_FFFF;
+        let xid_bytes = xid.to_be_bytes();
+        let mut msg = vec![kind.code(), xid_bytes[1], xid_bytes[2], xid_bytes[3]];
+        put_option(
+            &mut msg,
+            dhcpv6::opt::CLIENT_ID,
+            request.client_duid.as_slice(),
+        );
+        put_option(&mut msg, dhcpv6::opt::SERVER_ID, server_duid.as_slice());
+
+        // The IA Address option (RFC 8415 §21.6): the leased address and its
+        // preferred/valid lifetimes, no encapsulated status (success).
+        let mut ia_addr = Vec::with_capacity(24);
+        ia_addr.extend_from_slice(&wire::DHCP6_LEASED_V6.octets());
+        ia_addr.extend_from_slice(&wire::DHCP6_LEASE_SECS.to_be_bytes());
+        ia_addr.extend_from_slice(&wire::DHCP6_LEASE_SECS.to_be_bytes());
+
+        // The IA_NA option (RFC 8415 §21.4): the echoed IAID, T1/T2 left to
+        // the client (zero), then the encapsulated IA Address.
+        let mut ia_na = Vec::with_capacity(12 + 4 + ia_addr.len());
+        ia_na.extend_from_slice(&request.iaid.to_be_bytes());
+        ia_na.extend_from_slice(&0u32.to_be_bytes()); // T1
+        ia_na.extend_from_slice(&0u32.to_be_bytes()); // T2
+        put_option(&mut ia_na, dhcpv6::opt::IA_ADDR, &ia_addr);
+        put_option(&mut msg, dhcpv6::opt::IA_NA, &ia_na);
+        msg
+    }
+
+    /// Build the full Ethernet frame carrying a server→client `Advertise` or
+    /// `Reply`, unicast back to the requesting client. Frames the DHCPv6
+    /// message as UDP(547→546)/IPv6(`peer_ll`→`client`)/Ethernet with the
+    /// production `lib/net` writers, so the guest's client decodes it exactly
+    /// as it would a real server's.
+    pub fn build_frame(
+        kind: Dhcp6MessageType,
+        request: &Request,
+        server_duid: &Duid,
+        peer_ll: Ipv6Addr,
+    ) -> Vec<u8> {
+        let message = write_message(kind, request, server_duid);
+
+        let source = peer_ll;
+        let destination = request.client_addr;
+        let mut datagram = vec![0u8; udp::UDP_HEADER_LEN + message.len()];
+        udp::write(
+            Pseudo::V6 {
+                source,
+                destination,
+            },
+            dhcpv6::SERVER_PORT,
+            dhcpv6::CLIENT_PORT,
+            &message,
+            &mut datagram,
+        )
+        .expect("the UDP buffer is sized for the DHCPv6 message");
+
+        let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
+        header.hop_limit = ND_HOP_LIMIT;
+        let mut packet = vec![0u8; super::IPV6_HEADER_LEN + datagram.len()];
+        header
+            .write(&mut packet, datagram.len())
+            .expect("the IPv6 header fits the sized packet");
+        packet[super::IPV6_HEADER_LEN..].copy_from_slice(&datagram);
+
+        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+        eth::write_header(
+            &mut frame,
+            request.client_mac,
+            MacAddress(wire::PEER_MAC),
+            ETHERTYPE_IPV6,
+        )
+        .expect("the Ethernet header fits the sized frame");
+        frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+        frame
+    }
+
+    /// Build the full Ethernet frame carrying the peer's Router
+    /// Advertisement, multicast to all nodes.
+    ///
+    /// TAIRiX's `lib/net` engine is a host and deliberately refuses to emit a
+    /// Router Advertisement, so — as with the DHCPv6 server messages — the
+    /// router half of the exchange is built here. The RA names
+    /// [`wire::DHCP6_PREFIX`] on-link and **non**-autonomous (the guest
+    /// installs the on-link route but forms no SLAAC address, so its only
+    /// global address stays the DHCPv6 lease) and sets a non-zero router
+    /// lifetime so the peer is adopted as a default router. It is sourced
+    /// from `peer_ll` at hop limit 255, exactly as RFC 4861 requires.
+    pub fn build_router_advertisement(peer_ll: Ipv6Addr) -> Vec<u8> {
+        // The ICMPv6 message: 4-octet header (type, code, checksum), then the
+        // RA fixed fields and options.
+        let mut msg = vec![TYPE_ROUTER_ADVERTISEMENT, 0, 0, 0];
+        // RA fixed fields (RFC 4861 §4.2): cur_hop_limit, flags (M set —
+        // addresses come from DHCPv6), router lifetime, reachable/retrans (0).
+        msg.push(64); // cur_hop_limit
+        msg.push(0x80); // Managed-address flag
+        msg.extend_from_slice(&RA_ROUTER_LIFETIME_SECS.to_be_bytes());
+        msg.extend_from_slice(&0u32.to_be_bytes()); // reachable time
+        msg.extend_from_slice(&0u32.to_be_bytes()); // retrans timer
+
+        // Source link-layer address option (type 1, length 1 unit = 8 bytes).
+        msg.push(1);
+        msg.push(1);
+        msg.extend_from_slice(&wire::PEER_MAC);
+
+        // Prefix Information option (type 3, length 4 units = 32 bytes): the
+        // shared /64, on-link (L) but not autonomous (A cleared).
+        msg.push(3);
+        msg.push(4);
+        msg.push(wire::DHCP6_PREFIX_LEN);
+        msg.push(0x80); // L (on-link) set, A (autonomous) clear
+        msg.extend_from_slice(&RA_PREFIX_LIFETIME_SECS.to_be_bytes()); // valid
+        msg.extend_from_slice(&RA_PREFIX_LIFETIME_SECS.to_be_bytes()); // preferred
+        msg.extend_from_slice(&0u32.to_be_bytes()); // reserved2
+        msg.extend_from_slice(&wire::DHCP6_PREFIX.octets());
+
+        // Seal the ICMPv6 checksum over the IPv6 pseudo-header + message.
+        let destination = ALL_NODES;
+        let upper_len = u16::try_from(msg.len()).expect("the RA message fits a u16 length");
+        let mut sum = Pseudo::V6 {
+            source: peer_ll,
+            destination,
+        }
+        .seed(NEXT_HEADER_ICMPV6, upper_len);
+        sum.push(&msg);
+        let checksum = sum.finish();
+        msg[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+        let mut header = Ipv6Header::new(peer_ll, destination, NEXT_HEADER_ICMPV6);
+        header.hop_limit = ND_HOP_LIMIT;
+        let mut packet = vec![0u8; super::IPV6_HEADER_LEN + msg.len()];
+        header
+            .write(&mut packet, msg.len())
+            .expect("the IPv6 header fits the sized packet");
+        packet[super::IPV6_HEADER_LEN..].copy_from_slice(&msg);
+
+        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+        eth::write_header(
+            &mut frame,
+            ipv6_multicast_mac(&destination),
+            MacAddress(wire::PEER_MAC),
+            ETHERTYPE_IPV6,
+        )
+        .expect("the Ethernet header fits the sized frame");
+        frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+        frame
+    }
+
+    /// The router lifetime the RA advertises (seconds): non-zero so the guest
+    /// adopts the peer as a default router. Ample for the short vertical.
+    const RA_ROUTER_LIFETIME_SECS: u16 = 1800;
+
+    /// The advertised prefix's valid and preferred lifetimes (seconds).
+    const RA_PREFIX_LIFETIME_SECS: u32 = 86_400;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tairix_net::dhcpv6::{Dhcp6Reply, MessageSpec};
+        use tairix_net::nd::{NdMessage, ND_HOP_LIMIT};
+
+        /// Build a client message the way the production client would (via
+        /// [`tairix_net::dhcpv6::write_message`]), so the server codec is
+        /// tested against real client output, never a hand-rolled fixture.
+        fn client_message(message_type: Dhcp6MessageType, xid: u32, iaid: u32) -> Vec<u8> {
+            let spec = MessageSpec {
+                message_type,
+                transaction_id: xid,
+                client_duid: Duid::ll_ethernet(MacAddress(wire::GUEST_MAC)),
+                server_id: None,
+                iaid,
+                elapsed_centis: 0,
+                ia_addr: None,
+                request_options: true,
+            };
+            let mut buf = [0u8; dhcpv6::MAX_MESSAGE_LEN];
+            let len = dhcpv6::write_message(&spec, &mut buf).expect("client message encodes");
+            buf[..len].to_vec()
+        }
+
+        #[test]
+        fn parses_a_real_client_solicit() {
+            let guest_ll = wire::link_local([0, 0, 0, 0, 0, 0, 0, 0x15]);
+            let message = client_message(Dhcp6MessageType::Solicit, 0x0012_3456, 0x0A0B_0C0D);
+            let request = parse_message(&message, guest_ll, MacAddress(wire::GUEST_MAC))
+                .expect("a Solicit is a valid request");
+            assert_eq!(request.message_type, Dhcp6MessageType::Solicit);
+            assert_eq!(request.xid, 0x0012_3456);
+            assert_eq!(request.iaid, 0x0A0B_0C0D);
+            assert_eq!(
+                request.client_duid,
+                Duid::ll_ethernet(MacAddress(wire::GUEST_MAC))
+            );
+        }
+
+        /// The Advertise and Reply the server builds round-trip through the
+        /// real client parser under the client's own xid + DUID, carrying the
+        /// leased address, its lifetimes, the echoed IAID, and a success
+        /// status — so the server and the production client agree on every
+        /// field.
+        #[test]
+        fn advertise_and_reply_round_trip_through_the_client_parser() {
+            let guest_duid = Duid::ll_ethernet(MacAddress(wire::GUEST_MAC));
+            let server_duid = Duid::ll_ethernet(MacAddress(wire::PEER_MAC));
+            let guest_ll = wire::link_local([0, 0, 0, 0, 0, 0, 0, 0x15]);
+            let xid = 0x00AB_CDEF;
+            let iaid = 0x1122_3344;
+            let request = Request {
+                message_type: Dhcp6MessageType::Solicit,
+                xid,
+                client_duid: guest_duid,
+                iaid,
+                client_addr: guest_ll,
+                client_mac: MacAddress(wire::GUEST_MAC),
+            };
+            let peer_ll = wire::link_local(wire::PEER_IID);
+            for kind in [Dhcp6MessageType::Advertise, Dhcp6MessageType::Reply] {
+                let frame = build_frame(kind, &request, &server_duid, peer_ll);
+                // Peel the frame back to the DHCPv6 payload with the same
+                // production decoders the guest uses.
+                let eth_frame = eth::EthernetFrame::parse(&frame).expect("valid Ethernet frame");
+                assert_eq!(eth_frame.destination, MacAddress(wire::GUEST_MAC));
+                let (ip, payload) =
+                    Ipv6Header::parse(eth_frame.payload).expect("valid IPv6 packet");
+                assert_eq!(ip.destination, guest_ll);
+                assert_eq!(ip.source, peer_ll);
+                let datagram = udp::UdpDatagram::parse(
+                    Pseudo::V6 {
+                        source: ip.source,
+                        destination: ip.destination,
+                    },
+                    payload,
+                )
+                .expect("valid UDP datagram");
+                assert_eq!(datagram.source_port, dhcpv6::SERVER_PORT);
+                assert_eq!(datagram.destination_port, dhcpv6::CLIENT_PORT);
+                let reply = Dhcp6Reply::parse(datagram.payload, xid, &guest_duid)
+                    .expect("a valid server reply");
+                assert_eq!(reply.message_type, kind);
+                assert_eq!(reply.server_id, Some(server_duid));
+                assert_eq!(reply.iaid, Some(iaid));
+                assert_eq!(reply.top_status, dhcpv6::status::SUCCESS);
+                assert_eq!(reply.ia_status, dhcpv6::status::SUCCESS);
+                let leased = reply
+                    .addresses
+                    .first_usable()
+                    .expect("the reply leases a usable address");
+                assert_eq!(leased.addr, wire::DHCP6_LEASED_V6);
+                assert_eq!(leased.preferred_lifetime, wire::DHCP6_LEASE_SECS);
+                assert_eq!(leased.valid_lifetime, wire::DHCP6_LEASE_SECS);
+            }
+        }
+
+        /// The server never mistakes its own reply for a client request: a
+        /// built Advertise frame (server→client, UDP 547→546) is not parsed
+        /// as a request, so the peer cannot answer itself in a loop.
+        #[test]
+        fn a_server_reply_is_not_parsed_as_a_client_request() {
+            let request = Request {
+                message_type: Dhcp6MessageType::Solicit,
+                xid: 1,
+                client_duid: Duid::ll_ethernet(MacAddress(wire::GUEST_MAC)),
+                iaid: 1,
+                client_addr: wire::link_local([0, 0, 0, 0, 0, 0, 0, 0x15]),
+                client_mac: MacAddress(wire::GUEST_MAC),
+            };
+            let peer_ll = wire::link_local(wire::PEER_IID);
+            let frame = build_frame(
+                Dhcp6MessageType::Advertise,
+                &request,
+                &Duid::ll_ethernet(MacAddress(wire::PEER_MAC)),
+                peer_ll,
+            );
+            assert!(parse_frame(&frame).is_none());
+        }
+
+        /// A frame that is not DHCPv6 (wrong UDP port / too short) is rejected
+        /// (fail closed), so the server only answers genuine client requests.
+        #[test]
+        fn a_non_dhcp6_frame_is_rejected() {
+            assert!(parse_frame(&[]).is_none());
+            assert!(parse_message(
+                &[0u8; 2],
+                wire::link_local(wire::PEER_IID),
+                MacAddress(wire::GUEST_MAC)
+            )
+            .is_none());
+        }
+
+        /// The Router Advertisement the peer builds round-trips through the
+        /// production [`NdMessage::parse`]: hop limit 255, one on-link,
+        /// non-autonomous prefix naming the shared `/64`, a non-zero router
+        /// lifetime, and the peer's link-layer address — exactly the facts the
+        /// guest's stack installs an on-link route and default router from.
+        #[test]
+        fn router_advertisement_round_trips_through_nd_parse() {
+            let peer_ll = wire::link_local(wire::PEER_IID);
+            let frame = build_router_advertisement(peer_ll);
+            let eth_frame = eth::EthernetFrame::parse(&frame).expect("valid Ethernet frame");
+            assert_eq!(eth_frame.destination, ipv6_multicast_mac(&ALL_NODES));
+            let (ip, payload) = Ipv6Header::parse(eth_frame.payload).expect("valid IPv6 packet");
+            assert_eq!(ip.source, peer_ll);
+            assert_eq!(ip.destination, ALL_NODES);
+            assert_eq!(ip.hop_limit, ND_HOP_LIMIT);
+            assert_eq!(ip.next_header, NEXT_HEADER_ICMPV6);
+            // The ICMPv6 message: type/code/checksum header, then the RA body
+            // `NdMessage::parse` reads. The checksum must verify (folding the
+            // pseudo-header + message to zero).
+            let mut verify = Pseudo::V6 {
+                source: ip.source,
+                destination: ip.destination,
+            }
+            .seed(NEXT_HEADER_ICMPV6, u16::try_from(payload.len()).unwrap());
+            verify.push(payload);
+            assert_eq!(verify.finish(), 0, "the RA ICMPv6 checksum verifies");
+            let message =
+                NdMessage::parse(payload[0], payload[1], ip.hop_limit, true, &payload[4..])
+                    .expect("a valid Router Advertisement");
+            match message {
+                NdMessage::RouterAdvertisement {
+                    managed,
+                    router_lifetime,
+                    source_ll,
+                    prefixes,
+                    ..
+                } => {
+                    assert!(managed, "the RA sets the Managed flag (DHCPv6)");
+                    assert_eq!(router_lifetime, RA_ROUTER_LIFETIME_SECS);
+                    assert_eq!(source_ll, Some(MacAddress(wire::PEER_MAC)));
+                    let prefix = prefixes.first().expect("the RA carries a prefix");
+                    assert_eq!(prefix.prefix, wire::DHCP6_PREFIX);
+                    assert_eq!(prefix.prefix_len, wire::DHCP6_PREFIX_LEN);
+                    assert!(prefix.on_link, "the prefix is on-link");
+                    assert!(
+                        !prefix.autonomous,
+                        "the prefix is not autonomous (no SLAAC)"
+                    );
+                }
+                other => panic!("expected a Router Advertisement, got {other:?}"),
+            }
         }
     }
 }

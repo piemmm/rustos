@@ -454,6 +454,56 @@ pub fn dhcp_net_store_files(
         .map_err(Clone::clone)
 }
 
+/// The composed store files the DHCPv6 vertical's disk plants: the shared
+/// [`app_store_files`] set **plus** the planted
+/// `/System/Settings/Network/network.conf` (the per-arch
+/// `tairix_test_netstack_wire::DHCP6_NETWORK_CONF_*`) that binds the NIC by
+/// `match.node`, selects `ipv6.method dhcp`, and disables IPv4 (DHCP D4c).
+/// The IPv6 sibling of [`dhcp_net_store_files`] — same shape, a different
+/// config — so the two verticals cannot share a config by accident; memoised
+/// per arch. Like [`dhcp_net_store_files`], the `match.node` bus location
+/// differs per bus, so the config planted names the NIC location this
+/// target's kernel actually resolves.
+///
+/// # Errors
+///
+/// As [`app_store_files`].
+pub fn dhcp6_net_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            let mut files = app_store_files(ctx, arch, profile)?.to_vec();
+            // The DHCPv6 vertical binds the NIC by its stable bus location
+            // (`<iface>.match.node`), which differs per bus: the aarch64/riscv64
+            // virtio-mmio slot base vs. the x86_64 virtio-PCI config-window BAR
+            // base. Plant the config whose `match.node` names the NIC location
+            // this target's kernel actually resolves, so the same fixture cannot
+            // silently mis-bind on the wrong arch.
+            let conf = match arch {
+                PieArch::X86_64 => tairix_test_netstack_wire::DHCP6_NETWORK_CONF_X86_64,
+                PieArch::Riscv64 => tairix_test_netstack_wire::DHCP6_NETWORK_CONF_RISCV64,
+                PieArch::Aarch64 => tairix_test_netstack_wire::DHCP6_NETWORK_CONF_AARCH64,
+            };
+            files.push(AppStoreFile {
+                components: vec![
+                    b"Settings".to_vec(),
+                    b"Network".to_vec(),
+                    b"network.conf".to_vec(),
+                ],
+                bytes: conf.as_bytes().to_vec(),
+            });
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// Run `body` over the borrowed `(components, bytes)` view of `files` —
 /// the planting shape `tools/mkimage` and the QEMU fixture accept. The
 /// borrow gymnastics live here once instead of at every call site.

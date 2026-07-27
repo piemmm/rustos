@@ -3184,6 +3184,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-dhcp6-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
+name = "tairix-test-netstack-dhcp6-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
+name = "tairix-test-netstack-dhcp6-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
 name = "tairix-test-netstack-ecn-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

@@ -162,8 +162,20 @@ The open items, in priority order:
   `lib/net` module adds compiled bytes that shift the same load/spawn
   timing; DHCPv6 is inert at runtime here (D4a is engine-only, no netstack
   wiring) so it cannot reach the pty path — and was likewise recorded for
-  the PTY owner. Any small `lib/net` binary-size change is expected to keep
-  tripping this gate until the structural fix lands.
+  the PTY owner. The subsequent DHCPv6 **D4c** change (`plans/DHCP.md` — the
+  live two-process QEMU verticals; production `lib/net`/`netstack` untouched,
+  all new code test-only in `netpeer`/`netstack_wire`/the three `dhcp6` test
+  crates) reproduces the identical 300 s PTY-Ctrl-C-stage freeze for the
+  identical reason and is likewise recorded for the PTY owner. That increment
+  *did* land part of the §7/§2.17 structural recommendation — it bound the QEMU
+  matrix concurrency harder (`qemu_host_budget_for`: one-quarter → one-**sixth**
+  of logical CPUs) so co-scheduled single-CPU TCG guests get more host headroom;
+  that rescued the new heavier `netstack-dhcp6-qemu-aarch64` full-boot vertical
+  (which had briefly tripped a load-dependent 240 s timeout, now a 360 s budget
+  sized to DHCPv6's larger work), but this desktop/PTY vertical still freezes on
+  the D10-class readiness gate above, which only the marker re-gate will fix.
+  Any small binary-size change is expected to keep tripping this gate until that
+  structural fix lands.
 
 - **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
   bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a

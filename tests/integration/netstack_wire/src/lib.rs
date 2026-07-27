@@ -531,6 +531,114 @@ wan.ipv4.method dhcp
 wan.ipv6.method disabled
 ";
 
+// --- DHCPv6 vertical (DHCP D4c) ----------------------------------------
+//
+// The DHCPv6 vertical proves RFC 8415 stateful IPv6 address configuration
+// end to end. Like the DHCPv4 vertical it binds the NIC to the `wan` alias
+// by its stable bus location (`match.node`) but selects `ipv6.method dhcp`
+// and disables IPv4, so the interface's only global address is the one the
+// host DHCPv6 server peer leases it. DHCPv6 grants no on-link prefix (RFC
+// 8415 leaves on-link reachability to Router Advertisements), so the peer
+// also acts as the on-link router: it advertises the leased address's `/64`
+// as on-link (non-autonomous, so no SLAAC address forms) and names itself a
+// default router, giving the guest the route it needs to answer. The peer
+// then pings the guest at the *leased* address; the guest holds it only if
+// its DHCPv6 client completed the exchange, so a broken lease leaves the
+// campaign unanswered (fail loud).
+
+/// The admin alias the DHCPv6 vertical's `network.conf` binds the NIC to.
+pub const DHCP6_IFACE_ALIAS: &str = "wan";
+
+/// Prefix length of the DHCPv6 vertical's shared IPv6 subnet: a single
+/// on-link `/64` both the leased address and the server address sit in, so
+/// the peer reaches the guest directly once the guest learns the prefix is
+/// on-link from the peer's Router Advertisement.
+pub const DHCP6_PREFIX_LEN: u8 = 64;
+
+/// The network address of the DHCPv6 vertical's shared on-link `/64`
+/// (`fd6a::/64`, a Unique Local prefix distinct from the static vertical's
+/// `fd00::/64` so the two verticals can never share a subnet by accident).
+/// It is the prefix the peer advertises on-link in its Router Advertisement.
+pub const DHCP6_PREFIX: Ipv6Addr = Ipv6Addr::new(0xFD6A, 0, 0, 0, 0, 0, 0, 0);
+
+/// The host DHCPv6 server peer's own global address in [`DHCP6_PREFIX`]. The
+/// peer assigns itself this address, advertises the prefix as on-link, and
+/// pings the guest from it once the lease is granted.
+pub const DHCP6_SERVER_V6: Ipv6Addr = Ipv6Addr::new(0xFD6A, 0, 0, 0, 0, 0, 0, 0x0001);
+
+/// The IPv6 address the host DHCPv6 server leases the guest (an IA_NA
+/// address in [`DHCP6_PREFIX`]). The peer pings this address once the lease
+/// is granted; the guest holds it only if its DHCPv6 client completed the
+/// four-message exchange, so a broken lease leaves the campaign unanswered.
+pub const DHCP6_LEASED_V6: Ipv6Addr = Ipv6Addr::new(0xFD6A, 0, 0, 0, 0, 0, 0, 0x0050);
+
+/// The IA_NA address lifetime in seconds the server grants (preferred and
+/// valid alike). Long enough that the short vertical never approaches
+/// renewal (T1 = lease/2), so the run exercises acquisition and steady-state
+/// reachability, not renewal timing.
+pub const DHCP6_LEASE_SECS: u32 = 3600;
+
+/// The `/System/Settings/Network/network.conf` the aarch64 DHCPv6 vertical
+/// plants on its read-only `/System` volume.
+///
+/// It binds the alias [`DHCP6_IFACE_ALIAS`] to the NIC at bus location
+/// [`GUEST_NIC_NODE_LOCATION_AARCH64`] (`0x0a003c00`, as the other verticals
+/// do), disables IPv4, and selects `ipv6.method dhcp` so the interface's
+/// only global address is a DHCPv6 lease. The literals here are cross-checked
+/// against those constants by the `dhcp6_network_conf_matches_the_wire_constants`
+/// unit test, so the config and the location the guest binds by can never
+/// drift (one source of truth).
+pub const DHCP6_NETWORK_CONF_AARCH64: &str = "\
+# TAIRiX DHCPv6 QEMU vertical network.conf.
+# Binds the `wan` alias to the NIC by its stable bus location and selects
+# DHCPv6 addressing (IPv4 disabled), so the interface's only global address is
+# the lease the host DHCPv6 server grants — proving RFC 8415 end to end.
+wan.kind ethernet
+wan.match.node 0xa003c00
+wan.ipv4.method disabled
+wan.ipv6.method dhcp
+";
+
+/// The `/System/Settings/Network/network.conf` the **x86_64** DHCPv6
+/// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
+/// of [`DHCP6_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on x86_64 is the NIC's lowest config-window BAR base
+/// [`GUEST_NIC_NODE_LOCATION_X86_64`] (`0xfe004000`) rather than the aarch64
+/// mmio slot. Cross-checked by `x86_64_dhcp6_network_conf_matches_the_wire_constants`.
+pub const DHCP6_NETWORK_CONF_X86_64: &str = "\
+# TAIRiX DHCPv6 QEMU vertical network.conf (x86_64).
+# Binds the `wan` alias to the virtio-net-pci NIC by its stable bus location
+# (the lowest config-window BAR base) and selects DHCPv6 addressing (IPv4
+# disabled), so the interface's only global address is the lease the host
+# DHCPv6 server grants — proving RFC 8415 end to end over PCI.
+wan.kind ethernet
+wan.match.node 0xfe004000
+wan.ipv4.method disabled
+wan.ipv6.method dhcp
+";
+
+/// The `/System/Settings/Network/network.conf` the **riscv64** DHCPv6
+/// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
+/// of [`DHCP6_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on the QEMU riscv64 `virt` board is the NIC's virtio-mmio transport
+/// slot base [`GUEST_NIC_NODE_LOCATION_RISCV64`] (`0x10007000`). Cross-checked
+/// by `riscv64_dhcp6_network_conf_matches_the_wire_constants`.
+pub const DHCP6_NETWORK_CONF_RISCV64: &str = "\
+# TAIRiX DHCPv6 QEMU vertical network.conf (riscv64).
+# Binds the `wan` alias to the virtio-net-device NIC by its stable bus location
+# (its virtio-mmio transport slot base) and selects DHCPv6 addressing (IPv4
+# disabled), so the interface's only global address is the lease the host
+# DHCPv6 server grants — proving RFC 8415 end to end over mmio.
+wan.kind ethernet
+wan.match.node 0x10007000
+wan.ipv4.method disabled
+wan.ipv6.method dhcp
+";
+
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
@@ -893,6 +1001,100 @@ mod tests {
             GUEST_NIC_NODE_LOCATION_RISCV64, GUEST_NIC_NODE_LOCATION_X86_64,
             "the riscv64 and x86_64 NIC locations are distinct"
         );
+    }
+
+    /// The planted DHCPv6 `network.conf` and the wire location/alias/subnet
+    /// constants are one source of truth: parse the config through the real
+    /// `lib/netconfig` engine and confirm it binds the `wan` alias to the
+    /// QEMU-virt NIC bus location, selects DHCPv6, and disables IPv4 — so the
+    /// interface's only global address is a DHCPv6 lease. A drift between the
+    /// config text and a constant fails here, long before a QEMU boot.
+    #[test]
+    fn dhcp6_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP6_NETWORK_CONF_AARCH64)
+            .expect("the planted DHCPv6 network.conf parses and validates");
+        let iface = config
+            .interface(DHCP6_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_AARCH64),
+            "the config's match.node names the QEMU-virt NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Dhcp);
+        assert_eq!(iface.ipv4_address, None, "IPv4 is disabled");
+        assert_eq!(
+            iface.ipv6_address, None,
+            "a DHCPv6 interface carries no static IPv6 address"
+        );
+        // The leased address and the server address share the advertised
+        // on-link /64, and the prefix is that /64's network address.
+        assert_eq!(DHCP6_PREFIX_LEN, 64);
+        assert_eq!(DHCP6_SERVER_V6.octets()[..8], DHCP6_LEASED_V6.octets()[..8]);
+        assert_eq!(DHCP6_PREFIX.octets()[..8], DHCP6_LEASED_V6.octets()[..8]);
+        assert_eq!(
+            DHCP6_PREFIX.octets()[8..],
+            [0u8; 8],
+            "the prefix constant is the /64 network address (host bits zero)"
+        );
+        assert_ne!(DHCP6_SERVER_V6, DHCP6_LEASED_V6);
+        // The DHCPv6 subnet is distinct from the static vertical's fd00::/64,
+        // so the two verticals can never share a subnet by accident.
+        assert_ne!(DHCP6_PREFIX.octets()[..8], GUEST_STATIC_V6.octets()[..8]);
+    }
+
+    /// The x86_64 DHCPv6 `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the x86_64 NIC's
+    /// config-window BAR base while carrying the identical alias and DHCPv6 /
+    /// disabled-IPv4 methods. Drift fails here, long before a QEMU boot.
+    #[test]
+    fn x86_64_dhcp6_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP6_NETWORK_CONF_X86_64)
+            .expect("the planted x86_64 DHCPv6 network.conf parses and validates");
+        let iface = config
+            .interface(DHCP6_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_X86_64),
+            "the config's match.node names the x86_64 virtio-PCI NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Dhcp);
+        assert_eq!(iface.ipv4_address, None, "IPv4 is disabled");
+        assert_eq!(iface.ipv6_address, None, "DHCPv6 carries no static IPv6");
+    }
+
+    /// The riscv64 DHCPv6 `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the riscv64 NIC's
+    /// virtio-mmio transport slot base while carrying the identical alias and
+    /// DHCPv6 / disabled-IPv4 methods. Drift fails here, long before a QEMU
+    /// boot.
+    #[test]
+    fn riscv64_dhcp6_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP6_NETWORK_CONF_RISCV64)
+            .expect("the planted riscv64 DHCPv6 network.conf parses and validates");
+        let iface = config
+            .interface(DHCP6_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_RISCV64),
+            "the config's match.node names the riscv64 virtio-mmio NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Disabled);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Dhcp);
+        assert_eq!(iface.ipv4_address, None, "IPv4 is disabled");
+        assert_eq!(iface.ipv6_address, None, "DHCPv6 carries no static IPv6");
     }
 
     /// The planted ECN `system.conf` and the setting it means are one source

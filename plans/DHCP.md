@@ -229,10 +229,49 @@ selects DHCPv6 as an IPv6 method. Key facts for the next worker:
   rejection, netconfig parse/validate, devmgr mapping, netstack service
   enable/disable. D4b is done and gate-green.
 
-#### D4c — the live two-process QEMU vertical, all three Tier-1 arches `[ ]`
-`tests/integration/netstack_dhcp6_qemu_{aarch64,x86_64,riscv64}`, the IPv6
-peer of the D3 verticals, with a `NetPeerMode::V6Dhcp6Echo` server peer.
-Not started.
+#### D4c — the live two-process QEMU vertical, all three Tier-1 arches `[x]`
+`tests/integration/netstack_dhcp6_qemu_{aarch64,x86_64,riscv64}` each boot the
+production pipeline for their arch against the `dhcp6-net-root` disk (the
+signed virtio-net driver bundle plus a planted `network.conf` binding the NIC
+by `match.node`, selecting `ipv6.method dhcp`, and disabling IPv4) with the
+harness-side DHCPv6-server peer (`NetPeerMode::V6Dhcp6Echo`) on the QEMU
+`dgram` netdev. `devmgr` autoloads the driver and delivers the config;
+`netstack` drives its DHCPv6 client, which Solicits, accepts the peer's
+Advertise of `wire::DHCP6_LEASED_V6`, Requests it, and applies the Reply — the
+interface's only global address (it forms none itself). PASS keys on three log
+witnesses (`devmgr` `NETSTACK_BOUND`, `netstack` `DHCP6_LEASE_ACQUIRED`,
+`netstack` `INBOUND_ECHO_SERVED`) plus the peer's own verdict (it advertised,
+replied, and got the echo reply at the leased address), so a broken lease
+cannot pass on an address the guest formed itself.
+
+Key facts for the next worker:
+- The three arches differ **only** in the bus the NIC lives on (aarch64/
+  riscv64 virtio-MMIO, x86_64 virtio-PCI) and hence the `match.node` bus
+  location the planted config names — the per-arch `DHCP6_NETWORK_CONF_*`,
+  planted by `dhcp6_net_store_files`. The driver set, DHCPv6-server peer, disk
+  builder, and the three witnesses are the one shared definition every arch
+  reuses (§2.2).
+- **Reachability is the one genuinely new thing over D3.** DHCPv6 conveys no
+  on-link prefix (RFC 8415 leaves that to RAs), so the leased `/128` is not
+  reachable by itself. The host peer therefore *also acts as the on-link
+  router*: it periodically emits a hand-built Router Advertisement naming the
+  shared `/64` on-link and **non-autonomous** (the guest installs the on-link
+  route + default router but forms no SLAAC address, keeping the DHCPv6 lease
+  its only global address), and gives itself `DHCP6_SERVER_V6` in that `/64`.
+  Only then can the peer↔guest echo round-trip complete.
+- The host DHCPv6 **server** and the RA are test-only (the plan ships no
+  server and the `lib/net` engine is a host that refuses to emit an RA), so
+  both live beside their one consumer in `tools/xtask`'s `netpeer::dhcp6_server`,
+  encoding/decoding the *same* wire layout the client codec exposes publicly
+  (`tairix_net::dhcpv6`'s `opt`/`status`/`Duid`/`MessageType`, and
+  `tairix_net::nd` for the RA). Round-trip unit tests parse every server reply
+  back through the real `Dhcp6Reply::parse` and the RA back through
+  `NdMessage::parse`, so the two sides cannot drift.
+- The shared wire constants (`DHCP6_SERVER_V6`, `DHCP6_LEASED_V6`,
+  `DHCP6_PREFIX`, `DHCP6_PREFIX_LEN`, `DHCP6_LEASE_SECS`,
+  `DHCP6_NETWORK_CONF_{AARCH64,X86_64,RISCV64}`) live in
+  `tests/integration/netstack_wire`, cross-checked against the real
+  `lib/netconfig` parser.
 
 ## 4. Tests, docs, and gate (binding)
 

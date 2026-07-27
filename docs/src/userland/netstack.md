@@ -337,3 +337,23 @@ peer's own offered/acked/echo verdict — so a broken lease cannot pass on an
 address the guest formed itself (it forms none). The three arches differ only
 in the NIC's bus (aarch64/riscv64 virtio-mmio, x86_64 virtio-PCI) and hence the
 `match.node` the planted config names.
+
+The `netstack_dhcp6_qemu_{aarch64,riscv64,x86_64}` verticals prove the RFC 8415
+stateful DHCPv6 path live on all three Tier-1 targets (`plans/DHCP.md` D4c) —
+the IPv6 peer of the DHCPv4 verticals. The planted `network.conf` binds the NIC
+to the `wan` alias by `match.node` but selects `ipv6.method dhcp` and disables
+IPv4, so the interface forms **no** global address of its own: the stack must
+drive its DHCPv6 client to lease one (Solicit → Advertise → Request → Reply)
+from the harness-side DHCPv6-server peer (`NetPeerMode::V6Dhcp6Echo`). Because
+DHCPv6 conveys no on-link prefix, that peer *also* acts as the on-link router —
+it emits a Router Advertisement naming the shared `/64` on-link and
+non-autonomous (the guest installs the on-link route and default router but
+forms no SLAAC address, keeping the lease its only global address) — and only
+then pings the guest at the leased address. Witnessed by `devmgr`'s
+`NETSTACK_BOUND`, the stack's `DHCP6_LEASE_ACQUIRED`, and a post-lease
+`INBOUND_ECHO_SERVED`, plus the peer's own advertised/replied/echo verdict, so
+a broken lease cannot pass on an address the guest formed itself. The
+test-only DHCPv6 server and RA live beside their one consumer in `tools/xtask`'s
+`netpeer` and encode the same wire layout the production
+`tairix_net::dhcpv6` / `tairix_net::nd` decoders parse, round-trip-checked so
+the two sides cannot drift.

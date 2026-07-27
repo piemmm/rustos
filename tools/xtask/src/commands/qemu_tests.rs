@@ -12,7 +12,7 @@
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
 //! runner charges one-vCPU guests for the vCPU plus emulator/I/O work against
-//! one quarter of the host's effective logical capacity. SMP TCG guests reserve
+//! one sixth of the host's effective logical capacity. SMP TCG guests reserve
 //! that complete budget and therefore run alone: their synchronising vCPUs must
 //! make simultaneous host progress and cannot safely share a wall-clock budget
 //! with other CPU-bound emulators. See [`run_once`].
@@ -196,6 +196,19 @@ enum NetPeerMode {
     /// one, so a broken lease leaves the campaign unanswered and fails the
     /// run loud. The IPv4 analogue of [`Self::V6StaticEcho`].
     V4DhcpEcho,
+    /// A **DHCPv6-server** peer (the DHCP D4c vertical): the peer takes its
+    /// own [`tairix_test_netstack_wire::DHCP6_SERVER_V6`] in the shared
+    /// on-link `/64`, answers the guest's DHCPv6 `Solicit`/`Request` with an
+    /// `Advertise`/`Reply` leasing [`tairix_test_netstack_wire::DHCP6_LEASED_V6`]
+    /// (RFC 8415 stateful IA_NA), and — because DHCPv6 conveys no on-link
+    /// prefix — also emits Router Advertisements naming the shared prefix
+    /// on-link (non-autonomous) so the guest can reach it, then campaigns over
+    /// the *leased* address. The guest's planted `network.conf` selects
+    /// `ipv6.method dhcp` and disables IPv4, so it forms no global address
+    /// itself — the leased address is its only reachable one, so a broken
+    /// lease leaves the campaign unanswered and fails the run loud. The IPv6
+    /// analogue of [`Self::V4DhcpEcho`].
+    V6Dhcp6Echo,
     /// A **bond-failover** peer (the N9b-3-2-β-2-ii-b-bond vertical): the
     /// guest binds *two* virtio-net NICs as the members of one active-backup
     /// bond, so the runner attaches **two** `dgram` netdevs (`net0` pinned to
@@ -334,6 +347,18 @@ enum FsDisk {
     /// console dialogue. The console stays the UART text console (no
     /// display/input driver).
     DhcpNetRootDisk,
+    /// The net-only-driver encrypted-root layout carrying the **standard**
+    /// signed application store **plus** a planted
+    /// `/System/Settings/Network/network.conf`
+    /// ([`tairix_test_netstack_wire::DHCP6_NETWORK_CONF_AARCH64`]) that binds
+    /// the NIC by `match.node`, selects `ipv6.method dhcp`, and disables IPv4
+    /// — the DHCPv6 vertical's backing (`plans/DHCP.md` D4c). `devmgr`
+    /// autoloads the NIC driver into its own process and reads the planted
+    /// config; `netstack` drives its DHCPv6 client, which leases the interface
+    /// its only global address from the host DHCPv6-server peer — all
+    /// pre-unlock, no console dialogue. The console stays the UART text
+    /// console (no display/input driver).
+    Dhcp6NetRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -4559,6 +4584,88 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/DHCP.md` D4c: the live DHCPv6 vertical, one per Tier-1 arch — the
+    // IPv6 peer of the D3 DHCPv4 verticals. Each boots the *production*
+    // pipeline for its arch with the `dhcp6-net-root` disk: the net-only
+    // signed driver set **plus** a planted
+    // `/System/Settings/Network/network.conf` that binds the NIC to the `wan`
+    // alias by its stable bus location (`<iface>.match.node`), selects
+    // `ipv6.method dhcp`, and disables IPv4 (`FsDisk::Dhcp6NetRootDisk`), with
+    // a `virtio-net` device attached and the harness-side DHCPv6-server peer
+    // on its `dgram` netdev (`NetPeerMode::V6Dhcp6Echo`). Everything runs
+    // **before** any root unlock (headless, no serial script), like the D3
+    // siblings. `devmgr` autoloads the virtio-net driver into its own process
+    // (it publishes a `netchan` node), reads the planted config, and binds the
+    // NIC to `wan`; `netstack` drives the DHCPv6 client, which Solicits,
+    // accepts the peer's Advertise, Requests it, and applies the Reply —
+    // leasing the interface its only global address. Because DHCPv6 grants no
+    // on-link prefix, the peer also emits Router Advertisements naming the
+    // shared `/64` on-link (non-autonomous) so the guest can route back; the
+    // peer then pings the guest at the leased address and the guest answers.
+    // PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP6_LEASE_ACQUIRED` (the lease was granted and applied), and
+    // `netstack`'s `INBOUND_ECHO_SERVED` — the last gating exit so the guest
+    // stays alive until a frame addressed to its *leased* address has been
+    // answered; the peer's own verdict (it advertised, replied, and got the
+    // echo reply at the leased address) is required too, so a broken lease
+    // cannot pass on an address the guest formed itself (it forms none). A
+    // 240-second budget covers boot + autoload + service bring-up + the bind +
+    // the DHCPv6 exchange + the paced echo campaign on QEMU TCG; single CPU
+    // like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp6-qemu-aarch64",
+        binary: "tairix-test-netstack-dhcp6-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(360),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6Dhcp6Echo,
+        ramfb: false,
+        fs_disk: FsDisk::Dhcp6NetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/DHCP.md` D4c: the x86_64 DHCPv6 vertical — the virtio-**PCI**
+    // sibling of the aarch64 one, binding the NIC by its config-window BAR
+    // base. See the aarch64 entry above for the full choreography.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp6-qemu-x86-64",
+        binary: "tairix-test-netstack-dhcp6-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(360),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6Dhcp6Echo,
+        ramfb: false,
+        fs_disk: FsDisk::Dhcp6NetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/DHCP.md` D4c: the riscv64 DHCPv6 vertical — the virtio-**MMIO**
+    // sibling of the aarch64 one on the QEMU riscv64 `virt` board. See the
+    // aarch64 entry above for the full choreography.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp6-qemu-riscv64",
+        binary: "tairix-test-netstack-dhcp6-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(360),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6Dhcp6Echo,
+        ramfb: false,
+        fs_disk: FsDisk::Dhcp6NetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the riscv64 bond-failover
     // live-config vertical — the virtio-**MMIO** analogue of
     // `tairix-test-netstack-bond-qemu-aarch64` on the QEMU riscv64 `virt`
@@ -5743,14 +5850,17 @@ pub(crate) fn qemu_job_weight(cpus: u32, host_budget: usize) -> usize {
 ///
 /// TCG vCPU threads are sustained compute workloads, so SMT siblings do not
 /// provide independent wall-clock capacity and QEMU's emulator/I/O threads
-/// still compete with cargo and the host. Use at most one quarter of reported
-/// logical capacity; the weighted runner still lets a heavier guest run alone
-/// when its weight exceeds this budget. The additional headroom keeps the
-/// four-vCPU stress and migration guests' solo-reachable deadlines reachable
-/// when the complete matrix is active.
+/// still compete with cargo and the host. A single full-boot guest is heavier
+/// than its lone vCPU thread (translation, the RCU/main-loop and I/O threads),
+/// so a full-boot aarch64 guest observably starved under the one-quarter cap
+/// when the whole matrix was active. Use at most one **sixth** of reported
+/// logical capacity, leaving each co-scheduled guest more host headroom; the
+/// weighted runner still lets a heavier guest run alone when its weight
+/// exceeds this budget, so the four-vCPU stress and migration guests keep
+/// their solo-reachable deadlines.
 #[must_use]
 pub(crate) fn qemu_host_budget_for(logical_cpus: usize) -> usize {
-    logical_cpus.max(1).div_ceil(4)
+    logical_cpus.max(1).div_ceil(6)
 }
 
 /// QEMU matrix capacity for this host.
@@ -5771,7 +5881,7 @@ pub(crate) fn qemu_host_budget() -> usize {
 /// no host resource except CPU. They are therefore run through the shared
 /// weighted-concurrency runner ([`super::parallel`]): one-vCPU guests reserve
 /// one emulator/I/O unit beyond their vCPU, while an SMP guest reserves the
-/// complete budget and runs alone. The budget is one quarter of the host's
+/// complete budget and runs alone. The budget is one sixth of the host's
 /// effective logical-CPU count, so QEMU's non-vCPU work, cargo, and the host
 /// retain capacity without treating SMT siblings as full independent TCG
 /// cores.
@@ -5919,6 +6029,9 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the DHCPv4 vertical plants: the shared
     /// set plus the planted DHCP `network.conf` (no test-only bundle).
     dhcp_net_apps: &'static [AppStoreFile],
+    /// The application/service bundles the DHCPv6 vertical plants: the shared
+    /// set plus the planted DHCPv6 `network.conf` (no test-only bundle).
+    dhcpv6_net_apps: &'static [AppStoreFile],
 }
 
 /// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
@@ -5979,7 +6092,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::PingRootDisk
         | FsDisk::StaticNetRootDisk
         | FsDisk::BondNetRootDisk
-        | FsDisk::DhcpNetRootDisk => {
+        | FsDisk::DhcpNetRootDisk
+        | FsDisk::Dhcp6NetRootDisk => {
             super::image_drivers::net_driver_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
@@ -5996,6 +6110,10 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
+    let dhcpv6_net_apps = match t.fs_disk {
+        FsDisk::Dhcp6NetRootDisk => super::image_apps::dhcp6_net_store_files(ctx, arch, profile)?,
+        _ => EMPTY,
+    };
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
@@ -6007,6 +6125,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         static_net_apps,
         bond_net_apps,
         dhcp_net_apps,
+        dhcpv6_net_apps,
     })
 }
 
@@ -7156,7 +7275,8 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         | FsDisk::PingRootDisk
         | FsDisk::StaticNetRootDisk
         | FsDisk::BondNetRootDisk
-        | FsDisk::DhcpNetRootDisk => Some(net_root_fs_disk_image(t, stores)?),
+        | FsDisk::DhcpNetRootDisk
+        | FsDisk::Dhcp6NetRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
 }
 
@@ -7177,6 +7297,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
         static_net_apps,
         bond_net_apps,
         dhcp_net_apps,
+        dhcpv6_net_apps,
         ..
     } = stores;
     let (drivers, app_set, extension, label) = match t.fs_disk {
@@ -7217,6 +7338,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
             dhcp_net_apps,
             "dhcp-net-root.img",
             "dhcp-net-root",
+        ),
+        FsDisk::Dhcp6NetRootDisk => (
+            net_only_drivers,
+            dhcpv6_net_apps,
+            "dhcp6-net-root.img",
+            "dhcp6-net-root",
         ),
         _ => unreachable!("net_root_fs_disk_image is called only for net-root disks"),
     };
@@ -7281,6 +7408,7 @@ fn spawn_net_peer(
         }
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
         NetPeerMode::V4DhcpEcho => super::netpeer::NetPeer::spawn_dhcp(qemu_sock, peer_sock),
+        NetPeerMode::V6Dhcp6Echo => super::netpeer::NetPeer::spawn_dhcp6(qemu_sock, peer_sock),
         // The bond peer needs two wires (two socket pairs), so it is attached
         // directly in `finish_run`, never through this single-wire spawner.
         NetPeerMode::Bond => {
@@ -7728,10 +7856,10 @@ mod tests {
         assert_eq!(qemu_host_budget_for(0), 1);
         assert_eq!(qemu_host_budget_for(1), 1);
         assert_eq!(qemu_host_budget_for(2), 1);
-        assert_eq!(qemu_host_budget_for(4), 1);
-        assert_eq!(qemu_host_budget_for(8), 2);
-        assert_eq!(qemu_host_budget_for(9), 3);
-        assert_eq!(qemu_host_budget_for(64), 16);
+        assert_eq!(qemu_host_budget_for(6), 1);
+        assert_eq!(qemu_host_budget_for(12), 2);
+        assert_eq!(qemu_host_budget_for(13), 3);
+        assert_eq!(qemu_host_budget_for(64), 11);
     }
 
     /// The smallest wall-clock budget any enrolment may carry.
