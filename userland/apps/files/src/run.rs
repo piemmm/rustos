@@ -76,7 +76,7 @@ mod program {
         build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
         delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
         draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
-        owner_field_at, permission_cell_at, progress_cancel_at, render, OwnerField,
+        owner_field_at, permission_cell_at, progress_cancel_at, render, scroll_pointer, OwnerField,
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
@@ -94,7 +94,7 @@ mod program {
     use tairix_controls::Menu;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
-    use tairix_input::{Key, Modifiers, NamedKey};
+    use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
@@ -979,6 +979,23 @@ mod program {
             // primary press is routed by `apply_primary_press`. Every other
             // pointer action is a no-op.
             WindowEvent::Pointer { x, y, action, .. } => {
+                // The right-edge scrollbar owns its gutter: give it first
+                // refusal on a primary press/drag/release so a click on the
+                // bar (an end button, the track, or the thumb) scrolls the
+                // listing instead of selecting an item beneath it. It consumes
+                // only events that belong to it; anything else falls through to
+                // the content below.
+                let point = Point::new(
+                    i32::try_from(*x).unwrap_or(i32::MAX),
+                    i32::try_from(*y).unwrap_or(i32::MAX),
+                );
+                if let Some(event) = scroll_input_event(*action, point) {
+                    if let Some(repaint) =
+                        scroll_pointer(browser, font, theme, viewport, point, &event)
+                    {
+                        return (repaint, false);
+                    }
+                }
                 // A secondary-button (right-click) press opens the context
                 // menu on the item under the pointer; its commands are the
                 // user's own verbs, so it needs the overlay/launcher state.
@@ -2252,6 +2269,28 @@ mod program {
             i32::try_from(x).unwrap_or(i32::MAX),
             i32::try_from(y).unwrap_or(i32::MAX),
         ))
+    }
+
+    /// Translate a wire [`PointerAction`] into the shared [`InputEvent`] the
+    /// interactive scrollbar consumes, or `None` for an action the scrollbar
+    /// never handles (a secondary/middle button — those belong to the content).
+    /// A press/release carries no position, so `point` is threaded through the
+    /// move variant and the router re-positions the bar before applying it.
+    fn scroll_input_event(action: PointerAction, point: Point) -> Option<InputEvent> {
+        match action {
+            PointerAction::Moved => Some(InputEvent::PointerMoved { to: point }),
+            PointerAction::Pressed(PointerButtonCode::Primary) => {
+                Some(InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                })
+            }
+            PointerAction::Released(PointerButtonCode::Primary) => {
+                Some(InputEvent::PointerReleased {
+                    button: PointerButton::Primary,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Route one primary-button press at window-local `point` in navigation

@@ -938,6 +938,60 @@ mod program {
                         );
                     }
                 }
+                // A client-area pointer motion the window manager consumed no
+                // furniture for: forward it to the owning app as a window-local
+                // move so its in-content controls track hover and thumb drags.
+                // A negative coordinate cannot occur (the router clamps into the
+                // client); refuse rather than wrap if it ever did.
+                InputResponse::ClientPointerMoved { window, local } => {
+                    if let (Some(id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Moved,
+                            },
+                        );
+                    }
+                }
+                // A primary release that ended a client pointer grab: forward it
+                // so an in-content click or drag completes (a tab or combo
+                // selection, a released scrollbar thumb).
+                InputResponse::ClientPointerReleased { window, local } => {
+                    if let (Some(id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Released(
+                                    tairix_abi::input::PointerButtonCode::Primary,
+                                ),
+                            },
+                        );
+                    }
+                }
                 // Window-manager-local outcomes the session does not forward
                 // app-ward: a scrollbar press, a move-grab, and the per-frame
                 // resize ticks (the app is told once, at `ResizeEnded`, above).

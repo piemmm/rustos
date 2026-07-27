@@ -1866,6 +1866,24 @@ impl AddressSpaceRegistry {
         entry.pty_slave().map(PtySlaveEnd::pty)
     }
 
+    /// Resolve `task`'s open descriptor `fd` to the pseudo-terminal it is a
+    /// **master** end of, **borrowed in place**, or `None` when `fd` is not a
+    /// pty-master descriptor of `task` (`plans/PTY.md`).
+    ///
+    /// The resolution `pty_set_size` uses: the graphical terminal holds the
+    /// master end, so setting the pty's character-cell geometry on a window
+    /// resize is a master-side operation. Borrows in place — never a clone —
+    /// so the lookup never touches the pty's live-end counts, and `task` is
+    /// the kernel-trusted caller id, so one process cannot reach another's
+    /// pty by guessing a number.
+    ///
+    /// [`Pty`]: crate::pty::Pty
+    #[must_use]
+    pub fn pty_master(&self, task: TaskId, fd: u32) -> Option<&crate::pty::Pty> {
+        let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
+        entry.pty_master().map(PtyMasterEnd::pty)
+    }
+
     /// Release `task`'s open descriptor `fd`, returning `true` if it was
     /// open.
     ///

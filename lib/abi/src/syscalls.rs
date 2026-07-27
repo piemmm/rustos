@@ -2409,6 +2409,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::PTY_SET_SIZE,
+        name: "pty_set_size",
+        arg_count: 3,
+        args: [
+            // The pty **master** descriptor whose geometry to set; not a
+            // master of the caller fails closed with `NotFound`.
+            AbiType::U32,
+            // The new row count; non-zero and `u16`-bounded, else
+            // `OutOfRange` before any state is touched.
+            AbiType::U32,
+            // The new column count; same bounds.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Unprivileged, exactly like `pty_create`: it updates the geometry
+        // of the caller's own pty and reaches nothing else. Not audited: a
+        // window-size change is a security-neutral property of the caller's
+        // own terminal, re-issued on every drag-resize.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

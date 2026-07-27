@@ -281,9 +281,38 @@ recovery = 40, `FM9_TYPING_DONE` = 41); `qkeycode_for` gains `\u{3}` →
   rejected). `qkeycode_for` gained `\u{3}`→`ctrl-c`; the FM9/FM10/FM11
   delivery gates re-based off the new command.
 
+## PTY6 — the terminal window is resizable (`pty_set_size`)
+
+`done`. The graphical terminal is a resizable window: dragging its frame (or a
+maximize/restore) reshapes the character grid and updates the shell's window
+size, so `elsh`'s prompt sizing and any full-screen program track the real
+window. What it guarantees:
+
+- **The `pty_set_size` syscall (number 98).** The tty `TIOCSWINSZ` analogue:
+  the **master**-end holder sets the pty's `TerminalSize` after create, so the
+  shared geometry both ends observe (`terminal_size`) tracks the window.
+  Unprivileged and unaudited like `pty_create` (it reaches only the caller's
+  own pty); a zero/oversized dimension fails closed `OutOfRange`, a descriptor
+  that is not a pty master of the caller `NotFound`. Wired end to end:
+  `lib/abi` spec + `SyscallNumber::PTY_SET_SIZE`, the kernel handler over the
+  new `AddressSpaceRegistry::pty_master` resolver, `lib/rt::pty_set_size`, the
+  `tairix_sys_pty_set_size` C stub + regenerated `include/` header, and
+  proptest/fuzz stubs. Kernel host test proves a master-side resize updates the
+  slave's `terminal_size` and fails closed on the bad cases.
+- **The grid reflows.** `Grid::resize` / `Terminal::resize` reshape the screen
+  to a new `cols`×`rows`, preserving the top-left overlap of the contents and
+  clamping the cursor, scroll region, saved cursor, and any alternate screen —
+  the tty `TIOCSWINSZ` behaviour. Host-tested.
+- **The terminal app opts in.** `userland/apps/terminal` creates its window
+  `resizable: true` and, on each `WindowEvent::Resized`, re-maps its frame
+  region at the new client size (fail-closed, keeping the current surface on a
+  refused re-map), derives the new grid from the shared monospace advance /
+  line height, `Terminal::resize`s the screen, `pty_set_size`s the pty, and
+  repaints. Files was already resizable; the terminal now joins it.
+
 ## Status
 
-`done` — **PTY0–PTY5 landed**: env inheritance, the shared `lib/tty` line
+`done` — **PTY0–PTY6 landed**: env inheritance, the shared `lib/tty` line
 discipline, the kernel `Pty` object + shared `ForegroundOwnership`, the
 `pty_create` ABI with its backing wiring / stream+wait-set dispatch /
 pty-slave `stream_input_mode`/`terminal_size`/`console_foreground`

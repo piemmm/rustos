@@ -32,6 +32,8 @@ use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
+use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use tairix_controls::ScrollBar;
 
 /// The most directories the back and forward navigation stacks each retain.
 ///
@@ -58,6 +60,13 @@ pub struct Browser<S: DirectorySource> {
     sort_mode: SortMode,
     view_mode: ViewMode,
     scroll_offset: u64,
+    /// The interactive vertical scrollbar's transient state (thumb-drag
+    /// capture, held end/track button, hover, focus) for the right-edge
+    /// gutter. The authoritative offset stays [`scroll_offset`](Self::scroll_offset);
+    /// the bar's model is re-synced from the live geometry each time it is
+    /// painted or fed a pointer event ([`render`](mod@crate::render)), so this
+    /// holds interaction state only, never a second copy of the offset.
+    scrollbar: ScrollBar,
     /// Directories visited before the current one, oldest first; the last is
     /// where [`go_back`](Self::go_back) returns to.
     back: VecDeque<Vec<String>>,
@@ -111,6 +120,10 @@ impl<S: DirectorySource> Browser<S> {
             sort_mode,
             view_mode: ViewMode::default(),
             scroll_offset: 0,
+            scrollbar: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1),
+            ),
             back: VecDeque::new(),
             forward: VecDeque::new(),
         })
@@ -142,6 +155,23 @@ impl<S: DirectorySource> Browser<S> {
     #[must_use]
     pub const fn scroll_offset(&self) -> u64 {
         self.scroll_offset
+    }
+
+    /// The interactive scrollbar's transient state, for the renderer to draw
+    /// its live hover/drag treatment.
+    #[must_use]
+    pub const fn scrollbar(&self) -> &ScrollBar {
+        &self.scrollbar
+    }
+
+    /// Mutable access to the interactive scrollbar, for the pointer-routing
+    /// helper ([`render::scroll_pointer`](crate::render::scroll_pointer)) to
+    /// feed it events. The offset it requests is applied through
+    /// [`set_scroll_offset`](Self::set_scroll_offset), so the browser stays the
+    /// one owner of the authoritative offset.
+    #[must_use]
+    pub fn scrollbar_mut(&mut self) -> &mut ScrollBar {
+        &mut self.scrollbar
     }
 
     /// Set the desired first-visible line. The value is stored verbatim and

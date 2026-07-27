@@ -51,7 +51,9 @@ mod program {
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
+    use tairix_font::BitmapFont;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+    use tairix_terminal::grid::MAX_DIMENSION;
     use tairix_terminal::render::render;
     use tairix_terminal::{
         shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, COLS,
@@ -101,6 +103,78 @@ mod program {
 
     /// The wait-set token of the shell-child member.
     const CHILD_TOKEN: u64 = 3;
+
+    /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
+    /// tightly-packed four-bytes-per-pixel row. One definition so the initial
+    /// window and every resize build the surface identically (§2.2).
+    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
+        DisplayMode {
+            width_px,
+            height_px,
+            stride_bytes: width_px.saturating_mul(4),
+            format: DisplayFormat::Rgba8888,
+        }
+    }
+
+    /// The character grid `(cols, rows)` that fits a `width_px` × `height_px`
+    /// client, from the shared monospace face's advance and line height (the
+    /// same metrics [`WIN_WIDTH`]/[`WIN_HEIGHT`] and the renderer derive the
+    /// grid from, §2.2). Floored so the grid never exceeds the surface (no
+    /// clipped cell), at least `1`×`1`, and capped at [`MAX_DIMENSION`] so a
+    /// huge window never asks for an unbounded grid (fail closed).
+    fn grid_dims(width_px: u32, height_px: u32) -> (u16, u16) {
+        let advance = BitmapFont::inconsolata().advance().max(1);
+        let line_height = BitmapFont::inconsolata().line_height().max(1);
+        let cols = (width_px / advance).clamp(1, u32::from(MAX_DIMENSION)) as u16;
+        let rows = (height_px / line_height).clamp(1, u32::from(MAX_DIMENSION)) as u16;
+        (cols, rows)
+    }
+
+    /// Re-map the window `window` onto a fresh frame region shaped as
+    /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
+    /// success — the old region (`old_base` / `old_len`) already unmapped — or
+    /// `None` when the region could not be allocated or the session refused the
+    /// re-map, in which case the old region is left intact and still mapped so
+    /// the current surface stays valid (never a crash or a blank window, §5.4).
+    ///
+    /// The fresh region is created and granted first and adopted only once
+    /// [`WindowClient::resize`] succeeds; the old mapping is released only
+    /// after adoption, and a refused resize releases the freshly-allocated
+    /// region so nothing leaks.
+    fn resize_frames(
+        client: &mut WindowClient<RtWindowTransport>,
+        window: u64,
+        old_base: usize,
+        old_len: usize,
+        new_mode: &DisplayMode,
+    ) -> Option<(usize, usize)> {
+        let new_len = (new_mode.stride_bytes as usize)
+            .checked_mul(new_mode.height_px as usize)?
+            .checked_mul(FRAME_COUNT as usize)?;
+        let mut region_id: u64 = 0;
+        let new_base = tairix_rt::shm_create(new_len, &mut region_id);
+        if new_base < 0 {
+            return None;
+        }
+        let Ok(new_base) = usize::try_from(new_base) else {
+            return None;
+        };
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        if grant < 1 {
+            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        let accepted = client
+            .resize(window, grant as u64, FRAME_COUNT, new_mode)
+            .is_ok();
+        if !accepted {
+            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
+            return None;
+        }
+        let _ = tairix_rt::shm_unmap(old_base as u64, old_len);
+        Some((new_base, new_len))
+    }
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -238,13 +312,10 @@ mod program {
         };
 
         // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // window mode, created here and granted to the session.
-        let mode = DisplayMode {
-            width_px: WIN_WIDTH,
-            height_px: WIN_HEIGHT,
-            stride_bytes: WIN_WIDTH * 4,
-            format: DisplayFormat::Rgba8888,
-        };
+        // window mode, created here and granted to the session. The terminal
+        // is resizable, so the mode, the mapped region, and the frame slice
+        // are rebound on every window resize (below).
+        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
@@ -269,7 +340,9 @@ mod program {
         // The session maps the same frames read-only for its blit, and
         // the protocol serialises access: this app is parked in its
         // present call while the session reads.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        let mut frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        let mut region_base = base;
+        let mut region_len = total;
 
         // --- The event mailbox and the wait-set the program parks on.
         // The mailbox id is unique by construction (the shared
@@ -318,7 +391,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Terminal",
-            false,
+            true,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
@@ -342,6 +415,59 @@ mod program {
                 EVENT_TOKEN => {
                     match drain_events(&mut terminal, event_endpoint, server) {
                         EventOutcome::Continue => {}
+                        EventOutcome::Resized {
+                            width_px,
+                            height_px,
+                        } => {
+                            // Re-map the frame region at the new client size,
+                            // reshape the grid, and tell the shell (via the pty
+                            // window size) so its prompt and any full-screen
+                            // program re-lay-out. A refused or unallocatable
+                            // re-map keeps the current window rather than
+                            // failing the app (fail closed): the grid and pty
+                            // size are only updated once the new region is
+                            // adopted, so the screen never claims a geometry
+                            // the surface cannot hold.
+                            let new_mode = mode_for(width_px, height_px);
+                            if let Some((new_base, new_len)) = resize_frames(
+                                &mut client,
+                                window,
+                                region_base,
+                                region_len,
+                                &new_mode,
+                            ) {
+                                region_base = new_base;
+                                region_len = new_len;
+                                mode = new_mode;
+                                // SAFETY: `resize_frames` mapped `region_len`
+                                // zeroed R/W bytes at `region_base` and the
+                                // session adopted them; the old region is now
+                                // unmapped. Same invariants as the initial
+                                // mapping — nothing else aliases it, and the
+                                // present below serialises access.
+                                frames = unsafe {
+                                    core::slice::from_raw_parts_mut(
+                                        region_base as *mut u8,
+                                        region_len,
+                                    )
+                                };
+                                let (cols, rows) = grid_dims(width_px, height_px);
+                                let _ = terminal.resize(cols, rows);
+                                let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
+                                if present_frame(
+                                    &terminal,
+                                    theme,
+                                    &mut client,
+                                    window,
+                                    frames,
+                                    &mode,
+                                )
+                                .is_err()
+                                {
+                                    return fail(EXIT_CHANNEL_LOST, "present refused");
+                                }
+                            }
+                        }
                         EventOutcome::End => {
                             // The desktop asked, or the shell's stdin is
                             // gone: close the window and end cleanly. The
@@ -416,6 +542,17 @@ mod program {
     enum EventOutcome {
         /// Every pending event was applied; keep serving.
         Continue,
+        /// The window manager resized the window to this new client size (a
+        /// drag-resize that settled, or a maximize/restore); the caller
+        /// re-maps its frame region, reshapes the grid, and updates the pty
+        /// window size. Any events queued behind it re-report on the next
+        /// wake (the port readiness is level-triggered).
+        Resized {
+            /// New client width in pixels.
+            width_px: u32,
+            /// New client height in pixels.
+            height_px: u32,
+        },
         /// The session asked the window to close, or the shell can no
         /// longer accept input: end the program cleanly.
         End,
@@ -468,6 +605,22 @@ mod program {
                             }
                         }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
+                        // The window manager resized the window (a settled
+                        // drag-resize, or a maximize/restore): hand the new
+                        // client size back to the caller, which re-maps the
+                        // frame region, reshapes the grid, and updates the pty
+                        // window size. Returning here leaves any events queued
+                        // behind it for the next wake (level-triggered peek).
+                        WindowEvent::Resized {
+                            width_px,
+                            height_px,
+                            ..
+                        } => {
+                            return EventOutcome::Resized {
+                                width_px,
+                                height_px,
+                            }
+                        }
                         // Focus changes and pointer events repaint nothing;
                         // the screen is shell-driven. A wheel likewise has
                         // nothing to move: the terminal renders the shell's
@@ -479,17 +632,12 @@ mod program {
                         //
                         // Minimized needs no action (the window is hidden and
                         // kept on the taskbar; the screen is redrawn from the
-                        // shell on demand). Resized cannot reach this window:
-                        // the terminal renders a fixed character grid and does
-                        // not request resizable decoration, so the window
-                        // manager offers it neither maximize nor a resize
-                        // grabber and never sends it a new client size. Both
-                        // are honest no-ops, not deferred work.
+                        // shell on demand). These are honest no-ops, not
+                        // deferred work.
                         WindowEvent::Focus { .. }
                         | WindowEvent::Pointer { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
-                        | WindowEvent::Resized { .. }
                         | WindowEvent::FilePicked { .. }
                         | WindowEvent::PickCancelled { .. } => {}
                     }

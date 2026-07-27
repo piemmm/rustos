@@ -308,8 +308,9 @@ it guarantees:
   region **only after** the session adopts the new one, re-wraps its text to the
   new column count, and repaints — preserving the reader's scroll position. It
   fails closed (keeping the current surface, never crashing) if a new region
-  cannot be allocated or the session refuses the re-map. Files and the terminal
-  present fixed size by design and pass `resizable: false`.
+  cannot be allocated or the session refuses the re-map. The file manager
+  (`resizable: true`) re-lays-out its listing on `Resized`, and the terminal is
+  now resizable too (Stage G).
 - **The viewer's render is size-parameterized and host-tested.** `render_status`/
   `render_lines` take the current `width`/`height`, `visible_{rows,cols}_for`
   derive the grid from the client size, and `ScrollView::relayout` re-wraps and
@@ -321,6 +322,27 @@ it guarantees:
   covers a resizable-requested open decorating with a resizable frame and a live
   size toggle; the viewer engine covers size-aware render and relayout; the
   freestanding viewer/terminal/files cross-compile against the new signatures.
+
+### Stage G — Resize actually reachable, and in-content pointer input — DONE
+
+Two gaps that made resizable windows only nominally resizable are closed:
+
+- **A resizable window reserves a real grab border.** `WindowFrame`'s
+  left/right/bottom band is the theme's `resize_grabber_extent` for a
+  **resizable** window (`band_inset`, consumed by `insets`/`layout`), instead
+  of the 1-pixel `frame_inset` a fixed window keeps. The corner `ResizeGrabber`
+  and the frame resize edges now sit in furniture the pointer can actually hit,
+  and the client insets out from under the grabber (it never overlaps content).
+  A fixed-size window is unchanged.
+- **Client-area pointer motion and release reach the app.** The window manager
+  gives a client press an implicit pointer grab (`client_grab`), so the
+  subsequent motion (clamped into the client) and the release are delivered to
+  the owning app as `WindowEvent::Pointer` `Moved`/`Released` — the missing half
+  that left in-content scrollbar thumbs undraggable and tab/combo clicks
+  (which complete on release) dead. A hover over client content is delivered
+  too, so in-content controls track the pointer. The file manager's own
+  scrollbar is now interactive (`tairix_browse::scroll_pointer`: arrow/track
+  step, thumb drag, hover), driven through the shared `ScrollBar`.
 
 ## 3. Definition of done
 

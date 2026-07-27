@@ -105,6 +105,9 @@ const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 /// `pty_create` syscall number (as above).
 const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 
+/// `pty_set_size` syscall number (as above).
+const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
+
 /// `mem_map` syscall number (as above).
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 
@@ -1320,6 +1323,48 @@ pub fn pty_create(rows: u16, cols: u16) -> Result<(u32, u32), i64> {
         return Err(signed);
     }
     Ok((fds[0], fds[1]))
+}
+
+/// Set the character-cell geometry of the pseudo-terminal `master_fd` is the
+/// **master** end of, to `rows`×`cols` (`SyscallNumber::PTY_SET_SIZE`,
+/// `plans/PTY.md`).
+///
+/// The graphical terminal's window-resize path — the tty `TIOCSWINSZ`
+/// analogue: when the user drag-resizes the terminal window the emulator
+/// recomputes the new character grid and calls this so the shared window size
+/// both pty ends observe ([`terminal_size`]) tracks the real window, and the
+/// shell's prompt sizing and any full-screen program re-lay-out. Unprivileged:
+/// it reaches only the caller's own pty.
+///
+/// # Errors
+///
+/// The raw negative `-errno` register on refusal (recover the
+/// [`tairix_abi::Errno`] as `-ret`): a zero or oversized `rows`/`cols` is
+/// [`tairix_abi::Errno::OutOfRange`], and an `fd` that is not a pty **master**
+/// of the caller is [`tairix_abi::Errno::NotFound`].
+pub fn pty_set_size(master_fd: u32, rows: u16, cols: u16) -> Result<(), i64> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates the descriptor and geometry before
+    // touching any state.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PTY_SET_SIZE,
+            [
+                u64::from(master_fd),
+                u64::from(rows),
+                u64::from(cols),
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno encoding.
+    let signed = ret as i64;
+    if signed < 0 {
+        return Err(signed);
+    }
+    Ok(())
 }
 
 /// Spawn the embedded program at `path` on the installed console `console`

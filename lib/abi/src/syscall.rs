@@ -1866,6 +1866,26 @@ impl SyscallNumber {
     /// spawn.
     pub const PTY_CREATE: Self = Self(97);
 
+    /// Set a pseudo-terminal's character-cell geometry from its **master**
+    /// end — the graphical terminal's window-resize path (`plans/PTY.md`).
+    ///
+    /// A pty is created ([`Self::PTY_CREATE`]) with a fixed initial
+    /// `rows`×`cols`; when the user drag-resizes the terminal window the
+    /// emulator recomputes the new character grid and calls this to update
+    /// the shared [`crate::TerminalSize`] both ends observe, so the shell's
+    /// prompt sizing ([`Self::TERMINAL_SIZE`]) and any full-screen program
+    /// track the real window. It is the tty `TIOCSWINSZ` analogue.
+    ///
+    /// Arguments: `fd: u32` (a pty **master** descriptor of the caller —
+    /// anything else fails closed with [`crate::Errno::NotFound`], never
+    /// leaking which case occurred), and `rows: u32` / `cols: u32`, the new
+    /// geometry. Each dimension must be non-zero and fit a `u16`; a zero or
+    /// oversized dimension fails closed with [`crate::Errno::OutOfRange`]
+    /// before any state is touched. Unprivileged, exactly like
+    /// [`Self::PTY_CREATE`]: it reaches only the caller's own pty and carries
+    /// no authority of its own.
+    pub const PTY_SET_SIZE: Self = Self(98);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

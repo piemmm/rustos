@@ -110,6 +110,46 @@ fn grid_new_rejects_degenerate_sizes() {
 }
 
 #[test]
+fn grid_resize_preserves_top_left_and_clamps_cursor() {
+    let mut grid = render_bytes(6, 3, b"abc\r\ndef");
+    assert_eq!(row_text(&grid, 0), "abc");
+    assert_eq!(row_text(&grid, 1), "def");
+
+    // Shrink: the overlapping top-left content is kept and the cursor is
+    // clamped into the new bounds.
+    assert!(grid.resize(4, 2));
+    assert_eq!((grid.cols(), grid.rows()), (4, 2));
+    assert_eq!(row_text(&grid, 0), "abc");
+    assert_eq!(row_text(&grid, 1), "def");
+    assert!(grid.cursor_col() < 4 && grid.cursor_row() < 2);
+
+    // Grow: the preserved content stays put and the newly exposed row is blank.
+    assert!(grid.resize(8, 4));
+    assert_eq!((grid.cols(), grid.rows()), (8, 4));
+    assert_eq!(row_text(&grid, 0), "abc");
+    assert_eq!(row_text(&grid, 1), "def");
+    assert_eq!(row_text(&grid, 3), "");
+
+    // A degenerate, oversized, or no-op resize changes nothing (fail closed).
+    assert!(!grid.resize(0, 4));
+    assert!(!grid.resize(8, MAX_DIMENSION + 1));
+    assert!(!grid.resize(8, 4));
+    assert_eq!((grid.cols(), grid.rows()), (8, 4));
+}
+
+#[test]
+fn terminal_resize_reshapes_the_grid() {
+    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    term.feed(b"hi");
+    assert_eq!(term.grid().cols(), 20);
+    assert!(term.resize(40, 10));
+    assert_eq!((term.grid().cols(), term.grid().rows()), (40, 10));
+    // The content survives the reshape; a no-op resize reports no change.
+    assert_eq!(row_text(term.grid(), 0), "hi");
+    assert!(!term.resize(40, 10));
+}
+
+#[test]
 fn a_wide_glyph_occupies_a_lead_and_a_continuation_cell() {
     // The same two-column layout the curses window writer and the framebuffer
     // console produce, so column arithmetic agrees across the stack.

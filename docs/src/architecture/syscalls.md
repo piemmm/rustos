@@ -141,6 +141,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  95 | `sched_set_realtime` | `u32 realtime`                    | `errno`       | `CAP_SCHED_REALTIME` | yes |
 |  96 | `fs_set_owner` | `user_ptr` (path), `len`, `u32 uid`, `u32 gid` | `errno`       | `CAP_FS_ACCESS` (+ `CAP_FS_CHOWN` per-inode) | yes |
 |  97 | `pty_create`   | `user_ptr` (out: two `u32` fds), `u32 rows`, `u32 cols` | `errno` | —           | no    |
+|  98 | `pty_set_size` | `u32 fd` (pty master), `u32 rows`, `u32 cols` | `errno` | —           | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -802,6 +803,21 @@ client, and the kernel never fabricates a size (`AGENTS.md` §5.4). A buffer
 shorter than the wire length fails closed with `BufferTooSmall`. The
 first-party Rust wrapper is `tairix_rt::terminal_size`; the C stub is
 `tairix_sys_terminal_size`.
+
+`pty_set_size` (no. 98) is the tty `TIOCSWINSZ` analogue: the **master**-end
+holder of a pseudo-terminal (`pty_create`, no. 97) sets its character-cell
+geometry after create, so the shared `tairix_abi::TerminalSize` both ends
+observe (and `terminal_size` reports) tracks the window. The graphical terminal
+calls it on every window resize so the hosted shell's prompt sizing and any
+full-screen program re-lay-out. It is **ungated** and unaudited, the same
+unprivileged baseline as `pty_create`: it reaches only the caller's own pty. The
+handler validates `rows`/`cols` (non-zero, `u16`-bounded) into a `TerminalSize`
+(a zero or oversized dimension → `OutOfRange`, before any state is touched) and
+resolves `fd` against the caller's descriptor table as a pty **master**
+(`AddressSpaceRegistry::pty_master`); a descriptor that is not the caller's pty
+master fails closed with `NotFound`, never leaking which case occurred. The
+first-party Rust wrapper is `tairix_rt::pty_set_size`; the C stub is
+`tairix_sys_pty_set_size`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

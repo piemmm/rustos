@@ -158,6 +158,7 @@ const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
+const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 
@@ -526,6 +527,30 @@ pub extern "C" fn sys_pty_create(out: *mut c_void, rows: u32, cols: u32) -> i32 
         ret_i32(raw_syscall(
             NUM_PTY_CREATE,
             [ptr_arg(out), u64::from(rows), u64::from(cols), 0, 0, 0],
+        ))
+    }
+}
+
+/// `pty_set_size`: set the character-cell geometry of the pseudo-terminal `fd`
+/// is the **master** end of, to `rows`×`cols` (`SyscallNumber::PTY_SET_SIZE`,
+/// `plans/PTY.md`). Returns a `TAIRIX_E_*` code.
+///
+/// The tty `TIOCSWINSZ` analogue: a terminal emulator calls this when its
+/// window is resized so the shared window size both pty ends observe
+/// (`tairix_sys_terminal_size`) tracks the real window. Unprivileged, like
+/// `tairix_sys_pty_create`: it reaches only the caller's own pty. Each
+/// dimension must be non-zero and fit a `uint16_t`, else the call fails closed
+/// with `TAIRIX_E_OUT_OF_RANGE`; an `fd` that is not a pty **master** of the
+/// caller fails closed with `TAIRIX_E_NOT_FOUND`.
+#[must_use]
+#[export_name = "tairix_sys_pty_set_size"]
+pub extern "C" fn sys_pty_set_size(fd: u32, rows: u32, cols: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel validates the descriptor and geometry before touching state.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_PTY_SET_SIZE,
+            [u64::from(fd), u64::from(rows), u64::from(cols), 0, 0, 0],
         ))
     }
 }
@@ -2467,6 +2492,7 @@ mod tests {
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_PTY_CREATE, "pty_create", 3),
+        (NUM_PTY_SET_SIZE, "pty_set_size", 3),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
         (NUM_FS_SET_OWNER, "fs_set_owner", 4),
         (NUM_FS_ATTR_GET, "fs_attr_get", 6),

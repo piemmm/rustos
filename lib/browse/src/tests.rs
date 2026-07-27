@@ -1112,6 +1112,147 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
 }
 
 #[test]
+fn scrollbar_bounds_matches_the_reserved_gutter() {
+    use crate::render::scrollbar_bounds;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 200, 200);
+    let header = crate::render::chrome_height(font, &theme);
+    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    // The bar sits in the reserved right-edge gutter (its right edge is the
+    // window's right edge), below the chrome header, and is a real strip wide.
+    assert_eq!(bounds.right(), i32::try_from(vp.width).unwrap());
+    assert_eq!(bounds.top(), i32::try_from(header).unwrap());
+    assert!(bounds.width > 0);
+    assert!(bounds.left() > 0 && bounds.left() < i32::try_from(vp.width).unwrap());
+    // A window too short for any item area has no gutter.
+    assert!(scrollbar_bounds(&theme, font, Rect::new(0, 0, 200, header)).is_none());
+}
+
+#[test]
+fn scrollbar_click_on_the_increment_button_scrolls_down() {
+    use crate::render::{row_height, scroll_pointer, scrollbar_bounds};
+    use tairix_geometry::Point;
+    use tairix_input::{InputEvent, PointerButton};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(40);
+    let row = row_height(font);
+    let vp = Rect::new(
+        0,
+        0,
+        200,
+        crate::render::chrome_height(font, &theme) + row * 6,
+    );
+    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
+
+    // A press on the increment (down) button at the bottom of the bar steps
+    // the offset one line — the arrow button now scrolls the listing.
+    let down = Point::new(cx, bounds.bottom() - 1);
+    let press = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    assert_eq!(
+        scroll_pointer(&mut browser, font, &theme, vp, down, &press),
+        Some(true)
+    );
+    assert_eq!(browser.scroll_offset(), 1);
+
+    // A press away from the gutter is not the scrollbar's: it falls through to
+    // the content (the helper reports it did not consume it).
+    let off = Point::new(10, bounds.top() + 4);
+    assert_eq!(
+        scroll_pointer(&mut browser, font, &theme, vp, off, &press),
+        None
+    );
+}
+
+#[test]
+fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
+    use crate::render::{row_height, scroll_model, scroll_pointer, scrollbar_bounds};
+    use tairix_controls::{ScrollBar, ScrollOrientation, ScrollPart};
+    use tairix_geometry::{Point, Scale};
+    use tairix_input::{InputEvent, PointerButton};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(60);
+    let row = row_height(font);
+    let vp = Rect::new(
+        0,
+        0,
+        200,
+        crate::render::chrome_height(font, &theme) + row * 6,
+    );
+    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
+
+    // Find a point on the thumb using the same layout the router uses.
+    let probe = ScrollBar::new(
+        ScrollOrientation::Vertical,
+        scroll_model(&browser, font, &theme, vp),
+    );
+    let thumb_y = (bounds.top()..bounds.bottom())
+        .find(|&y| {
+            probe.part_at(bounds, Point::new(cx, y), Scale::ONE, &theme) == ScrollPart::Thumb
+        })
+        .expect("the bar has a draggable thumb");
+
+    // Press the thumb: the drag is captured but nothing has moved yet.
+    let press = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    assert_eq!(
+        scroll_pointer(
+            &mut browser,
+            font,
+            &theme,
+            vp,
+            Point::new(cx, thumb_y),
+            &press
+        ),
+        Some(true)
+    );
+    assert_eq!(browser.scroll_offset(), 0);
+
+    // Dragging the thumb toward the bottom scrolls the listing down.
+    let to = Point::new(cx, bounds.bottom() - 2);
+    let moved = InputEvent::PointerMoved { to };
+    assert_eq!(
+        scroll_pointer(&mut browser, font, &theme, vp, to, &moved),
+        Some(true)
+    );
+    assert!(browser.scroll_offset() > 0);
+
+    // Releasing ends the capture; a later move off the bar is no longer the
+    // scrollbar's (it reports it consumed nothing).
+    let release = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+    assert_eq!(
+        scroll_pointer(&mut browser, font, &theme, vp, to, &release),
+        Some(true)
+    );
+    let off = InputEvent::PointerMoved {
+        to: Point::new(10, bounds.top() + 3),
+    };
+    assert_eq!(
+        scroll_pointer(
+            &mut browser,
+            font,
+            &theme,
+            vp,
+            Point::new(10, bounds.top() + 3),
+            &off
+        ),
+        None
+    );
+}
+
+#[test]
 fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     use crate::render::entry_index_at;
     use tairix_geometry::Point;

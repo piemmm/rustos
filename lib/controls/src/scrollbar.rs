@@ -212,6 +212,15 @@ impl ScrollBar {
         self.held
     }
 
+    /// Whether a primary press is currently captured on the bar — a thumb
+    /// drag in progress or an end/track button held down. An owner uses this
+    /// to decide that a subsequent move or release belongs to the bar (the
+    /// interaction the press started) rather than to the content beneath it.
+    #[must_use]
+    pub fn is_pressing(&self) -> bool {
+        self.dragging || self.held.is_some()
+    }
+
     /// Classify a surface `point` into a [`ScrollPart`] for the bar drawn at
     /// `bounds`, using the same layout as paint and input (spec §11.28). Off a
     /// present bar, or when the bar is degenerate, this is [`ScrollPart::Outside`].

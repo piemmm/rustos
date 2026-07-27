@@ -588,11 +588,16 @@ fn resize_edges_only_when_resizable() {
         frame.hit(bounds, Scale::ONE, &theme, edge),
         FurniturePart::ResizeEdge(ResizeEdge::Bottom)
     );
+    // A fixed-size window has no resize band (its client keeps the thin frame
+    // inset), so the point just below *its own* client is inert frame, never a
+    // resize edge.
     let mut fixed = furniture();
     fixed.resizable = false;
     let frame = WindowFrame::new(fixed);
+    let fixed_client = frame.layout(bounds, Scale::ONE, &theme).client;
+    let fixed_edge = Point::new(fixed_client.left() + 10, fixed_client.bottom());
     assert_eq!(
-        frame.hit(bounds, Scale::ONE, &theme, edge),
+        frame.hit(bounds, Scale::ONE, &theme, fixed_edge),
         FurniturePart::Frame
     );
 }

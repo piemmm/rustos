@@ -1061,20 +1061,42 @@ impl WindowFrame {
         (border, title_h, inset_amt)
     }
 
+    /// The left/right/bottom furniture-band thickness around the client.
+    ///
+    /// A **resizable** window reserves a real grab border here — the theme's
+    /// resize-grabber extent — so the resize edges are a usable pointer target
+    /// and the corner grabber has furniture to live in (it never overlaps the
+    /// client). A fixed-size window keeps the thin frame inset, so it is not
+    /// widened by a border it can never use. Never thinner than the frame
+    /// border, so a rim always draws.
+    fn band_inset(&self, scale: Scale, theme: &Theme) -> u32 {
+        let (_, _, inset_amt) = Self::edges(scale, theme);
+        if self.furniture.resizable {
+            scale
+                .scale_length(theme.metrics().resize_grabber_extent)
+                .max(inset_amt)
+        } else {
+            inset_amt
+        }
+    }
+
     /// The per-edge furniture-band thickness around the client, at the active
     /// scale and theme.
     ///
     /// The top band carries the frame border and the title bar; the other three
-    /// carry the frame inset. This is the one definition [`Self::layout`] and
-    /// [`Self::outer_for_client`] share (they never restate the metric math).
+    /// carry the resize band (the theme's resize-grabber extent on a resizable
+    /// window, the thin frame inset otherwise). This is the one definition
+    /// [`Self::layout`] and [`Self::outer_for_client`] share (they never
+    /// restate the metric math).
     #[must_use]
     pub fn insets(&self, scale: Scale, theme: &Theme) -> FrameInsets {
-        let (border, title_h, inset_amt) = Self::edges(scale, theme);
+        let (border, title_h, _) = Self::edges(scale, theme);
+        let band = self.band_inset(scale, theme);
         FrameInsets {
             top: border.saturating_add(title_h),
-            left: inset_amt,
-            right: inset_amt,
-            bottom: inset_amt,
+            left: band,
+            right: band,
+            bottom: band,
         }
     }
 
@@ -1108,7 +1130,8 @@ impl WindowFrame {
     /// window never shifts its client when it gains or loses focus.
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> FrameLayout {
-        let (b, title_h, inset_amt) = Self::edges(scale, theme);
+        let (b, title_h, _) = Self::edges(scale, theme);
+        let band = self.band_inset(scale, theme);
 
         let title_bar = Rect::new(
             bounds.left() + to_i32(b),
@@ -1117,14 +1140,14 @@ impl WindowFrame {
             title_h,
         );
         let client = Rect::new(
-            bounds.left() + to_i32(inset_amt),
+            bounds.left() + to_i32(band),
             bounds.top() + to_i32(b) + to_i32(title_h),
-            bounds.width.saturating_sub(inset_amt.saturating_mul(2)),
+            bounds.width.saturating_sub(band.saturating_mul(2)),
             bounds
                 .height
                 .saturating_sub(b)
                 .saturating_sub(title_h)
-                .saturating_sub(inset_amt),
+                .saturating_sub(band),
         );
 
         FrameLayout {

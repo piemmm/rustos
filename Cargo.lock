@@ -647,6 +647,7 @@ dependencies = [
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
+ "tairix-input",
  "tairix-path",
  "tairix-raster",
  "tairix-theme",

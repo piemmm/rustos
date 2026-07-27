@@ -4511,6 +4511,34 @@ where
         }
     }
 
+    fn pty_set_size(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        rows: u32,
+        cols: u32,
+    ) -> SyscallResult {
+        // Validate the geometry before touching any state, exactly as
+        // `pty_create` does: each dimension must be non-zero and fit a `u16`,
+        // else `OutOfRange` — never silently clamped to a size the caller did
+        // not ask for.
+        let rows = u16::try_from(rows).map_err(|_| Errno::OutOfRange)?;
+        let cols = u16::try_from(cols).map_err(|_| Errno::OutOfRange)?;
+        let size = TerminalSize::new(rows, cols)?;
+        // Resolve `fd` to a pty the caller holds the **master** end of. The
+        // `task` id is kernel-trusted, so one process cannot resize another's
+        // pty; anything that is not the caller's own pty master fails closed
+        // with `NotFound`, never leaking which case occurred. Unprivileged by
+        // design (the dispatcher required no capability): the geometry is a
+        // property of the caller's own terminal.
+        let aspaces = self.aspaces.read();
+        let Some(pty) = aspaces.pty_master(caller.task_id, fd) else {
+            return Err(Errno::NotFound);
+        };
+        pty.set_size(size);
+        Ok(0)
+    }
+
     fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i32) -> SyscallResult {
         // A pty slave is a *tty*: if `fd` is a pty-slave descriptor of the
         // caller, its controlling ownership lives on the `Pty`. The
@@ -15407,6 +15435,81 @@ mod tests {
         assert_eq!(
             h.fs_write(&ctx, master_fd, 0, 0x1000, 4),
             Err(Errno::BrokenPipe)
+        );
+    }
+
+    /// `pty_set_size` on the **master** end updates the shared geometry both
+    /// ends observe (the graphical terminal's window-resize path): the slave's
+    /// `terminal_size` reports the new grid. It fails closed on a zero/oversized
+    /// dimension and on a descriptor that is not a pty master of the caller
+    /// (`plans/PTY.md`).
+    #[test]
+    fn pty_set_size_updates_the_shared_geometry_and_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Mint a pty at 24×80; the master end lands first at 0x1800.
+        assert_eq!(h.pty_create(&ctx, 0x1800, 24, 80), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let master_fd = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        let slave_fd = u32::from_ne_bytes([fds[4], fds[5], fds[6], fds[7]]);
+
+        // A zero (or oversized) dimension fails closed before any state moves.
+        assert_eq!(
+            h.pty_set_size(&ctx, master_fd, 0, 80),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.pty_set_size(&ctx, master_fd, 50, 0x1_0000),
+            Err(Errno::OutOfRange)
+        );
+        // A descriptor that is not a pty master of the caller (the slave, or
+        // an unopened number) fails closed with `NotFound`, never leaking
+        // which case occurred.
+        assert_eq!(
+            h.pty_set_size(&ctx, slave_fd, 50, 100),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(h.pty_set_size(&ctx, 999, 50, 100), Err(Errno::NotFound));
+
+        // The master-side resize updates the shared geometry: the slave's
+        // `terminal_size` now reports the new grid.
+        assert_eq!(h.pty_set_size(&ctx, master_fd, 50, 100), Ok(0));
+        assert_eq!(h.terminal_size(&ctx, slave_fd, 0x1900, 4), Ok(4));
+        let mut size = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1900), &mut size).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(
+            TerminalSize::from_bytes(&size),
+            Ok(TerminalSize::new(50, 100).unwrap())
         );
     }
 

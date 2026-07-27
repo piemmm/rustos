@@ -53,6 +53,18 @@ impl<S: ShellSource> Terminal<S> {
         &self.grid
     }
 
+    /// Reshape the screen to `cols`×`rows` (a window resize), preserving the
+    /// top-left overlap of the current contents. Returns `false`, changing
+    /// nothing, for a zero/oversized dimension or a no-op resize (fail closed).
+    ///
+    /// The shell learns the new geometry through the pty window size the caller
+    /// sets alongside this (`pty_set_size`), so its prompt and any full-screen
+    /// program re-lay-out on their next output; this only reshapes the local
+    /// screen model so the next render fills the resized window.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
+        self.grid.resize(cols, rows)
+    }
+
     /// Read the bytes the shell has produced and apply them to the screen,
     /// returning how many bytes were applied.
     ///

@@ -568,9 +568,18 @@ fn press_activates_raises_and_focuses() {
     let top = c.add_window(Point::new(20, 0), opaque(20, 30, RED));
     let mut router = InputRouter::new();
 
-    // Press on the bottom window where the top does not cover it.
+    // Press on the bottom window where the top does not cover it. A hover
+    // over client content is delivered to that window (undecorated test
+    // windows are all client) so its in-content controls can track the
+    // pointer.
     let r = router.handle(moved(5, 5), &mut c);
-    assert_eq!(r, InputResponse::Ignored);
+    assert_eq!(
+        r,
+        InputResponse::ClientPointerMoved {
+            window: bottom,
+            local: Point::new(5, 5),
+        }
+    );
     let r = router.handle(press_primary(), &mut c);
     assert_eq!(
         r,
@@ -835,6 +844,97 @@ fn drag_ends_if_grabbed_window_removed() {
         InputResponse::MoveEnded { window: win }
     );
     assert!(!router.is_moving());
+}
+
+#[test]
+fn client_hover_moves_route_to_the_window_under_the_pointer() {
+    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    // A hover over client content is delivered window-local so the client's
+    // in-content controls (a scrollbar, a menu) can track the pointer.
+    assert_eq!(
+        router.handle(moved(15, 12), &mut c),
+        InputResponse::ClientPointerMoved {
+            window: win,
+            local: Point::new(5, 2),
+        }
+    );
+    // A hover over the desktop belongs to no client.
+    assert_eq!(router.handle(moved(50, 50), &mut c), InputResponse::Ignored);
+}
+
+#[test]
+fn client_press_captures_the_pointer_until_release() {
+    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    // Press on the client content: activates the window and takes the
+    // implicit pointer grab.
+    router.handle(moved(15, 15), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::Activated {
+            window: win,
+            local: Point::new(5, 5),
+        }
+    );
+
+    // A move during the grab is delivered to the grabbed window as an
+    // in-content drag, even once the pointer leaves the window: the position
+    // is clamped into the client so the drag keeps tracking rather than
+    // wrapping or jumping.
+    assert_eq!(
+        router.handle(moved(25, 25), &mut c),
+        InputResponse::ClientPointerMoved {
+            window: win,
+            local: Point::new(15, 15),
+        }
+    );
+    assert_eq!(
+        router.handle(moved(100, 100), &mut c),
+        InputResponse::ClientPointerMoved {
+            window: win,
+            local: Point::new(19, 19),
+        }
+    );
+
+    // The release completes the in-content click/drag on the grabbed window
+    // and ends the grab; a later move is a plain hover again.
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::ClientPointerReleased {
+            window: win,
+            local: Point::new(19, 19),
+        }
+    );
+    assert_eq!(
+        router.handle(moved(15, 15), &mut c),
+        InputResponse::ClientPointerMoved {
+            window: win,
+            local: Point::new(5, 5),
+        }
+    );
+}
+
+#[test]
+fn client_grab_ends_if_grabbed_window_removed() {
+    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    router.handle(moved(15, 15), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert!(c.remove(win));
+    // With the grabbed window gone, the drag fails closed to Ignored rather
+    // than naming a window that no longer exists.
+    assert_eq!(router.handle(moved(20, 20), &mut c), InputResponse::Ignored);
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::Ignored
+    );
 }
 
 #[test]

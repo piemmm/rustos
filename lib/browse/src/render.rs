@@ -28,17 +28,19 @@ use alloc::vec::Vec;
 
 use tairix_controls::button::{Button, ButtonContent};
 use tairix_controls::decision::Dialog;
-use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use tairix_controls::scroll::{ScrollModel, ScrollRange};
 use tairix_controls::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, SelectionState,
 };
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    Card, Checkbox, IconButton, Menu, MenuItem, Panel, ScrollBar, TableCell, TableRow, Toolbar,
+    Card, Checkbox, IconButton, Menu, MenuItem, Panel, ScrollAction, ScrollBar, ScrollPart,
+    TableCell, TableRow, Toolbar,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{Palette, Theme};
 
@@ -310,23 +312,103 @@ fn draw_scrollbar<S: DirectorySource>(
     font: BitmapFont,
     viewport: Rect,
 ) {
+    let Some(bounds) = scrollbar_bounds(theme, font, viewport) else {
+        return;
+    };
+    // Draw the browser's own interactive bar (its live hover/drag/held state),
+    // with its model re-synced from the current geometry so the thumb size and
+    // position match the listing exactly. The bar is `Copy`, so this reflects
+    // the live interaction state without disturbing the stored offset owner.
+    let mut bar: ScrollBar = *browser.scrollbar();
+    bar.set_model(scroll_model(browser, font, theme, viewport));
+    bar.render(surface, bounds, Scale::ONE, theme);
+}
+
+/// The screen rectangle (window-local) the vertical [`ScrollBar`] occupies: the
+/// reserved right-edge gutter spanning the item area below the path bar, or
+/// `None` when the window is too narrow for a gutter or too short for any item
+/// area. This is the exact geometry the drawn scrollbar paints into (and that
+/// [`scroll_pointer`] hit-tests against), so a pointer hit-test and the drawn
+/// bar can never disagree (§2.2).
+#[must_use]
+pub fn scrollbar_bounds(theme: &Theme, font: BitmapFont, viewport: Rect) -> Option<Rect> {
     let gutter = gutter_width(theme, viewport.width);
     let header = chrome_height(font, theme);
     if gutter == 0 || viewport.height <= header {
-        return;
+        return None;
     }
     let content = content_viewport(viewport, theme);
-    let bounds = Rect::new(
+    Some(Rect::new(
         i32::try_from(content.width).unwrap_or(i32::MAX),
         i32::try_from(header).unwrap_or(i32::MAX),
         gutter,
         viewport.height.saturating_sub(header),
+    ))
+}
+
+/// Route a pointer `event` (a primary press, release, or a motion) to the
+/// browser's interactive scrollbar, returning `Some(repaint)` when the bar
+/// consumed it (so the caller does not also treat the press as a click in the
+/// content) and `None` when the pointer had nothing to do with the bar (the
+/// caller handles it as content input).
+///
+/// The bar owns the interaction the press started: a press on an end button or
+/// track region steps the offset once, a press on the thumb captures a drag,
+/// and the subsequent motions and the release are routed here (the window
+/// manager's client pointer grab delivers them) until the release ends it. A
+/// hover over the bar is consumed so the bar can brighten. The requested
+/// offset is applied through [`Browser::set_scroll_offset`], keeping the
+/// browser the one owner of the authoritative offset. `event` must carry the
+/// window-local pointer position (a press/release is preceded here by a
+/// synthetic move to that position, exactly as the window controls are fed).
+pub fn scroll_pointer<S: DirectorySource>(
+    browser: &mut Browser<S>,
+    font: BitmapFont,
+    theme: &Theme,
+    viewport: Rect,
+    point: Point,
+    event: &InputEvent,
+) -> Option<bool> {
+    let bounds = scrollbar_bounds(theme, font, viewport)?;
+    let model = scroll_model(browser, font, theme, viewport);
+    let bar = browser.scrollbar_mut();
+    bar.set_model(model);
+    // Position the bar at this event before applying the action, so a press
+    // knows which part it landed on and a drag reads the current point (the
+    // press/release events carry no position of their own).
+    let synth = bar.on_pointer(
+        &InputEvent::PointerMoved { to: point },
+        bounds,
+        Scale::ONE,
+        theme,
     );
-    let bar = ScrollBar::new(
-        ScrollOrientation::Vertical,
-        scroll_model(browser, font, theme, viewport),
-    );
-    bar.render(surface, bounds, Scale::ONE, theme);
+    let pressing_before = bar.is_pressing();
+    let on_bar = bar.part_at(bounds, point, Scale::ONE, theme) != ScrollPart::Outside;
+    let (consumed, action) = match event {
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        } => (on_bar, bar.on_pointer(event, bounds, Scale::ONE, theme)),
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        } => (
+            pressing_before,
+            bar.on_pointer(event, bounds, Scale::ONE, theme),
+        ),
+        InputEvent::PointerMoved { .. } => (pressing_before || on_bar, synth),
+        _ => (false, None),
+    };
+    if !consumed {
+        return None;
+    }
+    match action {
+        Some(ScrollAction::ScrollTo { offset }) => {
+            browser.set_scroll_offset(offset);
+            Some(true)
+        }
+        // A consumed press on the thumb (drag start) or a hover moves nothing
+        // yet but changes the bar's drawn state, so the caller repaints.
+        None => Some(true),
+    }
 }
 
 /// Build the [`TableRow`] for one list entry: a leading name cell (a directory

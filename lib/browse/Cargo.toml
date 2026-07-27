@@ -38,6 +38,11 @@ tairix-controls = { path = "../controls", version = "=0.0.0" }
 # `IconKind` (the one file-type classifier the manager and picker share, §2.2),
 # and the grid tile draws that glyph. A display hint only; it gates no operation.
 tairix-icon = { path = "../icon", version = "=0.0.0" }
+# Shared pointer/keyboard input vocabulary: the interactive scrollbar consumes
+# the same `InputEvent`/`PointerButton` the window manager and every control
+# use, so the file manager routes a scrollbar press/drag through one input
+# vocabulary rather than a private one (§2.2, §17.4).
+tairix-input = { path = "../input", version = "=0.0.0" }
 
 [lints]
 workspace = true

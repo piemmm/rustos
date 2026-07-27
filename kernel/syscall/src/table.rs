@@ -377,6 +377,27 @@ pub trait SyscallHandlers {
         let _ = (caller, out, rows, cols);
         Err(Errno::NotImplemented)
     }
+    /// Set the character-cell geometry of the pseudo-terminal the caller's
+    /// descriptor `fd` is the **master** end of, to `rows`×`cols`
+    /// (`plans/PTY.md`). Returns `Ok(0)` on success. The graphical
+    /// terminal's window-resize path — the tty `TIOCSWINSZ` analogue.
+    ///
+    /// Each dimension must be non-zero and fit a `u16`, else the call fails
+    /// closed with [`Errno::OutOfRange`] before any state is touched. `fd`
+    /// must be a pty **master** descriptor of the caller; anything else
+    /// fails closed with [`Errno::NotFound`], never leaking which case
+    /// occurred. The default body fails closed with [`Errno::NotImplemented`]
+    /// so a build without the pty facility announces the inert interface.
+    fn pty_set_size(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        rows: u32,
+        cols: u32,
+    ) -> SyscallResult {
+        let _ = (caller, fd, rows, cols);
+        Err(Errno::NotImplemented)
+    }
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
     /// read.
@@ -2554,6 +2575,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     decode_u32(args.0[2]),
                 )
             }
+            SyscallNumber::PTY_SET_SIZE => {
+                // args[0] is the pty master descriptor; args[1] and args[2]
+                // are the new row/column geometry (master resolution and
+                // bounds validated in the handler).
+                self.handlers.pty_set_size(
+                    caller,
+                    decode_u32(args.0[0]),
+                    decode_u32(args.0[1]),
+                    decode_u32(args.0[2]),
+                )
+            }
             SyscallNumber::KEY_INJECT => {
                 // args[0] is the seat id; `validate_arg` guarantees args[1]
                 // is a non-null `UserPtr`; args[2] is the record length.
@@ -3449,6 +3481,19 @@ mod tests {
             self.record("pty_create");
             // Echo the row count back so the reachability test can assert
             // the dispatcher decoded the `(out, rows, cols)` arguments
+            // without wiring a real pty facility here.
+            Ok(u64::from(rows))
+        }
+        fn pty_set_size(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            rows: u32,
+            _cols: u32,
+        ) -> SyscallResult {
+            self.record("pty_set_size");
+            // Echo the row count back so the reachability test can assert
+            // the dispatcher decoded the `(fd, rows, cols)` arguments
             // without wiring a real pty facility here.
             Ok(u64::from(rows))
         }

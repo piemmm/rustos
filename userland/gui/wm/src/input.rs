@@ -158,6 +158,32 @@ pub enum InputResponse {
         /// The window whose resize-grab ended.
         window: WindowId,
     },
+    /// A client-area pointer motion the window manager consumed no furniture
+    /// for, delivered to the application to interpret (a hover highlight, an
+    /// in-content scrollbar-thumb drag). `local` is the position in the
+    /// window's client-viewport coordinates. While the client holds the
+    /// implicit pointer grab a primary press started, the motion is reported
+    /// to the grabbed window even after the pointer leaves it — `local`
+    /// clamped into the client — so an in-content drag tracks like every
+    /// other grab; otherwise it is a plain hover over the window under the
+    /// pointer.
+    ClientPointerMoved {
+        /// The window whose client received the motion.
+        window: WindowId,
+        /// Motion position in the window's client-viewport coordinates.
+        local: Point,
+    },
+    /// A primary release that ended a client pointer grab, delivered to the
+    /// grabbed window so an in-content click or drag completes (a tab or
+    /// combo selection, a released scrollbar thumb). `local` is the release
+    /// position in the window's client-viewport coordinates, clamped into
+    /// the client.
+    ClientPointerReleased {
+        /// The window whose client received the release.
+        window: WindowId,
+        /// Release position in the window's client-viewport coordinates.
+        local: Point,
+    },
 }
 
 /// An in-flight interactive move: the grabbed window and the offset
@@ -233,6 +259,13 @@ pub struct InputRouter {
     /// returns it, so a decorated window's content keeps its keys until the
     /// user reaches for the furniture.
     furniture_key_focus: bool,
+    /// The client window holding the implicit pointer grab a primary press on
+    /// its content started, so the motion and the release complete on that
+    /// same window — an in-content drag (a scrollbar thumb) or click (a tab, a
+    /// combo item) never leaks to a window the pointer later crosses. Cleared
+    /// on the release, and on any press that starts a furniture, move, or
+    /// desktop interaction instead.
+    client_grab: Option<WindowId>,
 }
 
 impl InputRouter {
@@ -314,8 +347,10 @@ impl InputRouter {
                     self.resize_drag_to(to, compositor)
                 } else if self.control_grab.is_some() {
                     self.control_drag_to(&event, compositor)
-                } else {
+                } else if self.grab.is_some() {
                     self.drag_to(to, compositor)
+                } else {
+                    self.client_pointer_moved(to, compositor)
                 }
             }
             InputEvent::PointerScrolled { dx, dy } => self.wheel(dx, dy, compositor),
@@ -409,6 +444,10 @@ impl InputRouter {
         let Some(origin) = compositor.window(window).map(Window::origin) else {
             return false;
         };
+        // Starting a move supersedes the implicit client pointer grab: this
+        // press moves the window, so its motion and release drive the move,
+        // never leak to the client as an in-content drag.
+        self.client_grab = None;
         self.grab = Some(MoveGrab {
             window,
             offset: Point::new(
@@ -421,6 +460,9 @@ impl InputRouter {
 
     /// Handle a primary-button press at the current pointer position.
     fn press_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        // A fresh press supersedes any prior client grab; it is re-armed below
+        // only when this press lands on client content.
+        self.client_grab = None;
         let Some(window) = compositor.window_at(self.pointer) else {
             self.focused = None;
             return InputResponse::DesktopPressed;
@@ -465,6 +507,10 @@ impl InputRouter {
         // press position is reported relative to the client viewport, so a
         // decorated window's client sees content-local coordinates.
         self.furniture_key_focus = false;
+        // The client content holds the implicit pointer grab until release, so
+        // its motion and the release complete on this window (an in-content
+        // drag/click) rather than leaking to a window the pointer crosses.
+        self.client_grab = Some(window);
         let client = compositor
             .window_client_rect(window)
             .map_or(Point::ORIGIN, |rect| rect.origin);
@@ -474,6 +520,38 @@ impl InputRouter {
                 self.pointer.x.saturating_sub(client.x),
                 self.pointer.y.saturating_sub(client.y),
             ),
+        }
+    }
+
+    /// Route a pointer motion no window-manager grab claimed: during a client
+    /// pointer grab it is an in-content drag reported to the grabbed window
+    /// (even once the pointer leaves it, `local` clamped into the client);
+    /// otherwise it is a hover over the client content under the pointer. A
+    /// motion over the desktop, over window furniture, or over a window that
+    /// has vanished is [`InputResponse::Ignored`] (no client owns it).
+    fn client_pointer_moved(&mut self, to: Point, compositor: &Compositor) -> InputResponse {
+        if let Some(window) = self.client_grab {
+            let Some(client) = compositor.window_client_rect(window) else {
+                self.client_grab = None;
+                return InputResponse::Ignored;
+            };
+            return InputResponse::ClientPointerMoved {
+                window,
+                local: client_local(to, client),
+            };
+        }
+        let Some(window) = compositor.window_at(to) else {
+            return InputResponse::Ignored;
+        };
+        if !over_client(window, to, compositor) {
+            return InputResponse::Ignored;
+        }
+        let Some(client) = compositor.window_client_rect(window) else {
+            return InputResponse::Ignored;
+        };
+        InputResponse::ClientPointerMoved {
+            window,
+            local: client_local(to, client),
         }
     }
 
@@ -784,6 +862,15 @@ impl InputRouter {
             }
             return InputResponse::FurniturePressed { window };
         }
+        if let Some(window) = self.client_grab.take() {
+            let Some(client) = compositor.window_client_rect(window) else {
+                return InputResponse::Ignored;
+            };
+            return InputResponse::ClientPointerReleased {
+                window,
+                local: client_local(self.pointer, client),
+            };
+        }
         match self.grab.take() {
             Some(grab) => InputResponse::MoveEnded {
                 window: grab.window,
@@ -872,4 +959,37 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
     let width = u32::try_from(right - left).unwrap_or(0);
     let height = u32::try_from(bottom - top).unwrap_or(0);
     Rect::new(left, top, width, height)
+}
+
+/// Whether `point` over `window` falls on the client content rather than
+/// window furniture (the outer frame, title bar, or a root-viewport
+/// scrollbar). An undecorated window with no root viewport is all client.
+fn over_client(window: WindowId, point: Point, compositor: &Compositor) -> bool {
+    if let Some(part) = compositor.frame_hit(window, point) {
+        if !matches!(part, FurniturePart::Client) {
+            return false;
+        }
+    }
+    if let Some(hit) = compositor.furniture_hit(window, point) {
+        if !matches!(hit, FurnitureHit::Client) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The client-local position of screen `point`, clamped into `client`.
+///
+/// A hover already lands inside the client, so the clamp is a no-op there; it
+/// matters during a client pointer grab, where the pointer may leave the
+/// window and the delivered position must stay a valid in-content coordinate
+/// (so an in-content drag keeps tracking the grabbed edge rather than jumping
+/// or wrapping). The result is always non-negative, so the session can encode
+/// it as the unsigned window-local pixels the pointer event carries.
+fn client_local(point: Point, client: Rect) -> Point {
+    let max_x = client.right().saturating_sub(1).max(client.left());
+    let max_y = client.bottom().saturating_sub(1).max(client.top());
+    let x = point.x.clamp(client.left(), max_x) - client.left();
+    let y = point.y.clamp(client.top(), max_y) - client.top();
+    Point::new(x, y)
 }

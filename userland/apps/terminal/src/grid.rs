@@ -108,6 +108,69 @@ impl Grid {
         })
     }
 
+    /// Reshape the screen to `cols`×`rows`, preserving the top-left overlap of
+    /// the current contents (a window resize).
+    ///
+    /// Cells inside both the old and new rectangle keep their glyph and pen;
+    /// cells the resize newly exposes are blank; cells it drops are discarded.
+    /// The cursor, the saved cursor, and the scroll region are clamped into the
+    /// new bounds (the scroll region reset to the full screen, as a real tty
+    /// does on `TIOCSWINSZ`), and any active alternate screen is reshaped the
+    /// same way so its state stays consistent. Returns `false`, changing
+    /// nothing, for a zero/oversized dimension or a no-op resize (fail closed).
+    #[must_use]
+    pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
+        if cols == 0 || rows == 0 || cols > MAX_DIMENSION || rows > MAX_DIMENSION {
+            return false;
+        }
+        if cols == self.cols && rows == self.rows {
+            return false;
+        }
+        self.cells = Self::reshape_cells(&self.cells, self.cols, self.rows, cols, rows);
+        if let Some(alt) = self.alternate.as_mut() {
+            alt.cells = Self::reshape_cells(&alt.cells, self.cols, self.rows, cols, rows);
+            alt.cursor_col = alt.cursor_col.min(cols - 1);
+            alt.cursor_row = alt.cursor_row.min(rows - 1);
+            alt.scroll_top = 0;
+            alt.scroll_bottom = rows - 1;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.cursor_col = self.cursor_col.min(cols - 1);
+        self.cursor_row = self.cursor_row.min(rows - 1);
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
+        if let Some(saved) = self.saved_cursor.as_mut() {
+            saved.col = saved.col.min(cols - 1);
+            saved.row = saved.row.min(rows - 1);
+        }
+        true
+    }
+
+    /// A fresh `cols`×`rows` cell buffer holding the top-left overlap of
+    /// `old` (an `old_cols`×`old_rows` buffer); newly exposed cells are blank.
+    fn reshape_cells(
+        old: &[Cell],
+        old_cols: u16,
+        old_rows: u16,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<Cell> {
+        let mut out = vec![Cell::BLANK; usize::from(cols) * usize::from(rows)];
+        let copy_rows = old_rows.min(rows);
+        let copy_cols = old_cols.min(cols);
+        for r in 0..copy_rows {
+            for c in 0..copy_cols {
+                let src = usize::from(r) * usize::from(old_cols) + usize::from(c);
+                let dst = usize::from(r) * usize::from(cols) + usize::from(c);
+                if let (Some(&cell), Some(slot)) = (old.get(src), out.get_mut(dst)) {
+                    *slot = cell;
+                }
+            }
+        }
+        out
+    }
+
     /// The number of columns.
     #[must_use]
     pub const fn cols(&self) -> u16 {

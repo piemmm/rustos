@@ -519,6 +519,11 @@ impl DesktopShell {
             | InputResponse::Key { .. }
             | InputResponse::Scrolled { .. }
             | InputResponse::AppScroll { .. }
+            // A client-area hover/drag/release acts on the already-focused
+            // window (the press that armed the grab moved focus), so none of
+            // them changes the highlighted task.
+            | InputResponse::ClientPointerMoved { .. }
+            | InputResponse::ClientPointerReleased { .. }
             | InputResponse::Ignored => return,
         };
         if self.tasks.sync_focus(self.session.taskbar_mut(), focus) {
