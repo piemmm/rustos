@@ -114,6 +114,7 @@
 pub mod backtrace;
 pub mod conformance;
 pub mod context;
+pub mod coreclock;
 pub mod cpucycles;
 pub mod cpufeatures;
 pub mod entropy;
@@ -150,6 +151,10 @@ pub use cpufeatures::{
 };
 
 pub use cpucycles::{conformance as cpucycles_conformance, CpuCycles};
+
+pub use coreclock::{
+    conformance as coreclock_conformance, frequency_hz, CoreClock, CoreClockSupport,
+};
 
 pub use entropy::{
     conformance as entropy_conformance, EntropyEntry, EntropyProfile, EntropySupport,

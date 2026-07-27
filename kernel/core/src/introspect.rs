@@ -189,6 +189,21 @@ pub trait IntrospectSource: Sync {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn cpu_load(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records`
+    /// [`tairix_abi::sysinfo::CpuInfoRecord`]s beginning at CPU index
+    /// `offset`, in ascending CPU order, packed little-endian
+    /// back-to-back: the `/proc/cpuinfo`-class hardware facts for each
+    /// online core — performance class, ISA-extension feature bits, the
+    /// raw identity register, the model/vendor name, the fixed
+    /// reference/timebase frequency, and the live measured core-clock
+    /// frequency. An `offset` past the last CPU returns an empty `Vec` (the
+    /// paging terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn cpu_info(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 }
 
 /// The fail-closed default installed before the binding kernel wires the real
@@ -247,6 +262,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn cpu_load(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn cpu_info(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

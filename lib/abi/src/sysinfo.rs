@@ -286,6 +286,20 @@ impl SysinfoQueryId {
     /// (`plans/NETWORK.md` §5, §6.3).
     pub const NET_BOND_MEMBERS: Self = Self(24);
 
+    /// List per-CPU processor information: one [`CpuInfoRecord`] per online
+    /// CPU (core index, performance class, ISA-extension feature bits, raw
+    /// identity register, the fixed reference/timebase frequency, and the
+    /// live measured core-clock frequency), paged by a [`CpuInfoListRequest`].
+    ///
+    /// Ungated: vendor, model, ISA features, topology, and clock speed are
+    /// the classic `/proc/cpuinfo` public hardware facts every user may read
+    /// — like [`Self::CPU_TIME_STATS`] they expose no per-task, per-user, or
+    /// kernel-internal secret. The live frequency is a measured hardware
+    /// property, not an address-space or credential oracle. (This differs
+    /// from [`Self::CPU_LOAD`], whose queue depths and preemption counters
+    /// are scheduler internals gated on `CAP_SYSINFO_KERNEL`.)
+    pub const CPU_INFO: Self = Self(25);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -376,6 +390,11 @@ pub enum IntrospectDomain {
     /// one packed [`CrashRecord`], with the syscall's `arg` naming the
     /// record offset to page from.
     Crashes = 15,
+    /// Per-CPU processor information: every online CPU, one packed
+    /// [`CpuInfoRecord`] (class, ISA features, identity, reference and live
+    /// core-clock frequency), with the syscall's `arg` naming the record
+    /// offset to page from.
+    CpuInfo = 16,
 }
 
 impl IntrospectDomain {
@@ -406,6 +425,7 @@ impl IntrospectDomain {
             13 => Ok(Self::CpuLoad),
             14 => Ok(Self::Irqs),
             15 => Ok(Self::Crashes),
+            16 => Ok(Self::CpuInfo),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -609,6 +629,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "net_bond_members",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CPU_INFO,
+        name: "cpu_info",
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -3048,6 +3074,258 @@ impl CpuLoadRecord {
     }
 }
 
+/// The performance class of a CPU reported in a [`CpuInfoRecord`].
+///
+/// The `sysinfo-v1` mirror of the kernel's core-class discriminant
+/// (`tairix_arch_api::CoreClass`), defined here so the ABI carries no edge
+/// to a `kernel/*` crate. A homogeneous machine reports every CPU as
+/// [`CpuCoreClass::Performance`].
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum CpuCoreClass {
+    /// A high-throughput core (Intel "Core" / ARM "big"), the default on a
+    /// homogeneous machine.
+    #[default]
+    Performance = 0,
+    /// A low-power efficiency core (Intel "Atom" / ARM "LITTLE").
+    Efficiency = 1,
+}
+
+impl CpuCoreClass {
+    /// Raw discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a raw discriminant, failing closed on an unknown value.
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value outside the closed set.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Performance),
+            1 => Ok(Self::Efficiency),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Request payload for [`SysinfoQueryId::CPU_INFO`].
+///
+/// Same paging shape as [`CpuLoadRequest`]: `offset` names the first CPU
+/// index to return and `limit` bounds the page. Each `sysinfo-v1` query
+/// owns its own frozen payload type.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuInfoListRequest {
+    /// Index of the first CPU to return.
+    pub offset: u32,
+    /// Maximum number of [`CpuInfoRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl CpuInfoListRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// Maximum length, in bytes, of the model/vendor name in a [`CpuInfoRecord`].
+///
+/// A fixed field (a bound, not a scaling capacity): ample for the longest
+/// x86 brand string (`Intel(R) Core(TM) …`, 48 bytes) and every ARM/RISC-V
+/// part name. A longer discovered name is rejected at construction rather
+/// than truncated silently (fail closed).
+pub const CPU_MODEL_NAME_MAX: usize = 48;
+
+/// [`CpuInfoRecord::flags`] bit: [`CpuInfoRecord::current_freq_hz`] is a
+/// live *measured* frequency. When clear, the core clock could not be
+/// measured on this CPU (no core-clock counter, or no sample taken yet) and
+/// `current_freq_hz` is `0` — the honest unknown, never a fabricated rate.
+pub const CPU_INFO_FLAG_FREQ_MEASURED: u8 = 1 << 0;
+
+/// One CPU's processor information inside a [`SysinfoQueryId::CPU_INFO`]
+/// response — the `/proc/cpuinfo`-class hardware facts for one online core.
+///
+/// Every field is filled from kernel-attested hardware state: the ISA
+/// feature bits and identity register read from the silicon, and the live
+/// frequency measured by the kernel's per-CPU estimator (the core-clock /
+/// reference-counter ratio). `current_freq_hz` is `0` and
+/// [`CPU_INFO_FLAG_FREQ_MEASURED`] clear when the core clock could not be
+/// measured; `reference_hz` is the fixed reference/timebase frequency (`0`
+/// when unknown).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CpuInfoRecord {
+    /// The CPU index this record describes.
+    pub cpu: u32,
+    /// The CPU's performance class ([`CpuCoreClass`]).
+    pub class: CpuCoreClass,
+    /// State bits ([`CPU_INFO_FLAG_FREQ_MEASURED`]); other bits reserved zero.
+    pub flags: u8,
+    /// Valid byte length of [`Self::model`] (`<= CPU_MODEL_NAME_MAX`).
+    pub model_len: u8,
+    /// The raw ISA feature bitset (`tairix_abi::cpufeatures::CpuFeatureSet`
+    /// bits) this core implements.
+    pub feature_bits: u64,
+    /// The raw per-core identity register (aarch64 `MIDR_EL1`, the x86 CPUID
+    /// signature, riscv64 `mvendorid:marchid:mimpid`); `0` when the port has
+    /// no such register.
+    pub raw_id: u64,
+    /// Live measured core-clock frequency in Hz, or `0` when unmeasured (see
+    /// [`CPU_INFO_FLAG_FREQ_MEASURED`]).
+    pub current_freq_hz: u64,
+    /// The fixed reference/timebase frequency in Hz, or `0` when unknown.
+    pub reference_hz: u64,
+    /// The model/vendor name, UTF-8, `model_len` bytes valid.
+    pub model: [u8; CPU_MODEL_NAME_MAX],
+}
+
+impl CpuInfoRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 40 + CPU_MODEL_NAME_MAX;
+
+    /// Construct a record, validating the model name fits the fixed field.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `model` exceeds [`CPU_MODEL_NAME_MAX`].
+    // A CPU record is eight independent scalar/identity fields; threading them
+    // through a builder would be gratuitous indirection for a frozen wire type.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        cpu: u32,
+        class: CpuCoreClass,
+        flags: u8,
+        feature_bits: u64,
+        raw_id: u64,
+        current_freq_hz: u64,
+        reference_hz: u64,
+        model: &[u8],
+    ) -> Result<Self, Errno> {
+        // `CPU_MODEL_NAME_MAX` is 48, so a fitting length always converts
+        // without truncation; a longer name fails closed here.
+        let model_len = u8::try_from(model.len()).map_err(|_| Errno::OutOfRange)?;
+        if usize::from(model_len) > CPU_MODEL_NAME_MAX {
+            return Err(Errno::OutOfRange);
+        }
+        let mut model_buf = [0u8; CPU_MODEL_NAME_MAX];
+        model_buf[..model.len()].copy_from_slice(model);
+        Ok(Self {
+            cpu,
+            class,
+            flags,
+            model_len,
+            feature_bits,
+            raw_id,
+            current_freq_hz,
+            reference_hz,
+            model: model_buf,
+        })
+    }
+
+    /// The valid model-name bytes.
+    #[must_use]
+    pub fn model_bytes(&self) -> &[u8] {
+        &self.model[..self.model_len as usize]
+    }
+
+    /// Whether the live frequency was actually measured.
+    #[must_use]
+    pub const fn freq_measured(&self) -> bool {
+        self.flags & CPU_INFO_FLAG_FREQ_MEASURED != 0
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.cpu);
+        out[4] = self.class.as_u8();
+        out[5] = self.flags;
+        out[6] = self.model_len;
+        // out[7] reserved zero.
+        put_u64(&mut out, 8, self.feature_bits);
+        put_u64(&mut out, 16, self.raw_id);
+        put_u64(&mut out, 24, self.current_freq_hz);
+        put_u64(&mut out, 32, self.reference_hz);
+        out[40..40 + CPU_MODEL_NAME_MAX].copy_from_slice(&self.model);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if the reserved byte or an unknown `flags` bit
+    ///   is set.
+    /// * [`Errno::OutOfRange`] if `class` is unknown or `model_len` exceeds
+    ///   the field (fail closed on a corrupt wire).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[7] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let flags = bytes[5];
+        if flags & !CPU_INFO_FLAG_FREQ_MEASURED != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let class = CpuCoreClass::from_u8(bytes[4])?;
+        let model_len = bytes[6];
+        if model_len as usize > CPU_MODEL_NAME_MAX {
+            return Err(Errno::OutOfRange);
+        }
+        let mut model = [0u8; CPU_MODEL_NAME_MAX];
+        model.copy_from_slice(&bytes[40..40 + CPU_MODEL_NAME_MAX]);
+        Ok(Self {
+            cpu: read_u32(bytes, 0),
+            class,
+            flags,
+            model_len,
+            feature_bits: read_u64(bytes, 8),
+            raw_id: read_u64(bytes, 16),
+            current_freq_hz: read_u64(bytes, 24),
+            reference_hz: read_u64(bytes, 32),
+            model,
+        })
+    }
+}
+
 /// Request payload for [`SysinfoQueryId::IRQ_LIST`].
 ///
 /// Identical paging shape to [`SeatListRequest`]: `offset` names the first
@@ -3740,6 +4018,10 @@ mod tests {
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
     use super::{
+        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED,
+        CPU_MODEL_NAME_MAX,
+    };
+    use super::{
         CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, CrashRecordRequest,
         CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
@@ -3789,6 +4071,16 @@ mod tests {
             Some(CapabilityId::SYSINFO_GLOBAL)
         );
         assert!(spec_for(SysinfoQueryId::NET_BOND_MEMBERS).unwrap().audit);
+        assert_eq!(SysinfoQueryId::CPU_INFO.as_u16(), 25);
+        // The `/proc/cpuinfo`-class query is ungated and unaudited: public
+        // hardware facts, no cross-principal secret.
+        assert_eq!(
+            spec_for(SysinfoQueryId::CPU_INFO)
+                .unwrap()
+                .required_capability,
+            None
+        );
+        assert!(!spec_for(SysinfoQueryId::CPU_INFO).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -3846,12 +4138,13 @@ mod tests {
             (13, IntrospectDomain::CpuLoad),
             (14, IntrospectDomain::Irqs),
             (15, IntrospectDomain::Crashes),
+            (16, IntrospectDomain::CpuInfo),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(16), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(17), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -4917,6 +5210,91 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 1;
         assert_eq!(CpuLoadRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn cpu_info_list_request_round_trips_and_rejects_reserved() {
+        let req = CpuInfoListRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        assert_eq!(CpuInfoListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(CpuInfoListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            CpuInfoListRequest::from_bytes(&[0u8; CpuInfoListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn cpu_core_class_round_trips_and_fails_closed() {
+        for c in [CpuCoreClass::Performance, CpuCoreClass::Efficiency] {
+            assert_eq!(CpuCoreClass::from_u8(c.as_u8()), Ok(c));
+        }
+        assert_eq!(CpuCoreClass::from_u8(2), Err(Errno::OutOfRange));
+        assert_eq!(CpuCoreClass::from_u8(255), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn cpu_info_record_round_trips_and_fails_closed() {
+        let record = CpuInfoRecord::new(
+            2,
+            CpuCoreClass::Efficiency,
+            CPU_INFO_FLAG_FREQ_MEASURED,
+            0x0000_0000_00A5_00A5,
+            0x410F_D083,
+            1_512_000_000,
+            54_000_000,
+            b"ARM Cortex-A72",
+        )
+        .expect("model fits");
+        let decoded = CpuInfoRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.model_bytes(), b"ARM Cortex-A72");
+        assert!(decoded.freq_measured());
+        assert_eq!(decoded.current_freq_hz, 1_512_000_000);
+        assert_eq!(decoded.reference_hz, 54_000_000);
+
+        // An unmeasured frequency: flag clear, zero rate — the honest unknown.
+        let unmeasured =
+            CpuInfoRecord::new(0, CpuCoreClass::Performance, 0, 0, 0, 0, 0, b"").expect("empty ok");
+        assert!(!unmeasured.freq_measured());
+        assert_eq!(unmeasured.model_bytes(), b"");
+        assert_eq!(
+            CpuInfoRecord::from_bytes(&unmeasured.to_le_bytes()),
+            Ok(unmeasured)
+        );
+
+        // A model name exactly at the cap round-trips; one over is rejected.
+        let max_name = [b'x'; CPU_MODEL_NAME_MAX];
+        assert!(CpuInfoRecord::new(0, CpuCoreClass::Performance, 0, 0, 0, 0, 0, &max_name).is_ok());
+        let over = [b'x'; CPU_MODEL_NAME_MAX + 1];
+        assert_eq!(
+            CpuInfoRecord::new(0, CpuCoreClass::Performance, 0, 0, 0, 0, 0, &over),
+            Err(Errno::OutOfRange)
+        );
+
+        // Fail-closed decode paths: short buffer, reserved byte, unknown flag
+        // bit, unknown class, overlong model length.
+        assert_eq!(
+            CpuInfoRecord::from_bytes(&[0u8; CpuInfoRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bytes = record.to_le_bytes();
+        bytes[7] = 1;
+        assert_eq!(CpuInfoRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        let mut bytes = record.to_le_bytes();
+        bytes[5] = 0x80;
+        assert_eq!(CpuInfoRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        let mut bytes = record.to_le_bytes();
+        bytes[4] = 9;
+        assert_eq!(CpuInfoRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        let mut bytes = record.to_le_bytes();
+        bytes[6] = u8::try_from(CPU_MODEL_NAME_MAX + 1).expect("fits u8");
+        assert_eq!(CpuInfoRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
     #[test]

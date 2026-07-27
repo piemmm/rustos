@@ -24,7 +24,7 @@
 
 use alloc::sync::Arc;
 
-use tairix_arch_api::{ContextSwitch, CpuFeatures, PlatformEntropy, SecondaryBringup};
+use tairix_arch_api::{ContextSwitch, CoreClock, CpuFeatures, PlatformEntropy, SecondaryBringup};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use tairix_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
@@ -227,6 +227,24 @@ pub trait KernelArch: SchedulerArch {
     /// simply contributes nothing, so the delivered common set stays empty and
     /// every process falls closed to the portable baseline (never a trap).
     fn cpu_features(&self) -> Option<&dyn CpuFeatures> {
+        None
+    }
+
+    /// The port's live-core-frequency source (the Arch HAL `coreclock`
+    /// slice), when it can read a counter that advances at the actual
+    /// (DVFS-varying) core clock.
+    ///
+    /// [`crate::kernel_main`] enables it on the boot CPU and installs it into
+    /// the per-CPU frequency estimator ([`crate::cpufreq`]); each secondary
+    /// enables it as it comes up. The estimator samples the returned counter
+    /// pair at the preemption tick and reports the live clock through the
+    /// System Information API.
+    ///
+    /// The default is `None` — a port without the slice (the host test arch)
+    /// simply contributes no frequency source, so the estimator reports no
+    /// live frequency (fail closed, never a fabricated rate) and readers fall
+    /// back to the discovered nominal frequency.
+    fn core_clock(&self) -> Option<&dyn CoreClock> {
         None
     }
 

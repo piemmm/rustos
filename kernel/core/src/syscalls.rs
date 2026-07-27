@@ -77,9 +77,9 @@ use crate::sched::{CpuId, SchedClass, SchedError, Scheduler, SchedulerArch};
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord,
-    IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord, UserDirectoryRecord,
-    CRASH_MAX_FRAMES,
+    CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashNamedReg,
+    CrashRecord, IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
+    UserDirectoryRecord, CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
@@ -5740,6 +5740,13 @@ where
                 }
                 let max_records = out_cap / CpuLoadRecord::WIRE_LEN;
                 self.introspect.cpu_load(arg, max_records)?
+            }
+            IntrospectDomain::CpuInfo => {
+                if out_cap < CpuInfoRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / CpuInfoRecord::WIRE_LEN;
+                self.introspect.cpu_info(arg, max_records)?
             }
             IntrospectDomain::Irqs => {
                 if out_cap < IrqRecord::WIRE_LEN {
@@ -22884,6 +22891,13 @@ mod tests {
             Err(Errno::NotImplemented)
         }
         fn cpu_load(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn cpu_info(
             &self,
             _offset: u64,
             _max_records: usize,

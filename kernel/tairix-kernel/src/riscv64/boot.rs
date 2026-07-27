@@ -277,6 +277,19 @@ impl KernelArch for RiscvBinArch {
         Some(&DETECT)
     }
 
+    fn core_clock(&self) -> Option<&dyn tairix_arch_api::CoreClock> {
+        // The riscv64 `rdcycle` core-clock counter over the `rdtime` /
+        // `timebase-frequency` reference: the kernel's per-CPU estimator
+        // divides the two counters' deltas to report the live "cpu MHz".
+        // Publish the discovered `timebase-frequency` (there is no CSR that
+        // reports it) so the ratio has its scale; the handle itself is a
+        // stateless `const` value, so a `'static` reference to it is sound.
+        tairix_arch_riscv64::coreclock::set_reference_hz(self.arch.timebase_hz());
+        const CLOCK: tairix_arch_riscv64::coreclock::CoreClockCounter =
+            tairix_arch_riscv64::coreclock::CoreClockCounter::new();
+        Some(&CLOCK)
+    }
+
     fn cpu_name(&self) -> Option<tairix_abi::CpuName> {
         // Captured from the device tree at construction; an unlisted or
         // generic (`riscv`) compatible stays an honest `None` (the boot

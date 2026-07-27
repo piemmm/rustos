@@ -374,6 +374,19 @@ impl KernelArch for Aarch64BinArch {
         Some(&DETECT)
     }
 
+    fn core_clock(&self) -> Option<&dyn tairix_arch_api::CoreClock> {
+        // The aarch64 `PMCCNTR_EL0` core-clock counter (over the
+        // `CNTVCT_EL0`/`CNTFRQ_EL0` reference): the kernel's per-CPU estimator
+        // divides the two counters' deltas to report the live "cpu MHz". A
+        // core with no architected PMU declares itself unsupported and reads
+        // zero, so the estimator reports nothing rather than a fabricated
+        // rate. The handle is a stateless `const` value, so a `'static`
+        // reference to it is sound.
+        const CLOCK: tairix_arch_aarch64::coreclock::CoreClockCounter =
+            tairix_arch_aarch64::coreclock::CoreClockCounter::new();
+        Some(&CLOCK)
+    }
+
     fn secondary_bringup(&self) -> Option<&dyn SecondaryBringup> {
         // The arch handle is the bring-up surface (`SecondaryBringup`):
         // PSCI `CPU_ON` or the Devicetree spin-table release, whichever

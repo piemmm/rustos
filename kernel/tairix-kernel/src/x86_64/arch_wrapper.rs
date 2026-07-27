@@ -401,6 +401,19 @@ impl KernelArch for BinArch {
         Some(&DETECT)
     }
 
+    fn core_clock(&self) -> Option<&dyn tairix_arch_api::CoreClock> {
+        // The x86_64 `IA32_APERF`/`IA32_MPERF` effective-frequency pair over
+        // the calibrated TSC reference: the kernel's per-CPU estimator divides
+        // the two counters' deltas to report the live "cpu MHz", turbo and
+        // throttling included. A CPU without the feedback pair (many QEMU TCG
+        // models) declares itself unsupported and reads zero, so the estimator
+        // reports nothing rather than a fabricated rate. The handle is a
+        // stateless `const` value, so a `'static` reference to it is sound.
+        const CLOCK: tairix_arch_x86_64::coreclock::CoreClockCounter =
+            tairix_arch_x86_64::coreclock::CoreClockCounter::new();
+        Some(&CLOCK)
+    }
+
     fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
         // x86_64 seeds the kernel CSPRNG reserve from RDSEED/RDRAND. The
         // handle is zero-sized, so a `'static` instance suffices; whether

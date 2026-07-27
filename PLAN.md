@@ -6216,6 +6216,17 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-27 — Arch HAL `CoreClock` live-frequency slice.** Amended §17.2 to
+  enumerate a new closed Arch HAL slice, `CoreClock`, after the System
+  Information API needed to report each CPU's *live* clock speed and the
+  existing `CpuCycles` counter turned out to be a fixed-rate *reference* clock
+  (`CNTVCT`/`time` CSR/invariant TSC) that cannot track DVFS. `CoreClock` adds
+  a genuine core-clock counter per port (aarch64 `PMCCNTR_EL0`, x86_64
+  `APERF`/`MPERF`, riscv64 `rdcycle`; wasm32/host honestly unsupported) over
+  the fixed reference; the kernel's per-CPU estimator divides the two deltas
+  (`Δcore·ref_hz/Δref`) at the preemption tick to publish an honest measured
+  frequency, never a fabricated one.
+
 - **2026-07-21 — First-party Rust boot chain.** Amended §3 (added `lib/bootload`,
   `lib/multiboot2`, and the planned `boot/` per-firmware shells), §12 (a
   boot-chain note), and the §15.18 jump-sheet (a `plans/BOOTLOADER.md` row),

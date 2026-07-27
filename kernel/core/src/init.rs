@@ -321,6 +321,19 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         }],
     );
 
+    // Install the port's live-core-frequency source (the Arch HAL `coreclock`
+    // slice) and enable it on the boot CPU; each secondary enables it on
+    // itself as it comes up. The per-CPU estimator then samples the
+    // core/reference counter pair at every preemption tick and reports the
+    // live "cpu MHz" through the System Information API. A port without the
+    // slice installs nothing, so the estimator reports no frequency and
+    // readers fall back to the discovered nominal figure (fail closed). The
+    // handle is read from the leaked-`'static` kernel state, so it outlives
+    // the estimator's set-once install.
+    if let Some(core_clock) = state.arch.core_clock() {
+        crate::cpufreq::install(core_clock);
+    }
+
     // Bring the remaining discovered CPUs online now that every init
     // phase has succeeded: the scheduler, IRQ dispatch, and syscall hook
     // are live, so a started core can immediately join the shared
@@ -559,6 +572,11 @@ impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryD
         if let Some(cpu_features) = self.state.arch.cpu_features() {
             crate::cpuops::contribute(cpu_features.detect(cpu));
         }
+        // Runs on the secondary itself as it comes up (a core can only read
+        // and arm its own counters), so this is where a per-CPU core-clock
+        // counter (aarch64 `PMCCNTR_EL0`) is enabled on this core; a no-op on
+        // a port with no core-clock slice or an already-global counter.
+        crate::cpufreq::enable_this_cpu();
     }
 
     fn mark_online(&self, cpu: CpuId) {

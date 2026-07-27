@@ -17,8 +17,8 @@ use tairix_abi::net_ipc::{
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
+    CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
+    LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
     ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use tairix_abi::time::Duration64;
@@ -211,6 +211,19 @@ pub trait SysinfoSource {
     /// whole and [`crate::serve`] applies the `offset`/`limit` paging;
     /// ordering must be stable across paged calls.
     fn cpu_load(&self, caller: &Caller) -> Result<Vec<CpuLoadRecord>, Errno>;
+
+    /// Return the per-CPU processor information (`/proc/cpuinfo`-class
+    /// facts): one record per online CPU in ascending CPU order —
+    /// performance class, ISA-extension feature bits, the raw identity
+    /// register, the model/vendor name, the fixed reference/timebase
+    /// frequency, and the live measured core-clock frequency.
+    ///
+    /// Ungated (needs no capability): vendor, model, features, topology,
+    /// and clock speed are public hardware facts, like
+    /// [`cpu_times`](Self::cpu_times). The owned list is returned whole and
+    /// [`crate::serve`] applies the `offset`/`limit` paging; ordering must
+    /// be stable across paged calls.
+    fn cpu_info(&self, caller: &Caller) -> Result<Vec<CpuInfoRecord>, Errno>;
 
     /// Return the seat inventory: one record per seat, in ascending seat-id
     /// order (`plans/DISPLAY.md` D3).

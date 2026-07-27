@@ -117,6 +117,18 @@ pub(crate) struct CpuState {
     /// cadence that is already firing on the CPU. Distinct from
     /// [`Self::preempt_pending`], which is gated on a runnable competitor.
     pub(crate) force_yield: AtomicBool,
+    /// Live-core-frequency estimator: the Arch HAL `coreclock` core-cycle
+    /// counter value read at this CPU's previous frequency sample (`0` = no
+    /// prior sample yet). [`crate::cpufreq`] samples the core/reference
+    /// counter pair at the preemption tick and stores the ratio.
+    pub(crate) freq_last_core: AtomicU64,
+    /// The fixed-rate reference counter value read alongside
+    /// [`Self::freq_last_core`] at the previous sample.
+    pub(crate) freq_last_ref: AtomicU64,
+    /// The most recent measured live core frequency of this CPU, in Hz. `0`
+    /// means "not yet measured" — the honest unknown, never a fabricated
+    /// rate; a reader then falls back to the discovered nominal frequency.
+    pub(crate) freq_hz: AtomicU64,
     /// Watchdog **kernel-activity breadcrumb** — the site tag of the last
     /// in-kernel region this CPU *itself* entered (a
     /// [`crate::watchdog::KernelBreadcrumb`] encoded as `u8`), published by
@@ -214,6 +226,9 @@ impl CpuState {
             wd_ctx_aux: AtomicU64::new(0),
             wd_ctx_in_kernel: AtomicBool::new(false),
             force_yield: AtomicBool::new(false),
+            freq_last_core: AtomicU64::new(0),
+            freq_last_ref: AtomicU64::new(0),
+            freq_hz: AtomicU64::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
             kbc_site: AtomicU8::new(0),
             #[cfg(feature = "watchdog-diagnostics")]

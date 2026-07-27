@@ -7,11 +7,12 @@ use tairix_abi::net_ipc::{
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
-    spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashRecord,
-    CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
-    MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest,
-    ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    spec_for, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
+    CpuTimeRecord, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
+    MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
+    ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    UserDirectoryRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -176,6 +177,8 @@ fn dispatch(
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::CPU_LOAD {
         cpu_load_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::CPU_INFO {
+        cpu_info_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_FACTS {
         net_facts_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_STATE {
@@ -473,6 +476,26 @@ fn cpu_load_list(
     )
 }
 
+/// Decode the [`CpuInfoListRequest`], apply paging, and pack the selected
+/// [`CpuInfoRecord`]s into `response`.
+fn cpu_info_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = CpuInfoListRequest::from_bytes(payload)?;
+    let records = source.cpu_info(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        CpuInfoRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`CpuTimeListRequest`], apply paging, and pack the selected
 /// [`CpuTimeRecord`]s into `response`.
 fn cpu_time_list(
@@ -647,12 +670,12 @@ mod tests {
         NetSocketRecord,
     };
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket,
-        CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest,
-        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability,
-        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
+        CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
+        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
         MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
         SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
@@ -970,6 +993,19 @@ mod tests {
         }
         fn cpu_load(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuLoadRecord>, Errno> {
             Ok(fixture_cpu_load())
+        }
+        fn cpu_info(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuInfoRecord>, Errno> {
+            Ok(alloc::vec![CpuInfoRecord::new(
+                0,
+                tairix_abi::sysinfo::CpuCoreClass::Performance,
+                tairix_abi::sysinfo::CPU_INFO_FLAG_FREQ_MEASURED,
+                0xA5,
+                0x410F_D083,
+                1_512_000_000,
+                54_000_000,
+                b"ARM Cortex-A72",
+            )
+            .unwrap()])
         }
         fn seats(&self, _caller: &Caller) -> Result<alloc::vec::Vec<SeatRecord>, Errno> {
             Ok(alloc::vec![SeatRecord {

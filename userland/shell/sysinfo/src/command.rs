@@ -44,6 +44,11 @@ pub enum Command {
     /// Read the per-CPU scheduler load figures, one row per CPU
     /// (`CPU_LOAD`, gated on `CAP_SYSINFO_KERNEL`).
     CpuLoad,
+    /// Read the per-CPU processor information — vendor/model, performance
+    /// class, ISA-extension flags, identity, and the live core-clock and
+    /// reference frequencies — the `/proc/cpuinfo`-class report
+    /// (`CPU_INFO`, ungated).
+    CpuInfo,
     /// List the kernel IRQ table, one row per bound interrupt line — the
     /// line id, the owning driver task, the interrupt count since boot, and
     /// whether the line is quarantined (`IRQ_LIST`, which the service gates
@@ -81,6 +86,7 @@ pub enum Command {
 /// | `reclaim`             | [`Command::Reclaim`]             |
 /// | `ramzip`              | [`Command::Ramzip`]              |
 /// | `cpu`                 | [`Command::CpuLoad`]             |
+/// | `cpuinfo`             | [`Command::CpuInfo`]             |
 /// | `irq`, `irqs`         | [`Command::Irqs`]                |
 ///
 /// # Errors
@@ -103,6 +109,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "reclaim" => no_more(rest).map(|()| Command::Reclaim),
         "ramzip" => no_more(rest).map(|()| Command::Ramzip),
         "cpu" => no_more(rest).map(|()| Command::CpuLoad),
+        "cpuinfo" => no_more(rest).map(|()| Command::CpuInfo),
         "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
         _ => Err(SysinfoError::Usage),
     }
@@ -173,6 +180,7 @@ mod tests {
         assert_eq!(parse(&["reclaim"]), Ok(Command::Reclaim));
         assert_eq!(parse(&["ramzip"]), Ok(Command::Ramzip));
         assert_eq!(parse(&["cpu"]), Ok(Command::CpuLoad));
+        assert_eq!(parse(&["cpuinfo"]), Ok(Command::CpuInfo));
         assert_eq!(parse(&["irq"]), Ok(Command::Irqs));
         assert_eq!(parse(&["irqs"]), Ok(Command::Irqs));
     }

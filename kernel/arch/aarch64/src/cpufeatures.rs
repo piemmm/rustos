@@ -231,25 +231,10 @@ impl CpuCycleCounter {
 
 impl CpuCycles for CpuCycleCounter {
     fn cpu_cycles(&self) -> u64 {
-        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-        {
-            let cnt: u64;
-            // SAFETY: `CNTVCT_EL0` is the architected generic-timer
-            // virtual count, readable at EL1 with no side effect and
-            // monotonically increasing.
-            unsafe {
-                core::arch::asm!(
-                    "mrs {cnt}, cntvct_el0",
-                    cnt = out(reg) cnt,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
-            cnt
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-        {
-            0
-        }
+        // The generic-timer virtual count is also the reference counter the
+        // core-clock frequency slice divides against, so the register read
+        // lives once in `coreclock` and both handles call it.
+        crate::coreclock::read_cntvct()
     }
 
     fn cycles_monotonic_hint(&self) -> bool {

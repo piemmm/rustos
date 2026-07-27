@@ -100,6 +100,11 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// aarch64 implementation of the Arch HAL core-clock surface
+/// ([`tairix_arch_api::CoreClock`]): the `PMCCNTR_EL0` PMU cycle counter
+/// (core-clock cycles, DVFS-tracking) over the `CNTVCT_EL0`/`CNTFRQ_EL0`
+/// fixed reference, from which the kernel derives the live "cpu MHz".
+pub mod coreclock;
 /// ARMv8-A CoreSight external-debug cross-core PC sampling: the memory-
 /// mapped `EDPCSR` read that observes a hard-locked core's PC without
 /// halting it and over a channel `DAIF` cannot mask — the one live datum a

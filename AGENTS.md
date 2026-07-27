@@ -1886,7 +1886,12 @@ as non-negotiable as §2.
   / `misa` + ISA string / host query — into the arch-neutral
   `CpuFeatureSet` the `lib/cpuops` self-optimising dispatch framework
   gates on, `plans/FIX-HARDWARE-FEATURES.md`), the `CpuCycles` per-core
-  cycle counter that framework's microbenchmark measures over, and the
+  cycle counter that framework's microbenchmark measures over, the
+  `CoreClock` live-frequency source (a *core-clock* cycle counter —
+  aarch64 `PMCCNTR_EL0`, x86_64 `IA32_APERF`/`MPERF`, riscv64 `rdcycle` —
+  over the fixed reference counter, from which the kernel's per-CPU
+  estimator derives the live "cpu MHz" the System Information API reports,
+  `plans/FIX-HARDWARE-FEATURES.md`), and the
   lockup-watchdog non-maskable liveness sample + cross-CPU recovery
   (`plans/WATCHDOG.md`).
   Each slice carries a

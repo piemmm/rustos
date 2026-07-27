@@ -6,11 +6,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-    SysinfoQueryId, SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT,
-    RECLAIM_CLASS_NAMES,
+    CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
+    KernelMemoryStats, MemoryPressureStats, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SystemIdentity, Uptime,
+    PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
 };
 use tairix_abi::{Errno, LimitKind};
 
@@ -40,6 +41,7 @@ queries:
   reclaim             reclaimable-cache ledger per class (needs CAP_SYSINFO_KERNEL)
   ramzip              compressed-tier counters (needs CAP_SYSINFO_KERNEL)
   cpu                 per-CPU queue depth, switches, preemptions (needs CAP_SYSINFO_KERNEL)
+  cpuinfo             per-CPU model, class, flags, and live/reference MHz
   irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
   help, -h, -?        show this help";
 
@@ -79,6 +81,7 @@ pub fn run(
         Command::Reclaim => run_reclaim(transport, out),
         Command::Ramzip => run_ramzip(transport, out),
         Command::CpuLoad => run_cpu_load(transport, out),
+        Command::CpuInfo => run_cpu_info(transport, out),
         Command::Irqs => run_irqs(transport, out),
     }
 }
@@ -458,6 +461,115 @@ fn run_cpu_load(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
     }
 }
 
+/// Format a frequency in Hz as `MHz` with three decimals, using integer
+/// arithmetic (no float in `no_std`): `1_512_000_000` → `1512.000`.
+fn format_mhz(hz: u64) -> String {
+    let whole = hz / 1_000_000;
+    // Milli-MHz: the fractional MHz to three digits (kHz resolution).
+    let milli = (hz % 1_000_000) / 1_000;
+    format!("{whole}.{milli:03}")
+}
+
+/// The lowercase feature-flag list of a [`CpuFeatureSet`], space-separated
+/// in stable bit order — the `/proc/cpuinfo` "flags" line. `(none)` when
+/// the set is empty (the honest answer for a build-time-floor CPU, never a
+/// fabricated flag).
+fn feature_flags(set: CpuFeatureSet) -> String {
+    let mut out = String::new();
+    for feature in CpuFeature::ALL {
+        if set.contains(feature) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(feature.name());
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(none)");
+    }
+    out
+}
+
+/// Render one CPU's `/proc/cpuinfo`-superset block to `out`.
+///
+/// Reports the vendor/model, the performance class, the live measured
+/// core-clock frequency (or an explicit "unknown" when the port drives no
+/// core-clock counter — never a fabricated rate), the fixed
+/// reference/timebase frequency, the raw identity register, and the decoded
+/// ISA-extension flags.
+fn render_cpu_info(record: &CpuInfoRecord, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(out, &format!("processor     : {}", record.cpu))?;
+    let model = name_lossy(record.model_bytes());
+    let model = if model.is_empty() { "unknown" } else { &model };
+    emit(out, &format!("model name    : {model}"))?;
+    let class = match record.class {
+        CpuCoreClass::Performance => "performance",
+        CpuCoreClass::Efficiency => "efficiency",
+    };
+    emit(out, &format!("core class    : {class}"))?;
+    if record.freq_measured() {
+        emit(
+            out,
+            &format!("cpu MHz       : {}", format_mhz(record.current_freq_hz)),
+        )?;
+    } else {
+        // Honest unknown: no core-clock counter on this port, or no sample
+        // taken yet — never a fabricated or nominal figure.
+        emit(out, "cpu MHz       : unknown (no core-clock measurement)")?;
+    }
+    if record.reference_hz != 0 {
+        emit(
+            out,
+            &format!("reference MHz : {}", format_mhz(record.reference_hz)),
+        )?;
+    }
+    emit(out, &format!("identity      : {:#018x}", record.raw_id))?;
+    emit(
+        out,
+        &format!(
+            "flags         : {}",
+            feature_flags(CpuFeatureSet::from_bits(record.feature_bits))
+        ),
+    )
+}
+
+/// Fetch and render the per-CPU processor information, one
+/// `/proc/cpuinfo`-style block per CPU separated by a blank line. One page
+/// carries every CPU a machine has today; the request's `limit` bounds it
+/// explicitly and a second page continues the walk. Ungated — the facts are
+/// the public hardware view every user may read.
+fn run_cpu_info(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    /// Records requested per page: bounds the reply size without bounding
+    /// how many CPUs the machine may have.
+    const PAGE: u16 = 64;
+    let mut offset: u32 = 0;
+    let mut first = true;
+    loop {
+        let request = CpuInfoListRequest {
+            offset,
+            limit: PAGE,
+            flags: 0,
+        };
+        let reply = service_call(transport, SysinfoQueryId::CPU_INFO, &request.to_le_bytes())?;
+        if reply.len() % CpuInfoRecord::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / CpuInfoRecord::WIRE_LEN;
+        for chunk in reply.chunks_exact(CpuInfoRecord::WIRE_LEN) {
+            let record = CpuInfoRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            if !first {
+                emit(out, "")?;
+            }
+            first = false;
+            render_cpu_info(&record, out)?;
+        }
+        if records < usize::from(PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(PAGE));
+    }
+}
+
 /// Fetch and render the kernel IRQ table, one aligned row per bound line:
 /// the line id, the owning driver task, the interrupt count since boot, and
 /// whether the line is quarantined. The paged walk, the fail-closed decode,
@@ -504,12 +616,14 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, ProcessListRequest,
-        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, SEAT_FLAG_OWNED,
+        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
+        KernelMemoryStats, MemoryPressureStats, ProcessListRequest, ProcessRecord, ProcessState,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
@@ -663,6 +777,10 @@ mod tests {
     }
 
     impl Transport for Fixture {
+        // A test double that must answer every query the CLI issues; the
+        // one-branch-per-query dispatch is inherently long and splitting it
+        // would only obscure the exhaustive mapping.
+        #[allow(clippy::too_many_lines)]
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
             let header = SysinfoRequestHeader::from_bytes(request)?;
             self.seen.borrow_mut().push(header.query);
@@ -735,6 +853,36 @@ mod tests {
                 let take = core::cmp::min(self.cpu_loads.len() - offset, req.limit as usize);
                 let mut out = Vec::with_capacity(take * CpuLoadRecord::WIRE_LEN);
                 for record in &self.cpu_loads[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
+            } else if header.query == SysinfoQueryId::CPU_INFO {
+                let req = CpuInfoListRequest::from_bytes(payload)?;
+                let records = [
+                    CpuInfoRecord::new(
+                        0,
+                        CpuCoreClass::Performance,
+                        CPU_INFO_FLAG_FREQ_MEASURED,
+                        CpuFeatureSet::new()
+                            .with(CpuFeature::Aes)
+                            .with(CpuFeature::Crc32)
+                            .bits(),
+                        0x410F_D083,
+                        1_512_000_000,
+                        54_000_000,
+                        b"ARM Cortex-A72",
+                    )
+                    .unwrap(),
+                    CpuInfoRecord::new(1, CpuCoreClass::Efficiency, 0, 0, 0, 0, 54_000_000, b"")
+                        .unwrap(),
+                ];
+                let offset = req.offset as usize;
+                if offset >= records.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(records.len() - offset, req.limit as usize);
+                let mut out = Vec::new();
+                for record in &records[offset..offset + take] {
                     out.extend_from_slice(&record.to_le_bytes());
                 }
                 Ok(out)
@@ -1154,6 +1302,36 @@ mod tests {
             run(Command::CpuLoad, &denied, &Recorder::new()),
             Err(SysinfoError::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn cpu_info_renders_blocks_with_flags_and_frequencies() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::CpuInfo, &fixture, &out).expect("cpuinfo renders");
+        let lines = out.lines();
+        // Two blocks separated by a blank line: 6 lines each (no reference
+        // row is omitted since both carry a reference frequency) + 1 blank.
+        assert_eq!(lines[0], "processor     : 0");
+        assert!(lines.iter().any(|l| l == "model name    : ARM Cortex-A72"));
+        assert!(lines.iter().any(|l| l == "core class    : performance"));
+        // A measured core running at 1.512 GHz, shown as MHz.
+        assert!(lines.iter().any(|l| l == "cpu MHz       : 1512.000"));
+        assert!(lines.iter().any(|l| l == "reference MHz : 54.000"));
+        // The decoded ISA flags (bit order: crc32 before aes).
+        assert!(lines.iter().any(|l| l == "flags         : crc32 aes"));
+        // The efficiency core reports an unknown clock honestly and an
+        // empty model falls back to "unknown".
+        assert!(lines.iter().any(|l| l == "processor     : 1"));
+        assert!(lines.iter().any(|l| l == "core class    : efficiency"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "cpu MHz       : unknown (no core-clock measurement)"));
+        assert!(lines.iter().any(|l| l == "model name    : unknown"));
+        // A feature-less core lists no flags rather than fabricating one.
+        assert!(lines.iter().any(|l| l == "flags         : (none)"));
+        // Exactly one blank line separates the two blocks.
+        assert_eq!(lines.iter().filter(|l| l.is_empty()).count(), 1);
     }
 
     #[test]

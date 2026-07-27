@@ -28,21 +28,23 @@
 //! the stack-wide `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`
 //! defence aggregates, `plans/NETWORK.md` §5).
 
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
+use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
     NetInterfaceStateRecord, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
-    reclaim_class_from_name, CpuLoadRecord, IrqRecord, KernelMemoryStats, MemoryPressureStats,
-    NetInterfaceListRequest, NetInterfaceRatesRequest, RamzipStats, ReclaimClassRecord,
-    ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime, PRESSURE_BAND_NAMES,
-    RESOURCE_LIMITS_REPORT_LEN,
+    reclaim_class_from_name, CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord,
+    IrqRecord, KernelMemoryStats, MemoryPressureStats, NetInterfaceListRequest,
+    NetInterfaceRatesRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
+    SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -312,17 +314,12 @@ fn resolve_info_value(
                 Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
             )
         }
-        // The number of online CPUs, counted from the gated per-CPU load
-        // query: a kernel-tier hardware fact, so — like `info:mem/physical`
-        // — the answer costs `CAP_SYSINFO_KERNEL` and a denial surfaces
-        // below.
-        ["cpu", "count"] => {
-            let cpus = query_cpu_loads(transport)?;
-            (
-                InfoValue::new_str(Sensitivity::Public, &cpus.len().to_string()),
-                Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
-            )
-        }
+        // The `/proc/cpuinfo`-class per-CPU facts (count, vendor/model,
+        // ISA-extension flags, performance-class topology). All ride the
+        // ungated `CPU_INFO` query — public hardware facts every user may
+        // read, exposing no per-principal secret — and are resolved in one
+        // helper so this dispatch stays compact.
+        ["cpu", leaf] => return resolve_cpu_leaf(transport, leaf),
         // One interface's static facts, served by `netstack` through the
         // broker's `CAP_SYSINFO_HW`-gated interface-facts page. The MAC is
         // stable hardware identity (`plans/ALIAS.md` §6.2), so it is
@@ -823,6 +820,110 @@ fn query_cpu_loads(transport: &dyn Transport) -> Result<Vec<CpuLoadRecord>, Reso
     })
     .map_err(map_list_error)?;
     Ok(records)
+}
+
+/// Resolve one `info:cpu/<leaf>` fact from the ungated `CPU_INFO` query.
+///
+/// `count` is the online core count; `vendor`/`model` report the boot CPU's
+/// discovered name (the one identity string the port derived — the x86
+/// vendor id, the aarch64 `MIDR` part name), an unnamed part being the
+/// honest empty string; `features` is the boot CPU's decoded ISA-extension
+/// flags (`crc32 aes …`, or `(none)`); `topology` is the core count plus the
+/// per-class breakdown. Every leaf is `Unprivileged`; an unknown leaf fails
+/// closed. Split out of [`resolve_info_value`] so that dispatch stays compact.
+fn resolve_cpu_leaf(
+    transport: &dyn Transport,
+    leaf: &str,
+) -> Result<(InfoValue, Authorization), ResolveInfoError> {
+    let cpus = query_cpu_info(transport)?;
+    let value = match leaf {
+        "count" => cpus.len().to_string(),
+        "vendor" | "model" => cpus
+            .first()
+            .map(|record| field_lossy(record.model_bytes()))
+            .unwrap_or_default(),
+        "features" => cpus.first().map_or_else(
+            || String::from("(none)"),
+            |record| cpu_feature_flags(record.feature_bits),
+        ),
+        "topology" => cpu_topology_string(&cpus),
+        _ => return Err(ResolveInfoError::UnknownSelector),
+    };
+    let info =
+        InfoValue::new_str(Sensitivity::Public, &value).map_err(|_| ResolveInfoError::Malformed)?;
+    Ok((info, Authorization::Unprivileged))
+}
+
+/// Page through the per-CPU processor-info records via the ungated
+/// `CPU_INFO` query. Returns records in ascending CPU order.
+fn query_cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, ResolveInfoError> {
+    /// Records requested per page: bounds the reply without bounding how
+    /// many CPUs the machine may have.
+    const PAGE: u16 = 64;
+    let mut records = Vec::new();
+    let mut offset: u32 = 0;
+    loop {
+        let request = CpuInfoListRequest {
+            offset,
+            limit: PAGE,
+            flags: 0,
+        };
+        let reply = call(transport, SysinfoQueryId::CPU_INFO, &request.to_le_bytes())
+            .map_err(map_call_error)?;
+        if reply.len() % CpuInfoRecord::WIRE_LEN != 0 {
+            return Err(ResolveInfoError::Malformed);
+        }
+        let count = reply.len() / CpuInfoRecord::WIRE_LEN;
+        for chunk in reply.chunks_exact(CpuInfoRecord::WIRE_LEN) {
+            records
+                .push(CpuInfoRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?);
+        }
+        if count < PAGE as usize {
+            return Ok(records);
+        }
+        offset = offset.saturating_add(u32::from(PAGE));
+    }
+}
+
+/// The lowercase, space-separated ISA-extension flag list of a raw
+/// [`CpuFeatureSet`] bitset, in stable bit order; `(none)` when empty. The
+/// single decode shared by `info:cpu/features` (here) and the `sysinfo
+/// cpuinfo` renderer walks [`CpuFeature::ALL`], so neither keeps a private
+/// list.
+fn cpu_feature_flags(bits: u64) -> String {
+    let set = CpuFeatureSet::from_bits(bits);
+    let mut out = String::new();
+    for feature in CpuFeature::ALL {
+        if set.contains(feature) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(feature.name());
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(none)");
+    }
+    out
+}
+
+/// The performance-class topology string: the online core count and the
+/// per-class breakdown, e.g. `4 (performance:2 efficiency:2)`. A
+/// homogeneous machine still lists both classes (one at zero) so the shape
+/// is stable.
+fn cpu_topology_string(cpus: &[CpuInfoRecord]) -> String {
+    let performance = cpus
+        .iter()
+        .filter(|record| record.class == CpuCoreClass::Performance)
+        .count();
+    let efficiency = cpus
+        .iter()
+        .filter(|record| record.class == CpuCoreClass::Efficiency)
+        .count();
+    format!(
+        "{} (performance:{performance} efficiency:{efficiency})",
+        cpus.len()
+    )
 }
 
 /// Page through the kernel IRQ table (gated on `CAP_SYSINFO_HW`) through the
@@ -1680,6 +1781,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
     use tairix_abi::net_ipc::{
         NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
         NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
@@ -1687,10 +1789,10 @@ mod tests {
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, KernelMemoryStats,
-        MemoryPressureStats, NetInterfaceListRequest, RamzipStats, ReclaimClassRecord,
-        ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
+        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
+        IrqListRequest, IrqRecord, KernelMemoryStats, MemoryPressureStats, NetInterfaceListRequest,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -1710,6 +1812,7 @@ mod tests {
         ramzip: RamzipStats,
         cpu_times: Vec<tairix_abi::sysinfo::CpuTimeRecord>,
         cpu_loads: Vec<CpuLoadRecord>,
+        cpu_infos: Vec<CpuInfoRecord>,
         irqs: Vec<IrqRecord>,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
@@ -1797,6 +1900,30 @@ mod tests {
         ]
     }
 
+    /// Two CPUs' processor-info records: a named performance core with a
+    /// measured clock and ISA flags, and an efficiency core whose clock is
+    /// unknown and whose model is empty.
+    fn fixture_cpu_infos() -> Vec<CpuInfoRecord> {
+        alloc::vec![
+            CpuInfoRecord::new(
+                0,
+                CpuCoreClass::Performance,
+                tairix_abi::sysinfo::CPU_INFO_FLAG_FREQ_MEASURED,
+                CpuFeatureSet::new()
+                    .with(CpuFeature::Crc32)
+                    .with(CpuFeature::Aes)
+                    .bits(),
+                0x410F_D083,
+                1_512_000_000,
+                54_000_000,
+                b"ARM Cortex-A72",
+            )
+            .expect("model fits"),
+            CpuInfoRecord::new(1, CpuCoreClass::Efficiency, 0, 0, 0, 0, 54_000_000, b"")
+                .expect("empty model ok"),
+        ]
+    }
+
     /// Two bound interrupt lines: a healthy one and a quarantined one
     /// (300000 fires total across the pair).
     fn fixture_irqs() -> Vec<IrqRecord> {
@@ -1871,6 +1998,7 @@ mod tests {
                 ramzip: fixture_ramzip(),
                 cpu_times: fixture_cpu_times(),
                 cpu_loads: fixture_cpu_loads(),
+                cpu_infos: fixture_cpu_infos(),
                 irqs: fixture_irqs(),
                 deny: None,
                 seen: RefCell::new(Vec::new()),
@@ -1905,6 +2033,10 @@ mod tests {
     }
 
     impl crate::transport::Transport for Fixture {
+        // A test double that must answer every `sysinfo-v1` query kind; the
+        // one-arm-per-query dispatch is inherently long and splitting it would
+        // only obscure the exhaustive mapping.
+        #[allow(clippy::too_many_lines)]
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
             let header = SysinfoRequestHeader::from_bytes(request)?;
             self.seen.borrow_mut().push(header.query);
@@ -1942,6 +2074,15 @@ mod tests {
                     let req = tairix_abi::sysinfo::CpuTimeListRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_times
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::CPU_INFO => {
+                    let req = CpuInfoListRequest::from_bytes(payload)?;
+                    let encoders: Vec<_> = self
+                        .cpu_infos
                         .iter()
                         .map(|record| move || record.to_le_bytes())
                         .collect();
@@ -2592,24 +2733,28 @@ mod tests {
     }
 
     #[test]
-    fn info_cpu_count_is_a_gated_fact() {
+    fn info_cpu_leaves_are_ungated_public_facts() {
         let fixture = Fixture::new();
-        let response = resolve_str("info:cpu/count", &fixture).expect("resolves");
-        assert_eq!(
-            response.authorization,
-            Authorization::Capability(CapabilityId::SYSINFO_KERNEL)
-        );
-        let ResponsePayload::Info(value) = &response.payload else {
-            panic!("expected an info value");
-        };
-        assert_eq!(value.value(), "2");
-
-        let mut denied = Fixture::new();
-        denied.deny = Some(SysinfoQueryId::CPU_LOAD);
-        assert_eq!(
-            resolve_str("info:cpu/count", &denied),
-            Err(ResolveInfoError::CapabilityDenied)
-        );
+        // Each `/proc/cpuinfo`-class leaf is ungated public hardware data.
+        for (reference, expected) in [
+            ("info:cpu/count", "2"),
+            ("info:cpu/vendor", "ARM Cortex-A72"),
+            ("info:cpu/model", "ARM Cortex-A72"),
+            // Flags of CPU 0, in stable bit order (crc32 before aes).
+            ("info:cpu/features", "crc32 aes"),
+            ("info:cpu/topology", "2 (performance:1 efficiency:1)"),
+        ] {
+            let response = resolve_str(reference, &fixture).expect("resolves");
+            assert_eq!(
+                response.authorization,
+                Authorization::Unprivileged,
+                "{reference} must be ungated"
+            );
+            let ResponsePayload::Info(value) = &response.payload else {
+                panic!("expected an info value for {reference}");
+            };
+            assert_eq!(value.value(), expected, "{reference}");
+        }
     }
 
     #[test]

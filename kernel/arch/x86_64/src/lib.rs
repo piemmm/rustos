@@ -87,6 +87,15 @@ pub mod context;
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
+/// x86_64 implementation of the Arch HAL core-clock surface
+/// ([`tairix_arch_api::CoreClock`]): the `IA32_APERF`/`IA32_MPERF`
+/// effective-frequency pair over the TSC reference, from which the kernel
+/// derives the live "cpu MHz" (turbo and throttling included).
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `tairix-arch-api` dependency this module's trait lives in.
+#[cfg(feature = "sched-arch")]
+pub mod coreclock;
 /// x86_64 implementation of the Arch HAL CPU-feature-detection and
 /// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
 /// [`tairix_arch_api::CpuCycles`]): the `CPUID` extension decode and the

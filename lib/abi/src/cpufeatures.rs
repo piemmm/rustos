@@ -111,6 +111,75 @@ impl CpuFeature {
     pub const fn bit(self) -> u32 {
         self as u32
     }
+
+    /// Every defined [`CpuFeature`], in ascending bit order.
+    ///
+    /// The single enumeration a consumer walks to render or decode a
+    /// [`CpuFeatureSet`] — a `/proc/cpuinfo`-style flag list, the
+    /// `info:cpu/features` value — so no consumer keeps its own private
+    /// list that could drift from the enum.
+    pub const ALL: [CpuFeature; 25] = [
+        CpuFeature::Crc32,
+        CpuFeature::Aes,
+        CpuFeature::Pmull,
+        CpuFeature::Sha1,
+        CpuFeature::Sha2,
+        CpuFeature::Sha3,
+        CpuFeature::Lse,
+        CpuFeature::Asimd,
+        CpuFeature::Dit,
+        CpuFeature::DcZva,
+        CpuFeature::Sse2,
+        CpuFeature::Ssse3,
+        CpuFeature::Sse42,
+        CpuFeature::Avx,
+        CpuFeature::Avx2,
+        CpuFeature::AesNi,
+        CpuFeature::Pclmulqdq,
+        CpuFeature::ShaNi,
+        CpuFeature::Rdrand,
+        CpuFeature::Rdseed,
+        CpuFeature::Erms,
+        CpuFeature::Zbb,
+        CpuFeature::Zbc,
+        CpuFeature::Zbkc,
+        CpuFeature::VectorV,
+    ];
+
+    /// The stable, lowercase flag name of this feature — the token a
+    /// `/proc/cpuinfo`-style reader shows and `info:cpu/features` lists.
+    /// Names mirror the conventional spelling used by the toolchains and
+    /// existing operating systems (`crc32`, `aes`, `sse4_2`, `avx2`, `zbb`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            CpuFeature::Crc32 => "crc32",
+            CpuFeature::Aes => "aes",
+            CpuFeature::Pmull => "pmull",
+            CpuFeature::Sha1 => "sha1",
+            CpuFeature::Sha2 => "sha2",
+            CpuFeature::Sha3 => "sha3",
+            CpuFeature::Lse => "lse",
+            CpuFeature::Asimd => "asimd",
+            CpuFeature::Dit => "dit",
+            CpuFeature::DcZva => "dczva",
+            CpuFeature::Sse2 => "sse2",
+            CpuFeature::Ssse3 => "ssse3",
+            CpuFeature::Sse42 => "sse4_2",
+            CpuFeature::Avx => "avx",
+            CpuFeature::Avx2 => "avx2",
+            CpuFeature::AesNi => "aes_ni",
+            CpuFeature::Pclmulqdq => "pclmulqdq",
+            CpuFeature::ShaNi => "sha_ni",
+            CpuFeature::Rdrand => "rdrand",
+            CpuFeature::Rdseed => "rdseed",
+            CpuFeature::Erms => "erms",
+            CpuFeature::Zbb => "zbb",
+            CpuFeature::Zbc => "zbc",
+            CpuFeature::Zbkc => "zbkc",
+            CpuFeature::VectorV => "v",
+        }
+    }
 }
 
 /// An arch-neutral set of the CPU extensions a core implements.
@@ -188,40 +257,30 @@ mod tests {
 
     #[test]
     fn feature_bits_are_distinct_and_stable() {
-        // No two variants share a bit position.
-        let all = [
-            CpuFeature::Crc32,
-            CpuFeature::Aes,
-            CpuFeature::Pmull,
-            CpuFeature::Sha1,
-            CpuFeature::Sha2,
-            CpuFeature::Sha3,
-            CpuFeature::Lse,
-            CpuFeature::Asimd,
-            CpuFeature::Dit,
-            CpuFeature::DcZva,
-            CpuFeature::Sse2,
-            CpuFeature::Ssse3,
-            CpuFeature::Sse42,
-            CpuFeature::Avx,
-            CpuFeature::Avx2,
-            CpuFeature::AesNi,
-            CpuFeature::Pclmulqdq,
-            CpuFeature::ShaNi,
-            CpuFeature::Rdrand,
-            CpuFeature::Rdseed,
-            CpuFeature::Erms,
-            CpuFeature::Zbb,
-            CpuFeature::Zbc,
-            CpuFeature::Zbkc,
-            CpuFeature::VectorV,
-        ];
+        // No two variants share a bit position. Walk the single `ALL`
+        // enumeration so this test cannot drift from a private copy.
         let mut seen = 0u64;
-        for f in all {
+        for f in CpuFeature::ALL {
             assert!(f.bit() < 64, "feature bit must fit in the 64-bit set");
             let mask = 1u64 << f.bit();
             assert_eq!(seen & mask, 0, "feature {f:?} reuses a bit index");
             seen |= mask;
+        }
+    }
+
+    #[test]
+    fn feature_names_are_unique_nonempty_and_lowercase() {
+        for (i, a) in CpuFeature::ALL.iter().enumerate() {
+            let name = a.name();
+            assert!(!name.is_empty(), "{a:?} has an empty flag name");
+            assert!(
+                name.bytes()
+                    .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_')),
+                "{a:?} flag name {name:?} must be lowercase ascii/digits/underscore"
+            );
+            for b in &CpuFeature::ALL[i + 1..] {
+                assert_ne!(name, b.name(), "{a:?} and {b:?} share a flag name");
+            }
         }
     }
 

@@ -169,6 +169,12 @@ pub fn note_preempt_tick(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         state.preempt_pending.store(true, Ordering::Release);
     }
+    // Piggy-back the live-core-frequency estimator on this per-CPU periodic
+    // point: it reads the calling CPU's core/reference counters and divides
+    // the deltas since the previous tick (pure accounting, no blocking). Off
+    // the context-switch hot path and taken only when the port drives a
+    // core-clock source.
+    crate::cpufreq::sample(cpu);
 }
 
 /// Consume `cpu`'s pending-preemption latch: `true` exactly once per

@@ -23,9 +23,10 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
-    ProcessRecord, ProcessState, ReclaimClassRecord, ResourceLimitRecord, SystemIdentity, Uptime,
-    UserDirectoryRecord, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage,
+    MemoryPressureStats, ProcessRecord, ProcessState, ReclaimClassRecord, ResourceLimitRecord,
+    SystemIdentity, Uptime, UserDirectoryRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX,
+    PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use tairix_kernel_mem::pressure::PressureBand;
@@ -476,6 +477,63 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 // the preemptions actually taken under load.
                 preemptions: crate::preempt::preemption_count(cpu_id),
             };
+            out.extend_from_slice(&record.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    fn cpu_info(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        let cpu_count = u64::from(self.state.scheduler.cpu_count());
+        let first = offset.min(cpu_count);
+        let last = first.saturating_add(max_records as u64).min(cpu_count);
+        let features = self.state.arch.cpu_features();
+        // The fixed reference/timebase frequency is one value for the whole
+        // machine; `0` when the port drives no core-clock source.
+        let reference_hz = crate::cpufreq::reference_hz();
+        let mut out = Vec::new();
+        for cpu in first..last {
+            let cpu_id = u32::try_from(cpu).unwrap_or(u32::MAX);
+            // ISA feature bits and per-core identity read through the Arch
+            // HAL. `detect`/`core_type` read the *executing* core's ID
+            // registers, so on a heterogeneous machine they describe the CPU
+            // running this read rather than `cpu_id`; the per-CPU frequency
+            // below is genuinely per-target (sampled on each core's own
+            // tick). A port with no CPU-feature slice honestly reports no
+            // bits and an unknown core (fail closed, never fabricated).
+            let feature_bits = features.map_or(0, |f| f.detect(cpu_id).bits());
+            let (class, raw_id, model) = match features.map(|f| f.core_type(cpu_id)) {
+                Some(core) => {
+                    let class = match core.class {
+                        tairix_arch_api::CoreClass::Efficiency => CpuCoreClass::Efficiency,
+                        tairix_arch_api::CoreClass::Performance => CpuCoreClass::Performance,
+                    };
+                    (class, core.raw_id, core.model.unwrap_or(""))
+                }
+                None => (CpuCoreClass::Performance, 0, ""),
+            };
+            // The live measured core-clock frequency (`0` = not measured on
+            // this CPU yet, or the port drives no core-clock source), and the
+            // flag that says which it is — never a fabricated rate.
+            let current_freq_hz = crate::cpufreq::current_freq_hz(cpu_id);
+            let flags = if current_freq_hz != 0 {
+                CPU_INFO_FLAG_FREQ_MEASURED
+            } else {
+                0
+            };
+            // The model name is a short static ASCII string; cap it to the
+            // record's fixed field rather than error a whole page.
+            let model_bytes = model.as_bytes();
+            let model_bytes = &model_bytes[..model_bytes.len().min(CPU_MODEL_NAME_MAX)];
+            let record = CpuInfoRecord::new(
+                cpu_id,
+                class,
+                flags,
+                feature_bits,
+                raw_id,
+                current_freq_hz,
+                reference_hz,
+                model_bytes,
+            )?;
             out.extend_from_slice(&record.to_le_bytes());
         }
         Ok(out)

@@ -111,6 +111,11 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// riscv64 implementation of the Arch HAL core-clock surface
+/// ([`tairix_arch_api::CoreClock`]): the `rdcycle` core-clock counter
+/// (core cycles, DVFS-tracking) over the `rdtime`/`timebase-frequency`
+/// fixed reference, from which the kernel derives the live "cpu MHz".
+pub mod coreclock;
 /// riscv64 implementation of the Arch HAL CPU-feature-detection and
 /// cycle-counter surfaces ([`tairix_arch_api::CpuFeatures`] /
 /// [`tairix_arch_api::CpuCycles`]): the `misa` vector-extension bit, the
