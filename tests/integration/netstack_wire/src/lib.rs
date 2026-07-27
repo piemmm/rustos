@@ -31,7 +31,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use core::net::Ipv6Addr;
+use core::net::{Ipv4Addr, Ipv6Addr};
 
 /// Peer IPv6 interface identifier.
 pub const PEER_IID: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x02];
@@ -417,6 +417,71 @@ wan.ipv6.method static
 wan.ipv6.address fd00::2/64
 ";
 
+// --- DHCPv4 vertical (DHCP D3) -----------------------------------------
+//
+// The DHCP vertical proves RFC 2131 dynamic IPv4 address configuration end
+// to end. The guest's planted `network.conf` binds the NIC to the `wan`
+// alias by its stable bus location (`match.node`, as the static vertical
+// does) but selects `ipv4.method dhcp` and disables IPv6 — so the guest
+// forms *no* address on its own: its only reachable address is whatever the
+// host DHCP server leases it. The host peer runs a minimal DHCP server (it
+// answers the guest's DISCOVER with an OFFER of `DHCP_LEASED_V4` and its
+// REQUEST with an ACK) and then, from its own `DHCP_SERVER_V4`, pings the
+// guest at the leased address. If DHCP failed the guest has no IPv4 at all
+// and the campaign goes unanswered, so the run fails loud rather than
+// passing on an address the guest formed itself (a real discriminator).
+
+/// The admin alias the DHCP vertical's `network.conf` binds the NIC to.
+pub const DHCP_IFACE_ALIAS: &str = "wan";
+
+/// Prefix length of the DHCP vertical's shared IPv4 subnet: a single on-link
+/// `/24` both the server's and the leased address sit in, so ARP resolves
+/// them without any router.
+pub const DHCP_PREFIX_LEN: u8 = 24;
+
+/// The subnet mask [`DHCP_PREFIX_LEN`] denotes (`255.255.255.0`), the value
+/// the server places in the lease's subnet-mask option. Kept beside the
+/// prefix so the mask and the prefix length cannot drift.
+pub const DHCP_SUBNET_MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+
+/// The host DHCP server's own IPv4 address (its server identifier, the
+/// lease's default router, and the source of the peer's echo campaign). It
+/// sits in the same `/24` as the leased address, so the guest reaches it
+/// on-link.
+pub const DHCP_SERVER_V4: Ipv4Addr = Ipv4Addr::new(192, 168, 66, 1);
+
+/// The IPv4 address the host DHCP server leases the guest. The peer pings
+/// this address (from [`DHCP_SERVER_V4`]) once the lease is granted; the
+/// guest holds it only if its DHCP client completed the exchange, so a
+/// broken lease leaves the campaign unanswered.
+pub const DHCP_LEASED_V4: Ipv4Addr = Ipv4Addr::new(192, 168, 66, 50);
+
+/// The lease duration in seconds the server grants. Long enough that the
+/// short vertical never approaches renewal (T1 = lease/2), so the run
+/// exercises acquisition and steady-state reachability, not renewal timing.
+pub const DHCP_LEASE_SECS: u32 = 3600;
+
+/// The `/System/Settings/Network/network.conf` the aarch64 DHCP vertical
+/// plants on its read-only `/System` volume.
+///
+/// It binds the alias [`DHCP_IFACE_ALIAS`] to the NIC at bus location
+/// [`GUEST_NIC_NODE_LOCATION_AARCH64`] (`0x0a003c00`, as the static vertical
+/// does), disables IPv6, and selects `ipv4.method dhcp` so the interface's
+/// only address is a DHCP lease. The literals here are cross-checked against
+/// those constants by the `dhcp_network_conf_matches_the_wire_constants`
+/// unit test, so the config and the location the guest binds by can never
+/// drift (one source of truth).
+pub const DHCP_NETWORK_CONF_AARCH64: &str = "\
+# TAIRiX DHCPv4 QEMU vertical network.conf.
+# Binds the `wan` alias to the NIC by its stable bus location and selects
+# DHCPv4 addressing (IPv6 disabled), so the interface's only address is the
+# lease the host DHCP server grants — proving RFC 2131 end to end.
+wan.kind ethernet
+wan.match.node 0xa003c00
+wan.ipv4.method dhcp
+wan.ipv6.method disabled
+";
+
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
@@ -673,6 +738,45 @@ mod tests {
             .expect("the bond carries a static IPv6 address");
         assert_eq!(v6.addr, GUEST_STATIC_V6);
         assert_eq!(v6.prefix, STATIC_PREFIX_LEN);
+    }
+
+    /// The planted DHCP `network.conf` and the wire location/alias constants
+    /// are one source of truth: parse the config through the real
+    /// `lib/netconfig` engine (the same parser `devmgr` runs) and confirm it
+    /// binds the `wan` alias to the QEMU-virt NIC bus location, selects
+    /// DHCPv4, and disables IPv6 — so the interface's only address is a DHCP
+    /// lease. A drift between the config text and a constant fails here, long
+    /// before a QEMU boot, and a config the engine would reject never reaches
+    /// a fixture.
+    #[test]
+    fn dhcp_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP_NETWORK_CONF_AARCH64)
+            .expect("the planted DHCP network.conf parses and validates");
+        let iface = config
+            .interface(DHCP_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_AARCH64),
+            "the config's match.node names the QEMU-virt NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Disabled);
+        assert_eq!(
+            iface.ipv4_address, None,
+            "a DHCP interface carries no static IPv4 address"
+        );
+        assert_eq!(iface.ipv6_address, None, "IPv6 is disabled");
+        // The mask constant and the prefix length are consistent: a /24
+        // is 255.255.255.0.
+        assert_eq!(DHCP_PREFIX_LEN, 24);
+        assert_eq!(DHCP_SUBNET_MASK, Ipv4Addr::new(255, 255, 255, 0));
+        // The server and the leased address share the /24 the peer reaches
+        // the guest over on-link.
+        assert_eq!(DHCP_SERVER_V4.octets()[..3], DHCP_LEASED_V4.octets()[..3]);
+        assert_ne!(DHCP_SERVER_V4, DHCP_LEASED_V4);
     }
 
     /// The planted ECN `system.conf` and the setting it means are one source

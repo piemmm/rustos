@@ -186,6 +186,16 @@ enum NetPeerMode {
     /// `match.node` mis-bind (the static address never assigned) leaves the
     /// campaign incomplete and fails the run loud.
     V6StaticEcho,
+    /// A **DHCPv4-server** peer (the DHCP D3 vertical): the peer takes its
+    /// own [`tairix_test_netstack_wire::DHCP_SERVER_V4`] in the shared `/24`,
+    /// answers the guest's DHCP `DISCOVER`/`REQUEST` with an
+    /// `OFFER`/`ACK` of [`tairix_test_netstack_wire::DHCP_LEASED_V4`], and
+    /// then campaigns over that *leased* address. The guest's planted
+    /// `network.conf` selects `ipv4.method dhcp` and disables IPv6, so it
+    /// forms no address itself — the leased address is its only reachable
+    /// one, so a broken lease leaves the campaign unanswered and fails the
+    /// run loud. The IPv4 analogue of [`Self::V6StaticEcho`].
+    V4DhcpEcho,
     /// A **bond-failover** peer (the N9b-3-2-β-2-ii-b-bond vertical): the
     /// guest binds *two* virtio-net NICs as the members of one active-backup
     /// bond, so the runner attaches **two** `dgram` netdevs (`net0` pinned to
@@ -312,6 +322,18 @@ enum FsDisk {
     /// address — all pre-unlock, no console dialogue. The console stays the
     /// UART text console (no display/input driver).
     BondNetRootDisk,
+    /// The net-only-driver encrypted-root layout carrying the **standard**
+    /// signed application store **plus** a planted
+    /// `/System/Settings/Network/network.conf`
+    /// ([`tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64`]) that binds
+    /// the NIC by `match.node`, selects `ipv4.method dhcp`, and disables IPv6
+    /// — the DHCPv4 vertical's backing (`plans/DHCP.md` D3). `devmgr`
+    /// autoloads the NIC driver into its own process and reads the planted
+    /// config; `netstack` drives its DHCP client, which leases the interface
+    /// its only address from the host DHCP-server peer — all pre-unlock, no
+    /// console dialogue. The console stays the UART text console (no
+    /// display/input driver).
+    DhcpNetRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -4248,6 +4270,48 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/DHCP.md` D3: the live DHCPv4 vertical.
+    // `tairix-test-netstack-dhcp-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the `dhcp-net-root` disk: the net-only signed driver set
+    // **plus** a planted `/System/Settings/Network/network.conf` that binds
+    // the NIC to the `wan` alias by its stable bus location
+    // (`<iface>.match.node`), selects `ipv4.method dhcp`, and disables IPv6
+    // (`FsDisk::DhcpNetRootDisk`), with a `virtio-net-device` attached and the
+    // harness-side DHCP-server peer on its `dgram` netdev
+    // (`NetPeerMode::V4DhcpEcho`). Everything runs **before** any root unlock
+    // (headless, no serial script), like the static sibling. `devmgr`
+    // autoloads the virtio-net driver into its own process (it publishes a
+    // `netchan` node), reads the planted config, and binds the NIC to `wan`;
+    // `netstack` drives the DHCP client, which broadcasts DISCOVER, accepts
+    // the peer's OFFER, REQUESTs it, and applies the peer's ACK — leasing the
+    // interface its only address. The peer then pings the guest at that leased
+    // address and the guest answers. PASS once the log sink has seen
+    // `devmgr`'s `NETSTACK_BOUND`, `netstack`'s `DHCP_LEASE_ACQUIRED` (the
+    // lease was granted and applied), and `netstack`'s `INBOUND_ECHO_SERVED` —
+    // the last gating exit so the guest stays alive until a frame addressed to
+    // its *leased* address has been answered; the peer's own verdict (it
+    // offered, acked, and got the echo reply at the leased address) is
+    // required too, so a broken lease cannot pass on an address the guest
+    // formed itself (it forms none). A 240-second budget covers boot +
+    // autoload + service bring-up + the bind + the DHCP exchange + the paced
+    // echo campaign on QEMU TCG; single CPU like the other full-boot
+    // verticals.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp-qemu-aarch64",
+        binary: "tairix-test-netstack-dhcp-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V4DhcpEcho,
+        ramfb: false,
+        fs_disk: FsDisk::DhcpNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
     // *production* aarch64 pipeline with the `bond-net-root` disk: the
@@ -5769,6 +5833,9 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the bond-failover vertical plants: the
     /// shared set plus the planted bond `network.conf` (no test-only bundle).
     bond_net_apps: &'static [AppStoreFile],
+    /// The application/service bundles the DHCPv4 vertical plants: the shared
+    /// set plus the planted DHCP `network.conf` (no test-only bundle).
+    dhcp_net_apps: &'static [AppStoreFile],
 }
 
 /// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
@@ -5820,7 +5887,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::ListenRootDisk
         | FsDisk::PingRootDisk
         | FsDisk::StaticNetRootDisk
-        | FsDisk::BondNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
+        | FsDisk::BondNetRootDisk
+        | FsDisk::DhcpNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     let static_net_apps = match t.fs_disk {
@@ -5829,6 +5897,10 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     };
     let bond_net_apps = match t.fs_disk {
         FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    let dhcp_net_apps = match t.fs_disk {
+        FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch)?,
         _ => EMPTY,
     };
     Ok(StoreSet {
@@ -5841,6 +5913,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         net_only_drivers,
         static_net_apps,
         bond_net_apps,
+        dhcp_net_apps,
     })
 }
 
@@ -6930,19 +7003,13 @@ fn image_total_sectors(bytes: &[u8]) -> u64 {
 /// the FAT32 fixture is hand-built; the arxfs fixture is authored by the
 /// real arxfs driver itself (format + plant).
 fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, String> {
-    // The per-vertical store sets, resolved for this target arch. Destructured
-    // once so each arm names the set it plants directly (the bundle
-    // composition already happened in `stores_for`).
+    // Only the two plain encrypted-root disks name their app set directly
+    // here; every driver-store (net-root) disk is authored in
+    // `net_root_fs_disk_image`, which selects its own sets from `stores`.
     let StoreSet {
         apps,
         apps_with_memsoak,
-        autoload_drivers,
-        apps_with_tcpecho,
-        apps_with_tcpecho_ecn,
-        apps_with_tcpserve,
-        net_only_drivers,
-        static_net_apps,
-        bond_net_apps,
+        ..
     } = stores;
     Ok(match t.fs_disk {
         FsDisk::None => None,
@@ -6973,20 +7040,9 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
                 total_sectors,
             })
         }
-        // The whole-disk encrypted-root image with the autoload driver
-        // bundles planted in its read-only `/System/Drivers/` store alongside
-        // the app/service bundles — one whole-disk author, no per-fixture copy
-        // (`AGENTS.md` §2.2).
-        FsDisk::AutoloadRootDisk => Some(net_root_image(
-            t,
-            autoload_drivers,
-            apps,
-            "autoload-root.img",
-            "autoload-root",
-        )?),
-        // The encrypted-root layout with the memsoak-augmented bundle set:
-        // the same builder, planting the same store plus the one test-only
-        // fixture bundle.
+        // The memsoak vertical uses the plain encrypted-root author (no
+        // driver store): the same builder as `EncryptedRootDisk`, planting
+        // the standard store plus the one test-only fixture bundle.
         FsDisk::MemsoakRootDisk => {
             let bytes = encrypted_root_disk_bytes(t, apps_with_memsoak)?;
             let total_sectors = image_total_sectors(&bytes);
@@ -6996,67 +7052,82 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
                 total_sectors,
             })
         }
-        // The two-process TCP verticals: the same whole-disk author and the
-        // same net-only driver set, differing only in the app set (the
-        // `tcpecho` client vs. the `tcpserve` server) — one builder, no copy.
-        FsDisk::StreamRootDisk => Some(net_root_image(
-            t,
+        // Every driver-store vertical (the autoload disk plus the net-only
+        // TCP / ping / static / bond / DHCP disks) shares one whole-disk
+        // author, selected in `net_root_fs_disk_image` — never a per-fixture
+        // copy.
+        FsDisk::AutoloadRootDisk
+        | FsDisk::StreamRootDisk
+        | FsDisk::EcnRootDisk
+        | FsDisk::ListenRootDisk
+        | FsDisk::PingRootDisk
+        | FsDisk::StaticNetRootDisk
+        | FsDisk::BondNetRootDisk
+        | FsDisk::DhcpNetRootDisk => Some(net_root_fs_disk_image(t, stores)?),
+    })
+}
+
+/// Build the whole-disk image for a **net-root** vertical — a signed driver
+/// store plus a per-vertical app/config store — the one place each such
+/// disk's driver set, app set, backing-file extension, and label are
+/// selected. Every net-root disk routes through `net_root_image`, so they
+/// cannot drift in how the whole disk is authored. Called only for the
+/// net-root `FsDisk` variants (the caller's match guarantees it).
+fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, String> {
+    let StoreSet {
+        apps,
+        autoload_drivers,
+        apps_with_tcpecho,
+        apps_with_tcpecho_ecn,
+        apps_with_tcpserve,
+        net_only_drivers,
+        static_net_apps,
+        bond_net_apps,
+        dhcp_net_apps,
+        ..
+    } = stores;
+    let (drivers, app_set, extension, label) = match t.fs_disk {
+        FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img", "autoload-root"),
+        FsDisk::StreamRootDisk => (
             net_only_drivers,
             apps_with_tcpecho,
             "stream-root.img",
             "stream-root",
-        )?),
-        // The ECN vertical: the same net-only driver set and whole-disk
-        // author as the stream vertical, differing only in the app set (the
-        // `tcpecho` client plus a planted `system.conf` that turns
-        // `net.tcp.ecn` on) — one builder, no copy.
-        FsDisk::EcnRootDisk => Some(net_root_image(
-            t,
+        ),
+        FsDisk::EcnRootDisk => (
             net_only_drivers,
             apps_with_tcpecho_ecn,
             "ecn-root.img",
             "ecn-root",
-        )?),
-        FsDisk::ListenRootDisk => Some(net_root_image(
-            t,
+        ),
+        FsDisk::ListenRootDisk => (
             net_only_drivers,
             apps_with_tcpserve,
             "listen-root.img",
             "listen-root",
-        )?),
-        // The `ping` vertical: the same net-only driver set and whole-disk
-        // author, planting the **standard** app store (which carries the real
-        // `ping` bundle) rather than a test-only fixture — one builder, no copy.
-        FsDisk::PingRootDisk => Some(net_root_image(
-            t,
-            net_only_drivers,
-            apps,
-            "ping-root.img",
-            "ping-root",
-        )?),
-        // The static-addressing (`match.node`) vertical: the same net-only
-        // driver set and whole-disk author, planting the standard app store
-        // **plus** the `network.conf` (carried in `static_net_apps`) — one
-        // builder, no copy.
-        FsDisk::StaticNetRootDisk => Some(net_root_image(
-            t,
+        ),
+        FsDisk::PingRootDisk => (net_only_drivers, apps, "ping-root.img", "ping-root"),
+        FsDisk::StaticNetRootDisk => (
             net_only_drivers,
             static_net_apps,
             "static-net-root.img",
             "static-net-root",
-        )?),
-        // The bond-failover vertical: the same net-only driver set and
-        // whole-disk author, planting the standard app store **plus** the
-        // bond `network.conf` (carried in `bond_net_apps`) — one builder, no
-        // copy.
-        FsDisk::BondNetRootDisk => Some(net_root_image(
-            t,
+        ),
+        FsDisk::BondNetRootDisk => (
             net_only_drivers,
             bond_net_apps,
             "bond-net-root.img",
             "bond-net-root",
-        )?),
-    })
+        ),
+        FsDisk::DhcpNetRootDisk => (
+            net_only_drivers,
+            dhcp_net_apps,
+            "dhcp-net-root.img",
+            "dhcp-net-root",
+        ),
+        _ => unreachable!("net_root_fs_disk_image is called only for net-root disks"),
+    };
+    net_root_image(t, drivers, app_set, extension, label)
 }
 
 /// Build a whole-disk encrypted-root image planting a driver set in
@@ -7116,6 +7187,7 @@ fn spawn_net_peer(
             super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
         }
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
+        NetPeerMode::V4DhcpEcho => super::netpeer::NetPeer::spawn_dhcp(qemu_sock, peer_sock),
         // The bond peer needs two wires (two socket pairs), so it is attached
         // directly in `finish_run`, never through this single-wire spawner.
         NetPeerMode::Bond => {
