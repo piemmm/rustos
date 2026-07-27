@@ -1305,6 +1305,7 @@ You are not exempt from any rule above. In addition:
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, user-pinned app shortcuts (pin/drag), the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
+    | Text rendering / fonts: the OS font service (`fontd`), the `/System/Fonts` store, the `FONT_ENDPOINT` glyph protocol, the thin `lib/font` client, and the kernel console-atlas subset | `plans/FONT-SERVICE.md` |
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |

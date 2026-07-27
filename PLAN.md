@@ -3131,6 +3131,23 @@ Shipped (headless-testable, model + renderer over injected seams):
   merged-family resolution, used by both the `font-atlas` generator and the
   runtime `lib/font` so the atlas and live text share one rasteriser, §2.2),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
+  - **Font-as-OS-service (planned, `plans/FONT-SERVICE.md`).** Today
+    `lib/font` `include_bytes!`s the full-Unicode atlas (~3.6 MB) **and** the
+    four TrueType faces (~6.1 MB) into **every** GUI `Run` image, so each of
+    `{terminal,files,viewer,widgets,wm,taskbar,session}` carries a private
+    ~10 MB read-only copy that the launch path reads + SHA-256s + eager-copies
+    on every start — the measured cause of slow desktop/app launch, and a
+    §16.4/§19.5/§2.2 violation (fonts must be an OS-provided, sandboxed shared
+    resource, not per-app static data). Planned fix: a sandboxed `fontd`
+    service (`userland/system/fontd`) owning `/System/Fonts` + the full atlas
+    and rasterising TrueType in a §19.5 minimum-capability sandbox, serving
+    glyph coverage over the reserved `FONT_ENDPOINT` (`lib/abi/src/font_ipc.rs`);
+    `lib/font`'s render path becomes a thin client + local cache with the
+    embeds deleted; the kernel/`lib/fbcon` boot console keeps only a small
+    ASCII/box-drawing console-atlas subset (boot floor). A separate,
+    independent step fixes the shippable `installer` image building userland/
+    drivers in the debug Cargo profile while its kernel is release
+    (`pie_build::cross_compile_pie_elf`).
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).
