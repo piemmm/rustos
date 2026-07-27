@@ -125,11 +125,36 @@ selects DHCPv4. Key facts for the next worker:
   rejection, netconfig parse/validate, devmgr mapping, netstack service
   enable/disable. D2 is done and gate-green.
 
-### D3 — the live two-process QEMU vertical `[ ]`
-A `netpeer` DHCP-server mode leases an address to the booted guest over the
-shared wire topology (`tests/integration/netstack_wire`); the guest's
-interface comes up DHCP-configured and answers/originates traffic on the
-leased address. Mirrors the existing static-addressing and bond verticals.
+### D3 — the live two-process QEMU vertical `[x]`
+`tests/integration/netstack_dhcp_qemu_aarch64` boots the production aarch64
+pipeline against the `dhcp-net-root` disk (the signed virtio-net driver
+bundle plus a planted `network.conf` binding the NIC by `match.node`,
+selecting `ipv4.method dhcp`, and disabling IPv6) with the harness-side
+DHCP-server peer (`NetPeerMode::V4DhcpEcho`) on the QEMU `dgram` netdev.
+`devmgr` autoloads the driver and delivers the config; `netstack` drives its
+DHCP client, which DISCOVERs, accepts the peer's OFFER of
+`wire::DHCP_LEASED_V4`, REQUESTs it, and applies the ACK — the interface's
+only address (it forms none itself). The peer then pings the guest at that
+leased address and the guest answers. PASS keys on three log witnesses
+(`devmgr` `NETSTACK_BOUND`, `netstack` `DHCP_LEASE_ACQUIRED`, `netstack`
+`INBOUND_ECHO_SERVED`) plus the peer's own verdict (it offered, acked, and
+got the echo reply at the leased address), so a broken lease cannot pass on
+an address the guest formed itself.
+
+Key facts for the next worker:
+- The host DHCP **server** is test-only (the plan ships no server), so it
+  lives beside its one consumer in `tools/xtask`'s `netpeer::dhcp_server`,
+  encoding/decoding the *same* wire layout the client codec now exposes
+  publicly (`tairix_net::dhcp`'s `opt`, header offsets, `MAGIC_COOKIE`); a
+  round-trip unit test parses every reply it builds back through the real
+  `DhcpReply::parse`, so the two cannot drift.
+- The shared wire constants (`DHCP_SERVER_V4`, `DHCP_LEASED_V4`,
+  `DHCP_SUBNET_MASK`, `DHCP_LEASE_SECS`, `DHCP_NETWORK_CONF_AARCH64`) live in
+  `tests/integration/netstack_wire`, cross-checked against the real
+  `lib/netconfig` parser.
+- Only the aarch64 vertical is enrolled; the x86_64 (virtio-PCI) and riscv64
+  (virtio-MMIO) siblings are the natural next increment, mirroring how the
+  static vertical staged its arches.
 
 ### D4 — DHCPv6 (RFC 8415) `[ ]` (future, own sub-plan when scheduled)
 Stateful DHCPv6 as an IPv6 peer of D1–D3, reusing the interface-engine

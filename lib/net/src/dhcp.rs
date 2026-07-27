@@ -33,31 +33,47 @@ pub const CLIENT_PORT: u16 = 68;
 /// UDP port a DHCP server listens on / sources from (RFC 2131 §4.1).
 pub const SERVER_PORT: u16 = 67;
 
-/// `op` field: a client→server message (RFC 2131 §2).
-const OP_BOOTREQUEST: u8 = 1;
+/// `op` field: a client→server message (RFC 2131 §2). Public so a test
+/// harness that speaks the *server* side of the exchange encodes the same
+/// wire layout this client codec decodes, never a divergent second copy.
+pub const OP_BOOTREQUEST: u8 = 1;
 /// `op` field: a server→client message.
-const OP_BOOTREPLY: u8 = 2;
+pub const OP_BOOTREPLY: u8 = 2;
 
 /// `htype` for a 10 Mb Ethernet address (RFC 2131 §2, per the ARP hardware
 /// type registry).
-const HTYPE_ETHERNET: u8 = 1;
+pub const HTYPE_ETHERNET: u8 = 1;
 
 /// `hlen` for an Ethernet hardware address, as the wire `hlen` field
 /// carries it. Asserted equal to [`MAC_ADDRESS_LEN`] so the wire value and
 /// the address length can never diverge.
-const HLEN_ETHERNET: u8 = 6;
+pub const HLEN_ETHERNET: u8 = 6;
 const _: () = assert!(HLEN_ETHERNET as usize == MAC_ADDRESS_LEN);
 
 /// The four-octet magic cookie that precedes the options field
 /// (RFC 2131 §3, value `99.130.83.99`).
-const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
+pub const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
 
 /// Length of the fixed BOOTP header preceding the magic cookie
 /// (RFC 2131 §2: `op`..`file`, i.e. through the 128-byte boot-file name).
-const BOOTP_HEADER_LEN: usize = 236;
+pub const BOOTP_HEADER_LEN: usize = 236;
 
 /// Offset of the magic cookie / start of the options field.
-const OPTIONS_OFFSET: usize = BOOTP_HEADER_LEN + MAGIC_COOKIE.len();
+pub const OPTIONS_OFFSET: usize = BOOTP_HEADER_LEN + MAGIC_COOKIE.len();
+
+/// Offset of the four-octet transaction id (`xid`) in the BOOTP header.
+pub const XID_OFFSET: usize = 4;
+/// Offset of the two-octet `secs` field.
+pub const SECS_OFFSET: usize = 8;
+/// Offset of the two-octet `flags` field (the broadcast bit lives here).
+pub const FLAGS_OFFSET: usize = 10;
+/// Offset of the four-octet client address (`ciaddr`).
+pub const CIADDR_OFFSET: usize = 12;
+/// Offset of the four-octet "your" address (`yiaddr`) the server assigns.
+pub const YIADDR_OFFSET: usize = 16;
+/// Offset of the client hardware address (`chaddr`); the first
+/// [`MAC_ADDRESS_LEN`] octets carry the Ethernet MAC.
+pub const CHADDR_OFFSET: usize = 28;
 
 /// Offset of the `sname` (server host name) field within the BOOTP header.
 const SNAME_OFFSET: usize = 44;
@@ -77,22 +93,39 @@ pub const MAX_ADDRESSES: usize = 4;
 /// renewal is ever scheduled for such a lease.
 pub const INFINITE_LEASE_SECS: u32 = u32::MAX;
 
-/// DHCP option codes used by the client (RFC 2132).
-mod opt {
+/// DHCP option codes (RFC 2132). Public so a test harness encoding the
+/// server side of the exchange names the same option registry this client
+/// codec decodes, never a divergent copy.
+pub mod opt {
+    /// Padding octet (no length, no value); skipped on parse.
     pub const PAD: u8 = 0;
+    /// Subnet mask (option 1).
     pub const SUBNET_MASK: u8 = 1;
+    /// Default router list (option 3).
     pub const ROUTER: u8 = 3;
+    /// Domain name server list (option 6).
     pub const DOMAIN_NAME_SERVER: u8 = 6;
+    /// Requested IP address (option 50).
     pub const REQUESTED_IP: u8 = 50;
+    /// IP address lease time in seconds (option 51).
     pub const LEASE_TIME: u8 = 51;
+    /// Option overload (option 52): `file`/`sname` carry options.
     pub const OVERLOAD: u8 = 52;
+    /// DHCP message type (option 53).
     pub const MESSAGE_TYPE: u8 = 53;
+    /// Server identifier (option 54).
     pub const SERVER_ID: u8 = 54;
+    /// Parameter request list (option 55).
     pub const PARAMETER_REQUEST_LIST: u8 = 55;
+    /// Maximum DHCP message size the client can reassemble (option 57).
     pub const MAX_MESSAGE_SIZE: u8 = 57;
+    /// Renewal (T1) time in seconds (option 58).
     pub const RENEWAL_TIME: u8 = 58;
+    /// Rebinding (T2) time in seconds (option 59).
     pub const REBINDING_TIME: u8 = 59;
+    /// Client identifier (option 61): hardware type + hardware address.
     pub const CLIENT_ID: u8 = 61;
+    /// End-of-options marker (option 255).
     pub const END: u8 = 255;
 }
 
@@ -344,18 +377,28 @@ impl DhcpReply {
         if usize::from(header[2]) != MAC_ADDRESS_LEN {
             return None;
         }
-        let msg_xid = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let msg_xid = u32::from_be_bytes([
+            header[XID_OFFSET],
+            header[XID_OFFSET + 1],
+            header[XID_OFFSET + 2],
+            header[XID_OFFSET + 3],
+        ]);
         if msg_xid != xid {
             return None;
         }
         // Match our hardware address in the first six chaddr octets.
-        if header[28..28 + MAC_ADDRESS_LEN] != chaddr.0 {
+        if header[CHADDR_OFFSET..CHADDR_OFFSET + MAC_ADDRESS_LEN] != chaddr.0 {
             return None;
         }
         if header[BOOTP_HEADER_LEN..OPTIONS_OFFSET] != MAGIC_COOKIE {
             return None;
         }
-        let your_addr = Ipv4Addr::new(header[16], header[17], header[18], header[19]);
+        let your_addr = Ipv4Addr::new(
+            header[YIADDR_OFFSET],
+            header[YIADDR_OFFSET + 1],
+            header[YIADDR_OFFSET + 2],
+            header[YIADDR_OFFSET + 3],
+        );
 
         let mut builder = ReplyBuilder::default();
         walk_options(&mut builder, &bytes[OPTIONS_OFFSET..]);
@@ -512,13 +555,13 @@ pub fn write_message(spec: &MessageSpec, out: &mut [u8]) -> Result<usize, WriteE
     out[1] = HTYPE_ETHERNET;
     out[2] = HLEN_ETHERNET;
     // hops = 0 (out[3]); a client never sets it.
-    out[4..8].copy_from_slice(&spec.xid.to_be_bytes());
-    out[8..10].copy_from_slice(&spec.secs.to_be_bytes());
+    out[XID_OFFSET..XID_OFFSET + 4].copy_from_slice(&spec.xid.to_be_bytes());
+    out[SECS_OFFSET..SECS_OFFSET + 2].copy_from_slice(&spec.secs.to_be_bytes());
     let flags = if spec.broadcast { FLAG_BROADCAST } else { 0 };
-    out[10..12].copy_from_slice(&flags.to_be_bytes());
-    out[12..16].copy_from_slice(&spec.client_addr.octets());
-    // yiaddr/siaddr/giaddr (out[16..28]) stay zero for a client message.
-    out[28..28 + MAC_ADDRESS_LEN].copy_from_slice(&spec.chaddr.0);
+    out[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&flags.to_be_bytes());
+    out[CIADDR_OFFSET..CIADDR_OFFSET + 4].copy_from_slice(&spec.client_addr.octets());
+    // yiaddr/siaddr/giaddr stay zero for a client message.
+    out[CHADDR_OFFSET..CHADDR_OFFSET + MAC_ADDRESS_LEN].copy_from_slice(&spec.chaddr.0);
     out[BOOTP_HEADER_LEN..OPTIONS_OFFSET].copy_from_slice(&MAGIC_COOKIE);
 
     let mut w = OptionWriter {

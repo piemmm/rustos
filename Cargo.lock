@@ -3129,6 +3129,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-dhcp-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
 name = "tairix-test-netstack-ecn-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
