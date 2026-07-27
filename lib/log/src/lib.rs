@@ -38,6 +38,7 @@ pub mod render;
 pub mod report;
 pub mod segment;
 pub mod stream;
+pub mod tee;
 
 /// The typed field-value model. Re-exported from `tairix_abi` (its ABI-schema
 /// home) so `tairix_log::field::*` keeps resolving; there is one definition.
@@ -81,6 +82,7 @@ pub use tairix_abi::field::{
     reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
     ToFieldValue, Uuid, RESERVED_PREFIXES,
 };
+pub use tee::TeeSink;
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

@@ -423,32 +423,53 @@ Land in the **same change**:
     makes a read panic. Full host tests, rustdoc, and `const`-constructible
     for a `static`.
 
+**Done (the boot audit-log composition — the producer half of the item-1 wiring):**
+
+- The `BootAuditRing` is composed into the boot **audit** channel of every
+  Tier-1 boot binary. Each arch's `main.rs` now passes `BootInfo`'s audit sink
+  a `tairix_log::TeeSink` fan-out that delivers each record both to the port's
+  serial sink (unchanged) *and* to a retained per-arch `BOOT_AUDIT_RING`
+  `static` in that arch's `boot.rs`.
+  - **Fan-out defined once (`lib/log::TeeSink`, §2.2).** A `const`-constructible,
+    alloc-free `TeeSink<'a, N>` over `[&'a (dyn Sink + Sync); N]`; only the ring
+    `static` is per-port, because its `IrqSafeSpinLock` is parameterised by the
+    arch `InterruptControl` (`RflagsIrqControl` / `DaifIrqControl` /
+    `SstatusIrqControl`). riscv64 gained its first `InterruptControl`
+    (`SstatusIrqControl`), and the port's existing kheap CSR adapters now
+    delegate to it (one definition of the mask discipline).
+  - **Arch-neutral monotonic stamp.** `kernel/core::boot_audit_ring::boot_audit_clock`
+    reads the one arch-neutral wait-queue clock (`waitq::wait_now_ns`), so no
+    per-arch clock code exists; records emitted before that clock is installed
+    carry an honest zero (ordered by sequence regardless). The plan's earlier
+    "per-arch monotonic-clock seam / none wired on x86_64" note is moot — the
+    shared clock covers every port.
+  - **Capacity is one shared constant** (`BOOT_AUDIT_RING_CAPACITY`, a diagnostic
+    tail bound, not a scalable capacity). Host tests cover the tee fan-out and
+    the clock mapping; `docs/src/architecture/supervisor.md` documents it. The
+    QEMU boot verticals inject their own audit sink, so retention is
+    production-only and never disturbs a test's audit interception.
+
 **Remaining (the kernel consumer):**
 
-1. Compose the `BootAuditRing` into the boot audit path (a tee alongside the
-   per-arch serial audit sink) with the kernel's monotonic since-boot clock,
-   and wire the reader into `SupervisorHost::log_tail`. The ring primitive
-   above is landed; this is its kernel producer + reader wiring, which needs
-   the per-arch monotonic-clock seam (the serial sink notes none is wired on
-   x86_64 yet) threaded through. `panic-log` reads the `WATCHDOG.md` /
-   `FIX-PANICS.md` records, not this ring.
-2. A kernel `SupervisorHost` wiring each command to its existing source
+1. A kernel `SupervisorHost` wiring each command to its existing source
    (introspect/version/mem/uptime/date, `tairix_kernel_mem::ram_selftest`
-   for `memtest`, `lib/partition`, the `lib/abi` hardware tree, the boot
-   audit ring above, the ARXFS descriptor read, the `/System` `FilesystemRead`
-   for `ls`, `KernelArch::reboot`/`poweroff` for control, and the real
+   for `memtest`, `lib/partition`, the `lib/abi` hardware tree, the ARXFS
+   descriptor read, the `/System` `FilesystemRead` for `ls`,
+   `KernelArch::reboot`/`poweroff` for control, and the real
    `mount_root_disk_and_load_users` for `mount`), plus the `41xx`
-   `SupervisorEvent` audit ids.
-3. The ESC boot-screen window at the top of
+   `SupervisorEvent` audit ids. Its `log_tail` reads the `BOOT_AUDIT_RING`
+   composed above (`seq_range()`/`record(seq)`); `panic-log` reads the
+   `WATCHDOG.md` / `FIX-PANICS.md` records, not this ring.
+2. The ESC boot-screen window at the top of
    `root_mount.rs :: unlock_root_disk_interactively_impl` (byte-exact
    `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
    `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
    including the timed-read/non-blocking-poll primitive and the ESC-vs-CSI
    re-poll driving `LineEditor::resolve_escape`, threading the
    `SupervisorHost` through the unlock path from `unlock_orchestrate.rs`.
-4. The QEMU integration vertical driving ESC at both trigger points with the
+3. The QEMU integration vertical driving ESC at both trigger points with the
    byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
 
-The engine layer and the machine-control seam are complete and green; items
-1–4 are the remaining kernel wiring, to land behind a green whole-project
-gate (item 1 first, as items 2–3 depend on it).
+The engine layer, the machine-control seam, and the boot audit-log
+composition are complete and green; items 1–3 are the remaining kernel
+wiring (the `SupervisorHost` first, as items 2–3 depend on it).

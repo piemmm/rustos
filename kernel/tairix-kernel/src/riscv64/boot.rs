@@ -63,12 +63,16 @@ use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
 use tairix_arch_riscv64::{
-    halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage,
+    halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
+};
+use tairix_kernel_core::boot_audit_ring::{
+    boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };
 use tairix_kernel_core::{kernel_main, BootInfo, ConsoleWrite, IrqRouting, KernelArch};
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use tairix_kernel_sched_api::SchedulerConfig;
-use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
+use tairix_sync::{InterruptControl, IrqState};
 
 use crate::riscv64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
 
@@ -847,36 +851,101 @@ pub fn boot(
     }
 }
 
+/// Saved `sstatus.SIE` state for [`SstatusIrqControl`] — the prior
+/// interrupt-enable bit, masked to `SSTATUS_SIE`, an opaque token.
+#[derive(Copy, Clone)]
+pub struct SstatusState(usize);
+
+impl IrqState for SstatusState {}
+
+/// The riscv64 [`InterruptControl`] every IRQ-safe kernel structure on this
+/// port masks through: it clears `sstatus.SIE` (masking S-mode interrupt
+/// *taking* on this hart) for the critical section and restores the exact
+/// prior state on release. Reentrant — a `disable` while already masked
+/// captures a cleared bit whose restore leaves interrupts masked. The
+/// riscv64 sibling of x86_64's `RflagsIrqControl` and aarch64's
+/// `DaifIrqControl`.
+pub struct SstatusIrqControl;
+
+// SAFETY: `disable` clears `sstatus.SIE` and reads the prior `sstatus`,
+// atomically masking S-mode interrupts on this hart and returning the exact
+// prior interrupt-enable state; `restore` re-sets `sstatus.SIE` only when it
+// was set before, leaving an already-masked state masked (reentrant), exactly
+// as the trait requires. Both CSR ops are well-defined in S-mode and touch
+// only the interrupt-enable bit.
+unsafe impl InterruptControl for SstatusIrqControl {
+    type State = SstatusState;
+
+    fn disable() -> Self::State {
+        let prev: usize;
+        // SAFETY: `csrrci sstatus, 2` atomically clears `sstatus.SIE` (bit 1)
+        // and reads the prior `sstatus` into `prev`; it touches only the
+        // interrupt-enable bit.
+        unsafe {
+            core::arch::asm!("csrrci {0}, sstatus, 2", out(reg) prev, options(nomem, nostack));
+        }
+        SstatusState(prev & (trap::SSTATUS_SIE as usize))
+    }
+
+    unsafe fn restore(state: Self::State) {
+        if state.0 & (trap::SSTATUS_SIE as usize) != 0 {
+            // SAFETY: `csrs sstatus` sets only `sstatus.SIE`, re-enabling
+            // S-mode interrupts exactly as they were before the paired
+            // disable.
+            unsafe {
+                core::arch::asm!("csrs sstatus, {0}", in(reg) trap::SSTATUS_SIE, options(nomem, nostack));
+            }
+        }
+    }
+}
+
 /// Mask this hart's supervisor interrupts for a kernel-heap-allocator
 /// critical section, returning the prior `sstatus.SIE` as an opaque token.
 ///
 /// The `fn`-pointer adapter the boot path installs into the global heap so
 /// the allocator's lock is interrupt-safe: an interrupt taken on a hart
 /// already holding the lock can no longer reenter `alloc`/`dealloc` and spin
-/// forever on the lock its own interrupted mainline holds. The riscv64
-/// sibling of aarch64's `kalloc_irq_disable`.
+/// forever on the lock its own interrupted mainline holds. Delegates to the
+/// same [`SstatusIrqControl`] every IRQ-safe spinlock uses, so the masking
+/// discipline is defined once. The riscv64 sibling of aarch64's
+/// `kalloc_irq_disable`.
 fn kalloc_irq_disable() -> usize {
-    let prev: usize;
-    // SAFETY: `csrrci sstatus, 2` atomically clears `sstatus.SIE` (bit 1) —
-    // masking S-mode interrupts on this hart — and reads the prior `sstatus`
-    // into `prev`; it touches only the interrupt-enable bit.
-    unsafe {
-        core::arch::asm!("csrrci {0}, sstatus, 2", out(reg) prev, options(nomem, nostack));
-    }
-    prev & (trap::SSTATUS_SIE as usize)
+    <SstatusIrqControl as InterruptControl>::disable().0
 }
 
 /// Restore this hart's supervisor interrupt state from a token
 /// [`kalloc_irq_disable`] returned, closing the allocator critical section.
 fn kalloc_irq_restore(token: usize) {
-    if token & (trap::SSTATUS_SIE as usize) != 0 {
-        // SAFETY: `csrs sstatus` sets only `sstatus.SIE`, re-enabling S-mode
-        // interrupts exactly as they were before the paired disable.
-        unsafe {
-            core::arch::asm!("csrs sstatus, {0}", in(reg) trap::SSTATUS_SIE, options(nomem, nostack));
-        }
+    // SAFETY: `token` is the `sstatus.SIE` state a paired `kalloc_irq_disable`
+    // captured on this hart; restoring it re-enables interrupts only if they
+    // were enabled before.
+    unsafe {
+        <SstatusIrqControl as InterruptControl>::restore(SstatusState(token));
     }
 }
+
+/// The retained, tail-able in-memory boot audit ring for this port.
+///
+/// Composed into the boot audit channel through [`AUDIT_SINK`], so every
+/// audit record the kernel emits from the earliest boot onward is teed into
+/// it and can be read back non-destructively — the store the pre-boot
+/// Supervisor's `log` command tails (`plans/NEW-SUPERVISOR.md`). It is
+/// guarded by the riscv64 [`SstatusIrqControl`], so a record copy masks this
+/// hart's interrupts for its short, allocation-free duration and the ring is
+/// safe to write from an interrupt handler that logs. It stamps each record
+/// with the kernel's monotonic since-boot clock ([`boot_audit_clock`]).
+pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, SstatusIrqControl> =
+    BootAuditRing::new(boot_audit_clock);
+
+/// The production boot **audit** channel: a fan-out delivering each record to
+/// both the SBI serial console ([`SERIAL_SINK`]) and the retained
+/// [`BOOT_AUDIT_RING`].
+///
+/// `main.rs` passes this as [`BootInfo`]'s audit sink for the production
+/// binary; the QEMU boot verticals substitute their own audit sink through
+/// [`boot`] directly, so retaining the trail is a production-only wiring and
+/// never disturbs a test's audit interception.
+pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
 
 /// Log the RV-P2 paged-boot init line (MMU + dispatch reached).
 fn log_reached(sink: &(dyn Sink + Sync), hartid: u64, dtb: u64, mmu_on: bool) {

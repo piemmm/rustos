@@ -597,7 +597,7 @@ fn note_resched_here() {
 /// Saved DAIF state for [`DaifIrqControl`].
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 #[derive(Copy, Clone)]
-struct DaifState(u64);
+pub struct DaifState(u64);
 
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 impl IrqState for DaifState {}
@@ -618,7 +618,7 @@ impl IrqState for DaifState {}
 /// a Raspberry Pi 4, where Group 0 is secure) FIQ stays masked exactly as
 /// in a shippable build (fail closed).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-struct DaifIrqControl;
+pub struct DaifIrqControl;
 
 // SAFETY: `disable` reads DAIF and sets its IRQ+FIQ mask bits — always
 // permitted at EL1, touches no memory — atomically masking asynchronous

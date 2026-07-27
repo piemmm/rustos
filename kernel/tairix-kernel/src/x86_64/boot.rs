@@ -58,11 +58,17 @@ use tairix_arch_x86_64::gdt::PerCpuGdt;
 use tairix_arch_x86_64::irq as arch_irq;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
+use tairix_kernel_core::boot_audit_ring::{
+    boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
+};
 use tairix_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use tairix_kernel_irq::IrqController;
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use tairix_kernel_sched_api::SchedulerConfig;
-use tairix_log::{Event, EventId, Field, Level, Sink};
+use tairix_log::{Event, EventId, Field, Level, Sink, TeeSink};
+
+use crate::x86_64::com1_rx::RflagsIrqControl;
+use crate::x86_64::serial_sink::SERIAL_SINK;
 
 use crate::mem_map::carve_guard_arena_from_map;
 use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
@@ -325,6 +331,31 @@ const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4097);
 /// its guard page faulted — under the task's own `CR3`, so
 /// the arena carve refuses to place the arena there.
 const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
+
+// --- Retained boot audit log ----------------------------------------
+
+/// The retained, tail-able in-memory boot audit ring for this port.
+///
+/// Composed into the boot audit channel through [`AUDIT_SINK`], so every
+/// audit record the kernel emits from the earliest boot onward is teed into
+/// it and can be read back non-destructively — the store the pre-boot
+/// Supervisor's `log` command tails (`plans/NEW-SUPERVISOR.md`). It is
+/// guarded by the x86_64 [`RflagsIrqControl`], so a record copy masks this
+/// CPU's interrupts for its short, allocation-free duration and the ring is
+/// safe to write from an interrupt handler that logs. It stamps each record
+/// with the kernel's monotonic since-boot clock ([`boot_audit_clock`]).
+pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, RflagsIrqControl> =
+    BootAuditRing::new(boot_audit_clock);
+
+/// The production boot **audit** channel: a fan-out delivering each record to
+/// both the COM1 serial console ([`SERIAL_SINK`]) and the retained
+/// [`BOOT_AUDIT_RING`].
+///
+/// `main.rs` passes this as [`BootInfo`]'s audit sink for the production
+/// binary; the QEMU boot verticals substitute their own audit sink through
+/// [`boot`] directly, so retaining the trail is a production-only wiring and
+/// never disturbs a test's audit interception.
+pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
 
 // --- The boot entry -------------------------------------------------
 

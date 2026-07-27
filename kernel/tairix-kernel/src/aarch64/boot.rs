@@ -64,9 +64,14 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::{PlatformDiscovery, SchedulerArch};
 use tairix_fdt::Fdt;
+use tairix_kernel_core::boot_audit_ring::{
+    boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
+};
 use tairix_kernel_core::{kernel_main, BootInfo};
 use tairix_kernel_sched_api::SchedulerConfig;
-use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
+
+use crate::aarch64::gic_irq::DaifIrqControl;
 use tairix_util::fmt::format_hex_u64;
 
 use crate::aarch64::arch_wrapper::{
@@ -231,6 +236,29 @@ fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     }
     Some(space)
 }
+
+/// The retained, tail-able in-memory boot audit ring for this port.
+///
+/// Composed into the boot audit channel through [`AUDIT_SINK`], so every
+/// audit record the kernel emits from the earliest boot onward is teed into
+/// it and can be read back non-destructively — the store the pre-boot
+/// Supervisor's `log` command tails (`plans/NEW-SUPERVISOR.md`). It is
+/// guarded by the aarch64 [`DaifIrqControl`], so a record copy masks this
+/// CPU's interrupts for its short, allocation-free duration and the ring is
+/// safe to write from an interrupt handler that logs. It stamps each record
+/// with the kernel's monotonic since-boot clock ([`boot_audit_clock`]).
+pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, DaifIrqControl> =
+    BootAuditRing::new(boot_audit_clock);
+
+/// The production boot **audit** channel: a fan-out delivering each record to
+/// both the PL011 serial console ([`SERIAL_SINK`]) and the retained
+/// [`BOOT_AUDIT_RING`].
+///
+/// `main.rs` passes this as [`BootInfo`]'s audit sink for the production
+/// binary; the QEMU boot verticals substitute their own audit sink through
+/// [`boot`] directly, so retaining the trail is a production-only wiring and
+/// never disturbs a test's audit interception.
+pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
 
 /// Boot the aarch64 kernel on the boot CPU and hand off to
 /// [`tairix_kernel_core::kernel_main`].

@@ -72,6 +72,21 @@ use tairix_sync::IrqSafeSpinLock;
 /// always be retained.
 pub const TAIL_MESSAGE_MAX: usize = 120;
 
+/// The number of most-recent boot audit records the retained ring keeps.
+///
+/// This is a **diagnostic tail bound**, not a scalable capacity: the ring's
+/// whole purpose is "the last N audit records", so a fixed N is the correct
+/// shape (a larger machine gains nothing from a longer boot-audit tail, and a
+/// smaller one must not pay for one). A boot emits well under this many
+/// *audit-level* records — the boot lifecycle markers plus the security
+/// decisions (discovery, driver bring-up, the root-unlock verdicts) — so this
+/// comfortably retains a whole boot's trail; if a pathological boot exceeds
+/// it, the tail keeps the most recent records, which is exactly what an
+/// operator inspecting a failed boot wants. Defined once here so every
+/// architecture's `BootAuditRing` `static` sizes identically rather than
+/// copying a literal.
+pub const BOOT_AUDIT_RING_CAPACITY: usize = 128;
+
 /// A monotonic clock the ring stamps each record with.
 ///
 /// A [`Sink`] receives an [`Event`] with no timestamp, so the ring reads the
@@ -80,6 +95,33 @@ pub const TAIL_MESSAGE_MAX: usize = 120;
 /// pointer is `const`-evaluable, so a `BootAuditRing` built from one can live
 /// in a `static`.
 pub type MonotonicClock = fn() -> Duration64;
+
+/// The kernel's monotonic since-boot clock, as a [`MonotonicClock`] a
+/// production [`BootAuditRing`] `static` is built from.
+///
+/// It reads the single arch-neutral monotonic clock the wait-queue timer
+/// already runs on ([`wait_now_ns`](crate::waitq::wait_now_ns)), so every
+/// architecture stamps its retained records from the *same* source with no
+/// per-port clock code — the values differ, the code does not. Before the
+/// boot path installs that clock (the earliest records, emitted while the
+/// scheduler is still being built) it returns [`Duration64::ZERO`]: an honest
+/// "monotonic time is not running yet" rather than a fabricated instant. The
+/// tail is ordered by each record's strictly-increasing sequence, never by
+/// this stamp, so a zero on the earliest records never disorders it.
+#[must_use]
+pub fn boot_audit_clock() -> Duration64 {
+    stamp_from(crate::waitq::wait_now_ns())
+}
+
+/// Turn an optional monotonic-ns reading into the stamp
+/// [`boot_audit_clock`] returns: the elapsed duration when the clock is
+/// running, or [`Duration64::ZERO`] before it is installed.
+///
+/// Split out from [`boot_audit_clock`] so the mapping is unit-testable without
+/// installing the global wait-queue clock.
+fn stamp_from(monotonic_ns: Option<u64>) -> Duration64 {
+    monotonic_ns.map_or(Duration64::ZERO, Duration64::from_nanos)
+}
 
 /// One record copied out of a [`BootAuditRing`] for display.
 ///
@@ -374,6 +416,20 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn stamp_is_zero_before_the_clock_runs_and_elapsed_after() {
+        use super::stamp_from;
+        // No installed clock (earliest boot): an honest zero, not a fabricated
+        // instant.
+        assert_eq!(stamp_from(None), Duration64::ZERO);
+        // A running clock projects the elapsed nanoseconds forward.
+        assert_eq!(stamp_from(Some(0)), Duration64::ZERO);
+        assert_eq!(
+            stamp_from(Some(2_500_000_001)),
+            Duration64::from_nanos(2_500_000_001)
+        );
     }
 
     #[test]

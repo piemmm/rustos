@@ -54,6 +54,32 @@ arrow/Delete keys) is resolved in the shared line discipline `lib/vt`
 (`LineEditor::resolve_escape` / `LineFeed::Escape`), driven by a bounded,
 timed re-poll — never a busy-spin.
 
+## The retained boot audit log
+
+The `log` command tails the boot audit trail even after the serial console has
+scrolled it away, so the recent security-relevant decisions are still
+inspectable at the bootstrap floor. That retention is a **fan-out** on the
+audit channel: each Tier-1 boot binary passes `BootInfo`'s audit sink a
+`tairix_log::TeeSink` that delivers every record both to the port's serial
+console (unchanged) *and* to a retained, tail-able in-memory ring
+(`tairix_kernel_core::boot_audit_ring::BootAuditRing`). The ring keeps the most
+recent `BOOT_AUDIT_RING_CAPACITY` records, overwriting the oldest, and a viewer
+reads them back **non-destructively** by sequence — unlike the drain-once
+`tairix_log::BootRing` the journal import consumes.
+
+The fan-out is defined once (`TeeSink`); only the ring `static` is per-port,
+because its interrupt-safe lock is parameterised by the architecture's
+`InterruptControl` (`RflagsIrqControl` on x86_64, `DaifIrqControl` on aarch64,
+`SstatusIrqControl` on riscv64) so a record copy masks the current CPU's
+interrupts for its short, allocation-free duration — the ring is a `Sink` and
+may be written from an interrupt handler that logs. Each record is stamped from
+the one arch-neutral monotonic since-boot clock (`boot_audit_clock`, reading the
+wait-queue timer); the earliest records, emitted before that clock is installed,
+carry an honest zero rather than a fabricated instant, and the tail is ordered
+by each record's strictly-increasing sequence regardless. The QEMU boot
+verticals substitute their own audit sink, so retention is a production-only
+wiring that never disturbs a test's audit interception.
+
 ## Command set
 
 Control: `help`, `continue` (alias `boot`), `mount`, `reboot`, `poweroff`

@@ -78,10 +78,13 @@ mod kernel {
         // the heap then grows past its `.bss` bootstrap region on demand
         // instead of being capped at a fixed slab.
         tairix_kernel::register_global_heap(&ALLOCATOR);
+        // Log stream: the raw COM1 sink. Audit stream: the fan-out that both
+        // renders to COM1 and retains the trail in the tail-able boot audit
+        // ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
         boot(
             boot_info,
             &SERIAL_SINK,
-            &SERIAL_SINK,
+            &tairix_kernel::x86_64::boot::AUDIT_SINK,
             tairix_log::Level::Info,
         )
     }
@@ -150,10 +153,13 @@ mod kernel {
         // the heap then grows past its `.bss` bootstrap region on demand
         // instead of being capped at a fixed slab.
         tairix_kernel::register_global_heap(&ALLOCATOR);
+        // Log stream: the raw PL011 sink. Audit stream: the fan-out that both
+        // renders to the PL011 and retains the trail in the tail-able boot
+        // audit ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
         boot::boot(
             dtb,
             &SERIAL_SINK,
-            &SERIAL_SINK,
+            &boot::AUDIT_SINK,
             tairix_log::Level::Info,
             &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
@@ -225,11 +231,15 @@ mod kernel {
         // the heap then grows past its `.bss` bootstrap region on demand
         // instead of being capped at a fixed slab.
         tairix_kernel::register_global_heap(&ALLOCATOR);
+        // Log stream: the raw SBI sink. Audit stream: the fan-out that both
+        // renders to the SBI console and retains the trail in the tail-able
+        // boot audit ring the pre-boot Supervisor reads
+        // (`plans/NEW-SUPERVISOR.md`).
         boot::boot(
             hartid,
             dtb,
             &SERIAL_SINK,
-            &SERIAL_SINK,
+            &boot::AUDIT_SINK,
             tairix_log::Level::Info,
         )
     }
