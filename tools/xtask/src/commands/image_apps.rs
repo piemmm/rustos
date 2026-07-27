@@ -153,10 +153,55 @@ pub fn app_store_files(
     static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
         [const { OnceLock::new() }; MEMO_SLOTS];
     FILES[memo_slot(arch, profile)]
-        .get_or_init(|| build_app_bundles(ctx, arch, profile).map(|bundles| store_files(&bundles)))
+        .get_or_init(|| {
+            let mut files = build_app_bundles(ctx, arch, profile).map(|b| store_files(&b))?;
+            // The four `/System/Fonts` faces the `fontd` service loads at
+            // startup ship on every image alongside the bundles.
+            files.extend(system_font_files(ctx)?);
+            Ok(files)
+        })
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
+}
+
+/// The `/System/Fonts` faces the image plants: every committed TrueType face
+/// under `lib/font/assets/`, laid down at `Fonts/<basename>` so the sandboxed
+/// `fontd` font service can load them at startup (`AGENTS.md` §16.2/§16.4,
+/// `plans/FONT-SERVICE.md` FS-6). Discovered from the on-disk assets rather
+/// than a hand-maintained list, so a face ships without editing this file
+/// (§2.2); `fontd` opens exactly these paths.
+///
+/// # Errors
+///
+/// A string describing a failed read of the font-assets directory or a face.
+fn system_font_files(ctx: &Context) -> Result<Vec<AppStoreFile>, String> {
+    let dir = ctx.workspace_root.join("lib/font/assets");
+    let mut faces = Vec::new();
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("image: reading font assets {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("image: font asset entry in {}: {e}", dir.display()))?
+            .path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ttf") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("image: non-UTF-8 font asset name in {}", dir.display()))?
+            .to_owned();
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("image: font face {}: {e}", path.display()))?;
+        faces.push(AppStoreFile {
+            components: vec![b"Fonts".to_vec(), name.into_bytes()],
+            bytes,
+        });
+    }
+    // `read_dir` order is unspecified; sort so the planted set is deterministic.
+    faces.sort_by(|a, b| a.components.cmp(&b.components));
+    Ok(faces)
 }
 
 /// The composed store files a single-fixture vertical's disk plants: the

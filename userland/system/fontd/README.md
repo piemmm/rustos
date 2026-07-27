@@ -45,12 +45,16 @@ The manifest requests only:
 
 - `CAP_IPC_BIND_PRIVILEGED` — to bind the reserved `FONT_ENDPOINT` (a squatter
   binding it first would feed forged coverage to every app).
+- `CAP_FS_ACCESS` — the one-shot startup read of the four committed
+  `/System/Fonts` faces through the secured VFS (which still authorises every
+  path per-inode under the service's attested identity, and `/System` is
+  mounted read-only so this reach can never write).
 - `CAP_LOG_EMIT` — its startup audit records.
 
-Reading the world-readable `/System/Fonts` faces is a one-shot mode-gated open
-(`AGENTS.md` §5.3), not a held capability. The service requests no spawn, no
-network, and no filesystem *write* authority — the minimum-capability sandbox
-of §19.5.
+The service requests no spawn and no network authority, and the untrusted
+TrueType parse runs in this service's own isolated address space — the
+minimum-capability sandbox of `AGENTS.md` §19.5. It keeps no open descriptor
+after the startup read.
 
 ## Tests
 

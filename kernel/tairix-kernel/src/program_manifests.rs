@@ -161,6 +161,25 @@ pub const NETSTACK_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `fontd` font service's manifest (`plans/FONT-SERVICE.md`):
+/// `CAP_IPC_BIND_PRIVILEGED` to bind the reserved well-known
+/// `FONT_ENDPOINT` rendezvous (reserved ids fail closed against a squatter
+/// feeding forged glyph coverage to the compositor), `CAP_FS_ACCESS` for the
+/// one-shot startup read of the four committed `/System/Fonts` faces through
+/// the secured VFS (which still authorises every path per-inode under the
+/// service's attested identity, and `/System` is mounted read-only so this
+/// reach can never write), and `CAP_LOG_EMIT` for its structured audit
+/// records. It requests no spawn or network authority, and the untrusted
+/// TrueType parse runs in this service's own isolated address space, so a
+/// malformed face can fault only this sandbox. Drawing text is not a security
+/// boundary, so serving glyph coverage needs no capability of its own.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const FONTD_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -486,6 +505,18 @@ mod tests {
                 CapabilityId::NET_RAW,
                 CapabilityId::SHM,
                 CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::LOG_EMIT,
+            ])
+        );
+    }
+
+    #[test]
+    fn fontd_manifest_is_pinned() {
+        assert_eq!(
+            set(FONTD_MANIFEST),
+            set(&[
+                CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::FS_ACCESS,
                 CapabilityId::LOG_EMIT,
             ])
         );
@@ -939,6 +970,7 @@ mod tests {
             ("elsh", AppKind::Command, SHELL_MANIFEST),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
             ("files", AppKind::Command, FILES_BROWSER_REQUEST),
+            ("fontd", AppKind::Service, FONTD_MANIFEST),
             ("fstree", AppKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("head", AppKind::Command, FILE_TOOL_REQUEST),

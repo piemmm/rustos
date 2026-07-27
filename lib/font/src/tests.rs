@@ -81,35 +81,17 @@ fn ukrainian_cyrillic_has_glyphs_with_ink() {
 }
 
 #[test]
-fn japanese_text_has_distinct_glyphs_with_ink() {
-    for ch in ['あ', 'ア', '漢', '字', '日', '本', '語', '。', '「', '」'] {
-        let glyph = lookup(ch);
-        assert!(glyph.is_some(), "{ch:?} has no glyph");
-        assert_ne!(glyph, lookup('\u{FFFD}'), "{ch:?} uses the fallback glyph");
-        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
-    }
-}
-
-#[test]
-fn korean_text_has_distinct_glyphs_with_ink() {
-    for ch in ['가', '각', '한', '글', '안', '녕', '하', '세', '요', '힣'] {
-        let glyph = lookup(ch);
-        assert!(glyph.is_some(), "{ch:?} has no glyph");
-        assert_ne!(glyph, lookup('\u{FFFD}'), "{ch:?} uses the fallback glyph");
-        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
-    }
-}
-
-#[test]
-fn hebrew_text_has_distinct_glyphs_with_ink() {
-    for ch in [
-        'א', 'ב', 'ה', 'ו', 'ל', 'ם', 'ש', 'ך', 'ן', 'ף', 'ץ', '־', '׳', '״', '\u{05B0}',
-        '\u{05B8}', '\u{05BC}',
-    ] {
-        let glyph = lookup(ch);
-        assert!(glyph.is_some(), "{ch:?} has no glyph");
-        assert_ne!(glyph, lookup('\u{FFFD}'), "{ch:?} uses the fallback glyph");
-        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+fn cjk_and_hebrew_are_not_in_the_console_atlas() {
+    // The compiled-in atlas is the primary Latin face's repertoire only; CJK
+    // and Hebrew scalars are not mapped, so the console shows the U+FFFD
+    // fallback and `fontd` serves rich text at runtime instead.
+    for ch in ['あ', 'ア', '漢', '日', '가', '각', '한', 'א', 'ב', 'ש'] {
+        assert_eq!(lookup(ch), None, "{ch:?} must not be in the console atlas");
+        assert_eq!(
+            lookup_or_fallback(ch),
+            lookup_or_fallback('\u{FFFD}'),
+            "{ch:?} must fall back to the replacement glyph"
+        );
     }
 }
 
@@ -173,9 +155,17 @@ mod render {
     use tairix_raster::{Color, Surface};
 
     use crate::atlas;
+    use crate::client::install_test_transport;
     use crate::font::BitmapFont;
 
     const WHITE: Color = Color::rgb(255, 255, 255);
+
+    /// Install the shared solid test transport (`client::SolidTestTransport`).
+    /// Every draw test installs the same transport, so the process-global
+    /// client is deterministic even with the harness running in parallel.
+    fn install() {
+        install_test_transport();
+    }
 
     fn surface() -> Surface {
         Surface::new(64, 32).expect("surface")
@@ -215,6 +205,7 @@ mod render {
 
     #[test]
     fn draw_text_advances_the_pen_and_leaves_ink() {
+        install();
         let font = BitmapFont::inconsolata();
         let mut surface = surface();
         let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
@@ -224,7 +215,10 @@ mod render {
 
     #[test]
     fn draw_text_paints_wide_glyphs_across_two_cells() {
+        install();
         let font = BitmapFont::inconsolata();
+        // Wide (CJK) scalars advance two cells; the service returns a two-cell
+        // bitmap, so ink reaches the continuation cell.
         for (text, language) in [("日", "Japanese"), ("한", "Korean")] {
             let mut surface = surface();
             let pen = font.draw_text(&mut surface, 0, 0, text, WHITE);
@@ -241,17 +235,19 @@ mod render {
 
     #[test]
     fn full_coverage_keeps_the_callers_colour() {
+        install();
         let font = BitmapFont::inconsolata();
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);
-        // The full block covers every cell pixel at 15/15, which must map to
-        // the caller's exact colour, not one rounded down.
+        // Full 8-bit coverage (255) must map to the caller's exact colour, not
+        // one rounded down — the top entry of the 256-entry blend table.
         let px = surface.get(1, 1).expect("in bounds");
         assert_eq!((px.r, px.g, px.b, px.a), (255, 255, 255, 255));
     }
 
     #[test]
     fn offscreen_text_clips_without_panicking() {
+        install();
         let font = BitmapFont::inconsolata();
         let mut surface = surface();
         font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);
@@ -260,20 +256,22 @@ mod render {
     }
 
     #[test]
-    fn unmapped_text_draws_the_replacement_glyph() {
+    fn a_scalar_the_faces_do_not_cover_still_draws() {
+        install();
+        // The client blits whatever coverage the service returns; resolving an
+        // unmapped scalar to the U+FFFD fallback is the service's job (tested
+        // in `fontd`). Here the scalar still produces a drawn glyph rather than
+        // being silently dropped.
         let font = BitmapFont::inconsolata();
-        let mut crab = surface();
-        font.draw_text(&mut crab, 0, 0, "🦀", WHITE);
-        let mut replacement = surface();
-        font.draw_text(&mut replacement, 0, 0, "\u{FFFD}", WHITE);
-        assert_eq!(crab.pixels(), replacement.pixels());
-        assert!(crab.pixels().iter().any(|p| p.a > 0));
+        let mut surface = surface();
+        font.draw_text(&mut surface, 0, 0, "🦀", WHITE);
+        assert!(surface.pixels().iter().any(|p| p.a > 0));
     }
 
     #[test]
     fn native_height_is_the_default_font() {
-        // Exactly the native cell height is the console font, drawn straight
-        // from the atlas, so nothing about console rendering changes.
+        // Exactly the native cell height is the console font, so nothing about
+        // console-size rendering changes.
         assert_eq!(
             BitmapFont::with_pixel_height(atlas::CELL_HEIGHT),
             BitmapFont::inconsolata()
@@ -296,9 +294,10 @@ mod render {
 
     #[test]
     fn a_large_font_rasterises_bigger_crisp_glyphs_from_the_outline() {
-        // The core fix: a size well above native rasterises a large glyph
-        // straight from the outline (never an upscaled 28px bitmap). Metrics
-        // and ink both scale up, and the tall cell is filled with real ink.
+        install();
+        // A size well above native asks the service to rasterise a large
+        // glyph from the outline (never an upscaled bitmap): metrics and ink
+        // both scale up with the cell height.
         let big = BitmapFont::with_pixel_height(200);
         assert_eq!(big.glyph_height(), 200);
         assert!(big.advance() > BitmapFont::inconsolata().advance());
@@ -345,6 +344,7 @@ mod render {
 
     #[test]
     fn scaled_text_advances_by_the_scaled_metric_and_leaves_ink() {
+        install();
         let font = BitmapFont::with_pixel_height(14);
         let mut surface = surface();
         let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
@@ -361,9 +361,9 @@ mod render {
 
     #[test]
     fn scaled_full_block_is_opaque() {
-        // The full-block outline fills the whole cell, so an interior pixel is
-        // fully covered and stays the caller's exact colour at a non-native
-        // size too.
+        install();
+        // Full coverage stays the caller's exact colour at a non-native size
+        // too.
         let font = BitmapFont::with_pixel_height(14);
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);
@@ -373,6 +373,7 @@ mod render {
 
     #[test]
     fn scaled_rendering_is_deterministic_across_the_cache() {
+        install();
         // Drawing the same text at the same size twice must be identical:
         // a cache miss then a cache hit resolve to the same bytes.
         let font = BitmapFont::with_pixel_height(13);
@@ -385,6 +386,7 @@ mod render {
 
     #[test]
     fn scaled_wide_glyph_paints_its_continuation_cell() {
+        install();
         let font = BitmapFont::with_pixel_height(16);
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "日", WHITE);
@@ -398,6 +400,7 @@ mod render {
 
     #[test]
     fn scaled_offscreen_text_clips_without_panicking() {
+        install();
         let font = BitmapFont::with_pixel_height(12);
         let mut surface = surface();
         font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);

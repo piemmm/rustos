@@ -1,5 +1,9 @@
-//! Glyph lookup over the generated Inconsolata EX + M PLUS 1 Code + `D2Coding` +
-//! Noto Sans Hebrew atlas.
+//! Glyph lookup over the generated Inconsolata EX console atlas.
+//!
+//! The compiled-in atlas is the primary face's repertoire only (the CJK and
+//! Hebrew companions are served at runtime by `fontd`), so a CJK/Hebrew scalar
+//! resolves to the U+FFFD fallback here exactly like any other unmapped
+//! scalar.
 //!
 //! [`lookup`] maps any `char` to its atlas cell by binary search over the
 //! generated codepoint ranges ([`crate::atlas::RANGES`]); a scalar the face

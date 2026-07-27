@@ -27,5 +27,10 @@ tairix-icon = { path = "../icon", version = "=0.0.0" }
 # consumes; the same events the window manager routes.
 tairix-input = { path = "../input", version = "=0.0.0" }
 
+# The controls' host tests draw text, so they inject the shared solid test
+# transport via the `test-util` feature (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+
 [lints]
 workspace = true

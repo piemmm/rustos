@@ -50,6 +50,15 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# On the real target the `Run` binary reaches the sandboxed font service over
+# the runtime `ipc_call` transport; the base dependency stays host-neutral so
+# host tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The gallery model's host tests draw text, so they inject the shared solid
+# test transport via the `test-util` feature (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

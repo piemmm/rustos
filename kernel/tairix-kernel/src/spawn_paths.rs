@@ -56,6 +56,13 @@ pub const SEATMGR_PATH: &[u8] = b"/System/Services/seatmgr.app/Run";
 /// path contract, identical on every target.
 pub const NETSTACK_PATH: &[u8] = b"/System/Services/netstack.app/Run";
 
+/// Absolute path the font service program is registered under
+/// (`plans/FONT-SERVICE.md`): the service store's `<name>.app` bundle. It
+/// must match exactly the `fontd` path PID 1 `init` hands to the `spawn`
+/// syscall at startup (`userland/system/init/src/startup.rs`). One OS-wide
+/// path contract, identical on every target.
+pub const FONTD_PATH: &[u8] = b"/System/Services/fontd.app/Run";
+
 /// Absolute path the `ps` tool program is registered under: the system app
 /// store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -126,9 +133,9 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
 #[cfg(test)]
 mod tests {
     use super::{
-        CAT_PATH, CLEAR_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, NETSTACK_PATH, PS_PATH,
-        RESET_PATH, SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH, SYSINFO_PATH,
-        SYSMON_PATH, TOP_PATH, USERS_CLI_PATH,
+        CAT_PATH, CLEAR_PATH, DEVMGR_PATH, FONTD_PATH, LOGIN_PATH, LS_PATH, MAN_PATH,
+        NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH,
+        SYSINFO_PATH, SYSMON_PATH, TOP_PATH, USERS_CLI_PATH,
     };
     use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
 
@@ -146,6 +153,7 @@ mod tests {
             (SYSINFOD_PATH, "sysinfod"),
             (SEATMGR_PATH, "seatmgr"),
             (NETSTACK_PATH, "netstack"),
+            (FONTD_PATH, "fontd"),
         ] {
             let expected = alloc::format!(
                 "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",

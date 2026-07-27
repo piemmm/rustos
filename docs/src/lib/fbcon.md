@@ -10,15 +10,19 @@ exactly once instead of being re-derived per target.
 It turns a byte stream into on-screen text by feeding it to the single shared
 `tairix_vt::Parser`, applying each parsed `tairix_vt::Op` to a retained cell
 grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
-scan-out surface (`&mut [u32]`), rendering glyphs with the
-shared `tairix_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
-Hebrew coverage atlas: 15×28 cells with 16-level anti-aliased coverage,
-Japanese hiragana/katakana/kanji, all precomposed Hangul syllables, and
-Hebrew/Yiddish alongside the primary face's Latin/Greek/Cyrillic repertoire,
-with a U+FFFD fallback for anything the merged family does not map. Double-width
-glyphs occupy a lead plus a continuation cell (the same
-`tairix_vt::char_width` layout the curses window writer produces), and their
-bitmap paints across both cells as one repaint unit. It is a full terminal:
+scan-out surface (`&mut [u32]`), rendering glyphs with the shared `tairix_font`
+compiled-in **console atlas**: the primary Inconsolata EX face's whole
+repertoire (Latin, Greek, Cyrillic, box drawing, arrows, punctuation,
+currency), 15×28 cells with 16-level anti-aliased coverage, and a U+FFFD
+fallback for anything outside it. The CJK (Japanese, Korean) and Hebrew
+companion faces are **not** compiled into the kernel/boot-console path — the
+font service (`fontd`) rasterises them on demand at runtime — so the boot and
+headless text console shows U+FFFD for a CJK/Hebrew scalar while rich CJK and
+Hebrew text is available through the graphical terminal, which draws via the
+service. A wide (double-width) scalar still occupies a lead plus a continuation
+cell (the same `tairix_vt::char_width` layout the curses window writer
+produces); the narrow fallback paints in the lead cell and the reserved
+continuation cell stays blank. It is a full terminal:
 
 - SGR colour: the 16 base colours, the 256-colour palette (colour cube + grey
   ramp), and 24-bit truecolour.

@@ -3121,33 +3121,36 @@ Shipped (headless-testable, model + renderer over injected seams):
   tracking, window ops; fails closed on bad modes.
 - Shared desktop libs (§2.2, one path each): `lib/raster` (incl. the
   `RasterCache` SVG→scale cache), `lib/theme`, `lib/geometry` (DPI/`Scale`),
-  `lib/font` (the system Inconsolata face: a generated 15×28 4-bit-coverage
-  atlas of every codepoint the face maps — `cargo xtask font-atlas`, drift
-  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback;
-  the text console draws the atlas verbatim, while the desktop rasterises
-  resized glyphs from the outlines at the requested size via `lib/fontface`,
-  cached, so UI text is crisp at any size and never a stretched bitmap),
+  `lib/font` (the text-rendering front end: a small compiled-in console atlas
+  — the primary Inconsolata EX face's repertoire only, `cargo xtask
+  font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a
+  U+FFFD fallback — that `lib/fbcon` draws verbatim, plus, behind the `render`
+  feature, a thin cached `FONT_ENDPOINT` client of the `fontd` service that
+  holds no font data of its own),
   `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser and
   merged-family resolution, used by both the `font-atlas` generator and the
   runtime `lib/font` so the atlas and live text share one rasteriser, §2.2),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
-  - **Font-as-OS-service (planned, `plans/FONT-SERVICE.md`).** Today
-    `lib/font` `include_bytes!`s the full-Unicode atlas (~3.6 MB) **and** the
-    four TrueType faces (~6.1 MB) into **every** GUI `Run` image, so each of
-    `{terminal,files,viewer,widgets,wm,taskbar,session}` carries a private
-    ~10 MB read-only copy that the launch path reads + SHA-256s + eager-copies
-    on every start — the measured cause of slow desktop/app launch, and a
-    §16.4/§19.5/§2.2 violation (fonts must be an OS-provided, sandboxed shared
-    resource, not per-app static data). Planned fix: a sandboxed `fontd`
-    service (`userland/system/fontd`) owning `/System/Fonts` + the full atlas
-    and rasterising TrueType in a §19.5 minimum-capability sandbox, serving
-    glyph coverage over the reserved `FONT_ENDPOINT` (`lib/abi/src/font_ipc.rs`);
-    `lib/font`'s render path becomes a thin client + local cache with the
-    embeds deleted; the kernel/`lib/fbcon` boot console keeps only a small
-    ASCII/box-drawing console-atlas subset (boot floor). A separate,
-    independent step fixes the shippable `installer` image building userland/
-    drivers in the debug Cargo profile while its kernel is release
-    (`pie_build::cross_compile_pie_elf`).
+  - **Font-as-OS-service (done, `plans/FONT-SERVICE.md`).** Text rendering is
+    a single sandboxed OS resource: the sandboxed `fontd` service
+    (`userland/system/fontd`, `/System/Services/fontd.app`) is the only
+    process that holds a font face or runs the TrueType rasteriser. It owns
+    the four `/System/Fonts` faces, rasterises in a §19.5 minimum-capability
+    sandbox, and serves 8-bit glyph coverage over the reserved `FONT_ENDPOINT`
+    (`lib/abi/src/font_ipc.rs`). `lib/font`'s render path is a thin cached
+    client with the ~10 MB of embedded atlas + TTF faces deleted, so no GUI
+    `Run` image carries a font payload; the kernel/`lib/fbcon` boot console
+    keeps only the small primary-face console-atlas subset (boot floor).
+    `fontd` is **not** a boot-floor service — text is a graphics-only resource,
+    so `login` starts it (as its uid-15 account, via `CAP_SPAWN_AS_USER`) the
+    first login round a machine is display-capable, covering both a graphical
+    login and the shell `desktop` command and never a headless/text boot
+    (§17.3); it resolves by path from the on-disk `/System/Services` bundle on
+    aarch64 and from the compiled-in program registry on x86_64/riscv64.
+    Starting it post-boot also avoids a latent early-boot concurrent-spawn
+    kernel defect (D18, `plans/OPEN-DEFECTS.md`). The independent profile fix
+    (`pie_build::cross_compile_pie_elf` reading `ImageProfile`) ships
+    `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).

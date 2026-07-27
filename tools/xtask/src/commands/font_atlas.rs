@@ -1,25 +1,33 @@
 //! `cargo xtask font-atlas` implementation.
 //!
-//! The system text family combines Inconsolata EX (Latin, Greek, Cyrillic),
-//! M PLUS 1 Code Regular (Japanese), `D2Coding` Regular (Korean), and Noto Sans
-//! Hebrew `ExtraCondensed`, all under SIL OFL 1.1 and committed as TrueType
-//! sources under `lib/font/assets/`. Faces have precedence in that order and
-//! each companion fills only codepoints earlier faces do not map. The renderers
-//! never parse TrueType at runtime:
-//! this command rasterises the merged repertoire into a fixed-cell,
-//! 4-bit-coverage bitmap atlas and emits it as
-//! generated data (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`)
-//! that `lib/font` compiles in. With no arguments the command verifies the
-//! committed atlas matches a fresh generation (the `ci` drift guard, exactly
-//! like `c-header`); `--write` regenerates it.
+//! This command rasterises the **console atlas**: the primary Inconsolata EX
+//! face's whole repertoire (Latin, Greek, Cyrillic, box drawing, arrows,
+//! punctuation, currency, U+FFFD; SIL OFL 1.1, committed as a TrueType source
+//! under `lib/font/assets/`) into a fixed-cell, 4-bit-coverage bitmap atlas,
+//! emitted as generated data (`lib/font/src/atlas.rs` +
+//! `lib/font/src/atlas_coverage.bin`) that the framebuffer boot console
+//! (`lib/fbcon`) and the `lib/font` geometry constants compile in. With no
+//! arguments the command verifies the committed atlas matches a fresh
+//! generation (the `ci` drift guard, exactly like `c-header`); `--write`
+//! regenerates it.
+//!
+//! Only the primary face is compiled in. The CJK (M PLUS 1 Code, `D2Coding`)
+//! and Hebrew (Noto Sans Hebrew) companion faces are **not** in this atlas:
+//! the kernel/headless text console renders the primary Latin repertoire and
+//! falls back to U+FFFD for a CJK/Hebrew scalar, while rich CJK/Hebrew text is
+//! served at runtime by the `fontd` font service, which rasterises every face
+//! and size on demand from `/System/Fonts` through this same `lib/fontface`
+//! engine. There is therefore exactly one compiled-in atlas (this console
+//! subset) and one runtime rasterisation source (the faces `fontd` loads) —
+//! no duplicated full-Unicode artifact (`AGENTS.md` §2.2).
 //!
 //! The generator is deliberately first-party and deterministic: the shared
 //! `lib/fontface` engine (a minimal TrueType reader
 //! `head`/`maxp`/`cmap` format 4/`hhea`/`hmtx`/`loca`/`glyf` and a scanline
 //! rasteriser — quadratic outlines flattened to segments, non-zero winding,
 //! 4 sample rows per pixel row with exact horizontal span coverage) turns each
-//! outline into coverage. That one engine also renders the desktop's resized
-//! UI glyphs, so the atlas and live text share a rasteriser (`AGENTS.md`
+//! outline into coverage. That one engine also renders the font service's
+//! glyphs, so the console atlas and live text share a rasteriser (`AGENTS.md`
 //! §2.2). Identical input bytes produce identical output bytes on every host,
 //! so the drift guard is meaningful.
 //!
@@ -27,10 +35,13 @@
 //! tall. Inconsolata is
 //! strictly monospace: every spacing glyph advances by one uniform width the
 //! generator reads from the face itself, and that advance defines the terminal
-//! cell. Every bitmap slot is two cells wide so Japanese and Korean full-width
-//! outlines can cover the continuation cell reserved by `lib/vt`; narrow
-//! outlines leave the second cell transparent. Cell height and baseline derive
-//! from the primary face. Zero-advance combining marks rasterise like
+//! cell. Every bitmap slot is two cells wide so the compiled-in glyph bitmap
+//! format is identical to the wide-glyph format the shared decode/blit path
+//! (`glyph.rs`, `font.rs`, `lib/fbcon`) already handles — one glyph format for
+//! both the compiled-in console glyphs and the wide glyphs the font service
+//! serves, never a second; a primary Latin glyph leaves the continuation cell
+//! transparent. Cell height and baseline derive from the primary face.
+//! Zero-advance combining marks rasterise like
 //! any other glyph — the face draws their outlines inside the advance-wide
 //! cell (GPOS anchor repositioning is a shaping concern the cell grid
 //! deliberately does not have), so each mark lands in its own cell: the same
@@ -41,14 +52,9 @@ use std::path::Path;
 
 use tairix_fontface::{CellGeometry, FontError, FontFamily, Repertoire, ATLAS_EM_PX};
 
-/// Workspace-relative path of the committed TrueType source.
+/// Workspace-relative path of the committed primary TrueType source (the
+/// only face compiled into the console atlas).
 pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
-/// Workspace-relative path of the committed Japanese companion face.
-pub const JAPANESE_TTF_PATH: &str = "lib/font/assets/MPLUS1Code-Regular.ttf";
-/// Workspace-relative path of the committed Korean companion face.
-pub const KOREAN_TTF_PATH: &str = "lib/font/assets/D2Coding-Regular.ttf";
-/// Workspace-relative path of the committed Hebrew companion face.
-pub const HEBREW_TTF_PATH: &str = "lib/font/assets/NotoSansHebrew-ExtraCondensed.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -193,21 +199,22 @@ impl Atlas {
         out.push_str(
             "// GENERATED FILE — DO NOT EDIT.\n\
              //\n\
-             // Emitted by `cargo xtask font-atlas --write` from the committed faces\n\
-             // under `lib/font/assets/` (SIL OFL 1.1; see\n\
-             // `lib/font/assets/OFL.txt`, `D2Coding-OFL.txt`, and\n\
-             // `NotoSansHebrew-OFL.txt`).\n\
+             // Emitted by `cargo xtask font-atlas --write` from the committed\n\
+             // primary face `lib/font/assets/Inconsolata-EX.ttf` (SIL OFL 1.1;\n\
+             // see `lib/font/assets/OFL.txt`).\n\
              // `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata EX + M PLUS 1 Code + `D2Coding` +\n\
-             //! Noto Sans Hebrew\n\
-             //! glyph atlas: fixed-cell 4-bit coverage bitmaps for the merged\n\
-             //! repertoire, plus the codepoint → glyph-index range table. Pure data;\n\
-             //! lookup and blitting live in\n\
-             //! the hand-written modules of this crate.\n\n",
+            "//! The generated Inconsolata EX **console atlas**: fixed-cell 4-bit\n\
+             //! coverage bitmaps for the primary face's whole repertoire (Latin,\n\
+             //! Greek, Cyrillic, box drawing, arrows, punctuation, currency,\n\
+             //! U+FFFD), plus the codepoint → glyph-index range table. The CJK and\n\
+             //! Hebrew companions are not compiled in — the font service rasterises\n\
+             //! them at runtime; a scalar outside this repertoire renders U+FFFD.\n\
+             //! Pure data; lookup and blitting live in the hand-written modules of\n\
+             //! this crate.\n\n",
         );
         let _ = writeln!(
             out,
@@ -366,34 +373,16 @@ fn emit_literals(mut literals: &[u8], output: &mut Vec<u8>) -> Result<(), String
     Ok(())
 }
 
-/// Generate the atlas from the committed face, returning the two artefacts
-/// as `(rust_view, coverage_payload)`.
+/// Generate the console atlas from the committed primary face, returning the
+/// two artefacts as `(rust_view, coverage_payload)`.
+///
+/// Only the primary Inconsolata EX face is compiled in; the CJK and Hebrew
+/// companions are served at runtime by `fontd`, not baked into the kernel.
 fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
-    let paths = [
-        DEFAULT_TTF_PATH,
-        JAPANESE_TTF_PATH,
-        KOREAN_TTF_PATH,
-        HEBREW_TTF_PATH,
-    ];
-    let face_data = paths
-        .map(|path| {
-            let path = workspace_root.join(path);
-            std::fs::read(&path)
-                .map_err(|e| format!("font-atlas: cannot read {}: {e}", path.display()))
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let faces = face_data
-        .iter()
-        .map(Vec::as_slice)
-        .zip([
-            Repertoire::Full,
-            Repertoire::Full,
-            Repertoire::Korean,
-            Repertoire::Full,
-        ])
-        .collect::<Vec<_>>();
-    let atlas = build_atlas(&faces)?;
+    let path = workspace_root.join(DEFAULT_TTF_PATH);
+    let primary = std::fs::read(&path)
+        .map_err(|e| format!("font-atlas: cannot read {}: {e}", path.display()))?;
+    let atlas = build_atlas(&[(&primary, Repertoire::Full)])?;
     Ok((atlas.render_rust(), atlas.coverage_bytes()?))
 }
 
@@ -450,38 +439,9 @@ mod tests {
         std::fs::read(workspace_root().join(DEFAULT_TTF_PATH)).expect("committed face")
     }
 
-    fn committed_japanese_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(JAPANESE_TTF_PATH)).expect("committed Japanese face")
-    }
-
-    fn committed_korean_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(KOREAN_TTF_PATH)).expect("committed Korean face")
-    }
-
-    fn committed_hebrew_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(HEBREW_TTF_PATH)).expect("committed Hebrew face")
-    }
-
-    fn system_faces<'a>(
-        primary: &'a [u8],
-        japanese: &'a [u8],
-        korean: &'a [u8],
-        hebrew: &'a [u8],
-    ) -> [(&'a [u8], Repertoire); 4] {
-        [
-            (primary, Repertoire::Full),
-            (japanese, Repertoire::Full),
-            (korean, Repertoire::Korean),
-            (hebrew, Repertoire::Full),
-        ]
-    }
-
     fn committed_atlas() -> Atlas {
         let primary = committed_face();
-        let japanese = committed_japanese_face();
-        let korean = committed_korean_face();
-        let hebrew = committed_hebrew_face();
-        build_atlas(&system_faces(&primary, &japanese, &korean, &hebrew)).expect("atlas builds")
+        build_atlas(&[(&primary, Repertoire::Full)]).expect("atlas builds")
     }
 
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
@@ -546,12 +506,15 @@ mod tests {
 
     #[test]
     fn compressed_payload_round_trips_without_size_regression() {
-        const PRE_KOREAN_PAYLOAD_BYTES: usize = 3_756_060;
+        // The console subset is the primary Latin face alone; shedding the CJK
+        // and Hebrew companions caps the compiled-in payload far below the old
+        // full-Unicode atlas (which was ~3.6 MB).
+        const CONSOLE_PAYLOAD_CEILING: usize = 600_000;
 
         let atlas = committed_atlas();
         let payload = atlas.coverage_bytes().expect("coverage encoding succeeds");
         assert!(
-            payload.len() <= PRE_KOREAN_PAYLOAD_BYTES,
+            payload.len() <= CONSOLE_PAYLOAD_CEILING,
             "compressed payload grew to {} bytes",
             payload.len()
         );
@@ -649,73 +612,23 @@ mod tests {
     }
 
     #[test]
-    fn japanese_is_covered_with_two_cell_glyphs() {
+    fn cjk_and_hebrew_companions_are_not_compiled_in() {
         let atlas = committed_atlas();
-        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
-        for ch in ['あ', 'ア', '漢', '字', '日', '本', '語', '。', '「', '」'] {
-            let glyph = cell_of(&atlas, u32::from(ch));
-            assert!(
-                glyph.iter().any(|&coverage| coverage > 0),
-                "{ch:?} has no ink"
-            );
-        }
-        for ch in ['あ', 'ア', '漢', '字', '日', '本', '語'] {
-            let glyph = cell_of(&atlas, u32::from(ch));
-            assert!(
-                glyph
-                    .chunks(width)
-                    .any(|row| row[atlas.geometry.width as usize..].iter().any(|&c| c > 0)),
-                "{ch:?} never reaches its continuation cell"
-            );
-        }
-    }
-
-    #[test]
-    fn korean_is_covered_with_two_cell_glyphs() {
-        let atlas = committed_atlas();
-        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
-        for ch in ['가', '각', '한', '글', '안', '녕', '하', '세', '요', '힣'] {
-            let glyph = cell_of(&atlas, u32::from(ch));
-            assert!(
-                glyph.iter().any(|&coverage| coverage > 0),
-                "{ch:?} has no ink"
-            );
-            assert!(
-                glyph
-                    .chunks(width)
-                    .any(|row| row[atlas.geometry.width as usize..].iter().any(|&c| c > 0)),
-                "{ch:?} never reaches its continuation cell"
-            );
-        }
-    }
-
-    #[test]
-    fn korean_scope_excludes_unrelated_companion_glyphs() {
-        let atlas = committed_atlas();
-        let unrelated_d2coding_codepoint = 0x1D02;
-        assert!(atlas.ranges.iter().all(|range| {
-            !(range.first..range.first + range.len).contains(&unrelated_d2coding_codepoint)
-        }));
-    }
-
-    #[test]
-    fn hebrew_is_covered_with_single_cell_glyphs() {
-        let atlas = committed_atlas();
-        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        // The console subset is the primary Latin face alone: CJK and Hebrew
+        // scalars are not mapped, so they resolve to U+FFFD at the console and
+        // are served by `fontd` at runtime instead.
+        let covered = |code: u32| {
+            atlas
+                .ranges
+                .iter()
+                .any(|r| (r.first..r.first + r.len).contains(&code))
+        };
         for ch in [
-            'א', 'ב', 'ה', 'ו', 'ל', 'ם', 'ש', 'ך', 'ן', 'ף', 'ץ', '־', '׳', '״', '\u{05B0}',
-            '\u{05B8}', '\u{05BC}',
+            'あ', 'ア', '漢', '字', '日', '本', '語', '가', '각', '한', '글', 'א', 'ב', 'ה', 'ש',
         ] {
-            let glyph = cell_of(&atlas, u32::from(ch));
             assert!(
-                glyph.iter().any(|&coverage| coverage > 0),
-                "{ch:?} has no ink"
-            );
-            assert!(
-                glyph
-                    .chunks(width)
-                    .all(|row| row[atlas.geometry.width as usize..].iter().all(|&c| c == 0)),
-                "{ch:?} reaches beyond its terminal cell"
+                !covered(u32::from(ch)),
+                "{ch:?} must not be in the console atlas"
             );
         }
     }
@@ -736,12 +649,8 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         let face = committed_face();
-        let japanese_face = committed_japanese_face();
-        let korean_face = committed_korean_face();
-        let hebrew_face = committed_hebrew_face();
-        let faces = system_faces(&face, &japanese_face, &korean_face, &hebrew_face);
-        let a = build_atlas(&faces).expect("atlas builds");
-        let b = build_atlas(&faces).expect("atlas builds");
+        let a = build_atlas(&[(&face, Repertoire::Full)]).expect("atlas builds");
+        let b = build_atlas(&[(&face, Repertoire::Full)]).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
         assert_eq!(
             a.coverage_bytes().expect("first encoding succeeds"),
@@ -752,65 +661,8 @@ mod tests {
     #[test]
     fn truncated_face_fails_closed() {
         let face = committed_face();
-        let japanese_face = committed_japanese_face();
-        let korean_face = committed_korean_face();
-        let hebrew_face = committed_hebrew_face();
         assert!(build_atlas(&[]).is_err());
-        assert!(build_atlas(&system_faces(
-            &face[..64],
-            &japanese_face,
-            &korean_face,
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face[..face.len() / 2],
-            &japanese_face,
-            &korean_face,
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face[..64],
-            &korean_face,
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face[..japanese_face.len() / 2],
-            &korean_face,
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face,
-            &korean_face[..64],
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face,
-            &korean_face[..korean_face.len() / 2],
-            &hebrew_face,
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face,
-            &korean_face,
-            &hebrew_face[..64],
-        ))
-        .is_err());
-        assert!(build_atlas(&system_faces(
-            &face,
-            &japanese_face,
-            &korean_face,
-            &hebrew_face[..hebrew_face.len() / 2],
-        ))
-        .is_err());
+        assert!(build_atlas(&[(&face[..64], Repertoire::Full)]).is_err());
+        assert!(build_atlas(&[(&face[..face.len() / 2], Repertoire::Full)]).is_err());
     }
 }

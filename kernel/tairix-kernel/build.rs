@@ -164,6 +164,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "NETSTACK",
     },
     Program {
+        pkg: "tairix-fontd",
+        bin: "tairix-fontd-run",
+        rel_dir: "../../userland/system/fontd",
+        fixture: "fontd_rxe.rs",
+        prefix: "FONTD",
+    },
+    Program {
         pkg: "tairix-ps",
         bin: "tairix-ps-run",
         rel_dir: "../../userland/apps/ps",

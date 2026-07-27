@@ -1,5 +1,5 @@
 //! The rasterising font-service dispatcher: the host-testable core that turns
-//! one decoded [`FontRequest`](tairix_abi::font_ipc::FontRequest) into a framed
+//! one decoded [`FontRequest`] into a framed
 //! `font-v1` reply.
 //!
 //! [`FontService`] owns the parsed system faces (borrowed byte sources), the

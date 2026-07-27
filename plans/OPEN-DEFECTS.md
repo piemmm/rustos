@@ -240,12 +240,75 @@ The open items, in priority order:
   aarch64 boot fault, and riscv64 metal is not the platform in play; it must
   not ship to real riscv hardware unfixed.
 
+- **D18 — early-boot silent guest death when PID 1 spawns a 5th concurrent
+  boot service — OPEN (latent, exposed by FONT-SERVICE).** Adding a 5th
+  `service` line to init's `DEFAULT_CONFIG` (the font-service work needed
+  one) makes the aarch64 `spawn-session`/`autoload-input` QEMU verticals die
+  silently ~2.5 s into boot — **no** kernel panic and **no** user-fault log,
+  QEMU exits (status -1) — with login just spawned and never drawing its
+  prompt. It is **not** specific to `fontd`: controlled experiments show it
+  tracks the *count* of services spawned in the tight early-boot window
+  (4 services pass; any 5 fail — removing `netstack` and keeping `fontd`
+  passes), and `fontd` itself binds `FONT_ENDPOINT` and serves correctly once
+  it starts later (in the desktop vertical). The trigger is several user
+  processes being spawned near-simultaneously (single CPU) while the encrypted
+  root is still mounting — a concurrency/capacity defect in the early-boot
+  spawn path (prime suspect: the kthread-stack guard-arena growth,
+  `kernel/tairix-kernel/src/mem_map.rs` + the per-arch `stack_arena` /
+  `spawn_producer`, sized `ram>>6` = ~4 MiB at the tests' 256 MiB and whose
+  growth past the initial blocks is a **staged** follow-on, §24). The overflow
+  does not fail closed (a §24 requirement) — it corrupts silently rather than
+  returning a `Result`. FONT-SERVICE worked around it (user-approved) by
+  **not** making `fontd` a boot-floor service — the graphical session brings
+  it up post-boot instead (headless-first, §17.3) — so no shipped path spawns
+  a 5th early service today, but the latent kernel defect remains. Proper fix:
+  make the early-boot concurrent-spawn / stack-arena growth path correct and
+  fail-closed for an arbitrary number of boot services (implement/repair the
+  growable-arena §24 follow-on and audit the spawn path for a race), with a
+  vertical that boots N services and asserts clean bring-up. Do **not** "fix"
+  it by capping the service count or bumping RAM (mitigation, not the
+  structural control, §2.17/§24.4).
+
+- **D19 — `autoload-input-qemu-aarch64` terminal stage: shell spawns
+  `/System/Apps/0.app` instead of the typed command — OPEN (latent, exposed by
+  FONT-SERVICE).** After the FONT-SERVICE change removed the ~10 MB per-app
+  font payload, the desktop vertical launches fast enough to *reach* the AW4
+  terminal round-trip stage for the first time (on untouched master each GUI
+  `Run` carried a ~10 MB `R` segment, so every launch took ~8–9 s under TCG and
+  the 300 s run timed out long before this stage — the timeout the prompt
+  attributed to "the payload"). The stage now reached, the harness types
+  `sleep 3600\n` into the focused terminal and the shell (`elsh`) issues
+  `spawn` for `/System/Apps/0.app` → `application bundle store error` →
+  `process spawn denied cause=deferred_load_failed` (serial: `comm=elsh
+  sc=spawn`, then `bundle=/System/Apps/0.app`). The command word reaching the
+  shell is `0`, **not** `sleep` — a correctly-tokenised `sleep 3600` resolves
+  to `sleep.app` (`lib/cmdres`), so the shell is reading garbled/partial input
+  over the pty. The `sleep` spawn is the test's PASS witness, so it never fires
+  and the run times out (300 s). This is **not** a font defect: `fontd` starts
+  (via login, display-gated), binds `FONT_ENDPOINT`, serves, and the terminal
+  renders text through it; the speedup merely made a latent terminal/pty
+  line-discipline (or interaction-timing) bug reachable. Prime suspects: the
+  pty cooked-mode line discipline / echo (`plans/PTY.md`, `lib/tty`) mangling
+  the typed line, or the harness typing before the terminal's shell has drained
+  its pty (a D10-class readiness-gate fragility, now that font rendering
+  changes the frame/present cadence around the typing gate). Fix: root-cause
+  the `0`-for-`sleep` command delivery (add a host/QEMU regression that types a
+  command into a live terminal and asserts the shell spawns *that* bundle), in
+  the pty/terminal/`lib/tty` path or the `autoload` interaction contract as the
+  evidence directs — **not** by masking the timeout or bumping the budget
+  (§2.17, §7 no-flaky). Font-service work is complete and correct independent
+  of this; recorded here (user-approved) rather than fixed in the font change
+  because it is a distinct, orthogonal terminal/pty defect.
+
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
-is a rustdoc/docs-build failure, and D10 was a fragile QEMU-harness
-readiness gate (fixed). Do not collapse them into one change; land each on
-its own whole-project-green gate (§7).
+is a rustdoc/docs-build failure, D10 was a fragile QEMU-harness
+readiness gate (fixed), D18 is an early-boot concurrent-spawn
+capacity/concurrency defect, and D19 is a terminal/pty command-delivery
+defect surfaced once the desktop launches fast enough to exercise it. Do not
+collapse them into one change; land each on its own whole-project-green gate
+(§7).
 
 ## Coupling to be aware of
 

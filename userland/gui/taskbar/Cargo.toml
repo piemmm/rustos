@@ -37,5 +37,10 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # it stays consistent with the window manager and apps.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 
+# The bar renderer's host tests draw text, so they inject the shared solid
+# test transport via the `test-util` feature (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
 [lints]
 workspace = true

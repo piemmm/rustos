@@ -1,15 +1,18 @@
 # Signed-AppInfo manifest source for the `fontd` font service (a service is an
 # app, AGENTS.md §16.2; plans/FONT-SERVICE.md FS-3). Discovered by the build's
 # app-bundle composer and planted under /System/Services/. The capability list
-# is the bundle's request and is deliberately minimal (§19.5, §5.2): only
+# is the bundle's request and is deliberately minimal (§19.5, §5.2):
 # CAP_IPC_BIND_PRIVILEGED (to bind the reserved well-known FONT_ENDPOINT, so a
-# squatter cannot feed forged glyph coverage to the compositor) and
-# CAP_LOG_EMIT (its audit records). Reading the world-readable /System/Fonts
-# faces at startup is mode-gated (§5.3), not a held capability; the service
-# requests no spawn, no network, and no filesystem *write* authority, so a
-# malformed face can fault only this sandbox.
+# squatter cannot feed forged glyph coverage to the compositor), CAP_FS_ACCESS
+# (the one-shot startup read of the four committed /System/Fonts faces through
+# the secured VFS — which still authorises every path per-inode under the
+# service's attested identity, and /System is mounted read-only so this reach
+# can never write), and CAP_LOG_EMIT (its audit records). The service requests
+# no spawn and no network authority, and the untrusted TrueType parse runs in
+# its own isolated address space, so a malformed face can fault only this
+# sandbox.
 id = "os.tairix.fontd"
 name = "fontd"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]
+capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

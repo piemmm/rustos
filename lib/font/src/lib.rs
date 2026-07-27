@@ -1,50 +1,48 @@
 //! Shared text rasterisation primitives (`lib/font`).
 //!
-//! This crate is the single home of the system's text rendering: the
-//! generated Inconsolata EX + M PLUS 1 Code + `D2Coding` + Noto Sans Hebrew glyph
-//! atlas ([`atlas`], emitted by `cargo xtask font-atlas --write` from the
-//! committed SIL OFL 1.1 faces in `assets/`), the Unicode glyph lookup over it
-//! ([`glyph`]), and the blitter
-//! that draws it onto a `lib/raster` `Surface` ([`font`], behind the
-//! default-on `render` feature). Font rendering is one of the curated
-//! shared-library classes; like `lib/geometry`, `lib/theme`, and
-//! `lib/raster`, it lives in `lib/*` so the taskbar and the default apps can
-//! draw text without depending on the window manager.
+//! This crate is the system's text-rendering front end. It holds two things
+//! and no font outline: the compiled-in **console atlas** ([`atlas`], emitted
+//! by `cargo xtask font-atlas --write` from the committed SIL OFL 1.1 primary
+//! Inconsolata EX face in `assets/`) with the Unicode glyph lookup over it
+//! ([`glyph`]), and — behind the default-on `render` feature — the
+//! service-backed blitter ([`font`]) that draws onto a `lib/raster` `Surface`.
+//! Font rendering is one of the curated shared-library classes; like
+//! `lib/geometry`, `lib/theme`, and `lib/raster`, it lives in `lib/*` so the
+//! taskbar and the default apps can draw text without depending on the window
+//! manager.
 //!
-//! Inconsolata EX remains primary for Latin, Greek, Cyrillic, box drawing,
-//! arrows, punctuation, and currency; M PLUS 1 Code fills missing Japanese
-//! hiragana, katakana, punctuation, and kanji; `D2Coding` fills all precomposed
-//! Hangul syllables; Noto Sans Hebrew `ExtraCondensed` fills Hebrew and Yiddish
-//! letters, punctuation, and marks. Anything outside the merged repertoire
-//! renders U+FFFD, visibly wrong rather than silently dropped. The cell model is
-//! one scalar per grid entry: a zero-advance combining mark occupies its own
-//! cell, while a wide Japanese or Korean bitmap may cover the lead and
-//! continuation cells reserved by `tairix_vt::char_width`.
+//! # The atlas is the kernel/console subset only
 //!
-//! The [`atlas`] and [`glyph`] modules are dependency-free `no_std` data and
-//! lookup, so a consumer that brings its own blitter — the framebuffer
-//! console engine `lib/fbcon`, which draws into device-coherent memory with
-//! no allocator — depends on this crate with `default-features = false` and
-//! stays `alloc`-free; the `lib/raster`-backed blitter rides the default-on
-//! `render` feature (one font definition either way).
+//! The compiled-in atlas is the primary Inconsolata EX face's whole
+//! repertoire (Latin, Greek, Cyrillic, box drawing, arrows, punctuation,
+//! currency, U+FFFD; §2.4 of `plans/FONT-SERVICE.md`). It is the boot/headless
+//! text console's glyph source (`lib/fbcon`, which brings its own allocator-free
+//! blitter via `default-features = false`), and it supplies the render path's
+//! monospace **geometry constants**. The CJK and Hebrew companion faces are
+//! **not** compiled in anywhere: the console falls back to U+FFFD for such a
+//! scalar, while rich CJK/Hebrew text is served by `fontd` (below).
+//!
+//! # Rendering goes through the sandboxed font service
+//!
+//! With the `render` feature, [`BitmapFont`] is a thin, cached client of the
+//! OS font service `fontd` (`plans/FONT-SERVICE.md`): it parses no TrueType
+//! and holds no face, and [`BitmapFont::draw_text`] fetches each glyph's 8-bit
+//! coverage from the service over `FONT_ENDPOINT` (see [`client`]) and blits
+//! it. `fontd` owns the four `/System/Fonts` faces and rasterises every scalar
+//! and size on demand in a minimum-capability sandbox, so a malformed face
+//! faults only that sandbox, never a compositor or terminal.
+//! The transport is injected: a program links it with `tairix-font/rt`, a host
+//! test installs a mock ([`set_font_transport`]); with no transport a draw
+//! composites nothing (fail closed) rather than reaching for local font data.
 //!
 //! A [`BitmapFont`] renders at a chosen cell height in physical pixels.
-//! [`BitmapFont::inconsolata`] keeps the atlas's native size (what the text
-//! console draws, straight from the atlas), while
-//! [`BitmapFont::with_pixel_height`] renders at any other size: the desktop
-//! resolves a comfortable size from the theme's logical font size and the DPI
-//! scale. A non-native cell rasterises each glyph **directly from the
-//! TrueType outline** at that exact size through the shared `lib/fontface`
-//! engine — the same rasteriser the atlas is generated with — cached per
-//! `(face, glyph, size)` (see the `cache` module). Text is therefore crisp at
-//! any size, small or large, never a stretched bitmap. Every metric scales
-//! with the cell height, so the font stays monospaced.
-//!
-//! There is no installed-font machinery yet: a `tairix-theme` font role
-//! selects a font by family name under `/System/Fonts`, but no faces are
-//! installed, so everything draws with the built-in
-//! [`BitmapFont::inconsolata`] face. When installed faces arrive they extend
-//! this crate; consumers keep calling `BitmapFont::draw_text`.
+//! [`BitmapFont::inconsolata`] keeps the native size (what the text console
+//! draws), while [`BitmapFont::with_pixel_height`] renders at any other size:
+//! the desktop resolves a comfortable size from the theme's logical font size
+//! and the DPI scale. Every metric scales with the cell height, so the font
+//! stays monospaced; the cell model is one scalar per grid entry, a wide
+//! Japanese or Korean bitmap covering the lead and continuation cells reserved
+//! by `tairix_vt::char_width`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -58,7 +56,7 @@ extern crate std;
 
 pub mod atlas;
 #[cfg(feature = "render")]
-mod cache;
+pub mod client;
 #[cfg(feature = "render")]
 pub mod font;
 pub mod glyph;
@@ -66,6 +64,10 @@ pub mod glyph;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "test-util")]
+pub use client::{install_test_transport, SolidTestTransport};
+#[cfg(feature = "render")]
+pub use client::{set_font_transport, FontTransport};
 #[cfg(feature = "render")]
 pub use font::BitmapFont;
 pub use glyph::{lookup, lookup_or_fallback, Glyph};

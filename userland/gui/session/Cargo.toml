@@ -52,6 +52,9 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The trusted picker's host tests draw text, so they inject the shared solid
+# test transport via the `test-util` feature (never a running `fontd`).
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 
 # The package is both the desktop-session glue library (above) and the `Run`
 # entry-point binary of the desktop session service (`plans/DISPLAY.md` D7c):
@@ -88,6 +91,10 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # (`BundleHelp`) and the shared short-help render the `-h`/`-?` switches
 # use, exactly as every other command app (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# On the real target the session reaches the sandboxed font service over the
+# runtime `ipc_call` transport; the base dependency stays host-neutral so host
+# tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
 
 [lints]
 workspace = true

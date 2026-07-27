@@ -44,16 +44,28 @@ pub const ELEVATE_REFUSED: EventId = EventId(10_008);
 /// sessions run without an elevation broker: an `elevate` request fails
 /// closed at the missing rendezvous rather than being served unattested.
 pub const ELEVATE_UNAVAILABLE: EventId = EventId(10_009);
+/// The sandboxed OS font service (`fontd`) was started
+/// (`plans/FONT-SERVICE.md`): the graphical desktop draws text through it, so
+/// login brings it up (as the `fontd` service account) the first round this
+/// machine is display-capable — never on a headless boot. Started once per
+/// login process; a duplicate would fail closed on the reserved
+/// `FONT_ENDPOINT` bind.
+pub const FONTD_STARTED: EventId = EventId(10_010);
+/// The font service could not be started for a graphical session (its spawn
+/// was refused). Login degrades gracefully — the graphical session still
+/// launches — but desktop text will not render until a font service is up,
+/// so the refusal is audited loudly (`AGENTS.md` §2.24).
+pub const FONTD_UNAVAILABLE: EventId = EventId(10_011);
 
 #[cfg(test)]
 mod tests {
     use super::{
         AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
-        LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ENDED, SESSION_LAUNCH_FAILED,
-        SESSION_STARTED,
+        FONTD_STARTED, FONTD_UNAVAILABLE, LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START,
+        SESSION_ENDED, SESSION_LAUNCH_FAILED, SESSION_STARTED,
     };
 
-    const ALL: [u32; 9] = [
+    const ALL: [u32; 11] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -63,6 +75,8 @@ mod tests {
         ELEVATE_GRANTED.0,
         ELEVATE_REFUSED.0,
         ELEVATE_UNAVAILABLE.0,
+        FONTD_STARTED.0,
+        FONTD_UNAVAILABLE.0,
     ];
 
     #[test]

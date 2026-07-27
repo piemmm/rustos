@@ -18,15 +18,19 @@ tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
 # The one Unicode terminal-column width definition. The bitmap blitter uses it
 # to advance wide CJK scalars by the same two cells every terminal grid reserves.
 tairix-vt = { path = "../vt", version = "=0.0.0", optional = true }
-# The spinlock + one-shot init guarding the process-global glyph cache and the
-# lazily-parsed outline family. Only the `render` blitter resizes glyphs; the
-# atlas-only view stays lock-free.
+# The spinlock guarding the process-global font-service client and its glyph
+# cache. Only the `render` blitter has a client; the atlas-only view stays
+# lock-free.
 tairix-sync = { path = "../sync", version = "=0.0.0", optional = true }
-# The shared TrueType glyph engine: the runtime rasterises a resized glyph from
-# the same outlines the atlas is generated from, so on-screen text is crisp at
-# any size and the atlas and live text share one rasteriser (§2.2). Only the
-# `render` blitter needs it; the atlas-only view stays outline-free.
-tairix-fontface = { path = "../fontface", version = "=0.0.0", optional = true }
+# The font-service wire protocol shared by this client and the `fontd` service
+# (§2.2): the render path parses TrueType nowhere, it asks `fontd` for glyph
+# coverage over `FONT_ENDPOINT`. Only the `render` blitter needs it.
+tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+# The runtime `ipc_call` transport the render path uses to reach `fontd` in a
+# real program. Off by default so host tests (which inject a mock transport)
+# and the atlas-only console view never pull the runtime in; a program links
+# it by enabling `tairix-font/rt`.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [features]
 default = ["render"]
@@ -36,8 +40,17 @@ render = [
     "dep:tairix-raster",
     "dep:tairix-vt",
     "dep:tairix-sync",
-    "dep:tairix-fontface",
+    "dep:tairix-abi",
 ]
+# The production, `ipc_call`-backed font-service transport. A program that
+# runs on the TAIRiX runtime enables this so `draw_text` reaches `fontd`
+# without any explicit setup; host tests leave it off and inject a mock.
+rt = ["render", "dep:tairix-rt"]
+# A deterministic solid-coverage test transport (`SolidTestTransport`),
+# installed lazily on first draw. A text-drawing consumer enables this as a
+# dev-dependency feature so its host tests render without a running `fontd`;
+# it is never part of a production build.
+test-util = ["render"]
 
 [lints]
 workspace = true

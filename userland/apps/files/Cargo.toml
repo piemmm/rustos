@@ -45,7 +45,10 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # The shared text rasteriser: the browser renders its labels at the theme's
 # font size, so the binary resolves the `BitmapFont` it passes to `render`.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The `Run` binary reaches the sandboxed font service over the runtime
+# `ipc_call` transport (this is a target-only dependency, so no host build is
+# affected).
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
 # The single shared theme definition (§10).
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present /

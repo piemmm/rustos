@@ -91,11 +91,12 @@ never baked into the kernel.
 - **Rasterises in a §19.5 sandbox.** The TrueType parse + outline
   rasterisation (`lib/fontface`) runs only in this service, a
   minimum-capability address space: it requests only
-  `CAP_IPC_BIND_PRIVILEGED` (to bind the reserved `FONT_ENDPOINT`) and
-  `CAP_LOG_EMIT` (audit) — no spawn, no network, no filesystem *write*
-  authority. Reading the world-readable `/System/Fonts` faces is a one-shot
-  mode-gated open at startup (§5.3), not a held capability; the faces are
-  trusted committed OS assets, but isolating the parser in its own address
+  `CAP_IPC_BIND_PRIVILEGED` (to bind the reserved `FONT_ENDPOINT`),
+  `CAP_FS_ACCESS` (the one-shot startup read of the faces through the secured
+  VFS — `fs_open` is capability-gated regardless of the file's world-readable
+  mode), and `CAP_LOG_EMIT` (audit) — no spawn and no network authority, and
+  `/System` is mounted read-only so the fs reach can never write. The faces
+  are trusted committed OS assets, but isolating the parser in its own address
   space means even a malformed face faults only this sandbox, never a
   compositor or terminal.
 - **Serves glyph coverage** over the reserved `FONT_ENDPOINT` (§2.2): a
@@ -165,9 +166,10 @@ The image builder plants the four committed TrueType faces under
 `/System/Fonts/` **once** (`tools/mkimage` + `tools/xtask` image pipeline),
 read-only within the read-only `/System` (§16.2). No atlas artifact is
 planted — `fontd` derives everything from the faces. `fontd` opens the faces
-at startup with a one-shot mode-gated read (§5.3) and then holds only the
-parsed in-memory faces; it retains no open fd and no filesystem authority for
-its serving lifetime (minimum authority, §19.5, §5.4).
+at startup with a one-shot read authorised by its `CAP_FS_ACCESS` and then
+holds only the parsed in-memory faces; it retains no open fd for its serving
+lifetime, and `/System` is read-only so the reach never writes (minimum
+authority, §19.5, §5.4).
 
 ### 2.6 Secondary defect — shippable image ships debug userland
 
@@ -184,101 +186,77 @@ the font work and is fixed in its own step.
 
 ---
 
-## 3. Deliverables (staged; each lands coherent and gate-green)
+## 3. Status — done
 
-- **FS-1 — Protocol.** `lib/abi/src/font_ipc.rs`: `FONT_ENDPOINT`, request/
-  reply framings, encoders/decoders, bounds checks, round-trip + fuzz tests;
-  C header regenerated; reserved-endpoint registration.
-- **FS-2 — Console-atlas subset + generator.** `cargo xtask font-atlas`
-  regenerates `lib/font/src/atlas.rs` + `atlas_coverage.bin` from the primary
-  committed face alone (the console subset, §2.4); `lib/fbcon`/kernel path
-  uses it. No full-Unicode atlas is compiled in or planted. `lib/fbcon`
-  CJK/Hebrew console tests updated to the fallback behaviour.
-- **FS-3 — Service.** `userland/system/fontd`: loads `/System/Fonts`, hosts
-  `FONT_ENDPOINT`, rasterises in the §19.5 sandbox, bounded glyph cache;
-  unit + mock-IPC tests; fuzz harness over the request decoder and the face
-  parser (§19.6).
-- **FS-4 — Client.** `lib/font` render path → `FONT_ENDPOINT` client + local
-  cache; the four TTF embeds (`cache.rs`) deleted; `BitmapFont` public API
-  (incl. its const-fn geometry from the retained console-atlas geometry
-  constants) preserved so GUI consumers are unchanged.
-- **FS-5 — GUI consumers.** Every `render`-feature consumer builds against
-  the client; no app embeds font data. `readelf` shows GUI `Run` images
-  losing the ~10 MB LOAD segment (regression assertion).
-- **FS-6 — Image + discovery.** Image builder plants the four `/System/Fonts`
-  TTF faces and the `fontd.app` service bundle; `init`/service discovery
-  starts `fontd` before the desktop; headless build unaffected (§17.3).
-- **FS-7 — Profile fix (§2.6).** Thread image profile through
-  `cross_compile_pie_elf`.
-- **FS-8 — Docs, README, gate.** `docs/src/lib/` (font client), `docs/src/`
-  service + security (sandboxed rendering), `docs/src/filesystem/` (/System/
-  Fonts), README matrix; full §7 gate green over the whole workspace; an
-  `installer` image built and a GUI-launch QEMU vertical shows the fast,
-  small-image launch.
+The migration is complete: the ~10 MB font payload no longer lives in any app.
+`/System/Fonts` holds the four committed TrueType faces; `fontd` is the only
+process that parses a face or runs the outline rasteriser, and every other
+process draws through the thin `lib/font` client over `FONT_ENDPOINT`.
 
-## 4. Status
+Load-bearing facts a future reader needs:
 
-- **Investigation — done.** Root cause and constraints measured (§1, §1.1).
-- **Design — done** (§2). No "future work" left implicit.
-- **FS-1 — done.** The `FONT_ENDPOINT` wire protocol lives in
-  `lib/abi/src/font_ipc.rs`: a fixed 16-byte [`FontRequest`] —
-  `Glyph { scalar: char, cell_height }` and `Metrics { cell_height }`, the
-  scalar carried as a `char` so a surrogate/out-of-range code point is
-  unrepresentable in an accepted request — a variable-length glyph-coverage
-  reply (status word + width + height + advance + `width*height` 8-bit
-  samples, bounded by `FONT_MAX_GLYPH_REPLY`), and a fixed metrics reply
-  (`FontMetrics { cell_width, cell_height, baseline }`). One
-  `glyph_coverage_len` bounds check governs both the encode and decode sides
-  so producer and consumer cannot diverge; the status-word convention is the
-  shared `crate::reply` frame. `FONT_ENDPOINT` (`0x464E_5400`) is registered
-  in `is_reserved_endpoint` (privileged bind), the decoders are enrolled in
-  the `fuzz_decode` harness, and every reply decode fails closed on a corrupt
-  frame. The cell-height bounds `FONT_MIN/MAX_CELL_HEIGHT` (8..=512) are the
-  canonical bounds the FS-4 client will adopt in place of
-  `BitmapFont::MIN/MAX_PIXEL_HEIGHT` (§2.2). Font IPC is not part of the
-  curated C-ABI surface, so the generated headers are unchanged. `docs/src`
-  prose is deferred to FS-8 with the service/client, matching how the sibling
-  `display_ipc`/`window_ipc` wire protocols are documented.
-- **FS-7 — done.** The image → Cargo-profile mapping lives once on
-  `tairix_mkimage::ImageProfile` (`cargo_build_args`/`cargo_profile_dir`,
-  alongside `index`/`COUNT`); both `kernel_build_profile` and the user-space
-  `pie_build::cross_compile_pie_elf` read it, so the shippable `installer`
-  image cross-compiles its userland/driver `Run` binaries `--release` (read
-  back from the `release/` subdir) while the `debug` and QEMU-test images
-  stay in Cargo's `dev` profile. Every `(arch, profile)` bundle memo in
-  `image_apps`/`image_drivers` is re-keyed through the shared `memo_slot`
-  helper (`MEMO_SLOTS = PieArch::COUNT * ImageProfile::COUNT`), so the
-  one-process image gate that builds both profiles can no longer hand one
-  profile's composed bundles to the other.
-- **FS-3 — done.** `userland/system/fontd` is the sandboxed font service: a
-  dual library + `Run`-binary crate modelled on `sysinfod`. The host-testable
-  `FontService` dispatcher (`src/service.rs`) parses the injected faces,
-  derives the native cell geometry once (`CellGeometry::derive` at
-  `ATLAS_EM_PX`), scales geometry/`px_per_em` per requested cell height exactly
-  as `lib/font`'s blitter does, rasterises through the shared `lib/fontface`
-  engine (4-bit `×17` → the protocol's 8-bit samples, byte-identical), and
-  memoises in a bounded `(face, glyph, height)` FIFO cache; `handle` always
-  emits a reply, a status-word error frame on any failure (fail closed). The
-  `Run` binary loads the four `/System/Fonts` faces (one-shot mode-gated read),
-  binds `FONT_ENDPOINT` with empty caps, and serves. The manifest requests only
-  `CAP_IPC_BIND_PRIVILEGED` + `CAP_LOG_EMIT` (§19.5). The `lib/fontface`
-  TrueType parser + rasteriser also gained its §19.6 fuzz harness
-  (`tests/fuzz_face.rs`, registered in `cargo xtask fuzz`). The service is
-  additive and not yet wired to a client (staged exactly as FS-1 was).
-- **Design decision (agreed).** No precomputed full-Unicode atlas artifact:
-  `/System/Fonts` holds only the four TTF faces, `fontd` rasterises every
-  size on demand from them (cached), and the one compiled-in atlas is the
-  primary-face console subset for `lib/fbcon` (§1.1, §2.4). The
-  kernel/headless text console therefore renders the primary Latin
-  repertoire and falls back to U+FFFD for CJK/Hebrew; rich text uses the
-  graphical terminal via the service.
-- **FS-2, FS-4, FS-5, FS-6, FS-8 — planned.** These are the interdependent
-  `lib/font`→IPC migration that removes the ~10 MB per-app font payload; until
-  it lands the desktop-launch QEMU vertical stays at its pre-existing 300 s
-  timeout (the payload it removes). The FS-4 client transport is designed on
-  `lib/display`'s injected-transport pattern (see `.junie/next-fix-prompt.md`).
+- **Protocol** (`lib/abi/src/font_ipc.rs`, `FONT_ENDPOINT = 0x464E_5400`,
+  registered in `is_reserved_endpoint` as a privileged bind). A fixed 16-byte
+  `FontRequest` — `Glyph { scalar: char, cell_height }` / `Metrics {
+  cell_height }`, the scalar a `char` so a surrogate is unrepresentable — and a
+  status-framed reply: a glyph reply (`width`, `height`, `advance`, then
+  `width*height` 8-bit samples, bounded by `FONT_MAX_GLYPH_REPLY`) or the
+  `FontMetrics { cell_width, cell_height, baseline }`. One shared
+  `glyph_coverage_len` bound governs encode and decode. Cell height is bounded
+  by `FONT_MIN/MAX_CELL_HEIGHT` (8..=512) — a validation bound. Not part of the
+  curated C-ABI surface, so the generated C headers carry no font view. The
+  request/reply decoders are in the `fuzz_decode` harness; the `lib/fontface`
+  TrueType parser has its own `tests/fuzz_face.rs`.
+- **Console atlas** (`lib/font/src/atlas.rs` + `atlas_coverage.bin`,
+  regenerated by `cargo xtask font-atlas --write` from the primary Inconsolata
+  EX face alone, §1.1/§2.4). The compiled-in atlas is the primary face's whole
+  repertoire only (~350 KB); the CJK + Hebrew companions are compiled in
+  nowhere. `lib/fbcon` and the render client's const-fn geometry read it; the
+  boot/headless console shows U+FFFD for a CJK/Hebrew scalar. There is no
+  precomputed full-Unicode atlas artifact.
+- **Service** (`userland/system/fontd`, `/System/Services/fontd.app`). A dual
+  library + `Run`-binary crate modelled on `sysinfod`. The host-testable
+  `FontService` dispatcher owns the parsed faces and a bounded `(face, glyph,
+  cell height)` FIFO cache, resolves a scalar to its covering face, rasterises
+  through the shared `lib/fontface` engine (4-bit `×17` → the protocol's 8-bit
+  samples, byte-identical to the old blitter), and always emits a reply
+  (status-word error frame on failure, fail closed). Its manifest requests
+  `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the one-shot startup read of the
+  faces through the secured VFS — `fs_open` is capability-gated regardless of
+  the file's mode; `/System` is read-only so no write reach), and
+  `CAP_LOG_EMIT`, and the `fontd` service account (uid 15, `FONTD_CEILING`)
+  grants exactly those three.
+- **Client** (`lib/font`, `render` feature). `BitmapFont` is a thin cached
+  `FONT_ENDPOINT` client with the same public API; the four TTF embeds
+  (`cache.rs`) and the full atlas are deleted. The transport is a
+  process-global `FontTransport` seam: real programs link `tairix-font/rt`
+  (routing through `tairix_rt::ipc_call`), host tests install a mock, and with
+  no transport a draw fails closed. GUI `Run` images no longer carry the ~10 MB
+  `R` LOAD segment.
+- **Image + discovery.** `image_apps::system_font_files` plants the four faces
+  under `/System/Fonts` in the shared `app_store_files`, and `fontd.app` is
+  auto-discovered under `/System/Services`. `fontd` is **not** a boot-floor
+  service (`init`'s `DEFAULT_CONFIG` does not name it): text rendering is a
+  graphics-only resource, so **`login` starts `fontd`** (as its uid-15 service
+  account, via `CAP_SPAWN_AS_USER`) the first login round a machine is
+  display-capable — covering both a graphical login and the shell's `desktop`
+  command, and never on a headless/text-only boot (§17.3). login resolves it by
+  path through the ordinary program gate: from the on-disk `/System/Services`
+  bundle on aarch64, and from the compiled-in program registry
+  (`spawn_paths::FONTD_PATH`, `program_manifests::FONTD_MANIFEST`,
+  `spawn_layout::SPAWN_PROGRAMS`, `build.rs`) on x86_64/riscv64 until their
+  storage floors land — a *spawnable* program there, not an init-auto-started
+  service. Starting it post-boot (rather than as a 5th early boot service) also
+  sidesteps a latent early-boot concurrent-spawn kernel defect (D18 in
+  `plans/OPEN-DEFECTS.md`).
+- **Profile fix (§2.6).** The image → Cargo-profile mapping lives once on
+  `tairix_mkimage::ImageProfile`; both `kernel_build_profile` and
+  `pie_build::cross_compile_pie_elf` read it, so `installer` cross-compiles
+  userland/driver `Run` binaries `--release` while `debug`/QEMU images stay
+  `dev`. Every `(arch, profile)` bundle memo in `image_apps`/`image_drivers` is
+  re-keyed through the shared `memo_slot`.
 
-## 5. Cross-references
+## 4. Cross-references
 
 - `AGENTS.md` §2.2, §2.3, §2.14, §5.2, §5.4, §16.2, §16.4, §16.5, §18.3,
   §19.5, §19.6, §17.3 — the rules this plan enforces.

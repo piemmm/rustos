@@ -58,6 +58,7 @@
   - [`tairix-dma-barrier`](./lib/dma_barrier.md)
   - [`tairix-drvrt`](./lib/drvrt.md)
   - [`tairix-fbcon`](./lib/fbcon.md)
+  - [`tairix-font`](./lib/font.md)
   - [`tairix-help`](./lib/help.md)
   - [`tairix-hid`](./lib/hid.md)
   - [`tairix-keymap`](./lib/keymap.md)
@@ -111,6 +112,7 @@
 
 - [PID 1 service manager](./userland/init.md)
 - [System Information service](./userland/sysinfod.md)
+- [Font service](./userland/fontd.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
 - [Networking tools (`ss`)](./userland/networking.md)

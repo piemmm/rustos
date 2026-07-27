@@ -1,46 +1,42 @@
 //! The system bitmap font and the glyph blitter that draws it onto a
 //! [`Surface`].
 //!
-//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code +
-//! `D2Coding` + Noto Sans Hebrew atlas with its metrics (cell size, pen advance,
-//! line height) and the coverage-aware blitter.
-//! [`BitmapFont::draw_text`] composites each glyph onto a `lib/raster`
+//! [`BitmapFont`] is a thin, cached front end to the sandboxed OS font
+//! service (`fontd`): it holds only the monospace layout metrics (cell size,
+//! pen advance, baseline, line height) derived from the console-atlas
+//! geometry constants, and fetches each glyph's coverage bitmap from the
+//! service over [`crate::client`]. No font outline or face lives in this
+//! process.
+//! [`BitmapFont::draw_text`] composites each fetched glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
-//! coverage level into a 16-entry table, and blended per lit pixel — so
-//! anti-aliased edges and translucent text both come out right with no
+//! 8-bit coverage level into a 256-entry table, and blended per lit pixel —
+//! so anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
 
-use alloc::vec::Vec;
-
-use tairix_fontface::CellGeometry;
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
-use crate::cache;
-use crate::glyph::{lookup_or_fallback, Glyph};
+use crate::client;
 
-/// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
-/// Japanese, `D2Coding` Korean, and Noto Sans Hebrew companions, plus their shared
-/// layout metrics.
+/// The system monospace bitmap font: the layout metrics a client needs to
+/// draw text, backed by the sandboxed font service for glyph coverage.
 ///
 /// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
 /// exactly the cell width and lines by exactly the cell height.
 ///
-/// A font renders at a chosen **cell height in physical pixels**. The atlas is
-/// authored at one native size ([`atlas::CELL_HEIGHT`]); [`inconsolata`] keeps
-/// that size for the text console, while [`with_pixel_height`] asks for any
-/// other cell — the desktop resolves a comfortable physical size from the
-/// theme's logical font size and the DPI scale. A non-native cell rasterises
-/// each glyph **directly from the TrueType outline** at that exact size
-/// (cached per `(face, glyph, size)`), so text is crisp whether tiny or very
-/// large — never a stretched bitmap. At the native size the atlas is used
-/// verbatim, so console rendering is byte-for-byte what it always was. Every
-/// derived metric (advance, cell width, baseline, line height) scales with the
-/// cell height, keeping the font monospaced and its width-to-height ratio
-/// constant.
+/// A font renders at a chosen **cell height in physical pixels**. The metrics
+/// derive from one native size ([`atlas::CELL_HEIGHT`], the console-atlas
+/// geometry); [`inconsolata`] keeps that size, while [`with_pixel_height`]
+/// asks for any other cell — the desktop resolves a comfortable physical size
+/// from the theme's logical font size and the DPI scale. Every glyph is
+/// rasterised by the font service **directly from the TrueType outline** at
+/// the requested size, so text is crisp whether tiny or very large — never a
+/// stretched bitmap. Every derived metric (advance, cell width, baseline, line
+/// height) scales with the cell height, keeping the font monospaced and its
+/// width-to-height ratio constant.
 ///
 /// [`inconsolata`]: Self::inconsolata
 /// [`with_pixel_height`]: Self::with_pixel_height
@@ -74,12 +70,8 @@ impl BitmapFont {
     /// unbounded rasterisation.
     pub const MAX_PIXEL_HEIGHT: u32 = 512;
 
-    /// The built-in family at its **native** atlas size, with Inconsolata EX
-    /// primary, M PLUS 1 Code for Japanese, `D2Coding` for Korean, and Noto
-    /// Sans Hebrew for Hebrew and Yiddish coverage.
-    ///
-    /// This is the size the text console renders at; its glyphs come straight
-    /// from the atlas with no resampling.
+    /// The built-in family at its **native** cell size (the console-atlas
+    /// geometry). This is the size the text console renders at.
     #[must_use]
     pub const fn inconsolata() -> Self {
         Self {
@@ -92,11 +84,10 @@ impl BitmapFont {
     /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
     ///
     /// The desktop uses this to render UI text at the theme's requested size.
-    /// Any non-native height rasterises each glyph from the outline at that
-    /// exact size, so both smaller and larger text stay crisply anti-aliased
-    /// rather than stretched from the fixed atlas bitmap. Asking for exactly
-    /// the native height yields [`inconsolata`](Self::inconsolata), which draws
-    /// straight from the atlas.
+    /// Every height rasterises each glyph from the outline (in the font
+    /// service) at that exact size, so both smaller and larger text stay
+    /// crisply anti-aliased rather than stretched from a fixed bitmap. Asking
+    /// for exactly the native height yields [`inconsolata`](Self::inconsolata).
     #[must_use]
     pub const fn with_pixel_height(pixels: u32) -> Self {
         let cell_height = if pixels < Self::MIN_PIXEL_HEIGHT {
@@ -107,13 +98,6 @@ impl BitmapFont {
             pixels
         };
         Self { cell_height }
-    }
-
-    /// `true` when this font renders straight from the atlas with no
-    /// resampling (its cell height is the native atlas height).
-    #[must_use]
-    const fn is_native(self) -> bool {
-        self.cell_height == atlas::CELL_HEIGHT
     }
 
     /// The glyph cell width in pixels: the native cell width scaled to this
@@ -184,158 +168,67 @@ impl BitmapFont {
     /// Draw `text` onto `surface` with its top-left corner at `(x, y)` in
     /// `color`, returning the pen x-coordinate after the last glyph.
     ///
-    /// The pen advances by [`advance`](Self::advance) per terminal cell. Pixels
-    /// that fall outside the surface (including at negative coordinates) are
-    /// skipped, so off-screen text clips rather than panicking. Each covered
-    /// glyph pixel is composited over the destination at its anti-aliased
-    /// coverage, so translucent text and glyph edges blend correctly. A
-    /// character the face does not cover draws the U+FFFD replacement glyph
-    /// rather than being silently dropped.
+    /// The pen advances by [`advance`](Self::advance) per terminal cell. Each
+    /// glyph's coverage is fetched from the font service (cached client-side)
+    /// at this font's cell height and composited over the destination at its
+    /// anti-aliased coverage, so translucent text and glyph edges blend
+    /// correctly. Pixels that fall outside the surface (including at negative
+    /// coordinates) are skipped, so off-screen text clips rather than
+    /// panicking. A scalar the faces do not cover draws the U+FFFD replacement
+    /// glyph (the service's fallback) rather than being silently dropped; if
+    /// the service is unreachable the glyph composites nothing (fail closed)
+    /// rather than reaching for any local font data.
     pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
-        if self.is_native() {
-            return self.draw_text_native(surface, x, y, text, color);
-        }
-        self.draw_text_scaled(surface, x, y, text, color)
-    }
-
-    /// Draw `text` straight from the atlas at the native cell size — the exact
-    /// path the text console has always used, with no resampling.
-    fn draw_text_native(
-        self,
-        surface: &mut Surface,
-        x: i32,
-        y: i32,
-        text: &str,
-        color: Color,
-    ) -> i32 {
-        let sources = coverage_sources(color);
-        let mut pen = x;
-        for ch in text.chars() {
-            let cells = u32::from(char_width(ch));
-            let glyph = lookup_or_fallback(ch);
-            draw_glyph(
-                surface,
-                pen,
-                y,
-                &glyph,
-                self.advance().saturating_mul(cells),
-                &sources,
-            );
-            pen = pen.saturating_add(advance_step(self.advance().saturating_mul(cells)));
-        }
-        pen
-    }
-
-    /// Draw `text` at a non-native cell size, blitting each glyph's coverage
-    /// rasterised from the outline (fetched from the shared cache) instead of
-    /// the atlas bitmap.
-    fn draw_text_scaled(
-        self,
-        surface: &mut Surface,
-        x: i32,
-        y: i32,
-        text: &str,
-        color: Color,
-    ) -> i32 {
         let sources = coverage_sources(color);
         let advance = self.advance();
-        // A glyph may cover two cells, so its rasterised bitmap is two cells
-        // wide; a one-cell glyph is clipped to the left cell, exactly as the
-        // native path clips a narrow glyph to `CELL_WIDTH` of `GLYPH_WIDTH`.
-        let geometry = CellGeometry {
-            width: self.glyph_width(),
-            height: self.cell_height,
-            baseline: self.baseline(),
-        };
-        let full_width = geometry.width.saturating_mul(2);
-        let px_per_em = cache::px_per_em(self.cell_height);
-        // One reusable buffer for every glyph in the run: the cache copies each
-        // glyph's coverage into it, so a glyph costs no allocation after the
-        // first (the size varies with the cell height, not per glyph).
-        let mut buffer: Vec<u8> = Vec::new();
         let mut pen = x;
         for ch in text.chars() {
             let cells = u32::from(char_width(ch));
-            cache::scaled_coverage(ch, &geometry, px_per_em, &mut buffer);
-            let visible = advance.saturating_mul(cells).min(full_width);
-            draw_scaled_glyph(
-                surface,
-                pen,
-                y,
-                &buffer,
-                full_width,
-                geometry.height,
-                visible,
-                &sources,
-            );
-            pen = pen.saturating_add(advance_step(advance.saturating_mul(cells)));
+            let step_advance = advance.saturating_mul(cells);
+            // A glyph may span two cells; the service returns a bitmap two
+            // cells wide, so a narrow glyph is clipped to its own advance.
+            client::with_glyph(ch, self.cell_height, |glyph| {
+                let visible = step_advance.min(glyph.width);
+                draw_coverage_glyph(surface, pen, y, glyph, visible, &sources);
+            });
+            pen = pen.saturating_add(advance_step(step_advance));
         }
         pen
     }
 }
 
-/// The premultiplied source pixel for each of the 16 coverage levels:
-/// `color` with its alpha scaled by `level / 15`, computed once per
+/// The premultiplied source pixel for each of the 256 8-bit coverage levels:
+/// `color` with its alpha scaled by `level / 255`, computed once per
 /// [`BitmapFont::draw_text`] call so the per-pixel work is one table load
-/// and one `over`.
-fn coverage_sources(color: Color) -> [Pixel; 16] {
+/// and one `over`. Level 255 keeps the caller's exact alpha.
+fn coverage_sources(color: Color) -> [Pixel; 256] {
     let source = color.premultiply();
-    // Nibble 15 must map to exactly 255 so full coverage keeps the caller's
-    // alpha; 17 = 255 / 15.
-    let mut sources = [source; 16];
-    for (level, slot) in (0u8..).zip(sources.iter_mut()) {
-        *slot = source.scale_alpha(level * 17);
+    let mut sources = [source; 256];
+    for (level, slot) in (0u8..=u8::MAX).zip(sources.iter_mut()) {
+        *slot = source.scale_alpha(level);
     }
     sources
 }
 
-/// Blit one glyph at top-left `(x, y)`, blending each covered pixel.
-fn draw_glyph(
+/// Blit one service-returned glyph at top-left `(x, y)` from its row-major
+/// `width * height` 8-bit coverage, blending each covered pixel up to
+/// `visible` columns. Off-surface pixels clip rather than panic.
+fn draw_coverage_glyph(
     surface: &mut Surface,
     x: i32,
     y: i32,
-    glyph: &Glyph,
-    width: u32,
-    sources: &[Pixel; 16],
-) {
-    for row in 0..atlas::CELL_HEIGHT {
-        let py = y.saturating_add(step(row));
-        let Ok(uy) = u32::try_from(py) else { continue };
-        for col in 0..width.min(atlas::GLYPH_WIDTH) {
-            let coverage = glyph.coverage(col, row);
-            if coverage == 0 {
-                continue;
-            }
-            let px = x.saturating_add(step(col));
-            let Ok(ux) = u32::try_from(px) else { continue };
-            if let Some(dst) = surface.get(ux, uy) {
-                surface.set(ux, uy, sources[usize::from(coverage)].over(dst));
-            }
-        }
-    }
-}
-
-/// Blit one resampled glyph at top-left `(x, y)` from its row-major coverage
-/// `bitmap` (`bitmap_width` wide, `height` tall), blending each covered pixel
-/// up to `visible` columns. Off-surface pixels clip rather than panic, exactly
-/// like the native blitter.
-#[allow(clippy::too_many_arguments)]
-fn draw_scaled_glyph(
-    surface: &mut Surface,
-    x: i32,
-    y: i32,
-    bitmap: &[u8],
-    bitmap_width: u32,
-    height: u32,
+    glyph: &client::CachedGlyph,
     visible: u32,
-    sources: &[Pixel; 16],
+    sources: &[Pixel; 256],
 ) {
-    for row in 0..height {
+    let width = glyph.width;
+    for row in 0..glyph.height {
         let py = y.saturating_add(step(row));
         let Ok(uy) = u32::try_from(py) else { continue };
-        for col in 0..visible.min(bitmap_width) {
-            let coverage = bitmap
-                .get((row * bitmap_width + col) as usize)
+        for col in 0..visible.min(width) {
+            let coverage = glyph
+                .data
+                .get((row * width + col) as usize)
                 .copied()
                 .unwrap_or(0);
             if coverage == 0 {

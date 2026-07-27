@@ -47,5 +47,10 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # uses, so decorated windows render text without a second font path (§2.2).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 
+# The compositor's host tests draw window-title text, so they inject the
+# shared solid test transport via the `test-util` feature (never `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
 [lints]
 workspace = true

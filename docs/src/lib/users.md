@@ -170,10 +170,11 @@ The compiled-in **system identity** (`plans/USERS.md`) is defined here
 too: `system_accounts()` — the no-login `system` record (uid 0, group
 `system` gid 0, empty ceiling; the *name* the kernel's bootstrap identity
 resolves to) plus one no-login account per system service (`devmgr` 10,
-`sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, primary group
-`services` gid 101), each carrying exactly its own service's grant
+`sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15, primary
+group `services` gid 101), each carrying exactly its own service's grant
 ceiling (`DEVMGR_CEILING`, `SYSINFOD_CEILING`, `SEATMGR_CEILING`,
-`LOGIN_CEILING`, `NETSTACK_CEILING`) so the §5.2 ceiling∩manifest intersection does real
+`LOGIN_CEILING`, `NETSTACK_CEILING`, `FONTD_CEILING`) so the §5.2
+ceiling∩manifest intersection does real
 work — and `system_groups()` (`system:0`, `services:101`). The kernel is
 the sole consumer: the set is compiled into its identity table, never
 authored to a volume. PID 1 resolves a startup-config account name onto

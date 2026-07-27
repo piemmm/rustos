@@ -13,8 +13,9 @@
 //! # What this service does
 //!
 //! At startup `fontd` reads the four committed TrueType faces from
-//! `/System/Fonts/` (a one-shot, mode-gated open — it holds no filesystem
-//! *write* authority and no open fd afterwards, §5.3, §19.5), parses them into
+//! `/System/Fonts/` (a one-shot open authorised by the manifest's
+//! `CAP_FS_ACCESS`; `/System` is mounted read-only so it holds no write reach
+//! and keeps no open fd afterwards), parses them into
 //! the sandboxed [`FontService`](tairix_fontd::FontService) rasteriser, binds
 //! the well-known [`FONT_ENDPOINT`](tairix_abi::font_ipc::FONT_ENDPOINT) (a
 //! reserved rendezvous, so binding it needs the manifest's

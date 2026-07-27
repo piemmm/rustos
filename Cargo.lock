@@ -1263,8 +1263,9 @@ dependencies = [
 name = "tairix-font"
 version = "0.0.0"
 dependencies = [
- "tairix-fontface",
+ "tairix-abi",
  "tairix-raster",
+ "tairix-rt",
  "tairix-sync",
  "tairix-vt",
 ]

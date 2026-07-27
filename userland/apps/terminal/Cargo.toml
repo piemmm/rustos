@@ -66,6 +66,16 @@ tairix-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
 # The shared account-authoring policy: `DEFAULT_SHELL`, the one definition
 # of the login shell's bundle path, imported rather than respelled (§2.2).
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# On the real target the `Run` binary reaches the sandboxed font service over
+# the runtime `ipc_call` transport; this augments the host-neutral base
+# dependency with the `rt` transport for the bare-metal build only, so host
+# tests still inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The engine library's host tests draw text, so they inject the shared solid
+# test transport (never a running `fontd`) via the `test-util` feature.
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

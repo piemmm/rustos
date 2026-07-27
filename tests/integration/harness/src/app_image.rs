@@ -631,6 +631,7 @@ mod tests {
                 "elsh",
                 "false",
                 "files",
+                "fontd",
                 "fstree",
                 "groupadd",
                 "head",
@@ -683,7 +684,7 @@ mod tests {
             .collect();
         assert_eq!(
             services,
-            ["devmgr", "login", "netstack", "seatmgr", "sysinfod"]
+            ["devmgr", "fontd", "login", "netstack", "seatmgr", "sysinfod"]
         );
     }
 

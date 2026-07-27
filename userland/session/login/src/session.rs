@@ -131,6 +131,16 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
 /// path, so the two can never name different bundles.
 pub const DESKTOP_SESSION_PATH: &str = "/System/Apps/desktop.app/Run";
 
+/// Absolute path of the sandboxed OS font service (`fontd`) `Run` binary —
+/// the service the graphical desktop draws text through (`FONT_ENDPOINT`,
+/// `plans/FONT-SERVICE.md`). login starts it (as the `fontd` service
+/// account) when launching a [`SessionKind::Graphical`] session, so text
+/// rendering is a single sandboxed OS resource that runs only when a
+/// graphical session needs it — never on a text-only or headless boot
+/// (`AGENTS.md` §17.3, §16.4). One OS-wide spelling, matching the bundle the
+/// image plants under `/System/Services`.
+pub const FONTD_SERVICE_PATH: &str = "/System/Services/fontd.app/Run";
+
 /// The program a session of `kind` runs for `user`: the authenticated
 /// account's own shell of choice for a text session, the OS desktop
 /// session service ([`DESKTOP_SESSION_PATH`]) for a graphical one.
