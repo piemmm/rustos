@@ -325,20 +325,44 @@ impl WaitQueue {
     /// (the timed wake). A [`NO_DEADLINE`] waiter is never released here.
     ///
     /// The deadline index is ordered, so only the already-expired prefix is
-    /// visited — O(log n + woken), not a scan of every waiter on every
-    /// timer expiry. As with [`Self::wake_all`], the expired ids are
-    /// collected under the lock and `unpark`ed after it is dropped; the
-    /// woken waiter deregisters itself, so entries are left in place here
-    /// and a redundant re-sweep before it runs is a harmless idempotent
-    /// re-`unpark`.
+    /// visited — O(log n + woken), not a scan of every waiter on every timer
+    /// expiry. The expired ids are collected under the lock and `unpark`ed
+    /// after it is dropped, so the scheduler's locks are never taken while
+    /// holding the wait-queue lock.
+    ///
+    /// A fired deadline is **consumed** here: its entry is removed from the
+    /// deadline index and the waiter's stored deadline is reset to
+    /// [`NO_DEADLINE`], while the waiter keeps its FIFO slot in `order` /
+    /// `by_task` (so the register-before-retest lost-wake discipline holds and
+    /// an edge [`Self::wake_all`] still finds it). Consuming it is what makes
+    /// the timed wake single-shot per registration. Leaving the entry in place
+    /// — relying on the woken waiter to deregister — pins the timer one-shot in
+    /// the past forever when that waiter is instead released by another path
+    /// (an edge wake) or exits without re-parking: `earliest_deadline` then
+    /// keeps returning an already-elapsed time, the one-shot re-arms in the
+    /// past and fires immediately, and the dispatch loop spins without ever
+    /// idling — starving the console-transmit drain until the lockup watchdog
+    /// trips. A waiter that is still blocked simply re-`register`s with a fresh
+    /// deadline on its next park.
     pub fn sweep(&self, arch: &dyn WaitQueueArch, now_ns: u64) {
-        let ids: Vec<TaskId> = self
-            .waiters
-            .lock()
-            .deadlines
-            .range(..=(now_ns, u64::MAX))
-            .map(|(_, &task)| task)
-            .collect();
+        let ids: Vec<TaskId> = {
+            let mut set = self.waiters.lock();
+            let expired: Vec<(u64, u64)> = set
+                .deadlines
+                .range(..=(now_ns, u64::MAX))
+                .map(|(&key, _)| key)
+                .collect();
+            let mut ids = Vec::with_capacity(expired.len());
+            for key in expired {
+                if let Some(task) = set.deadlines.remove(&key) {
+                    if let Some(waiter) = set.by_task.get_mut(&task) {
+                        waiter.deadline_ns = NO_DEADLINE;
+                    }
+                    ids.push(task);
+                }
+            }
+            ids
+        };
         for id in ids {
             arch.unpark(id);
         }
@@ -977,6 +1001,45 @@ mod tests {
             alloc::vec![2],
             "only the elapsed finite deadline is released"
         );
+    }
+
+    #[test]
+    fn sweep_consumes_the_fired_deadline_so_it_cannot_re_arm_in_the_past() {
+        // A fired timed deadline must be consumed by the sweep, not left in
+        // the index for the woken waiter to clear. A waiter released by
+        // timeout but then woken/retired by another path (or that exits)
+        // never re-parks to deregister; if `sweep` left its entry,
+        // `earliest_deadline` would keep returning an already-elapsed time,
+        // the timer one-shot would re-arm in the past and fire immediately,
+        // and the dispatch loop would spin without ever idling — the Pi 4
+        // console-starving hard-lockup this regresses.
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(1, 100);
+        // The first sweep past the deadline releases the waiter exactly once.
+        q.sweep(&arch, 150);
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![1]);
+        // The deadline is consumed: nothing is left to perpetually re-arm the
+        // one-shot in the past.
+        assert_eq!(
+            q.earliest_deadline(),
+            None,
+            "the fired deadline is removed from the index"
+        );
+        // A second sweep (the waiter never re-parked) releases nobody — no
+        // stale entry, so no perpetual re-arm and no dispatch-loop spin.
+        q.sweep(&arch, 200);
+        assert_eq!(
+            *arch.unparked.borrow(),
+            alloc::vec![1],
+            "a consumed deadline is not swept again"
+        );
+        // The waiter keeps its FIFO slot (register-before-retest / edge wakes).
+        assert!(!q.is_empty(), "the waiter itself stays registered");
+        assert_eq!(q.oldest_task(), Some(1));
+        // On its next park it re-registers a fresh deadline cleanly.
+        q.register(1, 500);
+        assert_eq!(q.earliest_deadline(), Some(500));
     }
 
     #[test]
