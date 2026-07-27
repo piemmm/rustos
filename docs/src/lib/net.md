@@ -305,8 +305,25 @@ no renewal. The transaction id and the backoff jitter are caller-supplied
 CSPRNG draws (the `tcp::conn` `iss` precedent), so the engine stays
 deterministic and replayable and never generates randomness itself.
 `next_deadline` is a folded one-shot, so a bound interface with a permanent
-lease costs no timer wakeups. The netstack integration (framing the send
-actions and feeding received datagrams back in) is `plans/DHCP.md` D2.
+lease costs no timer wakeups.
+
+`Stack` drives this client when an interface is configured for DHCPv4
+(`Stack::enable_dhcp`, selected by the `<iface>.ipv4.method = dhcp` key,
+`plans/DHCP.md` D2): it polls the client from `Stack::advance`, folds the
+client's deadline into `Stack::next_deadline`, and frames each send action
+as a UDP(68→67)/IPv4/Ethernet datagram on the owning link — a link-layer
+broadcast to `255.255.255.255` for DISCOVER and the SELECTING/REBINDING
+REQUESTs (no route or ARP, since the client may have neither yet), or a
+neighbour-resolved unicast to the leasing server for a RENEWING REQUEST.
+A received DHCP reply (UDP source 67 → destination 68) is intercepted in
+`Stack::on_ipv4` *before* the unicast-address filter — so a broadcast reply
+reaches the client while it still has no address — and never surfaces as an
+ordinary datagram. On `Configured` the stack applies the leased address,
+the subnet mask's prefix, and the default route through the leased router
+(fail-safe: a router the server placed off the connected subnet is refused
+by `set_ipv4_config`, and the address is applied alone); on `Deconfigured`
+it withdraws the address and its routes. Each lease change is surfaced as a
+`StackEvent::DhcpLeaseAcquired`/`DhcpLeaseLost` the service audits.
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

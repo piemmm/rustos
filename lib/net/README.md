@@ -115,8 +115,17 @@ connection state machine, and the listener + SYN-cookie driver),
   `mcast` (`poll`/`on_reply` take `now`, emit `Action`s, and re-arm from a
   tickless `next_deadline`); the transaction id and backoff jitter are
   caller-supplied CSPRNG draws (the `tcp::conn` `iss` precedent), so an
-  interface obtains an address the way SLAAC does, not over a socket. The
-  netstack integration is `plans/DHCP.md` D2.
+  interface obtains an address the way SLAAC does, not over a socket.
+  `Stack` drives this client when an interface selects DHCPv4
+  (`enable_dhcp`, the `<iface>.ipv4.method = dhcp` key): it polls the client
+  from `advance`, folds its deadline into `next_deadline`, frames each send
+  as a UDP(68→67)/IPv4/Ethernet broadcast (or a neighbour-resolved unicast
+  to the leasing server for a renewal), and intercepts a received reply
+  (UDP 67→68) in `on_ipv4` **before** the unicast-address filter — so a
+  broadcast reply reaches the client with no address yet — applying the
+  leased address/mask/route on `Configured` and withdrawing them on
+  `Deconfigured`, each surfaced as a `StackEvent::DhcpLease*` the service
+  audits (`plans/DHCP.md` D2).
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

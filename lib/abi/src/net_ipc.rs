@@ -685,6 +685,11 @@ pub enum NetIpv4Config {
         /// requires it to lie inside the connected subnet.
         gateway: Option<[u8; 4]>,
     },
+    /// Dynamic addressing via the RFC 2131 DHCPv4 client: the stack's
+    /// interface engine runs a DHCP client on this interface and applies
+    /// the leased address, mask, and default route for the lease's life.
+    /// The message carries no address fields (the lease supplies them).
+    Dhcp,
 }
 
 /// The IPv6 addressing an interface configuration requests
@@ -716,6 +721,8 @@ pub enum NetIpv6Config {
 const IPV4_METHOD_DISABLED: u8 = 0;
 /// Wire discriminant of [`NetIpv4Config::Static`].
 const IPV4_METHOD_STATIC: u8 = 1;
+/// Wire discriminant of [`NetIpv4Config::Dhcp`].
+const IPV4_METHOD_DHCP: u8 = 2;
 /// Wire discriminant of [`NetIpv6Config::Disabled`].
 const IPV6_METHOD_DISABLED: u8 = 0;
 /// Wire discriminant of [`NetIpv6Config::Slaac`].
@@ -803,6 +810,7 @@ impl NetInterfaceConfigMsg {
                     out[37..41].copy_from_slice(&gw);
                 }
             }
+            NetIpv4Config::Dhcp => out[30] = IPV4_METHOD_DHCP,
         }
         match self.ipv6 {
             NetIpv6Config::Disabled => out[41] = IPV6_METHOD_DISABLED,
@@ -973,6 +981,15 @@ fn decode_ipv4_config(bytes: &[u8]) -> Result<NetIpv4Config, Errno> {
                 prefix,
                 gateway,
             })
+        }
+        IPV4_METHOD_DHCP => {
+            // DHCP carries no static address fields; the whole IPv4
+            // address block must be zero (a set field is a malformed
+            // message, not a silently-ignored one).
+            if prefix != 0 || addr != [0; 4] || bytes[36..41].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            Ok(NetIpv4Config::Dhcp)
         }
         _ => Err(Errno::OutOfRange),
     }
@@ -2336,11 +2353,53 @@ mod tests {
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 9000,
             },
+            // DHCPv4 (no static address fields), SLAAC v6.
+            NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: Some([0x52, 0x54, 0x00, 0x00, 0x00, 0x01]),
+                match_node: None,
+                ipv4: NetIpv4Config::Dhcp,
+                ipv6: NetIpv6Config::Slaac,
+                mtu: 0,
+            },
         ] {
             let bytes = msg.to_le_bytes();
             assert_eq!(NetInterfaceConfigMsg::from_bytes(&bytes), Ok(msg));
             msg.validate().expect("the sample configs are valid");
         }
+    }
+
+    #[test]
+    fn dhcp_ipv4_config_rejects_smuggled_address_fields() {
+        // DHCP carries no static address; a set prefix/address/gateway
+        // behind the DHCP method is a malformed message, not ignored.
+        let good = NetInterfaceConfigMsg {
+            alias: name("wan"),
+            match_mac: None,
+            match_node: None,
+            ipv4: NetIpv4Config::Dhcp,
+            ipv6: NetIpv6Config::Disabled,
+            mtu: 0,
+        }
+        .to_le_bytes();
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&good).map(|m| m.ipv4),
+            Ok(NetIpv4Config::Dhcp)
+        );
+        // A non-zero prefix (byte 31) behind the DHCP method (byte 30 == 2).
+        let mut bad = good;
+        bad[31] = 24;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A set address byte (byte 32).
+        let mut bad = good;
+        bad[32] = 10;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

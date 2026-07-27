@@ -93,17 +93,37 @@ round-trips, `xid`/`chaddr` mismatch rejection, and fail-closed decode; the
 `fuzz_net_dhcp` harness covers the parser. No I/O, no `netstack` change yet —
 the engine stands alone and gate-green.
 
-### D2 — netstack interface integration `[ ]`
-Drive `DhcpClient` from the netstack interface engine for an interface whose
-`network.conf` selects DHCPv4: frame the engine's send actions as
-UDP(68→67)/IPv4(0.0.0.0 or ciaddr → 255.255.255.255 or server)/Ethernet
-(broadcast or server MAC) on the owning link; feed received DHCP datagrams
-(the stack already demuxes UDP) back through `on_reply`; apply/withdraw the
-address, mask, and default route on `Configured`/`Deconfigured`; arm the
-one-shot from `next_deadline()`. A `<iface>.method = dhcp` key in
-`network.conf` selects it (mutually exclusive with static addressing on that
-family). Every lease change is audited (§19.4). Host-driven through the same
-`Stack`/`iface` tests the live service runs.
+### D2 — netstack interface integration `[x]`
+`Stack` drives the `DhcpClient` for an interface whose `network.conf`
+selects DHCPv4. Key facts for the next worker:
+- **Config:** `NetIpv4Config::Dhcp` (ABI, wire discriminant 2, no address
+  fields — decode rejects any set prefix/addr/gw), `Ipv4Method::Dhcp`
+  (`lib/netconfig`, spelled `dhcp`, forbids a static `ipv4.address`/
+  `ipv4.gateway`), mapped by devmgr `addressing_of`.
+- **Engine seam:** `Stack::{enable_dhcp(rng), disable_dhcp, dhcp_active}`.
+  DHCP is an IPv4 method: `enable_dhcp` forces IPv4 on and starts clean; the
+  client + its injected CSPRNG (`Box<dyn FnMut() -> u32>`) live in
+  `Stack.dhcp: Option<DhcpDriver>`. The service injects the rng via
+  `Netstack`'s new `dhcp_rng_factory` (a sibling of `temp_factory`);
+  `apply_interface_config` enables it idempotently for `Dhcp` and calls
+  `disable_dhcp` for `Static`/`Disabled`.
+- **Driving:** polled from `Stack::advance`, folded into
+  `Stack::next_deadline`. Send actions are framed as UDP(68→67)/IPv4/
+  Ethernet — link-layer broadcast to `255.255.255.255` for DISCOVER and
+  SELECTING/REBINDING REQUESTs, neighbour-resolved unicast to the server for
+  a RENEWING REQUEST. A received reply (UDP 67→68) is intercepted in
+  `Stack::on_ipv4` **before** the unicast-address filter (so a broadcast
+  reply reaches an address-less client) and never surfaces as an ordinary
+  datagram.
+- **Lease:** `Configured` applies address + mask prefix + default route
+  (a router off the connected subnet is refused by `set_ipv4_config`, so the
+  address is applied alone — fail-safe); `Deconfigured` withdraws them. Each
+  is a `StackEvent::DhcpLeaseAcquired`/`DhcpLeaseLost` the service audits
+  (`netstack` events `DHCP_LEASE_ACQUIRED`=16020 / `DHCP_LEASE_LOST`=16021).
+- **Tests:** `lib/net` `stack_tests` (acquire end-to-end, pre-address-filter
+  intercept, expiry withdrawal, disable), ABI round-trip + smuggled-field
+  rejection, netconfig parse/validate, devmgr mapping, netstack service
+  enable/disable. D2 is done and gate-green.
 
 ### D3 — the live two-process QEMU vertical `[ ]`
 A `netpeer` DHCP-server mode leases an address to the booted guest over the

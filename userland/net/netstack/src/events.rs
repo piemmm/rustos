@@ -103,6 +103,15 @@ pub const BOND_CONFIG_REFUSED: EventId = EventId(16_018);
 /// path. Recorded at `Info` — a dead member is a visible, audited fact.
 pub const BOND_FAILOVER: EventId = EventId(16_019);
 
+/// An interface's DHCPv4 client committed a lease (RFC 2131): the engine
+/// applied the leased address, mask, and default route. A
+/// security-relevant addressing change, recorded at `Info`.
+pub const DHCP_LEASE_ACQUIRED: EventId = EventId(16_020);
+/// An interface's DHCPv4 lease was lost (a server NAK or lease expiry):
+/// the engine withdrew the address and its routes and the client
+/// re-acquires. Recorded at `Info` — losing an address is an audited fact.
+pub const DHCP_LEASE_LOST: EventId = EventId(16_021);
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -112,6 +121,7 @@ mod tests {
         SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_FAILOVER};
+    use super::{DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -135,6 +145,8 @@ mod tests {
             BOND_CONFIG_APPLIED,
             BOND_CONFIG_REFUSED,
             BOND_FAILOVER,
+            DHCP_LEASE_ACQUIRED,
+            DHCP_LEASE_LOST,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -162,6 +174,8 @@ mod tests {
             BOND_CONFIG_APPLIED.0,
             BOND_CONFIG_REFUSED.0,
             BOND_FAILOVER.0,
+            DHCP_LEASE_ACQUIRED.0,
+            DHCP_LEASE_LOST.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

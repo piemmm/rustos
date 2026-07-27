@@ -2000,7 +2000,8 @@ No hidden state, no per-driver config files, no imperative boot scripts.
     alias to hardware by stable identity, never discovery order),
     `<iface>.kind` (`ethernet` | `bond` | `loopback`; future link kinds
     extend the closed set in place, §2.13);
-  - addressing: `<iface>.ipv4.method` (`static` | `disabled`),
+  - addressing: `<iface>.ipv4.method` (`static` | `dhcp` | `disabled`;
+    `dhcp` leases the address over RFC 2131 DHCPv4, `plans/DHCP.md`),
     `<iface>.ipv4.address`/`gateway`, `<iface>.ipv6.method` (`slaac` |
     `static` | `disabled`), `<iface>.ipv6.address`/`gateway`,
     `<iface>.mtu`;

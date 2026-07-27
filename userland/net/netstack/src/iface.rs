@@ -140,6 +140,17 @@ impl Interface {
 /// fresh source drawn from this factory at construction.
 pub type TempAddrFactory = Box<dyn FnMut() -> Box<dyn TempAddrSource>>;
 
+/// A factory for per-interface DHCPv4 client randomness sources
+/// (`<iface>.ipv4.method = dhcp`).
+///
+/// Like [`TempAddrFactory`], entropy lives at the service seam: the `Run`
+/// glue injects a factory backed by the kernel CSPRNG, host tests a
+/// deterministic one, and the pure `lib/net` engine only *calls* the
+/// closure it is handed to draw the RFC 2131 transaction id and backoff
+/// jitter. A fresh source is drawn each time an interface is (re-)configured
+/// for DHCPv4 and handed to its [`Stack`] through [`Stack::enable_dhcp`].
+pub type DhcpRngFactory = Box<dyn FnMut() -> Box<dyn FnMut() -> u32>>;
+
 /// The service's interface table and the engine glue around it.
 ///
 /// Grows on demand — an interface is added per discovered NIC, never
@@ -166,19 +177,26 @@ pub struct Netstack {
     /// [`TempAddrFactory`]). Each managed [`Stack`] draws a fresh
     /// source from it at construction.
     temp_factory: TempAddrFactory,
+    /// Injected source of DHCPv4 client randomness (see
+    /// [`DhcpRngFactory`]). A fresh source is drawn each time an interface
+    /// is configured for DHCPv4 and handed to its [`Stack`].
+    dhcp_rng_factory: DhcpRngFactory,
 }
 
 impl Netstack {
-    /// An empty table with the injected temporary-address randomness
-    /// factory (`net.ipv6.privacy`; the service layer owns entropy).
+    /// An empty table with the injected randomness factories (the service
+    /// layer owns entropy): `temp_factory` for RFC 8981 temporary
+    /// addresses (`net.ipv6.privacy`) and `dhcp_rng_factory` for the RFC
+    /// 2131 DHCPv4 client (`<iface>.ipv4.method = dhcp`).
     #[must_use]
-    pub fn new(temp_factory: TempAddrFactory) -> Self {
+    pub fn new(temp_factory: TempAddrFactory, dhcp_rng_factory: DhcpRngFactory) -> Self {
         Self {
             interfaces: Vec::new(),
             settings: NetworkSettings::default(),
             scratch: Vec::new(),
             out: StackOutput::default(),
             temp_factory,
+            dhcp_rng_factory,
         }
     }
 
@@ -347,15 +365,17 @@ impl Netstack {
             self.find(msg.alias).ok_or(Errno::NotFound)?
         };
         // A bond member owns no addresses: the bond does. Refuse a direct
-        // address assignment (static v4/v6 or SLAAC) to an enrolled member
-        // (fail closed) — the member is a pure frame conduit. A disabled
-        // family is harmless (a member's families are already disabled).
+        // address assignment (static v4/v6, DHCPv4, or SLAAC) to an
+        // enrolled member (fail closed) — the member is a pure frame
+        // conduit. A disabled family is harmless (a member's families are
+        // already disabled).
         if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
-            let assigns_address = matches!(msg.ipv4, NetIpv4Config::Static { .. })
-                || matches!(
-                    msg.ipv6,
-                    NetIpv6Config::Static { .. } | NetIpv6Config::Slaac
-                );
+            let assigns_address =
+                matches!(msg.ipv4, NetIpv4Config::Static { .. } | NetIpv4Config::Dhcp)
+                    || matches!(
+                        msg.ipv6,
+                        NetIpv6Config::Static { .. } | NetIpv6Config::Slaac
+                    );
             if assigns_address {
                 return Err(Errno::PermissionDenied);
             }
@@ -376,21 +396,40 @@ impl Netstack {
             self.interfaces[index].name = msg.alias;
             renamed = Some((old, msg.alias));
         }
+        // A DHCPv4 interface needs a fresh CSPRNG source for its client.
+        // Draw it before borrowing the interface's stack (the factory is a
+        // sibling field of the interface table); only the DHCP method
+        // consumes it, and a re-applied DHCP config drops it unused.
+        let dhcp_rng = matches!(msg.ipv4, NetIpv4Config::Dhcp).then(|| (self.dhcp_rng_factory)());
         let stack = &mut self.interfaces[index].stack;
         if msg.mtu != 0 {
             stack.set_mtu(msg.mtu);
         }
         match msg.ipv4 {
-            NetIpv4Config::Disabled => stack.set_ipv4_enabled(false),
+            NetIpv4Config::Disabled => {
+                stack.disable_dhcp();
+                stack.set_ipv4_enabled(false);
+            }
             NetIpv4Config::Static {
                 addr,
                 prefix,
                 gateway,
             } => {
+                stack.disable_dhcp();
                 stack.set_ipv4_enabled(true);
                 stack
                     .set_ipv4_config(Ipv4Addr::from(addr), prefix, gateway.map(Ipv4Addr::from))
                     .map_err(|_| Errno::OutOfRange)?;
+            }
+            NetIpv4Config::Dhcp => {
+                // Re-applying the same DHCP config is idempotent: keep the
+                // running client (and its lease) rather than restart
+                // acquisition. A fresh interface starts the client now.
+                if !stack.dhcp_active() {
+                    if let Some(rng) = dhcp_rng {
+                        stack.enable_dhcp(rng);
+                    }
+                }
             }
         }
         match msg.ipv6 {
@@ -987,6 +1026,7 @@ impl Netstack {
             out,
             settings: _,
             temp_factory: _,
+            dhcp_rng_factory: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();

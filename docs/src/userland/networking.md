@@ -112,9 +112,10 @@ document, `/System/Settings/Network/network.conf`, parsed and rendered by
 the single `lib/netconfig` engine. Each managed interface is named by a
 stable admin alias (`wan`, `lan0`) bound to hardware by its MAC
 (`<iface>.match.mac`) — never by discovery order — and carries its
-addressing (`<iface>.ipv4.method static|disabled` with
-`ipv4.address`/`ipv4.gateway`; `<iface>.ipv6.method slaac|static|disabled`
-with `ipv6.address`/`ipv6.gateway`) and an optional `<iface>.mtu`.
+addressing (`<iface>.ipv4.method static|dhcp|disabled` — `static` with
+`ipv4.address`/`ipv4.gateway`, `dhcp` leasing them over RFC 2131 DHCPv4;
+`<iface>.ipv6.method slaac|static|disabled` with
+`ipv6.address`/`ipv6.gateway`) and an optional `<iface>.mtu`.
 
 ```
 wan.match.mac    52:54:00:12:34:56

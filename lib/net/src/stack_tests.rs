@@ -109,6 +109,212 @@ fn bring_up(a: &mut Stack, b: &mut Stack) -> (Vec<StackEvent>, Vec<StackEvent>) 
     (events_a, events_b)
 }
 
+/// A counting RNG for the DHCP client: distinct, deterministic values.
+fn dhcp_counter() -> alloc::boxed::Box<dyn FnMut() -> u32> {
+    let mut n: u32 = 0x1000_0000;
+    alloc::boxed::Box::new(move || {
+        n = n.wrapping_add(0x0101_0101);
+        n
+    })
+}
+
+/// A DHCPv4-configured client stack, IPv6 disabled so only DHCP frames
+/// egress (the test inspects them by index).
+fn dhcp_client() -> Stack {
+    let mut c = stack(MAC_A, IID_A);
+    c.set_ipv6_enabled(false, t(0));
+    c.enable_dhcp(dhcp_counter());
+    c
+}
+
+const DHCP_SERVER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+const DHCP_LEASED: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 50);
+const DHCP_MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+
+/// The DHCP message bytes carried by a single emitted frame (Ethernet +
+/// IPv4 + UDP stripped), plus the UDP ports, or `None` if it is not a
+/// UDP datagram.
+fn dhcp_out(frame: &[u8]) -> Option<(u16, u16, Vec<u8>)> {
+    let eth = EthernetFrame::parse(frame)?;
+    let (hdr, _o, payload) = Ipv4Header::parse(eth.payload)?;
+    let pseudo = crate::udp::Pseudo::V4 {
+        source: hdr.source,
+        destination: hdr.destination,
+    };
+    let dg = UdpDatagram::parse(pseudo, payload)?;
+    Some((dg.source_port, dg.destination_port, dg.payload.to_vec()))
+}
+
+/// Build a server→client DHCP reply frame (broadcast at layer 2, since the
+/// client has no address yet): BOOTREPLY with the given type and options,
+/// wrapped in UDP(67→68)/IPv4(server→255.255.255.255)/Ethernet.
+fn dhcp_server_frame(msg: u8, xid: u32, lease_secs: Option<u32>) -> Vec<u8> {
+    let mut dhcp = alloc::vec![0u8; 240];
+    dhcp[0] = 2; // BOOTREPLY
+    dhcp[1] = 1; // htype Ethernet
+    dhcp[2] = 6; // hlen
+    dhcp[4..8].copy_from_slice(&xid.to_be_bytes());
+    dhcp[16..20].copy_from_slice(&DHCP_LEASED.octets());
+    dhcp[28..34].copy_from_slice(&MAC_A.0);
+    dhcp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    let mut opt = |code: u8, data: &[u8]| {
+        dhcp.push(code);
+        dhcp.push(u8::try_from(data.len()).expect("fits"));
+        dhcp.extend_from_slice(data);
+    };
+    opt(53, &[msg]);
+    opt(54, &DHCP_SERVER.octets());
+    opt(1, &DHCP_MASK.octets());
+    opt(3, &DHCP_SERVER.octets());
+    if let Some(l) = lease_secs {
+        opt(51, &l.to_be_bytes());
+    }
+    dhcp.push(255);
+    let src = DHCP_SERVER;
+    let dst = Ipv4Addr::BROADCAST;
+    let mut udpbuf = alloc::vec![0u8; crate::udp::UDP_HEADER_LEN + dhcp.len()];
+    crate::udp::write(
+        crate::udp::Pseudo::V4 {
+            source: src,
+            destination: dst,
+        },
+        67,
+        68,
+        &dhcp,
+        &mut udpbuf,
+    )
+    .expect("udp");
+    let ip = Ipv4Header::new(src, dst, crate::udp::PROTOCOL_UDP);
+    let mut packet = alloc::vec![0u8; IPV4_HEADER_LEN + udpbuf.len()];
+    ip.write(&mut packet, udpbuf.len()).expect("ipv4");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&udpbuf);
+    let mut frame = alloc::vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, BROADCAST, MAC_B, ETHERTYPE_IPV4).expect("eth");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// The client's outstanding transaction id, read from the DISCOVER it
+/// emits at bring-up.
+fn discover_xid(discover: &[u8]) -> u32 {
+    let (src, dst, msg) = dhcp_out(discover).expect("udp");
+    assert_eq!((src, dst), (68, 67), "DISCOVER is client 68 → server 67");
+    u32::from_be_bytes([msg[4], msg[5], msg[6], msg[7]])
+}
+
+/// The DHCP message-type (option 53) carried in a client message's option
+/// region (from offset 240, past the cookie), by scanning the TLVs.
+fn dhcp_msg_type(msg: &[u8]) -> Option<u8> {
+    let mut i = 240;
+    while i < msg.len() {
+        match msg[i] {
+            255 => return None,
+            0 => i += 1,
+            code => {
+                let len = *msg.get(i + 1)? as usize;
+                if code == 53 {
+                    return msg.get(i + 2).copied();
+                }
+                i += 2 + len;
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn dhcp_acquires_a_lease_end_to_end() {
+    let mut c = dhcp_client();
+    // First advance emits a broadcast DISCOVER.
+    let out = c.advance_collect(t(0));
+    assert_eq!(out.frames.len(), 1, "one DISCOVER frame");
+    let xid = discover_xid(&out.frames[0].bytes);
+    assert!(c.iface().ipv4().is_none(), "no address before the lease");
+
+    // The server OFFERs; the client REQUESTs it.
+    let offer = dhcp_server_frame(2, xid, Some(3600));
+    let out = c.on_frame_collect(&offer, t(0));
+    let request = out
+        .frames
+        .iter()
+        .find(|f| dhcp_out(&f.bytes).map(|(s, d, _)| (s, d)) == Some((68, 67)))
+        .expect("a REQUEST frame");
+    let (_s, _d, req_msg) = dhcp_out(&request.bytes).expect("udp");
+    assert_eq!(
+        dhcp_msg_type(&req_msg),
+        Some(3),
+        "the client message is a REQUEST"
+    );
+
+    // The server ACKs; the lease is applied and audited.
+    let ack = dhcp_server_frame(5, xid, Some(3600));
+    let out = c.on_frame_collect(&ack, t(0));
+    assert_eq!(
+        c.iface().ipv4(),
+        Some((DHCP_LEASED, 24)),
+        "the leased address and /24 mask are applied"
+    );
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        StackEvent::DhcpLeaseAcquired { address, prefix_len, router }
+            if *address == DHCP_LEASED && *prefix_len == 24 && *router == Some(DHCP_SERVER)
+    )));
+    // The default route through the leased router reaches an off-link host.
+    assert_eq!(c.next_hop_v4(Ipv4Addr::new(8, 8, 8, 8)), Some(DHCP_SERVER));
+}
+
+#[test]
+fn dhcp_reply_is_intercepted_before_the_address_filter() {
+    // A DHCP reply arrives at 255.255.255.255 while the client has no
+    // address; the normal IPv4 path would drop it, but the client
+    // consumes it and it never surfaces as an ordinary UDP datagram.
+    let mut c = dhcp_client();
+    let out = c.advance_collect(t(0));
+    let xid = discover_xid(&out.frames[0].bytes);
+    let offer = dhcp_server_frame(2, xid, Some(3600));
+    let out = c.on_frame_collect(&offer, t(0));
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, StackEvent::UdpDatagram { .. })),
+        "a DHCP reply is never surfaced as an ordinary datagram"
+    );
+}
+
+#[test]
+fn dhcp_lease_expiry_withdraws_the_address() {
+    let mut c = dhcp_client();
+    let xid = discover_xid(&c.advance_collect(t(0)).frames[0].bytes);
+    c.on_frame_collect(&dhcp_server_frame(2, xid, Some(3600)), t(0));
+    c.on_frame_collect(&dhcp_server_frame(5, xid, Some(3600)), t(0));
+    assert!(c.iface().ipv4().is_some(), "lease held");
+    // Drive the timers with no server answering: RENEWING at T1 (1800 s),
+    // REBINDING at T2 (3150 s), then withdrawal at expiry (3600 s).
+    c.advance_collect(t(1800));
+    c.advance_collect(t(3150));
+    let out = c.advance_collect(t(3600));
+    assert!(
+        c.iface().ipv4().is_none(),
+        "the lease is withdrawn at expiry"
+    );
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, StackEvent::DhcpLeaseLost)));
+}
+
+#[test]
+fn disable_dhcp_withdraws_the_lease_and_stops_the_client() {
+    let mut c = dhcp_client();
+    let xid = discover_xid(&c.advance_collect(t(0)).frames[0].bytes);
+    c.on_frame_collect(&dhcp_server_frame(2, xid, Some(3600)), t(0));
+    c.on_frame_collect(&dhcp_server_frame(5, xid, Some(3600)), t(0));
+    assert!(c.dhcp_active() && c.iface().ipv4().is_some());
+    c.disable_dhcp();
+    assert!(!c.dhcp_active(), "the client is stopped");
+    assert!(c.iface().ipv4().is_none(), "its lease is withdrawn");
+}
+
 #[test]
 fn construction_refuses_bad_device_facts() {
     let mut bad = facts(MAC_A);

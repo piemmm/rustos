@@ -327,6 +327,7 @@ fn addressing_of(
                 gateway: iface.ipv4_gateway.map(|gw| gw.octets()),
             }
         }
+        Ipv4Method::Dhcp => tairix_abi::net_ipc::NetIpv4Config::Dhcp,
     };
     let ipv6 = match iface.ipv6_method() {
         Ipv6Method::Disabled => tairix_abi::net_ipc::NetIpv6Config::Disabled,
@@ -982,6 +983,26 @@ eth1.match.mac 02:00:00:00:00:03
         assert_eq!(bond.members(), &[iface_name("eth0"), iface_name("eth1")]);
         assert_eq!(bond.primary, Some(iface_name("eth0")));
         assert_eq!(plan.rejected, alloc::vec![iface_name("lan")]);
+    }
+
+    #[cfg(feature = "program")]
+    #[test]
+    fn a_dhcp_interface_maps_to_the_dhcp_addressing() {
+        // A `wan` interface configured for DHCPv4 yields a message whose
+        // IPv4 addressing is `Dhcp` (no static address fields).
+        let text = "\
+wan.match.mac aa:bb:cc:dd:ee:ff
+wan.ipv4.method dhcp
+";
+        let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        let plan = interface_configs_from_config(&config);
+        let wan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("wan"))
+            .expect("wan");
+        assert!(matches!(wan.ipv4, tairix_abi::net_ipc::NetIpv4Config::Dhcp));
+        assert!(plan.rejected.is_empty());
     }
 
     #[cfg(feature = "program")]

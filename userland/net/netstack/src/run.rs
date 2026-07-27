@@ -290,7 +290,7 @@ mod program {
         // identifiers from the platform CSPRNG through this factory; the
         // engine consults it only while net.ipv6.privacy is enabled.
         let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
-        let mut stack = Netstack::new(temp_factory);
+        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory());
         let mut sockets = SocketService::new();
         // The bound NIC channels, one per slot in the reserved endpoint
         // block. A fixed table (not a growable capacity): the channel count
@@ -908,6 +908,23 @@ mod program {
         u16::from_le_bytes(bytes)
     }
 
+    /// A DHCPv4 client randomness factory backed by the platform CSPRNG:
+    /// each configured DHCP interface draws a fresh source that yields a
+    /// 32-bit value per call (the RFC 2131 transaction id and backoff
+    /// jitter). A blocking draw is safe here — DHCP randomness is drawn off
+    /// the data path (bring-up and infrequent renewals) and must be
+    /// unpredictable to off-path spoofers; a short draw fails closed to a
+    /// zero (a legal, if predictable, value the engine simply uses).
+    fn dhcp_rng_factory() -> tairix_netstack::DhcpRngFactory {
+        Box::new(|| {
+            Box::new(|| {
+                let mut bytes = [0u8; 4];
+                let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
+                u32::from_le_bytes(bytes)
+            }) as Box<dyn FnMut() -> u32>
+        })
+    }
+
     /// Bounded pump rounds per channel: a doorbell can leave inbound
     /// frames the current `service_interface` did not re-harvest (a
     /// SYN-ACK on the RX ring), and driving a segment can produce egress
@@ -1001,6 +1018,16 @@ mod program {
                         events::INBOUND_ECHO_SERVED,
                         Level::Info,
                         "netstack: inbound echo request served (reply queued)",
+                    ),
+                    StackEvent::DhcpLeaseAcquired { .. } => audit(
+                        events::DHCP_LEASE_ACQUIRED,
+                        Level::Info,
+                        "netstack: DHCPv4 lease acquired (address applied)",
+                    ),
+                    StackEvent::DhcpLeaseLost => audit(
+                        events::DHCP_LEASE_LOST,
+                        Level::Info,
+                        "netstack: DHCPv4 lease lost (address withdrawn)",
                     ),
                     StackEvent::UdpDatagram { .. } | StackEvent::EchoReply { .. } => {
                         emit_deliveries(&sockets.deliver(event));

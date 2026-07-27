@@ -50,7 +50,7 @@ Every key is `<iface>.<suffix>` where the suffix is drawn from the closed
 | `kind`                  | `ethernet` \| `bond` \| `loopback`       | the link kind (default `ethernet`) |
 | `match.mac`             | `aa:bb:cc:dd:ee:ff`                       | bind the alias to this NIC by MAC |
 | `match.node`            | hex register base, e.g. `0xa003e00`      | bind the alias to the NIC at this bus location |
-| `ipv4.method`           | `static` \| `disabled`                   | IPv4 addressing (default `disabled`) |
+| `ipv4.method`           | `static` \| `dhcp` \| `disabled`          | IPv4 addressing (default `disabled`) |
 | `ipv4.address`          | `a.b.c.d/prefix`                         | the static IPv4 address (`static` only) |
 | `ipv4.gateway`          | `a.b.c.d`                                | the IPv4 default gateway (`static` only) |
 | `ipv6.method`           | `slaac` \| `static` \| `disabled`        | IPv6 addressing (default `slaac`) |
@@ -84,7 +84,9 @@ invariants a per-line parse cannot, whole-document, fail-closed
 
 Addressing is also checked for internal consistency: a `static` method
 requires its `address`, and an `address`/`gateway` requires the `static`
-method.
+method. A `dhcp` (DHCPv4) interface carries no static `ipv4.address`/
+`ipv4.gateway` — the lease supplies both — so setting either alongside
+`dhcp` is inconsistent and refused.
 
 ## API shape
 

@@ -67,6 +67,7 @@ doc-valid-idents = [
     "MLD",
     "MLDv1",
     "MLDv2",
+    "DHCPv4",
     "SLAAC",
     "SACKed",
     "unSACKed",

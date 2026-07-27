@@ -79,9 +79,10 @@ fn caller(net: bool, proc_byte: u8) -> Caller {
 }
 
 fn routed_stack() -> Netstack {
-    let mut stack = Netstack::new(Box::new(|| {
-        Box::new(FixedTempSource) as Box<dyn TempAddrSource>
-    }));
+    let mut stack = Netstack::new(
+        Box::new(|| Box::new(FixedTempSource) as Box<dyn TempAddrSource>),
+        Box::new(|| Box::new(|| 0u32) as Box<dyn FnMut() -> u32>),
+    );
     let now = Duration64::from_secs(0);
     stack
         .add_interface(if_name(), NetIfKind::Ethernet, facts(), [0; 8], 7, 0, now)

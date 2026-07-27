@@ -138,15 +138,20 @@ pub enum Ipv4Method {
     /// A statically configured address (`<iface>.ipv4.address`) and
     /// optional gateway (`<iface>.ipv4.gateway`).
     Static,
+    /// A DHCPv4-leased address (RFC 2131): the stack runs a DHCP client on
+    /// this interface and applies the leased address, mask, and default
+    /// route. No static `<iface>.ipv4.address`/`gateway` is set.
+    Dhcp,
 }
 
 impl Ipv4Method {
-    /// The canonical value spelling (`disabled` / `static`).
+    /// The canonical value spelling (`disabled` / `static` / `dhcp`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::Static => "static",
+            Self::Dhcp => "dhcp",
         }
     }
 
@@ -156,6 +161,7 @@ impl Ipv4Method {
         match value {
             "disabled" => Some(Self::Disabled),
             "static" => Some(Self::Static),
+            "dhcp" => Some(Self::Dhcp),
             _ => None,
         }
     }
@@ -1020,7 +1026,9 @@ impl NetworkConfig {
                     return Err(ConfigError::InconsistentInterface);
                 }
             }
-            Ipv4Method::Disabled => {
+            // Neither disabled nor DHCP may carry a static address or
+            // gateway (DHCP supplies both from the lease).
+            Ipv4Method::Disabled | Ipv4Method::Dhcp => {
                 if iface.ipv4_address.is_some() || iface.ipv4_gateway.is_some() {
                     return Err(ConfigError::InconsistentInterface);
                 }
@@ -1243,7 +1251,7 @@ wan.mtu 9000
     #[test]
     fn invalid_values_fail_closed() {
         assert_eq!(err("wan.kind switch\n"), ConfigError::InvalidValue);
-        assert_eq!(err("wan.ipv4.method dhcp\n"), ConfigError::InvalidValue);
+        assert_eq!(err("wan.ipv4.method auto\n"), ConfigError::InvalidValue);
         // Case-sensitive: one canonical spelling.
         assert_eq!(err("wan.kind Ethernet\n"), ConfigError::InvalidValue);
         assert_eq!(
@@ -1472,6 +1480,29 @@ outer.bond.members inner,eth0
     }
 
     #[test]
+    fn dhcp_ipv4_method_parses_and_forbids_a_static_address() {
+        // A plain DHCPv4 interface parses and needs no address.
+        let config = NetworkConfig::parse("wan.ipv4.method dhcp\n").expect("parses");
+        assert_eq!(
+            config.interface("wan").expect("wan").ipv4_method(),
+            Ipv4Method::Dhcp
+        );
+        // A DHCP interface may not also carry a static address or gateway.
+        assert_eq!(
+            err("wan.ipv4.method dhcp\nwan.ipv4.address 10.0.0.5/24\n"),
+            ConfigError::InconsistentInterface
+        );
+        assert_eq!(
+            err("wan.ipv4.method dhcp\nwan.ipv4.gateway 10.0.0.1\n"),
+            ConfigError::InconsistentInterface
+        );
+        // It round-trips through render/parse.
+        let rendered = config.render();
+        assert!(rendered.contains("wan.ipv4.method dhcp"));
+        assert_eq!(NetworkConfig::parse(&rendered).expect("re-parses"), config);
+    }
+
+    #[test]
     fn monitor_interval_bounds_are_enforced() {
         let below = format!(
             "bond0.bond.monitor-interval {}\n",
@@ -1562,7 +1593,7 @@ bond0.bond.primary eth0
         for kind in [IfaceKind::Ethernet, IfaceKind::Bond, IfaceKind::Loopback] {
             assert_eq!(IfaceKind::from_value(kind.as_str()), Some(kind));
         }
-        for method in [Ipv4Method::Disabled, Ipv4Method::Static] {
+        for method in [Ipv4Method::Disabled, Ipv4Method::Static, Ipv4Method::Dhcp] {
             assert_eq!(Ipv4Method::from_value(method.as_str()), Some(method));
         }
         for method in [Ipv6Method::Slaac, Ipv6Method::Static, Ipv6Method::Disabled] {

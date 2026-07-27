@@ -46,6 +46,7 @@ use crate::addr::{
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
 use crate::checksum::{ChecksumCheck, ChecksumMode, Pseudo};
+use crate::dhcp::{self, Action as DhcpAction, DhcpClient, DhcpReply, Lease, SendAction};
 use crate::eth::{
     ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
     ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
@@ -226,6 +227,22 @@ pub enum StackEvent {
         /// The checksum-valid TCP segment (header, options, payload).
         segment: Vec<u8>,
     },
+    /// The interface's DHCPv4 client committed a lease (RFC 2131): the
+    /// engine has applied the address, mask, and default route. The
+    /// service layer records the security-relevant configuration change
+    /// in the audit log; the addressing itself is already in effect.
+    DhcpLeaseAcquired {
+        /// The leased interface address.
+        address: Ipv4Addr,
+        /// The on-link prefix length derived from the lease's subnet mask.
+        prefix_len: u8,
+        /// The default router the lease carried, if any.
+        router: Option<Ipv4Addr>,
+    },
+    /// The interface's DHCPv4 lease was lost (a server NAK or lease
+    /// expiry) and the engine has withdrawn the address and its routes.
+    /// The client re-acquires from scratch; the service audits the loss.
+    DhcpLeaseLost,
 }
 
 impl StackEvent {
@@ -244,7 +261,9 @@ impl StackEvent {
             | StackEvent::DadFailed { .. }
             | StackEvent::NeighborUnreachable { .. }
             | StackEvent::IcmpErrorReceived { .. }
-            | StackEvent::ReassemblyExpired { .. } => {}
+            | StackEvent::ReassemblyExpired { .. }
+            | StackEvent::DhcpLeaseAcquired { .. }
+            | StackEvent::DhcpLeaseLost => {}
         }
     }
 }
@@ -582,6 +601,19 @@ struct PendingPacket {
     offload: TxOffload,
 }
 
+/// One interface's DHCPv4 client and the CSPRNG source that feeds it the
+/// unpredictable transaction id and backoff jitter RFC 2131 requires.
+///
+/// Present only while the interface is configured for DHCPv4 (the
+/// `<iface>.ipv4.method = dhcp` key). The randomness lives at the service
+/// seam — the engine stays pure — exactly as the RFC 8981 temporary-address
+/// source does: the service injects a CSPRNG-backed closure through
+/// [`Stack::enable_dhcp`], and the engine only ever *calls* it.
+struct DhcpDriver {
+    client: DhcpClient,
+    rng: Box<dyn FnMut() -> u32>,
+}
+
 /// The dual-stack host engine. See the module docs.
 ///
 /// The engine legitimately carries several independent boolean condition
@@ -636,6 +668,11 @@ pub struct Stack {
     /// over-size super-segment for the device to split.
     tx_segment_tcp: bool,
     counters: StackCounters,
+    /// The interface's DHCPv4 client, present only while the interface is
+    /// configured for DHCPv4 (`<iface>.ipv4.method = dhcp`). Driven from
+    /// [`Stack::advance`], fed replies intercepted in [`Stack::on_ipv4`],
+    /// and folded into [`Stack::next_deadline`].
+    dhcp: Option<DhcpDriver>,
     /// Recycled byte buffers backing the allocation-free hot path.
     bufs: BufPool,
 }
@@ -705,6 +742,7 @@ impl Stack {
             tx_csum_tcp: config.facts.offloads.contains(NetOffloads::TX_CSUM_TCP),
             tx_segment_tcp: config.facts.offloads.contains(NetOffloads::TX_SEGMENT_TCP),
             counters: StackCounters::default(),
+            dhcp: None,
         })
     }
 
@@ -897,6 +935,45 @@ impl Stack {
     pub fn set_privacy(&mut self, enabled: bool, now: Duration64) {
         self.iface.set_privacy(enabled, now);
     }
+
+    /// Start the RFC 2131 DHCPv4 client on this interface
+    /// (`<iface>.ipv4.method = dhcp`).
+    ///
+    /// DHCPv4 is an IPv4 addressing method, so this enables the IPv4 family
+    /// and starts from a clean slate — any prior static address and its
+    /// routes are dropped. The client begins in INIT and broadcasts its
+    /// first DISCOVER on the next [`Stack::advance`]; the leased address,
+    /// mask, and default route are applied when the exchange completes.
+    ///
+    /// `rng` is the injected CSPRNG source the client draws its transaction
+    /// id and backoff jitter from (the service owns entropy; the engine
+    /// stays pure). Re-enabling while already running restarts acquisition,
+    /// so the service only calls this when the client is not already active.
+    pub fn enable_dhcp(&mut self, rng: Box<dyn FnMut() -> u32>) {
+        self.set_ipv4_enabled(true);
+        self.iface.clear_ipv4();
+        self.routes_v4 = RoutingTable::new();
+        self.dhcp = Some(DhcpDriver {
+            client: DhcpClient::new(self.mac),
+            rng,
+        });
+    }
+
+    /// Stop the DHCPv4 client and withdraw any lease it applied (the
+    /// address and its routes), leaving the IPv4 family enabled but
+    /// unaddressed. Idempotent: a no-op when no client is running.
+    pub fn disable_dhcp(&mut self) {
+        if self.dhcp.take().is_some() {
+            self.iface.clear_ipv4();
+            self.routes_v4 = RoutingTable::new();
+        }
+    }
+
+    /// Whether a DHCPv4 client is currently running on this interface.
+    #[must_use]
+    pub fn dhcp_active(&self) -> bool {
+        self.dhcp.is_some()
+    }
 }
 
 impl Stack {
@@ -997,9 +1074,23 @@ impl Stack {
         check: ChecksumCheck,
         now: Duration64,
     ) {
-        let (Some((header, _options, payload)), Some((our_v4, _))) =
-            (Ipv4Header::parse(packet), self.iface.ipv4())
-        else {
+        let Some((header, _options, payload)) = Ipv4Header::parse(packet) else {
+            self.counters.rx_dropped += 1;
+            return;
+        };
+        // A DHCP reply reaches the client before any address is configured
+        // — it is broadcast to 255.255.255.255 (or unicast to the leased
+        // address during renewal). Intercept it here, ahead of the
+        // unicast-address filter that would otherwise drop an
+        // address-less receive, whenever a DHCP client is running.
+        if self.dhcp.is_some()
+            && !header.is_fragment()
+            && header.protocol == PROTOCOL_UDP
+            && self.consume_dhcp_reply(out, &header, payload, check, now)
+        {
+            return;
+        }
+        let Some((our_v4, _)) = self.iface.ipv4() else {
             self.counters.rx_dropped += 1;
             return;
         };
@@ -2990,6 +3081,10 @@ impl Stack {
         for report in self.membership_v6.advance(now) {
             self.emit_mld_report(out, report, now);
         }
+        // Drive the DHCPv4 client's timed work (INIT DISCOVER, retransmit
+        // backoff, T1/T2/expiry) and carry out the actions it returns
+        // (send a framed message, apply or withdraw a lease).
+        self.drive_dhcp(out, now);
     }
 
     /// When the earliest timed transition across every component is
@@ -3004,10 +3099,202 @@ impl Stack {
             self.reassembler.next_deadline(),
             self.membership_v4.next_deadline(),
             self.membership_v6.next_deadline(),
+            self.dhcp.as_ref().and_then(|d| d.client.next_deadline()),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|deadline| (deadline.secs(), deadline.subsec_nanos()))
+    }
+}
+
+// --- DHCPv4 client driving (RFC 2131) -----------------------------------
+impl Stack {
+    /// Poll the DHCPv4 client for the timed work due at `now` (the INIT
+    /// DISCOVER, retransmission backoff, and the T1/T2/expiry transitions)
+    /// and carry out the actions it returns. A no-op when no client runs.
+    fn drive_dhcp(&mut self, out: &mut StackOutput, now: Duration64) {
+        let actions = match self.dhcp.as_mut() {
+            Some(driver) => driver.client.poll(now, &mut *driver.rng),
+            None => return,
+        };
+        self.apply_dhcp_actions(out, actions, now);
+    }
+
+    /// Fold a received DHCP server message (UDP source 67 → destination 68)
+    /// into the client, returning `true` when the datagram was a DHCP reply
+    /// this client claimed — parsed and applied, or dropped as a spoof —
+    /// so the caller stops treating it as ordinary IPv4 traffic. A UDP
+    /// datagram that is not DHCP (or does not parse) returns `false` and
+    /// takes the normal receive path.
+    fn consume_dhcp_reply(
+        &mut self,
+        out: &mut StackOutput,
+        header: &Ipv4Header,
+        payload: &[u8],
+        check: ChecksumCheck,
+        now: Duration64,
+    ) -> bool {
+        let pseudo = udp::Pseudo::V4 {
+            source: header.source,
+            destination: header.destination,
+        };
+        let Some(datagram) = UdpDatagram::parse_with(pseudo, payload, check) else {
+            return false;
+        };
+        if datagram.destination_port != dhcp::CLIENT_PORT
+            || datagram.source_port != dhcp::SERVER_PORT
+        {
+            return false;
+        }
+        // A DHCP-ported datagram belongs to this client. Match it against
+        // the outstanding transaction id and this interface's hardware
+        // address (the parser rejects any other), fold it, and never
+        // surface it as ordinary traffic. A reply that does not parse (a
+        // spoof, a truncation, a foreign transaction) is dropped.
+        let (xid, chaddr) = match self.dhcp.as_ref() {
+            Some(driver) => (
+                driver.client.transaction_id(),
+                driver.client.hardware_addr(),
+            ),
+            None => return false,
+        };
+        let Some(reply) = DhcpReply::parse(datagram.payload, xid, chaddr) else {
+            self.counters.rx_dropped += 1;
+            return true;
+        };
+        let actions = match self.dhcp.as_mut() {
+            Some(driver) => driver.client.on_reply(now, &reply),
+            None => return true,
+        };
+        self.apply_dhcp_actions(out, actions, now);
+        true
+    }
+
+    /// Carry out each action the client produced: frame and transmit a
+    /// message, apply a newly committed lease, or withdraw a lost one.
+    fn apply_dhcp_actions(
+        &mut self,
+        out: &mut StackOutput,
+        actions: Vec<DhcpAction>,
+        now: Duration64,
+    ) {
+        for action in actions {
+            match action {
+                DhcpAction::Send(send) => self.send_dhcp(out, &send, now),
+                DhcpAction::Configured(lease) => self.apply_dhcp_lease(out, lease),
+                DhcpAction::Deconfigured => self.withdraw_dhcp_lease(out),
+            }
+        }
+    }
+
+    /// Frame one client→server DHCP message as UDP(68→67)/IPv4/Ethernet on
+    /// this link and queue it.
+    ///
+    /// A broadcast message (DISCOVER, a SELECTING or REBINDING REQUEST) is
+    /// sent from the client's current address (`0.0.0.0` before a lease) to
+    /// the limited broadcast `255.255.255.255` at the link-layer broadcast
+    /// MAC — no route or neighbour resolution, since the client may have
+    /// neither yet. A RENEWING unicast to the leasing server is sent from
+    /// the leased address and resolves the server's MAC through the
+    /// neighbour cache (the lease installed its connected route).
+    fn send_dhcp(&mut self, out: &mut StackOutput, action: &SendAction, now: Duration64) {
+        if !self.link_up {
+            return;
+        }
+        let mut message = [0u8; dhcp::MAX_MESSAGE_LEN];
+        let Ok(len) = dhcp::write_message(&action.spec, &mut message) else {
+            return;
+        };
+        let (source, dest) = match action.destination {
+            dhcp::Destination::Broadcast => (action.spec.client_addr, Ipv4Addr::BROADCAST),
+            dhcp::Destination::Server(server) => (action.spec.client_addr, server),
+        };
+        // The UDP datagram: client port 68 → server port 67.
+        let mut datagram = self.bufs.take_zeroed(udp::UDP_HEADER_LEN + len);
+        if udp::write(
+            udp::Pseudo::V4 {
+                source,
+                destination: dest,
+            },
+            dhcp::CLIENT_PORT,
+            dhcp::SERVER_PORT,
+            &message[..len],
+            &mut datagram,
+        )
+        .is_err()
+        {
+            self.bufs.give(datagram);
+            return;
+        }
+        // Wrap it in an IPv4 packet.
+        let mut ipv4 = Ipv4Header::new(source, dest, PROTOCOL_UDP);
+        ipv4.identification = self.next_ident;
+        self.next_ident = self.next_ident.wrapping_add(1);
+        let mut packet = self.bufs.take_zeroed(IPV4_HEADER_LEN + datagram.len());
+        if ipv4.write(&mut packet, datagram.len()).is_none() {
+            self.bufs.give(packet);
+            self.bufs.give(datagram);
+            return;
+        }
+        packet[IPV4_HEADER_LEN..].copy_from_slice(&datagram);
+        self.bufs.give(datagram);
+        match action.destination {
+            dhcp::Destination::Broadcast => {
+                self.push_frame(out, BROADCAST, ETHERTYPE_IPV4, &packet);
+                self.bufs.give(packet);
+            }
+            dhcp::Destination::Server(server) => {
+                self.resolve_and_send_offloaded(
+                    out,
+                    IpAddr::V4(server),
+                    ETHERTYPE_IPV4,
+                    packet,
+                    TxOffload::None,
+                    now,
+                );
+            }
+        }
+    }
+
+    /// Apply a committed DHCP lease: the leased address, the subnet mask's
+    /// prefix, and (when the server named an on-link router) the default
+    /// route. A router the server placed off the connected subnet is
+    /// refused by [`Stack::set_ipv4_config`]; the address is then applied
+    /// alone rather than left unconfigured (fail safe, never a partial
+    /// state). A `DhcpLeaseAcquired` event lets the service audit the
+    /// change.
+    fn apply_dhcp_lease(&mut self, out: &mut StackOutput, lease: Lease) {
+        // A lease with no (or a non-contiguous) mask falls back to a host
+        // /32: the address is usable even when the server omitted a mask.
+        let prefix_len = lease
+            .subnet_mask
+            .and_then(prefix_len_from_mask)
+            .filter(|&bits| bits >= 1)
+            .unwrap_or(32);
+        let (applied, router) = match self.set_ipv4_config(lease.addr, prefix_len, lease.router) {
+            Ok(()) => (true, lease.router),
+            Err(_) => (
+                self.set_ipv4_config(lease.addr, prefix_len, None).is_ok(),
+                None,
+            ),
+        };
+        if applied {
+            out.events.push(StackEvent::DhcpLeaseAcquired {
+                address: lease.addr,
+                prefix_len,
+                router,
+            });
+        }
+    }
+
+    /// Withdraw a DHCP lease that was lost (a NAK or expiry): drop the
+    /// leased address and every IPv4 route, leaving the family enabled so
+    /// the client re-acquires. A `DhcpLeaseLost` event lets the service
+    /// audit the loss.
+    fn withdraw_dhcp_lease(&mut self, out: &mut StackOutput) {
+        self.iface.clear_ipv4();
+        self.routes_v4 = RoutingTable::new();
+        out.events.push(StackEvent::DhcpLeaseLost);
     }
 }
 
@@ -3221,6 +3508,19 @@ fn mask_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
     }
     let bits = u32::from_be_bytes(addr.octets());
     Ipv4Addr::from((bits & (u32::MAX << (32 - u32::from(prefix_len)))).to_be_bytes())
+}
+
+/// The prefix length a DHCP subnet mask (option 1) encodes, or `None`
+/// when the mask is not a contiguous run of leading ones (a hole makes it
+/// no valid prefix — fail closed rather than guess a length).
+fn prefix_len_from_mask(mask: Ipv4Addr) -> Option<u8> {
+    let bits = u32::from_be_bytes(mask.octets());
+    let ones = bits.leading_ones();
+    if bits.count_ones() != ones {
+        return None;
+    }
+    // `ones` is at most 32, so this conversion never truncates.
+    u8::try_from(ones).ok()
 }
 
 /// Zero the host bits of `addr` for a `prefix_len`-bit prefix.

@@ -148,9 +148,15 @@ The open items, in priority order:
   reason — a few added `lib/net` constants/helpers shift the same load/spawn
   timing; ABE cannot reach the pty path (`enable_ecn` off, `on_ecn`
   unreachable without a negotiated-ECN connection) — and was likewise
-  accepted with this recorded for the PTY owner. Any small `lib/net`
-  binary-size change is expected to keep tripping this gate until the
-  structural fix lands.
+  accepted with this recorded for the PTY owner. The subsequent DHCPv4
+  D2 change (`plans/DHCP.md` — the `lib/net::Stack`/`netstack` interface
+  integration of the DHCP client) reproduces the identical 300 s timeout at
+  the same PTY Ctrl-C stage (viewer.app loaded, desktop still pumping, no
+  WARN/panic/OOM) for the identical reason — a few added `lib/net`/`netstack`
+  bytes shift the same load/spawn timing; DHCP cannot reach the pty path — and
+  was likewise accepted (User-confirmed) with this recorded for the PTY owner.
+  Any small `lib/net` binary-size change is expected to keep tripping this
+  gate until the structural fix lands.
 
 - **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
   bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a
