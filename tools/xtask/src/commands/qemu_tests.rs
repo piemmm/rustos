@@ -4396,6 +4396,47 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/DHCP.md` D3: the x86_64 live DHCPv4 vertical — the virtio-**PCI**
+    // analogue of `tairix-test-netstack-dhcp-qemu-aarch64`. It boots the
+    // *production* x86_64 pipeline with the `dhcp-net-root` disk
+    // (`FsDisk::DhcpNetRootDisk`), whose planted `network.conf` is the x86_64
+    // variant (`DHCP_NETWORK_CONF_X86_64`): it binds the NIC to the `wan` alias
+    // by its stable bus location (`<iface>.match.node` = the virtio-PCI
+    // config-window BAR base the kernel enumerator assigns, not the aarch64
+    // mmio slot), selects `ipv4.method dhcp`, and disables IPv6 — so the
+    // interface forms no address of its own. A `virtio-net-pci` device is
+    // attached and the harness-side DHCP-server peer (`NetPeerMode::V4DhcpEcho`)
+    // leases the guest its only address and campaigns to it. Everything runs
+    // **before** any root unlock — the `/System` store and its `Settings/`
+    // config are on the always-readable volume — so the guest needs no console
+    // dialogue (headless, no serial script). `devmgr` autoloads the virtio-net
+    // driver into its own process (it publishes a `netchan` node), reads the
+    // planted config, and binds the NIC to `wan` by its resolved BAR base;
+    // `netstack` drives its DHCP client, which broadcasts DISCOVER, accepts the
+    // peer's OFFER, REQUESTs it, and applies the peer's ACK. PASS once the log
+    // sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP_LEASE_ACQUIRED`, and `netstack`'s `INBOUND_ECHO_SERVED` — the last
+    // gating exit so the guest stays alive until a frame addressed to its
+    // *leased* address has been answered; the peer's own verdict (it offered,
+    // acked, and got the echo reply at the leased address) is required too, so
+    // a broken lease cannot pass on an address the guest formed itself (it
+    // forms none). Single CPU and the same 240-second budget as its siblings.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp-qemu-x86-64",
+        binary: "tairix-test-netstack-dhcp-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V4DhcpEcho,
+        ramfb: false,
+        fs_disk: FsDisk::DhcpNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the x86_64 bond-failover
     // live-config vertical — the virtio-**PCI** analogue of
     // `tairix-test-netstack-bond-qemu-aarch64`. It boots the *production*
@@ -4470,6 +4511,48 @@ const TESTS: &[QemuTest] = &[
         netstack_peer: NetPeerMode::V6StaticEcho,
         ramfb: false,
         fs_disk: FsDisk::StaticNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/DHCP.md` D3: the riscv64 live DHCPv4 vertical — the
+    // virtio-**MMIO** analogue of `tairix-test-netstack-dhcp-qemu-aarch64` on
+    // the QEMU riscv64 `virt` board. It boots the *production* riscv64 pipeline
+    // with the `dhcp-net-root` disk (`FsDisk::DhcpNetRootDisk`), whose planted
+    // `network.conf` is the riscv64 variant (`DHCP_NETWORK_CONF_RISCV64`): it
+    // binds the NIC to the `wan` alias by its stable bus location
+    // (`<iface>.match.node` = the NIC's virtio-mmio transport slot base the
+    // board's enumeration resolves, distinct from the aarch64 board's slot and
+    // the x86_64 BAR base), selects `ipv4.method dhcp`, and disables IPv6 — so
+    // the interface forms no address of its own. A `virtio-net-device` is
+    // attached and the harness-side DHCP-server peer (`NetPeerMode::V4DhcpEcho`)
+    // leases the guest its only address and campaigns to it. Everything runs
+    // **before** any root unlock — the `/System` store and its `Settings/`
+    // config are on the always-readable volume — so the guest needs no console
+    // dialogue (headless, no serial script). `devmgr` autoloads the virtio-net
+    // driver into its own process (it publishes a `netchan` node), reads the
+    // planted config, and binds the NIC to `wan` by its resolved slot base;
+    // `netstack` drives its DHCP client, which broadcasts DISCOVER, accepts the
+    // peer's OFFER, REQUESTs it, and applies the peer's ACK. PASS once the log
+    // sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP_LEASE_ACQUIRED`, and `netstack`'s `INBOUND_ECHO_SERVED` — the last
+    // gating exit so the guest stays alive until a frame addressed to its
+    // *leased* address has been answered; the peer's own verdict (it offered,
+    // acked, and got the echo reply at the leased address) is required too, so
+    // a broken lease cannot pass on an address the guest formed itself (it
+    // forms none). Single CPU and the same 240-second budget as its siblings.
+    QemuTest {
+        package: "tairix-test-netstack-dhcp-qemu-riscv64",
+        binary: "tairix-test-netstack-dhcp-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V4DhcpEcho,
+        ramfb: false,
+        fs_disk: FsDisk::DhcpNetRootDisk,
         keyboard: None,
         typed_keys: &[],
         screendumps: &[],

@@ -482,6 +482,55 @@ wan.ipv4.method dhcp
 wan.ipv6.method disabled
 ";
 
+/// The `/System/Settings/Network/network.conf` the **x86_64** DHCPv4
+/// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
+/// of [`DHCP_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on x86_64 is the NIC's lowest config-window BAR base
+/// [`GUEST_NIC_NODE_LOCATION_X86_64`] (`0xfe004000`) rather than the aarch64
+/// mmio slot. It binds the alias [`DHCP_IFACE_ALIAS`] to that NIC, selects
+/// `ipv4.method dhcp`, and disables IPv6, so the interface's only address is a
+/// DHCP lease. The literals are cross-checked against the constants by the
+/// `x86_64_dhcp_network_conf_matches_the_wire_constants` unit test, so the
+/// config and the location the guest binds by can never drift.
+pub const DHCP_NETWORK_CONF_X86_64: &str = "\
+# TAIRiX DHCPv4 QEMU vertical network.conf (x86_64).
+# Binds the `wan` alias to the virtio-net-pci NIC by its stable bus location
+# (the lowest config-window BAR base) and selects DHCPv4 addressing (IPv6
+# disabled), so the interface's only address is the lease the host DHCP server
+# grants — proving RFC 2131 end to end over PCI.
+wan.kind ethernet
+wan.match.node 0xfe004000
+wan.ipv4.method dhcp
+wan.ipv6.method disabled
+";
+
+/// The `/System/Settings/Network/network.conf` the **riscv64** DHCPv4
+/// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
+/// of [`DHCP_NETWORK_CONF_AARCH64`].
+///
+/// Identical in every respect except the `<iface>.match.node` bus location,
+/// which on the QEMU riscv64 `virt` board is the NIC's virtio-mmio transport
+/// slot base [`GUEST_NIC_NODE_LOCATION_RISCV64`] (`0x10007000`) rather than the
+/// aarch64 board's slot base. It binds the alias [`DHCP_IFACE_ALIAS`] to that
+/// NIC, selects `ipv4.method dhcp`, and disables IPv6, so the interface's only
+/// address is a DHCP lease. The literals are cross-checked against the
+/// constants by the `riscv64_dhcp_network_conf_matches_the_wire_constants`
+/// unit test, so the config and the location the guest binds by can never
+/// drift.
+pub const DHCP_NETWORK_CONF_RISCV64: &str = "\
+# TAIRiX DHCPv4 QEMU vertical network.conf (riscv64).
+# Binds the `wan` alias to the virtio-net-device NIC by its stable bus location
+# (its virtio-mmio transport slot base) and selects DHCPv4 addressing (IPv6
+# disabled), so the interface's only address is the lease the host DHCP server
+# grants — proving RFC 2131 end to end over mmio.
+wan.kind ethernet
+wan.match.node 0x10007000
+wan.ipv4.method dhcp
+wan.ipv6.method disabled
+";
+
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
@@ -777,6 +826,73 @@ mod tests {
         // the guest over on-link.
         assert_eq!(DHCP_SERVER_V4.octets()[..3], DHCP_LEASED_V4.octets()[..3]);
         assert_ne!(DHCP_SERVER_V4, DHCP_LEASED_V4);
+    }
+
+    /// The x86_64 DHCP `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the x86_64 NIC's
+    /// config-window BAR base while carrying the identical alias and DHCPv4 /
+    /// disabled-IPv6 methods. Drift fails here, long before a QEMU boot.
+    #[test]
+    fn x86_64_dhcp_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP_NETWORK_CONF_X86_64)
+            .expect("the planted x86_64 DHCP network.conf parses and validates");
+        let iface = config
+            .interface(DHCP_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_X86_64),
+            "the config's match.node names the x86_64 virtio-PCI NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Disabled);
+        assert_eq!(iface.ipv4_address, None, "DHCP carries no static IPv4");
+        assert_eq!(iface.ipv6_address, None, "IPv6 is disabled");
+        // The two arch confs differ *only* in the bus location: the x86_64
+        // conf is the aarch64 conf with its match.node line rewritten.
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_X86_64, GUEST_NIC_NODE_LOCATION_AARCH64,
+            "the two arch NIC locations are distinct"
+        );
+    }
+
+    /// The riscv64 DHCP `network.conf` is the aarch64 one with a different
+    /// `match.node` bus location and nothing else: parse it through the real
+    /// `lib/netconfig` engine and confirm it names the riscv64 NIC's
+    /// virtio-mmio transport slot base while carrying the identical alias and
+    /// DHCPv4 / disabled-IPv6 methods. Drift fails here, long before a QEMU
+    /// boot.
+    #[test]
+    fn riscv64_dhcp_network_conf_matches_the_wire_constants() {
+        let config = tairix_netconfig::NetworkConfig::parse(DHCP_NETWORK_CONF_RISCV64)
+            .expect("the planted riscv64 DHCP network.conf parses and validates");
+        let iface = config
+            .interface(DHCP_IFACE_ALIAS)
+            .expect("the config declares the `wan` interface");
+        assert_eq!(iface.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        assert_eq!(
+            iface.match_node,
+            Some(GUEST_NIC_NODE_LOCATION_RISCV64),
+            "the config's match.node names the riscv64 virtio-mmio NIC bus location"
+        );
+        assert_eq!(iface.match_mac, None, "bound by location, not MAC");
+        assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+        assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Disabled);
+        assert_eq!(iface.ipv4_address, None, "DHCP carries no static IPv4");
+        assert_eq!(iface.ipv6_address, None, "IPv6 is disabled");
+        // The riscv64 location is distinct from both siblings: the three arch
+        // confs differ *only* in the bus location line.
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_RISCV64, GUEST_NIC_NODE_LOCATION_AARCH64,
+            "the riscv64 and aarch64 NIC locations are distinct"
+        );
+        assert_ne!(
+            GUEST_NIC_NODE_LOCATION_RISCV64, GUEST_NIC_NODE_LOCATION_X86_64,
+            "the riscv64 and x86_64 NIC locations are distinct"
+        );
     }
 
     /// The planted ECN `system.conf` and the setting it means are one source

@@ -370,13 +370,15 @@ pub fn bond_net_store_files(
 
 /// The composed store files the DHCPv4 vertical's disk plants: the shared
 /// [`app_store_files`] set **plus** the planted
-/// `/System/Settings/Network/network.conf`
-/// ([`tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64`]) that binds the
+/// `/System/Settings/Network/network.conf` (the per-arch
+/// `tairix_test_netstack_wire::DHCP_NETWORK_CONF_*`) that binds the
 /// NIC by `match.node`, selects `ipv4.method dhcp`, and disables IPv6 (DHCP
 /// D3). The sibling of [`static_net_store_files`] — same shape, a different
 /// config — so the two verticals cannot share a config by accident; memoised
-/// per arch. Only the aarch64 vertical enrols this disk (the `match.node`
-/// location is the QEMU-virt board's), so the aarch64 config is planted.
+/// per arch. Like [`static_net_store_files`], the `match.node` bus location
+/// differs per bus, so the config planted names the NIC location this
+/// target's kernel actually resolves (the aarch64/riscv64 virtio-mmio slot
+/// base vs. the x86_64 virtio-PCI config-window BAR base).
 ///
 /// # Errors
 ///
@@ -390,15 +392,24 @@ pub fn dhcp_net_store_files(
     FILES[arch.index()]
         .get_or_init(|| {
             let mut files = app_store_files(ctx, arch)?.to_vec();
+            // The DHCP vertical binds the NIC by its stable bus location
+            // (`<iface>.match.node`), which differs per bus: the aarch64/riscv64
+            // virtio-mmio slot base vs. the x86_64 virtio-PCI config-window BAR
+            // base. Plant the config whose `match.node` names the NIC location
+            // this target's kernel actually resolves, so the same fixture cannot
+            // silently mis-bind on the wrong arch.
+            let conf = match arch {
+                PieArch::X86_64 => tairix_test_netstack_wire::DHCP_NETWORK_CONF_X86_64,
+                PieArch::Riscv64 => tairix_test_netstack_wire::DHCP_NETWORK_CONF_RISCV64,
+                PieArch::Aarch64 => tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64,
+            };
             files.push(AppStoreFile {
                 components: vec![
                     b"Settings".to_vec(),
                     b"Network".to_vec(),
                     b"network.conf".to_vec(),
                 ],
-                bytes: tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64
-                    .as_bytes()
-                    .to_vec(),
+                bytes: conf.as_bytes().to_vec(),
             });
             Ok(files)
         })

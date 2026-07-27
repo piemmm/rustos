@@ -323,3 +323,17 @@ bond fails over to the surviving member, witnessed by `BOND_CONFIG_APPLIED`,
 `BOND_FAILOVER`, and a post-failover `INBOUND_ECHO_SERVED` (the ordering makes
 a pre-failover echo insufficient) — the end-to-end proof of the live
 link-status → failover path.
+
+The `netstack_dhcp_qemu_{aarch64,riscv64,x86_64}` verticals prove the RFC 2131
+dynamic-addressing path live on all three Tier-1 targets (`plans/DHCP.md` D3).
+The planted `network.conf` binds the NIC to the `wan` alias by `match.node`
+(its per-bus location, as the static vertical does) but selects `ipv4.method
+dhcp` and disables IPv6, so the interface forms **no** address of its own: the
+stack must drive its DHCP client to lease one from the harness-side DHCP-server
+peer (`NetPeerMode::V4DhcpEcho`), which OFFERs/ACKs a lease and then pings the
+guest at the leased address. Witnessed by `devmgr`'s `NETSTACK_BOUND`, the
+stack's `DHCP_LEASE_ACQUIRED`, and a post-lease `INBOUND_ECHO_SERVED`, plus the
+peer's own offered/acked/echo verdict — so a broken lease cannot pass on an
+address the guest formed itself (it forms none). The three arches differ only
+in the NIC's bus (aarch64/riscv64 virtio-mmio, x86_64 virtio-PCI) and hence the
+`match.node` the planted config names.
