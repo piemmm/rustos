@@ -59,6 +59,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/abi wire decoders (IPC + manifest headers)",
     },
     Target {
+        package: "tairix-fontface",
+        test: "fuzz_face",
+        description: "lib/fontface TrueType parser + outline rasteriser",
+    },
+    Target {
         package: "tairix-kernel-syscall",
         test: "fuzz_args",
         description: "syscall dispatcher argument validation",

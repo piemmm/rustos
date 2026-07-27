@@ -1,0 +1,57 @@
+[package]
+name = "tairix-fontd"
+description = "TAIRiX font service: the sandboxed OS text-rasterisation service that owns the system faces and serves glyph coverage over FONT_ENDPOINT (plans/FONT-SERVICE.md FS-3, AGENTS.md §16.4, §19.5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-sysinfod`. `cargo
+# build -p tairix-fontd` builds the service program with it; host tooling
+# builds only the dispatcher *library* (`FontService` + the rasterising
+# glyph source), so the host test build never pulls the userland runtime's
+# `_start` / `#[global_allocator]` / `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-fontd` dispatcher library (the host-testable
+# `FontService` rasteriser + bounded glyph cache) and the `Run` entry-point
+# binary of the font service installed at `/System/Services/fontd.app/Run`
+# (`AGENTS.md` §16.2). The binary is a freestanding pure-Rust program on the
+# native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-fontd-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen `font-v1` wire surface (`FONT_ENDPOINT`, `FontRequest`, the reply
+# encoders) and the `Errno` table the dispatcher fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared first-party TrueType reader + scanline rasteriser — the *one*
+# engine the atlas generator and this service share (`AGENTS.md` §2.2). Only
+# this service ever parses a face at runtime (§19.5).
+tairix-fontface = { path = "../../../lib/fontface", version = "=0.0.0" }
+# Unicode terminal-cell width, so a glyph's pen advance is the same
+# one-or-two-cell notion `lib/vt` / the client / the atlas use.
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0", default-features = false }
+# §19.4 structured audit log: face-load and bind decisions are recorded
+# through a `tairix_log::Sink`.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
+# provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, the filesystem read wrappers used to load
+# `/System/Fonts`, and the endpoint syscall wrappers (`call_create`/
+# `call_recv`/`call_reply`), plus the `CapabilitySet` primitive the bind names.
+# Pulled in only for the bare-metal targets the program is built for; on the
+# host the binary is an inert stub and neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

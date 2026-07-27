@@ -1270,8 +1270,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-fontd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-fontface",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-vt",
+]
+
+[[package]]
 name = "tairix-fontface"
 version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+]
 
 [[package]]
 name = "tairix-fsmeta"

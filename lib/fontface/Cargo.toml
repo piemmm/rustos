@@ -10,3 +10,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The shared per-run PRNG seed + wall-clock budget seam for the deterministic
+# `fuzz_face` face-parser/rasteriser fuzz harness (§19.6).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

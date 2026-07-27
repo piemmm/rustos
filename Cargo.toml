@@ -147,6 +147,7 @@ members = [
     "userland/system/drvhost",
     "userland/system/seatmgr",
     "userland/system/sysinfod",
+    "userland/system/fontd",
     "userland/system/journald",
     "userland/system/init",
     "userland/system/appmgr",
