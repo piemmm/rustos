@@ -204,7 +204,18 @@ the font work and is fixed in its own step.
   curated C-ABI surface, so the generated headers are unchanged. `docs/src`
   prose is deferred to FS-8 with the service/client, matching how the sibling
   `display_ipc`/`window_ipc` wire protocols are documented.
-- **FS-2 … FS-8 — planned.**
+- **FS-7 — done.** The image → Cargo-profile mapping lives once on
+  `tairix_mkimage::ImageProfile` (`cargo_build_args`/`cargo_profile_dir`,
+  alongside `index`/`COUNT`); both `kernel_build_profile` and the user-space
+  `pie_build::cross_compile_pie_elf` read it, so the shippable `installer`
+  image cross-compiles its userland/driver `Run` binaries `--release` (read
+  back from the `release/` subdir) while the `debug` and QEMU-test images
+  stay in Cargo's `dev` profile. Every `(arch, profile)` bundle memo in
+  `image_apps`/`image_drivers` is re-keyed through the shared `memo_slot`
+  helper (`MEMO_SLOTS = PieArch::COUNT * ImageProfile::COUNT`), so the
+  one-process image gate that builds both profiles can no longer hand one
+  profile's composed bundles to the other.
+- **FS-2 … FS-6, FS-8 — planned.**
 
 ## 5. Cross-references
 

@@ -28,7 +28,9 @@ use tairix_itest_harness::elf2rxe::elf_to_rxe;
 use tairix_itest_harness::pie::PieArch;
 use tairix_itest_harness::USER_IMAGE_BIAS;
 
-use super::image_apps::AppStoreFile;
+use tairix_mkimage::ImageProfile;
+
+use super::image_apps::{memo_slot, AppStoreFile, MEMO_SLOTS};
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
 
@@ -119,6 +121,7 @@ fn build_bundle(
     package: &str,
     caps: &[CapabilityId],
     bind_keys: &[tairix_abi::DriverBindKey],
+    profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
     // Map the package name to its source directory under `drivers/`. Only
     // the crates installed into the image are listed; an unknown package is
@@ -139,7 +142,15 @@ fn build_bundle(
     };
     // A driver crate's `Run` binary shares the package name.
     let crate_dir = ctx.workspace_root.join(rel_dir);
-    let elf = cross_compile_pie_elf(ctx, arch, "image-drivers", package, package, &crate_dir)?;
+    let elf = cross_compile_pie_elf(
+        ctx,
+        arch,
+        "image-drivers",
+        package,
+        package,
+        &crate_dir,
+        profile,
+    )?;
     let rxe = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
@@ -174,7 +185,11 @@ fn build_bundle(
 ///
 /// A string describing a failed cross-compile, a missing ELF artefact, or an
 /// ELF->rxe conversion failure.
-pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_vcmailbox_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -185,6 +200,7 @@ pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
             CapabilityId::IPC_BIND_PRIVILEGED,
         ],
         tairix_vcmailbox::BIND_KEYS,
+        profile,
     )
 }
 
@@ -202,7 +218,11 @@ pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_pcie_brcm_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -213,6 +233,7 @@ pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
             CapabilityId::HW_EMIT,
         ],
         tairix_drv_bus_pcie_brcm::BIND_KEYS,
+        profile,
     )
 }
 
@@ -229,13 +250,18 @@ pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_vl805_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
         "tairix-drv-bus-usb-vl805",
         &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
         tairix_drv_bus_usb_vl805::BIND_KEYS,
+        profile,
     )
 }
 
@@ -256,7 +282,11 @@ pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Strin
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_xhci_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -272,6 +302,7 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
             CapabilityId::SCHED_REALTIME,
         ],
         tairix_drv_bus_usb::BIND_KEYS,
+        profile,
     )
 }
 
@@ -288,7 +319,11 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_usb_kbd_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -300,6 +335,7 @@ pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_input_usb_kbd::BIND_KEYS,
+        profile,
     )
 }
 
@@ -316,7 +352,11 @@ pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_usb_mouse_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -328,6 +368,7 @@ pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_input_usb_mouse::BIND_KEYS,
+        profile,
     )
 }
 
@@ -346,7 +387,11 @@ pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_usb_msd_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -359,6 +404,7 @@ pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_storage_usb_msd::BIND_KEYS,
+        profile,
     )
 }
 
@@ -377,7 +423,11 @@ pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_volmgr_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -389,6 +439,7 @@ pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Stri
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_storage_volmgr::BIND_KEYS,
+        profile,
     )
 }
 
@@ -406,7 +457,11 @@ pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Stri
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_virtio_kbd_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -418,6 +473,7 @@ pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
             CapabilityId::INPUT_INJECT,
         ],
         tairix_drv_input_virtio_input::BIND_KEYS,
+        profile,
     )
 }
 
@@ -439,7 +495,11 @@ pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_framebuffer_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -451,6 +511,7 @@ pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>,
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_display_framebuffer::BIND_KEYS,
+        profile,
     )
 }
 
@@ -470,7 +531,11 @@ pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>,
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
+pub fn build_virtio_net_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         arch,
@@ -486,6 +551,7 @@ pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_network_virtio_net::BIND_KEYS,
+        profile,
     )
 }
 
@@ -509,15 +575,25 @@ pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
 pub fn autoload_driver_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
             Ok(vec![
-                store_file(VIRTIO_KBD_STORE_PATH, build_virtio_kbd_bundle(ctx, arch)?),
-                store_file(FRAMEBUFFER_STORE_PATH, build_framebuffer_bundle(ctx, arch)?),
-                store_file(VIRTIO_NET_STORE_PATH, build_virtio_net_bundle(ctx, arch)?),
+                store_file(
+                    VIRTIO_KBD_STORE_PATH,
+                    build_virtio_kbd_bundle(ctx, arch, profile)?,
+                ),
+                store_file(
+                    FRAMEBUFFER_STORE_PATH,
+                    build_framebuffer_bundle(ctx, arch, profile)?,
+                ),
+                store_file(
+                    VIRTIO_NET_STORE_PATH,
+                    build_virtio_net_bundle(ctx, arch, profile)?,
+                ),
             ])
         })
         .as_ref()
@@ -540,14 +616,15 @@ pub fn autoload_driver_store_files(
 pub fn net_driver_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
             Ok(vec![store_file(
                 VIRTIO_NET_STORE_PATH,
-                build_virtio_net_bundle(ctx, arch)?,
+                build_virtio_net_bundle(ctx, arch, profile)?,
             )])
         })
         .as_ref()

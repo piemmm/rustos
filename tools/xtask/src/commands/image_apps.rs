@@ -36,10 +36,27 @@ use tairix_itest_harness::app_image::{
 use tairix_itest_harness::elf2rxe::elf_to_rxe;
 use tairix_itest_harness::pie::PieArch;
 use tairix_itest_harness::USER_IMAGE_BIAS;
+use tairix_mkimage::ImageProfile;
 
 use super::image_drivers::build_support;
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
+
+/// The number of memo slots a `(arch, profile)`-keyed bundle table needs:
+/// one per architecture per image profile. The image gate builds the
+/// `debug` and `installer` images in one process, so a table keyed by arch
+/// alone would hand the second profile the first profile's composed bundles
+/// (which are built in a different Cargo profile) — [`memo_slot`] keys by
+/// both to keep them apart.
+pub(super) const MEMO_SLOTS: usize = PieArch::COUNT * ImageProfile::COUNT;
+
+/// The stable slot a `(arch, profile)` pair occupies in a
+/// [`MEMO_SLOTS`]-sized memo table, so each pair memoises its own composed
+/// set without a runtime map. The single definition every `(arch, profile)`
+/// memo in the image pipeline addresses.
+pub(super) const fn memo_slot(arch: PieArch, profile: ImageProfile) -> usize {
+    arch.index() * ImageProfile::COUNT + profile.index()
+}
 
 /// One composed, signed application bundle ready to plant: the store it
 /// lives in, its bundle directory, and its two file payloads. The bundle's
@@ -78,13 +95,17 @@ pub struct AppStoreFile {
 /// A string describing a failed discovery walk, cross-compile, ELF→rxe
 /// conversion, composition, or a composed manifest that fails the
 /// fail-closed sanity check.
-pub fn build_app_bundles(ctx: &Context, arch: PieArch) -> Result<Vec<BuiltAppBundle>, String> {
+pub fn build_app_bundles(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<BuiltAppBundle>, String> {
     let userland = ctx.workspace_root.join("userland");
     let discovered = discover_app_manifests(&userland)
         .map_err(|e| format!("image: app-manifest discovery: {e}"))?;
     discovered
         .iter()
-        .map(|app| build_bundle(ctx, arch, app))
+        .map(|app| build_bundle(ctx, arch, app, profile))
         .collect()
 }
 
@@ -124,11 +145,15 @@ pub fn store_files(bundles: &[BuiltAppBundle]) -> Vec<AppStoreFile> {
 /// # Errors
 ///
 /// As [`build_app_bundles`].
-pub fn app_store_files(ctx: &Context, arch: PieArch) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
-        .get_or_init(|| build_app_bundles(ctx, arch).map(|bundles| store_files(&bundles)))
+pub fn app_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| build_app_bundles(ctx, arch, profile).map(|bundles| store_files(&bundles)))
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
@@ -149,13 +174,14 @@ pub fn app_store_files(ctx: &Context, arch: PieArch) -> Result<&'static [AppStor
 fn fixture_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
     crate_dir: &str,
     label: &str,
-    cache: &'static [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT],
+    cache: &'static [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS],
 ) -> Result<&'static [AppStoreFile], String> {
-    cache[arch.index()]
+    cache[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let base = app_store_files(ctx, arch)?;
+            let base = app_store_files(ctx, arch, profile)?;
             let crate_dir = ctx.workspace_root.join(crate_dir);
             let app = discover_crate_manifest(&crate_dir)
                 .map_err(|e| format!("image: {label} manifest discovery: {e}"))?
@@ -165,7 +191,7 @@ fn fixture_store_files(
                         crate_dir.display()
                     )
                 })?;
-            let bundle = build_bundle(ctx, arch, &app)?;
+            let bundle = build_bundle(ctx, arch, &app, profile)?;
             let mut files = base.to_vec();
             files.extend(store_files(&[bundle]));
             Ok(files)
@@ -185,12 +211,14 @@ fn fixture_store_files(
 pub fn memsoak_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
     fixture_store_files(
         ctx,
         arch,
+        profile,
         "tests/integration/memsoak_program",
         "memsoak",
         &FILES,
@@ -207,12 +235,14 @@ pub fn memsoak_store_files(
 pub fn tcpecho_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
     fixture_store_files(
         ctx,
         arch,
+        profile,
         "tests/integration/tcpecho_program",
         "tcpecho",
         &FILES,
@@ -237,12 +267,13 @@ pub fn tcpecho_store_files(
 pub fn ecn_net_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let mut files = tcpecho_store_files(ctx, arch)?.to_vec();
+            let mut files = tcpecho_store_files(ctx, arch, profile)?.to_vec();
             files.push(AppStoreFile {
                 components: vec![
                     b"Settings".to_vec(),
@@ -270,12 +301,14 @@ pub fn ecn_net_store_files(
 pub fn tcpserve_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
     fixture_store_files(
         ctx,
         arch,
+        profile,
         "tests/integration/tcpserve_program",
         "tcpserve",
         &FILES,
@@ -298,12 +331,13 @@ pub fn tcpserve_store_files(
 pub fn static_net_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let mut files = app_store_files(ctx, arch)?.to_vec();
+            let mut files = app_store_files(ctx, arch, profile)?.to_vec();
             // The static vertical binds the NIC by its stable bus location
             // (`<iface>.match.node`), which differs per bus: the aarch64/riscv64
             // virtio-mmio slot base vs. the x86_64 virtio-PCI config-window BAR
@@ -345,12 +379,13 @@ pub fn static_net_store_files(
 pub fn bond_net_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let mut files = app_store_files(ctx, arch)?.to_vec();
+            let mut files = app_store_files(ctx, arch, profile)?.to_vec();
             files.push(AppStoreFile {
                 components: vec![
                     b"Settings".to_vec(),
@@ -386,12 +421,13 @@ pub fn bond_net_store_files(
 pub fn dhcp_net_store_files(
     ctx: &Context,
     arch: PieArch,
+    profile: ImageProfile,
 ) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
-        [const { OnceLock::new() }; PieArch::COUNT];
-    FILES[arch.index()]
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let mut files = app_store_files(ctx, arch)?.to_vec();
+            let mut files = app_store_files(ctx, arch, profile)?.to_vec();
             // The DHCP vertical binds the NIC by its stable bus location
             // (`<iface>.match.node`), which differs per bus: the aarch64/riscv64
             // virtio-mmio slot base vs. the x86_64 virtio-PCI config-window BAR
@@ -444,13 +480,22 @@ fn build_bundle(
     ctx: &Context,
     arch: PieArch,
     app: &DiscoveredApp,
+    profile: ImageProfile,
 ) -> Result<BuiltAppBundle, String> {
     // Every program crate's `Run` binary is named `<package>-run`
     // (the kernel `build.rs` builds the same bins); the artefact is read
     // back fail-closed, so a crate that breaks the convention fails the
     // build loudly.
     let bin = format!("{}-run", app.package);
-    let elf = cross_compile_pie_elf(ctx, arch, "image-apps", &app.package, &bin, &app.crate_dir)?;
+    let elf = cross_compile_pie_elf(
+        ctx,
+        arch,
+        "image-apps",
+        &app.package,
+        &bin,
+        &app.crate_dir,
+        profile,
+    )?;
     let run = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,

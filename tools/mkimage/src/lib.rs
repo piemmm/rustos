@@ -192,6 +192,50 @@ impl ImageProfile {
             _ => None,
         }
     }
+
+    /// The number of image profiles — the length a per-profile (or
+    /// per-`(arch, profile)`) memo table indexed by [`Self::index`] must
+    /// have. Kept in lockstep with the variants by
+    /// `index_covers_every_profile`.
+    pub const COUNT: usize = 2;
+
+    /// This profile's stable index, so a builder can memoise one composed
+    /// artefact per `(arch, profile)` pair in a fixed-size array without a
+    /// runtime map.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Debug => 0,
+            Self::Installer => 1,
+        }
+    }
+
+    /// The extra `cargo build` arguments that select the Cargo profile this
+    /// image compiles its Rust artefacts (the kernel and every user-space
+    /// `Run` binary) in: the non-shippable `debug` image builds in Cargo's
+    /// `dev` profile (`debug_assertions` on, no extra argument), and the
+    /// shippable `installer` image builds `--release` (optimised,
+    /// `debug_assertions` off). This is the single source of truth for the
+    /// image → Cargo-profile mapping, paired with [`Self::cargo_profile_dir`].
+    #[must_use]
+    pub const fn cargo_build_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Debug => &[],
+            Self::Installer => &["--release"],
+        }
+    }
+
+    /// The `target/<triple>/<dir>/` subdirectory Cargo writes this profile's
+    /// artefacts to — `debug` for the `dev` profile, `release` for
+    /// `--release`. The read-back path counterpart of
+    /// [`Self::cargo_build_args`].
+    #[must_use]
+    pub const fn cargo_profile_dir(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Installer => "release",
+        }
+    }
 }
 
 /// Username of the debug-profile test account.
@@ -579,6 +623,36 @@ mod tests {
     use tairix_users::STORAGE_GROUP;
 
     const TEST_KEY: VolumeKey = [0x42; VOLUME_KEY_LEN];
+
+    /// Every profile has a distinct index below `COUNT`, so a
+    /// `(arch, profile)` memo table sized `PieArch::COUNT * COUNT` and
+    /// addressed by `index` never aliases two profiles onto one slot — the
+    /// defect that let the `installer` image reuse the `debug` image's
+    /// composed bundles.
+    #[test]
+    fn index_covers_every_profile() {
+        let mut seen = [false; ImageProfile::COUNT];
+        for profile in [ImageProfile::Debug, ImageProfile::Installer] {
+            let idx = profile.index();
+            assert!(idx < ImageProfile::COUNT, "{profile:?} index in range");
+            assert!(!seen[idx], "{profile:?} index must be unique");
+            seen[idx] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "every slot is claimed once");
+    }
+
+    /// The image → Cargo-profile mapping: the non-shippable `debug` image
+    /// builds in Cargo's `dev` profile (no `--release`, artefacts under
+    /// `debug/`) and the shippable `installer` image builds `--release`
+    /// (artefacts under `release/`). The single source both the kernel build
+    /// and the user-space `Run` cross-compiles read.
+    #[test]
+    fn cargo_profile_mapping_matches_the_image_profile() {
+        assert!(ImageProfile::Debug.cargo_build_args().is_empty());
+        assert_eq!(ImageProfile::Debug.cargo_profile_dir(), "debug");
+        assert_eq!(ImageProfile::Installer.cargo_build_args(), &["--release"]);
+        assert_eq!(ImageProfile::Installer.cargo_profile_dir(), "release");
+    }
 
     struct TestEntropy(u8);
 

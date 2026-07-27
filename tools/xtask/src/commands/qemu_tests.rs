@@ -5938,30 +5938,38 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
             t.package, t.target
         )
     })?;
+    // Every QEMU vertical boots a `debug`-profile image (its kernel is the
+    // `debug/` build read below, and the seeded `root` account is a
+    // debug-only fixture), so its `/System` bundles are composed in the
+    // matching Cargo profile — never the shippable `installer` `--release`
+    // build.
+    let profile = tairix_mkimage::ImageProfile::Debug;
     let apps = match t.fs_disk {
         FsDisk::EncryptedRootDisk | FsDisk::AutoloadRootDisk | FsDisk::PingRootDisk => {
-            super::image_apps::app_store_files(ctx, arch)?
+            super::image_apps::app_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
     };
     let apps_with_memsoak = match t.fs_disk {
-        FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch)?,
+        FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let autoload_drivers = match t.fs_disk {
-        FsDisk::AutoloadRootDisk => super::image_drivers::autoload_driver_store_files(ctx, arch)?,
+        FsDisk::AutoloadRootDisk => {
+            super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
+        }
         _ => EMPTY,
     };
     let apps_with_tcpecho = match t.fs_disk {
-        FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch)?,
+        FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let apps_with_tcpecho_ecn = match t.fs_disk {
-        FsDisk::EcnRootDisk => super::image_apps::ecn_net_store_files(ctx, arch)?,
+        FsDisk::EcnRootDisk => super::image_apps::ecn_net_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let apps_with_tcpserve = match t.fs_disk {
-        FsDisk::ListenRootDisk => super::image_apps::tcpserve_store_files(ctx, arch)?,
+        FsDisk::ListenRootDisk => super::image_apps::tcpserve_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let net_only_drivers = match t.fs_disk {
@@ -5971,19 +5979,21 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::PingRootDisk
         | FsDisk::StaticNetRootDisk
         | FsDisk::BondNetRootDisk
-        | FsDisk::DhcpNetRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
+        | FsDisk::DhcpNetRootDisk => {
+            super::image_drivers::net_driver_store_files(ctx, arch, profile)?
+        }
         _ => EMPTY,
     };
     let static_net_apps = match t.fs_disk {
-        FsDisk::StaticNetRootDisk => super::image_apps::static_net_store_files(ctx, arch)?,
+        FsDisk::StaticNetRootDisk => super::image_apps::static_net_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let bond_net_apps = match t.fs_disk {
-        FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch)?,
+        FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let dhcp_net_apps = match t.fs_disk {
-        FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch)?,
+        FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     Ok(StoreSet {

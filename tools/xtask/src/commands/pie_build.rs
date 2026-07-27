@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tairix_itest_harness::pie::PieArch;
+use tairix_mkimage::ImageProfile;
 
 use crate::Context;
 
@@ -40,6 +41,15 @@ use crate::Context;
 /// package cross-compiled for two architectures never shares a private
 /// target directory.
 ///
+/// `profile` selects the Cargo build profile the program compiles in — the
+/// same image → Cargo-profile mapping the kernel build uses
+/// ([`ImageProfile::cargo_build_args`] / [`ImageProfile::cargo_profile_dir`]),
+/// so the shippable `installer` image builds its user-space `Run` binaries
+/// `--release` while the `debug` and QEMU-test images stay in Cargo's `dev`
+/// profile. Cargo namespaces the two profiles under distinct `debug/` and
+/// `release/` subdirectories of the one private target directory, so the two
+/// coexist without clobbering each other.
+///
 /// # Errors
 ///
 /// A string describing a failed cross-compile or a missing ELF artefact.
@@ -50,6 +60,7 @@ pub fn cross_compile_pie_elf(
     package: &str,
     bin: &str,
     crate_dir: &Path,
+    profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
     let triple = arch.target_triple();
     let run_ld = crate_dir.join("Run.ld");
@@ -101,12 +112,22 @@ pub fn cross_compile_pie_elf(
             triple,
             "-Z",
             "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
         ])
+        .args(profile.cargo_build_args())
+        .args(["--target-dir"])
         .arg(&target_dir);
-    ctx.run(&format!("image: program build ({package}, {triple})"), cmd)?;
+    ctx.run(
+        &format!(
+            "image: program build ({package}, {triple}, {})",
+            profile.cargo_profile_dir()
+        ),
+        cmd,
+    )?;
 
-    let elf_path = target_dir.join(triple).join("debug").join(bin);
+    let elf_path = target_dir
+        .join(triple)
+        .join(profile.cargo_profile_dir())
+        .join(bin);
     std::fs::read(&elf_path)
         .map_err(|e| format!("image: cannot read program ELF {}: {e}", elf_path.display()))
 }
