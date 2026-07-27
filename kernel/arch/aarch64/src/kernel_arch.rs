@@ -835,6 +835,83 @@ pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
 
+/// Make freshly-written bytes in `[start, start + len)` visible to
+/// instruction fetch — the "ensure the visibility of updates to
+/// instructions" sequence (ARM ARM B2.4.4).
+///
+/// The process loader writes a program's code pages through the *cacheable*
+/// direct map (`kernel/mem` `build_process_image`), leaving them in the data
+/// cache. The Cortex-A72's instruction cache is **not** coherent with those
+/// data-side writes, so without this the PE can fetch stale instruction-cache
+/// lines (or memory that has not reached the point of unification) for the new
+/// code and take an EC=0 "unknown/unallocated instruction" abort on perfectly
+/// valid code — the metal-only, per-frame-nondeterministic driver wedge this
+/// exists to prevent. (An I/O- and I-cache-coherent target never needs it,
+/// which is why the coherent `DirectPhysMap` wires a no-op instead.)
+///
+/// The sequence: clean each data-cache line in range to the point of
+/// unification (`dc cvau`), a `dsb ish` so those cleans complete, invalidate
+/// each instruction-cache line to the PoU (`ic ivau`), a second `dsb ish`, and
+/// an `isb` so the PE re-fetches. `ic ivau` acts on the physical line the VA
+/// resolves to (ARMv8 IC-by-VA is PoU/PA-effective), so cleaning through the
+/// kernel direct-map alias correctly covers the code the process will fetch at
+/// its own user VA. Stepping is by each cache's own minimum line
+/// ([`crate::paging::dcache_line_bytes`] / [`crate::paging::icache_line_bytes`]),
+/// since they can differ. A zero-length range is a no-op.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn sync_instruction_cache_range(start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let ctr: u64;
+    // SAFETY: reading the cache-type register is always permitted at EL1 and
+    // has no side effects.
+    unsafe {
+        core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+    }
+    let dline = crate::paging::dcache_line_bytes(ctr) as usize;
+    let iline = crate::paging::icache_line_bytes(ctr) as usize;
+    let end = start.saturating_add(len);
+    // Clean the data cache to the PoU so the writes reach the level the
+    // instruction fetch reads from.
+    let mut addr = start & !(dline - 1);
+    while addr < end {
+        // SAFETY: `dc cvau` cleans the data-cache line containing `addr` to
+        // the PoU; it changes no memory contents and the caller supplied a
+        // kernel-owned range.
+        unsafe {
+            core::arch::asm!("dc cvau, {0}", in(reg) addr, options(nostack, preserves_flags));
+        }
+        addr += dline;
+    }
+    // SAFETY: barrier-only — the cleans must complete before the I-cache
+    // invalidations below.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+    }
+    // Invalidate the (possibly stale) instruction-cache lines to the PoU so
+    // the PE re-fetches the freshly-cleaned bytes.
+    let mut addr = start & !(iline - 1);
+    while addr < end {
+        // SAFETY: `ic ivau` invalidates the instruction-cache line for the PA
+        // that `addr` resolves to, to the PoU; it changes no memory contents.
+        unsafe {
+            core::arch::asm!("ic ivau, {0}", in(reg) addr, options(nostack, preserves_flags));
+        }
+        addr += iline;
+    }
+    // SAFETY: barrier + context-synchronisation so the invalidations complete
+    // and the PE discards any prefetched stale instructions before fetching
+    // the new code.
+    unsafe {
+        core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+}
+
+/// Host-test twin of [`sync_instruction_cache_range`].
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn sync_instruction_cache_range(_start: usize, _len: usize) {}
+
 /// Milliseconds derived from the architectural physical counter, for the
 /// per-line log timestamp the serial sink prefixes (`[<secs>.<millis>]`).
 ///

@@ -269,6 +269,77 @@ fn clear_user_fault_resolver_for_tests() {
     USER_FAULT_RESOLVER.store(0, Ordering::Release);
 }
 
+/// Signature of the user-fault **terminator** the vector calls for a
+/// lower-EL (EL0) synchronous exception it can neither treat as a syscall
+/// nor resolve as a demand-paged abort — an illegal/unallocated
+/// instruction (`EC=0`), a PC/SP alignment fault, or any other such
+/// exception.
+///
+/// Unlike [`UserFaultResolveFn`] this never resolves and the vector never
+/// retries: the faulting instruction is genuinely unrecoverable, so the
+/// callback records the task's crash exit and reclaims it, then suspends it
+/// into the scheduler with an exit action — the vector call never completes
+/// on that stack, exactly like the fatal branch of a resolver. That keeps a
+/// user task's own bad instruction from parking the whole CPU. A `false`
+/// return means the exception could not be attributed to a running task
+/// (none current, or no published user kthread), so the vector falls
+/// through to its fatal [`FaultHandlerFn`]/halt path — a genuine
+/// kernel-level failure, not a user one.
+///
+/// `fault_pc` is the interrupted `ELR_EL1` (the offending instruction), and
+/// `regs` the captured EL0 register frame (or null), threaded so the
+/// termination can record a post-mortem crash record with a backtrace. Like
+/// every trap-path callback it is a bare `extern "C" fn` with no captured
+/// environment.
+pub type UserFaultTerminateFn =
+    extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
+
+/// Slot holding the installed user-fault terminator as a raw function
+/// pointer (`0` = none installed).
+static USER_FAULT_TERMINATOR: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the user-fault terminator.
+///
+/// Must be called once, on the boot CPU, before user space is entered
+/// (beside [`set_user_fault_resolver`]). Without one installed an
+/// unrecoverable lower-EL exception takes the fatal path (halt) — fail
+/// closed, exactly as before this path existed, so the omission can never
+/// silently continue running a task over an unhandled exception.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    USER_FAULT_TERMINATOR
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed user-fault terminator, if any. The vector calls
+/// this for an unrecoverable lower-EL exception; also a test/diagnostic
+/// observer.
+#[must_use]
+pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
+    let raw = USER_FAULT_TERMINATOR.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `UserFaultTerminateFn` through `set_user_fault_terminator`;
+        // function pointers are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, UserFaultTerminateFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_user_fault_terminator_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a terminator.
+    // Production code never clears the slot.
+    USER_FAULT_TERMINATOR.store(0, Ordering::Release);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +473,32 @@ mod tests {
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_user_fault_resolver_for_tests();
+    }
+
+    extern "C" fn host_user_fault_terminator(
+        _fault_pc: u64,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
+        false
+    }
+
+    #[test]
+    fn user_fault_terminator_slot_is_set_once_and_round_trips() {
+        clear_user_fault_terminator_for_tests();
+        assert!(user_fault_terminator().is_none());
+
+        set_user_fault_terminator(host_user_fault_terminator).expect("first install");
+        let got = user_fault_terminator().expect("terminator present");
+        assert_eq!(
+            got as *const () as usize,
+            host_user_fault_terminator as *const () as usize
+        );
+
+        assert_eq!(
+            set_user_fault_terminator(host_user_fault_terminator),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_user_fault_terminator_for_tests();
     }
 
     #[test]

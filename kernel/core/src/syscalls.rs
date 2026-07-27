@@ -9953,6 +9953,38 @@ where
         self.handlers.record_fault_exit(task, fault_va, write, regs);
         UserFaultOutcome::Terminated { cpu }
     }
+
+    fn terminate_user_fault(
+        &self,
+        fault_pc: u64,
+        regs: Option<&UserRegisterFrame>,
+    ) -> UserFaultOutcome {
+        // Identify the faulting task exactly as `dispatch` / `resolve_user_fault`
+        // do — the scheduler's per-CPU current-task slot, never anything
+        // caller-supplied. No task on this CPU means the exception cannot be
+        // attributed; the port falls back to its fatal path (halt).
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let Some(sched_task_id) = self.sched.current_task(cpu) else {
+            return UserFaultOutcome::Unhandled;
+        };
+        let task = SecTaskId(sched_task_id);
+        // No resolution is attempted: the instruction is unrecoverable (an
+        // illegal/unallocated encoding, an alignment fault, a store to a
+        // non-executable page), so retrying it would re-take the exception
+        // forever. Record the crash exit (with the `fault_pc`-relative
+        // backtrace from `regs`) and reclaim the task exactly as the fatal
+        // branch of `resolve_user_fault` does, then hand the port the CPU to
+        // suspend the task on. `write` is `false`: this is an
+        // instruction-side fault, not a store — the audit record's direction
+        // reflects that.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::FaultFatal,
+            fault_pc,
+        );
+        self.handlers.record_fault_exit(task, fault_pc, false, regs);
+        UserFaultOutcome::Terminated { cpu }
+    }
 }
 
 /// Decide how a completed syscall leaves the kernel: an explicit

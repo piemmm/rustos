@@ -152,6 +152,36 @@ The open items, in priority order:
   binary-size change is expected to keep tripping this gate until the
   structural fix lands.
 
+- **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
+  bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a
+  coherent I-cache) the boot wedged a core with interrupts masked shortly
+  after the USB keyboard/mouse drivers loaded; the lockup watchdog reported
+  a bare `context=kernel sampled=pre_silence k_site=user_switch
+  k_detail=0x0e` (task 14, a `usb_kbd` EL0 driver) with no fault/syscall
+  breadcrumb. Root-caused (on-metal beacons, then `objdump`) to **two**
+  distinct metal-only defects, both fixed:
+  1. **Missing I-cache maintenance after the loader writes a program's code
+     pages.** `kernel/mem` `build_process_image` fills code through the
+     cacheable direct map; the Cortex-A72 I-cache is not coherent with those
+     writes, so a freshly-loaded driver fetched stale/garbage instructions
+     and took an `EC=0` "unknown/unallocated instruction" abort on valid
+     code (non-deterministic per physical frame — "always after USB" = the
+     last-loaded drivers). Fix: a no-default `PhysMap::sync_instruction_cache`
+     (aarch64 `dc cvau`+`dsb ish`+`ic ivau`+`dsb ish`+`isb`; coherent/host
+     impls a documented no-op), called by the loader for `MapFlags::EXEC`
+     segments only.
+  2. **The trap handler parked the whole CPU on that user exception.** An
+     EL0 sync exception the specific handlers did not resolve (the `EC=0`
+     here) fell through to `halt_current_cpu()` (`msr DAIFSet,#0xf` + `wfi`
+     forever) — a one-task fault escalated to a system-wide hard lockup.
+     Fix (§17.1/§2.9/§26.5): a shared `fatal_exception` that, for any
+     lower-EL (`kind >= LOWER_SYNC`) exception, **terminates the offending
+     task and keeps the CPU alive** via a new resolution-free
+     `DispatchHook::terminate_user_fault` + aarch64 `UserFaultTerminateFn`;
+     only a same-EL kernel fault or an unattributable one halts. Regression
+     tests: the loader syncs code (and only code); the terminate path never
+     returns "retry".
+
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6

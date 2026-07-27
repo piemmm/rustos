@@ -767,19 +767,71 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             }
         }
 
-        // Any other synchronous exception (an abort, or a non-`svc`
-        // lower-EL fault). Forward to the installed fault handler if
-        // present (the memory-isolation vertical installs one);
-        // otherwise fail closed by parking.
-        if let Some(handler) = crate::fault::fault_handler() {
-            handler(esr, read_far(), read_elr());
-        }
-        crate::kernel_arch::halt_current_cpu();
+        // Any other synchronous exception the specific handlers above did
+        // not resolve (an illegal/unallocated instruction, a PC/SP alignment
+        // fault, an unresolved instruction abort). Route it to the shared
+        // fatal path, which terminates the offending task for a lower-EL
+        // (EL0) exception and only halts on a same-EL kernel fault.
+        fatal_exception(kind, esr, frame);
     }
 
-    // FIQ / SError / AArch32 entries are not expected in this slice.
-    // Park rather than `eret`-looping on an unhandled condition
-    // (never silently reset).
+    // FIQ / SError / AArch32 entries. These are not resolved here, but a
+    // lower-EL (EL0) one still belongs to the running task, not the CPU —
+    // route it through the same shared fatal path so an EL0-sourced SError
+    // kills only that task rather than parking the core.
+    fatal_exception(kind, read_esr(), frame);
+}
+
+/// Terminate the offending task for a **lower-EL (EL0)** unhandled
+/// exception and keep the CPU alive; halt only for a genuinely
+/// unrecoverable **same-EL (kernel)** exception or one that cannot be
+/// attributed to a running task.
+///
+/// This is the one fatal tail every unhandled/unresolved exception path
+/// funnels into. A user task's own bad instruction (an illegal encoding, an
+/// alignment fault, a store to a non-executable page, an EL0-sourced
+/// SError) must cost only that task: parking the whole CPU here — with
+/// interrupts masked, forever — escalated a one-task fault into a
+/// system-wide hard lockup (the Cortex-A72 boot wedge). For a lower-EL
+/// exception (`kind >= LOWER_SYNC`) it hands the running task to the
+/// installed terminator, which records the crash exit, reclaims the task,
+/// and suspends it with an exit action — that suspension switches to the
+/// dispatcher and never returns here, so the CPU stays alive running other
+/// work. The terminator returns only when the exception cannot be
+/// attributed to a running task (none current, or none published), which —
+/// like a same-EL kernel fault — is genuinely unrecoverable and falls
+/// through to the fatal handler / halt (never a silent reset).
+///
+/// # Safety
+///
+/// `frame` must be the live `[u64; SAVED_GPRS]` register frame the
+/// trampoline built for this exception (so [`user_register_frame`] reads
+/// only in-range slots); it is only read here.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
+    // A lower-EL (EL0) exception is the running task's fault: kill it, keep
+    // the CPU alive. (`kind >= LOWER_SYNC` covers the lower-EL AArch64 and
+    // AArch32 vector groups; the same-EL kernel groups are below it.)
+    if kind >= kind::LOWER_SYNC {
+        if let Some(terminate) = crate::fault::user_fault_terminator() {
+            // SAFETY: the caller's contract guarantees `frame` is the live
+            // saved register frame (full GP set + ELR/SPSR/SP_EL0), so every
+            // index `user_register_frame` reads is in range.
+            let user_frame = unsafe { user_register_frame(frame) };
+            // On success the terminator suspends the killed task and never
+            // returns here (control switches to the dispatcher); a return
+            // means the exception could not be attributed to a running task,
+            // so fall through to the unrecoverable path below.
+            let _ = terminate(read_elr(), &user_frame);
+        }
+    }
+    // A same-EL (kernel) exception, or a lower-EL one with no task to
+    // terminate: genuinely unrecoverable. Offer it to the installed fatal
+    // handler (which diverges) and otherwise park the CPU — never a silent
+    // reset.
+    if let Some(handler) = crate::fault::fault_handler() {
+        handler(esr, read_far(), read_elr());
+    }
     crate::kernel_arch::halt_current_cpu();
 }
 

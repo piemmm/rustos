@@ -59,6 +59,24 @@ pub trait PhysMap {
     /// silently inherited no-op is how the defect above shipped.
     fn clean_invalidate(&self, phys: PhysAddr, len: usize);
 
+    /// Make bytes the kernel just wrote through the direct-map alias of
+    /// `[phys, phys + len)` visible to **instruction fetch**, for a range
+    /// that will be executed (a freshly-loaded program's code pages).
+    ///
+    /// The process loader fills code pages through the *cacheable* direct
+    /// map, so the new instructions sit in the data cache. On a target whose
+    /// instruction cache is not coherent with those data-side writes (the
+    /// Cortex-A72), the PE can fetch stale instruction-cache lines — or
+    /// memory that has not reached the point of unification — and take an
+    /// EC=0 "unknown/unallocated instruction" abort on valid code. Every
+    /// implementation must therefore state its coherence decision explicitly:
+    /// a real clean-to-PoU + instruction-cache-invalidate on such a port, or
+    /// a documented no-op where the instruction cache is coherent with kernel
+    /// writes (x86_64) or the frames are never executed (host sims). There is
+    /// deliberately no default — a silently inherited no-op is exactly how a
+    /// non-coherent port would ship the stale-code wedge.
+    fn sync_instruction_cache(&self, phys: PhysAddr, len: usize);
+
     /// Recover the [`PhysAddr`] a direct-map virtual address `virt` names,
     /// or [`None`] when this map cannot invert the translation.
     ///
@@ -136,6 +154,17 @@ impl PhysMap for DirectPhysMap {
         // maintenance primitive instead — the aarch64
         // `ConfiguredIdentityPhysMap` — anywhere DMA buffers are zeroed
         // through the direct map.
+    }
+
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: `DirectPhysMap` serves only targets whose
+        // instruction cache is coherent with kernel data writes (x86_64) or
+        // configurations that never execute freshly-loaded code through it
+        // (the QEMU `virt` boards, which are I-cache-coherent). A port whose
+        // I-cache is not coherent with the loader's cacheable writes (the
+        // Pi 4's Cortex-A72) wires a `PhysMap` that performs the real
+        // clean-to-PoU + I-cache-invalidate instead — the aarch64
+        // `ConfiguredIdentityPhysMap`.
     }
 }
 
@@ -223,6 +252,12 @@ impl PhysMap for SimPhysMap {
     fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
         // Deliberate no-op: the simulator's "physical RAM" is ordinary
         // host memory with no hardware cache alias to maintain.
+    }
+
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: the simulator's "physical RAM" is ordinary host
+        // memory that is never fetched as instructions, so there is no
+        // instruction-cache alias to synchronise.
     }
 }
 

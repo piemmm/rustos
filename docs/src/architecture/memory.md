@@ -1568,9 +1568,15 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   CPU. The demand-grown **stack** resolver (§7c) is offered *before* this
   write-fatal file rule, for reads and writes alike — a stack push is a
   write — so a legitimate growth fault inside the task's recorded stack
-  span is backed, never killed. An instruction fetch is never offered at
-  all (a file mapping is never executable) and still falls to the port's
-  fatal path.
+  span is backed, never killed. An instruction fetch, and any other
+  synchronous EL0 exception the specific handlers do not resolve — an
+  illegal/unallocated instruction, an alignment fault — is never offered
+  to the demand-paging resolver (retrying it would re-take the exception
+  forever); the port instead routes it to a resolution-free terminate path
+  (`DispatchHook::terminate_user_fault`) that kills the offending task and
+  keeps the CPU alive. Only a genuinely unrecoverable *kernel* (same-EL)
+  exception, or one with no running task to attribute, halts the CPU — a
+  user task's own bad instruction never parks the core.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
   filesystem error, or frame exhaustion terminates the *faulting task*: the

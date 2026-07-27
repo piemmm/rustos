@@ -99,6 +99,10 @@ impl PhysMap for RecordingPhysMap<'_> {
         self.last_phys.set(phys.as_u64());
         self.last_len.set(len);
     }
+
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {
+        // No-op: host test double, no instruction-cache alias to synchronise.
+    }
 }
 
 #[test]

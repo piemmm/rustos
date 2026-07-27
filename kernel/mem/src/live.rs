@@ -1321,6 +1321,10 @@ mod tests {
         fn clean_invalidate(&self, phys: crate::frame::PhysAddr, len: usize) {
             self.0.clean_invalidate(phys, len);
         }
+
+        fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
+            self.0.sync_instruction_cache(phys, len);
+        }
     }
 
     /// The user virtual window device mappings land in — far above the
@@ -1664,6 +1668,10 @@ mod tests {
                     .last_phys
                     .store(phys.as_u64(), Ordering::Relaxed);
                 self.recorded.last_len.store(len, Ordering::Relaxed);
+            }
+
+            fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
+                self.inner.sync_instruction_cache(phys, len);
             }
         }
 

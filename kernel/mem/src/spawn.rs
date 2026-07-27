@@ -255,6 +255,14 @@ where
     A: FnMut() -> Option<Frame>,
 {
     let page = PAGE_SIZE as u64;
+    // An executable segment's freshly-written bytes must be made visible to
+    // instruction fetch before the process runs: the fill writes through the
+    // cacheable direct map, and on a target whose I-cache is not coherent with
+    // those writes the PE would fetch stale instructions and fault on valid
+    // code. Only executable segments need it (stack and startup-block pages
+    // are never fetched as code), so the sync is gated on `MapFlags::EXEC` and
+    // costs nothing for data mappings.
+    let executable = flags.contains(MapFlags::EXEC);
     map_region(
         space,
         base_va,
@@ -267,7 +275,11 @@ where
                     .checked_mul(page)
                     .ok_or(SpawnError::Layout(RxeError::AddressOverflow))?,
             )?;
-            fill_frame(physmap, frame, page_chunk(content, start))
+            fill_frame(physmap, frame, page_chunk(content, start))?;
+            if executable {
+                physmap.sync_instruction_cache(frame.start(), PAGE_SIZE);
+            }
+            Ok(())
         },
     )
 }
@@ -593,6 +605,91 @@ mod tests {
         assert_eq!(view.arg(1), Some(&b"--x"[..]));
         assert_eq!(view.env(0), Some(&b"K=v"[..]));
         assert_eq!(view.canary(), 0x0123_4567_89AB_CDEF);
+    }
+
+    #[test]
+    fn syncs_the_instruction_cache_for_executable_segments_only() {
+        use core::cell::RefCell;
+
+        // A `PhysMap` that records every `sync_instruction_cache` call while
+        // delegating the rest to a real `SimPhysMap`. This is the regression
+        // guard for the metal-only stale-I-cache wedge: the loader must make
+        // freshly-written *code* visible to instruction fetch, and must not
+        // waste the maintenance on data/stack/startup pages that are never
+        // executed.
+        struct RecordingIcache {
+            inner: SimPhysMap,
+            synced: RefCell<Vec<(u64, usize)>>,
+        }
+        impl crate::phys::PhysMap for RecordingIcache {
+            fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+                self.inner.translate(phys, len)
+            }
+            fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+                self.inner.clean_invalidate(phys, len);
+            }
+            fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+                self.synced.borrow_mut().push((phys.as_u64(), len));
+            }
+        }
+
+        // One 1-page ReadExecute (code) segment followed by a 2-page
+        // ReadWrite (data) segment; `build_process_image` maps segments in
+        // order and `frame_source` hands out consecutive frames from
+        // `SIM_BASE_FRAME`, so the single code page lands on the first frame.
+        let code: Vec<u8> = (0u8..16).collect();
+        let data: Vec<u8> = vec![0xAA; 8];
+        let specs = [
+            SegSpec {
+                vaddr: 0x1000,
+                file_size: code.len() as u64,
+                mem_size: 0x1000,
+                perm: RxePermission::ReadExecute,
+                content: code.clone(),
+            },
+            SegSpec {
+                vaddr: 0x2000,
+                file_size: data.len() as u64,
+                mem_size: 0x2000,
+                perm: RxePermission::ReadWrite,
+                content: data.clone(),
+            },
+        ];
+        let (bytes, _) = image_bytes(0x1000, &specs);
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
+        let physmap = RecordingIcache {
+            inner: sim(),
+            synced: RefCell::new(Vec::new()),
+        };
+        let mut space = AddressSpace::new(HostPageTable::new());
+        let stack = UserStack {
+            base: 0x10_0000,
+            page_count: 2,
+        };
+        build_process_image(
+            &mut space,
+            &physmap,
+            &image,
+            &bytes,
+            0,
+            &stack,
+            0x20_0000,
+            &[b"prog"],
+            &[],
+            0,
+            0,
+            frame_source(),
+        )
+        .expect("build");
+
+        // Exactly the one executable page was synced, at the first handed-out
+        // frame — never the data, stack, or startup-block pages.
+        let code_phys = (SIM_BASE_FRAME as u64) * PAGE_SIZE as u64;
+        assert_eq!(
+            &physmap.synced.borrow()[..],
+            &[(code_phys, PAGE_SIZE)],
+            "only the executable segment's page is made instruction-fetch-coherent"
+        );
     }
 
     #[test]

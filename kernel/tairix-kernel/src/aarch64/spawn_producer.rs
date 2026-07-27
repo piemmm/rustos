@@ -129,6 +129,23 @@ impl PhysMap for ConfiguredIdentityPhysMap {
             );
         }
     }
+
+    fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+        // The loader fills a program's code pages through this identity
+        // direct map (cacheable). The Cortex-A72's instruction cache is not
+        // coherent with those data writes, so clean the written range to the
+        // point of unification and invalidate the instruction cache before
+        // the process fetches it — otherwise the PE executes stale bytes and
+        // takes an EC=0 "unknown instruction" abort on valid code. `ic ivau`
+        // is PA-effective, so syncing through this kernel alias covers the
+        // code the process will fetch at its own user VA.
+        if let Some(ptr) = self.translate(phys, len) {
+            tairix_arch_aarch64::kernel_arch::sync_instruction_cache_range(
+                ptr.as_ptr() as usize,
+                len,
+            );
+        }
+    }
 }
 
 /// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table

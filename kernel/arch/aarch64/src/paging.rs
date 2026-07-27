@@ -715,6 +715,19 @@ pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
     4 << ((ctr_el0 >> 16) & 0xF)
 }
 
+/// Smallest instruction-cache line size in bytes encoded by a `CTR_EL0`
+/// value: `IminLine` (bits `[3:0]`) is the log2 of that line's length in
+/// *words*, so the byte length is `4 << IminLine` (ARM ARM D13.2.34).
+/// Pure so the decode is host-unit-tested; the freestanding
+/// instruction-cache sync ([`crate::kernel_arch::sync_instruction_cache_range`])
+/// feeds it the live register. Separate from [`dcache_line_bytes`] because
+/// the I- and D-cache minimum line sizes can differ, and `ic ivau` /
+/// `dc cvau` must each step by their own line.
+#[must_use]
+pub const fn icache_line_bytes(ctr_el0: u64) -> u64 {
+    4 << (ctr_el0 & 0xF)
+}
+
 /// Derive the identity-map Device gigapage mask from the board's
 /// discovered MMIO bases and the kernel image's own extent.
 ///

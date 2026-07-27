@@ -182,6 +182,57 @@ pub unsafe fn resolve_user_fault_via_slot(
     }
 }
 
+/// Terminate the task that took an **unrecoverable** EL0 exception through
+/// a slot's resident hook — an illegal/unallocated instruction, an
+/// alignment fault, or any synchronous lower-EL exception the port could
+/// neither treat as a syscall nor resolve as a demand-paged abort.
+///
+/// This is the counterpart of [`resolve_user_fault_via_slot`] for
+/// exceptions that must **not** be retried: no resolution is attempted, so
+/// the faulting instruction is never re-run (which would re-take the
+/// exception forever). The hook records the crash exit and reclaims the
+/// task; a task-fatal termination never returns from this call — the `Exit`
+/// suspension hands the CPU back to the scheduler, so the CPU stays alive
+/// and only the offending task dies.
+///
+/// Returns `false` — sending the port to its fatal path (halt) — only when
+/// the exception cannot be attributed to a running task (no current task,
+/// or no published user kthread to suspend); that is a genuine kernel-level
+/// failure, not a user one.
+///
+/// # Safety
+///
+/// `regs`, when non-null, must point to a valid [`UserRegisterFrame`] that
+/// lives for the duration of the call (the arch port builds it on its own
+/// trap stack and holds it across this call).
+pub unsafe fn terminate_user_fault_via_slot(
+    slot: &DispatchCallbackSlot,
+    fault_pc: u64,
+    regs: *const UserRegisterFrame,
+) -> bool {
+    let Some(hook) = slot.get() else {
+        return false;
+    };
+    // SAFETY: the caller guarantees `regs` is null or a valid frame live for
+    // this call; `as_ref` yields `None` for null and never dereferences it.
+    let regs = unsafe { regs.as_ref() };
+    match hook.terminate_user_fault(fault_pc, regs) {
+        UserFaultOutcome::Terminated { cpu } => {
+            // The task is dead (exit recorded, resources reclaimed): suspend
+            // it with `Exit`; control never returns for the reclaimed task. A
+            // `false` return means no user kthread is published on `cpu`, so
+            // the port falls through to its fatal path.
+            let _ = reschedule_current(cpu, RescheduleAction::Exit);
+            false
+        }
+        // The `Resolved` variant is meaningless for a termination request;
+        // treat it (and `Unhandled`) as "could not terminate" so the port
+        // fails closed to its fatal path rather than returning to re-run the
+        // faulting instruction.
+        UserFaultOutcome::Resolved | UserFaultOutcome::Unhandled => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +265,17 @@ mod tests {
                 !(write && self.fault_outcome == UserFaultOutcome::Resolved),
                 "a write fault must never resolve"
             );
+            self.fault_outcome
+        }
+        fn terminate_user_fault(
+            &self,
+            _fault_pc: u64,
+            _regs: Option<&UserRegisterFrame>,
+        ) -> UserFaultOutcome {
+            // Reuse the single configurable disposition: the terminate path
+            // is exercised by constructing the hook with the outcome under
+            // test (`Terminated` for the reclaim path, `Resolved`/`Unhandled`
+            // to prove the helper never returns "retry").
             self.fault_outcome
         }
     }
@@ -430,5 +492,55 @@ mod tests {
         let slot = DispatchCallbackSlot::new();
         let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO);
         assert!(got.is_none(), "empty slot must signal halt");
+    }
+
+    #[test]
+    fn terminate_user_fault_via_slot_fails_closed_without_a_hook() {
+        // No hook installed: the unrecoverable EL0 exception cannot be
+        // attributed, so the port takes its fatal path (halt).
+        let empty = DispatchCallbackSlot::new();
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe { terminate_user_fault_via_slot(&empty, 0xC000_1000, core::ptr::null()) });
+    }
+
+    #[test]
+    fn terminate_user_fault_via_slot_terminated_without_a_kthread_fails_closed() {
+        // A `Terminated` disposition on a CPU with no published user kthread
+        // (the host has none) cannot suspend the reclaimed task, so the
+        // helper reports "could not terminate" and the port halts. The
+        // disposition it acted on was the task-fatal one — the CPU is never
+        // halted while a task could have been killed instead.
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Terminated { cpu: 53 },
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        // SAFETY: null frame pointer (the "no captured frame" case).
+        assert!(!unsafe { terminate_user_fault_via_slot(&slot, 0xC000_1000, core::ptr::null()) });
+    }
+
+    #[test]
+    fn terminate_user_fault_via_slot_never_retries_the_faulting_instruction() {
+        // The safety invariant of the terminate path: it must NEVER return
+        // `true` (which would send the arch port back to `eret` and re-run
+        // the unrecoverable instruction forever). Even a hook that
+        // degenerately reports `Resolved` or `Unhandled` is treated as
+        // "could not terminate" (false → fatal path), never as "retry".
+        for outcome in [UserFaultOutcome::Resolved, UserFaultOutcome::Unhandled] {
+            let slot = DispatchCallbackSlot::new();
+            let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+                outcome: DispatchOutcome::NoCallerContext,
+                fault_outcome: outcome,
+            }));
+            slot.install_dispatcher(hook as &'static dyn DispatchHook)
+                .expect("install");
+            // SAFETY: null frame pointer (the "no captured frame" case).
+            assert!(
+                !unsafe { terminate_user_fault_via_slot(&slot, 0xC000_1000, core::ptr::null()) },
+                "terminate must never return retry for {outcome:?}"
+            );
+        }
     }
 }

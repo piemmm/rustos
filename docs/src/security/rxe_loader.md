@@ -89,6 +89,21 @@ the spawn builder below share one page-mapping loop (`map_region`), so
 the relocation/allocation arithmetic exists in exactly one place
 (`AGENTS.md` §2.2).
 
+## Instruction-cache coherency
+
+The builder fills each code page through the kernel's *cacheable* direct
+map, so on a target whose instruction cache is not coherent with those
+data-side writes (the Raspberry Pi 4's Cortex-A72) the freshly-written
+instructions can sit unseen in the data cache while the instruction cache
+holds a stale line for the same physical frame. Executing such a page
+takes an `EC=0` "unknown/unallocated instruction" abort on perfectly valid
+code. The builder therefore makes every **executable** segment
+instruction-fetch-coherent after filling it, through the arch-provided
+`PhysMap::sync_instruction_cache` (aarch64: clean-to-PoU + I-cache
+invalidate; a documented no-op where the I-cache is coherent, e.g. x86_64
+or the QEMU boards). It is gated on `MapFlags::EXEC`, so data, stack, and
+startup-block pages — never fetched as code — pay nothing.
+
 ## Building a runnable process image
 
 `kernel/mem::build_process_image` turns a validated `LoadImage` into a

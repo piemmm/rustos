@@ -228,6 +228,42 @@ pub trait DispatchHook: Sync {
     ) -> UserFaultOutcome {
         UserFaultOutcome::Unhandled
     }
+
+    /// Terminate the task currently running on the calling CPU because it
+    /// took an exception the architecture port cannot resolve and must not
+    /// retry — an illegal/unallocated instruction (aarch64 `EC=0`), a PC/SP
+    /// alignment fault, or any other synchronous EL0 exception that is
+    /// neither a syscall nor a demand-pageable abort.
+    ///
+    /// Unlike [`resolve_user_fault`](Self::resolve_user_fault) this makes
+    /// **no** resolution attempt: retrying the faulting instruction would
+    /// re-take the same exception forever (the instruction is genuinely
+    /// invalid, or its page is intentionally non-executable), so the only
+    /// correct action is to kill the task. The implementation records the
+    /// crash exit (identity, `fault_pc`-relative backtrace, register
+    /// snapshot from `regs`) and reclaims the task's kernel resources
+    /// exactly as the fatal branch of `resolve_user_fault` does.
+    ///
+    /// This exists so a user task's own bad instruction costs only that
+    /// task, never the whole CPU: without it the port's fatal fallthrough
+    /// parks the core forever (interrupts masked), turning one task's fault
+    /// into a system-wide hard lockup.
+    ///
+    /// * [`UserFaultOutcome::Terminated`] — the task's exit is recorded and
+    ///   its resources reclaimed; the port suspends it with
+    ///   [`RescheduleAction::Exit`] on the carried `cpu`.
+    /// * [`UserFaultOutcome::Unhandled`] — no task could be attributed (no
+    ///   current task on this CPU); the port falls back to its fatal path.
+    ///
+    /// The default refuses (returns [`UserFaultOutcome::Unhandled`]), so a
+    /// hook built without the termination path can never silently succeed.
+    fn terminate_user_fault(
+        &self,
+        _fault_pc: u64,
+        _regs: Option<&UserRegisterFrame>,
+    ) -> UserFaultOutcome {
+        UserFaultOutcome::Unhandled
+    }
 }
 
 /// Disposition of one [`DispatchHook::resolve_user_fault`] call — what the

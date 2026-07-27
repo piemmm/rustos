@@ -1095,6 +1095,10 @@ mod tests {
             fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
                 self.0.clean_invalidate(phys, len);
             }
+
+            fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+                self.0.sync_instruction_cache(phys, len);
+            }
         }
 
         set_max_level(Level::Trace);
