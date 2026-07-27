@@ -2116,7 +2116,9 @@ changes (§17.4 — the seam is the contract).
 ## 9. What this plan explicitly does *not* do
 
 - No DNS resolver, DHCP client/server, NTP, or HTTP library — future
-  consumers of the socket ABI, each its own plan.
+  consumers of the socket ABI, each its own plan. (DHCP is now
+  `plans/DHCP.md`; the DNS stub resolver is now `plans/DNS.md`, whose DNS1
+  pure `lib/net::dns` engine has landed.)
 - No firewall/NAT/forwarding policy engine (the routing table forwards
   nothing between interfaces in this plan; TAIRiX is a host, not a
   router, until a dedicated plan says otherwise).

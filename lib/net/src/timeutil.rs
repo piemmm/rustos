@@ -11,6 +11,12 @@ use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 /// Deadline value meaning "no timed transition is pending".
 pub(crate) const NEVER: u128 = u128::MAX;
 
+/// One second, in the `u128` nanoseconds the engines' internal deadlines use.
+///
+/// Defined once here so no engine carries its own copy of the same universal
+/// constant (the charter's one-definition rule).
+pub(crate) const ONE_SEC_NANOS: u128 = 1_000_000_000;
+
 /// Widen a non-negative monotonic [`Duration64`] to nanoseconds.
 ///
 /// A negative input (which monotonic time never produces) saturates to

@@ -11,7 +11,8 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
 `fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp` (segment codec, the
 connection state machine, and the listener + SYN-cookie driver),
-`fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`, `fuzz_net_dhcpv6`)
+`fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`, `fuzz_net_dhcpv6`,
+`fuzz_net_dns`)
 exercise.
 
 ## Contents
@@ -156,6 +157,27 @@ exercise.
   `Deconfigured` it withdraws it, each surfaced as a
   `StackEvent::Dhcp6Lease*` the service audits (`plans/DHCP.md` D4b). The
   engine is host-tested and fuzzed.
+- `dns` — the pure DNS stub resolver (RFC 1035 / RFC 5452, `plans/DNS.md`
+  DNS1), a sibling of `dhcp`, not a protocol baked into a socket. The
+  message codec: `Name` (a bounded, case-folded canonical wire encoding —
+  `Name::encode` parses a dotted host name with the label/length rules, and
+  the internal reader expands RFC 1035 §4.1.4 compression pointers with a
+  strictly-backwards follow rule so a crafted pointer loop cannot hang the
+  parser), `write_query` (one recursion-desired standard query), and
+  `DnsResponse::parse` — total, bounded, fail closed: a response is accepted
+  only when its id matches the outstanding query's CSPRNG-random id and its
+  echoed question matches the queried name (case-insensitively), type, and
+  class (the RFC 5452 §9 spoofing bound), and any CNAME chain in the answer
+  is followed to the queried type, capped at `MAX_ADDRESSES`. The
+  `DnsResolver` state machine sends a query to each configured recursive
+  server in turn with randomised exponential-backoff retransmission and
+  deterministic failover, finishing as Success / NoData / NonExistent
+  (NXDOMAIN) / Timeout. Pure and event-driven like `dhcp` (`poll` /
+  `on_response` take `now`, emit `Action`s, re-arm from a tickless
+  `next_deadline`); the query id and retransmit jitter are caller-supplied
+  CSPRNG draws (the `tcp::conn` `iss` precedent). No netstack wiring yet —
+  the engine stands alone (`plans/DNS.md` DNS2 threads it over the socket
+  ABI). Host-tested and fuzzed.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

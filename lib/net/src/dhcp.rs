@@ -598,10 +598,7 @@ pub fn write_message(spec: &MessageSpec, out: &mut [u8]) -> Result<usize, WriteE
 
 use tairix_abi::time::Duration64;
 
-use crate::timeutil::{from_nanos, nanos, NEVER};
-
-/// One second in nanoseconds, for deadline arithmetic.
-const ONE_SEC_NANOS: u128 = 1_000_000_000;
+use crate::timeutil::{from_nanos, nanos, NEVER, ONE_SEC_NANOS};
 
 /// Initial retransmission delay (RFC 2131 §4.1): four seconds, doubled on
 /// each retransmission up to [`MAX_BACKOFF_SECS`].

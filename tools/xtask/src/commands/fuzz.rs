@@ -134,6 +134,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net DHCPv6 client codec + state machine (RFC 8415 reply decode, transitions)",
     },
     Target {
+        package: "tairix-net",
+        test: "fuzz_net_dns",
+        description: "lib/net DNS stub resolver (RFC 1035 name/message decode, resolver state machine)",
+    },
+    Target {
         package: "tairix-netstack",
         test: "fuzz_net_sockabi",
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",

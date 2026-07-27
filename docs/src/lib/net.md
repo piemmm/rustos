@@ -394,6 +394,58 @@ SLAAC/static addresses intact. Each lease change is surfaced as a
 `StackEvent::Dhcp6LeaseAcquired`/`Dhcp6LeaseLost` the service audits. The
 engine remains host-tested and fuzzed (`fuzz_net_dhcpv6`).
 
+### `dns` — the DNS stub resolver engine
+
+The pure stub resolver (RFC 1035 / RFC 5452, `plans/DNS.md` DNS1): a client
+that sends a recursion-desired query to a configured recursive server and
+interprets the answer (RFC 1034 §5.3.1). It is a sibling of `dhcp` — pure,
+`no_std`, allocation-bounded, driven by injected monotonic time and
+caller-supplied CSPRNG values — not a protocol baked into a socket.
+
+The wire vocabulary is `Name`: a domain name in its canonical wire encoding
+(length-prefixed labels ended by the root label), ASCII-case-folded so two
+names compare equal exactly when they are equal under RFC 4343.
+`Name::encode` parses a dotted host name with the label rules (non-empty,
+≤ 63 octets, printable-ASCII — a control byte, space, or non-ASCII byte is
+rejected rather than encoded, since a resolver queries host names), bounded
+by the 255-octet ceiling. The internal reader expands RFC 1035 §4.1.4
+compression pointers, but every followed pointer must target an offset
+*strictly before* the pointer itself, so the walk decreases monotonically
+and a crafted pointer loop can never hang the parser; a reserved label type
+or an over-length expansion fails closed.
+
+`write_query` emits one standard query (the 12-byte header with the RD bit,
+one question, no other records). `DnsResponse::parse` validates a response
+datagram against the outstanding `QuerySpec` and is total, bounded, and
+fail-closed: it is accepted only when its transaction id equals the query's
+CSPRNG-random id *and* its single echoed question matches the queried name
+(case-insensitively), type, and class — the RFC 5452 §9 acceptance test
+that, with the random id, bounds off-path spoofing (source-port
+randomisation, the other RFC 5452 defence, is the socket layer's job in
+DNS2, not the engine's). Any structural error rejects the whole message.
+Answer records are followed through a CNAME chain from the queried name to
+collect matching-type (A / AAAA) addresses, capped at `MAX_ADDRESSES`; a
+record of the wrong class, a CNAME target this stub does not itself pursue,
+or a record whose RDATA length does not match its type is skipped rather
+than trusted. The surfaced `min_ttl` is the minimum TTL across the records
+used, so a caching caller knows how long the answer holds.
+
+`DnsResolver` is the retry/failover state machine, event-driven exactly like
+`DhcpClient`: `poll(now, rng)` starts the query and advances its
+retransmission and failover timers, `on_response(now, bytes, rng)` folds a
+datagram, and both return the `Action` the caller performs (`Send { query,
+server }` or `Finished(Resolution)`); `next_deadline` is the folded tickless
+one-shot. It tries each configured recursive server in turn with randomised
+exponential-backoff retransmission (a fresh random id per server, the same
+id across a server's retransmissions), and concludes as `Success` (an
+address of the queried type), `NoData` (NoError with no such record),
+`NonExistent` (NXDOMAIN, RFC 8020), or `Timeout` (no server answered within
+the budget); a `ServFail`/`Refused`/truncated answer fails the current
+server over to the next. A datagram that does not match the outstanding
+query is ignored and the resolver keeps waiting. There is no netstack wiring
+yet — the engine stands alone (DNS2 threads it over the UDP socket ABI). It
+is host-tested and fuzzed (`fuzz_net_dns`).
+
 ### `igmp`, `mld` — multicast group-membership message codecs
 
 The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership

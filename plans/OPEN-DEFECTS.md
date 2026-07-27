@@ -175,7 +175,13 @@ The open items, in priority order:
   sized to DHCPv6's larger work), but this desktop/PTY vertical still freezes on
   the D10-class readiness gate above, which only the marker re-gate will fix.
   Any small binary-size change is expected to keep tripping this gate until that
-  structural fix lands.
+  structural fix lands. The subsequent DNS **DNS1** change (`plans/DNS.md` — the
+  pure `lib/net::dns` RFC 1035/RFC 5452 stub-resolver engine, engine-only with no
+  netstack wiring) reproduces the identical 300 s PTY-Ctrl-C-stage freeze for the
+  identical reason — the new `lib/net` module adds compiled bytes that shift the
+  same load/spawn timing, and DNS is inert at runtime here so it cannot reach the
+  pty path — and was likewise accepted (User-confirmed) with this recorded for the
+  PTY owner.
 
 - **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
   bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a

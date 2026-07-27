@@ -47,7 +47,7 @@ use tairix_abi::time::Duration64;
 use crate::addr::{Ipv4Addr, Ipv6Addr};
 use crate::nd::PrefixInformation;
 use crate::route::CandidateAddr;
-use crate::timeutil::{from_nanos, nanos, NEVER};
+use crate::timeutil::{from_nanos, nanos, NEVER, ONE_SEC_NANOS};
 
 /// Maximum IPv6 addresses on one interface (link-local + static +
 /// SLAAC). A fixed validation bound: a hostile router advertising many
@@ -81,10 +81,7 @@ const MAX_DESYNC_DEN: u128 = 5;
 pub const RTR_SOLICITATION_INTERVAL: Duration64 = Duration64::from_secs(4);
 
 /// The RFC 4862 §5.5.3(e) two-hour floor for remaining valid lifetime.
-const TWO_HOURS_NANOS: u128 = 7_200 * NANOS_PER_SEC_U128;
-
-/// Nanoseconds per second, widened for deadline arithmetic.
-const NANOS_PER_SEC_U128: u128 = 1_000_000_000;
+const TWO_HOURS_NANOS: u128 = 7_200 * ONE_SEC_NANOS;
 
 /// The injected source of unpredictable material RFC 8981 temporary
 /// (privacy) addresses require.
@@ -1236,7 +1233,7 @@ fn lifetime_deadline(now: u128, lifetime_secs: u32) -> u128 {
     if lifetime_secs == u32::MAX {
         return NEVER;
     }
-    now.saturating_add(u128::from(lifetime_secs) * NANOS_PER_SEC_U128)
+    now.saturating_add(u128::from(lifetime_secs) * ONE_SEC_NANOS)
 }
 
 #[cfg(test)]

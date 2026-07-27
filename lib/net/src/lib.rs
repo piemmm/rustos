@@ -57,6 +57,14 @@
 //!   (Solicit → Request → Bound → Renew → Rebind, plus Release/Decline),
 //!   driven by injected monotonic time and caller-supplied CSPRNG values;
 //!   a sibling of [`dhcp`], not a `cfg`-fork of it.
+//! - [`dns`] — the pure stub resolver (RFC 1035 / RFC 5452): the DNS
+//!   message codec (name encode/decode with compression-pointer expansion,
+//!   the header/question/resource-record layout) and the `DnsResolver`
+//!   retry/failover state machine that sends a recursion-desired query to a
+//!   configured recursive server and interprets the answer (following any
+//!   CNAME chain), driven by injected monotonic time and caller-supplied
+//!   CSPRNG values (the query id and jitter) — a sibling of [`dhcp`], not a
+//!   protocol baked into a socket.
 //! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
 //!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
 //!   framings.
@@ -125,6 +133,7 @@ pub mod bond;
 pub mod checksum;
 pub mod dhcp;
 pub mod dhcpv6;
+pub mod dns;
 pub mod eth;
 pub mod frag;
 pub mod icmp;
