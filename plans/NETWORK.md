@@ -1884,9 +1884,17 @@ asserting the ECN handshake on the wire** are all landed and gate-green.
   DSCP written zero) and the IPv6 `Ipv6Header::ecn()`/`set_ecn()` accessors
   (low two bits of Traffic Class, DSCP preserved). Round-trip host-tested.
 - **Congestion response** (`tcp::cc`, done): a `CongestionControl::on_ecn`
-  signal whose default defers to `on_loss` (the same multiplicative
-  decrease with no retransmission), so CUBIC and NewReno both respond
-  without a second code path.
+  signal, applied at most once per window, whose trait default is the
+  RFC 3168 baseline (defer to `on_loss` — the same multiplicative decrease
+  with no retransmission) so a minimal policy is always correct. CUBIC and
+  NewReno both implement **RFC 8511 Alternative Backoff with ECN (ABE)**:
+  in congestion avoidance an ECN mark backs off with a larger `beta_ecn`
+  (0.8 NewReno vs 0.5 loss; 0.85 CUBIC vs 0.7 loss), so a shallow-AQM mark
+  drains the bottleneck without needlessly under-filling the path; in slow
+  start the standard loss reduction stands (RFC 8511 §3.1). Each policy
+  reuses its one loss-reduction path parameterised by the backoff factor
+  (no second code path), host-tested for the gentler-than-loss CA response,
+  the slow-start fallback, and the exact per-policy `beta_ecn`.
 - **Connection engine** (`tcp::conn`, done): `TcpConfig::enable_ecn` (off
   by default). Negotiation (ECN-setup SYN with ECE+CWR; SYN-ACK with ECE
   alone; `ecn_ok` set only on the exact exchange, falling back otherwise),

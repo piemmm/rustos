@@ -168,8 +168,11 @@ connection state machine, and the listener + SYN-cookie driver),
   duplicate ACKs) applies the multiplicative decrease once per window
   (RFC 6582 recover) and a timeout collapses to one segment; growth is slow
   start below `ssthresh` and the policy's increase above it. `on_ecn` (RFC 3168
-  §6.1.2) applies the same decrease for an explicit congestion mark with no
-  retransmission, so every policy responds to ECN without a second code path.
+  §6.1.2) reduces the window for an explicit congestion mark with no
+  retransmission; both policies implement RFC 8511 Alternative Backoff with
+  ECN (ABE), backing off in congestion avoidance with a larger `beta_ecn`
+  (0.8 NewReno, 0.85 CUBIC) than on loss and keeping the loss reduction in
+  slow start, each through its one reduction path (no second code path).
 - `tcp::listen` — the demultiplexing server-side listener (`Listener`) that
   sits above `tcp::conn`. It demultiplexes inbound segments by peer, holds a
   bounded backlog of half-open (SYN-RECEIVED) handshakes with a timeout, and

@@ -453,11 +453,20 @@ ACKs — multiplicative decrease, applied once per loss window through the
 RFC 6582 `recover` high-water mark so a burst cannot halve the window
 repeatedly), `on_rto` (a timeout — collapse to one segment and restart
 slow start), and `on_ecn` (an explicit congestion mark, RFC 3168 §6.1.2 —
-the same multiplicative decrease as a single loss but with no
-retransmission, since nothing was lost; the default defers to `on_loss` so
-every policy responds without a second code path). During recovery the send
-rate is governed by the RFC 6675 `pipe` estimate against `cwnd`, not by
-window inflation.
+a multiplicative decrease with no retransmission, since nothing was lost).
+Both policies implement RFC 8511 Alternative Backoff with ECN (ABE): in
+congestion avoidance an ECN mark from a shallow AQM signals *incipient*
+congestion, not an overflowed buffer, so it backs off with a larger
+(gentler) multiplicative-decrease factor than a loss — `beta_ecn = 0.8`
+vs `beta_loss = 0.5` for NewReno, `0.85` vs `0.7` for CUBIC — which drains
+the bottleneck without needlessly under-filling the path. ABE applies only
+in congestion avoidance (`cwnd > ssthresh`); in slow start an ECN mark
+keeps the standard loss reduction (RFC 8511 §3.1). The trait default is the
+RFC 3168 baseline (react exactly as to a loss) so a minimal policy is
+always correct; the shipped policies override it for ABE through the one
+reduction path each already uses for loss. During recovery the send rate is
+governed by the RFC 6675 `pipe` estimate against `cwnd`, not by window
+inflation.
 
 ### RFC 3168 Explicit Congestion Notification
 
@@ -481,10 +490,12 @@ ends agree (RFC 3168 §6.1.1):
   header, and the receive path surfaces it on `StackEvent::TcpSegment`.
 - **Receiver echo (§6.1.3).** On a Congestion-Experienced (CE) datagram
   the receiver sets ECE on every ACK until the peer answers with CWR.
-- **Sender response (§6.1.2).** An ECE-marked ACK triggers the same window
-  reduction as a single dropped packet (`cc.on_ecn`) — but no
-  retransmission — at most once per window of data, and the next fresh data
-  segment carries CWR to tell the peer the reduction happened.
+- **Sender response (§6.1.2, RFC 8511 ABE).** An ECE-marked ACK triggers a
+  window reduction (`cc.on_ecn`) — but no retransmission — at most once per
+  window of data, and the next fresh data segment carries CWR to tell the
+  peer the reduction happened. In congestion avoidance the reduction uses
+  the RFC 8511 gentler `beta_ecn` factor (0.8 NewReno / 0.85 CUBIC) rather
+  than the loss factor; in slow start it is identical to a loss.
 
 The engine, its full data-path threading, the stack-wide `net.tcp.ecn`
 operator toggle (delivered to `netstack` by `devmgr`, off by default), and a

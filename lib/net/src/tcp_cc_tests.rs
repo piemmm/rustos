@@ -207,6 +207,151 @@ fn cubic_convex_region_overshoots_the_prior_peak() {
     );
 }
 
+/// Drive a policy from its initial slow-start window into congestion
+/// avoidance: climb under slow start, take one loss to anchor a finite
+/// `ssthresh`, then acknowledge several windows so `cwnd` rises above it.
+fn drive_to_congestion_avoidance(cc: &mut dyn CongestionControl) {
+    for _ in 0..30 {
+        cc.on_ack(MSS, cc.cwnd(), 0);
+    }
+    cc.on_loss(cc.cwnd(), 1_000_000);
+    let mut now = 1_000_000u128;
+    for _ in 0..12 {
+        now += 20_000_000;
+        let w = cc.cwnd();
+        ack_window(cc, w, now);
+    }
+}
+
+#[test]
+fn conformance_ecn_reduces_the_window_and_sets_ssthresh() {
+    // RFC 3168 §6.1.2: an ECN mark shrinks the window like a loss (but with
+    // no retransmission). Every policy must still deflate cwnd to ssthresh
+    // and hold the 2·MSS floor.
+    for algo in algorithms() {
+        let mut cc = algo.build(MSS);
+        drive_to_congestion_avoidance(&mut *cc);
+        let before = cc.cwnd();
+        cc.on_ecn(before, 500_000_000);
+        assert!(cc.cwnd() < before, "{}: no ECN reduction", cc.name());
+        assert!(cc.ssthresh() >= 2 * MSS, "{}", cc.name());
+        assert_eq!(
+            cc.cwnd(),
+            cc.ssthresh(),
+            "{}: cwnd deflates to ssthresh",
+            cc.name()
+        );
+        assert!(cc.cwnd() >= MSS);
+    }
+}
+
+#[test]
+fn conformance_abe_ecn_backoff_is_gentler_than_loss_in_congestion_avoidance() {
+    // RFC 8511 §3: in congestion avoidance an ECN mark backs off with a
+    // larger multiplicative-decrease factor than a loss, so the resulting
+    // window is strictly larger. Two instances driven identically diverge
+    // only in the final signal.
+    for algo in algorithms() {
+        let mut via_ecn = algo.build(MSS);
+        let mut via_loss = algo.build(MSS);
+        drive_to_congestion_avoidance(&mut *via_ecn);
+        drive_to_congestion_avoidance(&mut *via_loss);
+        let flight = via_ecn.cwnd();
+        assert!(flight > via_ecn.ssthresh(), "{}: not in CA", via_ecn.name());
+        assert_eq!(flight, via_loss.cwnd(), "{}: not identical", via_ecn.name());
+
+        via_ecn.on_ecn(flight, 500_000_000);
+        via_loss.on_loss(flight, 500_000_000);
+        assert!(
+            via_ecn.cwnd() > via_loss.cwnd(),
+            "{}: ABE ({}) must exceed loss backoff ({})",
+            via_ecn.name(),
+            via_ecn.cwnd(),
+            via_loss.cwnd()
+        );
+    }
+}
+
+#[test]
+fn conformance_abe_falls_back_to_loss_backoff_in_slow_start() {
+    // RFC 8511 §3.1: ABE only applies in congestion avoidance. In slow
+    // start (cwnd ≤ ssthresh) an ECN mark gets the standard loss reduction.
+    for algo in algorithms() {
+        let mut via_ecn = algo.build(MSS);
+        let mut via_loss = algo.build(MSS);
+        for _ in 0..5 {
+            via_ecn.on_ack(MSS, via_ecn.cwnd(), 0);
+            via_loss.on_ack(MSS, via_loss.cwnd(), 0);
+        }
+        let flight = via_ecn.cwnd();
+        assert!(
+            flight <= via_ecn.ssthresh(),
+            "{}: expected slow start",
+            via_ecn.name()
+        );
+        via_ecn.on_ecn(flight, 1_000_000);
+        via_loss.on_loss(flight, 1_000_000);
+        assert_eq!(via_ecn.cwnd(), via_loss.cwnd(), "{}", via_ecn.name());
+        assert_eq!(
+            via_ecn.ssthresh(),
+            via_loss.ssthresh(),
+            "{}",
+            via_ecn.name()
+        );
+    }
+}
+
+#[test]
+fn newreno_abe_backs_off_to_four_fifths_of_flight() {
+    // NewReno beta_ecn = 0.8 vs beta_loss = 0.5 (RFC 8511 §3).
+    let mut reno = NewReno::new(MSS);
+    drive_to_congestion_avoidance(&mut reno);
+    assert!(reno.cwnd() > reno.ssthresh());
+    let flight = reno.cwnd();
+    let mut ecn = reno;
+    let mut loss = reno;
+    ecn.on_ecn(flight, 3);
+    loss.on_loss(flight, 3);
+    assert_eq!(
+        ecn.ssthresh(),
+        u32::try_from(u64::from(flight) * 800 / 1000).unwrap()
+    );
+    assert_eq!(ecn.cwnd(), ecn.ssthresh());
+    assert_eq!(loss.ssthresh(), flight / 2);
+    assert!(ecn.cwnd() > loss.cwnd());
+}
+
+#[test]
+fn cubic_abe_backs_off_to_beta_ecn_of_cwnd() {
+    // CUBIC beta_ecn = 0.85 vs beta_loss = 0.7 (RFC 8511 §3.1).
+    let mut cubic = Cubic::new(MSS);
+    for _ in 0..40 {
+        cubic.on_ack(MSS, cubic.cwnd(), 0);
+    }
+    cubic.on_loss(cubic.cwnd(), 1_000_000);
+    let mut now = 1_000_000u128;
+    for _ in 0..15 {
+        now += 20_000_000;
+        let w = cubic.cwnd();
+        ack_window(&mut cubic, w, now);
+    }
+    assert!(cubic.cwnd() > cubic.ssthresh());
+    let flight = cubic.cwnd();
+    let mut ecn = cubic;
+    let mut loss = cubic;
+    ecn.on_ecn(flight, now);
+    loss.on_loss(flight, now);
+    assert_eq!(
+        ecn.ssthresh(),
+        u32::try_from(u64::from(flight) * 850 / 1000).unwrap()
+    );
+    assert_eq!(
+        loss.ssthresh(),
+        u32::try_from(u64::from(flight) * 700 / 1000).unwrap()
+    );
+    assert!(ecn.cwnd() > loss.cwnd());
+}
+
 #[test]
 fn newreno_halves_on_loss() {
     let mut reno = NewReno::new(MSS);

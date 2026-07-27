@@ -62,11 +62,18 @@ pub trait CongestionControl: core::fmt::Debug + Send {
 
     /// An explicit congestion notification (RFC 3168 §6.1.2): a peer echoed
     /// ECE, so a router marked one of our ECN-capable packets as Congestion
-    /// Experienced. The window response is identical to a single dropped
-    /// packet — the multiplicative decrease — but no retransmission follows,
-    /// because nothing was lost. The connection applies this at most once
-    /// per window of data, so the default deferring to [`Self::on_loss`]
-    /// gives every policy the correct decrease without a second code path.
+    /// Experienced. Nothing was lost, so no retransmission follows; only the
+    /// window shrinks, at most once per window of data (the connection
+    /// enforces that cadence).
+    ///
+    /// The default is the RFC 3168 baseline: react exactly as to a single
+    /// dropped packet. Policies that implement RFC 8511 Alternative Backoff
+    /// with ECN (ABE) override this to back off more gently — a router's ECN
+    /// mark from a shallow AQM signals incipient congestion, not an
+    /// overflowed buffer, so a larger multiplicative-decrease factor drains
+    /// the bottleneck without needlessly under-filling the path. ABE applies
+    /// only in congestion avoidance (`cwnd > ssthresh`); in slow start the
+    /// standard loss reduction stands (RFC 8511 §3, §3.1).
     fn on_ecn(&mut self, flight: u32, now_ns: u128) {
         self.on_loss(flight, now_ns);
     }
@@ -90,11 +97,29 @@ fn initial_window(mss: u32) -> u32 {
     ten.min(two.max(14_600))
 }
 
-/// The multiplicative-decrease target on loss: `max(flight/2, 2·MSS)`
-/// (RFC 5681 §3.2 step 2). Shared by both policies' Reno component.
-fn reno_ssthresh(flight: u32, mss: u32) -> u32 {
-    (flight / 2).max(mss.saturating_mul(2))
+/// The Reno multiplicative-decrease target for a given per-mille backoff
+/// factor: `max(flight · permille/1000, 2·MSS)` (RFC 5681 §3.2 Equation 4,
+/// generalised by RFC 8511 §3 to a per-signal factor). Evaluated in `u64`
+/// so the scaled `FlightSize` cannot overflow. Shared by both policies'
+/// Reno component.
+fn reno_ssthresh_permille(flight: u32, mss: u32, permille: u32) -> u32 {
+    let scaled = u32::try_from(u64::from(flight) * u64::from(permille) / 1000).unwrap_or(u32::MAX);
+    scaled.max(mss.saturating_mul(2))
 }
+
+/// The multiplicative-decrease target on inferred packet loss:
+/// `max(flight · 0.5, 2·MSS)` — `beta_loss = 0.5` (RFC 5681 §3.2 step 2).
+fn reno_ssthresh(flight: u32, mss: u32) -> u32 {
+    reno_ssthresh_permille(flight, mss, RENO_BETA_LOSS_PERMILLE)
+}
+
+/// `NewReno` `beta_loss = 0.5`: the classic RFC 5681 halving on packet loss.
+const RENO_BETA_LOSS_PERMILLE: u32 = 500;
+
+/// `NewReno` `beta_ecn = 0.8`: the RFC 8511 §3 ECN backoff for standard TCP
+/// congestion control — gentler than `beta_loss` because an ECN mark from a
+/// shallow AQM is not buffer exhaustion.
+const RENO_BETA_ECN_PERMILLE: u32 = 800;
 
 /// The selectable congestion-control algorithm, chosen per connection in
 /// [`crate::tcp::conn::TcpConfig`]. This is the closed, versioned set of
@@ -184,6 +209,18 @@ impl CongestionControl for NewReno {
         self.ca_acked = 0;
     }
 
+    fn on_ecn(&mut self, flight: u32, now_ns: u128) {
+        // RFC 8511 §3.1: ABE only applies in congestion avoidance. In slow
+        // start (`cwnd <= ssthresh`) the standard loss backoff stands.
+        if self.cwnd <= self.ssthresh {
+            self.on_loss(flight, now_ns);
+            return;
+        }
+        self.ssthresh = reno_ssthresh_permille(flight, self.mss, RENO_BETA_ECN_PERMILLE);
+        self.cwnd = self.ssthresh;
+        self.ca_acked = 0;
+    }
+
     fn on_rto(&mut self, flight: u32, _now_ns: u128) {
         self.ssthresh = reno_ssthresh(flight, self.mss);
         self.cwnd = self.mss;
@@ -220,8 +257,14 @@ fn icbrt(v: u64) -> u64 {
     y
 }
 
-/// CUBIC's multiplicative-decrease factor `beta = 0.7`, as a 1/1000 ratio.
+/// CUBIC's `beta_loss = 0.7`, as a 1/1000 ratio: the multiplicative-decrease
+/// factor on inferred packet loss (RFC 9438 §4.6; the Linux CUBIC value
+/// since 2008).
 const CUBIC_BETA_PERMILLE: u64 = 700;
+
+/// CUBIC's `beta_ecn = 0.85`, as a 1/1000 ratio: the RFC 8511 §3.1 ABE
+/// backoff factor for CUBIC — gentler than `beta_loss` for an ECN mark.
+const CUBIC_BETA_ECN_PERMILLE: u64 = 850;
 
 /// CUBIC (RFC 9438).
 ///
@@ -302,6 +345,29 @@ impl Cubic {
             .saturating_mul(u64::from(self.mss));
         u32::try_from(bytes).unwrap_or(u32::MAX)
     }
+
+    /// The CUBIC multiplicative decrease for a given per-mille `beta` factor,
+    /// shared by the loss (`beta_loss`) and RFC 8511 ABE ECN (`beta_ecn`)
+    /// responses so a single code path defines the reduction. Applies fast
+    /// convergence (RFC 9438 §4.6) — lowering `W_max` when we back off before
+    /// reaching the previous peak so competing flows get room — sets
+    /// `ssthresh`/`cwnd` to `cwnd · beta` (floored at `2·MSS`), and clears the
+    /// epoch so the next congestion-avoidance ACK re-anchors the cubic.
+    fn reduce(&mut self, beta_permille: u64) {
+        if self.cwnd < self.w_max {
+            self.w_max = (u64::from(self.cwnd) * (1000 + beta_permille) / 2000)
+                .try_into()
+                .unwrap_or(self.cwnd);
+        } else {
+            self.w_max = self.cwnd;
+        }
+        let reduced = (u64::from(self.cwnd) * beta_permille / 1000)
+            .try_into()
+            .unwrap_or(self.cwnd);
+        self.ssthresh = reduced.max(self.mss.saturating_mul(2));
+        self.cwnd = self.ssthresh;
+        self.epoch_start_ns = 0;
+    }
 }
 
 impl CongestionControl for Cubic {
@@ -352,21 +418,17 @@ impl CongestionControl for Cubic {
     }
 
     fn on_loss(&mut self, _flight: u32, _now_ns: u128) {
-        // Fast convergence (RFC 9438 §4.6): if we lose before reaching the
-        // previous peak, lower the peak so competing flows get room.
-        if self.cwnd < self.w_max {
-            self.w_max = (u64::from(self.cwnd) * (1000 + CUBIC_BETA_PERMILLE) / 2000)
-                .try_into()
-                .unwrap_or(self.cwnd);
-        } else {
-            self.w_max = self.cwnd;
+        self.reduce(CUBIC_BETA_PERMILLE);
+    }
+
+    fn on_ecn(&mut self, _flight: u32, now_ns: u128) {
+        // RFC 8511 §3.1: ABE only applies in congestion avoidance. In slow
+        // start (`cwnd <= ssthresh`) the standard loss backoff stands.
+        if self.cwnd <= self.ssthresh {
+            self.on_loss(0, now_ns);
+            return;
         }
-        let reduced = (u64::from(self.cwnd) * CUBIC_BETA_PERMILLE / 1000)
-            .try_into()
-            .unwrap_or(self.cwnd);
-        self.ssthresh = reduced.max(self.mss.saturating_mul(2));
-        self.cwnd = self.ssthresh;
-        self.epoch_start_ns = 0;
+        self.reduce(CUBIC_BETA_ECN_PERMILLE);
     }
 
     fn on_rto(&mut self, _flight: u32, _now_ns: u128) {

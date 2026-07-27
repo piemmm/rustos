@@ -143,7 +143,14 @@ The open items, in priority order:
   count-independent readiness marker (as D10 did with `sc=shm_map` window
   creation), **not** a timeout bump or retry; reproduce with
   `cargo xtask test --qemu --only autoload-input-qemu-aarch64` on this
-  branch.
+  branch. The subsequent RFC 8511 ABE change (`plans/NETWORK.md` N13,
+  `lib/net::tcp::cc`) reproduces the identical freeze for the identical
+  reason — a few added `lib/net` constants/helpers shift the same load/spawn
+  timing; ABE cannot reach the pty path (`enable_ecn` off, `on_ecn`
+  unreachable without a negotiated-ECN connection) — and was likewise
+  accepted with this recorded for the PTY owner. Any small `lib/net`
+  binary-size change is expected to keep tripping this gate until the
+  structural fix lands.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
