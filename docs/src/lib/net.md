@@ -265,6 +265,49 @@ IPv6 source fragmentation (RFC 8200 §4.5) alike, against the path MTU
 only when it cannot be fragmented at all. The limited broadcast and the
 unspecified address are refused (`SendError::NotUnicast`).
 
+### `dhcp` — the DHCPv4 client engine
+
+The pure DHCPv4 client (RFC 2131 / RFC 2132, `plans/DHCP.md`), driven the
+way SLAAC is: an interface that is configured for DHCP obtains its address,
+mask, routers, and lease timers from this engine rather than from a
+userland socket client. A DHCP client must transmit from `0.0.0.0:68`
+broadcast *before* any address exists, which the capability-gated,
+route-checked socket surface correctly refuses; framing DHCP inside the
+stack (which owns the interface's egress) needs no new socket surface and
+grants no ambient authority.
+
+The codec is the BOOTP fixed header plus the RFC 2132 option TLVs.
+`DhcpReply::parse` surfaces only the fields a client acts on — message
+type, `yiaddr`, server identifier, subnet mask, routers, DNS servers, and
+the lease/T1/T2 times — and is total, bounded (a fixed option-region walk
+and fixed-capacity `MAX_ADDRESSES` address lists — never an attacker-sized
+allocation), and fail-closed: it rejects a wrong `op`/`htype`/`hlen`, a
+missing or corrupt magic cookie, a `xid`/`chaddr` that does not match the
+client's outstanding request (bounding off-path spoofing), or an options
+field with no message type, and it honours RFC 2131 §4.1 option overload
+(options carried in the `file`/`sname` fields). A single `write_message`
+encoder over a `MessageSpec` produces every client message — DISCOVER,
+the SELECTING and renew/rebind forms of REQUEST, DECLINE, and RELEASE —
+so there is one wire definition, not five.
+
+`DhcpClient` is the RFC 2131 §4.4 state machine, pure and event-driven like
+`neigh`/`mcast`: INIT → SELECTING → REQUESTING → BOUND → RENEWING →
+REBINDING, with NAK and lease-expiry restart. `poll(now, rng)` advances
+retransmissions and the T1/T2/expiry transitions; `on_reply(now, reply)`
+folds a server message; both return the `Action`s the interface layer
+performs (send a framed message to a broadcast or unicast destination,
+apply a `Lease`, or withdraw one on `Deconfigured`). Retransmission uses
+RFC 2131 §4.1 randomised exponential backoff (4 s doubling to 64 s, ±1 s
+jitter); the renewal timers default to T1 = lease/2 and T2 = lease·7⁄8
+(RFC 2131 §4.4.5), honouring server-supplied option 58/59 values only when
+they are internally consistent, and an infinite lease (`0xFFFF_FFFF`) arms
+no renewal. The transaction id and the backoff jitter are caller-supplied
+CSPRNG draws (the `tcp::conn` `iss` precedent), so the engine stays
+deterministic and replayable and never generates randomness itself.
+`next_deadline` is a folded one-shot, so a bound interface with a permanent
+lease costs no timer wakeups. The netstack integration (framing the send
+actions and feeding received datagrams back in) is `plans/DHCP.md` D2.
+
 ### `igmp`, `mld` — multicast group-membership message codecs
 
 The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership

@@ -11,7 +11,7 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
 `fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp` (segment codec, the
 connection state machine, and the listener + SYN-cookie driver),
-`fuzz_net_igmp`, `fuzz_net_mld`) exercise.
+`fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`) exercise.
 
 ## Contents
 
@@ -104,6 +104,19 @@ connection state machine, and the listener + SYN-cookie driver),
 - `udp` — the dual-stack UDP codec (RFC 768): one parse/emit core over
   the family-appropriate pseudo-header checksum, IPv4-optional /
   IPv6-mandatory checksum discipline.
+- `dhcp` — the pure DHCPv4 client (RFC 2131 / RFC 2132, `plans/DHCP.md`):
+  the BOOTP/DHCP wire codec (`DhcpReply::parse` — total, bounded, fail
+  closed, `xid`/`chaddr`-matched, option-overload aware; the single
+  `write_message` encoder shared by DISCOVER / REQUEST / DECLINE / RELEASE)
+  and the RFC 2131 §4.4 client state machine (`DhcpClient`): INIT →
+  SELECTING → REQUESTING → BOUND → RENEWING → REBINDING with NAK / lease-
+  expiry restart, RFC 2131 §4.1 randomised exponential backoff, and RFC
+  2131 §4.4.5 T1/T2 renewal timers. Pure and event-driven like `neigh` /
+  `mcast` (`poll`/`on_reply` take `now`, emit `Action`s, and re-arm from a
+  tickless `next_deadline`); the transaction id and backoff jitter are
+  caller-supplied CSPRNG draws (the `tcp::conn` `iss` precedent), so an
+  interface obtains an address the way SLAAC does, not over a socket. The
+  netstack integration is `plans/DHCP.md` D2.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

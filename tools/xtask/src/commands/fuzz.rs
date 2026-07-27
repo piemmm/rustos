@@ -119,6 +119,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net MLDv2 query decode + report encode (floating max-response, bounds)",
     },
     Target {
+        package: "tairix-net",
+        test: "fuzz_net_dhcp",
+        description: "lib/net DHCPv4 client codec + state machine (reply decode, transitions)",
+    },
+    Target {
         package: "tairix-netstack",
         test: "fuzz_net_sockabi",
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",

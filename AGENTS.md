@@ -1328,6 +1328,7 @@ You are not exempt from any rule above. In addition:
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
+    | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | TPM / measured boot | `plans/TPM.md` |
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |

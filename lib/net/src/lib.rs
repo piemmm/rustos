@@ -46,6 +46,11 @@
 //! - [`udp`] — the dual-stack UDP codec (RFC 768): one parse/emit core
 //!   folding the family-appropriate pseudo-header checksum, with the
 //!   IPv4-optional / IPv6-mandatory checksum discipline.
+//! - [`dhcp`] — the pure `DHCPv4` client (RFC 2131/2132): the BOOTP/DHCP
+//!   wire codec and the RFC 2131 §4.4 client state machine (INIT →
+//!   SELECTING → REQUESTING → BOUND → RENEWING → REBINDING), driven by
+//!   injected monotonic time and caller-supplied CSPRNG values, so an
+//!   interface can obtain an address the same way SLAAC obtains one.
 //! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
 //!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
 //!   framings.
@@ -112,6 +117,7 @@ pub mod addr;
 pub mod arp;
 pub mod bond;
 pub mod checksum;
+pub mod dhcp;
 pub mod eth;
 pub mod frag;
 pub mod icmp;
