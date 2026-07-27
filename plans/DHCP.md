@@ -160,9 +160,48 @@ Key facts for the next worker:
   RISCV64}`) live in `tests/integration/netstack_wire`, cross-checked against
   the real `lib/netconfig` parser.
 
-### D4 — DHCPv6 (RFC 8415) `[ ]` (future, own sub-plan when scheduled)
+### D4 — DHCPv6 (RFC 8415), stateful IA_NA address configuration
 Stateful DHCPv6 as an IPv6 peer of D1–D3, reusing the interface-engine
-integration shape. Not started; not speculated here.
+integration shape. DHCPv6 is a distinct protocol (UDP 546↔547, all-DHCP-
+relay-agents-and-servers multicast `ff02::1:2`, DUID-keyed leases, IA_NA/
+IAADDR bindings, four-message Solicit/Advertise/Request/Reply plus Renew/
+Rebind/Release/Decline, RFC 8415 §15 RT/IRT/MRT/MRC/MRD retransmission),
+so it is its own pure engine (`lib/net::dhcpv6`) beside `lib/net::dhcp`,
+never a `cfg`-forked sharing of the v4 one (§2.2 carve-out for parallel
+implementations of the same role).
+
+#### D4a — the pure `lib/net::dhcpv6` engine `[x]`
+The DHCPv6 wire codec (the 4-byte message header — msg-type + 3-byte
+transaction id — and the RFC 8415 §21 option TLVs: Client/Server
+Identifier DUID, IA_NA with its encapsulated IAADDR, Option Request,
+Elapsed Time, Status Code) and the RFC 8415 §18.2.1 client state machine
+(Solicit → Request → Bound → Renew → Rebind, plus Release/Decline and
+lease-expiry / Reply-Status restart). Pure, `no_std`,
+`#![forbid(unsafe_code)]`, allocation-bounded: a fixed-capacity IAADDR /
+DNS list, a capped option-region walk, total/bounded/fail-closed decode.
+Injected monotonic time and caller-supplied CSPRNG values (the 24-bit
+transaction id, the RFC 8415 §15 randomised-RT jitter); the engine never
+generates randomness itself (the `dhcp`/`tcp::conn` precedent). Host unit
+tests cover every state transition, the RT/MRC/MRD retransmission and
+lease-timer computation (default and IA-supplied T1/T2, infinite lease),
+codec round-trips, transaction-id / DUID mismatch rejection, and
+fail-closed decode; the `fuzz_net_dhcpv6` harness covers the parser and
+the state machine. No I/O, no `netstack` change yet — the engine stands
+alone and gate-green.
+
+#### D4b — netstack interface integration `[ ]`
+`Stack` drives the `Dhcp6Client` for an interface whose `network.conf`
+selects DHCPv6 as an IPv6 method (`ipv6.method dhcp`, sibling of the v4
+`ipv4.method dhcp`), framing engine output as UDP(546→547)/IPv6/Ethernet
+to `ff02::1:2` and feeding replies (UDP 547→546) back in before the
+address filter — exactly the D2 shape. Lease apply/withdraw via the IPv6
+address engine, surfaced as `StackEvent::Dhcp6Lease{Acquired,Lost}` and
+audited. Not started.
+
+#### D4c — the live two-process QEMU vertical, all three Tier-1 arches `[ ]`
+`tests/integration/netstack_dhcp6_qemu_{aarch64,x86_64,riscv64}`, the IPv6
+peer of the D3 verticals, with a `NetPeerMode::V6Dhcp6Echo` server peer.
+Not started.
 
 ## 4. Tests, docs, and gate (binding)
 

@@ -51,6 +51,12 @@
 //!   SELECTING → REQUESTING → BOUND → RENEWING → REBINDING), driven by
 //!   injected monotonic time and caller-supplied CSPRNG values, so an
 //!   interface can obtain an address the same way SLAAC obtains one.
+//! - [`dhcpv6`] — the pure stateful `DHCPv6` client (RFC 8415): the
+//!   message + option wire codec (DUID, `IA_NA`/IAADDR, Option Request,
+//!   Elapsed Time, Status Code) and the §18.2 client state machine
+//!   (Solicit → Request → Bound → Renew → Rebind, plus Release/Decline),
+//!   driven by injected monotonic time and caller-supplied CSPRNG values;
+//!   a sibling of [`dhcp`], not a `cfg`-fork of it.
 //! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
 //!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
 //!   framings.
@@ -118,6 +124,7 @@ pub mod arp;
 pub mod bond;
 pub mod checksum;
 pub mod dhcp;
+pub mod dhcpv6;
 pub mod eth;
 pub mod frag;
 pub mod icmp;

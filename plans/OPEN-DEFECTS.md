@@ -155,8 +155,15 @@ The open items, in priority order:
   WARN/panic/OOM) for the identical reason — a few added `lib/net`/`netstack`
   bytes shift the same load/spawn timing; DHCP cannot reach the pty path — and
   was likewise accepted (User-confirmed) with this recorded for the PTY owner.
-  Any small `lib/net` binary-size change is expected to keep tripping this
-  gate until the structural fix lands.
+  The subsequent DHCPv6 D4a change (`plans/DHCP.md` — the pure
+  `lib/net::dhcpv6` RFC 8415 client engine) reproduces the identical 300 s
+  timeout at the same stage (viewer.app loaded ~87 s guest-time, desktop
+  still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
+  `lib/net` module adds compiled bytes that shift the same load/spawn
+  timing; DHCPv6 is inert at runtime here (D4a is engine-only, no netstack
+  wiring) so it cannot reach the pty path — and was likewise recorded for
+  the PTY owner. Any small `lib/net` binary-size change is expected to keep
+  tripping this gate until the structural fix lands.
 
 - **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
   bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a

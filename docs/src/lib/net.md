@@ -325,6 +325,57 @@ by `set_ipv4_config`, and the address is applied alone); on `Deconfigured`
 it withdraws the address and its routes. Each lease change is surfaced as a
 `StackEvent::DhcpLeaseAcquired`/`DhcpLeaseLost` the service audits.
 
+### `dhcpv6` — the DHCPv6 client engine
+
+The pure stateful DHCPv6 client (RFC 8415, `plans/DHCP.md` D4a), a sibling
+of `dhcp` — not a `cfg`-fork of it, because DHCPv6 is a distinct protocol
+(UDP 546↔547, the `ff02::1:2` all-servers multicast, DUID-keyed leases,
+IA_NA/IAADDR address bindings, a four-message Solicit/Advertise/Request/
+Reply exchange). Like the DHCPv4 client it lives inside the stack rather
+than as a userland socket client and grants no ambient authority: every
+client message is framed as UDP(546→547)/IPv6/Ethernet to the all-servers
+multicast, which a client can send before it has any global address.
+
+The codec is the four-octet message header (type + 24-bit transaction id)
+plus the RFC 8415 §21 option TLVs. `Dhcp6Reply::parse` walks the top-level
+options and the options nested inside an IA_NA, surfacing only the fields a
+client acts on — the Server Identifier DUID, the IA_NA's IAID / T1 / T2, the
+leased IA Addresses with their preferred/valid lifetimes, the top-level and
+IA-level Status Codes, and the DNS servers (RFC 3646). It is total, bounded
+(a fixed option-region walk, fixed-capacity `MAX_ADDRESSES` lists, a DUID
+capped at the RFC 8415 §11 128-octet maximum — never an attacker-sized
+allocation), and fail-closed: it rejects a truncated header, a message type
+that is not a server response, a transaction id that does not match, and —
+bounding off-path spoofing — a missing or mismatched echoed Client
+Identifier or an absent Server Identifier. A single `write_message` encoder
+over a `MessageSpec` produces every client message (Solicit, Request, Renew,
+Rebind, Release, Decline), so there is one wire definition, not six. The
+client forms its own DUID-LL (`Duid::ll_ethernet`) from the interface MAC —
+stable, needing no persisted timestamp.
+
+`Dhcp6Client` is the RFC 8415 §18.2 state machine, pure and event-driven
+like `neigh`/`mcast`: Init → Soliciting → Requesting → Bound → Renewing →
+Rebinding, plus the Releasing and Declining teardown paths and lease-expiry
+/ NoBinding restart. `poll(now, rng)` advances retransmissions and the
+T1/T2/valid-lifetime transitions; `on_reply(now, reply, rng)` folds a server
+message; both return the `Action`s the interface layer performs (send a
+message to the all-servers multicast, apply a `Lease6`, or withdraw one on
+`Deconfigured`). Retransmission uses the RFC 8415 §15 randomised RT algorithm
+with the §7.6 per-message IRT/MRT/MRC parameters (a ±0.1 jitter, doubling up
+to MRT, bounded by MRC for Request/Release/Decline and by T2 / the valid
+lifetime for Renew / Rebind); the renewal timers honour server-supplied T1/T2
+and otherwise default to T1 = ½·preferred and T2 = ⅘·preferred (clamped so
+renew never lands after rebind), and an infinite lifetime (`0xFFFF_FFFF`)
+arms no renewal. The transaction id and the RT jitter are caller-supplied
+CSPRNG draws (the `tcp::conn` `iss` precedent), so the engine stays
+deterministic and never generates randomness itself. `next_deadline` is a
+folded one-shot, so a bound interface with a permanent lease — or an idle
+client after a completed Release — costs no timer wakeups.
+
+The netstack integration that drives this client for an interface configured
+for DHCPv6 is `plans/DHCP.md` D4b (not yet landed); the engine here stands
+alone, host-tested and fuzzed (`fuzz_net_dhcpv6`).
+
 ### `igmp`, `mld` — multicast group-membership message codecs
 
 The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership

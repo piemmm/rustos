@@ -11,7 +11,8 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
 `fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp` (segment codec, the
 connection state machine, and the listener + SYN-cookie driver),
-`fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`) exercise.
+`fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`, `fuzz_net_dhcpv6`)
+exercise.
 
 ## Contents
 
@@ -126,6 +127,24 @@ connection state machine, and the listener + SYN-cookie driver),
   leased address/mask/route on `Configured` and withdrawing them on
   `Deconfigured`, each surfaced as a `StackEvent::DhcpLease*` the service
   audits (`plans/DHCP.md` D2).
+- `dhcpv6` — the pure stateful DHCPv6 client (RFC 8415, `plans/DHCP.md`
+  D4a), a sibling of `dhcp`, not a `cfg`-fork of it (DHCPv6 is a distinct
+  protocol: UDP 546↔547, the `ff02::1:2` all-servers multicast, DUID-keyed
+  leases, IA_NA/IAADDR bindings, a Solicit/Advertise/Request/Reply
+  exchange). The message + option wire codec (`Dhcp6Reply::parse` — total,
+  bounded, fail closed, transaction-id + echoed-Client-ID matched, walking
+  the options nested in an IA_NA; the single `write_message` encoder shared
+  by Solicit / Request / Renew / Rebind / Release / Decline) and the RFC
+  8415 §18.2 client state machine (`Dhcp6Client`): Init → Soliciting →
+  Requesting → Bound → Renewing → Rebinding with Release/Decline teardown
+  and lease-expiry / NoBinding restart, the RFC 8415 §15 randomised RT
+  retransmission (§7.6 IRT/MRT/MRC), and server-or-default T1/T2 renewal
+  timers. Pure and event-driven like `dhcp` (`poll`/`on_reply` take `now`,
+  emit `Action`s, re-arm from a tickless `next_deadline`); the transaction
+  id and RT jitter are caller-supplied CSPRNG draws (the `tcp::conn` `iss`
+  precedent). The client forms its own DUID-LL from the interface MAC. The
+  netstack integration is `plans/DHCP.md` D4b (not yet landed); the engine
+  stands alone, host-tested and fuzzed.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host
