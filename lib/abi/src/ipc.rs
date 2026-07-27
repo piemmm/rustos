@@ -26,7 +26,8 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the seat
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
 /// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
-/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), the per-NIC
+/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), the sandboxed
+/// font service ([`crate::font_ipc::FONT_ENDPOINT`]), the per-NIC
 /// driver device channels
 /// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
 /// `+ NET_CHANNEL_ENDPOINT_COUNT`), and the per-console elevation
@@ -52,6 +53,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::window_ipc::WINDOW_ENDPOINT
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
+        || id == crate::font_ipc::FONT_ENDPOINT
     {
         return true;
     }
@@ -427,6 +429,7 @@ mod tests {
         assert!(is_reserved_endpoint(crate::window_ipc::WINDOW_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net_ipc::NETSTACK_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
         let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
         let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
         assert!(is_reserved_endpoint(base));

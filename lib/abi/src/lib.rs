@@ -27,6 +27,7 @@ pub mod driver_store;
 pub mod elevate;
 pub mod error;
 pub mod field;
+pub mod font_ipc;
 pub mod fs;
 pub mod hwtree;
 pub mod input;

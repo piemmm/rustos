@@ -185,7 +185,26 @@ the font work and is fixed in its own step.
 
 - **Investigation — done.** Root cause and constraints measured (§1, §1.1).
 - **Design — done** (§2). No "future work" left implicit.
-- **FS-1 … FS-8 — planned.**
+- **FS-1 — done.** The `FONT_ENDPOINT` wire protocol lives in
+  `lib/abi/src/font_ipc.rs`: a fixed 16-byte [`FontRequest`] —
+  `Glyph { scalar: char, cell_height }` and `Metrics { cell_height }`, the
+  scalar carried as a `char` so a surrogate/out-of-range code point is
+  unrepresentable in an accepted request — a variable-length glyph-coverage
+  reply (status word + width + height + advance + `width*height` 8-bit
+  samples, bounded by `FONT_MAX_GLYPH_REPLY`), and a fixed metrics reply
+  (`FontMetrics { cell_width, cell_height, baseline }`). One
+  `glyph_coverage_len` bounds check governs both the encode and decode sides
+  so producer and consumer cannot diverge; the status-word convention is the
+  shared `crate::reply` frame. `FONT_ENDPOINT` (`0x464E_5400`) is registered
+  in `is_reserved_endpoint` (privileged bind), the decoders are enrolled in
+  the `fuzz_decode` harness, and every reply decode fails closed on a corrupt
+  frame. The cell-height bounds `FONT_MIN/MAX_CELL_HEIGHT` (8..=512) are the
+  canonical bounds the FS-4 client will adopt in place of
+  `BitmapFont::MIN/MAX_PIXEL_HEIGHT` (§2.2). Font IPC is not part of the
+  curated C-ABI surface, so the generated headers are unchanged. `docs/src`
+  prose is deferred to FS-8 with the service/client, matching how the sibling
+  `display_ipc`/`window_ipc` wire protocols are documented.
+- **FS-2 … FS-8 — planned.**
 
 ## 5. Cross-references
 
