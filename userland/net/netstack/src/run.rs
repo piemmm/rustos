@@ -1029,6 +1029,16 @@ mod program {
                         Level::Info,
                         "netstack: DHCPv4 lease lost (address withdrawn)",
                     ),
+                    StackEvent::Dhcp6LeaseAcquired { .. } => audit(
+                        events::DHCP6_LEASE_ACQUIRED,
+                        Level::Info,
+                        "netstack: DHCPv6 lease acquired (address applied)",
+                    ),
+                    StackEvent::Dhcp6LeaseLost => audit(
+                        events::DHCP6_LEASE_LOST,
+                        Level::Info,
+                        "netstack: DHCPv6 lease lost (address withdrawn)",
+                    ),
                     StackEvent::UdpDatagram { .. } | StackEvent::EchoReply { .. } => {
                         emit_deliveries(&sockets.deliver(event));
                     }

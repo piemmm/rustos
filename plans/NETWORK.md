@@ -2003,7 +2003,8 @@ No hidden state, no per-driver config files, no imperative boot scripts.
   - addressing: `<iface>.ipv4.method` (`static` | `dhcp` | `disabled`;
     `dhcp` leases the address over RFC 2131 DHCPv4, `plans/DHCP.md`),
     `<iface>.ipv4.address`/`gateway`, `<iface>.ipv6.method` (`slaac` |
-    `static` | `disabled`), `<iface>.ipv6.address`/`gateway`,
+    `static` | `dhcp` | `disabled`; `dhcp` leases an address over RFC 8415
+    stateful DHCPv6, `plans/DHCP.md`), `<iface>.ipv6.address`/`gateway`,
     `<iface>.mtu`;
   - bonding (see 6.3): `<iface>.bond.members`, `<iface>.bond.mode`
     (`active-backup` | `balance`), `<iface>.bond.monitor-interval`,

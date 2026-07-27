@@ -112,6 +112,15 @@ pub const DHCP_LEASE_ACQUIRED: EventId = EventId(16_020);
 /// re-acquires. Recorded at `Info` — losing an address is an audited fact.
 pub const DHCP_LEASE_LOST: EventId = EventId(16_021);
 
+/// An interface's DHCPv6 client committed a lease (RFC 8415): the engine
+/// applied the leased IA_NA address as a host `/128`. A security-relevant
+/// addressing change, recorded at `Info`.
+pub const DHCP6_LEASE_ACQUIRED: EventId = EventId(16_022);
+/// An interface's DHCPv6 lease was lost (expiry, `NoBinding`, or a changed
+/// address on renewal): the engine withdrew the address and the client
+/// re-acquires. Recorded at `Info` — losing an address is an audited fact.
+pub const DHCP6_LEASE_LOST: EventId = EventId(16_023);
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -121,7 +130,7 @@ mod tests {
         SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_FAILOVER};
-    use super::{DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
+    use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -147,6 +156,8 @@ mod tests {
             BOND_FAILOVER,
             DHCP_LEASE_ACQUIRED,
             DHCP_LEASE_LOST,
+            DHCP6_LEASE_ACQUIRED,
+            DHCP6_LEASE_LOST,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -176,6 +187,8 @@ mod tests {
             BOND_FAILOVER.0,
             DHCP_LEASE_ACQUIRED.0,
             DHCP_LEASE_LOST.0,
+            DHCP6_LEASE_ACQUIRED.0,
+            DHCP6_LEASE_LOST.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

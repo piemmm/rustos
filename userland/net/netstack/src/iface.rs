@@ -374,7 +374,7 @@ impl Netstack {
                 matches!(msg.ipv4, NetIpv4Config::Static { .. } | NetIpv4Config::Dhcp)
                     || matches!(
                         msg.ipv6,
-                        NetIpv6Config::Static { .. } | NetIpv6Config::Slaac
+                        NetIpv6Config::Static { .. } | NetIpv6Config::Slaac | NetIpv6Config::Dhcp
                     );
             if assigns_address {
                 return Err(Errno::PermissionDenied);
@@ -396,11 +396,15 @@ impl Netstack {
             self.interfaces[index].name = msg.alias;
             renamed = Some((old, msg.alias));
         }
-        // A DHCPv4 interface needs a fresh CSPRNG source for its client.
-        // Draw it before borrowing the interface's stack (the factory is a
-        // sibling field of the interface table); only the DHCP method
-        // consumes it, and a re-applied DHCP config drops it unused.
-        let dhcp_rng = matches!(msg.ipv4, NetIpv4Config::Dhcp).then(|| (self.dhcp_rng_factory)());
+        // A DHCPv4/DHCPv6 interface needs a fresh CSPRNG source for its
+        // client, drawn before borrowing the interface's stack (the factory
+        // is a sibling field of the interface table). `.0` feeds the DHCPv4
+        // client, `.1` the DHCPv6 client; the non-selected method draws
+        // `None`, and a re-applied DHCP config drops its draw unused.
+        let dhcp_rng = (
+            matches!(msg.ipv4, NetIpv4Config::Dhcp).then(|| (self.dhcp_rng_factory)()),
+            matches!(msg.ipv6, NetIpv6Config::Dhcp).then(|| (self.dhcp_rng_factory)()),
+        );
         let stack = &mut self.interfaces[index].stack;
         if msg.mtu != 0 {
             stack.set_mtu(msg.mtu);
@@ -426,34 +430,13 @@ impl Netstack {
                 // running client (and its lease) rather than restart
                 // acquisition. A fresh interface starts the client now.
                 if !stack.dhcp_active() {
-                    if let Some(rng) = dhcp_rng {
+                    if let Some(rng) = dhcp_rng.0 {
                         stack.enable_dhcp(rng);
                     }
                 }
             }
         }
-        match msg.ipv6 {
-            NetIpv6Config::Disabled => stack.set_ipv6_enabled(false, now),
-            NetIpv6Config::Slaac => stack.set_ipv6_enabled(true, now),
-            NetIpv6Config::Static {
-                addr,
-                prefix,
-                gateway,
-            } => {
-                stack.set_ipv6_enabled(true, now);
-                match stack.add_ipv6_static(Ipv6Addr::from(addr), prefix, now) {
-                    // A re-applied identical address is not an error: this
-                    // apply is idempotent (config-vs-bind ordering aside).
-                    Ok(()) | Err(AddrError::Duplicate) => {}
-                    Err(_) => return Err(Errno::OutOfRange),
-                }
-                if let Some(gw) = gateway {
-                    stack
-                        .add_route_v6(Ipv6Addr::UNSPECIFIED, 0, Some(Ipv6Addr::from(gw)))
-                        .map_err(|_| Errno::OutOfRange)?;
-                }
-            }
-        }
+        apply_ipv6_config(stack, msg.ipv6, dhcp_rng.1, now)?;
         Ok(renamed)
     }
 
@@ -1765,6 +1748,66 @@ fn v4_bytes(addr: Ipv4Addr) -> [u8; 16] {
     let mut out = [0u8; 16];
     out[..4].copy_from_slice(&addr.octets());
     out
+}
+
+/// Apply an interface's IPv6 addressing (`network.conf` `<iface>.ipv6.*`)
+/// to its `stack`. Split out of [`Netstack::apply_interface_config`] so
+/// each family's addressing reads as one unit. `dhcp6_rng` is the
+/// pre-drawn CSPRNG source for a DHCPv6 interface (the factory is a sibling
+/// field of the interface table, so the draw happens before the stack is
+/// borrowed); it is consumed only when DHCPv6 starts and dropped otherwise.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] when the engine refuses a static address or its
+/// gateway (fail closed).
+fn apply_ipv6_config(
+    stack: &mut Stack,
+    ipv6: NetIpv6Config,
+    dhcp6_rng: Option<Box<dyn FnMut() -> u32>>,
+    now: Duration64,
+) -> Result<(), Errno> {
+    match ipv6 {
+        NetIpv6Config::Disabled => {
+            stack.disable_dhcp6();
+            stack.set_ipv6_enabled(false, now);
+        }
+        NetIpv6Config::Slaac => {
+            stack.disable_dhcp6();
+            stack.set_ipv6_enabled(true, now);
+        }
+        NetIpv6Config::Static {
+            addr,
+            prefix,
+            gateway,
+        } => {
+            stack.disable_dhcp6();
+            stack.set_ipv6_enabled(true, now);
+            match stack.add_ipv6_static(Ipv6Addr::from(addr), prefix, now) {
+                // A re-applied identical address is not an error: this
+                // apply is idempotent (config-vs-bind ordering aside).
+                Ok(()) | Err(AddrError::Duplicate) => {}
+                Err(_) => return Err(Errno::OutOfRange),
+            }
+            if let Some(gw) = gateway {
+                stack
+                    .add_route_v6(Ipv6Addr::UNSPECIFIED, 0, Some(Ipv6Addr::from(gw)))
+                    .map_err(|_| Errno::OutOfRange)?;
+            }
+        }
+        NetIpv6Config::Dhcp => {
+            // Re-applying the same DHCPv6 config is idempotent: keep the
+            // running client (and its lease) rather than restart
+            // acquisition. A fresh interface starts the client now
+            // (enabling IPv6 forms the link-local it rides on).
+            if !stack.dhcp6_active() {
+                if let Some(rng) = dhcp6_rng {
+                    stack.enable_dhcp6(rng, now);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

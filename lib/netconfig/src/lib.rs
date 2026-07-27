@@ -178,18 +178,25 @@ pub enum Ipv6Method {
     /// A statically configured address (`<iface>.ipv6.address`) and
     /// optional gateway (`<iface>.ipv6.gateway`).
     Static,
+    /// A stateful DHCPv6-leased address (RFC 8415): the stack runs a
+    /// DHCPv6 client on this interface and applies the leased IA_NA
+    /// address. The interface keeps its autoconfigured link-local (DHCPv6
+    /// rides on it); no static `<iface>.ipv6.address`/`gateway` is set.
+    Dhcp,
     /// No IPv6 on this interface: it binds no v6 address (not even the
     /// link-local) and answers no v6 packets.
     Disabled,
 }
 
 impl Ipv6Method {
-    /// The canonical value spelling (`slaac` / `static` / `disabled`).
+    /// The canonical value spelling (`slaac` / `static` / `dhcp` /
+    /// `disabled`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Slaac => "slaac",
             Self::Static => "static",
+            Self::Dhcp => "dhcp",
             Self::Disabled => "disabled",
         }
     }
@@ -200,6 +207,7 @@ impl Ipv6Method {
         match value {
             "slaac" => Some(Self::Slaac),
             "static" => Some(Self::Static),
+            "dhcp" => Some(Self::Dhcp),
             "disabled" => Some(Self::Disabled),
             _ => None,
         }
@@ -1040,7 +1048,10 @@ impl NetworkConfig {
                     return Err(ConfigError::InconsistentInterface);
                 }
             }
-            Ipv6Method::Slaac | Ipv6Method::Disabled => {
+            // None of SLAAC, DHCPv6, or disabled may carry a static
+            // address or gateway (DHCPv6 supplies the address from the
+            // lease; SLAAC from Router Advertisements).
+            Ipv6Method::Slaac | Ipv6Method::Dhcp | Ipv6Method::Disabled => {
                 if iface.ipv6_address.is_some() || iface.ipv6_gateway.is_some() {
                     return Err(ConfigError::InconsistentInterface);
                 }
@@ -1503,6 +1514,29 @@ outer.bond.members inner,eth0
     }
 
     #[test]
+    fn dhcp_ipv6_method_parses_and_forbids_a_static_address() {
+        // A plain DHCPv6 interface parses and needs no address.
+        let config = NetworkConfig::parse("wan.ipv6.method dhcp\n").expect("parses");
+        assert_eq!(
+            config.interface("wan").expect("wan").ipv6_method(),
+            Ipv6Method::Dhcp
+        );
+        // A DHCPv6 interface may not also carry a static address or gateway.
+        assert_eq!(
+            err("wan.ipv6.method dhcp\nwan.ipv6.address 2001:db8::5/64\n"),
+            ConfigError::InconsistentInterface
+        );
+        assert_eq!(
+            err("wan.ipv6.method dhcp\nwan.ipv6.gateway 2001:db8::1\n"),
+            ConfigError::InconsistentInterface
+        );
+        // It round-trips through render/parse.
+        let rendered = config.render();
+        assert!(rendered.contains("wan.ipv6.method dhcp"));
+        assert_eq!(NetworkConfig::parse(&rendered).expect("re-parses"), config);
+    }
+
+    #[test]
     fn monitor_interval_bounds_are_enforced() {
         let below = format!(
             "bond0.bond.monitor-interval {}\n",
@@ -1596,7 +1630,12 @@ bond0.bond.primary eth0
         for method in [Ipv4Method::Disabled, Ipv4Method::Static, Ipv4Method::Dhcp] {
             assert_eq!(Ipv4Method::from_value(method.as_str()), Some(method));
         }
-        for method in [Ipv6Method::Slaac, Ipv6Method::Static, Ipv6Method::Disabled] {
+        for method in [
+            Ipv6Method::Slaac,
+            Ipv6Method::Static,
+            Ipv6Method::Dhcp,
+            Ipv6Method::Disabled,
+        ] {
             assert_eq!(Ipv6Method::from_value(method.as_str()), Some(method));
         }
         for mode in [BondMode::ActiveBackup, BondMode::Balance] {

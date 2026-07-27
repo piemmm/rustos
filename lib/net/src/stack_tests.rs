@@ -315,6 +315,224 @@ fn disable_dhcp_withdraws_the_lease_and_stops_the_client() {
     assert!(c.iface().ipv4().is_none(), "its lease is withdrawn");
 }
 
+// --- DHCPv6 (RFC 8415) --------------------------------------------------
+
+/// A DHCPv6-configured client stack (IPv6 enabled — DHCPv6 rides on the
+/// link-local). The engine's transaction id + jitter come from the same
+/// deterministic counter the v4 tests use.
+fn dhcp6_client() -> Stack {
+    let mut c = stack(MAC_A, IID_A);
+    c.enable_dhcp6(dhcp_counter(), t(0));
+    c
+}
+
+/// The leased IA_NA address the test server hands out.
+const DHCP6_LEASED: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1234);
+/// The client's IA identifier (derived from `MAC_A`'s low four octets).
+const DHCP6_IAID: u32 = 1;
+/// The test server's DUID (a DUID-LL of `MAC_B`).
+const SERVER_DUID6: [u8; 10] = [0, 3, 0, 1, 0x02, 0xBB, 0, 0, 0, 0x02];
+
+/// The DHCPv6 message bytes carried by one emitted frame (the Ethernet,
+/// IPv6, and UDP headers stripped) plus the UDP ports, or `None` if it is
+/// not a UDP datagram.
+fn dhcp6_out(frame: &[u8]) -> Option<(u16, u16, Vec<u8>)> {
+    let eth = EthernetFrame::parse(frame)?;
+    if eth.ethertype != ETHERTYPE_IPV6 {
+        return None;
+    }
+    let (hdr, payload) = Ipv6Header::parse(eth.payload)?;
+    if hdr.next_header != crate::udp::PROTOCOL_UDP {
+        return None;
+    }
+    let pseudo = crate::udp::Pseudo::V6 {
+        source: hdr.source,
+        destination: hdr.destination,
+    };
+    let dg = UdpDatagram::parse(pseudo, payload)?;
+    Some((dg.source_port, dg.destination_port, dg.payload.to_vec()))
+}
+
+/// The 24-bit transaction id from a DHCPv6 message's header.
+fn dhcp6_xid(msg: &[u8]) -> u32 {
+    u32::from_be_bytes([0, msg[1], msg[2], msg[3]])
+}
+
+/// Append a DHCPv6 option (2-byte code, 2-byte length, body).
+fn push_opt6(out: &mut Vec<u8>, code: u16, data: &[u8]) {
+    out.extend_from_slice(&code.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(data.len()).expect("fits").to_be_bytes());
+    out.extend_from_slice(data);
+}
+
+/// Build a server→client DHCPv6 message (Advertise `2` or Reply `7`) with
+/// one `IA_NA`/IAADDR, wrapped in UDP(547→546)/IPv6(server-LL→client-LL)/
+/// Ethernet.
+fn dhcp6_server_frame(mt: u8, xid: u32, preferred: u32, valid: u32, t1: u32, t2: u32) -> Vec<u8> {
+    let mut msg = alloc::vec![mt];
+    msg.extend_from_slice(&xid.to_be_bytes()[1..4]);
+    // Client Identifier (echoing our DUID-LL) and Server Identifier.
+    push_opt6(
+        &mut msg,
+        1,
+        crate::dhcpv6::Duid::ll_ethernet(MAC_A).as_slice(),
+    );
+    push_opt6(&mut msg, 2, &SERVER_DUID6);
+    // IA_NA: IAID, T1, T2, then the encapsulated IA Address.
+    let mut ia = Vec::new();
+    ia.extend_from_slice(&DHCP6_IAID.to_be_bytes());
+    ia.extend_from_slice(&t1.to_be_bytes());
+    ia.extend_from_slice(&t2.to_be_bytes());
+    let mut iaddr = Vec::new();
+    iaddr.extend_from_slice(&DHCP6_LEASED.octets());
+    iaddr.extend_from_slice(&preferred.to_be_bytes());
+    iaddr.extend_from_slice(&valid.to_be_bytes());
+    push_opt6(&mut ia, 5, &iaddr);
+    push_opt6(&mut msg, 3, &ia);
+    // UDP 547 → 546 over IPv6, server link-local → client link-local.
+    let src = link_local(IID_B);
+    let dst = link_local(IID_A);
+    let mut udpbuf = alloc::vec![0u8; crate::udp::UDP_HEADER_LEN + msg.len()];
+    crate::udp::write(
+        crate::udp::Pseudo::V6 {
+            source: src,
+            destination: dst,
+        },
+        547,
+        546,
+        &msg,
+        &mut udpbuf,
+    )
+    .expect("udp");
+    let ip = Ipv6Header::new(src, dst, crate::udp::PROTOCOL_UDP);
+    let packet = ipv6_packet(&ip, &udpbuf).expect("ipv6");
+    let mut frame = alloc::vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, MAC_A, MAC_B, ETHERTYPE_IPV6).expect("eth");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// Advance the client past link-local DAD until its first Solicit egresses,
+/// returning that Solicit's transaction id.
+fn dhcp6_solicit_xid(c: &mut Stack) -> u32 {
+    let mut xid = None;
+    for s in 0..=2 {
+        for f in c.advance_collect(t(s)).frames {
+            if let Some((546, 547, msg)) = dhcp6_out(&f.bytes) {
+                if msg[0] == 1 {
+                    xid = Some(dhcp6_xid(&msg));
+                }
+            }
+        }
+    }
+    xid.expect("a Solicit egressed")
+}
+
+/// The transaction id of the Request the client emits in response to
+/// `frames` (its Solicit → Advertise → Request step).
+fn dhcp6_request_xid(frames: &[TxFrame]) -> u32 {
+    let request = frames
+        .iter()
+        .find_map(|f| {
+            let (sp, dp, msg) = dhcp6_out(&f.bytes)?;
+            (sp == 546 && dp == 547 && msg[0] == 3).then_some(msg)
+        })
+        .expect("a Request egressed");
+    dhcp6_xid(&request)
+}
+
+/// Drive a fresh DHCPv6 client through Solicit/Advertise/Request/Reply to a
+/// committed lease at `t(2)`.
+fn dhcp6_drive_to_bound(c: &mut Stack) {
+    let sol_xid = dhcp6_solicit_xid(c);
+    let advertise = dhcp6_server_frame(2, sol_xid, 3600, 7200, 1800, 2880);
+    let out = c.on_frame_collect(&advertise, t(2));
+    let req_xid = dhcp6_request_xid(&out.frames);
+    let reply = dhcp6_server_frame(7, req_xid, 3600, 7200, 1800, 2880);
+    c.on_frame_collect(&reply, t(2));
+}
+
+/// Whether the interface holds a DHCPv6-leased address.
+fn has_dhcp6_addr(c: &Stack) -> bool {
+    c.iface()
+        .ipv6_addresses()
+        .iter()
+        .any(|a| a.origin == crate::iface::AddrOrigin::Dhcp)
+}
+
+#[test]
+fn dhcp6_acquires_a_lease_end_to_end() {
+    let mut c = dhcp6_client();
+    let sol_xid = dhcp6_solicit_xid(&mut c);
+    assert!(!has_dhcp6_addr(&c), "no leased address before the lease");
+
+    // The server Advertises; the client Requests the offered address.
+    let advertise = dhcp6_server_frame(2, sol_xid, 3600, 7200, 1800, 2880);
+    let out = c.on_frame_collect(&advertise, t(2));
+    let req_xid = dhcp6_request_xid(&out.frames);
+
+    // The server Replies; the lease is applied as a /128 and audited.
+    let reply = dhcp6_server_frame(7, req_xid, 3600, 7200, 1800, 2880);
+    let out = c.on_frame_collect(&reply, t(2));
+    assert!(
+        c.iface()
+            .ipv6_addresses()
+            .iter()
+            .any(|a| a.addr == DHCP6_LEASED
+                && a.prefix_len == 128
+                && a.origin == crate::iface::AddrOrigin::Dhcp),
+        "the leased IA_NA address is applied as a host /128"
+    );
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        StackEvent::Dhcp6LeaseAcquired { address, valid_lifetime }
+            if *address == DHCP6_LEASED && *valid_lifetime == 7200
+    )));
+}
+
+#[test]
+fn dhcp6_reply_is_intercepted_before_the_address_filter() {
+    // A DHCPv6 reply is consumed by the client and never surfaces as an
+    // ordinary datagram.
+    let mut c = dhcp6_client();
+    let sol_xid = dhcp6_solicit_xid(&mut c);
+    let advertise = dhcp6_server_frame(2, sol_xid, 3600, 7200, 1800, 2880);
+    let out = c.on_frame_collect(&advertise, t(2));
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, StackEvent::UdpDatagram { .. })),
+        "a DHCPv6 reply is never surfaced as an ordinary datagram"
+    );
+}
+
+#[test]
+fn dhcp6_lease_expiry_withdraws_the_address() {
+    let mut c = dhcp6_client();
+    dhcp6_drive_to_bound(&mut c);
+    assert!(has_dhcp6_addr(&c), "lease held");
+    // Drive the timers with no server answering: RENEWING at T1 (1802 s),
+    // REBINDING at T2 (2882 s), then withdrawal at expiry (7202 s).
+    c.advance_collect(t(1802));
+    c.advance_collect(t(2882));
+    let out = c.advance_collect(t(7202));
+    assert!(!has_dhcp6_addr(&c), "the lease is withdrawn at expiry");
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, StackEvent::Dhcp6LeaseLost)));
+}
+
+#[test]
+fn disable_dhcp6_withdraws_the_lease_and_stops_the_client() {
+    let mut c = dhcp6_client();
+    dhcp6_drive_to_bound(&mut c);
+    assert!(c.dhcp6_active() && has_dhcp6_addr(&c));
+    c.disable_dhcp6();
+    assert!(!c.dhcp6_active(), "the client is stopped");
+    assert!(!has_dhcp6_addr(&c), "its lease is withdrawn");
+}
+
 #[test]
 fn construction_refuses_bad_device_facts() {
     let mut bad = facts(MAC_A);

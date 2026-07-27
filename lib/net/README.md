@@ -142,9 +142,20 @@ exercise.
   timers. Pure and event-driven like `dhcp` (`poll`/`on_reply` take `now`,
   emit `Action`s, re-arm from a tickless `next_deadline`); the transaction
   id and RT jitter are caller-supplied CSPRNG draws (the `tcp::conn` `iss`
-  precedent). The client forms its own DUID-LL from the interface MAC. The
-  netstack integration is `plans/DHCP.md` D4b (not yet landed); the engine
-  stands alone, host-tested and fuzzed.
+  precedent). The client forms its own DUID-LL from the interface MAC.
+  `Stack` drives this client when an interface selects DHCPv6
+  (`enable_dhcp6`, the `<iface>.ipv6.method = dhcp` key): it enables IPv6 so
+  the link-local it sources from forms, polls the client from `advance`,
+  folds its deadline into `next_deadline`, frames each send as a
+  UDP(546→547)/IPv6/Ethernet datagram to the `ff02::1:2` all-servers
+  multicast (skipped until the link-local passes DAD, never an unspecified
+  source), and intercepts a received reply (UDP 547→546) in `on_ipv6`
+  **before** the destination filter. On `Configured` it assigns the leased
+  IA_NA address as a host `/128` (on-link reachability comes from RAs) — and
+  Declines + re-acquires it if it fails DAD (RFC 8415 §18.2.10.1); on
+  `Deconfigured` it withdraws it, each surfaced as a
+  `StackEvent::Dhcp6Lease*` the service audits (`plans/DHCP.md` D4b). The
+  engine is host-tested and fuzzed.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

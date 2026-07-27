@@ -114,8 +114,9 @@ stable admin alias (`wan`, `lan0`) bound to hardware by its MAC
 (`<iface>.match.mac`) — never by discovery order — and carries its
 addressing (`<iface>.ipv4.method static|dhcp|disabled` — `static` with
 `ipv4.address`/`ipv4.gateway`, `dhcp` leasing them over RFC 2131 DHCPv4;
-`<iface>.ipv6.method slaac|static|disabled` with
-`ipv6.address`/`ipv6.gateway`) and an optional `<iface>.mtu`.
+`<iface>.ipv6.method slaac|static|dhcp|disabled` — `static` with
+`ipv6.address`/`ipv6.gateway`, `dhcp` leasing an address over RFC 8415
+stateful DHCPv6) and an optional `<iface>.mtu`.
 
 ```
 wan.match.mac    52:54:00:12:34:56

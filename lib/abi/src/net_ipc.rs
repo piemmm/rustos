@@ -715,6 +715,12 @@ pub enum NetIpv6Config {
         /// interface prefix, so it is validated only as a unicast address.
         gateway: Option<[u8; 16]>,
     },
+    /// Stateful dynamic addressing via the RFC 8415 DHCPv6 client: the
+    /// stack's interface engine runs a DHCPv6 client on this interface and
+    /// applies the leased IA_NA address for the lease's life. The interface
+    /// still forms its link-local (DHCPv6 rides on it); the message carries
+    /// no static address fields (the lease supplies the address).
+    Dhcp,
 }
 
 /// Wire discriminant of [`NetIpv4Config::Disabled`].
@@ -729,6 +735,8 @@ const IPV6_METHOD_DISABLED: u8 = 0;
 const IPV6_METHOD_SLAAC: u8 = 1;
 /// Wire discriminant of [`NetIpv6Config::Static`].
 const IPV6_METHOD_STATIC: u8 = 2;
+/// Wire discriminant of [`NetIpv6Config::Dhcp`].
+const IPV6_METHOD_DHCP: u8 = 3;
 
 /// One managed interface's declarative configuration, pushed to
 /// `netstack` post-unlock by the FS-capable device manager (which reads
@@ -828,6 +836,7 @@ impl NetInterfaceConfigMsg {
                     out[60..76].copy_from_slice(&gw);
                 }
             }
+            NetIpv6Config::Dhcp => out[41] = IPV6_METHOD_DHCP,
         }
         put_u16(&mut out, 76, self.mtu);
         if let Some(node) = self.match_node {
@@ -1043,6 +1052,15 @@ fn decode_ipv6_config(bytes: &[u8]) -> Result<NetIpv6Config, Errno> {
                 prefix,
                 gateway,
             })
+        }
+        IPV6_METHOD_DHCP => {
+            // DHCPv6 carries no static address fields; the whole IPv6
+            // address block must be zero (a set field is a malformed
+            // message, not a silently-ignored one).
+            if !addressless {
+                return Err(Errno::BadMagic);
+            }
+            Ok(NetIpv6Config::Dhcp)
         }
         _ => Err(Errno::OutOfRange),
     }
@@ -2362,6 +2380,15 @@ mod tests {
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
             },
+            // Disabled v4, DHCPv6 (no static address fields).
+            NetInterfaceConfigMsg {
+                alias: name("wan6"),
+                match_mac: Some([0x52, 0x54, 0x00, 0x00, 0x00, 0x02]),
+                match_node: None,
+                ipv4: NetIpv4Config::Disabled,
+                ipv6: NetIpv6Config::Dhcp,
+                mtu: 1500,
+            },
         ] {
             let bytes = msg.to_le_bytes();
             assert_eq!(NetInterfaceConfigMsg::from_bytes(&bytes), Ok(msg));
@@ -2396,6 +2423,46 @@ mod tests {
         // A set address byte (byte 32).
         let mut bad = good;
         bad[32] = 10;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn dhcp_ipv6_config_rejects_smuggled_address_fields() {
+        // DHCPv6 carries no static address; a set prefix/address/gateway
+        // behind the DHCPv6 method is a malformed message, not ignored.
+        let good = NetInterfaceConfigMsg {
+            alias: name("wan6"),
+            match_mac: None,
+            match_node: None,
+            ipv4: NetIpv4Config::Disabled,
+            ipv6: NetIpv6Config::Dhcp,
+            mtu: 0,
+        }
+        .to_le_bytes();
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&good).map(|m| m.ipv6),
+            Ok(NetIpv6Config::Dhcp)
+        );
+        // A non-zero prefix (byte 42) behind the DHCPv6 method (byte 41 == 3).
+        let mut bad = good;
+        bad[42] = 64;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A set address byte (byte 43).
+        let mut bad = good;
+        bad[43] = 0x20;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+        // A set gateway present-flag (byte 59).
+        let mut bad = good;
+        bad[59] = 1;
         assert_eq!(
             NetInterfaceConfigMsg::from_bytes(&bad),
             Err(Errno::BadMagic)

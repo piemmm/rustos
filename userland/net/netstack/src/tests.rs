@@ -2703,6 +2703,59 @@ fn interface_config_dhcp_starts_and_stops_the_client() {
 }
 
 #[test]
+fn interface_config_dhcp6_starts_and_stops_the_client() {
+    let mut stack = managed_stack();
+    // Selecting DHCPv6 starts the client (IPv6 enabled — the link-local it
+    // rides on forms — with no leased address yet).
+    let dhcp6 = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        match_node: None,
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Dhcp,
+        mtu: 0,
+    };
+    stack.apply_interface_config(&dhcp6, t(1)).expect("applied");
+    assert!(
+        stack
+            .interface(name("wan"))
+            .expect("wan")
+            .stack()
+            .dhcp6_active(),
+        "the DHCPv6 client is running"
+    );
+    // Re-applying the same DHCPv6 config is idempotent (client stays up).
+    stack
+        .apply_interface_config(&dhcp6, t(2))
+        .expect("re-applied");
+    assert!(stack
+        .interface(name("wan"))
+        .expect("wan")
+        .stack()
+        .dhcp6_active());
+    // Switching to SLAAC stops the client.
+    let slaac = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: None,
+        match_node: None,
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+    };
+    stack
+        .apply_interface_config(&slaac, t(3))
+        .expect("applied slaac");
+    assert!(
+        !stack
+            .interface(name("wan"))
+            .expect("wan")
+            .stack()
+            .dhcp6_active(),
+        "the DHCPv6 client is stopped"
+    );
+}
+
+#[test]
 fn interface_config_assigns_a_static_ipv6_address() {
     let mut stack = managed_stack();
     let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);

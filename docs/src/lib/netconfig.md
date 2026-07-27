@@ -53,7 +53,7 @@ Every key is `<iface>.<suffix>` where the suffix is drawn from the closed
 | `ipv4.method`           | `static` \| `dhcp` \| `disabled`          | IPv4 addressing (default `disabled`) |
 | `ipv4.address`          | `a.b.c.d/prefix`                         | the static IPv4 address (`static` only) |
 | `ipv4.gateway`          | `a.b.c.d`                                | the IPv4 default gateway (`static` only) |
-| `ipv6.method`           | `slaac` \| `static` \| `disabled`        | IPv6 addressing (default `slaac`) |
+| `ipv6.method`           | `slaac` \| `static` \| `dhcp` \| `disabled` | IPv6 addressing (default `slaac`) |
 | `ipv6.address`          | `addr/prefix`                            | the static IPv6 address (`static` only) |
 | `ipv6.gateway`          | `addr`                                   | the IPv6 default gateway (`static` only) |
 | `mtu`                   | `1280..=65535`                           | the interface MTU |
@@ -84,9 +84,9 @@ invariants a per-line parse cannot, whole-document, fail-closed
 
 Addressing is also checked for internal consistency: a `static` method
 requires its `address`, and an `address`/`gateway` requires the `static`
-method. A `dhcp` (DHCPv4) interface carries no static `ipv4.address`/
-`ipv4.gateway` — the lease supplies both — so setting either alongside
-`dhcp` is inconsistent and refused.
+method. A `dhcp` interface (DHCPv4 on `ipv4`, RFC 8415 stateful DHCPv6 on
+`ipv6`) carries no static `address`/`gateway` — the lease supplies the
+address — so setting either alongside `dhcp` is inconsistent and refused.
 
 ## API shape
 

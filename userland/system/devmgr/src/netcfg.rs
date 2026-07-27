@@ -340,6 +340,7 @@ fn addressing_of(
                 gateway: iface.ipv6_gateway.map(|gw| gw.octets()),
             }
         }
+        Ipv6Method::Dhcp => tairix_abi::net_ipc::NetIpv6Config::Dhcp,
     };
     Some((ipv4, ipv6))
 }
@@ -1002,6 +1003,26 @@ wan.ipv4.method dhcp
             .find(|m| m.alias == iface_name("wan"))
             .expect("wan");
         assert!(matches!(wan.ipv4, tairix_abi::net_ipc::NetIpv4Config::Dhcp));
+        assert!(plan.rejected.is_empty());
+    }
+
+    #[cfg(feature = "program")]
+    #[test]
+    fn a_dhcpv6_interface_maps_to_the_dhcp_addressing() {
+        // A `wan` interface configured for DHCPv6 yields a message whose
+        // IPv6 addressing is `Dhcp` (no static address fields).
+        let text = "\
+wan.match.mac aa:bb:cc:dd:ee:ff
+wan.ipv6.method dhcp
+";
+        let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        let plan = interface_configs_from_config(&config);
+        let wan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("wan"))
+            .expect("wan");
+        assert!(matches!(wan.ipv6, tairix_abi::net_ipc::NetIpv6Config::Dhcp));
         assert!(plan.rejected.is_empty());
     }
 

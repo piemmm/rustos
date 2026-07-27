@@ -372,9 +372,27 @@ deterministic and never generates randomness itself. `next_deadline` is a
 folded one-shot, so a bound interface with a permanent lease — or an idle
 client after a completed Release — costs no timer wakeups.
 
-The netstack integration that drives this client for an interface configured
-for DHCPv6 is `plans/DHCP.md` D4b (not yet landed); the engine here stands
-alone, host-tested and fuzzed (`fuzz_net_dhcpv6`).
+`Stack` drives this client when an interface is configured for DHCPv6
+(`Stack::enable_dhcp6`, selected by the `<iface>.ipv6.method = dhcp` key,
+`plans/DHCP.md` D4b): enabling it turns IPv6 on so the link-local the client
+sources its messages from forms, polls the client from `Stack::advance`,
+folds the client's deadline into `Stack::next_deadline`, and frames each
+send action as a UDP(546→547)/IPv6/Ethernet datagram from the interface's
+link-local to the `ff02::1:2` all-servers multicast at hop limit 1 (the
+multicast MAC is derived directly, no neighbour resolution — and the send is
+skipped, to be retried by the client's own timer, until the link-local has
+completed DAD, never sourced from the unspecified address). A received
+DHCPv6 reply (UDP source 547 → destination 546) is intercepted in
+`Stack::on_ipv6` *before* the destination filter and never surfaces as an
+ordinary datagram. On `Configured` the stack assigns the leased IA_NA
+address as a host `/128` (DHCPv6 grants no on-link prefix — on-link
+reachability comes from Router Advertisements), and if that address later
+fails DAD it is Declined to the server and re-acquired (RFC 8415
+§18.2.10.1); on `Deconfigured` (expiry, `NoBinding`, or a changed address on
+renewal) it withdraws the leased address, leaving the link-local and any
+SLAAC/static addresses intact. Each lease change is surfaced as a
+`StackEvent::Dhcp6LeaseAcquired`/`Dhcp6LeaseLost` the service audits. The
+engine remains host-tested and fuzzed (`fuzz_net_dhcpv6`).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

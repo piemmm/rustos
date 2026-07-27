@@ -189,14 +189,45 @@ fail-closed decode; the `fuzz_net_dhcpv6` harness covers the parser and
 the state machine. No I/O, no `netstack` change yet — the engine stands
 alone and gate-green.
 
-#### D4b — netstack interface integration `[ ]`
+#### D4b — netstack interface integration `[x]`
 `Stack` drives the `Dhcp6Client` for an interface whose `network.conf`
-selects DHCPv6 as an IPv6 method (`ipv6.method dhcp`, sibling of the v4
-`ipv4.method dhcp`), framing engine output as UDP(546→547)/IPv6/Ethernet
-to `ff02::1:2` and feeding replies (UDP 547→546) back in before the
-address filter — exactly the D2 shape. Lease apply/withdraw via the IPv6
-address engine, surfaced as `StackEvent::Dhcp6Lease{Acquired,Lost}` and
-audited. Not started.
+selects DHCPv6 as an IPv6 method. Key facts for the next worker:
+- **Config:** `NetIpv6Config::Dhcp` (ABI, wire discriminant 3, no address
+  fields — decode rejects any set prefix/addr/gw), `Ipv6Method::Dhcp`
+  (`lib/netconfig`, spelled `dhcp`, forbids a static `ipv6.address`/
+  `ipv6.gateway`), mapped by devmgr `addressing_of`.
+- **Engine seam:** `Stack::{enable_dhcp6(rng, now), disable_dhcp6,
+  dhcp6_active}`. `enable_dhcp6` turns IPv6 on (so the link-local the client
+  sources from forms) and starts clean; the client + its injected CSPRNG
+  (`Box<dyn FnMut() -> u32>`) live in `Stack.dhcp6: Option<Dhcp6Driver>`.
+  The client's IA identifier is derived from the interface MAC (stable, no
+  persisted state). The service injects the rng via the existing
+  `dhcp_rng_factory` (shared with DHCPv4; both engines take
+  `&mut dyn FnMut() -> u32`); `apply_interface_config` enables it
+  idempotently for `Dhcp` and calls `disable_dhcp6` for
+  `Static`/`Slaac`/`Disabled`.
+- **Driving:** polled from `Stack::advance`, folded into
+  `Stack::next_deadline`. Every send is framed UDP(546→547)/IPv6/Ethernet
+  from the link-local to `ff02::1:2` at hop limit 1 (the multicast MAC is
+  derived directly). The send is skipped — retried by the client's timer —
+  until the link-local completes DAD, so no message is ever sourced from
+  the unspecified address. A received reply (UDP 547→546) is intercepted in
+  `Stack::on_ipv6` **before** the destination filter and never surfaces as
+  an ordinary datagram.
+- **Lease:** `Configured` assigns the leased IA_NA address as a host `/128`
+  under a new `AddrOrigin::Dhcp` (DHCPv6 grants no on-link prefix — on-link
+  reachability comes from RAs); the engine owns the lease lifetime so the
+  interface holds it with no expiry of its own. If the address fails DAD it
+  is Declined to the server and re-acquired (RFC 8415 §18.2.10.1).
+  `Deconfigured` (expiry, `NoBinding`, or a changed address on renewal)
+  withdraws it via `clear_ipv6_dhcp`, leaving the link-local and any
+  SLAAC/static addresses intact. Each is a
+  `StackEvent::Dhcp6Lease{Acquired,Lost}` the service audits (`netstack`
+  events `DHCP6_LEASE_ACQUIRED`=16022 / `DHCP6_LEASE_LOST`=16023).
+- **Tests:** `lib/net` `stack_tests` (acquire end-to-end, pre-filter
+  intercept, expiry withdrawal, disable), ABI round-trip + smuggled-field
+  rejection, netconfig parse/validate, devmgr mapping, netstack service
+  enable/disable. D4b is done and gate-green.
 
 #### D4c — the live two-process QEMU vertical, all three Tier-1 arches `[ ]`
 `tests/integration/netstack_dhcp6_qemu_{aarch64,x86_64,riscv64}`, the IPv6

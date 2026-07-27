@@ -47,6 +47,9 @@ use crate::addr::{
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
 use crate::checksum::{ChecksumCheck, ChecksumMode, Pseudo};
 use crate::dhcp::{self, Action as DhcpAction, DhcpClient, DhcpReply, Lease, SendAction};
+use crate::dhcpv6::{
+    self, Action as Dhcp6Action, Dhcp6Client, Dhcp6Reply, Lease6, SendAction as Send6Action,
+};
 use crate::eth::{
     ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
     ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
@@ -243,6 +246,21 @@ pub enum StackEvent {
     /// expiry) and the engine has withdrawn the address and its routes.
     /// The client re-acquires from scratch; the service audits the loss.
     DhcpLeaseLost,
+    /// The interface's DHCPv6 client committed a lease (RFC 8415): the
+    /// engine has applied the leased IA_NA address as a host `/128`. The
+    /// service layer records the security-relevant configuration change in
+    /// the audit log; the addressing itself is already in effect.
+    Dhcp6LeaseAcquired {
+        /// The leased interface address.
+        address: Ipv6Addr,
+        /// The valid lifetime the lease carried, in seconds.
+        valid_lifetime: u32,
+    },
+    /// The interface's DHCPv6 lease was lost (expiry, a `NoBinding`, or a
+    /// changed address on renewal) and the engine has withdrawn the leased
+    /// address. The client re-acquires from scratch; the service audits
+    /// the loss.
+    Dhcp6LeaseLost,
 }
 
 impl StackEvent {
@@ -263,7 +281,9 @@ impl StackEvent {
             | StackEvent::IcmpErrorReceived { .. }
             | StackEvent::ReassemblyExpired { .. }
             | StackEvent::DhcpLeaseAcquired { .. }
-            | StackEvent::DhcpLeaseLost => {}
+            | StackEvent::DhcpLeaseLost
+            | StackEvent::Dhcp6LeaseAcquired { .. }
+            | StackEvent::Dhcp6LeaseLost => {}
         }
     }
 }
@@ -614,6 +634,19 @@ struct DhcpDriver {
     rng: Box<dyn FnMut() -> u32>,
 }
 
+/// One interface's DHCPv6 client (RFC 8415) and its CSPRNG source.
+///
+/// The IPv6 sibling of [`DhcpDriver`]: present only while the interface is
+/// configured for stateful DHCPv6 (the `<iface>.ipv6.method = dhcp` key).
+/// The randomness lives at the service seam — the engine stays pure — so
+/// the service injects a CSPRNG-backed closure through
+/// [`Stack::enable_dhcp6`] and the engine only ever *calls* it (for the
+/// 24-bit transaction id and the RFC 8415 §15 retransmission jitter).
+struct Dhcp6Driver {
+    client: Dhcp6Client,
+    rng: Box<dyn FnMut() -> u32>,
+}
+
 /// The dual-stack host engine. See the module docs.
 ///
 /// The engine legitimately carries several independent boolean condition
@@ -673,6 +706,11 @@ pub struct Stack {
     /// [`Stack::advance`], fed replies intercepted in [`Stack::on_ipv4`],
     /// and folded into [`Stack::next_deadline`].
     dhcp: Option<DhcpDriver>,
+    /// The interface's DHCPv6 client, present only while the interface is
+    /// configured for stateful DHCPv6 (`<iface>.ipv6.method = dhcp`).
+    /// Driven from [`Stack::advance`], fed replies intercepted in
+    /// [`Stack::on_ipv6`], and folded into [`Stack::next_deadline`].
+    dhcp6: Option<Dhcp6Driver>,
     /// Recycled byte buffers backing the allocation-free hot path.
     bufs: BufPool,
 }
@@ -743,6 +781,7 @@ impl Stack {
             tx_segment_tcp: config.facts.offloads.contains(NetOffloads::TX_SEGMENT_TCP),
             counters: StackCounters::default(),
             dhcp: None,
+            dhcp6: None,
         })
     }
 
@@ -973,6 +1012,49 @@ impl Stack {
     #[must_use]
     pub fn dhcp_active(&self) -> bool {
         self.dhcp.is_some()
+    }
+
+    /// Start the RFC 8415 stateful DHCPv6 client on this interface
+    /// (`<iface>.ipv6.method = dhcp`).
+    ///
+    /// DHCPv6 rides on the interface's link-local address, so this enables
+    /// the IPv6 family (forming the link-local the client sources its
+    /// messages from) and starts the client from a clean slate — any prior
+    /// DHCPv6-leased address is dropped. The client begins in INIT and
+    /// multicasts its first Solicit on the next [`Stack::advance`] once a
+    /// usable link-local source exists; the leased address is applied when
+    /// the Solicit/Advertise/Request/Reply exchange completes.
+    ///
+    /// The client's IA identifier is derived from the interface MAC so it
+    /// is stable across restarts (RFC 8415 §12.1 — a persistent per-IA
+    /// identity). `rng` is the injected CSPRNG source the client draws its
+    /// transaction id and retransmission jitter from (the service owns
+    /// entropy; the engine stays pure). Re-enabling while already running
+    /// restarts acquisition, so the service only calls this when the client
+    /// is not already active.
+    pub fn enable_dhcp6(&mut self, rng: Box<dyn FnMut() -> u32>, now: Duration64) {
+        self.set_ipv6_enabled(true, now);
+        self.iface.clear_ipv6_dhcp();
+        self.dhcp6 = Some(Dhcp6Driver {
+            client: Dhcp6Client::new(self.mac, dhcp6_iaid(self.mac)),
+            rng,
+        });
+    }
+
+    /// Stop the DHCPv6 client and withdraw any lease it applied (the leased
+    /// address), leaving the IPv6 family enabled with its link-local and
+    /// any SLAAC/static addresses intact. Idempotent: a no-op when no
+    /// client is running.
+    pub fn disable_dhcp6(&mut self) {
+        if self.dhcp6.take().is_some() {
+            self.iface.clear_ipv6_dhcp();
+        }
+    }
+
+    /// Whether a DHCPv6 client is currently running on this interface.
+    #[must_use]
+    pub fn dhcp6_active(&self) -> bool {
+        self.dhcp6.is_some()
     }
 }
 
@@ -1296,6 +1378,18 @@ impl Stack {
         };
         let dest = header.destination;
         let dest_is_multicast = dest.is_multicast();
+        // A DHCPv6 server reply (UDP source 547 → destination 546) is
+        // delivered to the interface's link-local address. Intercept it
+        // here, ahead of the destination filter — mirroring the DHCPv4
+        // pre-filter intercept — whenever a DHCPv6 client is running and
+        // the packet is a plain (no extension header) UDP datagram, so the
+        // client claims it rather than it surfacing as ordinary traffic.
+        if self.dhcp6.is_some()
+            && header.next_header == PROTOCOL_UDP
+            && self.consume_dhcp6_reply(out, &header, payload, check, now)
+        {
+            return;
+        }
         let for_us = self.iface.is_assigned(dest)
             || self.iface.is_tentative(dest)
             || dest == ALL_NODES
@@ -3061,6 +3155,11 @@ impl Stack {
                 IfaceAction::DadFailed { addr } => {
                     self.membership_v6
                         .leave(solicited_node_multicast(&addr), now);
+                    // A DHCPv6-leased address that fails DAD is in use by
+                    // another host: Decline it to the server and
+                    // re-acquire (RFC 8415 §18.2.10.1) rather than keep an
+                    // unusable binding.
+                    self.decline_dhcp6_if_leased(out, addr, now);
                     out.events.push(StackEvent::DadFailed { addr });
                 }
             }
@@ -3085,6 +3184,9 @@ impl Stack {
         // backoff, T1/T2/expiry) and carry out the actions it returns
         // (send a framed message, apply or withdraw a lease).
         self.drive_dhcp(out, now);
+        // Drive the DHCPv6 client's timed work (INIT Solicit, retransmit
+        // backoff, T1/T2/expiry) the same way.
+        self.drive_dhcp6(out, now);
     }
 
     /// When the earliest timed transition across every component is
@@ -3100,6 +3202,7 @@ impl Stack {
             self.membership_v4.next_deadline(),
             self.membership_v6.next_deadline(),
             self.dhcp.as_ref().and_then(|d| d.client.next_deadline()),
+            self.dhcp6.as_ref().and_then(|d| d.client.next_deadline()),
         ]
         .into_iter()
         .flatten()
@@ -3295,6 +3398,191 @@ impl Stack {
         self.iface.clear_ipv4();
         self.routes_v4 = RoutingTable::new();
         out.events.push(StackEvent::DhcpLeaseLost);
+    }
+}
+
+// --- DHCPv6 client driving (RFC 8415) -----------------------------------
+impl Stack {
+    /// Poll the DHCPv6 client for the timed work due at `now` (the INIT
+    /// Solicit, retransmission backoff, and the T1/T2/expiry transitions)
+    /// and carry out the actions it returns. A no-op when no client runs.
+    fn drive_dhcp6(&mut self, out: &mut StackOutput, now: Duration64) {
+        let actions = match self.dhcp6.as_mut() {
+            Some(driver) => driver.client.poll(now, &mut *driver.rng),
+            None => return,
+        };
+        self.apply_dhcp6_actions(out, actions, now);
+    }
+
+    /// Fold a received DHCPv6 server message (UDP source 547 → destination
+    /// 546) into the client, returning `true` when the datagram was a
+    /// DHCPv6 reply this client claimed — parsed and applied, or dropped as
+    /// a spoof — so the caller stops treating it as ordinary IPv6 traffic.
+    /// A UDP datagram that is not DHCPv6 (or does not parse) returns
+    /// `false` and takes the normal receive path.
+    fn consume_dhcp6_reply(
+        &mut self,
+        out: &mut StackOutput,
+        header: &Ipv6Header,
+        payload: &[u8],
+        check: ChecksumCheck,
+        now: Duration64,
+    ) -> bool {
+        let pseudo = udp::Pseudo::V6 {
+            source: header.source,
+            destination: header.destination,
+        };
+        let Some(datagram) = UdpDatagram::parse_with(pseudo, payload, check) else {
+            return false;
+        };
+        if datagram.destination_port != dhcpv6::CLIENT_PORT
+            || datagram.source_port != dhcpv6::SERVER_PORT
+        {
+            return false;
+        }
+        // A DHCPv6-ported datagram belongs to this client. Match it against
+        // the outstanding transaction id and this client's DUID (the parser
+        // rejects any other), fold it, and never surface it as ordinary
+        // traffic. A reply that does not parse (a spoof, a truncation, a
+        // foreign transaction) is dropped.
+        let (xid, duid) = match self.dhcp6.as_ref() {
+            Some(driver) => (driver.client.transaction_id(), driver.client.client_duid()),
+            None => return false,
+        };
+        let Some(reply) = Dhcp6Reply::parse(datagram.payload, xid, &duid) else {
+            self.counters.rx_dropped += 1;
+            return true;
+        };
+        let actions = match self.dhcp6.as_mut() {
+            Some(driver) => driver.client.on_reply(now, &reply, &mut *driver.rng),
+            None => return true,
+        };
+        self.apply_dhcp6_actions(out, actions, now);
+        true
+    }
+
+    /// Carry out each action the client produced: frame and transmit a
+    /// message, apply a newly committed lease, or withdraw a lost one.
+    fn apply_dhcp6_actions(
+        &mut self,
+        out: &mut StackOutput,
+        actions: Vec<Dhcp6Action>,
+        now: Duration64,
+    ) {
+        for action in actions {
+            match action {
+                Dhcp6Action::Send(send) => self.send_dhcp6(out, &send, now),
+                Dhcp6Action::Configured(lease) => self.apply_dhcp6_lease(out, lease, now),
+                Dhcp6Action::Deconfigured => self.withdraw_dhcp6_lease(out),
+            }
+        }
+    }
+
+    /// Frame one client→server DHCPv6 message as UDP(546→547)/IPv6/Ethernet
+    /// and queue it.
+    ///
+    /// Every DHCPv6 client message is sent from the interface's link-local
+    /// address to the `All_DHCP_Relay_Agents_and_Servers` link-scoped
+    /// multicast (`ff02::1:2`, RFC 8415 §16) at hop limit 1 — the multicast
+    /// MAC is derived directly (no neighbour resolution). Until the
+    /// link-local address has completed DAD there is no usable source, so
+    /// the send is skipped and the client's retransmission timer re-attempts
+    /// it (fail safe, never a spoofable unspecified source).
+    fn send_dhcp6(&mut self, out: &mut StackOutput, action: &Send6Action, now: Duration64) {
+        if !self.link_up {
+            return;
+        }
+        let Some(source) = self.iface.link_local() else {
+            return;
+        };
+        let mut message = [0u8; dhcpv6::MAX_MESSAGE_LEN];
+        let Ok(len) = dhcpv6::write_message(&action.spec, &mut message) else {
+            return;
+        };
+        // The UDP datagram: client port 546 → server port 547.
+        let dest = dhcpv6::ALL_SERVERS_MULTICAST;
+        let mut datagram = self.bufs.take_zeroed(udp::UDP_HEADER_LEN + len);
+        if udp::write(
+            udp::Pseudo::V6 {
+                source,
+                destination: dest,
+            },
+            dhcpv6::CLIENT_PORT,
+            dhcpv6::SERVER_PORT,
+            &message[..len],
+            &mut datagram,
+        )
+        .is_err()
+        {
+            self.bufs.give(datagram);
+            return;
+        }
+        self.send_ipv6_packet(
+            out,
+            source,
+            dest,
+            PROTOCOL_UDP,
+            &datagram,
+            MULTICAST_DATA_HOP_LIMIT,
+            now,
+        );
+        self.bufs.give(datagram);
+    }
+
+    /// Apply a committed DHCPv6 lease: assign the leased IA_NA address as a
+    /// host `/128` (DHCPv6 grants no on-link prefix — on-link reachability
+    /// comes from Router Advertisements). A re-applied identical address (a
+    /// renewal) is idempotent. A `Dhcp6LeaseAcquired` event lets the
+    /// service audit the change. When the interface refuses the address
+    /// (family disabled, table full) nothing is applied and no event is
+    /// emitted (fail safe, never a partial state).
+    fn apply_dhcp6_lease(&mut self, out: &mut StackOutput, lease: Lease6, now: Duration64) {
+        match self.iface.add_ipv6_dhcp(lease.addr, now) {
+            // A fresh assignment, or a renewal of the same address, is a
+            // usable lease: audit it either way.
+            Ok(()) | Err(crate::iface::AddrError::Duplicate) => {
+                out.events.push(StackEvent::Dhcp6LeaseAcquired {
+                    address: lease.addr,
+                    valid_lifetime: lease.valid_lifetime,
+                });
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Withdraw a DHCPv6 lease that was lost (expiry, `NoBinding`, or a
+    /// changed address on renewal): drop the leased address, leaving the
+    /// IPv6 family enabled (link-local and any SLAAC/static addresses
+    /// intact) so the client re-acquires. A `Dhcp6LeaseLost` event lets the
+    /// service audit the loss.
+    fn withdraw_dhcp6_lease(&mut self, out: &mut StackOutput) {
+        self.iface.clear_ipv6_dhcp();
+        out.events.push(StackEvent::Dhcp6LeaseLost);
+    }
+
+    /// When a DHCPv6-leased address fails DAD, Decline it to the server and
+    /// re-acquire (RFC 8415 §18.2.10.1). A no-op unless a DHCPv6 client is
+    /// running and `addr` is exactly the address it leased — an unrelated
+    /// DAD failure (a static or SLAAC address) never touches the client.
+    fn decline_dhcp6_if_leased(&mut self, out: &mut StackOutput, addr: Ipv6Addr, now: Duration64) {
+        let is_leased = self
+            .dhcp6
+            .as_ref()
+            .and_then(|d| d.client.lease())
+            .is_some_and(|lease| lease.addr == addr);
+        if !is_leased {
+            return;
+        }
+        // Build the Decline (it captures the declined address) before
+        // withdrawing the local binding.
+        let action = match self.dhcp6.as_mut() {
+            Some(driver) => driver.client.decline(now, &mut *driver.rng),
+            None => return,
+        };
+        self.withdraw_dhcp6_lease(out);
+        if let Some(action) = action {
+            self.apply_dhcp6_actions(out, vec![action], now);
+        }
     }
 }
 
@@ -3555,6 +3843,18 @@ fn ipv6_packet(header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
 /// §3.2.2: unspecified, multicast, or limited broadcast).
 fn v4_source_ambiguous(source: Ipv4Addr) -> bool {
     source.is_unspecified() || source.is_multicast() || source.is_broadcast()
+}
+
+/// Derive a stable DHCPv6 IA identifier (IAID) from the interface MAC.
+///
+/// RFC 8415 §12.1 wants the IAID to persist across restarts of the client
+/// on the same interface; deriving it from the low four octets of the
+/// stable hardware address gives that persistence without any stored
+/// state (the MAC is the same identity SLAAC and the DUID-LL already key
+/// on). The value is opaque — it only has to be stable and per-interface.
+fn dhcp6_iaid(mac: MacAddress) -> u32 {
+    let octets = mac.as_octets();
+    u32::from_be_bytes([octets[2], octets[3], octets[4], octets[5]])
 }
 
 /// Seed the membership report-jitter generator from the interface MAC,

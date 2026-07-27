@@ -210,6 +210,13 @@ pub enum AddrOrigin {
     /// regenerated periodically so a host is not tracked by a stable
     /// address across sessions.
     Temporary,
+    /// A stateful RFC 8415 DHCPv6 lease (an IA_NA IAADDR). Assigned as a
+    /// host `/128`; on-link reachability for other destinations comes from
+    /// Router Advertisements, never from the leased address's own prefix.
+    /// The DHCPv6 client engine owns the lease lifetime, so the address is
+    /// held with no interface-driven expiry — the client withdraws it on
+    /// lease loss rather than the interface aging it out.
+    Dhcp,
 }
 
 /// Typed outputs of the engine: send-intents the caller turns into
@@ -591,6 +598,46 @@ impl Iface {
         }
         self.v6.swap_remove(index);
         true
+    }
+
+    /// Assign a DHCPv6-leased IA_NA address; it enters DAD at `now`.
+    ///
+    /// The address is a host `/128` (DHCPv6 assigns no on-link prefix —
+    /// on-link reachability comes from Router Advertisements). Its lifetime
+    /// is owned by the DHCPv6 client engine, so the interface holds it with
+    /// no expiry of its own; the client withdraws it via
+    /// [`Self::clear_ipv6_dhcp`] on lease loss.
+    ///
+    /// # Errors
+    ///
+    /// [`AddrError::V6Disabled`] when IPv6 is off, [`AddrError::NotUnicast`]
+    /// for a non-unicast address, [`AddrError::Duplicate`] when already
+    /// present, [`AddrError::TableFull`] at the [`MAX_IPV6_ADDRS`] bound.
+    pub fn add_ipv6_dhcp(&mut self, addr: Ipv6Addr, now: Duration64) -> Result<(), AddrError> {
+        if self.v6_disabled || self.v6_admin_disabled {
+            return Err(AddrError::V6Disabled);
+        }
+        if addr.is_unspecified() || addr.is_loopback() || addr.is_multicast() {
+            return Err(AddrError::NotUnicast);
+        }
+        if self.find_v6(addr).is_some() {
+            return Err(AddrError::Duplicate);
+        }
+        if self.v6.len() >= MAX_IPV6_ADDRS {
+            return Err(AddrError::TableFull);
+        }
+        self.push_v6(addr, 128, AddrOrigin::Dhcp, NEVER, NEVER, NEVER, nanos(now));
+        Ok(())
+    }
+
+    /// Remove every DHCPv6-leased address, reporting whether any existed.
+    /// Used when the client loses its lease (expiry, `NoBinding`, or a
+    /// changed address on renewal); the link-local and any SLAAC/static
+    /// addresses are left untouched.
+    pub fn clear_ipv6_dhcp(&mut self) -> bool {
+        let before = self.v6.len();
+        self.v6.retain(|entry| entry.origin != AddrOrigin::Dhcp);
+        self.v6.len() != before
     }
 
     /// Apply the autonomous/on-link address facts of a validated
