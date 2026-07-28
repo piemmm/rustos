@@ -87,6 +87,22 @@ over the UART and is robust to the 2-second window race; the x86_64 sibling
 proves the same contract on the COM1 console, closing the
 `plans/ARCHSUPPORT.md` parity gap.
 
+Two further aarch64 verticals cover the *other* two trigger points on the same
+production path, **reusing the identical `tairix-test-supervisor-esc-qemu-aarch64`
+guest** — only the host-side serial script differs, so there is no second boot
+bin. `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` waits for the redrawn `ARXFS passphrase: `
+prompt (which appears only after the 2-second window elapses untouched) and then
+types a lone `ESC` as the line's first byte, deterministically exercising the
+live-passphrase-prompt drop (`read_passphrase_line`'s `Escape` outcome) rather
+than the window race. `SUPERVISOR_MOUNT_SCRIPT` runs the `mount` command inside
+the REPL — the Supervisor performing the real unlock itself, distinct from
+`continue` resuming the normal unlock. Because several enrolments now share one
+built binary, the runner (`tools/xtask`'s `backing_image_path`) gives each a
+distinct planted-image path keyed on its stable index in the enrolment table, so
+the concurrent matrix cannot let one run clobber another's image; a host test
+asserts those paths never collide and that all three scripts spell the frozen
+boot-screen states through one shared set of markers.
+
 ## Rich screens: colour and positioning
 
 Colour and cursor positioning at the bootstrap floor cost nothing new — the

@@ -418,6 +418,60 @@ const SUPERVISOR_ESC_SCRIPT: &[(&str, Duration, &str)] = &[
     ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
 ];
 
+/// The pre-boot-Supervisor serial script for the **live-passphrase-prompt**
+/// ESC entry point (`plans/NEW-SUPERVISOR.md` §2 step 4), shared by every
+/// arch that drives it. Unlike [`SUPERVISOR_ESC_SCRIPT`] — which enters at
+/// the timed announcement window — this script waits for the redrawn
+/// `ARXFS passphrase: ` prompt to appear *first* (which only happens after
+/// the 2 s window has elapsed with no keypress), then types a lone `ESC` as
+/// the first byte of the passphrase line. `read_passphrase_line` returns
+/// `PassphraseReadError::Escape` for a first-byte lone `ESC`, dropping into
+/// the same `enter_supervisor` REPL as the window path — the *other* entry
+/// point the window-race-robust [`SUPERVISOR_ESC_SCRIPT`] only reaches
+/// incidentally. Waiting for the prompt makes this path deterministic (never
+/// the window race). It then drives the same `help` → `continue` →
+/// passphrase round-trip, so PASS still keys on the unlock-service install
+/// witness (`EventId(4139)`) — proving the passphrase-prompt drop is equally
+/// transparent to boot. Steps:
+///
+/// 1. `ARXFS passphrase: ` (`root_mount::FS_UNLOCK_PROMPT`, the post-window
+///    redraw) → a lone `ESC` (`0x1b`), dropping into the REPL via the
+///    passphrase reader's `Escape` outcome.
+/// 2. `Supervisor` (`root_mount::SUPERVISOR_ENTER_BANNER`) → `help`.
+/// 3. `commands:` (the dispatcher's `Supervisor commands:` header) →
+///    `continue`.
+/// 4. `ARXFS passphrase: ` (the *next* occurrence — the normal unlock prompt
+///    redrawn after the REPL exited) → the fixture passphrase.
+const SUPERVISOR_ESC_AT_PROMPT_SCRIPT: &[(&str, Duration, &str)] = &[
+    ("ARXFS passphrase: ", Duration::ZERO, "\x1b"),
+    ("Supervisor", Duration::ZERO, "help\n"),
+    ("commands:", Duration::ZERO, "continue\n"),
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+];
+
+/// The pre-boot-Supervisor serial script for the in-REPL `mount` command
+/// (`plans/NEW-SUPERVISOR.md` §2 step 6, §4.1), shared by every arch that
+/// drives it. It enters the Supervisor at the announcement window (like
+/// [`SUPERVISOR_ESC_SCRIPT`]), then instead of `continue` it runs `mount`:
+/// the Supervisor performs the **real** root unlock *itself* under a typed
+/// passphrase — a path distinct from `continue` resuming the normal unlock —
+/// and on success returns `SupervisorExit::Mounted`, so boot proceeds with no
+/// second prompt. PASS keys on the same install witness (`EventId(4139)`),
+/// which the interactive unlock logs whenever it resolves to `Installed`
+/// (including the `mount`-from-REPL path), so reaching it proves the in-REPL
+/// mount mounted the encrypted `ARXFS` root. Steps:
+///
+/// 1. `[Press ESC for supervisor]` (`root_mount::SUPERVISOR_ANNOUNCE`) → a
+///    lone `ESC` (race-robust exactly as [`SUPERVISOR_ESC_SCRIPT`]).
+/// 2. `Supervisor` (`root_mount::SUPERVISOR_ENTER_BANNER`) → `mount`.
+/// 3. `ARXFS passphrase: ` (the `mount` command's own prompt, `cmd_mount`) →
+///    the fixture passphrase.
+const SUPERVISOR_MOUNT_SCRIPT: &[(&str, Duration, &str)] = &[
+    ("[Press ESC for supervisor]", Duration::ZERO, "\x1b"),
+    ("Supervisor", Duration::ZERO, "mount\n"),
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+];
+
 /// Serial marker after which the autoload-input vertical begins typing the
 /// unlock passphrase at the virtio keyboard.
 ///
@@ -727,7 +781,13 @@ const _: () = {
     );
 };
 
-const TESTS: &[QemuTest] = &[
+// A `static` (not a `const`): several enrolments may share one built binary
+// and `backing_image_path` disambiguates their planted images by each entry's
+// stable index in this table, found via `std::ptr::eq`. A `const` is inlined
+// at every use and its promoted array need not have a single address, so
+// pointer identity against a re-materialised `TESTS.iter()` is unreliable; a
+// `static` has one address, so the index lookup is sound.
+static TESTS: &[QemuTest] = &[
     QemuTest {
         package: "tairix-test-memory-isolation",
         binary: "tairix-test-memory-isolation",
@@ -3894,6 +3954,69 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: SUPERVISOR_ESC_SCRIPT,
     },
+    // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
+    // entered at the *live passphrase prompt* rather than the announcement
+    // window. It reuses the very same production `tairix-kernel` bin as the
+    // Supervisor ESC vertical above — the guest is byte-identical; only the
+    // host-side serial script differs — so there is no duplicated bin
+    // (`AGENTS.md` §2.2). The runner disambiguates the two enrolments' planted
+    // backing images by their `TESTS` index (`backing_image_path`), so the
+    // shared binary is safe under the concurrent matrix. The
+    // `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` waits for the redrawn
+    // `ARXFS passphrase: ` prompt to appear (which only happens after the 2 s
+    // window elapses untouched), then types a lone `ESC` as the line's first
+    // byte, exercising `read_passphrase_line`'s `PassphraseReadError::Escape`
+    // drop — the entry point the window-race-robust `SUPERVISOR_ESC_SCRIPT`
+    // reaches only incidentally. It then drives `help` → `continue` →
+    // passphrase, so PASS keys on the same install witness (`EventId(4139)`),
+    // proving the passphrase-prompt drop is equally transparent to boot. 120 s
+    // and single CPU match the ESC vertical it mirrors.
+    QemuTest {
+        package: "tairix-test-supervisor-esc-qemu-aarch64",
+        binary: "tairix-test-supervisor-esc-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+    },
+    // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
+    // `mount`-from-REPL path — the Supervisor performing the *real* root
+    // unlock itself, distinct from `continue` resuming the normal unlock. It
+    // reuses the same production bin as the two verticals above (no duplicated
+    // bin, `AGENTS.md` §2.2; `TESTS`-index-disambiguated backing image). The
+    // `SUPERVISOR_MOUNT_SCRIPT` enters at the announcement window, then types
+    // `mount` at the `*` prompt; `cmd_mount` prints its own
+    // `ARXFS passphrase: ` and the script types the fixture passphrase, so the
+    // Supervisor's `SupervisorHost::mount` runs `mount_root_disk_and_load_users`
+    // + `finish_install` and returns `SupervisorExit::Mounted`. The interactive
+    // unlock then resolves to `Installed` and logs the install witness
+    // (`EventId(4139)`) — the PASS the guest sink keys on — with no second
+    // prompt, proving the in-REPL mount mounts the encrypted `ARXFS` root and
+    // boots. 120 s and single CPU match the ESC vertical it mirrors.
+    QemuTest {
+        package: "tairix-test-supervisor-esc-qemu-aarch64",
+        binary: "tairix-test-supervisor-esc-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: SUPERVISOR_MOUNT_SCRIPT,
+    },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
     // and two-kthread-admission regression. It boots the *production* x86_64
     // `tairix-kernel` pipeline (`boot_x86_64::boot`) with the planted
@@ -6164,6 +6287,28 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     })
 }
 
+/// Path of a planted backing image for enrolment `t`, built beside its
+/// kernel binary with extension `ext`.
+///
+/// Several enrolments may share one built binary: they drive the *same*
+/// guest with different host-side serial scripts (the pre-boot Supervisor
+/// verticals, which enter the REPL through different trigger points, are the
+/// standing example). Those siblings must not plant to the same file, or the
+/// weighted-concurrency runner could let one run's plant clobber another's
+/// while its QEMU still has the image open. When a binary backs more than one
+/// enrolment the image name is disambiguated by the entry's stable index in
+/// [`TESTS`]; a binary used by a single enrolment keeps the plain
+/// `<binary>.<ext>` name, so no existing enrolment's image path changes.
+fn backing_image_path(kernel: &Path, t: &QemuTest, ext: &str) -> PathBuf {
+    let shared = TESTS.iter().filter(|e| e.binary == t.binary).count() > 1;
+    if shared {
+        let idx = TESTS.iter().position(|e| std::ptr::eq(e, t)).unwrap_or(0);
+        kernel.with_extension(format!("s{idx}.{ext}"))
+    } else {
+        kernel.with_extension(ext)
+    }
+}
+
 fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
@@ -6193,7 +6338,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // reads as zero, so the test's write+read-back of sector 1 cannot
     // pass on stale data.
     if let Some(sectors) = t.disk_sectors {
-        let image = kernel.with_extension("blk.img");
+        let image = backing_image_path(&kernel, t, "blk.img");
         let sector0: Vec<u8> = (0..tairix_qemu::disk::SECTOR_BYTES)
             .map(|i| u8::try_from(i % 256).unwrap_or(0))
             .collect();
@@ -6206,7 +6351,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // enrolment names one. Only the non-zero sectors are planted; the
     // planter zero-fills the rest, matching a freshly-formatted volume.
     if let Some(fs) = fs_disk_image(t, stores)? {
-        let image = kernel.with_extension(fs.extension);
+        let image = backing_image_path(&kernel, t, fs.extension);
         let sector_bytes = tairix_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs
             .bytes
@@ -7147,8 +7292,10 @@ fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        build_targets, persist_failure_serial, qemu_host_budget_for, qemu_job_weight, PrimePlan,
-        MEMSOAK_PASS_PREFIX, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        backing_image_path, build_targets, persist_failure_serial, qemu_host_budget_for,
+        qemu_job_weight, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
+        TESTS, UNLOCK_PASSPHRASE_LINE,
     };
     use std::time::Duration;
 
@@ -7180,6 +7327,86 @@ mod tests {
     #[test]
     fn tcpserve_script_marker_matches_the_fixture_marker() {
         assert_eq!(TCPSERVE_PASS_PREFIX, tairix_test_tcpserve::PASS_MARKER);
+    }
+
+    /// All three pre-boot-Supervisor serial scripts must spell the frozen
+    /// boot-screen states identically — the boot-screen wording is one
+    /// contract, never a per-script copy that could silently drift
+    /// (`AGENTS.md` §2.2, `plans/NEW-SUPERVISOR.md` §0). The canonical
+    /// spellings live in [`SUPERVISOR_ESC_SCRIPT`]; the two sibling scripts
+    /// for the other trigger points reuse exactly those markers.
+    #[test]
+    fn supervisor_scripts_share_the_frozen_boot_screen_markers() {
+        let announce = SUPERVISOR_ESC_SCRIPT[0].0;
+        let banner = SUPERVISOR_ESC_SCRIPT[1].0;
+        let commands = SUPERVISOR_ESC_SCRIPT[2].0;
+        let prompt = SUPERVISOR_ESC_SCRIPT[3].0;
+        let esc = "\u{1b}";
+
+        // ESC at the live passphrase prompt: enter at the *prompt* (not the
+        // announcement) by typing a lone ESC as the line's first byte, then
+        // the same banner/help-header/continue/passphrase round-trip.
+        assert_eq!(
+            SUPERVISOR_ESC_AT_PROMPT_SCRIPT.len(),
+            4,
+            "prompt-entry script is: prompt+ESC, banner+help, commands+continue, prompt+passphrase"
+        );
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[0].0, prompt);
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[0].2, esc);
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[1].0, banner);
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[2].0, commands);
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[3].0, prompt);
+        assert_eq!(SUPERVISOR_ESC_AT_PROMPT_SCRIPT[3].2, UNLOCK_PASSPHRASE_LINE);
+
+        // mount-from-REPL: enter at the announcement window, run `mount`, then
+        // satisfy the `mount` command's own passphrase prompt.
+        assert_eq!(
+            SUPERVISOR_MOUNT_SCRIPT.len(),
+            3,
+            "mount script is: announcement+ESC, banner+mount, prompt+passphrase"
+        );
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[0].0, announce);
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[0].2, esc);
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[1].0, banner);
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[1].2, "mount\n");
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].0, prompt);
+        assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].2, UNLOCK_PASSPHRASE_LINE);
+    }
+
+    /// Enrolments that share one built binary (the pre-boot Supervisor
+    /// verticals drive the byte-identical guest through different serial
+    /// scripts) must never plant to the same backing-image path, or the
+    /// concurrent runner could let one run clobber another's image while its
+    /// QEMU still has it open. [`backing_image_path`] disambiguates them by
+    /// their stable [`TESTS`] index; a binary used by a single enrolment keeps
+    /// the plain `<binary>.<ext>` name so no existing enrolment's path changed.
+    #[test]
+    fn backing_image_paths_never_collide_within_a_shared_binary() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::Path;
+
+        let mut by_binary: HashMap<&str, Vec<&QemuTest>> = HashMap::new();
+        for t in TESTS {
+            by_binary.entry(t.binary).or_default().push(t);
+        }
+        for (binary, group) in by_binary {
+            let kernel = Path::new("target").join("dummy").join(binary);
+            let mut seen = HashSet::new();
+            for t in &group {
+                let path = backing_image_path(&kernel, t, "arxfs.img");
+                assert!(
+                    seen.insert(path.clone()),
+                    "backing image path {path:?} collides within binary {binary}"
+                );
+            }
+            if group.len() == 1 {
+                assert_eq!(
+                    backing_image_path(&kernel, group[0], "arxfs.img"),
+                    kernel.with_extension("arxfs.img"),
+                    "a single-enrolment binary must keep its plain image name",
+                );
+            }
+        }
     }
 
     /// The `ping` vertical types the peer's own link-local address as its

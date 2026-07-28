@@ -895,17 +895,50 @@ zero total and a narrow geometry never panic.
   every port; the fast `console_wake` path is unchanged and it is a tickless
   one-shot park, never a busy-spin (§2.23).
 
+**Done (the *other*-trigger-point QEMU verticals — item 1):**
+
+- Two further aarch64 QEMU verticals now drive the two remaining ESC trigger
+  points on the production boot path, **reusing the exact same
+  `tairix-test-supervisor-esc-qemu-aarch64` bin** as the announcement-window
+  vertical — the guest is byte-identical, only the host-side serial script
+  differs, so no bin is duplicated (§2.2):
+  - `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` deterministically enters at the **live
+    passphrase prompt** (it waits for the redrawn `ARXFS passphrase: `, which
+    only appears once the 2 s window has elapsed untouched, then types a lone
+    `ESC` as the line's first byte, exercising `read_passphrase_line`'s
+    `PassphraseReadError::Escape` drop — the path the window-race-robust
+    original reached only incidentally), then `help` → `continue` →
+    passphrase.
+  - `SUPERVISOR_MOUNT_SCRIPT` drives the **`mount`-from-REPL** path (the
+    Supervisor performing the real unlock itself, distinct from `continue`
+    resuming the normal unlock): enter at the window, `mount`, then satisfy
+    `cmd_mount`'s own `ARXFS passphrase: ` prompt. The interactive unlock then
+    resolves to `Installed` and logs the install witness with no second
+    prompt.
+  Both key PASS on the same unlock-service install witness (`EventId(4139)`),
+  which the interactive unlock logs whenever it resolves to `Installed`
+  (including the `mount`-from-REPL path). All three scripts spell the frozen
+  boot-screen states through one shared set of markers (host-tested for
+  drift). Enabling this reuse, the runner's `backing_image_path`
+  (`tools/xtask`) now disambiguates the planted backing images of enrolments
+  that share one built binary by their stable `TESTS` index, and `TESTS` was
+  made a `static` so that index lookup (via `std::ptr::eq`) is sound — a
+  `const` need not have a single address, which would have silently collapsed
+  every shared entry onto one image path. Host tests cover the frozen-marker
+  consistency and the no-collision invariant; the three aarch64 guests pass
+  end to end under `cargo xtask test --qemu`.
+- **x86_64 sibling not added deliberately.** These two verticals exercise
+  *arch-neutral engine* paths (`read_passphrase_line`'s `Escape` arm and the
+  REPL `mount` command), which are already host-tested; the arch-sensitive
+  part — the byte-exact boot-screen contract over the port's console (UART vs
+  COM1) — is already proven on **both** PC-class arches by the landed
+  announcement-window ESC vertical. A future x86_64 parity pair is now
+  trivial: register two entries against the existing
+  `tairix-test-supervisor-esc-qemu-x86-64` bin with the same shared scripts.
+
 **Remaining:**
 
-1. QEMU coverage of the *other* trigger points, still open: a deterministic
-   drive of the lone-`ESC`-at-the-live-passphrase-prompt entry point (both
-   landed verticals enter via the announcement window and are only
-   *incidentally* robust to that path via the 2 s-window race, and
-   `read_passphrase_line`'s `Escape` arm is host-tested); and a `mount`-from-
-   REPL vertical (the REPL's real unlock path, distinct from `continue` +
-   normal unlock). The host unit tests and the landed aarch64 + x86_64
-   verticals already cover the core contract on both PC-class arches.
-2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
+1. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
    Stage A (the arch-neutral destructive full-range engine), the **arch-neutral
    half of Stage B** (the `MachineTakeover` Arch HAL slice + `TakeoverError` +
    `takeover::conformance` + the now supervisor-gated
@@ -923,8 +956,8 @@ destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
 slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
 seam), the §9 Stage-C `memtest full` command (confirmation + supervisor-only
 `TakeoverGrant` gate + pre-jump audit + `memtest_takeover` seam), and the §9
-Stage-D fullscreen memtest86-style UI, and the aarch64 + x86_64 ESC
-boot-screen QEMU verticals are complete and compiling on every Tier-1 target;
-the per-port takeover mechanisms, the §9 destructive-run QEMU vertical, and the
-remaining ESC-entry QEMU coverage (the passphrase-prompt entry and
-`mount`-from-REPL) remain.
+Stage-D fullscreen memtest86-style UI, the aarch64 + x86_64 ESC
+boot-screen QEMU verticals, and the two further aarch64 verticals covering the
+remaining ESC trigger points (the live-passphrase-prompt entry and
+`mount`-from-REPL) are complete and compiling on every Tier-1 target; the
+per-port takeover mechanisms and the §9 destructive-run QEMU vertical remain.
