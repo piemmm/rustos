@@ -7,6 +7,15 @@ order, grants each one the capability set its signed manifest requests
 intersected with init's own authority (`AGENTS.md` §5.2), and reaps the
 children that any PID 1 inherits.
 
+> **Planned evolution.** This page describes the current PID 1 service
+> orchestrator. The first-class service manager that grows out of it —
+> a service lifecycle + readiness protocol, discovery-vs-registration
+> vs on-demand endpoint activation, system- and per-user-scope
+> managers, idle linger, and stop/shutdown ordering, with service
+> configuration under `/System/Settings` — is specified in
+> `plans/NEW-SERVICEMANAGER.md`. That plan evolves this model *in
+> place* (`AGENTS.md` §2.2); it is not a parallel manager.
+
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
 so a userland service never links a kernel or driver crate
@@ -139,15 +148,23 @@ all and no `unsafe`.
 What `init` should do at user-mode entry is **data, not control flow**: a
 small, fail-closed startup config (`src/startup.rs`). The config is
 line-oriented; `#` begins a comment, and blank or comment-only lines are
-ignored. Exactly two directives are defined and each is required once:
+ignored. Three directives are defined; each names the compiled-in system
+account its program runs as, resolved to a uid at parse time:
 
 - `console` — open the system console so the banner (and later output)
-  has somewhere to go. Takes no argument.
-- `session <path>` — the absolute path of the program `init` launches as
-  the user's session (the login service `/System/Services/login.app/Run`,
-  `plans/PI.md` P11, which authenticates the user and spawns their shell
-  of choice). `init` launches it through the process-spawn syscall
-  (`plans/PI.md` P6d) and supervises it (below).
+  has somewhere to go. Takes no argument. Required once.
+- `session <path> <account>` — the absolute path of the program `init`
+  launches as the user's session (the login service
+  `/System/Services/login.app/Run`, `plans/PI.md` P11, which
+  authenticates the user and spawns their shell of choice) and the
+  account it runs as. Required once. `init` launches it through the
+  process-spawn syscall (`plans/PI.md` P6d) and supervises it (below).
+- `service <path> <account>` — a long-running system service `init`
+  launches at startup and supervises for the life of the system, and the
+  account it runs as. Optional and repeatable; the declaration order is
+  the launch order. This is the compiled-in **boot floor**
+  (`AGENTS.md` §18.6); services past the floor are discovered and
+  registered rather than named here (`plans/NEW-SERVICEMANAGER.md`).
 
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is

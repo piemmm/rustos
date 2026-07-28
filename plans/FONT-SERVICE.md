@@ -240,7 +240,12 @@ Load-bearing facts a future reader needs:
   graphics-only resource, so **`login` starts `fontd`** (as its uid-15 service
   account, via `CAP_SPAWN_AS_USER`) the first login round a machine is
   display-capable — covering both a graphical login and the shell's `desktop`
-  command, and never on a headless/text-only boot (§17.3). login resolves it by
+  command, and never on a headless/text-only boot (§17.3). **This `login`-owned
+  start is a transitional ad-hoc placement that `plans/NEW-SERVICEMANAGER.md`
+  (SVC-5) removes:** once the service manager gains readiness-condition
+  activation, `fontd` becomes an on-demand, `display-present`-gated service and
+  the `login` start path plus the x86_64/riscv64 compiled-in fallbacks below
+  are deleted (§2.14). Until then, login resolves it by
   path through the ordinary program gate: from the on-disk `/System/Services`
   bundle on aarch64, and from the compiled-in program registry
   (`spawn_paths::FONTD_PATH`, `program_manifests::FONTD_MANIFEST`,
@@ -264,6 +269,9 @@ Load-bearing facts a future reader needs:
 - `plans/FIX-DESKTOP.md` — the async launch (done) and the demand-paged/CoW
   image build (DESK-4..7, planned); this plan removes the *payload* the
   launch path must move, complementary to shrinking the *per-page* cost.
+- `plans/NEW-SERVICEMANAGER.md` — the first-class service manager that (SVC-5)
+  replaces the transitional `login`-starts-`fontd` placement (§3) with
+  readiness-condition on-demand activation, deleting the `login` start path.
 - `plans/DISPLAY.md`, `plans/COMPOSITOR-WORK.md`, `plans/GUI-CONTROLS-DESIGN.md`
   — the text-drawing consumers of the font client.
 - `lib/abi/src/{window,display,net}_ipc.rs` — the reserved-endpoint service

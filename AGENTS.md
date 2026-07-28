@@ -1303,6 +1303,7 @@ You are not exempt from any rule above. In addition:
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, user-pinned app shortcuts (pin/drag), the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
+    | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
     | Text rendering / fonts: the OS font service (`fontd`), the `/System/Fonts` store, the `FONT_ENDPOINT` glyph protocol, the thin `lib/font` client, and the kernel console-atlas subset | `plans/FONT-SERVICE.md` |
