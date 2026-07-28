@@ -192,6 +192,24 @@ pub trait ConsoleRead {
         let _ = timeout_ns;
         self.read(buf)
     }
+
+    /// Mark the reads that follow as secret (password) entry (`secret ==
+    /// true`) or ordinary echoed entry (`secret == false`).
+    ///
+    /// A backing that draws a secret-entry activity marker (the
+    /// `[input active…]` indicator, [`SecretFeedback`]) arms it only across a
+    /// secret read and shows nothing otherwise, so a prompt that reads a
+    /// passphrase brackets that one read with `set_secret(true)` … `false`
+    /// while ordinary line reads (a command prompt that echoes what it reads,
+    /// such as the pre-boot Supervisor REPL) leave it clear and never paint
+    /// the marker over their own echo. It is the read-half analogue of
+    /// [`ConsoleDevice::set_input_mode`]'s `Secret` arming.
+    ///
+    /// The default is a no-op: a backing with no secret feedback (the host
+    /// test consoles, [`NullConsoleRead`]) never draws the marker regardless.
+    fn set_secret(&self, secret: bool) {
+        let _ = secret;
+    }
 }
 
 /// The console input source installed before any real device exists.

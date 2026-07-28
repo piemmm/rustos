@@ -436,6 +436,43 @@ where
     Ok(tested)
 }
 
+/// Test one caller-**owned**, frame-aligned physical window
+/// `[base, base + len)` through `physmap`, running the whole-window
+/// address-line pass and the sampling device pass over it.
+///
+/// Unlike [`run`], which is sound only on the pre-allocator boot path where
+/// every `Usable` region is by definition idle, this tests a window the
+/// caller *owns* — frames it has itself allocated from the
+/// [`crate::FrameAllocator`] and will free afterwards. The passes write
+/// markers into the window and restore them to zero, so running them over
+/// memory another part of the running kernel holds would corrupt it; a caller
+/// that owns the frames keeps the operation non-destructive to live state
+/// while still exercising real DRAM cells (the per-word flush defeats the
+/// cache exactly as on the boot path). This is the entry point the pre-boot
+/// Supervisor's `memtest` drives, one owned frame span at a time, so its
+/// heavier repeated-pass test never touches RAM in use.
+///
+/// `len` must be a non-zero multiple of the word size; a whole frame count
+/// satisfies it. Returns:
+///
+/// * `Ok(true)` — the window was mapped and every tested cell read back
+///   correctly.
+/// * `Ok(false)` — the direct map does not cover the window, so it was left
+///   untested rather than trusted (fail closed; the caller reports the skip).
+/// * `Err(`[`RamFault`]`)` — the first cell that failed to read back.
+pub fn test_owned_window<M>(physmap: &M, base: PhysAddr, len: usize) -> Result<bool, RamFault>
+where
+    M: PhysMap + ?Sized,
+{
+    match PhysWindow::new(physmap, base, len) {
+        Some(window) => {
+            test_window(&window, base)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
@@ -663,6 +700,40 @@ mod tests {
             let v = unsafe { ptr.add(i).read() };
             assert_eq!(v, 0);
         }
+    }
+
+    #[test]
+    fn test_owned_window_tests_a_mapped_window_and_leaves_it_zeroed() {
+        let base = 0x40_0000u64;
+        let len = PAGE_SIZE;
+        let sim = SimPhysMap::new(PhysAddr::new(base), len);
+        assert_eq!(
+            test_owned_window(&sim, PhysAddr::new(base), len),
+            Ok(true),
+            "healthy owned window passes"
+        );
+        // The passes restore every cell they wrote to zero.
+        let ptr = sim
+            .translate(PhysAddr::new(base), len)
+            .expect("mapped")
+            .as_ptr();
+        for i in 0..len {
+            // SAFETY: `[base, base+len)` is the simulator's own allocation and
+            // `i` is in range.
+            assert_eq!(unsafe { ptr.add(i).read() }, 0);
+        }
+    }
+
+    #[test]
+    fn test_owned_window_reports_an_unmappable_window_as_skipped_not_a_pass() {
+        // The simulator covers one span; a window far outside it is not
+        // mappable, so the test is skipped (`Ok(false)`) rather than trusted.
+        let base = 0x50_0000u64;
+        let sim = SimPhysMap::new(PhysAddr::new(base), PAGE_SIZE);
+        assert_eq!(
+            test_owned_window(&sim, PhysAddr::new(base + 0x100_0000), PAGE_SIZE),
+            Ok(false),
+        );
     }
 
     #[test]

@@ -151,6 +151,12 @@ tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0
 # Scheme- and architecture-neutral (MBR on the Pi, GPT on UEFI x86_64), so
 # it is a common dependency and its host tests run on the CI host.
 tairix-partition = { path = "../../lib/partition", version = "=0.0.0" }
+# The arch-neutral pre-boot Supervisor console engine (`plans/NEW-SUPERVISOR.md`).
+# The kernel binary implements its `SupervisorHost` seam (`supervisor_host`) over
+# the already-computed bootstrap-floor state and drives `run_supervisor` from the
+# ESC boot-screen window; the engine names no kernel or arch type (§17.4), so it
+# is a common dependency and its host tests run on the CI host.
+tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 # The shared filesystem signature/identity probe and its mutation-evidence
 # window definition (`plans/DEVICES.md` D4c): the runtime volume service
 # matches a re-inserted volume to its unavailable record by the probed

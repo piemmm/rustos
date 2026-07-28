@@ -117,6 +117,7 @@ pub mod rlimit;
 pub mod seat;
 pub mod sharedreg;
 pub mod sleeplock;
+pub mod supervisor_system;
 // The single scheduler selection point. Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `tairix_kernel_sched_api` contract instead.
@@ -254,6 +255,10 @@ pub use spawn::{
 pub use spawn_services::{
     install_spawn_services, installed_spawn_services, ArchSpawnRuntime, SpawnRuntime,
     SpawnServices, SpawnServicesAlreadyInstalled,
+};
+pub use supervisor_system::{
+    boot_log_tail, install_boot_log_tail, install_supervisor_system, supervisor_system,
+    BootLogTail, SupervisorSystem,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
 pub use syscfg::load_and_apply_system_config;

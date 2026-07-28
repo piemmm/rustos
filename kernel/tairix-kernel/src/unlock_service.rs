@@ -684,6 +684,91 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             }
         }
     }
+
+    fn read_timeout(&self, buf: &mut [u8], timeout_ns: u64) -> Result<usize, Errno> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // The absolute monotonic instant the wait may run until: a genuine
+        // bounded park (never a busy poll), so the pre-boot Supervisor's
+        // 2-second "press ESC" window can wait for a keystroke and then fall
+        // through on time. `park` is woken by the console RX interrupt's
+        // `console_wake` the instant a byte lands, or by the timed sweep at
+        // the deadline — the CPU idles between, exactly as an untimed
+        // [`ConsoleRead::read`] does.
+        let start = tairix_kernel_core::wait_now_ns().unwrap_or(0);
+        let caller_deadline = start.saturating_add(timeout_ns);
+        loop {
+            let task = self.task.or_else(unlock_console_task);
+            // Wake no later than the caller's deadline; when the secret marker
+            // is animating, wake at whichever of its tick and the deadline is
+            // sooner so neither is missed.
+            let deadline = match self.secret.and_then(SecretFeedback::deadline_ns) {
+                Some(tick) => tick.min(caller_deadline),
+                None => caller_deadline,
+            };
+            if let Some(task) = task {
+                tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline);
+            }
+            let read = match self.inner.read(buf) {
+                Ok(read) => read,
+                Err(e) => {
+                    if let Some(task) = task {
+                        tairix_kernel_core::console_deregister(task, deadline);
+                    }
+                    return Err(e);
+                }
+            };
+            if read > 0 {
+                if let Some(task) = task {
+                    tairix_kernel_core::console_deregister(task, deadline);
+                }
+                if let Some(secret) = self.secret {
+                    let now = tairix_kernel_core::wait_now_ns().unwrap_or(0);
+                    secret.consumed(&buf[..read.min(buf.len())], now);
+                }
+                return Ok(read);
+            }
+            // Nothing pending: has the caller's window elapsed?
+            let now = tairix_kernel_core::wait_now_ns().unwrap_or(caller_deadline);
+            if now >= caller_deadline {
+                if let Some(task) = task {
+                    tairix_kernel_core::console_deregister(task, deadline);
+                }
+                return Err(Errno::TimedOut);
+            }
+            match task {
+                Some(task) => {
+                    tairix_kernel_core::rearm_timed_wakeup();
+                    self.yielder.park();
+                    tairix_kernel_core::console_deregister(task, deadline);
+                    if let Some(secret) = self.secret {
+                        if let Some(tick) = secret.deadline_ns() {
+                            let now = tairix_kernel_core::wait_now_ns().unwrap_or(0);
+                            if now >= tick {
+                                secret.tick(now);
+                            }
+                        }
+                    }
+                }
+                None => self.yielder.yield_now(),
+            }
+        }
+    }
+
+    fn set_secret(&self, secret: bool) {
+        // Arm the passphrase marker only across a secret read and disarm it
+        // otherwise, so the pre-boot Supervisor's echoed command prompt — read
+        // through this same reader — never paints the `[input active…]` marker
+        // over its own echo. A reader with no feedback attached is inert.
+        if let Some(feedback) = self.secret {
+            if secret {
+                feedback.arm();
+            } else {
+                feedback.disarm();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

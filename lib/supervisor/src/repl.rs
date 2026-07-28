@@ -1,7 +1,7 @@
 //! The Supervisor read-eval-print loop and its line reader.
 //!
 //! [`run_supervisor`] is the engine entry point the boot path calls once the
-//! operator has pressed `ESC`. It draws the `* ` prompt, reads one edited
+//! operator has pressed `ESC`. It draws the `*` prompt, reads one edited
 //! command line through the shared read line discipline
 //! ([`tairix_vt::line::LineEditor`] — the one definition login and the shell
 //! also run), dispatches it, and loops until a command asks to leave. Every
@@ -14,7 +14,7 @@ use crate::dispatch::{dispatch, Flow, Session};
 use crate::{Report, SupInput, SupervisorEvent, SupervisorExit, SupervisorHost, MAX_LINE_LEN};
 
 /// The Supervisor REPL prompt.
-pub const PROMPT: &[u8] = b"* ";
+pub const PROMPT: &[u8] = b"*";
 
 /// The result of reading one edited line from the console.
 pub(crate) enum LineOutcome {
@@ -141,8 +141,8 @@ mod tests {
     use crate::{SupervisorEvent, SupervisorExit};
 
     #[test]
-    fn the_prompt_is_a_star_space() {
-        assert_eq!(super::PROMPT, b"* ");
+    fn the_prompt_is_a_bare_star() {
+        assert_eq!(super::PROMPT, b"*");
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
         let exit = run_supervisor(&mut out, &mut input, &mut host);
         assert_eq!(exit, SupervisorExit::ContinueBoot);
         assert!(host.audits.contains(&SupervisorEvent::Entered));
-        assert!(out.contains("* "));
+        assert!(out.contains("*"));
     }
 
     #[test]

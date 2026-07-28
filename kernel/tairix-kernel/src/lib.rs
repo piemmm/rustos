@@ -370,6 +370,17 @@ pub mod driver_store_server;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod unlock_orchestrate;
 
+// The binding kernel's `SupervisorHost` — the consumer wiring the arch-neutral
+// pre-boot Supervisor engine (`lib/supervisor`) to the real bootstrap-floor
+// state (`plans/NEW-SUPERVISOR.md`): each command reaches its one existing
+// source of truth (the published `SupervisorSystem`, the boot audit-log ring,
+// the hardware tree, the shared boot disk, the real unlock path). Built in
+// `unlock_orchestrate`'s unlock kthread body and consumed by the ESC
+// boot-screen window in `root_mount`, so it is gated on exactly the three
+// instruction sets that drive that path, like its dependencies.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod supervisor_host;
+
 // The one definition of an interrupt-driven UART console's receive drain:
 // the lossless, backpressured loop that moves bytes from a hardware receive
 // FIFO into a `kernel/core` `ConsoleInputQueue`, shared verbatim by the

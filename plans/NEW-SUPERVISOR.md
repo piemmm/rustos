@@ -40,7 +40,7 @@ exception.
   1. `[Press ESC for supervisor]` — shown for 2 seconds.
   2. `ARXFS passphrase: ` — replaces (1) in place after the window.
   3. On ESC: the prompt/message line collapses to `ARXFS`, then a **blank
-     line**, then `Supervisor`, then the REPL prompt `* `.
+     line**, then `Supervisor`, then the REPL prompt `*`.
 - **Reuse, never re-derive (§2.2).** Every datum the Supervisor shows is
   already computed elsewhere: `kernel/core::memtest` over
   `tairix_kernel_mem::ramtest` (RAM test), `kernel/core::introspect_source`
@@ -113,26 +113,40 @@ everywhere.)
 
 State machine (all timed reads are parks, never spins):
 
-1. **Announce.** `write_all(console, b"[Press ESC for supervisor]")`.
+1. **Announce.** `write_all(console, b"\r\n[Press ESC for supervisor]")`. The
+   leading `\r\n` opens a fresh line, so one blank line separates the boot
+   banner (userland `init`'s machine-summary line beneath the
+   `TAIRiX <v> <RAM>MiB` counter) from the announcement — the same
+   one-blank-line spacing the standalone `FS_UNLOCK_PROMPT` draws, so the
+   screen is laid out identically whether the window is entered, skipped, or
+   times out.
 2. **Timed read window.** Loop until a 2-second deadline
    (`park_for_ns`-style: register a timed wakeup on `CONSOLE_WAITQ`, park,
    re-check the clock), polling `input` for one byte on each wake:
    - `ESC` (`0x1b`) → **enter Supervisor** (step 5). But `ESC` also opens
      CSI sequences (arrow/Delete keys the `LineEditor` consumes), so a lone
-     `ESC` must be disambiguated from `ESC [ …` — see §3.
-   - any other byte → discard it (so it cannot leak into the passphrase)
-     and fall through to the prompt.
-   - deadline reached with no byte → fall through.
-3. **Redraw in place.** Overwrite the message with the passphrase prompt on
-   the same line: `write_all(console, b"\rARXFS passphrase: \x1b[K")`. (The
-   `\r` returns to column 0 and `\x1b[K` erases the longer message's tail —
-   the same in-place technique `FS_UNLOCKED_LINE` already uses.) The unlock
-   then proceeds exactly as today (silent blank probe, then the interactive
-   loop). **Note:** the existing `FS_UNLOCK_PROMPT` opens with `\r\n`; when
-   the ESC window has already drawn the line, use the CR-in-place redraw
-   above instead of re-emitting `\r\n`, so the prompt lands on the message's
-   line rather than a fresh one. Keep both spellings built from the single
-   `fs_label!()` macro (§2.2) — extend it, do not add a second literal.
+     `ESC` must be disambiguated from `ESC [ …` — see §3. A CSI editor
+     sequence is drained and ignored (it is a stray key, not passphrase
+     content), then falls through to the prompt.
+   - any other byte → the operator has begun typing the passphrase before
+     the window elapsed, so it is the **first character of the passphrase
+     line**: carry it out of the window (`EscWindow::Continue { initial }`)
+     and feed it to `read_passphrase_line` as that line's first byte, then
+     fall through to the prompt. It must **never** be discarded — dropping it
+     silently corrupts a quickly-typed secret and dooms the unlock to endless
+     wrong-passphrase retries (the boot-hang the QEMU verticals caught).
+   - deadline reached with no byte → fall through with no carried byte.
+3. **Redraw in place.** Overwrite the announcement with the passphrase prompt
+   on the same line: `write_all(console, b"\rARXFS passphrase: \x1b[K")`. (The
+   `\r` returns to column 0 of the announcement line and `\x1b[K` erases the
+   longer message's tail — the same in-place technique `FS_UNLOCKED_LINE`
+   already uses.) The unlock then proceeds exactly as today (silent blank
+   probe, then the interactive loop). Because the announcement already opened a
+   fresh line (step 1), the CR-in-place redraw leaves the prompt on that line
+   with the blank line still above it — identical to the standalone
+   `FS_UNLOCK_PROMPT`'s own-line spacing, so no line gap is lost. Keep both
+   spellings built from the single `fs_label!()` macro (§2.2) — extend it, do
+   not add a second literal.
 4. **ESC at the live passphrase prompt.** ESC must *also* drop to the
    Supervisor while the `ARXFS passphrase: ` prompt is up. `read_passphrase_line`
    gains a new outcome: a lone `ESC` as the **first** byte of a line returns
@@ -145,13 +159,13 @@ State machine (all timed reads are parks, never spins):
    \r\n                  (one blank line)
    Supervisor\r\n
    ```
-   Then call `lib/supervisor::run_supervisor(...)`, whose prompt is `* `.
+   Then call `lib/supervisor::run_supervisor(...)`, whose prompt is `*`.
    On-screen result:
    ```
    ARXFS
 
    Supervisor
-   * 
+   *
    ```
 6. **Supervisor exit resumes boot.** `continue` (§4) returns from
    `run_supervisor`; control falls back into the normal unlock path
@@ -221,7 +235,9 @@ spirit (§16.7) where a command has a coreutils analogue (`ls`, `echo`).
   (walking-ones/zeros, address-in-address, moving-inversions) with a
   progress counter and **ESC-to-abort**. Strictly bounded, interruptible,
   fail-loud on a fault. No raw pointer arithmetic — only the safe
-  `ramtest::run` over the `BootMemoryMap`.
+  `ramtest::run` over the `BootMemoryMap`. This stays the safe,
+  non-destructive test; the destructive whole-RAM `memtest full` takeover
+  mode is a distinct command specified in §9.
 - `ls [path]` — the "crude" listing. Pre-mount, the only readable volume is
   the always-readable `/System` (the driver store lives there); scope `ls`
   to `/System` and say so clearly when the root is not yet mounted. After a
@@ -323,7 +339,7 @@ Land in the **same change**:
 - **QEMU integration vertical**: drive ESC at *both* trigger points and
   assert the **byte-exact** boot-screen strings (`[Press ESC for
   supervisor]` → in-place redraw to `ARXFS passphrase: ` on timeout; ESC →
-  `ARXFS`, blank line, `Supervisor`, `* `). Add the script alongside the
+  `ARXFS`, blank line, `Supervisor`, `*`). Add the script alongside the
   existing `UNLOCK_PASSPHRASE_LINE` script in
   `tools/xtask/src/commands/qemu_tests.rs`. Assert `continue` resumes to a
   normal boot and `mount` unlocks and boots.
@@ -337,7 +353,252 @@ Land in the **same change**:
 
 ---
 
-## 8. Charter housekeeping (do in the same change)
+## 8. Rich screens: colour and positioning (a `lib/vt` presentation layer)
+
+This section is **immediate work for an AI**, staged. It answers the design
+question directly: colour and cursor positioning at the bootstrap floor cost
+**nothing new** — the vocabulary, the emitter, and the console seam already
+exist and are already paid for. The rule is *reuse, never re-derive* (§2.2).
+
+### 8.0 Why this is cheap and charter-clean
+
+- **The console is already a byte stream that consumes escape sequences.**
+  The boot-screen state machine (§2) already emits `\r`, `\x1b[K`, and
+  in-place redraws through the same `Report` / `ConsoleWrite` seam. Colour
+  (`CSI … m`) and absolute positioning (`CSI row;col H`) are the *same class*
+  of output — no new driver, no new authority, no new ABI.
+- **A complete, arch-neutral, `no_std`, allocation-free VT emitter already
+  exists in `lib/vt`.** `lib/vt/src/op.rs` (`Op`) + `emit.rs`
+  (`encode_into` / `encode_all_into`) already cover **everything** a
+  memtest86-style screen needs and round-trip through the parser:
+  `Op::CursorPosition { row, col }`, `CursorColumn`, `EraseInDisplay`,
+  `EraseInLine`, `Sgr(..)` (colour/attributes), `EnterAltScreen` /
+  `LeaveAltScreen`, `HideCursor` / `ShowCursor`, `SaveCursor` /
+  `RestoreCursor`, `SetScrollRegion` / `ResetScrollRegion`,
+  `ScrollUp`/`ScrollDown`. The encoder needs only an `Extend<u8>` sink; the
+  Supervisor's `Report` seam already **is** a byte sink. So a rich screen is
+  built by constructing `Op`s and feeding `emit::encode_into` straight into
+  `Report`.
+
+### 8.1 Binding decisions
+
+- **Reuse `lib/vt`'s `Op` / `emit`; never hand-roll escape bytes (§2.2).** A
+  second copy of the CSI/SGR encoding — an ad-hoc `write_bytes(b"\x1b[...")`
+  scattered through a command — is the duplication the charter forbids and a
+  review blocker. The one exception already in the tree (`\r`, `\x1b[K`, the
+  in-place redraw of the byte-exact boot-screen strings in §2/§3) stays as-is
+  because those bytes are the frozen boot-screen **contract** (§2), not a
+  presentation layer; everything richer goes through `Op`/`emit`.
+- **Target only the universally-safe VT100/xterm subset** — exactly the `Op`s
+  enumerated in §8.0. At the bootstrap floor there is **no** `TERM` /
+  `lib/termcap` database resolved (that lives on the not-yet-mounted
+  `/System`) and **no** way to query the console's size or capabilities (the
+  write seam is one-way). So a rich screen must not depend on any capability
+  outside that subset.
+- **Assume a conservative fixed geometry, threaded not hard-coded.** With no
+  size query, a full-screen layout assumes a safe default (80×24). Where a
+  geometry value is available from discovery it is *threaded in as data*
+  (§18.1), never baked as a per-board constant (§2.20). The layout must clamp
+  to the assumed bounds and never position off-screen.
+- **Degrade gracefully; colour/position is a nicety, never a correctness
+  dependency (§5.4, §2.9).** Every rich screen offers a plain/monochrome
+  line-oriented fallback so a genuinely dumb serial line still shows usable
+  text. The fallback is selected by a single injected flag on the presenter,
+  defaulting to plain; there is no probe. A malformed/oversized coordinate
+  clamps, it never panics.
+- **No new "stuff" at the floor.** `lib/vt` and `lib/supervisor` are both
+  already `no_std` / alloc-free. The presentation helper is a thin
+  `Op`-building layer **inside `lib/supervisor`** (arch-neutral), not a new
+  crate or subsystem (§2.3). It adds no dependency `lib/supervisor` does not
+  already carry (`lib/vt`).
+
+### 8.2 Deliverable (one self-contained stage)
+
+- A small `screen` module in `lib/supervisor` exposing an arch-neutral
+  presenter built on `lib/vt`: a typed `Style` (foreground/background/attrs
+  mapped to `Sgr`), a `move_to(row, col)` / `clear` / `enter_fullscreen`
+  (alt-screen + hide cursor) / `leave_fullscreen` (show cursor + leave
+  alt-screen) helper set, and a `plain: bool` mode that emits text only. It
+  writes exclusively through the existing `Report` seam via
+  `emit::encode_into`; it names no board, MMIO, or `cfg(target_arch)`.
+- **Host unit tests** assert the emitted bytes equal the `lib/vt` encoding of
+  the corresponding `Op`s (so the "never a second copy" rule is *tested*, not
+  merely asserted), and that `plain` mode emits no escape bytes.
+- **Docs**: extend `docs/src/architecture/supervisor.md` with a short
+  "rich screens" note and rustdoc on every public item; `README.md`
+  stability tier unchanged (`experimental`).
+
+This stage stands alone and lands before §9 (the takeover memtest is the
+first *consumer* of the fullscreen presenter, but the presenter is useful on
+its own and is verified independently).
+
+---
+
+## 9. `memtest full` — the destructive, one-way takeover RAM test
+
+This section is **immediate work for an AI**, staged in well-defined full
+stages A–E; each stage is independently reviewable and must land complete
+(§27) with its tests and docs (§7, §13). It is **additive**: the existing
+non-destructive, bounded, ESC-abortable in-system `memtest` (§4.2) stays
+exactly as it is. The takeover mode is a distinct, explicitly-confirmed
+command.
+
+### 9.0 Why a takeover mode, and why it is the *only* way to test all of RAM
+
+The in-system `memtest` (`supervisor_system.rs`) runs **inside the live
+kernel**: it `alloc()`s free frames, tests each with `ram_test_owned_window`,
+frees them, and is deliberately capped (`MEMTEST_MAX_BYTES`, and never more
+than half of free RAM) precisely because "a RAM test must confine itself to
+memory it explicitly owns … never the live map (that would corrupt the
+running kernel)". It therefore can **never** test the RAM the kernel image,
+heap, page tables, or stacks occupy — the same wall memtest86 avoids by
+owning the whole machine.
+
+A takeover mode is the correct — and only — way to test *all* of RAM. It is a
+**one-way trip**, exactly like `reboot`/`poweroff`: there is no "drop back
+into the system", the only exits are reset/power-off. That irreversibility is
+what makes the confirmation (Stage C) and the pre-jump audit (Stage C)
+mandatory, not optional.
+
+### 9.1 Binding decisions (whole feature)
+
+- **Bootstrap-floor, in-kernel, no new ABI (§18.6).** Like the rest of the
+  Supervisor it runs pre-mount, before any app surface; it adds **no
+  `lib/abi` type and no syscall**, so `abi-v1` being unfrozen is irrelevant
+  here (§0 ABI note). It adds no driver and no new authority.
+- **Split arch-neutral vs arch-specific honestly (§2.20 / §2.21 / §17.2).**
+  The *pattern algorithm* (walking-ones/zeros, address-in-address,
+  moving-inversions) is arch-neutral and already lives in
+  `tairix_kernel_mem::ramtest` — extend it with a destructive full-range
+  variant shared by all four targets. The *takeover mechanism* (quiesce
+  secondaries, mask interrupts + watchdog, relocate/flatten paging so the
+  test can address physical RAM, cache maintenance) is irreducibly
+  target-divergent and lives behind a **new Arch HAL slice**, implemented
+  per `kernel/arch/<target>/`. Do **not** `cfg(target_arch)` this into shared
+  code (`cargo xtask cfg-check` forbids it).
+- **No raw pointer arithmetic without bounds-checked wrappers (§4).** The
+  destructive writes go through the safe, range-checked `ramtest` window over
+  the `BootMemoryMap` (the `WordWindow` / `PhysWindow` abstraction already
+  there), never ad-hoc pointers.
+- **Same threat model as the rest of the Supervisor (§0, §19.9).** It runs at
+  the physical console *before the root is unlocked*, so **no key material or
+  user secret is in RAM yet** — the destruction exposes nothing. That is a
+  reason to audit loudly and confirm explicitly, never to relax anything.
+- **No panic on any path (§2.9).** A platform that cannot take over (no
+  quiesce/relocate primitive) reports "not supported" fail-safe and stays in
+  the REPL — exactly like `poweroff` on a port without a power-off primitive
+  (`KernelArch::poweroff` returning). It never panics, never half-tears-down
+  the machine and wedges.
+- **No busy-waiting as steady state (§2.23).** Quiescing the other CPUs is a
+  legitimate *bounded handshake* (a documented §2.23 exception — the machine
+  is being deliberately torn down, so the secondaries spin-halt under a
+  bounded budget and it is documented as such), not a perpetual poll. If a
+  secondary does not acknowledge within the budget the takeover **fails
+  closed** (report "could not quiesce CPU N", stay in the REPL), it does not
+  spin forever.
+
+### Stage A — the arch-neutral destructive full-range pattern engine
+
+- Extend `kernel/mem/src/ramtest.rs` with a **destructive** whole-region
+  variant: given the `BootMemoryMap` and a physical-address window
+  abstraction, run the full multi-pattern sweep (moving-inversions +
+  address-in-address, reusing the existing `address_pass` / `test_window`
+  primitives) across a physical range **without** the "leave it zeroed /
+  restore" contract the non-destructive `run` keeps — because the machine
+  never resumes. Report progress through an injected `on_progress(tested,
+  total)` callback and honour an injected `abort() -> bool` between chunks.
+- It stays pure `lib/*` logic over the `WordWindow` trait, so it is fully
+  host-testable with the existing `FakeRam` double. No arch, no board.
+- **Host tests**: healthy region passes; each seeded `Fault`
+  (`StuckLow`/`StuckHigh`/`Alias`) is caught with the correct reported
+  physical offset; abort stops early; the engine touches every word in the
+  range (the point of "destructive full-range").
+
+### Stage B — the Arch HAL takeover slice
+
+- Add a new slice `kernel/arch/api/src/takeover.rs` following the existing
+  slice pattern (`smp.rs` / `watchdog.rs`): a `MachineTakeover` trait, a
+  `TakeoverError` enum (`CpuQuiesceTimeout { cpu }`, `NotSupported`, …), and a
+  `takeover::conformance` vertical with a stub double and host tests. The
+  trait's contract:
+  - `quiesce_secondaries(&self) -> Result<(), TakeoverError>` — stop/park
+    every other CPU into a bounded, controlled halt (the §9.1 bounded
+    handshake), fail-closed on timeout.
+  - `prepare_takeover(&self) -> Result<(), TakeoverError>` — mask interrupts,
+    stop the lockup watchdog (`plans/WATCHDOG.md`), and relocate/flatten
+    paging so the test routine can address physical RAM (the classic
+    memtest86 self-relocation into a small reserved arena), doing the cache
+    maintenance destructive writes require.
+  - `NotSupported` is the honest default for any port that has not wired it
+    (`wasm32`, mocks) — surfaced fail-safe, never a panic.
+- Expose it on `KernelArch` (`kernel/core/src/bootinfo.rs`) exactly as
+  `direct_phys_map` / `platform_entropy` are exposed: a
+  `fn machine_takeover(&self) -> Option<&'static dyn MachineTakeover>`
+  defaulting to `None` (fail-closed). No caller yet in this stage.
+- **Per-target implementation + conformance** under `kernel/arch/<target>/`,
+  staged per port (cross-reference `plans/PI.md` and `plans/ARCHSUPPORT.md`
+  for bring-up order). Add the slice to `kernel/arch/api` conformance and the
+  `plans/WIRING.md` per-slice status table and `PLAN.md`.
+
+### Stage C — the confirmation, the pre-jump synchronous audit, and the seam
+
+- Extend the `SupervisorSystem` seam (`kernel/core/src/supervisor_system.rs`)
+  with a `memtest_takeover(...) -> !`-shaped control method (mirroring how
+  `reboot`/`poweroff` are the state-changing methods), driven by a **distinct
+  command** in `lib/supervisor` — `memtest full` (alias `memtest
+  --takeover`). The default `memtest` stays the safe, bounded, ESC-abortable
+  in-system test.
+- **Explicit typed confirmation.** Because it is irreversible and destroys the
+  boot, the command requires an explicit, clearly-worded confirmation before
+  it does anything (a typed confirmation phrase read through the existing REPL
+  line reader — no new input path). A mistyped/blank/aborted confirmation
+  returns to the `*` prompt fail-closed and changes nothing.
+- **Audit *before* the jump, synchronously.** The in-memory `BOOT_AUDIT_RING`
+  is destroyed by the takeover, so a new stable id (extend the Supervisor
+  `41xx` range, e.g. `4157 SUPERVISOR_MEMTEST_TAKEOVER`) is flushed to the
+  **persistent serial/log sink synchronously** before control leaves the
+  kernel — after the jump nothing can be recorded. This is the one audit that
+  must not rely on the retained ring.
+- **Unsupported platform** (`machine_takeover()` is `None`, or the slice
+  returns `NotSupported`/a quiesce timeout) reports the reason fail-safe and
+  stays in the REPL (§2.9).
+
+### Stage D — the fullscreen memtest86-style UI (first consumer of §8)
+
+- Once the test owns the machine it owns the console outright, so this is the
+  natural home for the memtest86-style fullscreen, built entirely on the §8
+  presenter (alt-screen + hidden cursor + absolute-positioned header, a
+  per-pattern progress bar, a live pass counter, and a coloured error table),
+  with the §8 plain-text fallback for a dumb serial line. It reuses the §8
+  `screen` module — no second escape-emitting path (§2.2).
+- The UI renders only from the Stage A engine's `on_progress` callback and the
+  fault report; it computes nothing new.
+
+### Stage E — tests, docs, and the gate
+
+- **Host tests**: the Stage A engine (above); the confirmation/decision logic
+  over mock seams (confirm → takeover requested; decline/blank/abort → no
+  takeover, return to prompt, nothing changed); the pre-jump audit id is
+  emitted exactly once before the control jump; the fullscreen UI byte output
+  over a mock `Report` (and that `plain` mode emits no escapes); the Arch HAL
+  `takeover` conformance double.
+- **QEMU integration vertical**: because a true full-RAM destructive run
+  cannot "return", drive the confirmation, assert the pre-jump audit line and
+  the fullscreen output bytes on the serial console, and assert the guest
+  **ends in a reset** rather than resuming boot. (A tiny/emulated memory
+  window keeps the run bounded in CI.)
+- **Docs**: `docs/src/architecture/supervisor.md` gains the takeover section
+  (the one-way contract, the confirmation wording, the audit id, the Arch HAL
+  slice), rustdoc on every public item, and the `plans/WIRING.md` /
+  `plans/WATCHDOG.md` / `PLAN.md` cross-references.
+- **Gate**: the same whole-workspace gate as §7 (`cargo fmt --all`,
+  `cargo xtask ci` once, `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both
+  --secs 20`), green, before the work is done. The REPL fuzz harness (§7)
+  covers the new `memtest full` / confirmation parsing.
+
+---
+
+## 10. Charter housekeeping (do in the same change)
 
 - Add `lib/supervisor` to `AGENTS.md` §3 (`lib/*` map, one-line label).
 - Add the jump-sheet row to `AGENTS.md` §15.18:
@@ -347,7 +608,7 @@ Land in the **same change**:
 
 ---
 
-## 9. Status
+## 11. Status
 
 `in progress`.
 
@@ -363,7 +624,7 @@ Land in the **same change**:
   `SupervisorHost` seams and the `SupervisorExit` / `TestOutcome` /
   `MountOutcome` / `SupervisorEvent` vocabulary (`src/lib.rs`); the `&'static`
   command table + tokeniser + case-insensitive dispatcher + `help`
-  (`src/dispatch.rs`); the `* ` REPL + line reader/echo (`src/repl.rs`); every
+  (`src/dispatch.rs`); the `*` REPL + line reader/echo (`src/repl.rs`); every
   built-in command over the seams (`src/commands/{control,info,diag}.rs`); and
   full host tests via the in-memory mocks (`src/commands/test_support.rs`).
   `no_std`, alloc-free, clippy-clean under `-D warnings`.
@@ -449,27 +710,65 @@ Land in the **same change**:
     QEMU boot verticals inject their own audit sink, so retention is
     production-only and never disturbs a test's audit interception.
 
-**Remaining (the kernel consumer):**
+**Done (the kernel consumer — the `SupervisorHost` and the ESC boot-screen):**
 
-1. A kernel `SupervisorHost` wiring each command to its existing source
-   (introspect/version/mem/uptime/date, `tairix_kernel_mem::ram_selftest`
-   for `memtest`, `lib/partition`, the `lib/abi` hardware tree, the ARXFS
-   descriptor read, the `/System` `FilesystemRead` for `ls`,
-   `KernelArch::reboot`/`poweroff` for control, and the real
-   `mount_root_disk_and_load_users` for `mount`), plus the `41xx`
-   `SupervisorEvent` audit ids. Its `log_tail` reads the `BOOT_AUDIT_RING`
-   composed above (`seq_range()`/`record(seq)`); `panic-log` reads the
-   `WATCHDOG.md` / `FIX-PANICS.md` records, not this ring.
-2. The ESC boot-screen window at the top of
-   `root_mount.rs :: unlock_root_disk_interactively_impl` (byte-exact
-   `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
-   `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
-   including the timed-read/non-blocking-poll primitive and the ESC-vs-CSI
-   re-poll driving `LineEditor::resolve_escape`, threading the
-   `SupervisorHost` through the unlock path from `unlock_orchestrate.rs`.
-3. The QEMU integration vertical driving ESC at both trigger points with the
-   byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
+- `kernel/tairix-kernel/src/supervisor_host.rs :: KernelSupervisorHost<'a, B>`
+  — the binding kernel's `SupervisorHost`. Rendering/control/`memtest`
+  delegate to the boot-published `SupervisorSystem`
+  (`tairix_kernel_core::supervisor_system()`); `log_tail` reads the retained
+  `BOOT_AUDIT_RING` through `boot_log_tail()` (`seq_range()`/`record(seq)`);
+  `hardware` reads `HW_TREE.snapshot()`; `disks`/`partitions`/`arxfs`/`ls`/
+  `scan_disk` read the shared boot disk through independent `store.window()`
+  windows + `lib/partition` + `with_system_volume`; `mount` runs the **real**
+  `mount_root_disk_and_load_users` + `finish_install` (no oracle, no
+  fail-open) through the *same* `UnlockInstall` cells the interactive prompt
+  fills. Every state-changing decision audits a stable `41xx` id
+  (`4150..=4156`). `panic-log` honestly reports "no persisted record" until a
+  cross-boot panic store exists (`FIX-PANICS.md`/`WATCHDOG.md` record live,
+  not persistently) — it never fabricates one.
+- The ESC boot-screen window at the top of
+  `root_mount.rs :: unlock_root_disk_interactively_impl`, byte-exact:
+  `[Press ESC for supervisor]` → 2 s timed park (`ConsoleRead::read_timeout`,
+  a genuine bounded park) → in-place redraw `\rARXFS passphrase: \x1b[K`; a
+  lone `ESC` → `\rARXFS\x1b[K\r\n\r\nSupervisor\r\n` then `run_supervisor`.
+  ESC-vs-CSI disambiguation is a bounded re-poll (`esc_is_lone_escape` /
+  `drain_csi_sequence`). ESC **also** drops in at the live passphrase prompt
+  (`read_passphrase_line` returns `PassphraseReadError::Escape` on a
+  first-byte lone `ESC`); both entry points share one `enter_supervisor`
+  banner+REPL definition. The host is built in `unlock_orchestrate.rs`'s
+  unlock body and threaded as `Option<&mut dyn SupervisorHost>`
+  (`None` in host tests, so their behaviour is unchanged); on
+  `SupervisorExit::Mounted` the unlock returns `Installed` with no further
+  prompt. `install_boot_log_tail(&BOOT_AUDIT_RING)` is published on each
+  Tier-1 `kernel_main`.
+- Compiles clean on the host and all three freestanding Tier-1 targets;
+  clippy `-D warnings` clean; the 27 `root_mount` host tests pass with the
+  new signature.
 
-The engine layer, the machine-control seam, and the boot audit-log
-composition are complete and green; items 1–3 are the remaining kernel
-wiring (the `SupervisorHost` first, as items 2–3 depend on it).
+**Remaining:**
+
+1. The QEMU integration vertical driving `ESC` at both trigger points with
+   the byte-exact boot-screen assertions (alongside the existing
+   `UNLOCK_PASSPHRASE_LINE` script in `tools/xtask/src/commands/qemu_tests.rs`),
+   asserting `continue` resumes a normal boot and `mount` unlocks and boots.
+2. A `cargo xtask fuzz` harness over the REPL line/command parser (untrusted
+   console input, §19.6).
+3. The full whole-workspace validation gate (`cargo xtask ci` + `fuzz
+   --secs 5` + `soak.sh both --secs 20`) run to green.
+4. **§8 rich screens** — the arch-neutral `screen` presenter in
+   `lib/supervisor` over `lib/vt`'s `Op`/`emit` (colour, positioning,
+   alt-screen, plain-text fallback), with host tests and docs. A
+   self-contained stage (`planned`).
+5. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test,
+   staged A–E: the arch-neutral destructive full-range engine in
+   `kernel/mem::ramtest` (Stage A), the `MachineTakeover` Arch HAL slice +
+   per-port impls (Stage B), the confirmation + pre-jump synchronous audit +
+   seam (Stage C), the fullscreen memtest86-style UI on the §8 presenter
+   (Stage D), and tests/docs/gate (Stage E). Depends on §8 for Stage D
+   (`planned`).
+
+The arch-neutral engine, the machine-control seam, the boot audit-log
+composition, the `SupervisorHost`, and the ESC boot-screen (both entry
+points) are complete and compiling on every Tier-1 target; the QEMU
+vertical, the REPL fuzz harness, the full gate, and the newly-staged §8
+rich-screen presenter and §9 `memtest full` takeover mode remain.

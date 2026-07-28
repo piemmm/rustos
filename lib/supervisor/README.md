@@ -8,7 +8,7 @@ and controlling the machine while it is still at the bootstrap floor
 
 The boot path draws a brief `[Press ESC for supervisor]` window; pressing
 `ESC` there (or at the passphrase prompt) enters this REPL, whose prompt is
-`* `.
+`*`.
 
 ## What it is
 
