@@ -235,7 +235,9 @@ spirit (§16.7) where a command has a coreutils analogue (`ls`, `echo`).
   (walking-ones/zeros, address-in-address, moving-inversions) with a
   progress counter and **ESC-to-abort**. Strictly bounded, interruptible,
   fail-loud on a fault. No raw pointer arithmetic — only the safe
-  `ramtest::run` over the `BootMemoryMap`.
+  `ramtest::run` over the `BootMemoryMap`. This stays the safe,
+  non-destructive test; the destructive whole-RAM `memtest full` takeover
+  mode is a distinct command specified in §9.
 - `ls [path]` — the "crude" listing. Pre-mount, the only readable volume is
   the always-readable `/System` (the driver store lives there); scope `ls`
   to `/System` and say so clearly when the root is not yet mounted. After a
@@ -351,7 +353,252 @@ Land in the **same change**:
 
 ---
 
-## 8. Charter housekeeping (do in the same change)
+## 8. Rich screens: colour and positioning (a `lib/vt` presentation layer)
+
+This section is **immediate work for an AI**, staged. It answers the design
+question directly: colour and cursor positioning at the bootstrap floor cost
+**nothing new** — the vocabulary, the emitter, and the console seam already
+exist and are already paid for. The rule is *reuse, never re-derive* (§2.2).
+
+### 8.0 Why this is cheap and charter-clean
+
+- **The console is already a byte stream that consumes escape sequences.**
+  The boot-screen state machine (§2) already emits `\r`, `\x1b[K`, and
+  in-place redraws through the same `Report` / `ConsoleWrite` seam. Colour
+  (`CSI … m`) and absolute positioning (`CSI row;col H`) are the *same class*
+  of output — no new driver, no new authority, no new ABI.
+- **A complete, arch-neutral, `no_std`, allocation-free VT emitter already
+  exists in `lib/vt`.** `lib/vt/src/op.rs` (`Op`) + `emit.rs`
+  (`encode_into` / `encode_all_into`) already cover **everything** a
+  memtest86-style screen needs and round-trip through the parser:
+  `Op::CursorPosition { row, col }`, `CursorColumn`, `EraseInDisplay`,
+  `EraseInLine`, `Sgr(..)` (colour/attributes), `EnterAltScreen` /
+  `LeaveAltScreen`, `HideCursor` / `ShowCursor`, `SaveCursor` /
+  `RestoreCursor`, `SetScrollRegion` / `ResetScrollRegion`,
+  `ScrollUp`/`ScrollDown`. The encoder needs only an `Extend<u8>` sink; the
+  Supervisor's `Report` seam already **is** a byte sink. So a rich screen is
+  built by constructing `Op`s and feeding `emit::encode_into` straight into
+  `Report`.
+
+### 8.1 Binding decisions
+
+- **Reuse `lib/vt`'s `Op` / `emit`; never hand-roll escape bytes (§2.2).** A
+  second copy of the CSI/SGR encoding — an ad-hoc `write_bytes(b"\x1b[...")`
+  scattered through a command — is the duplication the charter forbids and a
+  review blocker. The one exception already in the tree (`\r`, `\x1b[K`, the
+  in-place redraw of the byte-exact boot-screen strings in §2/§3) stays as-is
+  because those bytes are the frozen boot-screen **contract** (§2), not a
+  presentation layer; everything richer goes through `Op`/`emit`.
+- **Target only the universally-safe VT100/xterm subset** — exactly the `Op`s
+  enumerated in §8.0. At the bootstrap floor there is **no** `TERM` /
+  `lib/termcap` database resolved (that lives on the not-yet-mounted
+  `/System`) and **no** way to query the console's size or capabilities (the
+  write seam is one-way). So a rich screen must not depend on any capability
+  outside that subset.
+- **Assume a conservative fixed geometry, threaded not hard-coded.** With no
+  size query, a full-screen layout assumes a safe default (80×24). Where a
+  geometry value is available from discovery it is *threaded in as data*
+  (§18.1), never baked as a per-board constant (§2.20). The layout must clamp
+  to the assumed bounds and never position off-screen.
+- **Degrade gracefully; colour/position is a nicety, never a correctness
+  dependency (§5.4, §2.9).** Every rich screen offers a plain/monochrome
+  line-oriented fallback so a genuinely dumb serial line still shows usable
+  text. The fallback is selected by a single injected flag on the presenter,
+  defaulting to plain; there is no probe. A malformed/oversized coordinate
+  clamps, it never panics.
+- **No new "stuff" at the floor.** `lib/vt` and `lib/supervisor` are both
+  already `no_std` / alloc-free. The presentation helper is a thin
+  `Op`-building layer **inside `lib/supervisor`** (arch-neutral), not a new
+  crate or subsystem (§2.3). It adds no dependency `lib/supervisor` does not
+  already carry (`lib/vt`).
+
+### 8.2 Deliverable (one self-contained stage)
+
+- A small `screen` module in `lib/supervisor` exposing an arch-neutral
+  presenter built on `lib/vt`: a typed `Style` (foreground/background/attrs
+  mapped to `Sgr`), a `move_to(row, col)` / `clear` / `enter_fullscreen`
+  (alt-screen + hide cursor) / `leave_fullscreen` (show cursor + leave
+  alt-screen) helper set, and a `plain: bool` mode that emits text only. It
+  writes exclusively through the existing `Report` seam via
+  `emit::encode_into`; it names no board, MMIO, or `cfg(target_arch)`.
+- **Host unit tests** assert the emitted bytes equal the `lib/vt` encoding of
+  the corresponding `Op`s (so the "never a second copy" rule is *tested*, not
+  merely asserted), and that `plain` mode emits no escape bytes.
+- **Docs**: extend `docs/src/architecture/supervisor.md` with a short
+  "rich screens" note and rustdoc on every public item; `README.md`
+  stability tier unchanged (`experimental`).
+
+This stage stands alone and lands before §9 (the takeover memtest is the
+first *consumer* of the fullscreen presenter, but the presenter is useful on
+its own and is verified independently).
+
+---
+
+## 9. `memtest full` — the destructive, one-way takeover RAM test
+
+This section is **immediate work for an AI**, staged in well-defined full
+stages A–E; each stage is independently reviewable and must land complete
+(§27) with its tests and docs (§7, §13). It is **additive**: the existing
+non-destructive, bounded, ESC-abortable in-system `memtest` (§4.2) stays
+exactly as it is. The takeover mode is a distinct, explicitly-confirmed
+command.
+
+### 9.0 Why a takeover mode, and why it is the *only* way to test all of RAM
+
+The in-system `memtest` (`supervisor_system.rs`) runs **inside the live
+kernel**: it `alloc()`s free frames, tests each with `ram_test_owned_window`,
+frees them, and is deliberately capped (`MEMTEST_MAX_BYTES`, and never more
+than half of free RAM) precisely because "a RAM test must confine itself to
+memory it explicitly owns … never the live map (that would corrupt the
+running kernel)". It therefore can **never** test the RAM the kernel image,
+heap, page tables, or stacks occupy — the same wall memtest86 avoids by
+owning the whole machine.
+
+A takeover mode is the correct — and only — way to test *all* of RAM. It is a
+**one-way trip**, exactly like `reboot`/`poweroff`: there is no "drop back
+into the system", the only exits are reset/power-off. That irreversibility is
+what makes the confirmation (Stage C) and the pre-jump audit (Stage C)
+mandatory, not optional.
+
+### 9.1 Binding decisions (whole feature)
+
+- **Bootstrap-floor, in-kernel, no new ABI (§18.6).** Like the rest of the
+  Supervisor it runs pre-mount, before any app surface; it adds **no
+  `lib/abi` type and no syscall**, so `abi-v1` being unfrozen is irrelevant
+  here (§0 ABI note). It adds no driver and no new authority.
+- **Split arch-neutral vs arch-specific honestly (§2.20 / §2.21 / §17.2).**
+  The *pattern algorithm* (walking-ones/zeros, address-in-address,
+  moving-inversions) is arch-neutral and already lives in
+  `tairix_kernel_mem::ramtest` — extend it with a destructive full-range
+  variant shared by all four targets. The *takeover mechanism* (quiesce
+  secondaries, mask interrupts + watchdog, relocate/flatten paging so the
+  test can address physical RAM, cache maintenance) is irreducibly
+  target-divergent and lives behind a **new Arch HAL slice**, implemented
+  per `kernel/arch/<target>/`. Do **not** `cfg(target_arch)` this into shared
+  code (`cargo xtask cfg-check` forbids it).
+- **No raw pointer arithmetic without bounds-checked wrappers (§4).** The
+  destructive writes go through the safe, range-checked `ramtest` window over
+  the `BootMemoryMap` (the `WordWindow` / `PhysWindow` abstraction already
+  there), never ad-hoc pointers.
+- **Same threat model as the rest of the Supervisor (§0, §19.9).** It runs at
+  the physical console *before the root is unlocked*, so **no key material or
+  user secret is in RAM yet** — the destruction exposes nothing. That is a
+  reason to audit loudly and confirm explicitly, never to relax anything.
+- **No panic on any path (§2.9).** A platform that cannot take over (no
+  quiesce/relocate primitive) reports "not supported" fail-safe and stays in
+  the REPL — exactly like `poweroff` on a port without a power-off primitive
+  (`KernelArch::poweroff` returning). It never panics, never half-tears-down
+  the machine and wedges.
+- **No busy-waiting as steady state (§2.23).** Quiescing the other CPUs is a
+  legitimate *bounded handshake* (a documented §2.23 exception — the machine
+  is being deliberately torn down, so the secondaries spin-halt under a
+  bounded budget and it is documented as such), not a perpetual poll. If a
+  secondary does not acknowledge within the budget the takeover **fails
+  closed** (report "could not quiesce CPU N", stay in the REPL), it does not
+  spin forever.
+
+### Stage A — the arch-neutral destructive full-range pattern engine
+
+- Extend `kernel/mem/src/ramtest.rs` with a **destructive** whole-region
+  variant: given the `BootMemoryMap` and a physical-address window
+  abstraction, run the full multi-pattern sweep (moving-inversions +
+  address-in-address, reusing the existing `address_pass` / `test_window`
+  primitives) across a physical range **without** the "leave it zeroed /
+  restore" contract the non-destructive `run` keeps — because the machine
+  never resumes. Report progress through an injected `on_progress(tested,
+  total)` callback and honour an injected `abort() -> bool` between chunks.
+- It stays pure `lib/*` logic over the `WordWindow` trait, so it is fully
+  host-testable with the existing `FakeRam` double. No arch, no board.
+- **Host tests**: healthy region passes; each seeded `Fault`
+  (`StuckLow`/`StuckHigh`/`Alias`) is caught with the correct reported
+  physical offset; abort stops early; the engine touches every word in the
+  range (the point of "destructive full-range").
+
+### Stage B — the Arch HAL takeover slice
+
+- Add a new slice `kernel/arch/api/src/takeover.rs` following the existing
+  slice pattern (`smp.rs` / `watchdog.rs`): a `MachineTakeover` trait, a
+  `TakeoverError` enum (`CpuQuiesceTimeout { cpu }`, `NotSupported`, …), and a
+  `takeover::conformance` vertical with a stub double and host tests. The
+  trait's contract:
+  - `quiesce_secondaries(&self) -> Result<(), TakeoverError>` — stop/park
+    every other CPU into a bounded, controlled halt (the §9.1 bounded
+    handshake), fail-closed on timeout.
+  - `prepare_takeover(&self) -> Result<(), TakeoverError>` — mask interrupts,
+    stop the lockup watchdog (`plans/WATCHDOG.md`), and relocate/flatten
+    paging so the test routine can address physical RAM (the classic
+    memtest86 self-relocation into a small reserved arena), doing the cache
+    maintenance destructive writes require.
+  - `NotSupported` is the honest default for any port that has not wired it
+    (`wasm32`, mocks) — surfaced fail-safe, never a panic.
+- Expose it on `KernelArch` (`kernel/core/src/bootinfo.rs`) exactly as
+  `direct_phys_map` / `platform_entropy` are exposed: a
+  `fn machine_takeover(&self) -> Option<&'static dyn MachineTakeover>`
+  defaulting to `None` (fail-closed). No caller yet in this stage.
+- **Per-target implementation + conformance** under `kernel/arch/<target>/`,
+  staged per port (cross-reference `plans/PI.md` and `plans/ARCHSUPPORT.md`
+  for bring-up order). Add the slice to `kernel/arch/api` conformance and the
+  `plans/WIRING.md` per-slice status table and `PLAN.md`.
+
+### Stage C — the confirmation, the pre-jump synchronous audit, and the seam
+
+- Extend the `SupervisorSystem` seam (`kernel/core/src/supervisor_system.rs`)
+  with a `memtest_takeover(...) -> !`-shaped control method (mirroring how
+  `reboot`/`poweroff` are the state-changing methods), driven by a **distinct
+  command** in `lib/supervisor` — `memtest full` (alias `memtest
+  --takeover`). The default `memtest` stays the safe, bounded, ESC-abortable
+  in-system test.
+- **Explicit typed confirmation.** Because it is irreversible and destroys the
+  boot, the command requires an explicit, clearly-worded confirmation before
+  it does anything (a typed confirmation phrase read through the existing REPL
+  line reader — no new input path). A mistyped/blank/aborted confirmation
+  returns to the `*` prompt fail-closed and changes nothing.
+- **Audit *before* the jump, synchronously.** The in-memory `BOOT_AUDIT_RING`
+  is destroyed by the takeover, so a new stable id (extend the Supervisor
+  `41xx` range, e.g. `4157 SUPERVISOR_MEMTEST_TAKEOVER`) is flushed to the
+  **persistent serial/log sink synchronously** before control leaves the
+  kernel — after the jump nothing can be recorded. This is the one audit that
+  must not rely on the retained ring.
+- **Unsupported platform** (`machine_takeover()` is `None`, or the slice
+  returns `NotSupported`/a quiesce timeout) reports the reason fail-safe and
+  stays in the REPL (§2.9).
+
+### Stage D — the fullscreen memtest86-style UI (first consumer of §8)
+
+- Once the test owns the machine it owns the console outright, so this is the
+  natural home for the memtest86-style fullscreen, built entirely on the §8
+  presenter (alt-screen + hidden cursor + absolute-positioned header, a
+  per-pattern progress bar, a live pass counter, and a coloured error table),
+  with the §8 plain-text fallback for a dumb serial line. It reuses the §8
+  `screen` module — no second escape-emitting path (§2.2).
+- The UI renders only from the Stage A engine's `on_progress` callback and the
+  fault report; it computes nothing new.
+
+### Stage E — tests, docs, and the gate
+
+- **Host tests**: the Stage A engine (above); the confirmation/decision logic
+  over mock seams (confirm → takeover requested; decline/blank/abort → no
+  takeover, return to prompt, nothing changed); the pre-jump audit id is
+  emitted exactly once before the control jump; the fullscreen UI byte output
+  over a mock `Report` (and that `plain` mode emits no escapes); the Arch HAL
+  `takeover` conformance double.
+- **QEMU integration vertical**: because a true full-RAM destructive run
+  cannot "return", drive the confirmation, assert the pre-jump audit line and
+  the fullscreen output bytes on the serial console, and assert the guest
+  **ends in a reset** rather than resuming boot. (A tiny/emulated memory
+  window keeps the run bounded in CI.)
+- **Docs**: `docs/src/architecture/supervisor.md` gains the takeover section
+  (the one-way contract, the confirmation wording, the audit id, the Arch HAL
+  slice), rustdoc on every public item, and the `plans/WIRING.md` /
+  `plans/WATCHDOG.md` / `PLAN.md` cross-references.
+- **Gate**: the same whole-workspace gate as §7 (`cargo fmt --all`,
+  `cargo xtask ci` once, `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both
+  --secs 20`), green, before the work is done. The REPL fuzz harness (§7)
+  covers the new `memtest full` / confirmation parsing.
+
+---
+
+## 10. Charter housekeeping (do in the same change)
 
 - Add `lib/supervisor` to `AGENTS.md` §3 (`lib/*` map, one-line label).
 - Add the jump-sheet row to `AGENTS.md` §15.18:
@@ -361,7 +608,7 @@ Land in the **same change**:
 
 ---
 
-## 9. Status
+## 11. Status
 
 `in progress`.
 
@@ -508,8 +755,20 @@ Land in the **same change**:
    console input, §19.6).
 3. The full whole-workspace validation gate (`cargo xtask ci` + `fuzz
    --secs 5` + `soak.sh both --secs 20`) run to green.
+4. **§8 rich screens** — the arch-neutral `screen` presenter in
+   `lib/supervisor` over `lib/vt`'s `Op`/`emit` (colour, positioning,
+   alt-screen, plain-text fallback), with host tests and docs. A
+   self-contained stage (`planned`).
+5. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test,
+   staged A–E: the arch-neutral destructive full-range engine in
+   `kernel/mem::ramtest` (Stage A), the `MachineTakeover` Arch HAL slice +
+   per-port impls (Stage B), the confirmation + pre-jump synchronous audit +
+   seam (Stage C), the fullscreen memtest86-style UI on the §8 presenter
+   (Stage D), and tests/docs/gate (Stage E). Depends on §8 for Stage D
+   (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, and the ESC boot-screen (both entry
 points) are complete and compiling on every Tier-1 target; the QEMU
-vertical, the REPL fuzz harness, and the full gate remain.
+vertical, the REPL fuzz harness, the full gate, and the newly-staged §8
+rich-screen presenter and §9 `memtest full` takeover mode remain.
