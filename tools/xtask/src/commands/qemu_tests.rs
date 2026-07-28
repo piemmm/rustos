@@ -3865,6 +3865,62 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
     },
+    // `plans/NEW-SUPERVISOR.md` §7: the pre-boot **Supervisor** ESC vertical.
+    // `tairix-test-supervisor-esc-qemu-aarch64` boots the *production* aarch64
+    // pipeline over the same planted whole-disk encrypted-root image the
+    // admission vertical above uses (`FsDisk::EncryptedRootDisk`), so the real
+    // `SupervisorHost` is installed and the byte-exact ESC boot screen is
+    // drawn. The serial script then walks the frozen boot-screen states in
+    // order — reaching each marker *is* the byte-exact assertion, and the run
+    // fails loud if the guest exits before every step was sent:
+    //
+    //  1. `[Press ESC for supervisor]` (`root_mount::SUPERVISOR_ANNOUNCE`) →
+    //     type a lone `ESC` (`0x1b`). The window disambiguates it from a CSI
+    //     editor sequence with a bounded re-poll; a lone `ESC` drops into the
+    //     REPL. (If the 2 s window elapses before the byte lands, the same
+    //     `ESC` is read as the first byte of the passphrase line and still
+    //     drops in via `PassphraseReadError::Escape` — the `Supervisor` banner
+    //     appears either way, so this step is race-robust.)
+    //  2. `Supervisor` (`root_mount::SUPERVISOR_ENTER_BANNER`, the collapse to
+    //     `ARXFS` then the `Supervisor` banner) → type `help`, exercising a
+    //     real command at the `*` prompt.
+    //  3. `commands:` (the host-independent `Supervisor commands:` header the
+    //     dispatcher's `help` renders) → type `continue`, leaving the REPL.
+    //  4. `ARXFS passphrase: ` (`root_mount::FS_UNLOCK_PROMPT`, redrawn *after*
+    //     the REPL exited) → type the fixture passphrase, proving a Supervisor
+    //     session is transparent to boot.
+    //
+    // The kernel-side audit sink reports PASS through the ARM semihosting
+    // finisher the instant it sees the unlock-service install message
+    // (`EventId(4139)`) — which can only follow `continue` resuming the normal
+    // unlock and that unlock mounting the encrypted `ARXFS` root. A run where
+    // ESC never enters the REPL, `continue` never resumes, or the resumed
+    // unlock never mounts never reaches the message and the harness times out.
+    // The database *content* authenticating `root`/`root` is proven by
+    // `root_unlock_login`, so this vertical keys on the install witness. 120 s
+    // matches the admission vertical it mirrors; single CPU like the other
+    // full-boot verticals.
+    QemuTest {
+        package: "tairix-test-supervisor-esc-qemu-aarch64",
+        binary: "tairix-test-supervisor-esc-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("[Press ESC for supervisor]", Duration::ZERO, "\x1b"),
+            ("Supervisor", Duration::ZERO, "help\n"),
+            ("commands:", Duration::ZERO, "continue\n"),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+        ],
+    },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
     // and two-kthread-admission regression. It boots the *production* x86_64
     // `tairix-kernel` pipeline (`boot_x86_64::boot`) with the planted

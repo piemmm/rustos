@@ -63,6 +63,23 @@ arrow/Delete keys) is resolved in the shared line discipline `lib/vt`
 (`LineEditor::resolve_escape` / `LineFeed::Escape`), driven by a bounded,
 timed re-poll — never a busy-spin.
 
+## End-to-end boot test
+
+The command dispatcher, the REPL, and the ESC/timeout state machine are
+covered by host unit tests over mock seams, and a fuzz harness drives the REPL
+line/command parser against hostile console input
+(`tairix-supervisor`'s `fuzz_repl` target). The boot-screen contract itself is
+proven on the *production* boot path by a QEMU vertical,
+`tairix-test-supervisor-esc-qemu-aarch64`: it boots the real aarch64 pipeline
+with a planted encrypted-root disk, presses `ESC` at the boot screen, runs a
+read-only command at the `*` prompt, `continue`s, and then unlocks. The
+runner's serial script walks the frozen screen states in order
+(`[Press ESC for supervisor]` → the `Supervisor` banner → the `help` output →
+the redrawn `ARXFS passphrase: ` prompt), so reaching each marker is the
+byte-exact assertion, and the run passes only once the unlock-service install
+message proves `continue` resumed the normal unlock and it mounted the root —
+i.e. that a Supervisor session is transparent to boot.
+
 ## Rich screens: colour and positioning
 
 Colour and cursor positioning at the bootstrap floor cost nothing new — the
