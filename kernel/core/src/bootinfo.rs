@@ -197,6 +197,29 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// The port's **machine-takeover** handle, when it can hand the whole
+    /// machine over to the pre-boot Supervisor's one-way destructive
+    /// whole-RAM test (`plans/NEW-SUPERVISOR.md` §9): stop every other CPU,
+    /// mask interrupts, stop the lockup watchdog, and flatten paging so a
+    /// small self-contained test routine can address physical RAM.
+    ///
+    /// Because a takeover is irreversible (its only exits are reset /
+    /// power-off), the Supervisor's `memtest full` command reads this handle
+    /// only *after* an explicit typed confirmation and a synchronous
+    /// pre-jump audit. Like [`Self::watchdog_recovery`] the reference is
+    /// `'static` and shared, so it is `Sync`.
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: a port that has not wired the takeover
+    /// slice (`wasm32`, the host test arch, or a bare-metal port before its
+    /// takeover mechanism lands) honestly reports "not supported", so the
+    /// Supervisor stays in the REPL and changes nothing rather than
+    /// half-tearing-down the machine (fail closed, never a panic).
+    fn machine_takeover(&self) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
+        None
+    }
+
     /// The port's resolver that names a stuck controller line belonging to a
     /// kernel-internal source with no task binding — a chained/bespoke line
     /// the kernel services itself (the platform MSI multiplexer, the console

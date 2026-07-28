@@ -103,7 +103,19 @@ the burn-down is complete.
 | Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
 | Memory-tagging profile (§19.10)   |   ✓    | ✓ MTE pend | ✓ unsup | ✓ unsup |
 | Post-mortem capture (`CpuStateCapture`) | ✓ | ✓ | ✓ | ✓ unsup |
+| Machine takeover (`MachineTakeover`, optional) | ✗ | ✗ | ✗ | n/a |
 | **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
+
+`MachineTakeover` (`kernel/arch/api/src/takeover.rs`) is **not** a §17.2
+mandatory primitive — the §17.2 burn-down above stays complete. It is the
+optional machine-takeover slice the pre-boot Supervisor's one-way destructive
+`memtest full` drives (`plans/NEW-SUPERVISOR.md` §9): the arch-neutral trait,
+`TakeoverError`, and its host `takeover::conformance` vertical have landed and
+`KernelArch::machine_takeover` defaults to `None` (fail closed), so every port
+honestly reports "not supported" until it wires the quiesce/relocate mechanism.
+`wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
+impls are staged with the Supervisor `memtest full` command, not part of the
+§17.2 parity guarantee.
 
 **QEMU vertical parity** (`tests/integration/*`):
 

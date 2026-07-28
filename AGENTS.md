@@ -1896,7 +1896,12 @@ as non-negotiable as §2.
   estimator derives the live "cpu MHz" the System Information API reports,
   `plans/FIX-HARDWARE-FEATURES.md`), and the
   lockup-watchdog non-maskable liveness sample + cross-CPU recovery
-  (`plans/WATCHDOG.md`).
+  (`plans/WATCHDOG.md`), and the **optional** machine-takeover mechanism
+  (`MachineTakeover`: quiesce the secondary CPUs, mask interrupts, stop the
+  watchdog, and flatten paging) the pre-boot Supervisor's one-way destructive
+  whole-RAM test drives (`plans/NEW-SUPERVISOR.md` §9) — optional because a
+  port that has not wired it fails closed to "not supported" rather than
+  blocking the boot floor, unlike the mandatory slices above.
   Each slice carries a
   conformance vertical in `kernel/arch/api`. Adding to this surface
   requires a PLAN.md entry and updates this section; per-slice migration

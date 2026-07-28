@@ -516,29 +516,29 @@ mandatory, not optional.
 
 ### Stage B — the Arch HAL takeover slice
 
-- Add a new slice `kernel/arch/api/src/takeover.rs` following the existing
-  slice pattern (`smp.rs` / `watchdog.rs`): a `MachineTakeover` trait, a
-  `TakeoverError` enum (`CpuQuiesceTimeout { cpu }`, `NotSupported`, …), and a
-  `takeover::conformance` vertical with a stub double and host tests. The
-  trait's contract:
-  - `quiesce_secondaries(&self) -> Result<(), TakeoverError>` — stop/park
-    every other CPU into a bounded, controlled halt (the §9.1 bounded
-    handshake), fail-closed on timeout.
-  - `prepare_takeover(&self) -> Result<(), TakeoverError>` — mask interrupts,
-    stop the lockup watchdog (`plans/WATCHDOG.md`), and relocate/flatten
-    paging so the test routine can address physical RAM (the classic
-    memtest86 self-relocation into a small reserved arena), doing the cache
-    maintenance destructive writes require.
-  - `NotSupported` is the honest default for any port that has not wired it
-    (`wasm32`, mocks) — surfaced fail-safe, never a panic.
-- Expose it on `KernelArch` (`kernel/core/src/bootinfo.rs`) exactly as
-  `direct_phys_map` / `platform_entropy` are exposed: a
-  `fn machine_takeover(&self) -> Option<&'static dyn MachineTakeover>`
-  defaulting to `None` (fail-closed). No caller yet in this stage.
-- **Per-target implementation + conformance** under `kernel/arch/<target>/`,
-  staged per port (cross-reference `plans/PI.md` and `plans/ARCHSUPPORT.md`
-  for bring-up order). Add the slice to `kernel/arch/api` conformance and the
-  `plans/WIRING.md` per-slice status table and `PLAN.md`.
+**Done (the arch-neutral slice):** `kernel/arch/api/src/takeover.rs` follows
+the `smp.rs`/`watchdog.rs` pattern — the object-safe `MachineTakeover` trait
+(`unsafe quiesce_secondaries` + `unsafe prepare_takeover`, both fail-closed and
+non-panicking, with a documented two-step ordering contract), the
+`TakeoverError` enum (`CpuQuiesceTimeout { cpu }`, `NotSupported`,
+`PrepareFailed(i64)`) with a stable `as_str()`, and the host
+`takeover::conformance` vertical (`run_unsupported`) proving the fail-closed
+vocabulary via an unsupported double (a genuine takeover has no harmless input,
+so — unlike `smp` — a supported port is only proven by the Stage E QEMU
+vertical). `KernelArch::machine_takeover` (`kernel/core/src/bootinfo.rs`) is the
+exposure seam, `Option<&'static (dyn MachineTakeover + Sync)>` defaulting to
+`None` (fail-closed), with no caller yet. Registered in
+`kernel/arch/api/src/lib.rs` (module + re-exports + crate-doc slice entry) and
+the `plans/WIRING.md` parity matrix (an *optional* slice, not a §17.2 mandatory
+primitive — the §17.2 burn-down stays complete).
+
+**Remaining (per-target implementation + conformance):** the real
+`MachineTakeover` bodies under `kernel/arch/<target>/` (quiesce the secondaries,
+mask interrupts, stop the watchdog, relocate/flatten paging, cache maintenance),
+each wiring `machine_takeover()` to return its handle and adding its QEMU
+conformance. Staged per port (cross-reference `plans/PI.md` and
+`plans/ARCHSUPPORT.md` for bring-up order); `wasm32` stays `NotSupported` (a
+sandbox owns no physical RAM to take over).
 
 ### Stage C — the confirmation, the pre-jump synchronous audit, and the seam
 
@@ -802,15 +802,18 @@ mandatory, not optional.
    asserting `continue` resumes a normal boot and `mount` unlocks and boots.
 2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
    Stage A (the arch-neutral destructive full-range engine in
-   `kernel/mem::ramtest`) is **done** (above). Remaining: the
-   `MachineTakeover` Arch HAL slice + per-port impls (Stage B), the
-   confirmation + pre-jump synchronous audit + seam (Stage C), the fullscreen
-   memtest86-style UI on the §8 `screen` presenter (Stage D), and
-   tests/docs/gate wiring the command in (Stage E) (`planned`).
+   `kernel/mem::ramtest`) and the **arch-neutral half of Stage B** (the
+   `MachineTakeover` Arch HAL slice + `TakeoverError` + `takeover::conformance`
+   + the fail-closed `KernelArch::machine_takeover` seam) are **done** (above).
+   Remaining: the per-port `MachineTakeover` bodies + their QEMU conformance
+   (rest of Stage B), the confirmation + pre-jump synchronous audit + seam
+   (Stage C), the fullscreen memtest86-style UI on the §8 `screen` presenter
+   (Stage D), and tests/docs/gate wiring the command in (Stage E) (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
-the §8 rich-screen presenter, the REPL fuzz harness, and the §9 Stage-A
-destructive full-range RAM engine are complete and compiling on every Tier-1
-target; the QEMU vertical and §9 Stages B–E (the takeover mechanism and its
-command) remain.
+the §8 rich-screen presenter, the REPL fuzz harness, the §9 Stage-A
+destructive full-range RAM engine, and the §9 Stage-B `MachineTakeover` Arch
+HAL slice (arch-neutral surface + conformance + fail-closed `KernelArch` seam)
+are complete and compiling on every Tier-1 target; the QEMU vertical, the
+per-port takeover mechanisms, and §9 Stages C–E (the takeover command) remain.

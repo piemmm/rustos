@@ -72,7 +72,13 @@
 //! [`SecondaryBringup`] trait whose [`SecondaryBringup::start_secondary`]
 //! starts a parked logical CPU (an x86_64 INIT-SIPI-SIPI handshake, an
 //! aarch64 PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web
-//! Worker spawn), plus its [`smp::conformance`] vertical. It also hosts
+//! Worker spawn), plus its [`smp::conformance`] vertical — and the
+//! **machine-takeover** slice (`plans/NEW-SUPERVISOR.md` §9): the
+//! [`MachineTakeover`] trait whose [`MachineTakeover::quiesce_secondaries`]
+//! and [`MachineTakeover::prepare_takeover`] hand the whole machine over
+//! to the pre-boot Supervisor's one-way destructive whole-RAM test (stop the
+//! other CPUs, mask interrupts, stop the watchdog, flatten paging), plus
+//! its [`takeover::conformance`] vertical. It also hosts
 //! the ** conformance
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
@@ -126,6 +132,7 @@ pub mod percpu;
 pub mod platform;
 pub mod sidechannel;
 pub mod smp;
+pub mod takeover;
 pub mod timer;
 pub mod tlb;
 pub mod uaccess;
@@ -198,6 +205,8 @@ pub use uaccess::{
 pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
 
 pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
+
+pub use takeover::{conformance as takeover_conformance, MachineTakeover, TakeoverError};
 
 pub use watchdog::{
     conformance as watchdog_conformance, RecoveryOutcome, RemotePcSample, StuckInterrupt,

@@ -163,3 +163,32 @@ The response is to audit loudly and fail closed, never to weaken a defence:
   explicit, audited control action.
 - Entering the console and every state-changing command emit a stable audit
   event on the hash-chained boot log; no event carries a secret.
+
+## Machine takeover (destructive whole-RAM test — foundation)
+
+The in-system `memtest` can only test RAM it explicitly owns; it can never
+test the frames the kernel image, heap, page tables, or stacks occupy. Testing
+*all* of RAM requires owning the whole machine — stopping every other CPU,
+masking interrupts, stopping the lockup watchdog, and flattening paging so a
+small self-contained test routine can address physical RAM — which is a
+one-way trip whose only exits are reset or power-off.
+
+That takeover mechanism is irreducibly per-architecture, so it lives behind an
+Arch HAL slice, `MachineTakeover` (`kernel/arch/api/src/takeover.rs`):
+
+- `quiesce_secondaries` stops every other CPU into a bounded, controlled halt
+  (a bounded tear-down handshake, never an unbounded spin) and fails closed
+  with `CpuQuiesceTimeout` if a core does not acknowledge in budget.
+- `prepare_takeover` masks interrupts, stops the watchdog, and
+  relocates/flattens paging for the destructive sweep.
+
+Both steps fail closed (`TakeoverError`), never panic, and leave the machine
+running and recoverable on any error. `KernelArch::machine_takeover` defaults
+to `None`, so a port that has not wired the mechanism (and `wasm32`, which owns
+no physical RAM to take over) honestly reports "not supported" and the
+Supervisor stays in the REPL. The arch-neutral destructive sweep the mechanism
+will drive already exists (`tairix_kernel_mem::ramtest::run_destructive`). The
+operator-facing `memtest full` command, its explicit typed confirmation, and
+the synchronous pre-jump audit are staged with the per-port takeover
+implementations (`plans/NEW-SUPERVISOR.md` §9); until a port wires them the
+safe, bounded, interruptible in-system `memtest` is the only RAM test offered.
