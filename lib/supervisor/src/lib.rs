@@ -56,9 +56,11 @@ mod dispatch;
 mod repl;
 
 pub mod commands;
+pub mod screen;
 
 pub use dispatch::{Command, Flow, Session, COMMANDS};
 pub use repl::{run_supervisor, PROMPT};
+pub use screen::{Geometry, Screen, Style};
 
 /// The longest command line, in bytes, the Supervisor accepts.
 ///

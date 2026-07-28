@@ -63,6 +63,35 @@ arrow/Delete keys) is resolved in the shared line discipline `lib/vt`
 (`LineEditor::resolve_escape` / `LineFeed::Escape`), driven by a bounded,
 timed re-poll — never a busy-spin.
 
+## Rich screens: colour and positioning
+
+Colour and cursor positioning at the bootstrap floor cost nothing new — the
+console is already a byte stream that consumes escape sequences, and `lib/vt`
+already has a complete, arch-neutral, allocation-free VT emitter (`Op` +
+`emit::encode_into`). The `lib/supervisor::screen` module is a thin
+`Op`-building layer over that emitter: a `Screen` presenter that offers
+`move_to`, `clear`, `set_style` / `reset_style`, and `enter_fullscreen` /
+`leave_fullscreen`, plus a typed `Style` (foreground/background `Color` and the
+common attributes) mapped to `Sgr`. It never hand-rolls a second copy of the
+CSI/SGR encoding — the charter forbids that duplication, and a host test asserts
+the emitted bytes equal `lib/vt`'s encoding of the corresponding `Op`s.
+
+Two properties make it safe at the floor:
+
+- **Plain fallback.** A `Screen` built with `plain` set emits **no** escape
+  bytes — only text — so a genuinely dumb serial line still shows usable
+  output. The choice is one injected flag; there is no probe (the write seam is
+  one-way, and the `TERM`/`lib/termcap` database lives on the not-yet-mounted
+  `/System`).
+- **Bounded geometry.** With no way to query the console size, a full-screen
+  layout assumes a conservative `Geometry` (80×24 by default, threaded in as
+  data rather than a per-board constant). Every position is clamped into that
+  geometry, so a malformed or oversized coordinate is pinned to the edge rather
+  than positioning off-screen, and nothing panics.
+
+The presenter stands alone; the destructive `memtest full` takeover UI
+(`plans/NEW-SUPERVISOR.md` §9) is its first full-screen consumer.
+
 ## The retained boot audit log
 
 The `log` command tails the boot audit trail even after the serial console has

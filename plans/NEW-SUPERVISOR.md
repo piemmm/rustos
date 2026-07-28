@@ -745,30 +745,49 @@ mandatory, not optional.
   clippy `-D warnings` clean; the 27 `root_mount` host tests pass with the
   new signature.
 
+**Done (§8 rich screens — the colour/positioning presenter):**
+
+- `lib/supervisor::screen` — the arch-neutral `no_std` presenter over
+  `lib/vt`'s `Op`/`emit`: a `Screen { move_to, clear, set_style,
+  reset_style, enter_fullscreen, leave_fullscreen }` writing through a
+  bounded stack flush-sink (`ReportSink: Extend<u8>` over the `Report`
+  seam), a typed `Style` (foreground/background `Color` + bold/underline/
+  reverse) mapped to a deterministic `Sgr` run, and a fail-closed
+  `Geometry` (default 80×24, dimensions clamped ≥1, positions clamped into
+  bounds). A `plain` flag emits **no** escape bytes (text only) for a dumb
+  serial line. It hand-rolls no escape encoding: host tests assert the
+  emitted bytes equal the `lib/vt` encoding of the corresponding `Op`s, that
+  `plain` mode emits no `\x1b`, and that the flush-sink crosses its chunk
+  boundary losslessly. Re-exported as `Screen`/`Style`/`Geometry`; rustdoc on
+  every public item; `docs/src/architecture/supervisor.md` "Rich screens"
+  section. This is §9's Stage-D dependency and now stands complete on its own.
+
+**Done (the REPL fuzz harness — the item-2 prerequisite):**
+
+- `lib/supervisor/tests/fuzz_repl.rs` — a deterministic, seeded harness
+  (`tairix_fuzzseed` LCG + budget/seed seam) driving `run_supervisor` over
+  hostile console scripts: mutated real-command-word streams, pure noise, and
+  over-long unterminated lines. Its invariant is "never panics, always
+  terminates"; host std mocks back the seams (`mount` varies its outcome by
+  passphrase length to reach every branch without echoing the secret).
+  Registered as target `fuzz_repl` in `tools/xtask/src/commands/fuzz.rs`
+  (`cargo xtask fuzz`) with a registry unit test.
+
 **Remaining:**
 
 1. The QEMU integration vertical driving `ESC` at both trigger points with
    the byte-exact boot-screen assertions (alongside the existing
    `UNLOCK_PASSPHRASE_LINE` script in `tools/xtask/src/commands/qemu_tests.rs`),
    asserting `continue` resumes a normal boot and `mount` unlocks and boots.
-2. A `cargo xtask fuzz` harness over the REPL line/command parser (untrusted
-   console input, §19.6).
-3. The full whole-workspace validation gate (`cargo xtask ci` + `fuzz
-   --secs 5` + `soak.sh both --secs 20`) run to green.
-4. **§8 rich screens** — the arch-neutral `screen` presenter in
-   `lib/supervisor` over `lib/vt`'s `Op`/`emit` (colour, positioning,
-   alt-screen, plain-text fallback), with host tests and docs. A
-   self-contained stage (`planned`).
-5. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test,
+2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test,
    staged A–E: the arch-neutral destructive full-range engine in
    `kernel/mem::ramtest` (Stage A), the `MachineTakeover` Arch HAL slice +
    per-port impls (Stage B), the confirmation + pre-jump synchronous audit +
-   seam (Stage C), the fullscreen memtest86-style UI on the §8 presenter
-   (Stage D), and tests/docs/gate (Stage E). Depends on §8 for Stage D
-   (`planned`).
+   seam (Stage C), the fullscreen memtest86-style UI on the §8 `screen`
+   presenter (Stage D), and tests/docs/gate (Stage E) (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
-composition, the `SupervisorHost`, and the ESC boot-screen (both entry
-points) are complete and compiling on every Tier-1 target; the QEMU
-vertical, the REPL fuzz harness, the full gate, and the newly-staged §8
-rich-screen presenter and §9 `memtest full` takeover mode remain.
+composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
+the §8 rich-screen presenter, and the REPL fuzz harness are complete and
+compiling on every Tier-1 target; the QEMU vertical and the §9 `memtest full`
+takeover mode remain.

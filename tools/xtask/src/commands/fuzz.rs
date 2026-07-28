@@ -385,6 +385,12 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_sandbox",
         description: "lib/sandbox decode seam (hostile input files through the sandboxed decode service, and hostile worker replies into the fail-closed client decoders)",
     },
+    Target {
+        package: "tairix-supervisor",
+        test: "fuzz_repl",
+        description:
+            "pre-boot Supervisor REPL line/command parser (untrusted physical-console bytes: never panics, always terminates)",
+    },
 ];
 
 /// How long to run each harness.
@@ -844,6 +850,14 @@ mod tests {
             assert_eq!(chosen.len(), 1);
             assert_eq!(chosen[0].package, "tairix-binfmt");
         }
+    }
+
+    #[test]
+    fn supervisor_repl_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_repl"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-supervisor");
     }
 
     #[test]
