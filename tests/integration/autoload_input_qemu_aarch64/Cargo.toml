@@ -43,10 +43,11 @@ tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 # display-service witness keys on — the shared definition, never a magic
 # number.
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-# The syscall audit vocabulary: the `SyscallInvoked` event id whose `sc`
-# field carries `fd_grant`/`fd_redeem` — the FM9-b open-a-file witnesses
+# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# field names the loaded bundle — the terminal round-trip / Ctrl-C recovery
+# witnesses attribute the shell's `sleep`/`true` loads by that exact path
 # (the shared definition, never a magic id).
-tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 # The reserved `DISPLAY_ENDPOINT` id the display-service witness matches.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so

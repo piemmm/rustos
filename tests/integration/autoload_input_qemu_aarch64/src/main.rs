@@ -63,7 +63,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on twelve witnesses
+//! ## Why the PASS keys on six witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -87,9 +87,10 @@
 //!    `CAP_IPC_BIND_PRIVILEGED` (only the display service may bind a
 //!    reserved endpoint id, so the witness is unforgeable by any other
 //!    process in the image).
-//! 5. A kernel `ProcessSpawned` audit record observed once the
-//!    kernel/ipc `MessageDelivered` count has reached the crate's shared
-//!    interaction contract ([`TERMINAL_ROUND_TRIP_DELIVERIES`]): the
+//! 5. The `appmgr` `APP_LOADED` record for [`TERMINAL_ROUND_TRIP_BUNDLE`]
+//!    (`/System/Apps/sleep.app`) — the shell resolved and ran the typed
+//!    command, attributed by the loaded bundle's own name rather than a
+//!    fragile delivery count: the
 //!    desktop session — logged in at the seat keyboard and driven by
 //!    injected pointer clicks — opened its start menu, spawned the files
 //!    bundle from the on-disk system app store, served its window over
@@ -102,82 +103,24 @@
 //!    the AW4 shell round trip, every hop kernel-attested (the only
 //!    spawn that can occur after the typing gate is the shell executing
 //!    the typed command).
-//! 6. `AuditEvent::FsNodeMutated` (`EventId` 4100) with `op=mkdir`,
-//!    observed *after* the terminal round trip: the file-manager stage
-//!    (`plans/NEW-FILEMANAGER.md` FM9-a) refocused the files window,
-//!    descended into `/Users/root` by scripted pointer clicks and seat-
-//!    keyboard `Enter`s, and clicked the New Folder tool, so the app made
-//!    a real permission-checked `fs_mkdir` under the logged-in user's own
-//!    identity. The count gate excludes every boot- and login-time
-//!    directory creation.
-//! 7. `AuditEvent::FsNodeMutated` with `op=rename` (after witness 6): the
-//!    inline rename committed a distinct name through `fs_rename` — the
-//!    manager's create-then-name flow, end to end and kernel-attested.
-//!    (A refused mutation logs `FsMutationDenied`, a different id that
-//!    never satisfies these witnesses — fail closed.)
-//! 8. `AuditEvent::SyscallInvoked` (`EventId` 5000) with `sc=fd_grant`,
-//!    observed after the FM9-a rename (`plans/NEW-FILEMANAGER.md` FM9-b):
-//!    the desktop session launched the Viewer from the start menu, the
-//!    Viewer (handed no document) asked the session's trusted file picker
-//!    (`plans/APPWIN.md` AW5), the picker opened at the user's home
-//!    `/Users/root`, and a scripted click on the planted document row
-//!    concluded the pick — so the session delegated the user's chosen file
-//!    to the Viewer through the CU6 one-shot `fd_grant`. In this image the
-//!    trusted picker is the only `fd_grant` caller, so the witness is
-//!    unambiguous.
-//! 9. `AuditEvent::SyscallInvoked` with `sc=fd_redeem` (after witness 8):
-//!    the Viewer redeemed the one-shot delegation handle, installing the
-//!    delegated read-only descriptor under the session's captured identity
-//!    — it now reads exactly the one file the user chose, with no
-//!    filesystem capability of its own. The CU6 delegation, end to end and
-//!    kernel-attested; the pick-click is gated on the test kernel's
-//!    picker-open marker so it lands only once the picker is composited.
-//! 10. `AuditEvent::FsNodeMutated` with `op=rename` whose `to` is under
-//!     `<home>/Library/Trash/` (after witness 9): the file-manager stage
-//!     (`plans/NEW-FILEMANAGER.md` FM9-c/FM10) right-clicked the FM9-a folder
-//!     to open the context menu, clicked its **Delete** row to open the
-//!     confirmation dialog, and clicked the dialog's Delete button — and
-//!     because the folder is in the user's home, on the same volume as the
-//!     user's Trash, the confirmed delete is a recoverable **move to Trash**
-//!     (one real permission-checked `fs_rename` into `<home>/Library/Trash/`)
-//!     under the logged-in user's own identity. It is gated on the FM9-b
-//!     delegation (witness 9) **and** a `Library/Trash` destination, so it
-//!     fires strictly after the whole FM9-a/-b sequence and no earlier
-//!     mutation can satisfy it; the right-click reaches the app through the
-//!     fixed `tools/qemu` secondary-button mask and the compositor's
-//!     secondary-press routing.
-//! 11. `AuditEvent::FsNodeMutated` with `op=rmdir` whose `path` is under
-//!     `<home>/Library/Trash/` (after witness 10): the file-manager stage
-//!     (`plans/NEW-FILEMANAGER.md` FM11) clicked the **Go to Trash** tool to
-//!     navigate into the user's Trash (now holding the FM10-trashed folder),
-//!     clicked the **Empty Trash** tool, and confirmed the *Delete
-//!     Permanently* dialog — so the manager permanently removed the trashed
-//!     folder (`fs_unlink` with the directory-only flag) under the user's own
-//!     identity. It is gated on the FM10 move having latched (witness 10), so
-//!     no earlier removal — of the folder before it reached Trash, or any
-//!     boot/login rmdir — can satisfy it (fail closed). The empty clicks are
-//!     held behind the `FM11_TRASH_FILLED_MARKER` the test kernel emits once
-//!     the move latches, so they land only after the folder is in the Trash.
-//! 12. `AuditEvent::ProcessSpawned` observed with the delivery counter at
-//!     or beyond [`CTRL_C_RECOVERY_DELIVERIES`] — the pty `Ctrl-C`
-//!     job-control round trip (`plans/PTY.md`). Temporally this fires
-//!     right after witness 5, before the FM9 stage; it is listed last only
-//!     to keep the numbering above stable. Witness 5's shell command is
-//!     now the blocking foreground `sleep`; once its spawn latched the
-//!     guest emitted [`CTRL_C_ARM_MARKER`], the runner injected a `Ctrl-C`
-//!     (which the terminal encodes as the `0x03` interrupt byte through the
-//!     shared `lib/keymap` rule) and then [`TERMINAL_CTRL_C_RECOVERY`]'s
-//!     `true` + Enter. The shell is parked in `wait` on `sleep`, so it can
-//!     read and spawn `true` only once the pty's cooked-mode line
-//!     discipline signalled the foreground `sleep` dead — making this later
-//!     spawn an end-to-end witness of keyboard → session → terminal → pty
-//!     cooked `^C` → foreground `Signal::Interrupt` → job death → shell
-//!     recovery, every hop kernel-attested. A failed interrupt leaves
-//!     `sleep` blocking past the run budget, so the witness never latches
-//!     and the run times out (fail loud).
+//! 6. The `appmgr` `APP_LOADED` record for [`CTRL_C_RECOVERY_BUNDLE`]
+//!    (`/System/Apps/true.app`), after the `sleep` round trip — the pty
+//!    `Ctrl-C` job-control round trip (`plans/PTY.md`), attributed by the
+//!    recovered bundle's own name. Once witness 5's `sleep` load latched the
+//!    guest emitted [`CTRL_C_ARM_MARKER`], the runner injected a `Ctrl-C`
+//!    (which the terminal encodes as the `0x03` interrupt byte through the
+//!    shared `lib/keymap` rule) and then [`TERMINAL_CTRL_C_RECOVERY`]'s
+//!    `true` + Enter. The shell is parked in `wait` on `sleep`, so it can
+//!    load and run `true` only once the pty's cooked-mode line discipline
+//!    signalled the foreground `sleep` dead — an end-to-end witness of
+//!    keyboard → session → terminal → pty cooked `^C` → foreground
+//!    `Signal::Interrupt` → job death → shell recovery, every hop
+//!    kernel-attested. A failed interrupt leaves `sleep` blocking past the
+//!    run budget, so the witness never latches and the run times out (fail
+//!    loud).
 //!
-//! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
-//! [`CTRL_C_RECOVERY_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_DELIVERIES
+//! [`TERMINAL_ROUND_TRIP_BUNDLE`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_BUNDLE
+//! [`CTRL_C_RECOVERY_BUNDLE`]: tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_BUNDLE
 //! [`CTRL_C_ARM_MARKER`]: tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER
 //! [`TERMINAL_CTRL_C_RECOVERY`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_CTRL_C_RECOVERY
 //!
@@ -193,7 +136,7 @@
 //! syscall, twice), and injects the mouse motion only once the key
 //! witness's `kind=key` line appears on serial — so each witness is
 //! attributable to its own injection. A run where any step fails never
-//! reaches all twelve witnesses, so the harness times out — the documented
+//! reaches all six witnesses, so the harness times out — the documented
 //! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
@@ -223,7 +166,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -236,14 +179,6 @@ mod kernel {
     // time (`build.rs`). The boot pipeline discovers the board from it
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-    /// The path fragment that identifies a rename destination as landing in the
-    /// user's Trash (`plans/NEW-FILEMANAGER.md` FM10). The file manager spells
-    /// its Trash destination from `lib/browse`'s `trash_dir` —
-    /// `<home>/Library/Trash/<name>` — so a `FsNodeMutated op=rename` whose
-    /// `to` contains this fragment is the recoverable move-to-Trash delete, and
-    /// never the FM9-a naming rename (whose destination is the home folder).
-    const TRASH_PATH_MARKER: &str = "/Library/Trash/";
 
     /// Static boot heap, mirroring the production aarch64 kernel binary's
     /// `.bss`-resident heap (zeroed by the boot trampoline).
@@ -261,45 +196,35 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all twelve witnesses have appeared: the per-kind
+    /// to QEMU once all six witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
     /// unlocked the encrypted root end to end), the reserved
     /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
-    /// came up on its granted surface), the AW4 shell round trip (a
-    /// `ProcessSpawned` record observed once the kernel/ipc
-    /// `MessageDelivered` count has reached the typed command's Enter
-    /// press — the crate's shared interaction contract — the windowed
-    /// terminal received every typed key edge, wrote the line to its
-    /// hosted shell, and the shell spawned the typed program), and the
-    /// FM9-a file-manager mutations (`FsNodeMutated op=mkdir` then
-    /// `op=rename`, both after the terminal round trip — the manager
-    /// created and named a folder in `/Users/root` under the user's own
-    /// identity), the FM9-b CU6 delegation (`fd_grant` then `fd_redeem` —
-    /// the session handing the user's chosen file to the Viewer), and the
-    /// FM10 recoverable delete (`FsNodeMutated op=rename` into
-    /// `<home>/Library/Trash/` after the delegation — the manager removing the
-    /// FM9-a folder through its right-click context menu and confirmation
-    /// dialog, which, the folder being on the same volume as the user's Trash,
-    /// is carried out as a recoverable move to Trash rather than an
-    /// irreversible unlink), and the FM11 empty-Trash removal
-    /// (`FsNodeMutated op=rmdir` under `<home>/Library/Trash/` after the move —
-    /// the manager navigating to the Trash via the Go-to-Trash tool, clicking
-    /// Empty Trash, and confirming the *Delete Permanently* dialog, so the
-    /// trashed folder is permanently removed), and the pty `Ctrl-C`
-    /// job-control round trip (a second `ProcessSpawned` at or beyond
-    /// [`CTRL_C_RECOVERY_DELIVERIES`] — the recovered `true` the shell could
-    /// only spawn once `Ctrl-C` interrupted the parked foreground `sleep`,
-    /// `plans/PTY.md`). The guest exits only after the host has everything
-    /// it needs (`plans/APPWIN.md` AW3 + AW4,
-    /// `plans/NEW-FILEMANAGER.md` FM9-a/-b/FM10/FM11, `plans/PTY.md`).
+    /// came up on its granted surface), the AW4 shell round trip (the
+    /// `appmgr` load of `/System/Apps/sleep.app` — the windowed terminal
+    /// received every typed key edge, wrote the line to its hosted shell, and
+    /// the shell resolved and ran the typed program), and the pty `Ctrl-C`
+    /// job-control round trip (the `appmgr` load of `/System/Apps/true.app`
+    /// after the `sleep` round trip — the recovered `true` the shell could
+    /// only run once `Ctrl-C` interrupted the parked foreground `sleep`,
+    /// `plans/PTY.md`). The guest exits only after the host has everything it
+    /// needs (`plans/APPWIN.md` AW3 + AW4, `plans/PTY.md`).
+    ///
+    /// The file-manager stages (`plans/NEW-FILEMANAGER.md` FM9-a/-b/-c,
+    /// FM10, FM11) are deliberately *not* driven here: that application UI
+    /// logic is proven by `lib/browse`'s host unit tests, and folding a
+    /// long, blind pointer-injection choreography of it into this vertical
+    /// added only fragility (the FONT-SERVICE delivery-count drift of
+    /// `plans/OPEN-DEFECTS.md` D20). This vertical proves what only QEMU
+    /// can: driver autoload, encrypted-root unlock, display bind, and the
+    /// keyboard → session → terminal → pty → shell round trip.
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
         users_db_loaded: AtomicBool,
         display_endpoint_bound: AtomicBool,
-        window_events_delivered: AtomicU32,
         /// First distinct window-event destination port (the files window);
         /// `0` until the first app-ward delivery.
         first_window_port: AtomicU64,
@@ -308,13 +233,6 @@ mod kernel {
         terminal_focus_marked: AtomicBool,
         shell_round_trip: AtomicBool,
         ctrl_c_recovered: AtomicBool,
-        fs_folder_created: AtomicBool,
-        fs_folder_renamed: AtomicBool,
-        fd_delegation_granted: AtomicBool,
-        fd_delegation_redeemed: AtomicBool,
-        fs_node_deleted: AtomicBool,
-        fs_trash_emptied: AtomicBool,
-        picker_open_marked: AtomicBool,
     }
 
     impl AutoloadInputSink {
@@ -324,18 +242,10 @@ mod kernel {
                 pointer_delivered: AtomicBool::new(false),
                 users_db_loaded: AtomicBool::new(false),
                 display_endpoint_bound: AtomicBool::new(false),
-                window_events_delivered: AtomicU32::new(0),
                 first_window_port: AtomicU64::new(0),
                 terminal_focus_marked: AtomicBool::new(false),
                 shell_round_trip: AtomicBool::new(false),
                 ctrl_c_recovered: AtomicBool::new(false),
-                fs_folder_created: AtomicBool::new(false),
-                fs_folder_renamed: AtomicBool::new(false),
-                fd_delegation_granted: AtomicBool::new(false),
-                fd_delegation_redeemed: AtomicBool::new(false),
-                fs_node_deleted: AtomicBool::new(false),
-                fs_trash_emptied: AtomicBool::new(false),
-                picker_open_marked: AtomicBool::new(false),
             }
         }
 
@@ -360,27 +270,35 @@ mod kernel {
         }
 
         /// Latch the terminal round-trip and the pty `Ctrl-C` job-control
-        /// witnesses from a `ProcessSpawned` record, keyed on the window-event
-        /// delivery counter (every other spawn in the image precedes the
-        /// typing gate):
+        /// witnesses from an `appmgr` `APP_LOADED` record's `bundle` field,
+        /// each attributed to the *exact bundle the shell loaded* — never a
+        /// cumulative delivery count (the drift `plans/OPEN-DEFECTS.md` D20
+        /// removed):
         ///
-        /// * the **first** spawn at or beyond
-        ///   [`TERMINAL_ROUND_TRIP_DELIVERIES`] is the foreground `sleep` the
-        ///   shell ran for the typed command — the AW4 round trip. On that
-        ///   first latch the guest emits [`CTRL_C_ARM_MARKER`] so the host
-        ///   runner injects its `Ctrl-C` recovery step against a live, parked
+        /// * loading [`TERMINAL_ROUND_TRIP_BUNDLE`] (`sleep`) is the AW4 round
+        ///   trip — the shell resolved and ran the typed command. On that
+        ///   latch the guest emits [`CTRL_C_ARM_MARKER`] so the host runner
+        ///   injects its `Ctrl-C` recovery step against a live, parked
         ///   foreground job (never before one exists).
-        /// * a spawn at or beyond [`CTRL_C_RECOVERY_DELIVERIES`] is the
-        ///   recovered `true`, reachable only once `Ctrl-C` interrupted the
-        ///   parked `sleep` (the shell is blocked in `wait` until then), so it
-        ///   witnesses the pty cooked-mode job-control path end to end
-        ///   (`plans/PTY.md`).
-        fn note_process_spawned(&self) {
-            let delivered = self.window_events_delivered.load(Ordering::Acquire);
-            if delivered >= tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_DELIVERIES {
-                self.ctrl_c_recovered.store(true, Ordering::Release);
+        /// * loading [`CTRL_C_RECOVERY_BUNDLE`] (`true`) *after* that is the
+        ///   recovered job the shell could reach only once `Ctrl-C`
+        ///   interrupted the parked `sleep` (it is blocked in `wait` until
+        ///   then), so it witnesses the pty cooked-mode job-control path end
+        ///   to end (`plans/PTY.md`). On that latch the guest emits
+        ///   [`CTRL_C_RECOVERED_MARKER`], the readiness boundary the whole FM9
+        ///   file-manager stage waits on. `sleep` is loaded only by the typed
+        ///   command and `true` only by the recovery, so each witness is
+        ///   uniquely attributable — no overlapping `≥` threshold.
+        fn note_bundle_loaded(&self, event: &Event<'_>) {
+            let mut bundle = "";
+            for field in event.fields {
+                if field.key == "bundle" {
+                    if let tairix_log::FieldValue::Str(value) = field.value {
+                        bundle = value;
+                    }
+                }
             }
-            if delivered >= tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+            if bundle == tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_BUNDLE
                 && !self.shell_round_trip.swap(true, Ordering::AcqRel)
             {
                 // Arm the runner's Ctrl-C injection: a parked foreground job
@@ -391,155 +309,13 @@ mod kernel {
                     message: tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER,
                     fields: &[],
                 });
-            }
-        }
-
-        /// Latch the file-manager mutation witnesses from a `FsNodeMutated`
-        /// record's `op` (and, for a rename, `to`; for a removal, `path`)
-        /// fields: `mkdir`, then `rename` (FM9-a), then the FM9-c/FM10
-        /// recoverable delete — a `rename` whose destination is under the
-        /// user's `Library/Trash` — then the FM11 empty-Trash removal (an
-        /// `rmdir`/`unlink` whose target is under `Library/Trash`).
-        /// Only mutations that occur *after* the AW4 terminal round trip are
-        /// counted (the delivery counter is at or past
-        /// [`TERMINAL_ROUND_TRIP_DELIVERIES`] by then), so the many boot- and
-        /// login-time directory creations — all strictly before the desktop
-        /// click-through — can never latch these. The FM9-a `rename` requires
-        /// `mkdir` first; the FM10 move-to-Trash requires the FM9-b delegation
-        /// redeemed **and** a `Library/Trash` destination, so neither the
-        /// FM9-a naming rename (its destination is the home folder, not Trash)
-        /// nor any earlier mutation can satisfy it; the FM11 empty requires the
-        /// FM10 move to have latched first, so no earlier removal can satisfy
-        /// it. The refusal event (`FsMutationDenied`) is a different id that
-        /// never reaches here (fail closed).
-        fn note_fs_mutation(&self, event: &Event<'_>) {
-            if self.window_events_delivered.load(Ordering::Acquire)
-                < tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+            } else if bundle == tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_BUNDLE
+                && self.shell_round_trip.load(Ordering::Acquire)
             {
-                return;
-            }
-            // Read the `op`, the removal target `path`, and (for a rename) the
-            // `to` destination once.
-            let mut op = "";
-            let mut path = "";
-            let mut to = "";
-            for field in event.fields {
-                match (field.key, field.value) {
-                    ("op", tairix_log::FieldValue::Str(value)) => op = value,
-                    ("path", tairix_log::FieldValue::Str(value)) => path = value,
-                    ("to", tairix_log::FieldValue::Str(value)) => to = value,
-                    _ => {}
-                }
-            }
-            match op {
-                "mkdir" => {
-                    self.fs_folder_created.store(true, Ordering::Release);
-                }
-                "rename" if self.fs_folder_created.load(Ordering::Acquire) => {
-                    self.fs_folder_renamed.store(true, Ordering::Release);
-                    // The FM10 move-to-Trash delete witness
-                    // (`plans/NEW-FILEMANAGER.md` FM10): the file manager
-                    // removed the FM9-a folder via the right-click context menu
-                    // → confirm dialog. The folder is in the user's home, on
-                    // the same volume as the user's Trash, so the confirmed
-                    // delete is a recoverable `fs_rename` of the folder into
-                    // `<home>/Library/Trash/` (in place of the old irreversible
-                    // `rmdir`). It is gated on the FM9-b delegation having been
-                    // redeemed **and** a `Library/Trash` destination, so it
-                    // fires strictly after the whole FM9-a/-b sequence and
-                    // neither the FM9-a naming rename (destination in the home
-                    // folder, not Trash) nor any earlier boot/login mutation
-                    // can satisfy it (fail closed — `FsMutationDenied` is a
-                    // different id that never reaches here). The app spells the
-                    // destination from `lib/browse`'s `trash_dir`
-                    // (`<home>/Library/Trash`), so this marker matches it. On
-                    // the *first* time the move latches, emit the deterministic
-                    // marker the runner gates its FM11 empty-Trash clicks on,
-                    // so those clicks land in a later wake — strictly after the
-                    // trashed folder is in the Trash, never before.
-                    if self.fd_delegation_redeemed.load(Ordering::Acquire)
-                        && to.contains(TRASH_PATH_MARKER)
-                        && !self.fs_node_deleted.swap(true, Ordering::AcqRel)
-                    {
-                        SerialSink::new().write_event(&Event {
-                            level: tairix_log::Level::Info,
-                            id: tairix_log::EventId(0),
-                            message:
-                                tairix_test_autoload_input_qemu_aarch64::FM11_TRASH_FILLED_MARKER,
-                            fields: &[],
-                        });
-                    }
-                }
-                // The FM11 empty-Trash witness (`plans/NEW-FILEMANAGER.md`
-                // FM11): the file manager navigated to the Trash and emptied
-                // it, permanently removing the FM10-trashed folder — an
-                // `fs_unlink` with the directory flag, so `op=rmdir`, whose
-                // `path` is the trashed item under `<home>/Library/Trash/`.
-                // Gated on the FM10 move having latched first, so no earlier
-                // removal (of the folder before it reached Trash, or any
-                // boot/login rmdir) can satisfy it (fail closed).
-                "rmdir" | "unlink"
-                    if self.fs_node_deleted.load(Ordering::Acquire)
-                        && path.contains(TRASH_PATH_MARKER) =>
-                {
-                    self.fs_trash_emptied.store(true, Ordering::Release);
-                }
-                _ => {}
-            }
-        }
-
-        /// Latch the file-manager open-a-file witnesses (`plans/NEW-FILEMANAGER.md`
-        /// FM9-b) from a `SyscallInvoked` record's `sc` field: `fd_grant` then,
-        /// once it has, `fd_redeem`. These fire only *after* the FM9-a rename
-        /// committed (`fs_folder_renamed`), so no earlier delegation could
-        /// satisfy them — and in this image the trusted file picker is the only
-        /// `fd_grant` caller and the viewer the only `fd_redeem` caller, both
-        /// reached only by this stage's scripted Viewer launch and pick. The
-        /// grant is the session delegating the user's chosen file; the redemption
-        /// is the viewer installing the delegated read-only descriptor — the CU6
-        /// one-shot delegation, end to end and kernel-attested. `fd_redeem`
-        /// requires `fd_grant` first, so a stray redemption cannot satisfy PASS
-        /// on its own.
-        fn note_syscall(&self, event: &Event<'_>) {
-            if !self.fs_folder_renamed.load(Ordering::Acquire) {
-                return;
-            }
-            // Read the record's `comm` (calling process) and `sc` (syscall
-            // name) once; both are `SyscallInvoked` fields.
-            let mut comm = "";
-            let mut sc = "";
-            for field in event.fields {
-                match (field.key, field.value) {
-                    ("comm", tairix_log::FieldValue::Str(value)) => comm = value,
-                    ("sc", tairix_log::FieldValue::Str(value)) => sc = value,
-                    _ => {}
-                }
-            }
-            match sc {
-                "fd_grant" => {
-                    self.fd_delegation_granted.store(true, Ordering::Release);
-                }
-                "fd_redeem" if self.fd_delegation_granted.load(Ordering::Acquire) => {
-                    self.fd_delegation_redeemed.store(true, Ordering::Release);
-                }
-                // The desktop session's first directory read after the FM9-a
-                // rename is the trusted picker's `open_at` listing of the
-                // user's home (done synchronously inside the `PickFile`
-                // serve). Emit the deterministic marker the runner gates its
-                // pick-click on, exactly once, so the click lands in a later
-                // wake with the picker composited.
-                "fs_open"
-                    if comm == tairix_test_autoload_input_qemu_aarch64::SESSION_COMM
-                        && !self.picker_open_marked.swap(true, Ordering::AcqRel) =>
-                {
-                    SerialSink::new().write_event(&Event {
-                        level: tairix_log::Level::Info,
-                        id: tairix_log::EventId(0),
-                        message: tairix_test_autoload_input_qemu_aarch64::FM9B_PICKER_OPEN_MARKER,
-                        fields: &[],
-                    });
-                }
-                _ => {}
+                // The recovered `true` loaded: `Ctrl-C` interrupted the parked
+                // `sleep` and the shell ran its next command — the pty
+                // job-control PASS witness. Latch it.
+                self.ctrl_c_recovered.store(true, Ordering::Release);
             }
         }
 
@@ -564,17 +340,13 @@ mod kernel {
             }
         }
 
-        /// Count an app-ward window-event delivery and, on the first delivery
-        /// to the second distinct destination port, emit
-        /// [`TERMINAL_FOCUSED_MARKER`] once. The lone port sender serves the
-        /// files window first and the terminal second, so a delivery to any
-        /// port other than the first-seen one is the terminal gaining focus —
-        /// the fact the typed command gates on rather than a raw count.
+        /// On the first app-ward window-event delivery to the *second*
+        /// distinct destination port, emit [`TERMINAL_FOCUSED_MARKER`] once —
+        /// the lone port sender serves the files window first and the terminal
+        /// second, so a delivery to any port other than the first-seen one is
+        /// the terminal gaining focus (the fact the typed command gates on,
+        /// not a count).
         fn note_window_delivery(&self, event: &Event<'_>) {
-            self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
-            if self.terminal_focus_marked.load(Ordering::Acquire) {
-                return;
-            }
             for field in event.fields {
                 if field.key != "port" {
                     continue;
@@ -613,20 +385,14 @@ mod kernel {
                 self.users_db_loaded.store(true, Ordering::Release);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
                 self.note_endpoint_created(event);
-            } else if event.id.0 == AuditEvent::FsNodeMutated.id().0 {
-                self.note_fs_mutation(event);
-            } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
-                self.note_syscall(event);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
                 self.note_window_delivery(event);
-            } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
-                // Attributable by ordering, not by name: every other spawn
-                // in the image happens strictly before the typing gate, so a
-                // spawn observed at or beyond the sleep round-trip / true
-                // recovery delivery counts can only be the shell executing
-                // the typed command, then the Ctrl-C recovery (the contract
-                // crate's rationale).
-                self.note_process_spawned();
+            } else if event.id.0 == tairix_appload::events::APP_LOADED.0 {
+                // Attributable by the loaded bundle's own name: `sleep` is
+                // loaded only by the shell running the typed command (the AW4
+                // round trip) and `true` only by the Ctrl-C recovery, so each
+                // witness is unambiguous — no fragile delivery-count threshold.
+                self.note_bundle_loaded(event);
             } else {
                 return;
             }
@@ -636,12 +402,6 @@ mod kernel {
                 && self.display_endpoint_bound.load(Ordering::Acquire)
                 && self.shell_round_trip.load(Ordering::Acquire)
                 && self.ctrl_c_recovered.load(Ordering::Acquire)
-                && self.fs_folder_created.load(Ordering::Acquire)
-                && self.fs_folder_renamed.load(Ordering::Acquire)
-                && self.fd_delegation_granted.load(Ordering::Acquire)
-                && self.fd_delegation_redeemed.load(Ordering::Acquire)
-                && self.fs_node_deleted.load(Ordering::Acquire)
-                && self.fs_trash_emptied.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

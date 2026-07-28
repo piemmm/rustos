@@ -2277,13 +2277,13 @@ name = "tairix-test-autoload-input-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-ipc",
- "tairix-kernel-syscall",
  "tairix-log",
  "tairix-util",
 ]

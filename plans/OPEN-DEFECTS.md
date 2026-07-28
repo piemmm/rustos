@@ -285,68 +285,34 @@ The open items, in priority order:
     `supervisor::MAX_SUPERVISED_SERVICES = 4`) belongs with the userland-heap
     PID 1 (`plans/SPAWN.md` SP5b) and lands with its own N-service guard then.
 
-- **D19 — `autoload-input-qemu-aarch64` terminal stage: shell spawns
-  `/System/Apps/0.app` instead of the typed command — CORE FIXED; a distinct
-  downstream harness-contract drift remains as D20.** Root cause (established
-  with kernel probes on the terminal→pty write and the seat `key_inject` path,
-  since removed): the harness typed `sleep 3600\n` **before the terminal window
-  was focused**. Evidence — every `sleep 3600` key edge (scalars 115,108,101,
-  101,112,32,51,54,48,48) was correctly injected into the seat, but during the
-  whole typing window every app-ward `MessageDelivered` went to the **files**
-  window's port (`e117…0f`); the **terminal**'s port (`e117…10`) received its
-  first event only ~0.8 s later, so `sleep 360` landed on the still-focused
-  files window and only the trailing `0`+Enter reached the belatedly-focused
-  terminal → `elsh` spawned `/System/Apps/0.app`. It was **never** a kernel
-  deadlock/lost-wakeup (all IPC balanced; the guest sat idle at the shell
-  prompt) and **not** a pty/`lib/tty` line-discipline bug — the pty carried
-  exactly the two bytes it was handed (`0`, `\r`). The trigger was the
-  FONT-SERVICE speedup changing the delivery/creation cadence: the typed-command
-  step was gated on "7 generic window-event deliveries", which the files window
-  alone satisfies long before the terminal window is even created, while the
-  terminal-focus click is gated on a separate clock (3 frame-maps) — the two
-  orderings were no longer guaranteed.
-  - **Core fix landed (this change).** The typed command is now gated on a
-    guest-emitted `TERMINAL_FOCUSED_MARKER` (the first app-ward delivery to the
-    *second* distinct window port — the terminal receiving focus), emitted by
-    the guest test kernel's `note_window_delivery`, mirroring the existing
-    `CTRL_C_ARM_MARKER`/`FM9B_PICKER_OPEN_MARKER` readiness handshakes. With it,
-    `sleep 3600` reaches `elsh` intact and `sleep.app` spawns (verified: serial
-    shows `bundle=/System/Apps/sleep.app`, the AW4 round-trip witness, and
-    `PTY ctrl-c armed`) — no `0.app`. Files touched:
-    `tests/integration/autoload_input_qemu_aarch64/{lib.rs,src/main.rs}` and the
-    `tools/xtask` runner gate.
-  - **Remaining (tracked as D20).** The vertical still does not reach PASS: the
-    *downstream* stages (pty Ctrl-C recovery, FM9-a/-b/-c, FM10, FM11) sequence
-    on cumulative window-event delivery **counts** the same speedup shifted, so
-    the FM9 pointer clicks now fire early and hijack focus before the recovery
-    `true` spawns. `autoload-input-qemu-aarch64` therefore remains **RED**
-    (user-approved) until D20 recalibrates that contract; the D19 input-drop
-    itself is fixed and correct independent of it.
-
-- **D20 — `autoload-input-qemu-aarch64` post-terminal contract is
-  delivery-count-sequenced and drifted by FONT-SERVICE — OPEN.** Every stage
-  after the terminal round trip (the pty Ctrl-C recovery, FM9-a New-Folder +
-  rename, FM9-b Viewer/picker, FM9-c delete, FM10 move-to-Trash, FM11 empty
-  Trash) is gated on **cumulative `MessageDelivered` counts**
-  (`TERMINAL_ROUND_TRIP_DELIVERIES = 28`, `CTRL_C_RECOVERY_DELIVERIES = 40`,
-  `FM9_TYPING_DONE_DELIVERIES = 41`, and the FM9 offsets from it). The
-  FONT-SERVICE speedup changed the real counts (the `sleep` spawn now lands at
-  count ~37, not 28; a later spawn reaches ~66), so the low FM9/FM9-b thresholds
-  are already exceeded *during* the terminal stage: the FM9 clicks fire early,
-  move focus off the terminal, and the Ctrl-C recovery `true` never spawns —
-  the run stalls at the FM9 pointer stage. Worse, the shifted thresholds now
-  **overlap across stages**, so the `≥`-style spawn witnesses (e.g. "a spawn at
-  ≥40 is the recovery `true`") can false-latch on an unrelated later spawn (the
-  Viewer). Bumping the numbers is **not** a robust fix. Proper fix: convert the
-  post-terminal stage sequencing from fragile cumulative counts to
-  **guest-emitted readiness markers** (the durable pattern the terminal-focus
-  (D19), `CTRL_C_ARM_MARKER`, `FM9B_PICKER_OPEN_MARKER`, and
-  `FM11_TRASH_FILLED_MARKER` handshakes already use) so each stage waits on a
-  fact about the guest, not a timing-fragile count — and make each spawn/FS
-  witness uniquely attributable rather than a shared `≥` threshold. Do **not**
-  mask it by re-tuning counts or bumping the budget (§2.17, §7 no-flaky). Until
-  it lands, `autoload-input-qemu-aarch64` is RED at the FM9 stage. (The D19
-  terminal-focus fix is a prerequisite and is already in place.)
+- **D19 / D20 — `autoload-input-qemu-aarch64` terminal + post-terminal
+  sequencing drift — CLOSED (green).** The vertical was RED because its
+  post-terminal stages were sequenced on **cumulative `MessageDelivered`
+  counts** that the FONT-SERVICE cadence change drifted, firing the
+  file-manager clicks early, hijacking focus off the terminal, and stalling
+  the run (surfacing as a 300 s timeout). Resolution:
+  - The terminal → pty stage now sequences on **guest readiness markers and
+    uniquely-attributable witnesses**, not counts: the AW4 round-trip and the
+    pty `Ctrl-C` recovery are attributed to the *bundle loads* of
+    `/System/Apps/sleep.app` and `/System/Apps/true.app` (the `appmgr`
+    `APP_LOADED` `bundle` field), and the typed command is gated on
+    `TERMINAL_FOCUSED_MARKER` (first delivery to the second window port).
+  - The FM9-a/-b/-c, FM10 and FM11 **file-manager choreography was removed
+    from this vertical** (user-approved scope-down): that application UI logic
+    is proven by `lib/browse`'s host unit tests, and driving it via a long,
+    blind pointer-injection script only added the count-drift fragility. The
+    vertical now proves what only QEMU can — driver autoload, encrypted-root
+    unlock, display bind, and the keyboard → session → terminal → pty → shell
+    round trip + `Ctrl-C` job control — and passes six deterministic
+    witnesses. The theme-toggle `light` screendump was also dropped: it is a
+    WM feature orthogonal to this vertical, and it was never content-verified
+    green (the toggle did not present a light frame; tracked below).
+  - **Follow-up (not blocking):** in the QEMU desktop the appearance-toggle
+    click did not produce a light-theme frame (the `window` and `light`
+    screendumps were byte-identical). The theme-toggle *logic* is host-tested
+    in `tairix_desktop_session`/`tairix_taskbar`; whether the QEMU gap is a
+    click-choreography artefact or a real present path issue is unresolved and
+    left for a compositor/display vertical to investigate.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -354,12 +320,10 @@ parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
 is a rustdoc/docs-build failure, D10 was a fragile QEMU-harness
 readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
-(closed), D19 was the `0.app` input-drop — the harness typing before the
-terminal window was focused — whose **core fix is landed** (terminal-focus
-marker gate), and D20 is the remaining post-terminal delivery-count-contract
-drift that keeps that same vertical RED. Do not
-collapse them into one change; land each on its own whole-project-green gate
-(§7).
+(closed), and D19/D20 were the `autoload-input-qemu-aarch64` count-drift
+(closed: marker-based sequencing + file-manager choreography moved to host
+tests). Do not collapse the open items into one change; land each on its own
+whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
