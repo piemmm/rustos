@@ -353,6 +353,31 @@ impl<'a> StartupConfig<'a> {
     }
 }
 
+/// Derive a service's short name from its bundle `Run` path.
+///
+/// A boot-floor service is named by its `.app` bundle directory:
+/// `/System/Services/devmgr.app/Run` yields `devmgr`. That name is what the
+/// service-manager engine uses to express dependencies and to label audit
+/// records, so it must be stable and unique across the floor — which bundle
+/// names are, since two bundles cannot share a directory.
+///
+/// The first path component ending in `.app` names the bundle; the text
+/// before `.app` is the service name. A path with no non-empty `.app`
+/// component falls back to the whole path, so a mis-shaped entry is still
+/// named (and still unique, since paths are unique) rather than silently
+/// empty — fail loud, never fabricate.
+#[must_use]
+pub fn service_name(path: &str) -> &str {
+    for component in path.split('/') {
+        if let Some(stem) = component.strip_suffix(".app") {
+            if !stem.is_empty() {
+                return stem;
+            }
+        }
+    }
+    path
+}
+
 /// Parse one `session`/`service` argument — `<path> <account>` — into a
 /// validated [`Launch`]: the path must be absolute, the account name must
 /// resolve against the compiled-in system identity, and nothing may
@@ -458,7 +483,10 @@ const fn is_ascii_whitespace(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_SERVICES};
+    use super::{
+        service_name, ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN,
+        MAX_SERVICES,
+    };
 
     extern crate alloc;
     use alloc::format;
@@ -504,6 +532,25 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn service_name_is_the_bundle_stem_and_falls_back_to_the_whole_path() {
+        // The `.app` bundle directory names the service.
+        assert_eq!(service_name("/System/Services/devmgr.app/Run"), "devmgr");
+        assert_eq!(
+            service_name("/System/Services/sysinfod.app/Run"),
+            "sysinfod"
+        );
+        // No `.app` component: fall back to the whole (unique) path rather
+        // than an empty name.
+        assert_eq!(
+            service_name("/System/Services/netd"),
+            "/System/Services/netd"
+        );
+        // A degenerate `.app` (empty stem) does not win the match; the whole
+        // path is used.
+        assert_eq!(service_name("/weird/.app/Run"), "/weird/.app/Run");
     }
 
     #[test]

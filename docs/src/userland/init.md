@@ -270,11 +270,15 @@ ambient device) — then **supervises** the user's session (see below). The
 runtime routes `main`'s return value through the `exit` syscall. (Both the
 Rust runtime and the C ABI reach the kernel through the one shared trap,
 `tairix-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
-§2.2.) It links **only** the runtime and its own startup-config parser,
-never the orchestrator library above: dragging that crate's `alloc` +
-crypto dependency chain into a banner-printing program would be the bloat
-`AGENTS.md` §2.3 forbids, so the shipped program contains no crypto code at
-all and no `unsafe`.
+§2.2.) It links the pure-Rust orchestrator library above and drives it live
+over the `lib/rt` userland heap (`plans/NEW-SERVICEMANAGER.md` SVC-A): the
+`Run` binary builds an `Init` engine over the real syscall seams — `spawn_as`
+for launching a service as its account, `signal` for the graceful-then-forced
+stop, `log_emit` (via `tairix_rt::LogSink`) for the audit sink, and a small
+`LoopReaper` mailbox the wait loop fills so `Init::reap` drains an exited
+child without a second `wait` — never a second, parallel service manager
+(`AGENTS.md` §2.2). The tiny startup-config parser still lives alongside the
+binary (`src/startup.rs`) rather than in the library.
 
 What `init` should do at user-mode entry is **data, not control flow**: a
 small, fail-closed startup config (`src/startup.rs`). The config is
@@ -305,37 +309,53 @@ given the wrong argument, a non-absolute `session` path, an over-long
 config, or an omitted required directive — rather than guess at a
 malformed intent (`AGENTS.md` §2.9, §5.4.5).
 
-### Session supervision (`plans/PI.md` P6e-3b-ii)
+### Boot-floor services and session supervision (`plans/PI.md` P6e-3b-ii, `plans/NEW-SERVICEMANAGER.md` SVC-A)
 
-Once the banner has landed, the `Run` binary does not exit — it
-**supervises** the `session` program for the lifetime of PID 1, owning its
-lifecycle rather than spawning it and forgetting it. Each cycle of the
-supervise loop:
+Once the banner has landed, the `Run` binary brings the **boot-floor
+services** up through the `Init` engine and then **supervises** the login
+sessions for the lifetime of PID 1, owning both rather than spawning and
+forgetting them.
 
-1. **launches** the session with the `spawn` syscall — a separate,
-   hardware-isolated process (a true `spawn`, not an `exec`-style hand-off,
-   `AGENTS.md` §4), so PID 1 keeps running. A negative result is fail-loud
-   but never fatal to the boot (`AGENTS.md` §2.24): the refusal is written
-   to `stderr` (`Sessions::report_launch_failure`) and only that entry's
-   slot is abandoned — the remaining services and sessions keep running,
-   so one refused bundle cannot take down the device manager or every
-   login session with it;
-2. **blocks** on exactly that child with the `wait` syscall
-   (`plans/SPAWN.md` SP6), reaping it when it exits so it never lingers as a
-   zombie. A negative `wait` — the supervisor cannot reap its own child — is
-   surfaced as `EXIT_WAIT_FAILED` rather than continuing blindly;
-3. **relaunches** it, up to a small `SESSION_SPAWN_BUDGET` of launches.
+First it registers each `service` directive with the engine — named by its
+`.app` bundle stem, run as the account the directive resolved — and calls
+`start_all`, which brings them up in dependency order through the
+readiness-gated admission engine above (the floor declares no dependencies,
+so all start immediately). PID 1 names only each service's binary and its
+account; the kernel — the single capability authority — verifies the signed
+bundle and grants `manifest ∩ ceiling` at load time. A service the kernel
+refuses to launch is reported on `stderr` and skipped, and the boot
+continues with the rest — one dead service never takes down the device
+manager, the other services, or the login sessions (`AGENTS.md` §2.24).
 
-That bound is a **crash-loop guard**, not a fixed restart count: a session
-that blocks on input runs for PID 1's whole life and never approaches it
-(the supervisor blocks in `wait`); a session that exits the instant it
-starts — e.g. no input backing is attached — would otherwise make the loop
-a busy `spawn` spin, which `AGENTS.md` §2.1 forbids, so after the budget is
-spent `init` stops and exits `EXIT_SESSION_EXHAUSTED` (a session that
-cannot stay up means the system cannot come up — fail closed, `AGENTS.md`
-§2.9). The reaped child's exit code is read but not yet acted on; a policy
-that tells a clean logout from a crash (and resets the budget on a session
-that ran long enough) awaits a clock/session-state ABI.
+Then it runs one wait-any supervision loop that owns the per-console login
+sessions directly and routes everything else to the engine:
+
+1. it **launches** one `session` (login) process per installed text console
+   with the `spawn` syscall — a separate, hardware-isolated process (a true
+   `spawn`, not an `exec`-style hand-off, `AGENTS.md` §4). A refused launch
+   is written to `stderr` (`Sessions::report_launch_failure`) and only that
+   console's slot is abandoned; the other consoles' sessions keep running;
+2. it **blocks** on any child with the `wait` syscall (`plans/SPAWN.md`
+   SP6). A reaped pid that is a live session slot is relaunched on **its
+   own** console, up to a small `SESSION_SPAWN_BUDGET`; every other reaped
+   pid — a service the engine started, or an inherited orphan — is handed to
+   the engine (`Init::reap`), which moves a known service to a terminal
+   state (scheduling any policy-driven restart) or logs the orphan. A
+   negative `wait` — the supervisor cannot reap its own child — is surfaced
+   as `EXIT_WAIT_FAILED` rather than continuing blindly.
+
+The per-console budget is a **crash-loop guard**, not a fixed restart count:
+a session that blocks on input runs for PID 1's whole life and never
+approaches it; a session that exits the instant it starts would otherwise
+make the loop a busy `spawn` spin, which `AGENTS.md` §2.1 forbids, so after
+its budget is spent that console is abandoned. `init` declares
+`EXIT_SESSION_EXHAUSTED` only when **no** session is alive **and** the
+engine holds no running service — so a perpetual service (e.g. `devmgr`,
+parked in `hw_tree_wait`) keeps PID 1 up for the life of the system even
+after every console's session has been abandoned (fail closed, `AGENTS.md`
+§2.9). A service's exit is reaped through its manifest restart policy; a
+session's exit code is not yet acted on (a clean-logout-vs-crash policy
+awaits a session-state ABI).
 
 ## Tests
 

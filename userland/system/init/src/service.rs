@@ -16,8 +16,10 @@
 //! grant on the launch path, so there is no second capability-derivation
 //! path to drift from the kernel's authoritative one.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use tairix_abi::{
     decode_capability_ids, ActivationMode, CapabilityId, Duration64, Errno, ManifestHeader,
@@ -486,11 +488,89 @@ pub trait Reaper {
     fn collect(&self) -> Option<ReapedChild>;
 }
 
+/// The live [`Reaper`] PID 1's supervision loop fills.
+///
+/// PID 1 does exactly one `wait`-any per loop turn and learns of one exited
+/// child at a time, whereas [`Init::reap`](crate::Init::reap) *pulls* from a
+/// [`Reaper`] until it drains. This mailbox bridges the two without a second
+/// `wait`: the loop [`deposit`](Self::deposit)s each child that is not one of
+/// its own login sessions, then calls `reap`, which drains exactly that child
+/// (a known service exit or an inherited orphan) and stops.
+///
+/// It never itself blocks or waits — the kernel `wait` the loop already made
+/// is the only wait — so it is not a busy-poll: [`collect`](Reaper::collect)
+/// simply pops the queue and returns `None` when empty. The queue is a
+/// [`VecDeque`] (not a single slot) purely so a future loop that harvests a
+/// burst of exits in one turn cannot lose one; today the loop deposits one at
+/// a time.
+///
+/// Interior mutability ([`RefCell`]) is required because [`Init`](crate::Init)
+/// borrows its reaper as `&dyn Reaper` (shared) for its whole lifetime while
+/// the loop must still push into it. Single-threaded PID 1 never re-enters a
+/// borrow, so the `RefCell` can never observe a conflicting borrow.
+#[derive(Debug, Default)]
+pub struct LoopReaper {
+    pending: RefCell<VecDeque<ReapedChild>>,
+}
+
+impl LoopReaper {
+    /// Create an empty mailbox.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pending: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    /// Record one exited child for the next [`Init::reap`](crate::Init::reap)
+    /// to drain. Called by PID 1's loop for a reaped pid that is not one of
+    /// its own login sessions.
+    pub fn deposit(&self, child: ReapedChild) {
+        self.pending.borrow_mut().push_back(child);
+    }
+}
+
+impl Reaper for LoopReaper {
+    fn collect(&self) -> Option<ReapedChild> {
+        self.pending.borrow_mut().pop_front()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Pid, ReapedChild, ServiceSpec};
+    use super::{LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec};
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn loop_reaper_yields_deposited_children_in_order_then_none() {
+        let reaper = LoopReaper::new();
+        assert_eq!(reaper.collect(), None);
+        reaper.deposit(ReapedChild {
+            pid: Pid::new(10),
+            exit_code: 0,
+        });
+        reaper.deposit(ReapedChild {
+            pid: Pid::new(20),
+            exit_code: 3,
+        });
+        assert_eq!(
+            reaper.collect(),
+            Some(ReapedChild {
+                pid: Pid::new(10),
+                exit_code: 0,
+            })
+        );
+        assert_eq!(
+            reaper.collect(),
+            Some(ReapedChild {
+                pid: Pid::new(20),
+                exit_code: 3,
+            })
+        );
+        // Drained: a `reap` that keeps pulling terminates.
+        assert_eq!(reaper.collect(), None);
+    }
 
     #[test]
     fn pid_round_trips() {

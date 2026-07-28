@@ -99,6 +99,6 @@ pub use manager::{
 };
 pub use registry::{enrol, unenrol, EnrolError, Enrolment};
 pub use service::{
-    decode_manifest_capabilities, ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner,
-    Stopper, DEFAULT_STOP_GRACE,
+    decode_manifest_capabilities, ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec,
+    Spawner, Stopper, DEFAULT_STOP_GRACE,
 };

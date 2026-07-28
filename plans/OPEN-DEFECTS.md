@@ -272,18 +272,19 @@ The open items, in priority order:
     closed at `> MAX_SERVICES` (`ConfigError::TooManyServices`). There is no
     silent overflow. `startup::MAX_SERVICES` is now *derived* from the
     boot floor (`DEFAULT_CONFIG`'s own `service`-directive count) rather than
-    a magic `4`, and `supervisor::MAX_SUPERVISED_SERVICES` imports it — so the
-    floor can never overrun its own bound and the two constants cannot drift
+    a magic `4`, so the floor can never overrun its own bound
     (`plans/NEW-SERVICEMANAGER.md` SVC-1).
   - **Standing regression coverage (no new vertical — §2.2/§2.3).** Concurrent
     early-boot service bring-up during root-mount is exercised by
     `spawn_session_qemu_*` (4 services + session); EL0 multitasking under the
     live scheduler by `spawn_el0_timeshare_qemu_*` and `scheduler_stress_qemu`;
     guard-arena growth/fail-closed by the `stack_arena` host tests
-    (`kernel/tairix-kernel/src/stack_arena_tests.rs`). A future rise of the
-    fixed no-heap service caps (`startup::MAX_SERVICES` /
-    `supervisor::MAX_SUPERVISED_SERVICES = 4`) belongs with the userland-heap
-    PID 1 (`plans/SPAWN.md` SP5b) and lands with its own N-service guard then.
+    (`kernel/tairix-kernel/src/stack_arena_tests.rs`). SVC-A has since moved
+    PID 1 onto the heap-backed `Init` engine (`plans/NEW-SERVICEMANAGER.md`),
+    so the services are no longer bounded by a no-heap `const`; only the
+    per-console session table (`supervisor::MAX_SUPERVISED_CONSOLES`) remains a
+    fixed stack bound, and the growable discovery-registered service tier lands
+    with its own N-service guard on the `lib/rt` heap (`plans/SPAWN.md` SP5b).
 
 - **D19 / D20 — `autoload-input-qemu-aarch64` terminal + post-terminal
   sequencing drift — CLOSED (green).** The vertical was RED because its

@@ -39,14 +39,23 @@ mod supervisor;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    extern crate alloc;
+    use alloc::vec::Vec;
+
+    use tairix_abi::{Duration64, Errno, Signal};
+    use tairix_init::{
+        Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner, Stopper,
+    };
     use tairix_rt::io::{Stderr, Stdout, Write};
+    use tairix_rt::LogSink;
 
-    use crate::startup::{render_banner, StartupConfig, BANNER_MAX, DEFAULT_CONFIG, MAX_SERVICES};
-    use crate::supervisor::{supervise, Launch, Outcome, Sessions};
+    use crate::startup::{render_banner, service_name, StartupConfig, BANNER_MAX, DEFAULT_CONFIG};
+    use crate::supervisor::{supervise, Launch, Outcome, Services, Sessions};
 
-    /// Exit code when the compiled-in startup config does not parse. A
-    /// reserved, fail-closed value; the default config is
-    /// well-formed, so reaching this is a build defect, not a runtime input.
+    /// Exit code when the compiled-in startup config does not parse, names a
+    /// duplicate service, or forms an invalid dependency graph. A reserved,
+    /// fail-closed value; the default config is well-formed and acyclic, so
+    /// reaching this is a build defect, not a runtime input.
     const EXIT_CONFIG_INVALID: i32 = 70;
 
     /// Exit code when waiting on the sessions failed — the `wait` syscall
@@ -56,10 +65,9 @@ mod program {
     /// in the audit transcript.
     const EXIT_WAIT_FAILED: i32 = 72;
 
-    /// Exit code when no console's session could stay up: every console
-    /// consumed its relaunch budget (`supervisor::SESSION_SPAWN_BUDGET`)
-    /// without a session ever blocking, so the supervisor stops rather than
-    /// relaunching forever.
+    /// Exit code when no console's session could stay up and no service is
+    /// running: every console consumed its relaunch budget without a session
+    /// ever blocking, so the supervisor stops rather than relaunching forever.
     const EXIT_SESSION_EXHAUSTED: i32 = 73;
 
     /// Exit code when the kernel reports no installed console (or refuses
@@ -67,10 +75,114 @@ mod program {
     /// streams to, so PID 1 reports the system unusable fail-closed rather than spawning stream-less sessions.
     const EXIT_NO_CONSOLES: i32 = 74;
 
+    /// The primary console index services attach their standard streams to
+    /// (for their fd 2 diagnostics). Sessions fan out across every console;
+    /// a service has no console of its own, so it takes console 0.
+    const SERVICE_CONSOLE: u64 = 0;
+
+    /// Recover the [`Errno`] a syscall encoded as a negative register
+    /// (`-errno`). An unrecognised code fails closed as
+    /// [`Errno::NotImplemented`] rather than being guessed — the same idiom
+    /// the other first-party services use.
+    fn errno_from(ret: i64) -> Errno {
+        i32::try_from(-ret)
+            .ok()
+            .and_then(Errno::from_i32)
+            .unwrap_or(Errno::NotImplemented)
+    }
+
+    /// The production [`Spawner`]: launch a service's `Run` binary on the
+    /// primary console as its own service account through `spawn_as`.
+    ///
+    /// The kernel is the single capability authority — it verifies the signed
+    /// bundle, resolves the account's ceiling, and grants
+    /// `manifest ∩ ceiling` — so this seam passes only the path and the
+    /// account uid, never a capability set. A refused load surfaces as the
+    /// kernel's `-errno`, which the engine records as
+    /// [`StartFailure::SpawnFailed`](tairix_init::StartFailure::SpawnFailed).
+    struct RtSpawner;
+
+    impl Spawner for RtSpawner {
+        fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno> {
+            let ret = tairix_rt::spawn_as(
+                spec.binary_path().as_bytes(),
+                SERVICE_CONSOLE,
+                spec.account(),
+            );
+            if ret < 0 {
+                Err(errno_from(ret))
+            } else {
+                // A non-negative kernel result is a valid pid.
+                #[allow(clippy::cast_sign_loss)]
+                Ok(Pid::new(ret as u64))
+            }
+        }
+    }
+
+    /// Deliver `signal` to `pid`, mapping the kernel's `-errno` to a typed
+    /// [`Errno`]. A pid that does not fit the syscall's `i32` argument is
+    /// out of range (fail closed) rather than truncated.
+    fn signal_pid(pid: Pid, signal: Signal) -> Result<(), Errno> {
+        let pid_i32 = i32::try_from(pid.as_u64()).map_err(|_| Errno::OutOfRange)?;
+        let ret = tairix_rt::signal(pid_i32, signal);
+        if ret < 0 {
+            Err(errno_from(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The production [`Stopper`]: graceful [`Signal::Terminate`] then, only
+    /// after the grace period, [`Signal::Kill`]. Never a blind kill.
+    struct RtStopper;
+
+    impl Stopper for RtStopper {
+        fn request_stop(&self, pid: Pid) -> Result<(), Errno> {
+            signal_pid(pid, Signal::Terminate)
+        }
+        fn force_terminate(&self, pid: Pid) -> Result<(), Errno> {
+            signal_pid(pid, Signal::Kill)
+        }
+    }
+
+    /// The [`Services`] backing over the live [`Init`] engine: PID 1's
+    /// service-manager half.
+    ///
+    /// The session supervisor hands every reaped pid that is not one of its
+    /// own login sessions to [`on_child_exit`](Services::on_child_exit),
+    /// which deposits it in the engine's [`LoopReaper`] and drives one
+    /// [`Init::reap`] — no second `wait` — so the engine classifies it (a
+    /// known service exit applying its restart policy, or an inherited
+    /// orphan). The engine and this seam share the same `reaper` by reference;
+    /// single-threaded PID 1 never overlaps a borrow.
+    struct EngineServices<'a, 'cfg> {
+        engine: &'a mut Init<'cfg>,
+        reaper: &'a LoopReaper,
+    }
+
+    impl Services for EngineServices<'_, '_> {
+        fn on_child_exit(&mut self, pid: u64, exit_code: i32) {
+            self.reaper.deposit(ReapedChild {
+                pid: Pid::new(pid),
+                exit_code,
+            });
+            // The monotonic clock feeds the engine's restart-backoff
+            // deadlines. The floor services restart `Never`, so `now` is
+            // inert for them today; it is correct as soon as a restarting
+            // service is registered.
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            self.engine.reap(now);
+        }
+
+        fn any_running(&self) -> bool {
+            self.engine.running_count() > 0
+        }
+    }
+
     /// The production [`Sessions`] backing: the real `tairix-rt` syscall
     /// wrappers (`console_count`, the console-selecting `spawn_at`, and
-    /// wait-any). Zero-sized — PID 1's supervision state lives on `main`'s
-    /// stack inside [`supervise`].
+    /// wait-any). Zero-sized — the per-console session table lives on
+    /// `main`'s stack inside [`supervise`].
     struct RtSessions;
 
     impl Sessions for RtSessions {
@@ -90,10 +202,10 @@ mod program {
         }
         fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
             // One terse line on the inherited diagnostic stream, so a
-            // refused service or session is visible at the console instead
-            // of silently absent. Best-effort: PID 1 boots on with the
-            // surviving entries whether or not the write lands, and the
-            // kernel's own audit log already carries the refusal.
+            // refused session is visible at the console instead of silently
+            // absent. Best-effort: PID 1 boots on with the surviving
+            // sessions whether or not the write lands, and the kernel's own
+            // audit log already carries the refusal.
             let shown = core::str::from_utf8(path).unwrap_or("<non-utf8 path>");
             let _ = Stderr.write_fmt(format_args!(
                 "init: launch of {shown} on console {console} refused (err {err}); continuing without it\n"
@@ -105,10 +217,12 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the machine-summary
-    /// banner line to its inherited standard output (fd 1) beneath the
-    /// kernel's identity + RAM-self-test line, then supervises one session
-    /// per discovered text console for the lifetime of PID 1
-    /// ([`supervise`] — `plans/PI.md` P11).
+    /// banner line to its inherited standard output (fd 1), brings the
+    /// boot-floor services up through the [`Init`] service-manager engine in
+    /// dependency order, then supervises one login session per discovered
+    /// text console for the lifetime of PID 1, routing every service/orphan
+    /// exit back to the engine ([`supervise`] — `plans/PI.md` P11,
+    /// `plans/NEW-SERVICEMANAGER.md` SVC-A).
     ///
     /// The banner write is *gated*: `write_all` loops over benign short writes
     /// and fails closed only when the backing accepts nothing more (a missing
@@ -121,7 +235,6 @@ mod program {
     /// fall to the last-resort halt spin: with no console and no wait-set
     /// there is nothing left to park on or report to.
     fn main() -> i32 {
-        const VACANT: Launch<'_> = Launch { path: b"", uid: 0 };
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
         };
@@ -154,44 +267,76 @@ mod program {
                 core::hint::spin_loop();
             }
         }
-        // Launch the configured long-running services (the device manager,
-        // `/System/Services/devmgr.app/Run`, today) once each, then supervise them
-        // alongside one login session per console for the life of PID 1
-        // ([`supervise`]). `devmgr` observes the discovered hardware tree
-        // and blocks reactively in `hw_tree_wait` — a **true**
-        // generation-keyed park, not a busy poll: the kernel ships the
-        // blocking wait-queue + scheduler wake-pending token + explicit
-        // wake (Design D P-2 — `kernel/core::waitq`,
-        // `RescheduleAction::Park`), and the tickless one-shot arms a
-        // finite-timeout wakeup per-port (`SchedulerArch::set_wakeup`) with
-        // the idle drive-loop parking on `KernelArch::wait_for_interrupt`
-        // and re-stepping a woken sole waiter rather than halting, so the
-        // perpetual `devmgr` parks off the run queue without starving a
-        // single-CPU system.
-        //
-        // The launch entries arrive as `&str` paths plus parse-time-resolved
-        // account uids from the config; PID 1 re-borrows them as bytes into
-        // a fixed stack array (no heap, `plans/SPAWN.md` SP5b) bounded by
-        // `MAX_SERVICES`, which the parser already enforces, so the slice is
-        // never truncated. Every entry is spawned as its own compiled-in
-        // service account (`plans/USERS.md`).
-        let services = config.services();
-        let mut service_launches: [Launch<'_>; MAX_SERVICES] = [VACANT; MAX_SERVICES];
-        for (dst, entry) in service_launches.iter_mut().zip(services) {
-            *dst = Launch {
-                path: entry.path.as_bytes(),
-                uid: entry.uid,
-            };
+
+        // Bring the boot-floor services up through the service-manager engine
+        // (`plans/NEW-SERVICEMANAGER.md` SVC-A). PID 1 names only each
+        // service's `Run` binary and its compiled-in service account
+        // (`plans/USERS.md`); the kernel — the single capability authority —
+        // verifies the signed bundle and grants `manifest ∩ ceiling` at load
+        // time. The engine orders the floor by declared dependencies (the
+        // floor has none, so all are immediate) and reaps and restarts them
+        // per their manifest policy; the growable, discovery-registered tier
+        // past the floor lands with the userland heap (SVC-3/SVC-4).
+        let spawner = RtSpawner;
+        let stopper = RtStopper;
+        let reaper = LoopReaper::new();
+        let sink = LogSink;
+        let mut engine = Init::new(InitConfig {
+            spawner: &spawner,
+            stopper: &stopper,
+            reaper: &reaper,
+            sink: &sink,
+        });
+        for entry in config.services() {
+            let spec =
+                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new());
+            if engine.register(spec).is_err() {
+                // Two floor services resolved to the same name — a defect in
+                // the compiled-in `DEFAULT_CONFIG`, not a runtime input.
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: duplicate service name for {}; refusing to boot a surprising system\n",
+                    entry.path
+                ));
+                return EXIT_CONFIG_INVALID;
+            }
         }
+        let report = match engine.start_all() {
+            Ok(report) => report,
+            Err(err) => {
+                // A structurally invalid floor graph (missing dependency or a
+                // cycle). The floor is acyclic, so this is a build defect; the
+                // engine has already audited `GRAPH_REJECTED`.
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: boot-floor service graph rejected ({err:?}); refusing to boot\n"
+                ));
+                return EXIT_CONFIG_INVALID;
+            }
+        };
+        // Fail loud, degrade gracefully: state each service the kernel refused
+        // to start (a stale or mis-signed bundle) and boot on with the rest —
+        // one dead service must not take down the device manager, the other
+        // services, or the login sessions. The kernel's audit log already
+        // carries the refusal; this makes it visible at the console too.
+        for failed in &report.failed {
+            let _ = Stderr.write_fmt(format_args!(
+                "init: service {} not started ({:?}); continuing without it\n",
+                failed.name, failed.failure
+            ));
+        }
+
+        // Supervise one login session per console and route every other
+        // reaped child — a service the engine started, or an inherited
+        // orphan — back to the engine. The session table is a fixed stack
+        // array; the engine owns the (heap-backed) service state.
+        let mut services = EngineServices {
+            engine: &mut engine,
+            reaper: &reaper,
+        };
         let session = Launch {
             path: config.session().path.as_bytes(),
             uid: config.session().uid,
         };
-        match supervise(
-            &mut RtSessions,
-            session,
-            &service_launches[..services.len()],
-        ) {
+        match supervise(&mut services, &mut RtSessions, session) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
             Outcome::WaitFailed => EXIT_WAIT_FAILED,
             Outcome::Exhausted => EXIT_SESSION_EXHAUSTED,
@@ -206,11 +351,15 @@ mod program {
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
 // entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
-// parses the compiled-in default config (and touches the parser's accessors)
-// so a malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build`,
-// and drives the session supervisor against an inert zero-console seam so
-// neither is dead code on the host. It performs no I/O.
-/// An inert host-stub seam: zero consoles, so the supervisor returns
+// parses the compiled-in default config (touching the parser's accessors and
+// the `service_name` derivation each boot-floor entry now flows through) so a
+// malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build`, and
+// drives the session supervisor against inert zero-console / no-service seams
+// so neither is dead code on the host. It performs no I/O. The real
+// engine-backed [`Services`](supervisor::Services) glue is exercised by the
+// freestanding build and the QEMU boot vertical; the pure supervision policy
+// and the engine itself are host-tested in their own modules.
+/// An inert host-stub session seam: zero consoles, so the supervisor returns
 /// [`supervisor::Outcome::NoConsoles`] without spawning or waiting.
 #[cfg(not(freestanding))]
 struct NoSessions;
@@ -229,24 +378,41 @@ impl supervisor::Sessions for NoSessions {
     fn report_launch_failure(&mut self, _path: &[u8], _console: u32, _err: i64) {}
 }
 
+/// An inert host-stub service seam: no running service, so the supervisor's
+/// exhaustion check depends only on the (also inert) sessions.
+#[cfg(not(freestanding))]
+struct NoServices;
+
+#[cfg(not(freestanding))]
+impl supervisor::Services for NoServices {
+    fn on_child_exit(&mut self, _pid: u64, _exit_code: i32) {}
+    fn any_running(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(not(freestanding))]
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
         let mut banner_buf = [0u8; startup::BANNER_MAX];
+        // Touch the `service_name` derivation every boot-floor entry now flows
+        // through, so a regression in it is caught by an ordinary host build.
+        for entry in config.services() {
+            let _ = startup::service_name(entry.path);
+        }
         let _ = (
             config.session(),
-            config.services(),
             startup::render_banner(None, &mut banner_buf),
         );
     }
     assert_eq!(
         supervisor::supervise(
+            &mut NoServices,
             &mut NoSessions,
             supervisor::Launch {
                 path: b"session",
                 uid: 0,
             },
-            &[],
         ),
         supervisor::Outcome::NoConsoles
     );

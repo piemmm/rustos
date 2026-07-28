@@ -290,9 +290,11 @@ a feature.
 ## 5. Scope audit (surprises checked in the tree)
 
 - **`MAX_SERVICES`** (`startup.rs`) is a floor-sized fail-closed bound derived
-  from `DEFAULT_CONFIG` (not a magic `4`), and `supervisor::MAX_SUPERVISED_SERVICES`
-  imports it rather than carrying a second copy; the bound tests assert the
-  floor exactly fills it and that a longer config fails closed (SVC-1, done).
+  from `DEFAULT_CONFIG` (not a magic `4`); the bound tests assert the floor
+  exactly fills it and that a longer config fails closed (SVC-1, done). The
+  supervisor no longer carries a service slot bound at all — SVC-A moved the
+  services into the `Init` engine, so `supervisor.rs` now sizes only the
+  per-console session table (`MAX_SUPERVISED_CONSOLES`).
 - **`login` starts `fontd`** (`FONT-SERVICE.md` §3; `login`'s start path,
   the x86_64/riscv64 compiled-in `FONTD_PATH`/`FONTD_MANIFEST`/
   `SPAWN_PROGRAMS` fallbacks): deleted in favour of readiness-condition
@@ -319,8 +321,10 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
 ### SVC-1 — Kill the `MAX_SERVICES` cap; floor-sized fail-closed bound — DONE
 - `startup::MAX_SERVICES` is derived from `DEFAULT_CONFIG` by a `const fn`
   service-directive counter, so the floor sizes its own bound and a stale
-  magic number can neither silently truncate a floor entry nor drift.
-  `supervisor::MAX_SUPERVISED_SERVICES` imports it (one definition, §2.2). A
+  magic number can neither silently truncate a floor entry nor drift. (The
+  old `supervisor::MAX_SUPERVISED_SERVICES` alias was retired in SVC-A when
+  the services moved into the engine; only the session table remains in the
+  supervisor.) A
   config exceeding the floor fails closed (`ConfigError::TooManyServices`);
   no behaviour change for the shipped floor. Tests assert the floor exactly
   fills the bound and that the `const` counter agrees with the runtime parser.
@@ -354,18 +358,35 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   that asserted init-side intersection/escalation are deleted (§2.14). The
   live boot is unchanged (the engine is still only reached from tests), so
   the existing boot behaviour and QEMU verticals are untouched by this step.
-- **Wire the engine into live PID 1 — TODO (the meat of "Stage A").**
-  Replace the no-heap bootstrap `supervise` / `StartupConfig` service path in
-  `userland/system/init/src/run.rs` with the heap-backed `Init` engine
-  driving the boot-floor services (all `Permanent`/`Immediate`), backing the
-  `Spawner`/`Reaper`/`Stopper`/`Sink` seams on the real syscalls
-  (`spawn_as(path, 0, account)`, `wait`, `signal`, `lib/log`). Per-console
-  **session** supervision (one `login` per console, crash-loop relaunch)
-  stays a distinct concern layered over the engine; the single wait loop
-  routes each reaped pid to the session table or to the engine
-  (`reap` handles service exits + orphans). No parallel manager (§2.2): the
-  old flat service handling is deleted in the same change. This step owns
-  the 3-arch QEMU boot verticals and the full §7 gate.
+- **Engine wired into live PID 1 — DONE.** `userland/system/init/src/run.rs`
+  no longer runs the flat, no-heap `supervise`-over-`StartupConfig` service
+  path (deleted, §2.14). PID 1 now builds the heap-backed `Init` engine over
+  real seams — `RtSpawner` (`spawn_as(path, console 0, account)`), `RtStopper`
+  (`signal` — `Terminate` then, only after grace, `Kill`), `LogSink` (the
+  `lib/rt` production `tairix_log::Sink` over `log_emit`), and `LoopReaper`
+  (`service.rs`, the interior-mutable mailbox the wait loop fills so
+  `Init::reap` drains one child without a second `wait`) — registers the
+  boot-floor services from `DEFAULT_CONFIG` (each named by its `.app`
+  bundle stem via `startup::service_name`, account uid resolved at parse
+  time, all default `Immediate`/`Permanent`/`Never`), and `start_all`s them
+  in dependency order, reporting any kernel-refused service on `stderr` and
+  booting on.
+- Per-console **session** supervision stays a distinct concern layered over
+  the engine (`supervisor.rs`, rewritten to session-only): the one wait-any
+  loop routes each reaped pid to the per-console `login` slot (crash-loop
+  relaunch within `SESSION_SPAWN_BUDGET`) or, for every other pid, to the
+  engine through the new `Services` seam (`EngineServices`) — a service exit
+  applies its restart policy, an orphan is logged — and only declares
+  `Exhausted` when no session is alive **and** the engine holds no running
+  service, so a perpetual service (`devmgr`) keeps PID 1 up. The supervision
+  policy is host-tested with mock `Sessions`/`Services`; the engine and
+  `LoopReaper` are host-tested in their own modules; the real seam glue is
+  freestanding-only and covered by the boot vertical.
+- Verified: the aarch64 `spawn_session` QEMU boot vertical is green (PID 1
+  boots on the heap-backed engine, spawns `sysinfod`/`netstack`/`devmgr`/
+  `seatmgr` in order then the login session, waits, and relaunches login).
+  The x86_64/riscv64 boot verticals and the full §7 gate share the same
+  arch-neutral `init` source and are expected to follow; they run in CI.
 
 ### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine) — DONE
 - `lib/abi/src/service.rs` (versioned/fail-closed, frozen on first release):
