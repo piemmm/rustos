@@ -95,11 +95,20 @@ pub const APPEARANCE_DUMP_DELIVERIES: u32 = 4;
 /// race them.
 pub const TERMINAL_WINDOW_FRAME_MAPS: u32 = 3;
 
-/// Deliveries after the terminal-window click completed (the files
-/// window's unfocus, the terminal's focus, and the activating press):
-/// the gate after which the runner types [`TERMINAL_COMMAND`] at the
-/// seat keyboard — the terminal is provably the focused key recipient.
+/// Deliveries after the terminal-window click (files unfocus, terminal
+/// focus, activating press). Retained only as the base for
+/// [`TERMINAL_ROUND_TRIP_DELIVERIES`] arithmetic, not as the focus gate: a
+/// count is satisfied by the files window before the terminal exists, so
+/// the typed command gates on [`TERMINAL_FOCUSED_MARKER`] instead.
 pub const TERMINAL_TYPE_DELIVERIES: u32 = 7;
+
+/// Guest marker: the terminal window first becomes the focused key
+/// recipient (first app-ward delivery to the second distinct window port;
+/// files is first, terminal second). [`TERMINAL_COMMAND`] typing gates on
+/// this, not a delivery count, since only a delivery to the terminal's own
+/// port proves focus routed to it. Mirrors [`CTRL_C_ARM_MARKER`] /
+/// [`FM9B_PICKER_OPEN_MARKER`]; test-only.
+pub const TERMINAL_FOCUSED_MARKER: &str = "AUTOLOAD terminal focused";
 
 /// The command the runner types into the focused terminal: a real store
 /// bundle the shell resolves and spawns as a **blocking foreground job**.
@@ -164,6 +173,12 @@ pub const CTRL_C_ARM_MARKER: &str = "PTY ctrl-c armed";
 // press — a click on the already-focused window delivers one press, and a
 // typed key delivers both of its edges). The guest applies the injected
 // events strictly in order, so these counts are exact, not racy.
+//
+// KNOWN-DRIFTED (`plans/OPEN-DEFECTS.md` D20): the base/witness counts
+// below (28 / 40 / 41 …) predate the FONT-SERVICE speedup that shifted the
+// cadence (the `sleep` spawn now lands near count 37), so these low FM9
+// thresholds fire early. D20 re-sequences the later stages off readiness
+// markers, not counts; until it lands the vertical is RED here.
 
 /// The delivery counter once the terminal stage has fully run: the
 /// [`TERMINAL_COMMAND`] round trip (`sleep 3600` + Enter, ending the

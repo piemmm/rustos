@@ -120,7 +120,10 @@ not an init-auto-started boot service). The desktop's font client fails closed
 until `fontd` has bound `FONT_ENDPOINT`, so the first frames may paint no text
 and then fill in once the service is serving.
 
-> Note: `fontd` deliberately is not started at boot because doing so exposes a
-> latent early-boot concurrent-spawn kernel defect (tracked as D18 in
-> `plans/OPEN-DEFECTS.md`); starting it from the post-boot graphical path both
-> sidesteps that defect and is the headless-first-correct design.
+> Note: starting `fontd` from the post-boot graphical path (rather than as an
+> init boot service) is the headless-first-correct design in its own right — a
+> text-only or headless system never needs a font renderer. An earlier concern
+> that a 5th concurrent boot service crashed the kernel (D18 in
+> `plans/OPEN-DEFECTS.md`) was investigated and found non-reproducing once this
+> service's ~10 MB payload was removed; the design choice stands on
+> headless-first alone.

@@ -246,9 +246,10 @@ Load-bearing facts a future reader needs:
   (`spawn_paths::FONTD_PATH`, `program_manifests::FONTD_MANIFEST`,
   `spawn_layout::SPAWN_PROGRAMS`, `build.rs`) on x86_64/riscv64 until their
   storage floors land — a *spawnable* program there, not an init-auto-started
-  service. Starting it post-boot (rather than as a 5th early boot service) also
-  sidesteps a latent early-boot concurrent-spawn kernel defect (D18 in
-  `plans/OPEN-DEFECTS.md`).
+  service. Post-boot start is the headless-first-correct design on its own
+  (§17.3); an earlier worry that a 5th concurrent boot service crashed the
+  kernel (D18) was investigated and closed non-reproducing once this service's
+  ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`).
 - **Profile fix (§2.6).** The image → Cargo-profile mapping lives once on
   `tairix_mkimage::ImageProfile`; both `kernel_build_profile` and
   `pie_build::cross_compile_pie_elf` read it, so `installer` cross-compiles

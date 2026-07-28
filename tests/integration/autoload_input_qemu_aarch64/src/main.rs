@@ -223,7 +223,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -300,6 +300,12 @@ mod kernel {
         users_db_loaded: AtomicBool,
         display_endpoint_bound: AtomicBool,
         window_events_delivered: AtomicU32,
+        /// First distinct window-event destination port (the files window);
+        /// `0` until the first app-ward delivery.
+        first_window_port: AtomicU64,
+        /// One-shot: [`TERMINAL_FOCUSED_MARKER`] emitted on the first delivery
+        /// to the second distinct window port (the terminal gaining focus).
+        terminal_focus_marked: AtomicBool,
         shell_round_trip: AtomicBool,
         ctrl_c_recovered: AtomicBool,
         fs_folder_created: AtomicBool,
@@ -319,6 +325,8 @@ mod kernel {
                 users_db_loaded: AtomicBool::new(false),
                 display_endpoint_bound: AtomicBool::new(false),
                 window_events_delivered: AtomicU32::new(0),
+                first_window_port: AtomicU64::new(0),
+                terminal_focus_marked: AtomicBool::new(false),
                 shell_round_trip: AtomicBool::new(false),
                 ctrl_c_recovered: AtomicBool::new(false),
                 fs_folder_created: AtomicBool::new(false),
@@ -375,9 +383,8 @@ mod kernel {
             if delivered >= tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
                 && !self.shell_round_trip.swap(true, Ordering::AcqRel)
             {
-                // First shell-command spawn (the foreground `sleep`): arm the
-                // runner's Ctrl-C injection now that a parked foreground job
-                // exists to interrupt.
+                // Arm the runner's Ctrl-C injection: a parked foreground job
+                // (`sleep`) now exists to interrupt.
                 SerialSink::new().write_event(&Event {
                     level: tairix_log::Level::Info,
                     id: tairix_log::EventId(0),
@@ -556,6 +563,42 @@ mod kernel {
                 }
             }
         }
+
+        /// Count an app-ward window-event delivery and, on the first delivery
+        /// to the second distinct destination port, emit
+        /// [`TERMINAL_FOCUSED_MARKER`] once. The lone port sender serves the
+        /// files window first and the terminal second, so a delivery to any
+        /// port other than the first-seen one is the terminal gaining focus —
+        /// the fact the typed command gates on rather than a raw count.
+        fn note_window_delivery(&self, event: &Event<'_>) {
+            self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
+            if self.terminal_focus_marked.load(Ordering::Acquire) {
+                return;
+            }
+            for field in event.fields {
+                if field.key != "port" {
+                    continue;
+                }
+                let tairix_log::FieldValue::Str(value) = field.value else {
+                    continue;
+                };
+                let Ok(port) = u64::from_str_radix(value, 16) else {
+                    continue;
+                };
+                let first = self.first_window_port.load(Ordering::Acquire);
+                if first == 0 {
+                    self.first_window_port.store(port, Ordering::Release);
+                } else if port != first && !self.terminal_focus_marked.swap(true, Ordering::AcqRel)
+                {
+                    SerialSink::new().write_event(&Event {
+                        level: tairix_log::Level::Info,
+                        id: tairix_log::EventId(0),
+                        message: tairix_test_autoload_input_qemu_aarch64::TERMINAL_FOCUSED_MARKER,
+                        fields: &[],
+                    });
+                }
+            }
+        }
     }
 
     impl Sink for AutoloadInputSink {
@@ -575,7 +618,7 @@ mod kernel {
             } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
                 self.note_syscall(event);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
-                self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
+                self.note_window_delivery(event);
             } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
                 // Attributable by ordering, not by name: every other spawn
                 // in the image happens strictly before the typing gate, so a

@@ -3147,10 +3147,11 @@ Shipped (headless-testable, model + renderer over injected seams):
     login and the shell `desktop` command and never a headless/text boot
     (§17.3); it resolves by path from the on-disk `/System/Services` bundle on
     aarch64 and from the compiled-in program registry on x86_64/riscv64.
-    Starting it post-boot also avoids a latent early-boot concurrent-spawn
-    kernel defect (D18, `plans/OPEN-DEFECTS.md`). The independent profile fix
-    (`pie_build::cross_compile_pie_elf` reading `ImageProfile`) ships
-    `installer` userland/drivers `--release`.
+    Post-boot start is the headless-first-correct design in its own right; an
+    earlier concurrent-spawn crash worry (D18) was closed non-reproducing once
+    the ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`). The independent
+    profile fix (`pie_build::cross_compile_pie_elf` reading `ImageProfile`)
+    ships `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).

@@ -474,14 +474,6 @@ const AUTOLOAD_WINDOW_MAP_MARKER: &str = "sc=shm_map";
 const AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES: u32 =
     tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS;
 
-/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the typed
-/// shell command: the terminal-window click's own deliveries (the files
-/// window's unfocus, the terminal's focus, and the press), after which
-/// the terminal is provably the focused key recipient — the shared
-/// contract.
-const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::TERMINAL_TYPE_DELIVERIES;
-
 /// The shell command the autoload vertical types into the focused
 /// terminal at the seat keyboard — the shared contract (`sleep 3600`
 /// plus Enter): the shell resolving and spawning it is the guest's AW4
@@ -494,6 +486,14 @@ const AUTOLOAD_TERMINAL_COMMAND: &str = tairix_test_autoload_input_qemu_aarch64:
 /// `sleep` spawn (`plans/PTY.md`), so the `Ctrl-C` lands against a live,
 /// parked foreground job — never before one exists.
 const AUTOLOAD_CTRL_C_ARM_MARKER: &str = tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER;
+
+/// Guest marker gating the terminal command typing: the terminal window
+/// first becomes the focused key recipient (first app-ward delivery to the
+/// second distinct window port). Gating on this, not a delivery count the
+/// files window satisfies before the terminal exists, keeps the typed
+/// command from racing ahead of the terminal-focus click.
+const AUTOLOAD_TERMINAL_FOCUSED_MARKER: &str =
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_FOCUSED_MARKER;
 
 /// The pty Ctrl-C recovery keys the vertical types once the `sleep` spawn
 /// has armed the step (the shared contract): a `Ctrl-C` (the `\u{3}` ETX
@@ -5015,13 +5015,13 @@ const TESTS: &[QemuTest] = &[
                 UNLOCK_PASSPHRASE_LINE,
             ),
             (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
-            // The AW4 terminal stage: once the terminal-window click's
-            // deliveries prove the terminal focused, type the shell
-            // command — its spawn is the guest PASS gate's round-trip
-            // witness.
+            // AW4 terminal stage: type the shell command once the terminal
+            // gains focus (its spawn is the PASS gate's round-trip witness).
+            // Gated on the guest focus marker, not a raw count the files
+            // window satisfies before the terminal exists.
             (
-                AUTOLOAD_WINDOW_EVENT_MARKER,
-                AUTOLOAD_TERMINAL_TYPE_OCCURRENCES,
+                AUTOLOAD_TERMINAL_FOCUSED_MARKER,
+                1,
                 AUTOLOAD_TERMINAL_COMMAND,
             ),
             // The pty Ctrl-C job-control step (`plans/PTY.md`): held behind

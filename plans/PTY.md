@@ -271,15 +271,28 @@ recovery = 40, `FM9_TYPING_DONE` = 41); `qkeycode_for` gains `\u{3}` →
   the master. `elsh` is unchanged — over the console-like slave it runs its
   full interactive editor. Host tests updated; docs
   (`docs/src/architecture/syscalls.md`) updated.
-- **PTY5 — the QEMU vertical. `[x]` landed.** The `autoload_input` aarch64
-  vertical proves the pty discipline end to end via the `Ctrl-C`
+- **PTY5 — the QEMU vertical. `[x]` landed (pty mechanism); vertical
+  currently RED on an unrelated harness drift.** The `autoload_input`
+  aarch64 vertical proves the pty discipline end to end via the `Ctrl-C`
   job-control witness (see "QEMU vertical" above): the AW4 command is the
   blocking `sleep 3600`, the guest arms a `Ctrl-C` injection on its spawn,
   and the recovered `true` spawn is the twelfth PASS witness. Echo/`ONLCR`
   stay covered by the `lib/tty` + `kernel/core/pty.rs` host tests (no
   robust graphical serial witness exists for them; fragile pixel-OCR was
-  rejected). `qkeycode_for` gained `\u{3}`→`ctrl-c`; the FM9/FM10/FM11
-  delivery gates re-based off the new command.
+  rejected). `qkeycode_for` gained `\u{3}`→`ctrl-c`.
+  - **Terminal-command gate (`plans/OPEN-DEFECTS.md` D19, fixed).** The
+    typed command is gated on the guest-emitted `TERMINAL_FOCUSED_MARKER`
+    (the terminal window's first focus delivery), not a raw window-event
+    *count* the files window satisfies before the terminal exists — the
+    former let the command race ahead of the terminal-focus click and land
+    on the files window (`0.app`). With the fix `sleep 3600` reaches `elsh`
+    and `sleep.app` spawns.
+  - **Downstream count drift (`plans/OPEN-DEFECTS.md` D20, open).** The
+    FM9/FM10/FM11 stages after the terminal still sequence on cumulative
+    delivery counts the FONT-SERVICE speedup shifted, so the vertical does
+    not yet reach PASS; the durable fix is to re-sequence them off
+    guest-emitted markers too (tracked as D20). The pty `Ctrl-C` mechanism
+    itself is correct and host-tested independently.
 
 ## PTY6 — the terminal window is resizable (`pty_set_size`)
 
