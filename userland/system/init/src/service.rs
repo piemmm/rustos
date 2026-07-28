@@ -21,7 +21,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::{
     decode_capability_ids, ActivationMode, CapabilityId, Duration64, Errno, ManifestHeader,
-    ReadinessKind, ReadyCondition, RestartPolicy, ServiceManifest, MANIFEST_MAX_CAPABILITIES,
+    ReadinessKind, ReadyCondition, RestartPolicy, ServiceLimit, ServiceManifest,
+    MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
 
@@ -121,6 +122,7 @@ pub struct ServiceSpec {
     restart: RestartPolicy,
     stop_grace: Duration64,
     connect_capability: Option<CapabilityId>,
+    limits: Vec<ServiceLimit>,
 }
 
 impl ServiceSpec {
@@ -159,6 +161,7 @@ impl ServiceSpec {
             restart: RestartPolicy::Never,
             stop_grace: DEFAULT_STOP_GRACE,
             connect_capability: None,
+            limits: Vec::new(),
         }
     }
 
@@ -211,7 +214,8 @@ impl ServiceSpec {
             .with_restart(manifest.restart())
             .with_stop_grace(manifest.stop_grace())
             .requiring(requires)
-            .providing(provides);
+            .providing(provides)
+            .with_limits(manifest.limits().collect::<Vec<ServiceLimit>>());
         if let Some(capability) = manifest.connect_capability() {
             spec = spec.with_connect_capability(capability);
         }
@@ -258,6 +262,18 @@ impl ServiceSpec {
     #[must_use]
     pub fn with_connect_capability(mut self, capability: CapabilityId) -> Self {
         self.connect_capability = Some(capability);
+        self
+    }
+
+    /// Set the per-service resource limits, consuming and returning `self`.
+    ///
+    /// The limits are unit metadata the manager threads to the kernel at
+    /// spawn, where they are enforced; the manager itself does not interpret
+    /// them. An empty list (the default) leaves the service governed by the
+    /// discovered, growable default policy.
+    #[must_use]
+    pub fn with_limits(mut self, limits: impl Into<Vec<ServiceLimit>>) -> Self {
+        self.limits = limits.into();
         self
     }
 
@@ -354,6 +370,14 @@ impl ServiceSpec {
     #[must_use]
     pub fn connect_capability(&self) -> Option<CapabilityId> {
         self.connect_capability
+    }
+
+    /// The per-service resource limits the kernel enforces at spawn, in
+    /// strictly ascending [`tairix_abi::LimitKind`] order (empty if the
+    /// service imposes none).
+    #[must_use]
+    pub fn limits(&self) -> &[ServiceLimit] {
+        &self.limits
     }
 }
 
@@ -512,10 +536,20 @@ mod tests {
     #[test]
     fn from_manifest_builds_a_spec_from_signed_unit_metadata() {
         use tairix_abi::{
-            ActivationMode, CapabilityId, Duration64, ReadinessKind, ReadyCondition, RestartPolicy,
-            ServiceManifest, ServiceUnit,
+            ActivationMode, CapabilityId, Duration64, LimitKind, ReadinessKind, ReadyCondition,
+            ResourceLimit, RestartPolicy, ServiceLimit, ServiceManifest, ServiceUnit,
         };
 
+        let limits = [
+            ServiceLimit {
+                kind: LimitKind::OpenStreams,
+                limit: ResourceLimit::new(32, 64).expect("well-formed"),
+            },
+            ServiceLimit {
+                kind: LimitKind::Processes,
+                limit: ResourceLimit::UNLIMITED,
+            },
+        ];
         let unit = ServiceUnit {
             account: 12,
             readiness: ReadinessKind::Notify,
@@ -526,6 +560,7 @@ mod tests {
             requires: &[ReadyCondition::NetworkUp],
             provides: &[ReadyCondition::SeatAvailable],
             dependencies: &["netstack", "sysinfod"],
+            limits: &limits,
         };
         let mut buf = [0u8; 256];
         let len = unit.encode(&mut buf).expect("encode");
@@ -550,6 +585,7 @@ mod tests {
         assert_eq!(spec.dependencies(), &["netstack", "sysinfod"]);
         assert_eq!(spec.requires(), &[ReadyCondition::NetworkUp]);
         assert_eq!(spec.provides(), &[ReadyCondition::SeatAvailable]);
+        assert_eq!(spec.limits(), &limits);
     }
 
     #[test]
@@ -573,6 +609,7 @@ mod tests {
             requires: &[] as &[ReadyCondition],
             provides: &[] as &[ReadyCondition],
             dependencies: &["../escape"],
+            limits: &[],
         };
         let mut buf = [0u8; 128];
         let len = bad_dep.encode(&mut buf).expect("encode");

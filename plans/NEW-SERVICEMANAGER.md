@@ -578,9 +578,31 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   (§3.10). A blind periodic restart is not offered (§2.1, §3.7).
 
 ### SVC-8 — Control API + tool + audit + rlimits + docs/gate
-- The versioned capability-checked control `lib/abi` surface, status via
-  §16.6, the control tool, the extended `events.rs` IDs, per-service
-  `rlimit` unit metadata enforced at spawn. Docs (`docs/src/userland/`,
+- **Per-service `rlimit` unit metadata — DONE (ABI + engine core).** The
+  `ServiceManifest`/`ServiceUnit` SUM1 record carries an optional
+  per-service resource-limit section: a `limits_count u16` at prefix offset
+  48 (prefix grown 48→50, `reserved0` kept reserved) and a body of
+  `ServiceLimit { kind: LimitKind, limit: ResourceLimit }` entries encoded as
+  `(u32 kind ‖ u64 soft ‖ u64 hard)`. The section is **canonical** — strictly
+  ascending by `LimitKind` discriminant, so a duplicate or descending kind, a
+  malformed (`soft > hard`) bound, an unknown discriminant, or more than
+  `SERVICE_MANIFEST_MAX_LIMITS` (= `LimitKind::COUNT`) entries all fail the
+  record closed — reusing the existing `lib/abi::rlimit` types (no second
+  limit model, §2.2) and the existing `CAP_RLIMIT_RAISE` gate (no new
+  capability). It stays an IPC-protocol module outside the generated C header
+  (no `abi-check`/`c-header` change) and its decoder is covered by the
+  `fuzz_decode` never-panic/canonical-round-trip arm (§19.6). `ServiceSpec`
+  gains `limits`/`with_limits`/`limits()`, and `ServiceSpec::from_manifest`
+  threads the decoded limits through so a discovered bundle's declared
+  limits reach the manager. **Kernel enforcement at spawn** (threading
+  `spec.limits()` into the `spawn_as` path) rides with the loader/kernel
+  transport seam (SVC-5) — the metadata is carried and validated now; the
+  live enforcement wiring is not yet in the boot path.
+- **Remaining (TODO).** The versioned capability-checked control `lib/abi`
+  surface (`start/stop/enable/disable/status`) and its service-control
+  capability (added *with* its enforcement point + a live holder, §5.2),
+  status via §16.6, the control tool, the extended `events.rs` IDs, and the
+  live rlimit enforcement at spawn. Docs (`docs/src/userland/`,
   `docs/src/architecture/`, `docs/src/abi/`), README matrix, and this plan
   collapsed to done-state. Full §7 gate green, output quoted.
 

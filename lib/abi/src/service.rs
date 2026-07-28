@@ -33,6 +33,7 @@
 //! self-announceable signal) rather than in an `abi-v2`.
 
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use crate::rlimit::{LimitKind, ResourceLimit};
 use crate::{CapabilityId, Duration64, Errno};
 
 /// Magic number identifying an `abi-v1` service readiness notice (`"SVC1"`
@@ -590,9 +591,23 @@ pub const SERVICE_MANIFEST_MAX_CONDITIONS: usize = 16;
 /// does not decide which names are admissible.
 pub const SERVICE_MANIFEST_MAX_NAME_LEN: usize = 128;
 
+/// Maximum number of per-service resource limits a unit-metadata record may
+/// carry.
+///
+/// Equal to [`LimitKind::COUNT`]: the limits section is canonical — strictly
+/// ascending by [`LimitKind`] discriminant, so each governed resource appears
+/// at most once and a record can never name more distinct limits than there
+/// are resource kinds. A fixed validation bound (anti-flood on the wire), not
+/// a scalable capacity.
+pub const SERVICE_MANIFEST_MAX_LIMITS: usize = LimitKind::COUNT;
+
 /// Fixed prefix byte length of a [`ServiceManifest`] record (everything
-/// before the variable `requires`/`provides`/dependency body).
-const SERVICE_MANIFEST_PREFIX_LEN: usize = 48;
+/// before the variable `requires`/`provides`/dependency/limits body).
+const SERVICE_MANIFEST_PREFIX_LEN: usize = 50;
+
+/// Wire length of one encoded per-service resource limit: a `u32`
+/// [`LimitKind`] discriminant followed by a [`ResourceLimit`] soft/hard pair.
+const SERVICE_LIMIT_WIRE_LEN: usize = 4 + ResourceLimit::WIRE_LEN;
 
 /// `flags` bit set when the record's activation mode is on-demand (a linger
 /// span applies); clear for a permanent service.
@@ -616,6 +631,7 @@ const SM_OFF_PROVIDES_COUNT: usize = 20;
 const SM_OFF_DEPENDENCY_COUNT: usize = 22;
 const SM_OFF_LINGER: usize = 24;
 const SM_OFF_STOP_GRACE: usize = 36;
+const SM_OFF_LIMITS_COUNT: usize = 48;
 
 /// The unit metadata one service declares in its signed bundle manifest — the
 /// analogue of a systemd `.service` unit file, but a compact, fail-closed
@@ -642,7 +658,7 @@ const SM_OFF_STOP_GRACE: usize = 36;
 /// accessor below is infallible and the record fails closed on the first
 /// malformed byte.
 ///
-/// The wire layout (little-endian) is a fixed 48-byte prefix followed by the
+/// The wire layout (little-endian) is a fixed 50-byte prefix followed by the
 /// variable body:
 ///
 /// ```text
@@ -659,10 +675,13 @@ const SM_OFF_STOP_GRACE: usize = 36;
 /// 22  dependency_count u16
 /// 24  linger     Duration64  (12 bytes; must be zero unless on-demand)
 /// 36  stop_grace Duration64  (12 bytes)
+/// 48  limits_count u16
 /// --- body ---
 ///     requires:      requires_count × u16 (ReadyCondition discriminants)
 ///     provides:      provides_count × u16
 ///     dependencies:  dependency_count × (u16 name_len ‖ name_len UTF-8 bytes)
+///     limits:        limits_count × (u32 LimitKind ‖ u64 soft ‖ u64 hard),
+///                    strictly ascending by kind (canonical, deduplicated)
 /// ```
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ServiceUnit<'a> {
@@ -689,6 +708,28 @@ pub struct ServiceUnit<'a> {
     pub provides: &'a [ReadyCondition],
     /// Names of the services that must start before this one.
     pub dependencies: &'a [&'a str],
+    /// Optional per-service resource limits, in strictly ascending
+    /// [`LimitKind`] order (each resource governed at most once). Empty means
+    /// the service inherits the discovered, growable default policy uncapped;
+    /// a present entry caps that resource for the service and its children.
+    pub limits: &'a [ServiceLimit],
+}
+
+/// One per-service resource limit: which resource it governs and its
+/// soft/hard bound.
+///
+/// Carried in a service's signed unit metadata so the manager can hand the
+/// bound to the kernel at spawn, where it is enforced (per-task storage,
+/// inheritance, and the [`crate::CapabilityId::RLIMIT_RAISE`] gate on raising
+/// a hard bound). It is *unit metadata*, not a capacity the manager itself
+/// interprets: an empty limit list leaves the service governed by the
+/// discovered growable default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceLimit {
+    /// The resource this limit governs.
+    pub kind: LimitKind,
+    /// The soft/hard bound imposed on that resource.
+    pub limit: ResourceLimit,
 }
 
 impl ServiceUnit<'_> {
@@ -710,6 +751,7 @@ impl ServiceUnit<'_> {
         for name in self.dependencies {
             len += 2 + name.len();
         }
+        len += self.limits.len() * SERVICE_LIMIT_WIRE_LEN;
         Ok(len)
     }
 
@@ -725,6 +767,26 @@ impl ServiceUnit<'_> {
             if name.is_empty() || name.len() > SERVICE_MANIFEST_MAX_NAME_LEN {
                 return Err(Errno::OutOfRange);
             }
+        }
+        if self.limits.len() > SERVICE_MANIFEST_MAX_LIMITS {
+            return Err(Errno::OutOfRange);
+        }
+        // Canonical form: strictly ascending by kind (which also forbids a
+        // duplicate resource) and every bound well-formed. Rejecting a
+        // non-canonical or malformed list here keeps encode/decode symmetric
+        // and the round-trip stable.
+        let mut previous: Option<u32> = None;
+        for entry in self.limits {
+            if !entry.limit.is_well_formed() {
+                return Err(Errno::OutOfRange);
+            }
+            let discriminant = entry.kind.as_u32();
+            if let Some(prev) = previous {
+                if discriminant <= prev {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+            previous = Some(discriminant);
         }
         Ok(())
     }
@@ -767,9 +829,11 @@ impl ServiceUnit<'_> {
         let provides_len = u16::try_from(self.provides.len()).map_err(|_| Errno::OutOfRange)?;
         let dependency_len =
             u16::try_from(self.dependencies.len()).map_err(|_| Errno::OutOfRange)?;
+        let limits_len = u16::try_from(self.limits.len()).map_err(|_| Errno::OutOfRange)?;
         put_u16(out, SM_OFF_REQUIRES_COUNT, requires_len);
         put_u16(out, SM_OFF_PROVIDES_COUNT, provides_len);
         put_u16(out, SM_OFF_DEPENDENCY_COUNT, dependency_len);
+        put_u16(out, SM_OFF_LIMITS_COUNT, limits_len);
         let linger = self.activation.linger().unwrap_or(Duration64::ZERO);
         out[SM_OFF_LINGER..SM_OFF_LINGER + Duration64::WIRE_LEN]
             .copy_from_slice(&linger.to_le_bytes());
@@ -793,6 +857,12 @@ impl ServiceUnit<'_> {
             off += 2;
             out[off..off + name.len()].copy_from_slice(name.as_bytes());
             off += name.len();
+        }
+        for entry in self.limits {
+            put_u32(out, off, entry.kind.as_u32());
+            off += 4;
+            out[off..off + ResourceLimit::WIRE_LEN].copy_from_slice(&entry.limit.encode());
+            off += ResourceLimit::WIRE_LEN;
         }
         Ok(total)
     }
@@ -818,6 +888,8 @@ pub struct ServiceManifest<'a> {
     provides_count: usize,
     dependencies_start: usize,
     dependencies_count: usize,
+    limits_start: usize,
+    limits_count: usize,
 }
 
 impl<'a> ServiceManifest<'a> {
@@ -883,9 +955,11 @@ impl<'a> ServiceManifest<'a> {
         let requires_count = usize::from(read_u16(bytes, SM_OFF_REQUIRES_COUNT));
         let provides_count = usize::from(read_u16(bytes, SM_OFF_PROVIDES_COUNT));
         let dependencies_count = usize::from(read_u16(bytes, SM_OFF_DEPENDENCY_COUNT));
+        let limits_count = usize::from(read_u16(bytes, SM_OFF_LIMITS_COUNT));
         if requires_count > SERVICE_MANIFEST_MAX_CONDITIONS
             || provides_count > SERVICE_MANIFEST_MAX_CONDITIONS
             || dependencies_count > SERVICE_MANIFEST_MAX_DEPENDENCIES
+            || limits_count > SERVICE_MANIFEST_MAX_LIMITS
         {
             return Err(Errno::OutOfRange);
         }
@@ -897,6 +971,8 @@ impl<'a> ServiceManifest<'a> {
         off = validate_conditions(bytes, off, provides_count)?;
         let dependencies_start = off;
         off = validate_dependencies(bytes, off, dependencies_count)?;
+        let limits_start = off;
+        off = validate_limits(bytes, off, limits_count)?;
         if off != bytes.len() {
             return Err(Errno::OutOfRange);
         }
@@ -915,6 +991,8 @@ impl<'a> ServiceManifest<'a> {
             provides_count,
             dependencies_start,
             dependencies_count,
+            limits_start,
+            limits_count,
         })
     }
 
@@ -984,6 +1062,17 @@ impl<'a> ServiceManifest<'a> {
             remaining: self.dependencies_count,
         }
     }
+
+    /// The per-service resource limits, in strictly ascending [`LimitKind`]
+    /// order (empty if the service imposes none).
+    #[must_use]
+    pub fn limits(&self) -> Limits<'a> {
+        Limits {
+            bytes: self.bytes,
+            off: self.limits_start,
+            remaining: self.limits_count,
+        }
+    }
 }
 
 /// Walk a `count`-long `u16` condition section, validating each discriminant,
@@ -1020,6 +1109,35 @@ fn validate_dependencies(bytes: &[u8], mut off: usize, count: usize) -> Result<u
         }
         core::str::from_utf8(&bytes[len_end..name_end]).map_err(|_| Errno::OutOfRange)?;
         off = name_end;
+    }
+    Ok(off)
+}
+
+/// Walk a `count`-long resource-limit section, validating each entry's kind
+/// discriminant, its soft/hard well-formedness, and the strictly-ascending
+/// (canonical, deduplicated) kind order, and return the offset just past it.
+/// Fails closed on a truncated section, an unknown kind, a malformed bound,
+/// or a non-canonical order.
+fn validate_limits(bytes: &[u8], mut off: usize, count: usize) -> Result<usize, Errno> {
+    let mut previous: Option<u32> = None;
+    for _ in 0..count {
+        let end = off
+            .checked_add(SERVICE_LIMIT_WIRE_LEN)
+            .ok_or(Errno::OutOfRange)?;
+        if end > bytes.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        let discriminant = read_u32(bytes, off);
+        LimitKind::from_u32(discriminant)?;
+        // `decode` enforces `soft <= hard`, so a malformed bound fails closed.
+        ResourceLimit::decode(&bytes[off + 4..end])?;
+        if let Some(prev) = previous {
+            if discriminant <= prev {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        previous = Some(discriminant);
+        off = end;
     }
     Ok(off)
 }
@@ -1066,6 +1184,38 @@ pub struct Dependencies<'a> {
     remaining: usize,
 }
 
+/// Iterator over a [`ServiceManifest`]'s per-service resource limits.
+///
+/// The backing bytes were validated by [`ServiceManifest::from_bytes`] (each
+/// kind is a known discriminant and each bound is well-formed), so iteration
+/// is total; the decode below never fails for a value that survived
+/// validation.
+#[derive(Clone, Debug)]
+pub struct Limits<'a> {
+    bytes: &'a [u8],
+    off: usize,
+    remaining: usize,
+}
+
+impl Iterator for Limits<'_> {
+    type Item = ServiceLimit;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let kind = LimitKind::from_u32(read_u32(self.bytes, self.off)).ok()?;
+        let limit = ResourceLimit::decode(self.bytes.get(self.off + 4..)?).ok()?;
+        self.off += SERVICE_LIMIT_WIRE_LEN;
+        self.remaining -= 1;
+        Some(ServiceLimit { kind, limit })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
 impl<'a> Iterator for Dependencies<'a> {
     type Item = &'a str;
 
@@ -1090,10 +1240,12 @@ impl<'a> Iterator for Dependencies<'a> {
 mod tests {
     use super::{
         ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, RestartPolicy,
-        ServiceManifest, ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC,
+        ServiceLimit, ServiceManifest, ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC,
         SERVICE_MANIFEST_MAX_CONDITIONS, SERVICE_MANIFEST_MAX_DEPENDENCIES,
-        SERVICE_MANIFEST_MAX_NAME_LEN, SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
+        SERVICE_MANIFEST_MAX_LIMITS, SERVICE_MANIFEST_MAX_NAME_LEN, SERVICE_NOTICE_MAGIC,
+        SERVICE_VERSION_V1,
     };
+    use crate::rlimit::{LimitKind, ResourceLimit};
     use crate::{CapabilityId, Duration64, Errno};
 
     #[test]
@@ -1250,6 +1402,7 @@ mod tests {
         assert_eq!(SERVICE_MANIFEST_MAX_DEPENDENCIES, 64);
         assert_eq!(SERVICE_MANIFEST_MAX_CONDITIONS, 16);
         assert_eq!(SERVICE_MANIFEST_MAX_NAME_LEN, 128);
+        assert_eq!(SERVICE_MANIFEST_MAX_LIMITS, LimitKind::COUNT);
     }
 
     #[test]
@@ -1267,6 +1420,7 @@ mod tests {
             ],
             provides: &[ReadyCondition::BootComplete],
             dependencies: &["netstack", "sysinfod"],
+            limits: &[],
         };
         let mut buf = [0u8; 256];
         let bytes = encode(&unit, &mut buf);
@@ -1304,6 +1458,7 @@ mod tests {
             requires: &[],
             provides: &[],
             dependencies: &[],
+            limits: &[],
         };
         let mut buf = [0u8; 64];
         let bytes = encode(&unit, &mut buf);
@@ -1334,6 +1489,7 @@ mod tests {
             requires: &[],
             provides: &[],
             dependencies: &[],
+            limits: &[],
         };
         let mut small = [0u8; 8];
         assert_eq!(unit.encode(&mut small), Err(Errno::BufferTooSmall));
@@ -1351,6 +1507,7 @@ mod tests {
             requires: &[],
             provides: &[],
             dependencies: &[],
+            limits: &[],
         };
         let mut buf = [0u8; 512];
 
@@ -1391,6 +1548,7 @@ mod tests {
             requires: &[ReadyCondition::NetworkUp],
             provides: &[],
             dependencies: &["dep"],
+            limits: &[],
         };
         let mut buf = [0u8; 256];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1461,6 +1619,7 @@ mod tests {
             requires: &[],
             provides: &[],
             dependencies: &[],
+            limits: &[],
         };
         let mut buf = [0u8; 64];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1485,6 +1644,7 @@ mod tests {
             requires: &[],
             provides: &[],
             dependencies: &[],
+            limits: &[],
         };
         let mut buf = [0u8; 64];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1492,6 +1652,132 @@ mod tests {
         assert_eq!(
             ServiceManifest::from_bytes(&buf[..len]),
             Err(Errno::BadMagic)
+        );
+    }
+
+    /// Build a permanent, immediate record carrying the given `limits`.
+    fn unit_with_limits(limits: &[ServiceLimit]) -> ServiceUnit<'_> {
+        ServiceUnit {
+            account: 12,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+            limits,
+        }
+    }
+
+    #[test]
+    fn service_manifest_round_trips_per_service_limits() {
+        let limits = [
+            ServiceLimit {
+                kind: LimitKind::OpenStreams,
+                limit: ResourceLimit::new(64, 128).expect("well-formed"),
+            },
+            ServiceLimit {
+                kind: LimitKind::Processes,
+                limit: ResourceLimit::new(8, 8).expect("well-formed"),
+            },
+            ServiceLimit {
+                kind: LimitKind::PinnedMemoryBytes,
+                limit: ResourceLimit::UNLIMITED,
+            },
+        ];
+        let unit = unit_with_limits(&limits);
+        let mut buf = [0u8; 256];
+        let bytes = encode(&unit, &mut buf);
+
+        let manifest = ServiceManifest::from_bytes(bytes).expect("decode");
+        assert!(manifest.limits().eq(limits.iter().copied()));
+        // The empty case yields no entries and re-encodes to the bare prefix.
+        let none = unit_with_limits(&[]);
+        let mut nbuf = [0u8; 64];
+        let nbytes = encode(&none, &mut nbuf);
+        assert_eq!(nbytes.len(), super::SERVICE_MANIFEST_PREFIX_LEN);
+        assert_eq!(
+            ServiceManifest::from_bytes(nbytes)
+                .expect("decode")
+                .limits()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn service_manifest_rejects_non_canonical_or_malformed_limits() {
+        // A duplicate kind is not strictly ascending, so encode refuses it.
+        let duplicate = [
+            ServiceLimit {
+                kind: LimitKind::Processes,
+                limit: ResourceLimit::UNLIMITED,
+            },
+            ServiceLimit {
+                kind: LimitKind::Processes,
+                limit: ResourceLimit::UNLIMITED,
+            },
+        ];
+        let mut buf = [0u8; 256];
+        assert_eq!(
+            unit_with_limits(&duplicate).encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+
+        // A descending pair is likewise non-canonical.
+        let descending = [
+            ServiceLimit {
+                kind: LimitKind::Processes,
+                limit: ResourceLimit::UNLIMITED,
+            },
+            ServiceLimit {
+                kind: LimitKind::OpenStreams,
+                limit: ResourceLimit::UNLIMITED,
+            },
+        ];
+        assert_eq!(
+            unit_with_limits(&descending).encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+
+        // More entries than there are resource kinds cannot be canonical.
+        let too_many = [ServiceLimit {
+            kind: LimitKind::AddressSpaceBytes,
+            limit: ResourceLimit::UNLIMITED,
+        }; SERVICE_MANIFEST_MAX_LIMITS + 1];
+        assert_eq!(
+            unit_with_limits(&too_many).encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+
+        // A well-formed single limit encodes; tampering its stored bound to
+        // soft > hard, or its kind to an unknown discriminant, fails the
+        // decoder closed.
+        let ok = [ServiceLimit {
+            kind: LimitKind::StackBytes,
+            limit: ResourceLimit::new(4096, 8192).expect("well-formed"),
+        }];
+        let len = unit_with_limits(&ok).encode(&mut buf).expect("encode");
+        assert!(ServiceManifest::from_bytes(&buf[..len]).is_ok());
+        // The single limit's body sits immediately after the fixed prefix
+        // (this record has no requires/provides/dependency body).
+        let limit_off = super::SERVICE_MANIFEST_PREFIX_LEN;
+        // Corrupt the kind discriminant.
+        let mut bad_kind = buf;
+        crate::le::put_u32(&mut bad_kind, limit_off, 0xDEAD_BEEF);
+        assert_eq!(
+            ServiceManifest::from_bytes(&bad_kind[..len]),
+            Err(Errno::OutOfRange)
+        );
+        // Corrupt the bound so soft > hard (soft is the 8 bytes after kind).
+        let mut bad_bound = buf;
+        crate::le::put_u64(&mut bad_bound, limit_off + 4, u64::MAX);
+        crate::le::put_u64(&mut bad_bound, limit_off + 12, 0);
+        assert_eq!(
+            ServiceManifest::from_bytes(&bad_bound[..len]),
+            Err(Errno::OutOfRange)
         );
     }
 }

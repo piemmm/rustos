@@ -26015,10 +26015,11 @@ mod tests {
         let ctl = UnsupportedController;
         // Task ids unique to this test: the wait-set registry is process-
         // global and another test asserts the exact count of sets it
-        // releases for its own task id.
-        let caps = make_caps_record(0x570B, &[], sink);
+        // releases for its own task id, so this owner id must differ from
+        // every other test's (0x570B is the signal-intake test's).
+        let caps = make_caps_record(0x570E, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x570B),
+            task_id: SecTaskId(0x570E),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -26037,7 +26038,7 @@ mod tests {
         let file_fd = aspaces
             .write()
             .open_file(
-                SecTaskId(0x570B),
+                SecTaskId(0x570E),
                 alloc::string::String::from("/Storage/x"),
                 OpenFlags::READ,
             )
@@ -26048,7 +26049,7 @@ mod tests {
         );
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(0x570B))
+            .open_pipe(SecTaskId(0x570E))
             .expect("pipe minted");
 
         let set = h.waitset_create(&ctx).expect("create");
@@ -26078,7 +26079,7 @@ mod tests {
         .expect("add own pipe read end");
 
         // Cleanup: this test's own sets and tables only.
-        assert_eq!(crate::waitset::release_owned_by(0x570B), 1);
+        assert_eq!(crate::waitset::release_owned_by(0x570E), 1);
         assert!(aspaces.write().withdraw(SecTaskId(0x570C)));
     }
 

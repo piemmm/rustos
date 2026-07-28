@@ -56,7 +56,7 @@ use tairix_abi::users_admin::{
 use tairix_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
-    ReadyCondition, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
+    ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
@@ -210,6 +210,7 @@ fn exercise_service_manifest(bytes: &[u8]) {
         let requires: Vec<ReadyCondition> = manifest.requires().collect();
         let provides: Vec<ReadyCondition> = manifest.provides().collect();
         let dependencies: Vec<&str> = manifest.dependencies().collect();
+        let limits: Vec<ServiceLimit> = manifest.limits().collect();
         let unit = ServiceUnit {
             account: manifest.account(),
             readiness: manifest.readiness(),
@@ -220,6 +221,7 @@ fn exercise_service_manifest(bytes: &[u8]) {
             requires: &requires,
             provides: &provides,
             dependencies: &dependencies,
+            limits: &limits,
         };
         let mut buf = vec![0u8; unit.encoded_len().expect("an accepted record has a length")];
         let len = unit
