@@ -98,18 +98,32 @@ pub const SERVICE_RESTART_EXHAUSTED: EventId = EventId(9_019);
 /// user's uid. A security-relevant refusal, audited and failing closed — no
 /// per-user manager can raise a service to authority it does not itself hold.
 pub const SERVICE_SCOPE_REJECTED: EventId = EventId(9_020);
+/// A control-surface `start` request brought a service up (or found it
+/// already up): a control tool, through the capability-gated control
+/// endpoint, asked the manager to start a specific registered service now.
+pub const SERVICE_CONTROL_STARTED: EventId = EventId(9_021);
+/// A control-surface `stop` request tore a service — and, in
+/// reverse-dependency order, its dependents — down gracefully.
+pub const SERVICE_CONTROL_STOPPED: EventId = EventId(9_022);
+/// A control-surface request was refused: it named an unknown or
+/// policy-invalid service, or the service could not be started in its
+/// current state or with a required readiness condition unmet. A
+/// security-relevant refusal, audited and failing closed — the request
+/// changes nothing.
+pub const SERVICE_CONTROL_DENIED: EventId = EventId(9_023);
 
 #[cfg(test)]
 mod tests {
     use super::{
         ACTIVATION_DENIED, ACTIVATION_QUEUED, CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END,
-        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED, SERVICE_EXITED,
+        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED,
+        SERVICE_CONTROL_DENIED, SERVICE_CONTROL_STARTED, SERVICE_CONTROL_STOPPED, SERVICE_EXITED,
         SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED, SERVICE_READY,
         SERVICE_RESTART_EXHAUSTED, SERVICE_RESTART_SCHEDULED, SERVICE_SCOPE_REJECTED,
         SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
     };
 
-    const ALL: [u32; 19] = [
+    const ALL: [u32; 22] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_SKIPPED.0,
@@ -129,6 +143,9 @@ mod tests {
         SERVICE_RESTART_SCHEDULED.0,
         SERVICE_RESTART_EXHAUSTED.0,
         SERVICE_SCOPE_REJECTED.0,
+        SERVICE_CONTROL_STARTED.0,
+        SERVICE_CONTROL_STOPPED.0,
+        SERVICE_CONTROL_DENIED.0,
     ];
 
     #[test]

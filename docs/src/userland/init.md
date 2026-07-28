@@ -222,6 +222,52 @@ capability-derivation path to drift from the kernel's authoritative one (the
 enrolment-ceiling check above is the only place init reads a manifest, and
 it governs eligibility, not the grant).
 
+## Control surface (`NEW-SERVICEMANAGER.md` SVC-8)
+
+Beyond boot bring-up, a running service is driven through a
+capability-gated **control surface** — the `systemctl` analogue. Its wire
+contract is the reserved synchronous call endpoint
+`tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT` (a fixed-size,
+bounds-checked `ServiceControlRequest` — a `ServiceControlOp` (`start` /
+`stop`) plus a bounded, UTF-8-validated service name — and a status-framed
+reply carrying the resulting `ServiceState`). Persistent enablement
+(`enable`/`disable`, which mutates the enrolment registry) and observability
+(`status`, served through the System Information API, `AGENTS.md` §16.6) are
+separate concerns and are **not** carried on this endpoint.
+
+The engine side is `Init::control`, which dispatches a decoded request to
+`Init::start_service` (`start`) or `Init::stop` (`stop`). **Authorization is
+the endpoint's, not the dispatch's** (`AGENTS.md` §5.2): the kernel gates
+*reaching* a manager's control endpoint on the send capability the manager
+binds it with, so the receiver does not re-check a caller capability — it
+validates the request against the strict service-name policy
+(`registry::validate_service_name`, so a path-traversal- or
+case-collision-shaped name never matches a service) and applies it, failing
+closed and auditing every refusal (`ControlError`):
+
+- `start` brings a down (`inactive`/`stopped`/terminally `failed`) service
+  up now, exactly like a boot admission — spawned as its own account,
+  marked ready if `immediate`, its order-dependents released — but **only**
+  when every readiness condition it requires is satisfied, so a
+  `display-present`-gated GUI service fails closed on a headless system
+  (`ControlError::Unavailable`) rather than being guessed into life
+  (`AGENTS.md` §17.3). It is idempotent for a service already coming up or
+  up (returns the current state, no respawn), cancels a pending restart
+  backoff first (an explicit start supersedes a queued relaunch), and
+  reports a kernel-refused spawn as `ControlError::NotStartable`.
+- `stop` tears the service and its transitive dependents down gracefully in
+  reverse-dependency order (reusing `Init::stop`; a stop is never fought
+  with a relaunch).
+
+An unknown or policy-invalid name fails closed as
+`ControlError::UnknownService`. This is the **engine core**; the live
+transport — a per-manager wait-set reactor that serves the endpoint
+alongside child reaping and one-shot timers, the `servicectl` control tool
+that holds the send capability, and the `CAP_SERVICE_CONTROL` grant that
+gates it — lands with the loader/kernel transport seam (SVC-5/SVC-8), the
+same staging the readiness (`notify`), activation (`connect`), and restart
+paths follow.
+
 ## Reaping
 
 A PID 1 must reap the zombies of the whole system — both the services it
@@ -269,7 +315,10 @@ plumbing and exhaustively testable.
 | 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice named an unknown or non-starting service |
 | 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
 
-(On-demand-activation and stop/linger events `9012`–`9017` are defined in
+(On-demand-activation and stop/linger events `9012`–`9017`, the restart and
+scope events `9018`–`9020`, and the control-surface events `9021`
+(`SERVICE_CONTROL_STARTED`), `9022` (`SERVICE_CONTROL_STOPPED`), and `9023`
+(`SERVICE_CONTROL_DENIED`) are defined in
 `src/events.rs`. `9003` is retired: init no longer decides capability
 grants — the kernel is the single authority and records its own denial — so
 there is no init-side capability-denial event; the number is left a gap,

@@ -98,7 +98,7 @@ pub mod registry;
 pub mod scope;
 pub mod service;
 
-pub use error::{ActivateError, InitError, NotifyError, StartFailure};
+pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 pub use manager::{
     ActivationOutcome, FailedService, Init, InitConfig, ReadyClient, StartReport, StartedService,
 };

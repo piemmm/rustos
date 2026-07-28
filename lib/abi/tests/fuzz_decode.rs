@@ -42,6 +42,10 @@ use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
 use tairix_abi::seat::SeatAdminRequest;
+use tairix_abi::service_control::{
+    decode_reply as decode_service_control_reply, ServiceControlRequest,
+    REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
+};
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
     KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
@@ -235,6 +239,25 @@ fn exercise_service_manifest(bytes: &[u8]) {
     }
 }
 
+/// Drive the service-manager control decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted control request round-trips through its
+/// canonical encoder, and the reply decoder — untrusted manager output the
+/// control tool parses — must refuse a corrupt frame cleanly, never panic.
+fn exercise_service_control(bytes: &[u8]) {
+    if let Ok(request) = ServiceControlRequest::decode(bytes) {
+        let mut buf = [0u8; SERVICE_CONTROL_REQUEST_LEN];
+        let len = request
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted control request must succeed");
+        let redecoded = ServiceControlRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted control request must succeed");
+        assert_eq!(request, redecoded);
+        // The encoding is canonical, so it reproduces the accepted bytes.
+        assert_eq!(&buf[..len], bytes);
+    }
+    let _ = decode_service_control_reply(bytes);
+}
+
 /// Drive the datagram-socket ABI decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted socket request or delivered datagram must
 /// round-trip through its encoder, and the two reply decoders — untrusted
@@ -400,6 +423,7 @@ fn exercise(bytes: &[u8]) {
         assert_eq!(header, redecoded);
     }
     exercise_service_manifest(bytes);
+    exercise_service_control(bytes);
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
     exercise_seatmgr(bytes);

@@ -158,6 +158,43 @@ impl fmt::Display for ActivateError {
     }
 }
 
+/// Why a service-control request was refused.
+///
+/// The engine side of the capability-gated control surface
+/// (`plans/NEW-SERVICEMANAGER.md` §3.8). Authorization is the endpoint's —
+/// the kernel gates *reaching* the manager's control endpoint on the send
+/// capability it binds it with — so these are the fail-closed reasons a
+/// *reachable* request is still not applied. Every variant is audited by the
+/// manager and changes nothing (fail closed).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ControlError {
+    /// The request named a service the manager does not have registered (or a
+    /// name that fails the strict service-name policy). Presence on disk
+    /// never grants control, and an unknown name is never acted on.
+    UnknownService,
+    /// The service cannot be started right now: a readiness condition it
+    /// requires is unsatisfied (for example a GUI-only service on a headless
+    /// system), or it is mid-teardown. The caller may retry once the
+    /// condition holds.
+    Unavailable,
+    /// The service could not be launched: the kernel's load gate refused the
+    /// spawn (a bad manifest, a capability beyond the account's ceiling, or
+    /// another load failure). The underlying [`StartFailure`] is recorded in
+    /// the audit log.
+    NotStartable,
+}
+
+impl fmt::Display for ControlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnknownService => "control request names an unregistered service",
+            Self::Unavailable => "the service cannot be started in its current state",
+            Self::NotStartable => "the service could not be launched",
+        };
+        f.write_str(message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InitError, StartFailure};

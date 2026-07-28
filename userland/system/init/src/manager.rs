@@ -14,14 +14,15 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
 use tairix_abi::{
-    Duration64, LifecycleSignal, ReadinessKind, ReadyCondition, ServiceState, NANOS_PER_SEC,
+    Duration64, LifecycleSignal, ReadinessKind, ReadyCondition, ServiceControlOp,
+    ServiceControlRequest, ServiceState, NANOS_PER_SEC,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
-use crate::error::{ActivateError, InitError, NotifyError, StartFailure};
+use crate::error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 use crate::events;
-use crate::registry::Enrolment;
+use crate::registry::{validate_service_name, Enrolment};
 use crate::scope::AuthorityScope;
 use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper};
 
@@ -1039,6 +1040,165 @@ impl<'a> Init<'a> {
         }
     }
 
+    /// Apply a decoded [`ServiceControlRequest`] — the engine side of the
+    /// capability-gated service-control surface
+    /// (`plans/NEW-SERVICEMANAGER.md` §3.8; the `systemctl` analogue).
+    ///
+    /// Authorization is the *endpoint's*: the kernel gates reaching this
+    /// manager's control endpoint on the send capability the manager binds
+    /// it with, so this dispatch does not re-check a caller capability (the
+    /// receiver need not re-check what the kernel enforced at dispatch). It
+    /// validates the request against the strict service-name policy, applies
+    /// the operation, and fails closed — auditing every refusal and changing
+    /// nothing on one.
+    ///
+    /// * [`ServiceControlOp::Start`] brings a specific registered service up
+    ///   now ([`start_service`](Self::start_service)).
+    /// * [`ServiceControlOp::Stop`] tears it and its dependents down in
+    ///   reverse-dependency order ([`stop`](Self::stop)).
+    ///
+    /// Returns the service's resulting [`ServiceState`]. `now` is the current
+    /// monotonic instant, from which a graceful-stop grace deadline is
+    /// computed.
+    ///
+    /// # Errors
+    ///
+    /// The typed [`ControlError`] for a refused request: an unknown or
+    /// policy-invalid name ([`ControlError::UnknownService`]), a service that
+    /// cannot be started in its current state or with a required condition
+    /// unmet ([`ControlError::Unavailable`]), or a spawn the kernel's load
+    /// gate refused ([`ControlError::NotStartable`]).
+    pub fn control(
+        &mut self,
+        request: ServiceControlRequest<'_>,
+        now: Duration64,
+    ) -> Result<ServiceState, ControlError> {
+        match request.op {
+            ServiceControlOp::Start => self.start_service(request.name),
+            ServiceControlOp::Stop => {
+                if validate_service_name(request.name).is_err()
+                    || self.index_of(request.name).is_none()
+                {
+                    self.audit(
+                        events::SERVICE_CONTROL_DENIED,
+                        Level::Warn,
+                        request.name,
+                        "unknown service",
+                    );
+                    return Err(ControlError::UnknownService);
+                }
+                // The name is registered, so the graceful teardown cannot
+                // fail closed on an unknown service; map any residual error
+                // to the same fail-closed outcome regardless.
+                self.stop(request.name, now)
+                    .map_err(|_| ControlError::UnknownService)?;
+                let state = self.state_of(request.name).unwrap_or(ServiceState::Stopped);
+                let owned = request.name.to_string();
+                self.audit(
+                    events::SERVICE_CONTROL_STOPPED,
+                    Level::Info,
+                    &owned,
+                    "control stop",
+                );
+                Ok(state)
+            }
+        }
+    }
+
+    /// Bring a specific registered service up now, on a control request — the
+    /// engine side of the control surface's `start`.
+    ///
+    /// Idempotent with respect to a service that is already coming up or up:
+    /// a [`ServiceState::Starting`], [`ServiceState::Ready`], or
+    /// [`ServiceState::Running`] service returns its current state unchanged.
+    /// A down service ([`ServiceState::Inactive`], [`ServiceState::Stopped`],
+    /// or a terminally [`ServiceState::Failed`] one) is admitted exactly like
+    /// a boot admission — spawned as its own service account, marked ready if
+    /// it is [`ReadinessKind::Immediate`], and its order-dependents released —
+    /// but only when every readiness condition it requires is satisfied, so
+    /// the headless `display-present` case fails closed rather than starting a
+    /// GUI-only service. A pending restart backoff is cancelled first: an
+    /// explicit start supersedes a queued relaunch, it never races it.
+    ///
+    /// # Errors
+    ///
+    /// * [`ControlError::UnknownService`] — the name is unregistered or fails
+    ///   the strict service-name policy.
+    /// * [`ControlError::Unavailable`] — a required readiness condition is
+    ///   unmet, or the service is mid-teardown ([`ServiceState::Stopping`]).
+    /// * [`ControlError::NotStartable`] — the kernel's load gate refused the
+    ///   spawn.
+    pub fn start_service(&mut self, name: &str) -> Result<ServiceState, ControlError> {
+        if validate_service_name(name).is_err() {
+            self.audit(
+                events::SERVICE_CONTROL_DENIED,
+                Level::Warn,
+                name,
+                "invalid service name",
+            );
+            return Err(ControlError::UnknownService);
+        }
+        let Some(idx) = self.index_of(name) else {
+            self.audit(
+                events::SERVICE_CONTROL_DENIED,
+                Level::Warn,
+                name,
+                "unknown service",
+            );
+            return Err(ControlError::UnknownService);
+        };
+        match self.services[idx].state {
+            ServiceState::Starting | ServiceState::Ready | ServiceState::Running => {
+                Ok(self.services[idx].state)
+            }
+            ServiceState::Stopping => {
+                self.audit(
+                    events::SERVICE_CONTROL_DENIED,
+                    Level::Warn,
+                    name,
+                    "service is stopping",
+                );
+                Err(ControlError::Unavailable)
+            }
+            ServiceState::Inactive | ServiceState::Stopped | ServiceState::Failed => {
+                // An explicit start supersedes any queued restart backoff and
+                // resets the service to a clean admission candidate.
+                self.services[idx].restart_deadline = None;
+                self.services[idx].state = ServiceState::Inactive;
+                if !self.admissible(idx) {
+                    self.audit(
+                        events::SERVICE_CONTROL_DENIED,
+                        Level::Warn,
+                        name,
+                        "readiness conditions unmet",
+                    );
+                    return Err(ControlError::Unavailable);
+                }
+                match self.try_start(idx) {
+                    Ok(_) => {
+                        if self.services[idx].spec.readiness() == ReadinessKind::Immediate {
+                            self.mark_ready(idx);
+                            // Promote Ready -> Running and release any
+                            // order-dependents this start satisfied.
+                            self.pump();
+                        }
+                        let owned = name.to_string();
+                        self.audit(
+                            events::SERVICE_CONTROL_STARTED,
+                            Level::Info,
+                            &owned,
+                            "control start",
+                        );
+                        Ok(self.services[idx].state)
+                    }
+                    // `try_start` already set the service `Failed` and audited
+                    // the spawn failure; the request changes nothing more.
+                    Err(_) => Err(ControlError::NotStartable),
+                }
+            }
+        }
+    }
+
     /// The set of services made up of `target` and everything that
     /// transitively depends on it, as a per-service boolean mask.
     ///
@@ -1639,8 +1799,8 @@ impl fmt::Write for DecWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_duration, event_message, ActivateError, ActivationOutcome, AuthorityScope, DecBuf,
-        Init, InitConfig, InitError, NotifyError, ServiceSpec, StartFailure,
+        add_duration, event_message, ActivateError, ActivationOutcome, AuthorityScope,
+        ControlError, DecBuf, Init, InitConfig, InitError, NotifyError, ServiceSpec, StartFailure,
     };
     use crate::events;
     use crate::service::{ClientId, Pid, ReapedChild, Reaper, Spawner, Stopper};
@@ -1650,7 +1810,7 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
         ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ReadinessKind,
-        ReadyCondition, RestartPolicy, ServiceState,
+        ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest, ServiceState,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -2901,5 +3061,176 @@ mod tests {
         // manager never brings a service back while shutting it down.
         init.shutdown(Duration64::from_secs(6));
         assert_eq!(init.restart_deadline("svc"), None);
+    }
+
+    // --- SVC-8: capability-gated control surface ------------------------
+
+    /// A control `start` request naming `name`.
+    fn start_req(name: &str) -> ServiceControlRequest<'_> {
+        ServiceControlRequest {
+            op: ServiceControlOp::Start,
+            name,
+        }
+    }
+
+    /// A control `stop` request naming `name`.
+    fn stop_req(name: &str) -> ServiceControlRequest<'_> {
+        ServiceControlRequest {
+            op: ServiceControlOp::Stop,
+            name,
+        }
+    }
+
+    #[test]
+    fn control_start_brings_up_a_down_service() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+        // Registered but never admitted: it rests inactive until asked.
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Inactive));
+
+        let state = init
+            .control(start_req("svc"), Duration64::from_secs(1))
+            .unwrap();
+        assert_eq!(state, ServiceState::Running);
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+        assert_eq!(init.running_count(), 1);
+        assert_eq!(sink.count(events::SERVICE_CONTROL_STARTED), 1);
+    }
+
+    #[test]
+    fn control_start_is_idempotent_for_an_up_service() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+        init.control(start_req("svc"), Duration64::from_secs(1))
+            .unwrap();
+        let pid = init.running_pid("svc").unwrap();
+
+        // A second start finds it already up: it returns the state and does
+        // not respawn (no second launch recorded, same live pid).
+        let state = init
+            .control(start_req("svc"), Duration64::from_secs(2))
+            .unwrap();
+        assert_eq!(state, ServiceState::Running);
+        assert_eq!(init.running_pid("svc"), Some(pid));
+        assert_eq!(spawner.launched.borrow().len(), 1);
+    }
+
+    #[test]
+    fn control_start_of_an_unknown_or_invalid_name_fails_closed() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+
+        assert_eq!(
+            init.control(start_req("ghost"), Duration64::from_secs(1)),
+            Err(ControlError::UnknownService)
+        );
+        // A path-traversal-shaped name is refused by the strict name policy
+        // before any lookup, so it can never match a registered service.
+        assert_eq!(
+            init.control(start_req("../etc"), Duration64::from_secs(1)),
+            Err(ControlError::UnknownService)
+        );
+        assert_eq!(init.running_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_CONTROL_DENIED), 2);
+    }
+
+    #[test]
+    fn control_start_fails_closed_when_a_required_condition_is_unmet() {
+        // The headless case: a `display-present`-gated service is refused
+        // while the condition is unmet, and comes up once it is satisfied —
+        // never guessed into life (§17.3).
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("gui", &[]).requiring([ReadyCondition::DisplayPresent]))
+            .unwrap();
+
+        assert_eq!(
+            init.control(start_req("gui"), Duration64::from_secs(1)),
+            Err(ControlError::Unavailable)
+        );
+        assert_eq!(init.state_of("gui"), Some(ServiceState::Inactive));
+        assert_eq!(init.running_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_CONTROL_DENIED), 1);
+
+        // Once the display appears the same request succeeds.
+        init.satisfy_condition(ReadyCondition::DisplayPresent);
+        let state = init
+            .control(start_req("gui"), Duration64::from_secs(2))
+            .unwrap();
+        assert_eq!(state, ServiceState::Running);
+        assert_eq!(sink.count(events::SERVICE_CONTROL_STARTED), 1);
+    }
+
+    #[test]
+    fn control_start_reports_a_refused_spawn_as_not_startable() {
+        let spawner = MockSpawner::failing("svc");
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+
+        assert_eq!(
+            init.control(start_req("svc"), Duration64::from_secs(1)),
+            Err(ControlError::NotStartable)
+        );
+        // `try_start` marked it failed and audited the spawn refusal.
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        assert_eq!(sink.count(events::SERVICE_START_FAILED), 1);
+    }
+
+    #[test]
+    fn control_stop_tears_down_a_running_service_and_its_dependents() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        // b depends on a; stopping a takes b (its dependent) down first.
+        init.register(spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
+        init.start_all().unwrap();
+        let pa = init.running_pid("a").unwrap();
+        let pb = init.running_pid("b").unwrap();
+
+        let state = init
+            .control(stop_req("a"), Duration64::from_secs(100))
+            .unwrap();
+        assert_eq!(state, ServiceState::Stopping);
+        assert_eq!(stopper.requested.borrow().as_slice(), &[pb, pa]);
+        assert_eq!(init.state_of("a"), Some(ServiceState::Stopping));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Stopping));
+        assert_eq!(sink.count(events::SERVICE_CONTROL_STOPPED), 1);
+    }
+
+    #[test]
+    fn control_stop_of_an_unknown_service_fails_closed() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+        init.start_all().unwrap();
+
+        assert_eq!(
+            init.control(stop_req("ghost"), Duration64::from_secs(1)),
+            Err(ControlError::UnknownService)
+        );
+        // Nothing was asked to stop; the denial is audited on the control
+        // channel and the running service is untouched.
+        assert!(stopper.requested.borrow().is_empty());
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+        assert_eq!(sink.count(events::SERVICE_CONTROL_DENIED), 1);
     }
 }

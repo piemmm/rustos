@@ -648,13 +648,36 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   `spec.limits()` into the `spawn_as` path) rides with the loader/kernel
   transport seam (SVC-5) — the metadata is carried and validated now; the
   live enforcement wiring is not yet in the boot path.
-- **Remaining (TODO).** The versioned capability-checked control `lib/abi`
-  surface (`start/stop/enable/disable/status`) and its service-control
-  capability (added *with* its enforcement point + a live holder, §5.2),
-  status via §16.6, the control tool, the extended `events.rs` IDs, and the
-  live rlimit enforcement at spawn. Docs (`docs/src/userland/`,
-  `docs/src/architecture/`, `docs/src/abi/`), README matrix, and this plan
-  collapsed to done-state. Full §7 gate green, output quoted.
+- **Control surface (start/stop) — DONE (ABI + engine core).** The versioned
+  reserved-endpoint control protocol is `lib/abi/src/service_control.rs`:
+  `SERVICE_CONTROL_ENDPOINT` (registered in `is_reserved_endpoint`), a
+  fixed-size bounds-checked `ServiceControlRequest` (`ServiceControlOp::{Start,
+  Stop}` + a bounded UTF-8 service name, reusing `SERVICE_MANIFEST_MAX_NAME_LEN`,
+  §2.2) with canonical framing, and a status-framed reply carrying the resulting
+  `ServiceState`. It is an IPC-protocol module (outside the generated C header,
+  no `abi-check`/`c-header` change) and its decoders are in the `fuzz_decode`
+  harness (§19.6) — which found and fixed an `i32::MIN` status-word negate
+  overflow (regression-tested). The engine side is `Init::control` dispatching
+  to a new client-less `start_service` (reusing `admissible`/`try_start`/
+  `mark_ready`/`pump`) and the existing reverse-dependency `stop`; it validates
+  the name against `registry::validate_service_name` and fails closed
+  (`ControlError::{UnknownService,Unavailable,NotStartable}`), auditing every
+  outcome with new IDs `SERVICE_CONTROL_STARTED` (9021), `SERVICE_CONTROL_STOPPED`
+  (9022), `SERVICE_CONTROL_DENIED` (9023). Authorization is the endpoint's
+  (kernel-enforced send cap), not re-checked in the dispatch (§5.2); `start` is
+  idempotent, condition-gated (headless fails closed, §17.3), and supersedes a
+  pending restart backoff. Host-tested; enable/disable (store-write) and status
+  (§16.6) are deliberately *not* on this endpoint.
+- **Remaining (TODO).** The **transport**: a per-manager wait-set reactor
+  (`waitset_*`) serving `SERVICE_CONTROL_ENDPOINT` alongside child-reaping and
+  the one-shot linger/grace/restart timers; the `servicectl` control tool (the
+  live holder) and the `CAP_SERVICE_CONTROL` send capability the manager binds
+  the endpoint with (added *with* that enforcement point + holder, §5.2); a QEMU
+  vertical proving live start/stop. Then `enable`/`disable` over the enrolment
+  store-write seam, `status` via §16.6, and the live rlimit enforcement at spawn.
+  This rides with the loader/kernel transport seam (SVC-5), the same staging the
+  readiness/activation/restart engine cores already follow. README matrix and
+  full §7 gate on each landing.
 
 ---
 

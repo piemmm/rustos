@@ -48,6 +48,7 @@ pub mod rlimit;
 pub mod rxe;
 pub mod seat;
 pub mod service;
+pub mod service_control;
 pub mod stdinfo;
 pub mod syscall;
 pub mod syscalls;
@@ -161,6 +162,10 @@ pub use service::{
     ServiceUnit, SERVICE_MANIFEST_MAGIC, SERVICE_MANIFEST_MAX_CONDITIONS,
     SERVICE_MANIFEST_MAX_DEPENDENCIES, SERVICE_MANIFEST_MAX_LIMITS, SERVICE_MANIFEST_MAX_NAME_LEN,
     SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
+};
+pub use service_control::{
+    ServiceControlOp, ServiceControlRequest, SERVICE_CONTROL_ENDPOINT, SERVICE_CONTROL_MAGIC,
+    SERVICE_CONTROL_VERSION_V1,
 };
 pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
