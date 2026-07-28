@@ -74,11 +74,12 @@
 //! aarch64 PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web
 //! Worker spawn), plus its [`smp::conformance`] vertical — and the
 //! **machine-takeover** slice (`plans/NEW-SUPERVISOR.md` §9): the
-//! [`MachineTakeover`] trait whose [`MachineTakeover::quiesce_secondaries`]
-//! and [`MachineTakeover::prepare_takeover`] hand the whole machine over
-//! to the pre-boot Supervisor's one-way destructive whole-RAM test (stop the
-//! other CPUs, mask interrupts, stop the watchdog, flatten paging), plus
-//! its [`takeover::conformance`] vertical. It also hosts
+//! [`MachineTakeover`] trait whose single [`MachineTakeover::take_over`]
+//! operation hands the whole machine over to the pre-boot Supervisor's
+//! one-way destructive whole-RAM test — quiesce the other CPUs, mask
+//! interrupts, stop the watchdog, flatten paging, run the sweep on a reserved
+//! stack, then reset (it never returns on success) — plus its
+//! [`takeover::conformance`] vertical. It also hosts
 //! the ** conformance
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
