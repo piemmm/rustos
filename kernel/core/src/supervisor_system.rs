@@ -22,7 +22,7 @@ use tairix_kernel_mem::{
     ram_test_owned_window, run_destructive, BootMemoryMap, DestructiveOutcome, Frame, RegionKind,
     PAGE_SIZE,
 };
-use tairix_supervisor::{Report, TestOutcome};
+use tairix_supervisor::{Geometry, MemtestUi, Report, Screen, TestOutcome};
 use tairix_sync::once::OnceCell;
 
 use crate::boot_audit_ring::{BootAuditRing, TailRecord};
@@ -239,26 +239,35 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
     /// reset. The sweep therefore overwrites all of RAM — including the frames
     /// the live kernel occupies — through the safe, range-checked
     /// [`run_destructive`] engine over the [`BootMemoryMap`], never raw pointer
-    /// arithmetic. Progress and the outcome are rendered best-effort to the
-    /// serial console (the in-memory audit ring is already gone). There is no
-    /// abort seam: once committed the machine is already destroyed.
+    /// arithmetic. Progress and the outcome are rendered on the memtest86-style
+    /// fullscreen display ([`MemtestUi`]) which drives the shared `lib/vt`
+    /// terminal vocabulary through the console; the in-memory audit ring is
+    /// already gone, so the console is the only record. There is no abort seam:
+    /// once committed the machine is already destroyed, so the sweep's abort
+    /// callback is a constant `false`.
     fn run_destructive_and_reset(&self, out: &mut dyn Report) -> ! {
         if let Some(physmap) = self.state.arch.direct_phys_map() {
-            let outcome = run_destructive(self.memory_map, physmap, |_tested, _total| {}, || false);
+            // The takeover owns the whole machine and the console now, so the
+            // test presents the rich fullscreen display. A caller that knows
+            // the console is a genuinely dumb line can build the screen with
+            // `plain = true` for the line-oriented fallback; here we render
+            // richly and the presenter clamps every position to the assumed
+            // 80x24 geometry (the one-way console cannot be queried for size).
+            let screen = Screen::new(out, Geometry::DEFAULT, false);
+            let mut ui = MemtestUi::new(screen);
+            ui.begin();
+            let outcome = run_destructive(
+                self.memory_map,
+                physmap,
+                |tested, total| ui.progress(tested, total),
+                || false,
+            );
             match outcome {
-                DestructiveOutcome::Passed { tested } => {
-                    out.write_str("memtest full: PASSED — ");
-                    out.write_u64(tested / MIB);
-                    out.line(" MiB tested. Resetting.");
-                }
+                DestructiveOutcome::Passed { tested } => ui.passed(tested),
                 DestructiveOutcome::Faulted(fault) => {
-                    out.write_str("memtest full: RAM FAULT at physical 0x");
-                    out.write_hex(fault.phys.as_u64());
-                    out.line(". Resetting.");
+                    ui.faulted(fault.phys.as_u64(), fault.expected, fault.observed);
                 }
-                DestructiveOutcome::Aborted { .. } => {
-                    out.line("memtest full: run did not complete. Resetting.");
-                }
+                DestructiveOutcome::Aborted { tested } => ui.aborted(tested),
             }
         } else {
             out.line("memtest full: no direct physical map; RAM cannot be addressed. Resetting.");

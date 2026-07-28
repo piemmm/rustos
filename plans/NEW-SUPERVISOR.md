@@ -565,14 +565,26 @@ sandbox owns no physical RAM to take over).
 
 ### Stage D — the fullscreen memtest86-style UI (first consumer of §8)
 
-- Once the test owns the machine it owns the console outright, so this is the
-  natural home for the memtest86-style fullscreen, built entirely on the §8
-  presenter (alt-screen + hidden cursor + absolute-positioned header, a
-  per-pattern progress bar, a live pass counter, and a coloured error table),
-  with the §8 plain-text fallback for a dumb serial line. It reuses the §8
-  `screen` module — no second escape-emitting path (§2.2).
-- The UI renders only from the Stage A engine's `on_progress` callback and the
-  fault report; it computes nothing new.
+**Done.** `lib/supervisor::memtest_ui::MemtestUi` — the memtest86-style
+fullscreen presenter, built entirely on the §8 `Screen` (alt-screen + hidden
+cursor via `enter_fullscreen`, a reverse-video title banner, the RAM-under-test
+and tested-so-far figures, a green absolute-positioned progress bar, a live
+percentage, and a coloured pass line / red fault table), with the §8 plain-text
+fallback (one injected `plain` flag, no probe) that degrades to concise,
+deduplicated lines for a dumb serial line. It reuses the §8 `screen` module —
+no second escape-emitting path (§2.2) — and renders **only** from the Stage-A
+engine's `on_progress(tested, total)` callback and the final `DestructiveOutcome`
+(mapped in from the kernel as plain integers, so `lib/supervisor` names no
+kernel type); its arithmetic is purely presentational and nothing panics on any
+input. `kernel/core::supervisor_system::run_destructive_and_reset` drives it:
+it builds the `Screen`/`MemtestUi` over the takeover console, feeds
+`ui.progress` from the sweep, and maps `Passed`/`Faulted`/`Aborted` to
+`ui.passed`/`ui.faulted`/`ui.aborted` before the reset. Three both-mode `Screen`
+helpers (`write_u64`/`write_hex`/`clear_line_tail`) were added for it. Full host
+tests over the `VecReport` mock: rich fullscreen emits escapes and the title,
+the bar/percentage/figures render, the fault table carries the values, plain
+mode emits **no** escape byte, plain progress deduplicates into 10% buckets, a
+zero total and a narrow geometry never panic.
 
 ### Stage E — tests, docs, and the gate
 
@@ -826,6 +838,25 @@ sandbox owns no physical RAM to take over).
   Registered as target `fuzz_repl` in `tools/xtask/src/commands/fuzz.rs`
   (`cargo xtask fuzz`) with a registry unit test.
 
+**Done (§9 Stage D — the fullscreen memtest86-style UI):**
+
+- `lib/supervisor::memtest_ui::MemtestUi` — the memtest86-style fullscreen
+  presenter built entirely on the §8 `Screen` (no second escape path, §2.2):
+  alt-screen + hidden cursor, a reverse-video title banner, the RAM-under-test
+  and tested-so-far figures, a green absolute-positioned progress bar and a
+  live percentage redrawn in place as the whole percent advances, and a
+  coloured pass line / red fault table for the final outcome, with a plain
+  line-oriented fallback (one injected `plain` flag, no probe) that
+  deduplicates into 10% buckets on a dumb serial line. It renders **only** from
+  the Stage-A engine's `on_progress(tested, total)` and the final
+  `DestructiveOutcome` (mapped in as plain integers, so the crate names no
+  kernel type); the arithmetic is purely presentational and nothing panics on
+  any input. `kernel/core::supervisor_system::run_destructive_and_reset` drives
+  it over the takeover console; three both-mode `Screen` helpers
+  (`write_u64`/`write_hex`/`clear_line_tail`) were added for it. Full host
+  tests, rustdoc on every public item, and the `docs/src/architecture/supervisor.md`
+  full-screen-display section.
+
 **Remaining:**
 
 1. The QEMU integration vertical driving `ESC` at both trigger points with
@@ -836,19 +867,19 @@ sandbox owns no physical RAM to take over).
    Stage A (the arch-neutral destructive full-range engine), the **arch-neutral
    half of Stage B** (the `MachineTakeover` Arch HAL slice + `TakeoverError` +
    `takeover::conformance` + the now supervisor-gated
-   `KernelArch::machine_takeover` seam), and **Stage C** (the confirmed
+   `KernelArch::machine_takeover` seam), **Stage C** (the confirmed
    `memtest full` command + the `TakeoverGrant` gate + the pre-jump audit +
-   the `memtest_takeover` seam) are **done** (above). Remaining: the per-port
-   `MachineTakeover` bodies + their QEMU conformance (rest of Stage B); the
-   fullscreen memtest86-style UI on the §8 `screen` presenter (Stage D); and
-   the destructive-run QEMU vertical (Stage E) (`planned`).
+   the `memtest_takeover` seam), and **Stage D** (the fullscreen memtest86-style
+   UI on the §8 `screen` presenter) are **done** (above). Remaining: the
+   per-port `MachineTakeover` bodies + their QEMU conformance (rest of Stage B);
+   and the destructive-run QEMU vertical (Stage E) (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
 the §8 rich-screen presenter, the REPL fuzz harness, the §9 Stage-A
 destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
 slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
-seam), and the §9 Stage-C `memtest full` command (confirmation + supervisor-
-only `TakeoverGrant` gate + pre-jump audit + `memtest_takeover` seam) are
-complete and compiling on every Tier-1 target; the per-port takeover
-mechanisms, the Stage-D fullscreen UI, and the QEMU verticals remain.
+seam), the §9 Stage-C `memtest full` command (confirmation + supervisor-only
+`TakeoverGrant` gate + pre-jump audit + `memtest_takeover` seam), and the §9
+Stage-D fullscreen memtest86-style UI are complete and compiling on every
+Tier-1 target; the per-port takeover mechanisms and the QEMU verticals remain.

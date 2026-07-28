@@ -35,6 +35,17 @@ world only through object-safe seams:
 Nothing here allocates — the bootstrap floor cannot assume a heap — and
 nothing panics on any input (`AGENTS.md` §2.9).
 
+## Rich screens
+
+`screen::Screen` is a thin colour/positioning presenter over the shared
+`lib/vt` `Op`/`emit` vocabulary — `move_to`, `clear`, `set_style`,
+`enter_fullscreen`/`leave_fullscreen`, and a typed `Style` — that never
+hand-rolls a second copy of the terminal encoding (§2.2) and offers a plain
+(escape-free) fallback for a dumb serial line. `memtest_ui::MemtestUi` is its
+first full-screen consumer: the memtest86-style progress display the
+destructive `memtest full` takeover renders through, driven only from the
+engine's `(tested, total)` progress and final outcome.
+
 ## Security
 
 The Supervisor runs at full kernel authority at the physical console before

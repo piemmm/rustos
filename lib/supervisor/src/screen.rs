@@ -279,9 +279,26 @@ impl<'a> Screen<'a> {
         self.out.write_bytes(bytes);
     }
 
+    /// Write an unsigned decimal integer (both modes), allocation-free.
+    pub fn write_u64(&mut self, value: u64) {
+        self.out.write_u64(value);
+    }
+
+    /// Write an unsigned value as `0x`-prefixed hexadecimal (both modes),
+    /// allocation-free.
+    pub fn write_hex(&mut self, value: u64) {
+        self.out.write_hex(value);
+    }
+
     /// End the current line with CR-LF (both modes).
     pub fn newline(&mut self) {
         self.out.write_bytes(b"\r\n");
+    }
+
+    /// Erase from the cursor to the end of the current line. In plain mode
+    /// this is a no-op (a dumb line has no addressable erase).
+    pub fn clear_line_tail(&mut self) {
+        self.emit(&Op::EraseInLine(EraseMode::ToEnd));
     }
 
     /// Emit `op` through the shared encoder, unless in plain mode.

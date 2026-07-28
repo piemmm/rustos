@@ -90,7 +90,8 @@ Two properties make it safe at the floor:
   than positioning off-screen, and nothing panics.
 
 The presenter stands alone; the destructive `memtest full` takeover UI
-(`plans/NEW-SUPERVISOR.md` §9) is its first full-screen consumer.
+(`lib/supervisor::memtest_ui`, `plans/NEW-SUPERVISOR.md` §9) is its first
+full-screen consumer — see *Machine takeover* below.
 
 ## The whole-RAM destructive test engine
 
@@ -112,9 +113,10 @@ so an early abort can never be mistaken for a clean pass. It reuses the same
 `WordWindow` / `PhysWindow` primitives and safe, range-checked physical-map
 access as the non-destructive path — no raw pointer arithmetic — and is fully
 host-tested over a fault-injecting fake. The takeover *mechanism* that quiesces
-the machine before it runs (an Arch HAL slice) and the confirmed `memtest full`
-command that drives it exist (see *Machine takeover* below); the per-port
-takeover bodies and the full-screen progress UI are the remaining stages of
+the machine before it runs (an Arch HAL slice), the confirmed `memtest full`
+command that drives it, and the memtest86-style full-screen progress UI it
+renders through all exist (see *Machine takeover* below); the per-port takeover
+bodies and the end-to-end QEMU vertical are the remaining stages of
 `plans/NEW-SUPERVISOR.md` §9.
 
 ## The retained boot audit log
@@ -212,11 +214,29 @@ caller can mint the grant, so none can obtain the `MachineTakeover` handle or
 invoke its `unsafe` steps: the accessor is the single gate and the grant is
 its only key. Once the ordered `quiesce_secondaries` → `prepare_takeover`
 handshake succeeds, the arch-neutral `run_destructive` sweep runs over the
-direct physical map and the machine is reset; it never returns.
+direct physical map, rendering to the memtest86-style full-screen UI, and the
+machine is reset; it never returns.
 
-The arch-neutral destructive sweep already exists
-(`tairix_kernel_mem::ramtest::run_destructive`). Until a port wires the
-per-port takeover mechanism, `memtest full` reports "not supported" and stays
-in the REPL, and the safe, bounded, interruptible in-system `memtest` is the
-only RAM test that actually runs; the full-screen progress UI is the last
-remaining stage (`plans/NEW-SUPERVISOR.md` §9).
+### The full-screen progress display
+
+Once the test owns the machine it owns the console outright, so the sweep is
+presented through `lib/supervisor::memtest_ui::MemtestUi`, built entirely on the
+`Screen` presenter above — there is no second escape-emitting path. It renders
+*only* from the values the engine hands it: the running `(tested, total)` byte
+counts drive a reverse-video title banner, the RAM-under-test and tested-so-far
+figures, a green progress bar, and a live percentage, all absolute-positioned
+and redrawn in place as the whole percent advances; the final `DestructiveOutcome`
+renders a green pass line, a red fault table (faulting physical address, expected
+and observed words — no secret was ever in this pre-unlock RAM), or an
+incomplete-run notice. On a genuinely dumb serial line the same information
+degrades to concise, deduplicated plain-text lines (one injected `plain` flag,
+no probe). The UI computes nothing about the RAM; its arithmetic is purely
+presentational, and nothing it does panics on any input.
+
+The arch-neutral destructive sweep and this UI already exist
+(`tairix_kernel_mem::ramtest::run_destructive`,
+`tairix_supervisor::memtest_ui`). Until a port wires the per-port takeover
+mechanism, `memtest full` reports "not supported" and stays in the REPL, and
+the safe, bounded, interruptible in-system `memtest` is the only RAM test that
+actually runs; the per-port takeover bodies and the end-to-end QEMU vertical
+are the last remaining stages (`plans/NEW-SUPERVISOR.md` §9).
