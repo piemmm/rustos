@@ -1612,6 +1612,40 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/NEW-SUPERVISOR.md` §9 Stage E (x86_64 sibling of the riscv64 /
+    // aarch64 takeovers above): `tairix-test-supervisor-memtest-takeover-qemu-x86-64`
+    // boots the production x86_64 `tairix-kernel` pipeline and, on
+    // `AuditEvent::BootCompleted` (the point where the Supervisor system is
+    // published and the kernel state is fully built), drives the pre-boot
+    // Supervisor's one-way destructive `memtest full` takeover through the real
+    // published `SupervisorSystem::memtest_takeover` seam. On the wired x86_64
+    // port the `MachineTakeover` body verifies no AP was started, masks
+    // interrupts, switches onto a reserved `.bss` stack, installs the reserved
+    // boot page tables, destructively tests all of RAM on that stack, tests the
+    // kernel-image region with the relocated stub under a minimal identity page
+    // table, and resets through the legacy 8042 / `0xCF9` hardware — so QEMU
+    // (`-no-reboot`) exits and the runner registers `Outcome::Pass`. A normal
+    // boot that idled would time out; a takeover that *returned*
+    // (refused/unsupported) writes a fail finisher — so a regression that stops
+    // the port resetting fails loud. Single CPU (the port starts no AP) and a
+    // 60-second budget match the riscv64/aarch64 siblings; the destructive
+    // sweep over the 256 MiB guest is comfortably bounded within it.
+    QemuTest {
+        package: "tairix-test-supervisor-memtest-takeover-qemu-x86-64",
+        binary: "tairix-test-supervisor-memtest-takeover-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PI Stage RV-P3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-riscv64`
     // boots the *production* riscv64 `tairix-kernel` pipeline
     // (`boot_riscv64::boot`) on the `virt` board, then drops into PID 1
@@ -7177,6 +7211,17 @@ fn spawn_net_peer(
 /// gating monitor injections on an audit message substring.
 const BOND_FAILOVER_TRIGGER_MARKER: &str = "netstack: inbound echo request served (reply queued)";
 
+/// The x86_64 destructive `memtest full` takeover vertical's binary
+/// (`plans/NEW-SUPERVISOR.md` §9 Stage E). Named so [`finish_run`] can opt it
+/// into the reset-is-success scoring the takeover needs.
+const MEMTEST_TAKEOVER_X86_64_BINARY: &str = "tairix-test-supervisor-memtest-takeover-qemu-x86-64";
+
+/// Serial marker gating the takeover vertical's reset-is-success pass: the
+/// `MemtestUi` prints this line the instant the whole-RAM sweep passes, just
+/// before the port resets. A crash that reset before finishing never prints
+/// it, so the run fails loud (`tairix_qemu::Spec::reset_success_marker`).
+const MEMTEST_TAKEOVER_PASS_MARKER: &str = "memtest full: PASSED";
+
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
 /// `netpeer` link peer, returning the updated spec and the running peer (if
 /// any). Every frame is captured to a `<binary>.pcap` beside the kernel image
@@ -7265,6 +7310,19 @@ fn attach_net_peer(
 /// file.
 fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     let (mut spec, peer) = attach_net_peer(t, kernel, spec)?;
+
+    // The destructive `memtest full` takeover vertical's guest signals success
+    // by *resetting the machine* — it takes the machine over and never returns
+    // to write a debug-exit code (`plans/NEW-SUPERVISOR.md` §9 Stage E). On
+    // x86_64, where a normal pass is the `isa-debug-exit` `0x21` status, a
+    // reset instead exits QEMU with status `0` under `-no-reboot`; accept that
+    // as a pass only when the memtest UI's `PASSED` line was printed first, so
+    // a regression that crash-resets before finishing still fails loud. The
+    // riscv64/aarch64 siblings already map a reset to a status-`0` pass, so the
+    // opt-in is x86-only.
+    if t.binary == MEMTEST_TAKEOVER_X86_64_BINARY {
+        spec = spec.with_reset_success_marker(MEMTEST_TAKEOVER_PASS_MARKER);
+    }
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {
@@ -7396,6 +7454,22 @@ mod tests {
         TESTS, UNLOCK_PASSPHRASE_LINE,
     };
     use std::time::Duration;
+
+    /// The x86_64 destructive-takeover vertical is enrolled under exactly the
+    /// binary name `finish_run` opts into reset-is-success scoring for, and
+    /// its pass marker is the `MemtestUi` PASSED-line prefix — so the scoring
+    /// hook and the guest's success signal cannot silently drift apart.
+    #[test]
+    fn memtest_takeover_x86_64_binary_is_enrolled_and_marker_is_stable() {
+        use super::{MEMTEST_TAKEOVER_PASS_MARKER, MEMTEST_TAKEOVER_X86_64_BINARY};
+        assert!(
+            TESTS
+                .iter()
+                .any(|t| t.binary == MEMTEST_TAKEOVER_X86_64_BINARY),
+            "the x86_64 takeover binary finish_run scores by reset must be enrolled",
+        );
+        assert_eq!(MEMTEST_TAKEOVER_PASS_MARKER, "memtest full: PASSED");
+    }
 
     /// The memory-stability vertical's serial-script marker is the leading
     /// prefix of the memsoak fixture's own success report line: it starts

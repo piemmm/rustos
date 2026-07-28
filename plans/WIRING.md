@@ -103,7 +103,7 @@ the burn-down is complete.
 | Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
 | Memory-tagging profile (§19.10)   |   ✓    | ✓ MTE pend | ✓ unsup | ✓ unsup |
 | Post-mortem capture (`CpuStateCapture`) | ✓ | ✓ | ✓ | ✓ unsup |
-| Machine takeover (`MachineTakeover`, optional) | ✗ | ✓ | ✓ | n/a |
+| Machine takeover (`MachineTakeover`, optional) | ✓ | ✓ | ✓ | n/a |
 | **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
 
 `MachineTakeover` (`kernel/arch/api/src/takeover.rs`) is **not** a §17.2
@@ -117,21 +117,24 @@ The accessor is **supervisor-gated**: it requires a
 `kernel/core::supervisor_system::TakeoverGrant` witness that only the confirmed
 `memtest full` path can mint, so a port hands its takeover `static` back only
 through this one accessor and no other caller can reach the handle.
-**riscv64** and **aarch64** have landed the real mechanism
-(`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce (single-core
-verified), mask interrupts (`sstatus.SIE`/`sie`; `DAIF` + `CNTV_CTL_EL0`),
-flatten paging (bare mode `satp = 0`; MMU-off `SCTLR_EL1` after a cache
-clean+invalidate — both ports are identity-mapped so `virt==phys` survives),
-switch to a reserved `.bss` stack, run the arch-neutral destructive sweep, then
-relocate a register-only stub into a swept usable page to test the kernel-image
-region (`[__kernel_image_start/__kernel_start, __kernel_end)`) and reset (SBI
-System-Reset; PSCI `SYSTEM_RESET` through the discovered conduit). Each is
-proven end-to-end by `tests/integration/supervisor_memtest_takeover_qemu_<t>`
-(the guest ends in a reset → QEMU `-no-reboot` exit 0). **x86_64** is still
-`None` (fail closed) pending its body (long mode requires paging, so it flattens
-via a `CR3` identity table rather than dropping paging); `wasm32` is `n/a` (a
-sandbox owns no physical RAM to take over). Per-port impls are staged with the
-Supervisor `memtest full` command, not part of the §17.2 parity guarantee.
+**riscv64**, **aarch64**, and **x86_64** have all landed the real mechanism
+(`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce (single-CPU
+verified via `smp::secondary_entry_addr() == 0`, else fail-closed
+`CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`; `DAIF` +
+`CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the arch-neutral
+destructive sweep, then relocate a register-only stub into a swept usable page
+to test the kernel-image region and reset. riscv64/aarch64 **flatten paging**
+(bare mode `satp = 0`; MMU-off `SCTLR_EL1` after a cache clean+invalidate —
+both ports are identity-mapped so `virt==phys` survives); x86_64 cannot drop
+paging (long mode requires it), so it instead switches `%cr3` to the
+**reserved** boot page tables (`boot_pml4` in `.boot.bss`) for the sweep and
+builds a minimal identity page table in the swept arena for the stub, testing
+`[__boot_phys_start, __kernel_phys_end)` and resetting through the legacy 8042 /
+`0xCF9` hardware. Each is proven end-to-end by
+`tests/integration/supervisor_memtest_takeover_qemu_<t>` (the guest ends in a
+reset). `wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
+impls are staged with the Supervisor `memtest full` command, not part of the
+§17.2 parity guarantee.
 
 **QEMU vertical parity** (`tests/integration/*`):
 
@@ -148,6 +151,7 @@ Supervisor `memtest full` command, not part of the §17.2 parity guarantee.
 | display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    | ✓(browser) |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 | **`cross_cpu_tlb_shootdown`** | ✓ | ✓ | ✓ | n/a |
+| **`memtest_takeover`** (destructive) | ✓ | ✓ | ✓ | n/a |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the

@@ -587,6 +587,18 @@ pub struct Spec {
     /// How the session presents itself to a human. Only the aarch64
     /// argv honours it today.
     pub session: SessionKind,
+    /// When `Some(marker)`, a guest-initiated machine **reset** — QEMU
+    /// exiting with process status `0` under `-no-reboot`, rather than an
+    /// architecture-specific debug-exit success — is the intended success
+    /// signal, accepted **only** when the captured serial also contains
+    /// `marker`. This is how the pre-boot Supervisor's one-way destructive
+    /// `memtest full` takeover vertical passes on x86_64, where success is
+    /// normally the `isa-debug-exit` `0x21` status (a takeover cannot write
+    /// it — it resets the real hardware). The marker gate keeps a crash that
+    /// merely triple-faults into a reset (also status `0`) failing loud: it
+    /// never printed the marker. `None` (the default) leaves the per-arch
+    /// [`Arch::outcome_from_status`] convention untouched.
+    pub reset_success_marker: Option<String>,
 }
 
 /// How a QEMU session presents itself to a human.
@@ -626,6 +638,7 @@ impl Spec {
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
+            reset_success_marker: None,
         }
     }
 
@@ -641,6 +654,19 @@ impl Spec {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Accept a guest-initiated machine **reset** (QEMU exit status `0` under
+    /// `-no-reboot`) as success, but **only** when the captured serial also
+    /// contains `marker`. See [`Spec::reset_success_marker`]: this is the
+    /// success signal for a run whose guest deliberately resets the machine
+    /// rather than writing an architecture-specific debug-exit code (the
+    /// pre-boot Supervisor's one-way destructive `memtest full` takeover on
+    /// x86_64), with the marker gate keeping a crash-into-reset failing loud.
+    #[must_use]
+    pub fn with_reset_success_marker(mut self, marker: impl Into<String>) -> Self {
+        self.reset_success_marker = Some(marker.into());
         self
     }
 
@@ -666,6 +692,7 @@ impl Spec {
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
+            reset_success_marker: None,
         }
     }
 
@@ -691,6 +718,7 @@ impl Spec {
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
+            reset_success_marker: None,
         }
     }
 
@@ -1297,7 +1325,26 @@ impl ProgressClock {
 /// architecture-specific public outcome.
 fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outcome {
     match done {
-        DoneReason::Exited(code) => spec.arch.outcome_from_status(code, serial),
+        DoneReason::Exited(code) => {
+            // A guest that deliberately resets the machine (its only exit is a
+            // reset/power-off) signals success through the reset itself, not an
+            // architecture-specific debug-exit code — QEMU exits status `0`
+            // under `-no-reboot`. Accept that as `Pass` only when the caller
+            // opted in *and* the required marker was printed, so a crash that
+            // merely triple-faults into a reset (also status `0`) still fails
+            // loud (it never reached the marker). Otherwise fall through to the
+            // per-arch debug-exit convention.
+            if let Some(marker) = &spec.reset_success_marker {
+                if code == 0 && serial.contains(marker.as_str()) {
+                    return Outcome::Pass;
+                }
+                return Outcome::Fail {
+                    status: code,
+                    serial,
+                };
+            }
+            spec.arch.outcome_from_status(code, serial)
+        }
         DoneReason::TimedOut => Outcome::Timeout {
             budget: spec.timeout,
             serial,
@@ -2142,6 +2189,63 @@ mod tests {
     }
 
     #[test]
+    fn reset_success_marker_accepts_a_marked_reset_exit() {
+        // A guest that resets (status 0 under -no-reboot) having printed the
+        // required marker is the takeover vertical's success: Pass.
+        let spec =
+            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
+        let serial = String::from("... memtest full: PASSED \u{2014} 181 MiB tested. Resetting.");
+        assert!(matches!(
+            outcome_from_done(DoneReason::Exited(0), &spec, serial),
+            Outcome::Pass
+        ));
+    }
+
+    #[test]
+    fn reset_success_marker_rejects_an_unmarked_reset_exit() {
+        // A crash that merely triple-faults into a reset (status 0) without
+        // ever printing the marker must still fail loud, not pass by accident.
+        let spec =
+            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
+        match outcome_from_done(DoneReason::Exited(0), &spec, "partial boot".into()) {
+            Outcome::Fail { status, serial } => {
+                assert_eq!(status, 0);
+                assert_eq!(serial, "partial boot");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_success_marker_rejects_a_nonzero_exit_even_with_the_marker() {
+        // Only a clean reset (status 0) is the success signal; a non-zero exit
+        // is a failure regardless of what the guest printed.
+        let spec =
+            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
+        match outcome_from_done(DoneReason::Exited(1), &spec, "memtest full: PASSED".into()) {
+            Outcome::Fail { status, .. } => assert_eq!(status, 1),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_a_reset_marker_the_per_arch_convention_still_applies() {
+        // The opt-in changes nothing by default: on x86_64 a status-0 exit is
+        // still the per-arch failure (success there is the isa-debug-exit
+        // 0x21 status), so an unrelated test cannot pass by exiting 0.
+        let spec = Spec::for_x86_64_kernel("/tmp/k");
+        assert!(matches!(
+            outcome_from_done(DoneReason::Exited(0), &spec, String::new()),
+            Outcome::Fail { .. }
+        ));
+        let ok = i32::from((SUCCESS_EXIT_CODE << 1) | 1);
+        assert!(matches!(
+            outcome_from_done(DoneReason::Exited(ok), &spec, String::new()),
+            Outcome::Pass
+        ));
+    }
+
+    #[test]
     fn spec_for_x86_64_defaults_are_architecture_neutral() {
         // The generic Spec carries only architecture-neutral fields; the
         // x86_64-specific defaults (RAM size, OVMF flags) are owned by
@@ -2665,6 +2769,7 @@ mod tests {
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
+            reset_success_marker: None,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

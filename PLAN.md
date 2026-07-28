@@ -6224,23 +6224,25 @@ can see *why* a rule exists without diffing the charter's history.
   to enumerate a new closed Arch HAL slice, `MachineTakeover`
   (`kernel/arch/api/src/takeover.rs`), the irreducibly per-architecture
   mechanism the pre-boot Supervisor's one-way destructive whole-RAM test
-  (`memtest full`, `plans/NEW-SUPERVISOR.md` §9) drives to own the machine:
-  `quiesce_secondaries` (a bounded tear-down handshake stopping every other
-  CPU) and `prepare_takeover` (mask interrupts, stop the watchdog, flatten
-  paging), both fail-closed (`TakeoverError`) and non-panicking. It is
-  enumerated as **optional** — unlike the mandatory slices, a port that has
-  not wired it fails closed to "not supported" (`KernelArch::machine_takeover`
+  (`memtest full`, `plans/NEW-SUPERVISOR.md` §9) drives to own the machine: a
+  single `take_over(sweep)` operation that owns the whole irreversible sequence
+  (quiesce every other CPU, mask interrupts, stop the watchdog, flatten/relocate
+  paging, switch to a reserved stack, run the caller's sweep, test the region it
+  ran from, and reset) — one op because the sweep destroys the caller's own
+  stack, so a "prepare then let the caller sweep + reset" split could never be
+  correct. It is fail-closed (`TakeoverError`) and non-panicking, and
+  enumerated as **optional** — unlike the mandatory slices, a port that has not
+  wired it fails closed to "not supported" (`KernelArch::machine_takeover`
   defaults to `None`) rather than blocking the boot floor, so `wasm32` (a
-  sandbox owning no physical RAM) and any not-yet-ported target simply decline.
-  Landed: the arch-neutral trait + `TakeoverError` + host
-  `takeover::conformance` vertical + the `KernelArch` seam, and the confirmed
-  `memtest full` command (Stage C) that drives it. The `KernelArch::machine_takeover`
+  sandbox owning no physical RAM) simply declines. The `KernelArch::machine_takeover`
   accessor is **supervisor-gated** — it requires a
   `kernel/core::supervisor_system::TakeoverGrant` witness only the confirmed
   `memtest full` path can mint — so the destructive mechanism is reachable from
-  nowhere else. The per-port takeover bodies, the fullscreen UI, and the
-  destructive-run QEMU vertical remain staged (`plans/NEW-SUPERVISOR.md` §9
-  Stages B/D/E, `plans/WIRING.md` parity row).
+  nowhere else. Complete on all four Tier-1 targets: the arch-neutral trait +
+  conformance + supervisor-gated `KernelArch` seam, the Stage-C `memtest full`
+  command, the Stage-D fullscreen UI, and the real per-port bodies + Stage-E
+  destructive QEMU verticals for riscv64, aarch64, and x86_64 (wasm32 stays
+  `NotSupported`).
 
 - **2026-07-27 — Arch HAL `CoreClock` live-frequency slice.** Amended §17.2 to
   enumerate a new closed Arch HAL slice, `CoreClock`, after the System

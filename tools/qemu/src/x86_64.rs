@@ -233,6 +233,7 @@ mod tests {
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
+            reset_success_marker: None,
         }
     }
 

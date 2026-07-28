@@ -139,7 +139,7 @@ The safe `memtest` command tests only RAM the running kernel does not hold: it
 allocates free frames, tests each, and frees them, so it can never exercise the
 memory the kernel image, heap, page tables, or stacks occupy. Testing *all* of
 RAM needs a one-way takeover — the machine is handed to the test and only a
-reset follows — which the future `memtest full` command will drive.
+reset follows — which the `memtest full` command drives.
 
 The arch-neutral core of that takeover already exists as
 `tairix_kernel_mem::ramtest::run_destructive`. Where the boot sanity check
@@ -154,10 +154,10 @@ so an early abort can never be mistaken for a clean pass. It reuses the same
 access as the non-destructive path — no raw pointer arithmetic — and is fully
 host-tested over a fault-injecting fake. The takeover *mechanism* that quiesces
 the machine before it runs (an Arch HAL slice), the confirmed `memtest full`
-command that drives it, and the memtest86-style full-screen progress UI it
-renders through all exist (see *Machine takeover* below); the per-port takeover
-bodies and the end-to-end QEMU vertical are the remaining stages of
-`plans/NEW-SUPERVISOR.md` §9.
+command that drives it, the memtest86-style full-screen progress UI it renders
+through, and the real per-port bodies + end-to-end QEMU verticals for all three
+bare-metal targets are complete (see *Machine takeover* below);
+`plans/NEW-SUPERVISOR.md` §9 is done on every Tier-1 target.
 
 ## The retained boot audit log
 
@@ -209,7 +209,7 @@ The response is to audit loudly and fail closed, never to weaken a defence:
 - Entering the console and every state-changing command emit a stable audit
   event on the hash-chained boot log; no event carries a secret.
 
-## Machine takeover (destructive whole-RAM test — foundation)
+## Machine takeover (destructive whole-RAM test)
 
 The in-system `memtest` can only test RAM it explicitly owns; it can never
 test the frames the kernel image, heap, page tables, or stacks occupy. Testing
@@ -280,21 +280,31 @@ presentational, and nothing it does panics on any input.
 
 The arch-neutral destructive sweep and this UI already exist
 (`tairix_kernel_mem::ramtest::run_destructive`,
-`tairix_supervisor::memtest_ui`). **riscv64** and **aarch64** wire the real
+`tairix_supervisor::memtest_ui`). All three bare-metal ports wire the real
 per-port mechanism (`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce
-(single-core verified), mask interrupts (`sstatus.SIE`/`sie`; `DAIF` plus the
-`CNTV_CTL_EL0` watchdog cadence), flatten paging (bare mode `satp = 0`; the
-MMU-off `SCTLR_EL1` after a cache clean+invalidate — both ports are
-identity-mapped so `virt==phys` survives), switch to a reserved `.bss` stack,
-run the sweep, then relocate a register-only stub into a swept usable page to
-test the kernel-image region and reset (SBI System-Reset; PSCI `SYSTEM_RESET`
-through the conduit the boot path discovered, threaded into the stub because
-aarch64 has no fixed reset instruction). Each is proven end-to-end by
-`tests/integration/supervisor_memtest_takeover_qemu_<t>`, which boots the
-production pipeline and drives the real `memtest_takeover` seam (neither serial
-console has interactive input this early, so the confirmation/command parsing is
-host-tested in `lib/supervisor`); the guest sweeps all of RAM and ends in a
-machine reset (QEMU `-no-reboot` exit 0). On **x86_64** `memtest full` still
-reports "not supported" and stays in the REPL until its body lands (long mode
-requires paging, so it flattens via a `CR3` identity table rather than dropping
-paging); that is the last remaining stage (`plans/NEW-SUPERVISOR.md` §9).
+(single-CPU verified via `smp::secondary_entry_addr() == 0`), mask interrupts
+(`sstatus.SIE`/`sie`; `DAIF` plus the `CNTV_CTL_EL0` watchdog cadence; `cli`),
+switch to a reserved `.bss` stack, run the sweep, then relocate a register-only
+stub into a swept usable page to test the kernel-image region and reset.
+**riscv64** and **aarch64** flatten paging (bare mode `satp = 0`; the MMU-off
+`SCTLR_EL1` after a cache clean+invalidate — both ports are identity-mapped so
+`virt==phys` survives) and reset via SBI System-Reset / PSCI `SYSTEM_RESET`
+(through the discovered conduit, threaded into the stub because aarch64 has no
+fixed reset instruction). **x86_64** cannot drop paging (long mode requires it),
+so instead of flattening the MMU it switches `%cr3` to the reserved boot page
+tables (`boot_pml4` in `.boot.bss`) for the sweep and builds a minimal identity
+page table in the swept arena for the relocated stub, which tests
+`[__boot_phys_start, __kernel_phys_end)` and resets through the legacy 8042 /
+`0xCF9` hardware (the same channels `reset::reboot` drives). Each is proven
+end-to-end by `tests/integration/supervisor_memtest_takeover_qemu_<t>`, which
+boots the production pipeline and drives the real `memtest_takeover` seam
+(neither serial console has interactive input this early, so the
+confirmation/command parsing is host-tested in `lib/supervisor`); the guest
+sweeps all of RAM and ends in a machine reset. On x86_64, where a normal QEMU
+pass is the `isa-debug-exit` `0x21` status a resetting guest cannot write, the
+vertical opts into a marker-gated reset-is-success rule
+(`tairix_qemu::Spec::with_reset_success_marker`): a status-`0` reset under
+`-no-reboot` passes only when the serial also carries the `MemtestUi` `PASSED`
+line, so a crash-into-reset still fails loud. `wasm32` stays `NotSupported` (a
+sandbox owns no physical RAM to take over); `memtest full` is now complete on
+all four Tier-1 targets (`plans/NEW-SUPERVISOR.md` §9).
