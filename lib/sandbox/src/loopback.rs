@@ -105,6 +105,13 @@ impl<S: Service> LoopbackChannel<S> {
             .skip(FRAME_HEADER_LEN)
             .collect();
         let reply = self.service.handle(&payload);
+        // Reclaim the already-consumed prefix of earlier replies before
+        // appending this one, so a worker reused across many requests keeps
+        // only the reply bytes still in flight rather than every reply it has
+        // ever produced (an unbounded buffer that would eventually exhaust
+        // memory over a long-running fuzz/soak run).
+        self.reply.drain(..self.reply_at);
+        self.reply_at = 0;
         // The reply is framed exactly as a real worker's send_frame does.
         let len = u32::try_from(reply.len().min(MAX_FRAME)).unwrap_or(0);
         self.reply.extend_from_slice(&len.to_le_bytes());
@@ -166,5 +173,33 @@ mod tests {
         let mut sandbox = ParserSandbox::new(LoopbackLauncher::new(|| Tagger), NullSink);
         assert_eq!(sandbox.request(b"alpha"), Ok(b">alpha".to_vec()));
         assert_eq!(sandbox.request(b"beta"), Ok(b">beta".to_vec()));
+    }
+
+    #[test]
+    fn a_reused_worker_does_not_grow_its_reply_buffer_across_requests() {
+        // Drive one reused loopback worker through many round trips and
+        // confirm its internal reply buffer tracks only the bytes still in
+        // flight, never every reply ever produced. Before the consumed
+        // prefix was reclaimed this buffer grew without bound, exhausting
+        // memory over a long-running fuzz/soak run.
+        use crate::host::Launcher;
+        use crate::proto::{recv_frame, send_frame, FRAME_HEADER_LEN};
+
+        let mut launcher = LoopbackLauncher::new(|| Tagger);
+        let mut channel = launcher.launch().expect("loopback launch never fails");
+        for _ in 0..10_000 {
+            send_frame(&mut channel, b"payload").expect("send succeeds");
+            let reply = recv_frame(&mut channel)
+                .expect("recv succeeds")
+                .expect("a reply frame arrives");
+            assert_eq!(reply, b">payload".to_vec());
+            // One framed reply (`>payload`) is 4 header + 8 payload bytes.
+            // The buffer never accumulates past a single reply's worth.
+            assert!(
+                channel.reply.len() <= FRAME_HEADER_LEN + b">payload".len(),
+                "reply buffer grew to {} bytes across reuse",
+                channel.reply.len(),
+            );
+        }
     }
 }
