@@ -350,6 +350,93 @@ impl ActivationMode {
     }
 }
 
+/// What the manager does when a supervised service's process exits — the
+/// analogue of systemd's `Restart=` unit setting.
+///
+/// This is unit metadata (it is read from a service's signed manifest,
+/// `plans/NEW-SERVICEMANAGER.md` §3.7): it tells the manager whether an
+/// exited service is left down, brought back only after an abnormal exit, or
+/// always brought back. A restart is never a blind retry-until-it-works: the
+/// manager reuses the bounded crash-loop budget so a service that dies the
+/// instant it starts is abandoned rather than relaunched forever, and each
+/// relaunch waits a bounded, exponentially-growing backoff.
+///
+/// Like the rest of this module it is versioned and freezes on the first
+/// release; `abi-v1` is not frozen yet, so the set may still grow in place.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum RestartPolicy {
+    /// The service is **never** restarted: once its process exits, for any
+    /// reason, it stays down. The default — a service is brought back only
+    /// when its manifest asks for it, never implicitly.
+    #[default]
+    Never = 0,
+    /// The service is restarted only after an **abnormal** exit (a non-zero
+    /// exit code or a crash), within the crash-loop budget and backoff. A
+    /// clean exit (code 0) or a manager-initiated graceful stop is honoured
+    /// and leaves the service down.
+    OnFailure = 1,
+    /// The service is **always** restarted when its process exits — clean or
+    /// not — within the crash-loop budget and backoff. The right choice for a
+    /// daemon whose clean exit is itself unexpected. A manager-initiated
+    /// graceful stop (idle-stop, shutdown) is still honoured: the manager
+    /// asked it to go, so it stays down.
+    Always = 2,
+}
+
+impl RestartPolicy {
+    /// Every policy, in wire-discriminant order.
+    pub const ALL: [RestartPolicy; 3] = [
+        RestartPolicy::Never,
+        RestartPolicy::OnFailure,
+        RestartPolicy::Always,
+    ];
+
+    /// The stable wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Classify a wire discriminant, or `None` if it is outside the closed
+    /// set (fail closed — an unknown policy is a manifest defect).
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(RestartPolicy::Never),
+            1 => Some(RestartPolicy::OnFailure),
+            2 => Some(RestartPolicy::Always),
+            _ => None,
+        }
+    }
+
+    /// The stable identifier used in manifests, audit records, and status
+    /// output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RestartPolicy::Never => "never",
+            RestartPolicy::OnFailure => "on-failure",
+            RestartPolicy::Always => "always",
+        }
+    }
+
+    /// Whether a service with this policy should be restarted after an exit
+    /// with `exit_code` that the manager did **not** itself initiate.
+    ///
+    /// A manager-initiated graceful stop is never a candidate for restart and
+    /// is handled by the caller before this is consulted; this decides only
+    /// the *unexpected* exit of a still-wanted service.
+    #[must_use]
+    pub const fn should_restart(self, exit_code: i32) -> bool {
+        match self {
+            RestartPolicy::Never => false,
+            RestartPolicy::OnFailure => exit_code != 0,
+            RestartPolicy::Always => true,
+        }
+    }
+}
+
 /// The lifecycle transition a service may **announce about itself** through
 /// a [`ReadyNotice`].
 ///
@@ -506,6 +593,31 @@ mod tests {
         assert!(mode.is_on_demand());
         assert_eq!(mode.linger(), Some(linger));
         assert_eq!(mode.as_str(), "on-demand");
+    }
+
+    #[test]
+    fn restart_policy_round_trips_and_decides_restart() {
+        use super::RestartPolicy;
+
+        assert_eq!(RestartPolicy::default(), RestartPolicy::Never);
+        for (i, policy) in RestartPolicy::ALL.into_iter().enumerate() {
+            assert_eq!(policy.as_u8() as usize, i);
+            assert_eq!(RestartPolicy::from_u8(policy.as_u8()), Some(policy));
+        }
+        assert_eq!(RestartPolicy::from_u8(3), None);
+        assert_eq!(RestartPolicy::Never.as_str(), "never");
+        assert_eq!(RestartPolicy::OnFailure.as_str(), "on-failure");
+        assert_eq!(RestartPolicy::Always.as_str(), "always");
+
+        // `never` never restarts; `on-failure` only on a non-zero code;
+        // `always` on any code.
+        assert!(!RestartPolicy::Never.should_restart(0));
+        assert!(!RestartPolicy::Never.should_restart(1));
+        assert!(!RestartPolicy::OnFailure.should_restart(0));
+        assert!(RestartPolicy::OnFailure.should_restart(1));
+        assert!(RestartPolicy::OnFailure.should_restart(-9));
+        assert!(RestartPolicy::Always.should_restart(0));
+        assert!(RestartPolicy::Always.should_restart(1));
     }
 
     #[test]

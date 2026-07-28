@@ -497,12 +497,52 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   sub-ceiling; parents/supervises/reaps the user's services; logout stops
   them in reverse-dep order. Boundary invariants (§3.2) tested.
 
-### SVC-7 — Restart policy + health-check; stop/shutdown ordering
-- `restart = never|on-failure|always` + bounded backoff + optional
-  health-check (`plans/WATCHDOG.md`); reverse-dependency stop/shutdown
-  ordering; system-shutdown sequence. Builds on the graceful single-service
-  stop primitive (`Stopper`, `Stopping` state, grace deadline → force) already
-  landed in SVC-4 — do not reinvent it (§2.2).
+### SVC-7 — Restart policy + reverse-dependency stop/shutdown ordering — DONE (engine core)
+- `lib/abi/src/service.rs` gains `RestartPolicy` (`never` | `on-failure` |
+  `always`, default `never`) — unit metadata carried in the signed manifest,
+  IPC-protocol module so no `abi-check`/`c-header` change. `never` is the
+  default (a service is brought back only when its manifest asks), `on-failure`
+  restarts only after a non-zero/crash exit, `always` after any exit;
+  `should_restart(exit_code)` is the one decision point. `ServiceSpec` gains
+  `restart`/`with_restart`/`restart()`.
+- `Init` engine (`manager.rs`): `reap` now takes the monotonic `now` and, for
+  an exit the manager did **not** itself initiate (a graceful idle-stop or
+  shutdown is honoured, never fought), schedules a policy-driven restart via
+  `schedule_restart`: it arms a single one-shot `restart_deadline = now +
+  restart_backoff(attempts)` and audits `SERVICE_RESTART_SCHEDULED` (9018).
+  Backoff is exponential (100 ms base, ×2, clamped to a 30 s cap) computed in
+  `u128` ns with a shift-back overflow check. The crash-loop budget
+  (`MAX_RESTART_ATTEMPTS` = 5) bounds a *tight* loop and fails closed
+  (`SERVICE_RESTART_EXHAUSTED`, 9019) rather than relaunching forever (§2.1);
+  it resets once a relaunched service has run past `RESTART_STABLE_WINDOW`
+  (30 s), tracked by `relaunched_at`, so a long-lived daemon that crashes once
+  after hours restarts with a full budget. `expire_restart_backoff(name, now)`
+  is the one-shot-timer callback the transport arms from `restart_deadline`; it
+  returns the service to `Inactive` and re-drives the admission `pump` (woken by
+  the event, never polled). `dependency_failed` ignores a `Failed` dependency
+  that has a live restart deadline, so a restarting dependency does not
+  permanently skip its dependents.
+- Reverse-dependency teardown: `stop(name, now)` gracefully stops `name` and its
+  transitive dependents dependents-first (`dependent_closure` + reversed
+  topological `reverse_stop_order`), and `shutdown(now)` tears the whole set
+  down the same way — the system-shutdown sequence (per-user managers stop their
+  users' services and exit first, then the system manager `shutdown`s the system
+  services). Both cancel any pending restart first (a deliberate stop is never
+  fought with a relaunch), and both build on the SVC-4 graceful-stop primitive
+  (`begin_stop`, `Stopping`, grace deadline → `expire_grace` → force) — not a
+  reinvention (§2.2). `stop` fails closed on an unknown name.
+- Host tests cover: every policy (never leaves a crash down; on-failure restarts
+  an abnormal exit but honours a clean one; always restarts even a clean exit);
+  the backoff doubling+cap and `duration_since` carry/clamp; the crash-loop
+  budget bounding a tight loop and failing closed; the stable-window budget
+  reset; reverse-dependency `shutdown` and `stop` ordering (dependents first,
+  independents untouched); fail-closed unknown-service stop; and shutdown
+  cancelling a pending restart.
+- Health-check/watchdog restart (`plans/WATCHDOG.md`) and the capability-gated
+  control surface that gates *who* may `stop`/restart a service are SVC-8; the
+  live one-shot-timer wiring off `restart_deadline` rides with the loader/kernel
+  transport seam SVC-5/SVC-8 wire, on the `lib/rt` heap for the growable tier
+  (§3.10). A blind periodic restart is not offered (§2.1, §3.7).
 
 ### SVC-8 — Control API + tool + audit + rlimits + docs/gate
 - The versioned capability-checked control `lib/abi` surface, status via

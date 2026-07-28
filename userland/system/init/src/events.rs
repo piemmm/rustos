@@ -83,6 +83,15 @@ pub const SERVICE_STOPPING: EventId = EventId(9_016);
 /// A service was **force-terminated**: it did not exit within its graceful
 /// stop grace period, so the manager forced the process down.
 pub const SERVICE_FORCE_TERMINATED: EventId = EventId(9_017);
+/// A crashed service is **scheduled to restart**: its
+/// [`RestartPolicy`](tairix_abi::RestartPolicy) asked for a restart after
+/// this exit and the crash-loop budget was not spent, so the manager armed
+/// a one-shot backoff deadline after which it is relaunched.
+pub const SERVICE_RESTART_SCHEDULED: EventId = EventId(9_018);
+/// A crashed service was **not** restarted because its crash-loop budget is
+/// spent: it kept dying before it ran stably, so the manager gave up rather
+/// than relaunch it forever (fail closed — never an unbounded retry loop).
+pub const SERVICE_RESTART_EXHAUSTED: EventId = EventId(9_019);
 
 #[cfg(test)]
 mod tests {
@@ -90,10 +99,11 @@ mod tests {
         ACTIVATION_DENIED, ACTIVATION_QUEUED, CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END,
         INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED, SERVICE_EXITED,
         SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED, SERVICE_READY,
-        SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
+        SERVICE_RESTART_EXHAUSTED, SERVICE_RESTART_SCHEDULED, SERVICE_SKIPPED, SERVICE_STARTED,
+        SERVICE_START_FAILED, SERVICE_STOPPING,
     };
 
-    const ALL: [u32; 16] = [
+    const ALL: [u32; 18] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_SKIPPED.0,
@@ -110,6 +120,8 @@ mod tests {
         SERVICE_LINGER_ARMED.0,
         SERVICE_STOPPING.0,
         SERVICE_FORCE_TERMINATED.0,
+        SERVICE_RESTART_SCHEDULED.0,
+        SERVICE_RESTART_EXHAUSTED.0,
     ];
 
     #[test]

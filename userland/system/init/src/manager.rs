@@ -41,6 +41,66 @@ const CONDITION_COUNT: usize = ReadyCondition::ALL.len();
 /// ever arises it is raised deliberately here, never removed.
 const MAX_PENDING_PER_SERVICE: usize = 64;
 
+/// How many times the restart policy will relaunch a single service that
+/// keeps dying before it has run stably, before the manager gives up on it.
+///
+/// This is the **crash-loop guard**, not a resource capacity: a service
+/// that crashes the instant it starts would otherwise be relaunched forever
+/// (the `spawn`-in-a-loop the charter forbids). Once a relaunched service
+/// runs longer than [`RESTART_STABLE_WINDOW`] the counter resets, so this
+/// bounds only a *tight* crash loop; a service that fails after a long,
+/// healthy uptime is always restarted afresh. The count is per service, so
+/// one crash-looping service never exhausts another's budget.
+const MAX_RESTART_ATTEMPTS: u32 = 5;
+
+/// The base of the exponential restart backoff, in nanoseconds (100 ms):
+/// the delay before the first relaunch. Each subsequent relaunch doubles
+/// it, capped at [`RESTART_BACKOFF_CAP`], so the manager never hammers a
+/// failing service.
+const RESTART_BACKOFF_BASE_NS: u128 = 100_000_000;
+
+/// The ceiling on the exponential restart backoff. A service that keeps
+/// failing waits at most this long between relaunches, so the delay never
+/// grows without bound while the crash-loop budget counts down.
+const RESTART_BACKOFF_CAP: Duration64 = Duration64::from_secs(30);
+
+/// How long a relaunched service must run before the manager considers it
+/// to have recovered and resets its [`MAX_RESTART_ATTEMPTS`] budget.
+///
+/// A service that stays up past this window and only then exits is treated
+/// as a fresh, isolated failure rather than part of a crash loop, so a
+/// long-lived daemon that crashes once after hours is restarted with a full
+/// budget instead of being penalised for restarts in the distant past.
+const RESTART_STABLE_WINDOW: Duration64 = Duration64::from_secs(30);
+
+/// The restart backoff for the `attempt`-th relaunch: `base * 2^attempt`,
+/// saturating and clamped to [`RESTART_BACKOFF_CAP`].
+///
+/// Computed in nanoseconds as a `u128`. A shift that would overflow the
+/// value (not merely the shift width) saturates to the maximum and is then
+/// clamped down, so a large `attempt` yields the cap rather than a wrapped
+/// value. The result is always in `RESTART_BACKOFF_BASE_NS..=CAP`.
+fn restart_backoff(attempt: u32) -> Duration64 {
+    let cap_ns = duration_nanos(RESTART_BACKOFF_CAP);
+    // `checked_shl` only rejects a shift wider than the type; a shift that
+    // discards significant bits still "succeeds", so verify it round-trips
+    // and otherwise saturate.
+    let scaled = match RESTART_BACKOFF_BASE_NS.checked_shl(attempt) {
+        Some(v) if (v >> attempt) == RESTART_BACKOFF_BASE_NS => v,
+        _ => u128::MAX,
+    };
+    let ns = scaled.min(cap_ns);
+    // `ns <= cap_ns`, which is well within `u64`, so the conversion is exact.
+    Duration64::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
+}
+
+/// The whole span `d` in nanoseconds as a `u128`, for backoff arithmetic.
+/// A negative span (never produced here) clamps to zero.
+fn duration_nanos(d: Duration64) -> u128 {
+    let secs = u128::try_from(d.secs()).unwrap_or(0);
+    secs * u128::from(NANOS_PER_SEC) + u128::from(d.subsec_nanos())
+}
+
 /// Construction-time configuration for an [`Init`] instance.
 ///
 /// All seams are borrowed for the manager's lifetime, mirroring the
@@ -159,6 +219,28 @@ struct Service {
     /// gracefully-stopping service is force-terminated if it has not yet
     /// exited.
     grace_deadline: Option<Duration64>,
+    /// When set, the absolute monotonic instant at (or after) which a
+    /// crashed service whose [`RestartPolicy`](tairix_abi::RestartPolicy)
+    /// asks for it is relaunched.
+    /// Armed by [`reap`](Init::reap) after an unexpected exit and consumed
+    /// by [`expire_restart_backoff`](Init::expire_restart_backoff) — a
+    /// single one-shot deadline, never a spawn-in-a-loop. `Some` here also
+    /// marks the service as *pending restart*, so a terminally-`Failed`
+    /// state with a live restart deadline does not block its dependents.
+    restart_deadline: Option<Duration64>,
+    /// How many times this service has been relaunched by the restart
+    /// policy since it last ran stably. Grows the backoff and is capped by
+    /// [`MAX_RESTART_ATTEMPTS`] so a service that dies the instant it starts
+    /// is abandoned rather than relaunched forever (the crash-loop guard).
+    restart_attempts: u32,
+    /// The monotonic instant at which the restart policy last relaunched
+    /// this service, or `None` if it has not been restarted since it was
+    /// first started (at boot or on demand). Used to reset
+    /// [`restart_attempts`](Service::restart_attempts) once a relaunched
+    /// service has run longer than [`RESTART_STABLE_WINDOW`], so a genuine
+    /// crash after a long, healthy uptime does not count against the
+    /// crash-loop budget.
+    relaunched_at: Option<Duration64>,
 }
 
 /// PID 1 service manager.
@@ -252,6 +334,9 @@ impl<'a> Init<'a> {
             waiters: VecDeque::new(),
             linger_deadline: None,
             grace_deadline: None,
+            restart_deadline: None,
+            restart_attempts: 0,
+            relaunched_at: None,
         });
         Ok(())
     }
@@ -619,6 +704,45 @@ impl<'a> Init<'a> {
         true
     }
 
+    /// Relaunch a service whose restart-backoff deadline has elapsed.
+    ///
+    /// The caller invokes this when the one-shot timer it armed from
+    /// [`restart_deadline`](Self::restart_deadline) fires. The manager
+    /// relaunches the service **only** if it still has a pending restart
+    /// deadline that has genuinely passed at `now`, it is in a terminal
+    /// state (its process really did exit), and it is not on-demand (an
+    /// on-demand service comes back on its next connect, never by timer).
+    /// Otherwise it is a no-op (fail safe).
+    ///
+    /// A relaunch records `now` as the service's last relaunch instant (so
+    /// the crash-loop budget can later reset once it has run stably), clears
+    /// the deadline, returns the service to [`ServiceState::Inactive`], and
+    /// drives the admission engine — which brings it back up if its
+    /// dependencies are still ready, exactly as at boot. The returned
+    /// [`StartReport`] lists whatever that pass started or failed.
+    ///
+    /// The relaunch is woken by the timer event, never by polling, and the
+    /// crash-loop budget already bounded whether a deadline was armed at
+    /// all, so this can never become a spawn-in-a-loop.
+    pub fn expire_restart_backoff(&mut self, name: &str, now: Duration64) -> StartReport {
+        let Some(idx) = self.index_of(name) else {
+            return StartReport::default();
+        };
+        let Some(deadline) = self.services[idx].restart_deadline else {
+            return StartReport::default();
+        };
+        if now < deadline
+            || !self.services[idx].state.is_terminal()
+            || self.services[idx].spec.activation().is_on_demand()
+        {
+            return StartReport::default();
+        }
+        self.services[idx].restart_deadline = None;
+        self.services[idx].relaunched_at = Some(now);
+        self.services[idx].state = ServiceState::Inactive;
+        self.pump()
+    }
+
     /// Drain the clients whose parked connections have been satisfied since
     /// the last call.
     ///
@@ -646,6 +770,16 @@ impl<'a> Init<'a> {
     pub fn grace_deadline(&self, name: &str) -> Option<Duration64> {
         self.index_of(name)
             .and_then(|idx| self.services[idx].grace_deadline)
+    }
+
+    /// The armed restart-backoff deadline of a service, or `None` if it has
+    /// no pending restart. The caller programs its one-shot timer from this
+    /// and calls [`expire_restart_backoff`](Self::expire_restart_backoff)
+    /// when it fires — a single one-shot wakeup, never a poll.
+    #[must_use]
+    pub fn restart_deadline(&self, name: &str) -> Option<Duration64> {
+        self.index_of(name)
+            .and_then(|idx| self.services[idx].restart_deadline)
     }
 
     /// Number of clients currently connected to a service's endpoint (its
@@ -745,9 +879,12 @@ impl<'a> Init<'a> {
 
     /// Begin a graceful stop of service `idx`: ask it to exit, move it to
     /// [`ServiceState::Stopping`], and arm the grace deadline after which it
-    /// is force-terminated. Clears any pending idle-linger.
+    /// is force-terminated. Clears any pending idle-linger and cancels any
+    /// pending restart (a stop the manager asked for is never fought with a
+    /// relaunch).
     fn begin_stop(&mut self, idx: usize, now: Duration64, reason: &str) {
         self.services[idx].linger_deadline = None;
+        self.services[idx].restart_deadline = None;
         if let Some(pid) = self.services[idx].pid {
             // Best-effort graceful request; if it cannot be delivered the
             // process is already exiting and the reaper will observe it.
@@ -758,6 +895,135 @@ impl<'a> Init<'a> {
         self.services[idx].grace_deadline = Some(add_duration(now, grace));
         let name = self.services[idx].spec.name().to_string();
         self.audit(events::SERVICE_STOPPING, Level::Info, &name, reason);
+    }
+
+    /// Whether service `idx` has a live-or-starting process the manager
+    /// should gracefully stop — as opposed to one already inactive, stopped,
+    /// or terminally failed.
+    fn is_alive(&self, idx: usize) -> bool {
+        matches!(
+            self.services[idx].state,
+            ServiceState::Starting | ServiceState::Ready | ServiceState::Running
+        )
+    }
+
+    /// Indices in **reverse-dependency order**: every service appears before
+    /// the services it depends on, so tearing down in this order never stops
+    /// a dependency while a dependent still needs it.
+    ///
+    /// It is the reverse of the topological start order. The graph was
+    /// validated when it was registered ([`start_all`](Self::start_all)), so
+    /// the topological sort succeeds; the registration-order fallback keeps
+    /// the function total if it is ever called on an unvalidated graph.
+    fn reverse_stop_order(&self) -> Vec<usize> {
+        let mut order = self
+            .topological_order()
+            .unwrap_or_else(|_| (0..self.services.len()).collect());
+        order.reverse();
+        order
+    }
+
+    /// Stop `name` and every service that transitively depends on it, in
+    /// reverse-dependency order (dependents first).
+    ///
+    /// A dependent is never stopped after the service it depends on: the
+    /// manager tears the closure down dependents-first so nothing is left
+    /// running against a stopped prerequisite. Each stop is graceful — the
+    /// service is asked to exit and force-terminated only if it overruns its
+    /// grace period ([`expire_grace`](Self::expire_grace)) — and any pending
+    /// restart in the closure is cancelled (a stop is honoured, never fought
+    /// with a relaunch). Services in the closure that are already down are
+    /// skipped.
+    ///
+    /// This is the engine mechanism; the capability-checked control surface
+    /// that gates *who* may stop a service is layered above it. `now` is the
+    /// current monotonic instant, from which each grace deadline is computed.
+    ///
+    /// # Errors
+    ///
+    /// [`ActivateError::UnknownService`] if `name` is not registered (fail
+    /// closed — an unknown name never triggers a wider teardown).
+    pub fn stop(&mut self, name: &str, now: Duration64) -> Result<(), ActivateError> {
+        let Some(target) = self.index_of(name) else {
+            self.audit(
+                events::ACTIVATION_DENIED,
+                Level::Warn,
+                name,
+                "unknown service",
+            );
+            return Err(ActivateError::UnknownService);
+        };
+        let closure = self.dependent_closure(target);
+        for idx in self.reverse_stop_order() {
+            if !closure[idx] {
+                continue;
+            }
+            // Cancel a pending restart even for a service that is already
+            // down: a deliberate stop supersedes a queued relaunch.
+            self.services[idx].restart_deadline = None;
+            if self.is_alive(idx) {
+                self.begin_stop(idx, now, "stop");
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop **every** service in reverse-dependency order — the
+    /// system-shutdown teardown.
+    ///
+    /// Tears the whole registered set down dependents-first (the reverse of
+    /// the boot start order) so no service is stopped while another still
+    /// depends on it. Every stop is graceful with its own grace deadline,
+    /// and every pending restart is cancelled first so a service the manager
+    /// is shutting down is never relaunched underneath it. `now` is the
+    /// current monotonic instant, from which the grace deadlines are
+    /// computed.
+    ///
+    /// In the full system-shutdown sequence a per-user manager stops its
+    /// user's services this way and exits before the system manager calls
+    /// this for the system services; the caller then reaps the graceful
+    /// exits and force-terminates any that overrun
+    /// ([`expire_grace`](Self::expire_grace)).
+    pub fn shutdown(&mut self, now: Duration64) {
+        for idx in self.reverse_stop_order() {
+            self.services[idx].restart_deadline = None;
+            if self.is_alive(idx) {
+                self.begin_stop(idx, now, "shutdown");
+            }
+        }
+    }
+
+    /// The set of services made up of `target` and everything that
+    /// transitively depends on it, as a per-service boolean mask.
+    ///
+    /// A breadth-first walk over the reverse-dependency edges (a service is
+    /// a dependent of `d` when it names `d` in its dependencies), so stopping
+    /// `target` can tear down exactly the services that would be left running
+    /// against a stopped prerequisite, and no others.
+    fn dependent_closure(&self, target: usize) -> Vec<bool> {
+        let n = self.services.len();
+        let mut in_set = vec![false; n];
+        in_set[target] = true;
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        queue.push_back(target);
+        while let Some(d) = queue.pop_front() {
+            let dep_name = self.services[d].spec.name();
+            for (i, service) in self.services.iter().enumerate() {
+                if in_set[i] {
+                    continue;
+                }
+                if service
+                    .spec
+                    .dependencies()
+                    .iter()
+                    .any(|dep| dep == dep_name)
+                {
+                    in_set[i] = true;
+                    queue.push_back(i);
+                }
+            }
+        }
+        in_set
     }
 
     /// Reap every child that has exited, returning the number reaped.
@@ -771,11 +1037,25 @@ impl<'a> Init<'a> {
     /// [`ServiceState::Failed`]. Any other reaped process is an inherited
     /// orphan and is logged as such (PID 1 reaps the whole system's zombies).
     ///
-    /// The process is gone, so its activation state is cleared: its sink and
-    /// pending waiters are dropped and any armed linger or grace deadline is
-    /// disarmed. Clients whose connections died with the process are the
-    /// transport layer's to notice; the manager holds no stale references.
-    pub fn reap(&mut self) -> usize {
+    /// A service whose [`RestartPolicy`](tairix_abi::RestartPolicy) asks to
+    /// come back — and whose exit the manager did **not** itself initiate
+    /// (an idle-stop or shutdown is honoured, never fought) — is scheduled
+    /// for relaunch after a bounded exponential backoff computed from `now`
+    /// rather than restarted on the spot: the caller arms a single one-shot
+    /// timer from [`restart_deadline`](Self::restart_deadline) and calls
+    /// [`expire_restart_backoff`](Self::expire_restart_backoff) when it
+    /// fires (no spawn-in-a-loop, no busy-poll). A tight crash loop is
+    /// bounded by `MAX_RESTART_ATTEMPTS`; a service that had run past the
+    /// stable window since its last relaunch is treated as a fresh failure
+    /// and restarted with a full budget.
+    ///
+    /// `now` is the current monotonic instant, from which a restart backoff
+    /// deadline is computed. The process is gone, so its activation state is
+    /// cleared: its sink and pending waiters are dropped and any armed
+    /// linger or grace deadline is disarmed. Clients whose connections died
+    /// with the process are the transport layer's to notice; the manager
+    /// holds no stale references.
+    pub fn reap(&mut self, now: Duration64) -> usize {
         let mut reaped = 0;
         while let Some(child) = self.cfg.reaper.collect() {
             reaped += 1;
@@ -792,12 +1072,62 @@ impl<'a> Init<'a> {
                 self.services[pos].waiters.clear();
                 self.services[pos].linger_deadline = None;
                 self.services[pos].grace_deadline = None;
+                self.services[pos].restart_deadline = None;
                 self.audit_exit(&name, child);
+                // A manager-initiated stop is final: the manager asked it to
+                // go, so it is never fought with a restart. Only an
+                // *unexpected* exit of a still-wanted service is a restart
+                // candidate.
+                if !was_stopping {
+                    self.schedule_restart(pos, child.exit_code, now);
+                }
             } else {
                 self.audit_orphan(child);
             }
         }
         reaped
+    }
+
+    /// Consider a just-exited service for a policy-driven restart, arming a
+    /// bounded-backoff relaunch deadline when one is due.
+    ///
+    /// The exit was not manager-initiated (the caller checked). If the
+    /// service's [`RestartPolicy`](tairix_abi::RestartPolicy) wants a
+    /// restart for this exit code and the crash-loop budget is not spent,
+    /// the manager arms [`restart_deadline`](Service::restart_deadline) and
+    /// audits it; if the budget is spent it audits the give-up and leaves
+    /// the service down (fail closed — never an unbounded relaunch loop).
+    fn schedule_restart(&mut self, idx: usize, exit_code: i32, now: Duration64) {
+        if !self.services[idx].spec.restart().should_restart(exit_code) {
+            return;
+        }
+        // Reset the crash-loop budget if the service had run stably since
+        // its last relaunch (or was never restarted — it ran since boot).
+        let ran_stably = self.services[idx]
+            .relaunched_at
+            .map_or(true, |t| duration_since(now, t) >= RESTART_STABLE_WINDOW);
+        if ran_stably {
+            self.services[idx].restart_attempts = 0;
+        }
+        let name = self.services[idx].spec.name().to_string();
+        if self.services[idx].restart_attempts >= MAX_RESTART_ATTEMPTS {
+            self.audit(
+                events::SERVICE_RESTART_EXHAUSTED,
+                Level::Warn,
+                &name,
+                "crash-loop budget spent",
+            );
+            return;
+        }
+        let backoff = restart_backoff(self.services[idx].restart_attempts);
+        self.services[idx].restart_deadline = Some(add_duration(now, backoff));
+        self.services[idx].restart_attempts += 1;
+        self.audit(
+            events::SERVICE_RESTART_SCHEDULED,
+            Level::Info,
+            &name,
+            "restart scheduled",
+        );
     }
 
     /// Drive the admission engine to a fixpoint: repeatedly admit every
@@ -888,12 +1218,18 @@ impl<'a> Init<'a> {
     }
 
     /// Whether any dependency of service `idx` has reached the terminal
-    /// [`ServiceState::Failed`] state, so `idx` can never be admitted and is
-    /// skipped.
+    /// [`ServiceState::Failed`] state *for good*, so `idx` can never be
+    /// admitted and is skipped.
+    ///
+    /// A dependency that is `Failed` but has a live restart-backoff deadline
+    /// is not counted: it is coming back, so its dependent waits for the
+    /// relaunch rather than being permanently skipped.
     fn dependency_failed(&self, idx: usize) -> bool {
         self.services[idx].spec.dependencies().iter().any(|dep| {
-            self.index_of(dep)
-                .is_some_and(|d| self.services[d].state == ServiceState::Failed)
+            self.index_of(dep).is_some_and(|d| {
+                self.services[d].state == ServiceState::Failed
+                    && self.services[d].restart_deadline.is_none()
+            })
         })
     }
 
@@ -1165,6 +1501,8 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_LINGER_ARMED => "idle linger armed",
         events::SERVICE_STOPPING => "service stopping",
         events::SERVICE_FORCE_TERMINATED => "service force-terminated",
+        events::SERVICE_RESTART_SCHEDULED => "service restart scheduled",
+        events::SERVICE_RESTART_EXHAUSTED => "service restart budget spent",
         _ => "init event",
     }
 }
@@ -1185,6 +1523,28 @@ fn add_duration(a: Duration64, b: Duration64) -> Duration64 {
     }
     // `nanos` is now below `NANOS_PER_SEC`, so this never fails; the
     // saturated-seconds fallback keeps the function total without a panic.
+    Duration64::new(secs, nanos).unwrap_or_else(|_| Duration64::from_secs(secs))
+}
+
+/// The non-negative span from the earlier instant `earlier` to the current
+/// instant `now`, both monotonic. A `now` before `earlier` (never expected
+/// from a monotonic clock) clamps to [`Duration64::ZERO`] rather than
+/// producing a negative span.
+fn duration_since(now: Duration64, earlier: Duration64) -> Duration64 {
+    if now <= earlier {
+        return Duration64::ZERO;
+    }
+    let mut secs = now.secs().saturating_sub(earlier.secs());
+    let now_nanos = i64::from(now.subsec_nanos());
+    let earlier_nanos = i64::from(earlier.subsec_nanos());
+    let mut nanos = now_nanos - earlier_nanos;
+    if nanos < 0 {
+        nanos += i64::from(NANOS_PER_SEC);
+        secs = secs.saturating_sub(1);
+    }
+    // `nanos` is now in `0..NANOS_PER_SEC` and `secs >= 0` because
+    // `now > earlier`; the fallback keeps the function total.
+    let nanos = u32::try_from(nanos).unwrap_or(0);
     Duration64::new(secs, nanos).unwrap_or_else(|_| Duration64::from_secs(secs))
 }
 
@@ -1242,7 +1602,7 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
         ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ReadinessKind,
-        ReadyCondition, ServiceState,
+        ReadyCondition, RestartPolicy, ServiceState,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -1597,7 +1957,7 @@ mod tests {
         init.start_all().unwrap();
         assert_eq!(init.running_pid("svc"), Some(Pid::new(100)));
 
-        let reaped_count = init.reap();
+        let reaped_count = init.reap(Duration64::ZERO);
         assert_eq!(reaped_count, 2);
         assert_eq!(init.running_count(), 0);
         assert_eq!(init.running_pid("svc"), None);
@@ -1902,9 +2262,12 @@ mod tests {
             pid,
             exit_code: 137,
         });
-        assert_eq!(init.reap(), 1);
+        assert_eq!(init.reap(Duration64::from_secs(135)), 1);
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Stopped));
         assert_eq!(init.running_pid("fontd"), None);
+        // A manager-initiated stop is never fought with a restart, even
+        // though the exit code was non-zero.
+        assert_eq!(init.restart_deadline("fontd"), None);
     }
 
     #[test]
@@ -2058,5 +2421,306 @@ mod tests {
 
         let saturated = add_duration(Duration64::from_secs(i64::MAX), Duration64::from_secs(10));
         assert_eq!(saturated.secs(), i64::MAX);
+    }
+
+    // --- SVC-7: restart policy + reverse-dependency stop/shutdown -------
+
+    /// A permanent, immediate service with the given restart policy.
+    fn restart_spec(name: &str, policy: RestartPolicy) -> ServiceSpec {
+        spec(name, &[]).with_restart(policy)
+    }
+
+    #[test]
+    fn restart_backoff_doubles_from_the_base_and_clamps_to_the_cap() {
+        // 100 ms base, doubling: 100, 200, 400, 800 ms, then clamped at the
+        // 30 s cap once the doubling would exceed it.
+        assert_eq!(
+            super::restart_backoff(0),
+            Duration64::new(0, 100_000_000).unwrap()
+        );
+        assert_eq!(
+            super::restart_backoff(1),
+            Duration64::new(0, 200_000_000).unwrap()
+        );
+        assert_eq!(
+            super::restart_backoff(3),
+            Duration64::new(0, 800_000_000).unwrap()
+        );
+        // A large attempt saturates the shift but is clamped to the cap,
+        // never overflows.
+        assert_eq!(super::restart_backoff(1_000), super::RESTART_BACKOFF_CAP);
+    }
+
+    #[test]
+    fn duration_since_is_the_non_negative_gap_and_clamps_a_backwards_clock() {
+        let earlier = Duration64::new(10, 250_000_000).unwrap();
+        let later = Duration64::new(12, 750_000_000).unwrap();
+        assert_eq!(
+            super::duration_since(later, earlier),
+            Duration64::new(2, 500_000_000).unwrap()
+        );
+        // A borrow across the second boundary carries correctly.
+        let a = Duration64::new(10, 100_000_000).unwrap();
+        let b = Duration64::new(11, 900_000_000).unwrap();
+        assert_eq!(
+            super::duration_since(b, a),
+            Duration64::new(1, 800_000_000).unwrap()
+        );
+        // now <= earlier clamps to zero rather than a negative span.
+        assert_eq!(super::duration_since(earlier, later), Duration64::ZERO);
+        assert_eq!(super::duration_since(earlier, earlier), Duration64::ZERO);
+    }
+
+    #[test]
+    fn never_policy_leaves_a_crashed_service_down() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::Never))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(10));
+        // Never: no restart is scheduled and the service stays failed.
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        assert_eq!(init.restart_deadline("svc"), None);
+        assert_eq!(init.running_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_RESTART_SCHEDULED), 0);
+    }
+
+    #[test]
+    fn on_failure_restarts_after_an_abnormal_exit_but_not_a_clean_one() {
+        // Abnormal exit: scheduled, then relaunched at its backoff deadline.
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(10));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        // First relaunch waits the base backoff (100 ms) from the exit.
+        assert_eq!(
+            init.restart_deadline("svc"),
+            Some(Duration64::new(10, 100_000_000).unwrap())
+        );
+        assert_eq!(sink.count(events::SERVICE_RESTART_SCHEDULED), 1);
+
+        // Before the deadline the relaunch is a no-op (no busy-poll).
+        let early = init.expire_restart_backoff("svc", Duration64::from_secs(10));
+        assert!(early.started.is_empty());
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+
+        // At the deadline the service is relaunched with a fresh pid.
+        let report = init.expire_restart_backoff("svc", Duration64::new(10, 100_000_000).unwrap());
+        assert_eq!(started_names(&report), ["svc"]);
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+        assert_ne!(init.running_pid("svc"), Some(pid));
+        assert_eq!(init.restart_deadline("svc"), None);
+
+        // A clean exit under on-failure is honoured: no restart.
+        let pid2 = init.running_pid("svc").unwrap();
+        reaper.push(ReapedChild {
+            pid: pid2,
+            exit_code: 0,
+        });
+        init.reap(Duration64::from_secs(40));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Stopped));
+        assert_eq!(init.restart_deadline("svc"), None);
+    }
+
+    #[test]
+    fn always_policy_restarts_even_after_a_clean_exit() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+
+        // Clean exit, but `always` brings it back.
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(5));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Stopped));
+        assert_eq!(
+            init.restart_deadline("svc"),
+            Some(Duration64::new(5, 100_000_000).unwrap())
+        );
+        let report = init.expire_restart_backoff("svc", Duration64::new(5, 100_000_000).unwrap());
+        assert_eq!(started_names(&report), ["svc"]);
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn a_crash_loop_is_bounded_by_the_restart_budget() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+
+        // Drive `MAX_RESTART_ATTEMPTS` rapid crash/relaunch cycles: each
+        // crash lands well inside the stable window of the previous
+        // relaunch, so the budget is never reset.
+        let mut now = Duration64::from_secs(1);
+        for _ in 0..super::MAX_RESTART_ATTEMPTS {
+            let pid = init.running_pid("svc").unwrap();
+            reaper.push(ReapedChild { pid, exit_code: 1 });
+            init.reap(now);
+            let deadline = init.restart_deadline("svc").expect("restart scheduled");
+            let report = init.expire_restart_backoff("svc", deadline);
+            assert_eq!(started_names(&report), ["svc"]);
+            now = add_duration(deadline, Duration64::new(0, 500_000_000).unwrap());
+        }
+
+        // One more crash inside the window exhausts the budget: the service
+        // is left down rather than relaunched forever (fail closed).
+        let pid = init.running_pid("svc").unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(now);
+        assert_eq!(init.restart_deadline("svc"), None);
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        assert_eq!(init.running_count(), 0);
+        assert_eq!(
+            sink.count(events::SERVICE_RESTART_SCHEDULED),
+            super::MAX_RESTART_ATTEMPTS as usize
+        );
+        assert_eq!(sink.count(events::SERVICE_RESTART_EXHAUSTED), 1);
+    }
+
+    #[test]
+    fn a_service_that_ran_stably_resets_its_restart_budget() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+
+        // First crash: relaunch at base backoff.
+        let pid = init.running_pid("svc").unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(1));
+        let deadline = init.restart_deadline("svc").unwrap();
+        assert_eq!(deadline, Duration64::new(1, 100_000_000).unwrap());
+        init.expire_restart_backoff("svc", deadline);
+
+        // Second crash long after the relaunch (past the stable window):
+        // the budget resets, so the backoff is the base again, not doubled.
+        let pid = init.running_pid("svc").unwrap();
+        let much_later = add_duration(deadline, super::RESTART_STABLE_WINDOW);
+        let much_later = add_duration(much_later, Duration64::from_secs(1));
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(much_later);
+        assert_eq!(
+            init.restart_deadline("svc"),
+            Some(add_duration(
+                much_later,
+                Duration64::new(0, 100_000_000).unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn shutdown_stops_every_service_in_reverse_dependency_order() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        // c depends on b depends on a.
+        init.register(spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
+        init.register(spec("c", &["b"])).unwrap();
+        init.start_all().unwrap();
+        let pa = init.running_pid("a").unwrap();
+        let pb = init.running_pid("b").unwrap();
+        let pc = init.running_pid("c").unwrap();
+
+        init.shutdown(Duration64::from_secs(100));
+
+        // Dependents are asked to stop before the services they depend on.
+        assert_eq!(stopper.requested.borrow().as_slice(), &[pc, pb, pa]);
+        for name in ["a", "b", "c"] {
+            assert_eq!(init.state_of(name), Some(ServiceState::Stopping));
+            assert!(init.grace_deadline(name).is_some());
+        }
+        assert_eq!(sink.count(events::SERVICE_STOPPING), 3);
+    }
+
+    #[test]
+    fn stop_tears_down_a_service_and_its_dependents_only() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        // c -> b -> a; d is independent.
+        init.register(spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
+        init.register(spec("c", &["b"])).unwrap();
+        init.register(spec("d", &[])).unwrap();
+        init.start_all().unwrap();
+        let pa = init.running_pid("a").unwrap();
+        let pb = init.running_pid("b").unwrap();
+        let pc = init.running_pid("c").unwrap();
+
+        // Stopping `a` must take `b` and `c` (its dependents) down first,
+        // dependents-first, and leave the independent `d` running.
+        init.stop("a", Duration64::from_secs(100)).unwrap();
+        assert_eq!(stopper.requested.borrow().as_slice(), &[pc, pb, pa]);
+        for name in ["a", "b", "c"] {
+            assert_eq!(init.state_of(name), Some(ServiceState::Stopping));
+        }
+        assert_eq!(init.state_of("d"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn stop_an_unknown_service_fails_closed() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.start_all().unwrap();
+        assert_eq!(
+            init.stop("ghost", Duration64::from_secs(1)),
+            Err(ActivateError::UnknownService)
+        );
+        assert_eq!(sink.count(events::ACTIVATION_DENIED), 1);
+    }
+
+    #[test]
+    fn shutdown_cancels_a_pending_restart() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(restart_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+
+        // A crash arms a pending restart.
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(5));
+        assert!(init.restart_deadline("svc").is_some());
+
+        // Shutdown supersedes it: the queued relaunch is cancelled so the
+        // manager never brings a service back while shutting it down.
+        init.shutdown(Duration64::from_secs(6));
+        assert_eq!(init.restart_deadline("svc"), None);
     }
 }

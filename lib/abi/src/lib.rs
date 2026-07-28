@@ -156,8 +156,8 @@ pub use rxe::{
     SEG_FLAG_READ, SEG_FLAG_WRITE,
 };
 pub use service::{
-    ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, ServiceState,
-    SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
+    ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, RestartPolicy,
+    ServiceState, SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
 };
 pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,

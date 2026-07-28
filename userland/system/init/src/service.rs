@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{
     decode_capability_ids, ActivationMode, CapabilityId, Duration64, Errno, ManifestHeader,
-    ReadinessKind, ReadyCondition, MANIFEST_MAX_CAPABILITIES,
+    ReadinessKind, ReadyCondition, RestartPolicy, MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
 
@@ -116,6 +116,7 @@ pub struct ServiceSpec {
     requires: Vec<ReadyCondition>,
     provides: Vec<ReadyCondition>,
     activation: ActivationMode,
+    restart: RestartPolicy,
     stop_grace: Duration64,
     connect_capability: Option<CapabilityId>,
 }
@@ -153,6 +154,7 @@ impl ServiceSpec {
             requires: Vec::new(),
             provides: Vec::new(),
             activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
             stop_grace: DEFAULT_STOP_GRACE,
             connect_capability: None,
         }
@@ -171,6 +173,18 @@ impl ServiceSpec {
     #[must_use]
     pub fn with_stop_grace(mut self, stop_grace: Duration64) -> Self {
         self.stop_grace = stop_grace;
+        self
+    }
+
+    /// Set what the manager does when this service's process exits
+    /// (never / on abnormal exit / always), consuming and returning `self`.
+    ///
+    /// The default is [`RestartPolicy::Never`]: a service is brought back
+    /// only when its manifest asks for it. A restart is always bounded by
+    /// the manager's crash-loop budget and backoff — never a blind retry.
+    #[must_use]
+    pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
+        self.restart = restart;
         self
     }
 
@@ -261,6 +275,13 @@ impl ServiceSpec {
     #[must_use]
     pub fn activation(&self) -> ActivationMode {
         self.activation
+    }
+
+    /// What the manager does when this service's process exits — never,
+    /// on an abnormal exit only, or always.
+    #[must_use]
+    pub fn restart(&self) -> RestartPolicy {
+        self.restart
     }
 
     /// The graceful-stop grace period this service is given to exit on its
