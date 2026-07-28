@@ -109,6 +109,11 @@ pub struct Interface {
     /// A `network.conf` `<iface>.match.node` binding selects this interface
     /// by it, independent of MAC or discovery order.
     node_location: u64,
+    /// The statically configured recursive DNS servers for this interface
+    /// (`<iface>.dns.servers`), in declared order — the last value the
+    /// device manager delivered, empty when none. They join this
+    /// interface's DHCP-learned servers in [`Netstack::resolver_servers`].
+    static_dns: Vec<NetResolverServer>,
 }
 
 impl Interface {
@@ -262,6 +267,7 @@ impl Netstack {
             rates: RateMeter::new(),
             role: BondRole::None,
             node_location,
+            static_dns: Vec::new(),
         });
         Ok(())
     }
@@ -405,6 +411,11 @@ impl Netstack {
             matches!(msg.ipv4, NetIpv4Config::Dhcp).then(|| (self.dhcp_rng_factory)()),
             matches!(msg.ipv6, NetIpv6Config::Dhcp).then(|| (self.dhcp_rng_factory)()),
         );
+        // Record the interface's statically configured DNS servers (the
+        // last delivered list wins, empty when none), so the active
+        // resolver set reflects the current config. Members carry none
+        // (`netconfig` forbids a member DNS key; the message is empty).
+        self.interfaces[index].static_dns = msg.dns.as_slice().to_vec();
         let stack = &mut self.interfaces[index].stack;
         if msg.mtu != 0 {
             stack.set_mtu(msg.mtu);
@@ -955,28 +966,35 @@ impl Netstack {
     }
 
     /// The host's active recursive-resolver server set (`plans/DNS.md`
-    /// DNS2): every managed interface's DHCP-learned recursive DNS
-    /// servers, walked in table order, deduplicated, and bounded by
+    /// DNS2): every managed interface's statically configured servers
+    /// (`<iface>.dns.servers`) followed by its DHCP-learned servers,
+    /// walked in table order, deduplicated, and bounded by
     /// [`MAX_RESOLVER_SERVERS`].
     ///
     /// This is the one source of truth the `ResolverServers` broker read
     /// serves — to the system-information `net_resolver_servers` query and
     /// to a userland resolver client alike, so the two can never disagree.
-    /// The set is derived on demand from each interface's *current* DHCP
+    /// The DHCP part is derived on demand from each interface's *current*
     /// lease(s) (`Stack::dhcp_dns_servers`), so it tracks acquisition and
-    /// withdrawal exactly and needs no stored copy to drift. Statically
-    /// configured servers join this same union once that config source
-    /// lands (a later `plans/DNS.md` DNS2 step); the aggregation shape is
-    /// already the union, so adding them is a source, not a reshape.
+    /// withdrawal exactly and needs no stored copy to drift; the static
+    /// part is the last `network.conf` DNS list the device manager
+    /// delivered. Static servers rank first as the admin's explicit choice.
     #[must_use]
     pub fn resolver_servers(&self) -> Vec<NetResolverServer> {
         let mut out: Vec<NetResolverServer> = Vec::new();
+        let mut push = |record: NetResolverServer| {
+            if out.len() < MAX_RESOLVER_SERVERS && !out.contains(&record) {
+                out.push(record);
+            }
+        };
         for iface in &self.interfaces {
+            // Statically configured servers first (the admin's explicit
+            // choice), then the interface's DHCP-learned servers.
+            for record in &iface.static_dns {
+                push(*record);
+            }
             for server in iface.stack.dhcp_dns_servers() {
-                let record = resolver_server_of(server);
-                if out.len() < MAX_RESOLVER_SERVERS && !out.contains(&record) {
-                    out.push(record);
-                }
+                push(resolver_server_of(server));
             }
         }
         out
@@ -1285,6 +1303,8 @@ impl Netstack {
             // A bond is composed in software; it has no hardware location,
             // so it can never be selected by a `match.node` binding.
             node_location: 0,
+            // Populated when the bond's own interface config is applied.
+            static_dns: Vec::new(),
         });
         Ok(())
     }

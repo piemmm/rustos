@@ -56,6 +56,7 @@ Every key is `<iface>.<suffix>` where the suffix is drawn from the closed
 | `ipv6.method`           | `slaac` \| `static` \| `dhcp` \| `disabled` | IPv6 addressing (default `slaac`) |
 | `ipv6.address`          | `addr/prefix`                            | the static IPv6 address (`static` only) |
 | `ipv6.gateway`          | `addr`                                   | the IPv6 default gateway (`static` only) |
+| `dns.servers`           | `9.9.9.9,2001:db8::1[,…]`                | recursive DNS servers for this interface |
 | `mtu`                   | `1280..=65535`                           | the interface MTU |
 | `bond.members`          | `eth0,eth1[,…]`                          | the member NIC aliases (bond only) |
 | `bond.mode`             | `active-backup` \| `balance`             | the bond transmit policy |
@@ -88,6 +89,20 @@ method. A `dhcp` interface (DHCPv4 on `ipv4`, RFC 8415 stateful DHCPv6 on
 `ipv6`) carries no static `address`/`gateway` — the lease supplies the
 address — so setting either alongside `dhcp` is inconsistent and refused.
 
+## DNS servers
+
+`<iface>.dns.servers` names the recursive DNS servers to use on an
+interface, as a comma-separated list of IPv4 and/or IPv6 addresses
+(at most `MAX_DNS_SERVERS`, the same bound as the host-wide active
+resolver set). Each entry must be a genuine unicast host address —
+the unspecified address, any multicast group, and the IPv4 limited
+broadcast are refused; loopback is allowed for a local resolver.
+The device manager delivers the list to `netstack`, where it joins
+the interface's DHCP-learned servers (option 6 / option 23) in the
+active resolver set, ranking first as the operator's explicit choice.
+DNS servers are addressing the bond owns, so — like an address — a
+bond member may not carry a `dns.servers` key.
+
 ## API shape
 
 - `NetworkConfig::parse(&str) -> Result<NetworkConfig, ParseError>` — the
@@ -97,7 +112,8 @@ address — so setting either alongside `dhcp` is inconsistent and refused.
   so render→parse round-trips exactly and shows exactly the live config).
 - `NetworkConfig::{interfaces, interface}` — the parsed interface set.
 - `InterfaceConfig` — one interface's `Option`-per-key state plus the
-  effective-value accessors (`kind`/`ipv4_method`/`ipv6_method`/`members`).
+  effective-value accessors
+  (`kind`/`ipv4_method`/`ipv6_method`/`members`/`dns_servers`).
 - `IfaceKey::{ALL, name, from_name}` — the closed registry.
 - `IfaceKind` / `Ipv4Method` / `Ipv6Method` / `BondMode` / `MacAddr` /
   `Ipv4Cidr` / `Ipv6Cidr` — the typed value vocabulary.

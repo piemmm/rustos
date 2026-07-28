@@ -131,20 +131,26 @@ Done so far — the active-server aggregation and its observability surface:
   (forwarding to the `netstack` broker) and read by `lib/procinfo`
   (`for_each_resolver_server` + the `state:net/resolver/servers` resolver
   branch, rendering the comma-separated set or `none`).
+- **Static config key** — the per-interface `network.conf`
+  `<iface>.dns.servers` key: a comma-separated unicast IPv4/IPv6 list in
+  `lib/netconfig` (`IfaceKey::DnsServers`, bounded by `MAX_DNS_SERVERS` =
+  `MAX_RESOLVER_SERVERS`, unicast-only, no member key), carried on the wire in
+  `NetInterfaceConfigMsg` as `NetDnsServers` (a fixed count + four
+  `NetResolverServer` slots, fail-closed decode), populated by `devmgr`
+  (`dns_of`/`dns_record_of`) and stored per interface in `netstack`.
+  `Netstack::resolver_servers()` unions each interface's static list **first**
+  (the operator's explicit choice) then its DHCP-learned servers, so the same
+  broker read now surfaces both sources.
 
 Remaining, in order:
 
-1. **Static config key** — a per-interface `network.conf` `<iface>.dns.servers`
-   key in `lib/netconfig`, mapped by devmgr-style delivery into netstack and
-   unioned with the DHCP-learned set (the aggregation shape is already the
-   union; this is a source, not a reshape).
-2. **`lib/resolver` client crate** — a freestanding+host-stub crate driving
+1. **`lib/resolver` client crate** — a freestanding+host-stub crate driving
    `DnsTransport` over `tairix_rt::net` (a datagram socket, port-0 bind for
    RFC 5452 source-port randomisation, `waitset_wait` delivery — the `ping`
    `RtPingIo` pattern) whose `resolve()` first fetches the servers (via the
    ungated `NET_RESOLVER_SERVERS` query) then drives `tairix_net::dns::resolve`.
    Landed **with** its first consumer (DNS3), never consumer-less (§2.4).
-3. **3-arch live QEMU verticals** — `netstack_dns_qemu_{aarch64,x86_64,riscv64}`
+2. **3-arch live QEMU verticals** — `netstack_dns_qemu_{aarch64,x86_64,riscv64}`
    mirroring DHCP D3: a `NetPeerMode::V*DnsEcho` host DNS server in
    `tools/xtask` `netpeer`, a planted `network.conf` naming the server, a tiny
    guest resolver client, and witnesses.

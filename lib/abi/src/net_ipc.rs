@@ -816,6 +816,10 @@ pub struct NetInterfaceConfigMsg {
     pub ipv6: NetIpv6Config,
     /// The link MTU override, or `0` to keep the device-reported MTU.
     pub mtu: u16,
+    /// The statically configured recursive DNS servers for this interface
+    /// (`<iface>.dns.servers`), empty when none are set. They join the
+    /// interface's DHCP-learned servers in the host's active resolver set.
+    pub dns: NetDnsServers,
 }
 
 impl NetInterfaceConfigMsg {
@@ -824,8 +828,8 @@ impl NetInterfaceConfigMsg {
     /// (1), addr (4), `gw_present` (1), gw (4)}, ipv6 {method (1), prefix
     /// (1), addr (16), `gw_present` (1), gw (16)}, mtu (2), `node_present`
     /// (1, byte 78), reserved (1, byte 79), `match_node` (8, bytes 80..88),
-    /// and a zero reserved tail.
-    pub const WIRE_LEN: usize = 96;
+    /// and the DNS-server list ([`NetDnsServers::WIRE_LEN`], bytes 88..).
+    pub const WIRE_LEN: usize = 88 + NetDnsServers::WIRE_LEN;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -878,6 +882,7 @@ impl NetInterfaceConfigMsg {
             out[78] = 1;
             put_u64(&mut out, 80, node);
         }
+        out[88..88 + NetDnsServers::WIRE_LEN].copy_from_slice(&self.dns.to_le_bytes());
         out
     }
 
@@ -902,9 +907,10 @@ impl NetInterfaceConfigMsg {
         if read_u16(bytes, 4) != NET_INTERFACE_CONFIG_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        // Reserved bytes: the mac-present padding (7), the node-present
-        // padding (79), and the final tail (88..96) must all be zero.
-        if bytes[7] != 0 || bytes[79] != 0 || bytes[88..Self::WIRE_LEN].iter().any(|&b| b != 0) {
+        // Reserved bytes: the mac-present padding (7) and the node-present
+        // padding (79) must be zero. The DNS-server list occupies bytes
+        // 88.. and is decoded (and validated for its own filler) below.
+        if bytes[7] != 0 || bytes[79] != 0 {
             return Err(Errno::BadMagic);
         }
         let match_node = match bytes[78] {
@@ -937,6 +943,7 @@ impl NetInterfaceConfigMsg {
         let ipv4 = decode_ipv4_config(bytes)?;
         let ipv6 = decode_ipv6_config(bytes)?;
         let mtu = read_u16(bytes, 76);
+        let dns = NetDnsServers::from_bytes(&bytes[88..88 + NetDnsServers::WIRE_LEN])?;
         Ok(Self {
             alias,
             match_mac,
@@ -944,6 +951,7 @@ impl NetInterfaceConfigMsg {
             ipv4,
             ipv6,
             mtu,
+            dns,
         })
     }
 
@@ -998,7 +1006,36 @@ impl NetInterfaceConfigMsg {
                 }
             }
         }
+        // A recursive resolver is a specific unicast host: the unspecified
+        // address, any multicast group, and the IPv4 limited broadcast are
+        // refused (loopback is allowed — a local resolver).
+        for server in self.dns.as_slice() {
+            if !resolver_addr_is_unicast(server) {
+                return Err(Errno::OutOfRange);
+            }
+        }
         Ok(())
+    }
+}
+
+/// Whether a [`NetResolverServer`] names a plausible recursive-resolver
+/// host: a unicast address, not the unspecified address, a multicast group,
+/// or the IPv4 limited broadcast. Loopback is permitted.
+fn resolver_addr_is_unicast(server: &NetResolverServer) -> bool {
+    match server.family {
+        NetAddrFamily::V4 => {
+            let a = core::net::Ipv4Addr::new(
+                server.addr[0],
+                server.addr[1],
+                server.addr[2],
+                server.addr[3],
+            );
+            !(a.is_unspecified() || a.is_multicast() || a.is_broadcast())
+        }
+        NetAddrFamily::V6 => {
+            let a = core::net::Ipv6Addr::from(server.addr);
+            !(a.is_unspecified() || a.is_multicast())
+        }
     }
 }
 
@@ -2173,6 +2210,15 @@ impl NetResolverServer {
     /// bytes.
     pub const WIRE_LEN: usize = 17;
 
+    /// The canonical filler for an unused slot of a [`NetDnsServers`] list:
+    /// a [`NetAddrFamily::V4`] record with a zero address. It never appears
+    /// in a list's significant prefix (a `0.0.0.0` resolver is refused as
+    /// non-unicast), so it is unambiguously "no server here".
+    pub const UNSPECIFIED: Self = Self {
+        family: NetAddrFamily::V4,
+        addr: [0u8; 16],
+    };
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -2197,6 +2243,135 @@ impl NetResolverServer {
         let family = NetAddrFamily::from_u8(bytes[0])?;
         let addr = address(bytes, 1, family)?;
         Ok(Self { family, addr })
+    }
+}
+
+/// A bounded, front-packed list of statically configured recursive DNS
+/// servers carried by a [`NetInterfaceConfigMsg`] (`plans/DNS.md` DNS2).
+///
+/// The list is the `<iface>.dns.servers` `network.conf` key, delivered to
+/// `netstack` where it joins the interface's DHCP-learned servers in the
+/// host's active resolver set. It holds at most [`MAX_RESOLVER_SERVERS`]
+/// entries — the same bound the aggregated set uses, so a per-interface
+/// static list can never overflow it.
+///
+/// The significant entries occupy the first [`Self::len`] slots in order;
+/// the remainder are [`NetResolverServer::UNSPECIFIED`] filler and are
+/// never read. This is a `Copy` inline value (no allocation) so it lives
+/// directly in the fixed-width [`NetInterfaceConfigMsg`] frame.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetDnsServers {
+    /// Number of significant entries in [`servers`](Self::servers), at most
+    /// [`MAX_RESOLVER_SERVERS`].
+    count: u8,
+    /// The servers, front-packed: `servers[..count]` are significant, the
+    /// rest are [`NetResolverServer::UNSPECIFIED`].
+    servers: [NetResolverServer; MAX_RESOLVER_SERVERS],
+}
+
+impl Default for NetDnsServers {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl NetDnsServers {
+    /// Encoded size: the count byte followed by [`MAX_RESOLVER_SERVERS`]
+    /// fixed-width [`NetResolverServer`] records (unused ones zeroed).
+    pub const WIRE_LEN: usize = 1 + MAX_RESOLVER_SERVERS * NetResolverServer::WIRE_LEN;
+
+    /// The empty list (no statically configured servers).
+    pub const EMPTY: Self = Self {
+        count: 0,
+        servers: [NetResolverServer::UNSPECIFIED; MAX_RESOLVER_SERVERS],
+    };
+
+    /// Build a list from `servers`, preserving order.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `servers` holds more than
+    /// [`MAX_RESOLVER_SERVERS`] entries (fail closed).
+    pub fn from_servers(servers: &[NetResolverServer]) -> Result<Self, Errno> {
+        if servers.len() > MAX_RESOLVER_SERVERS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut out = Self::EMPTY;
+        for (slot, server) in out.servers.iter_mut().zip(servers) {
+            *slot = *server;
+        }
+        // `servers.len() <= MAX_RESOLVER_SERVERS` (4), checked above, so it
+        // fits a u8.
+        out.count = u8::try_from(servers.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(out)
+    }
+
+    /// The number of significant servers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        usize::from(self.count)
+    }
+
+    /// Whether the list is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The significant servers, in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[NetResolverServer] {
+        &self.servers[..self.len()]
+    }
+
+    /// Encode `self` little-endian: the count byte, then the significant
+    /// servers' records. Slots past the count are left all-zero (decode
+    /// requires exactly that, so no data can be smuggled in them).
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.count;
+        let mut cursor = 1;
+        for server in self.as_slice() {
+            out[cursor..cursor + NetResolverServer::WIRE_LEN]
+                .copy_from_slice(&server.to_le_bytes());
+            cursor += NetResolverServer::WIRE_LEN;
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed input.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the list.
+    /// * [`Errno::OutOfRange`] — a count above [`MAX_RESOLVER_SERVERS`].
+    /// * [`Errno::BadMagic`] — a slot past the count is not the zeroed
+    ///   [`NetResolverServer::UNSPECIFIED`] filler (smuggled data).
+    /// * A [`NetResolverServer`] decode error for a significant slot.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let count = bytes[0];
+        if usize::from(count) > MAX_RESOLVER_SERVERS {
+            return Err(Errno::OutOfRange);
+        }
+        let mut out = Self::EMPTY;
+        out.count = count;
+        let mut cursor = 1;
+        for index in 0..MAX_RESOLVER_SERVERS {
+            let record = &bytes[cursor..cursor + NetResolverServer::WIRE_LEN];
+            if index < usize::from(count) {
+                out.servers[index] = NetResolverServer::from_bytes(record)?;
+            } else if record.iter().any(|&b| b != 0) {
+                // An unused slot must be the zeroed filler; anything else is
+                // smuggled data.
+                return Err(Errno::BadMagic);
+            }
+            cursor += NetResolverServer::WIRE_LEN;
+        }
+        Ok(out)
     }
 }
 
@@ -2502,7 +2677,8 @@ mod tests {
     #[test]
     fn interface_config_messages_round_trip() {
         for msg in [
-            // Full dual-stack static config, matched by MAC.
+            // Full dual-stack static config, matched by MAC, with a mixed
+            // static DNS-server list.
             NetInterfaceConfigMsg {
                 alias: name("wan"),
                 match_mac: Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
@@ -2518,6 +2694,17 @@ mod tests {
                     gateway: Some([0xfe; 16]),
                 },
                 mtu: 1500,
+                dns: NetDnsServers::from_servers(&[
+                    NetResolverServer {
+                        family: NetAddrFamily::V4,
+                        addr: v4(9, 9, 9, 9),
+                    },
+                    NetResolverServer {
+                        family: NetAddrFamily::V6,
+                        addr: [0x26; 16],
+                    },
+                ])
+                .expect("two servers fit"),
             },
             // Disabled v4, SLAAC v6, no MAC selector, no MTU override.
             NetInterfaceConfigMsg {
@@ -2529,6 +2716,7 @@ mod tests {
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             // Static v4 with no gateway, disabled v6.
             NetInterfaceConfigMsg {
@@ -2542,6 +2730,7 @@ mod tests {
                 },
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 9000,
+                dns: NetDnsServers::EMPTY,
             },
             // DHCPv4 (no static address fields), SLAAC v6.
             NetInterfaceConfigMsg {
@@ -2551,6 +2740,7 @@ mod tests {
                 ipv4: NetIpv4Config::Dhcp,
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             // Disabled v4, DHCPv6 (no static address fields).
             NetInterfaceConfigMsg {
@@ -2560,12 +2750,85 @@ mod tests {
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Dhcp,
                 mtu: 1500,
+                dns: NetDnsServers::EMPTY,
             },
         ] {
             let bytes = msg.to_le_bytes();
             assert_eq!(NetInterfaceConfigMsg::from_bytes(&bytes), Ok(msg));
             msg.validate().expect("the sample configs are valid");
         }
+    }
+
+    #[test]
+    fn interface_config_dns_servers_round_trip_and_fail_closed() {
+        // A DNS list round-trips, validates, and surfaces its servers.
+        let dns = NetDnsServers::from_servers(&[
+            NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4(1, 1, 1, 1),
+            },
+            NetResolverServer {
+                family: NetAddrFamily::V6,
+                addr: [0x20; 16],
+            },
+        ])
+        .expect("two fit");
+        let msg = NetInterfaceConfigMsg {
+            alias: name("wan"),
+            match_mac: Some([0x52, 0x54, 0x00, 0x00, 0x00, 0x01]),
+            match_node: None,
+            ipv4: NetIpv4Config::Dhcp,
+            ipv6: NetIpv6Config::Slaac,
+            mtu: 0,
+            dns,
+        };
+        let bytes = msg.to_le_bytes();
+        let decoded = NetInterfaceConfigMsg::from_bytes(&bytes).expect("round-trips");
+        assert_eq!(decoded, msg);
+        assert_eq!(decoded.dns.len(), 2);
+        assert_eq!(decoded.dns.as_slice()[0].addr, v4(1, 1, 1, 1));
+        decoded.validate().expect("unicast servers are valid");
+
+        // A list bounded at MAX_RESOLVER_SERVERS: one more is refused.
+        let too_many = [NetResolverServer {
+            family: NetAddrFamily::V4,
+            addr: v4(1, 1, 1, 1),
+        }; MAX_RESOLVER_SERVERS + 1];
+        assert_eq!(
+            NetDnsServers::from_servers(&too_many),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A non-unicast server (multicast) fails validation, not decode.
+        let mc = NetInterfaceConfigMsg {
+            dns: NetDnsServers::from_servers(&[NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4(224, 0, 0, 1),
+            }])
+            .expect("one fits"),
+            ..msg
+        };
+        assert_eq!(mc.validate(), Err(Errno::OutOfRange));
+
+        // A smuggled record in a slot past the count fails closed.
+        let mut bad = msg.to_le_bytes();
+        // The count byte is at offset 88; slots follow. Dirty the third
+        // slot (index 2, past the count of 2).
+        let third = 88 + 1 + 2 * NetResolverServer::WIRE_LEN;
+        bad[third] = NetAddrFamily::V4.as_u8();
+        bad[third + 1] = 8;
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&bad),
+            Err(Errno::BadMagic)
+        );
+
+        // A count above the maximum fails closed.
+        let mut over = msg.to_le_bytes();
+        over[88] = u8::try_from(MAX_RESOLVER_SERVERS + 1).expect("fits u8");
+        assert_eq!(
+            NetInterfaceConfigMsg::from_bytes(&over),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -2579,6 +2842,7 @@ mod tests {
             ipv4: NetIpv4Config::Dhcp,
             ipv6: NetIpv6Config::Disabled,
             mtu: 0,
+            dns: NetDnsServers::EMPTY,
         }
         .to_le_bytes();
         assert_eq!(
@@ -2612,6 +2876,7 @@ mod tests {
             ipv4: NetIpv4Config::Disabled,
             ipv6: NetIpv6Config::Dhcp,
             mtu: 0,
+            dns: NetDnsServers::EMPTY,
         }
         .to_le_bytes();
         assert_eq!(
@@ -2659,6 +2924,7 @@ mod tests {
             },
             ipv6: NetIpv6Config::Slaac,
             mtu: 1500,
+            dns: NetDnsServers::EMPTY,
         }
         .to_le_bytes();
         // A short buffer.
@@ -2775,6 +3041,7 @@ mod tests {
                 },
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             }
             .validate(),
             Err(Errno::OutOfRange)
@@ -2792,6 +3059,7 @@ mod tests {
                 },
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             }
             .validate(),
             Err(Errno::OutOfRange)
@@ -2805,6 +3073,7 @@ mod tests {
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 500,
+                dns: NetDnsServers::EMPTY,
             }
             .validate(),
             Err(Errno::OutOfRange)
@@ -2827,6 +3096,7 @@ mod tests {
                     gateway: None,
                 },
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             }
             .validate(),
             Err(Errno::OutOfRange)

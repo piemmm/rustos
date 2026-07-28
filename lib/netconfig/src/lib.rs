@@ -52,7 +52,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use core::net::{Ipv4Addr, Ipv6Addr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The directory that holds the network-configuration store, inside the
 /// writable `/System/Settings` subtree of the encrypted root volume.
@@ -75,6 +75,14 @@ pub const MAX_INTERFACES: usize = 32;
 /// Maximum number of member NICs a single bond may enrol
 /// ([`ConfigError::TooManyMembers`] otherwise).
 pub const MAX_BOND_MEMBERS: usize = tairix_abi::net_ipc::NET_BOND_MAX_MEMBERS;
+
+/// Maximum number of recursive DNS servers a single interface may name in
+/// its `<iface>.dns.servers` list. This is the one definition of that
+/// bound, shared with the active-resolver-set ceiling the network stack
+/// aggregates into ([`tairix_abi::net_ipc::MAX_RESOLVER_SERVERS`]), so the
+/// per-interface static list and the host-wide set can never disagree. A
+/// longer list is refused ([`ConfigError::TooManyDnsServers`]).
+pub const MAX_DNS_SERVERS: usize = tairix_abi::net_ipc::MAX_RESOLVER_SERVERS;
 
 /// Maximum length, in bytes, of an interface alias name. Matches the
 /// familiar Unix `IFNAMSIZ - 1` bound; a longer name fails closed.
@@ -430,6 +438,9 @@ pub enum IfaceKey {
     Ipv6Address,
     /// `ipv6.gateway` — the IPv6 default gateway.
     Ipv6Gateway,
+    /// `dns.servers` — the comma-separated recursive DNS servers to use on
+    /// this interface (IPv4 and/or IPv6 addresses).
+    DnsServers,
     /// `mtu` — the interface MTU.
     Mtu,
     /// `bond.members` — the comma-separated member NIC aliases.
@@ -455,6 +466,7 @@ impl IfaceKey {
         Self::Ipv6Method,
         Self::Ipv6Address,
         Self::Ipv6Gateway,
+        Self::DnsServers,
         Self::Mtu,
         Self::BondMembers,
         Self::BondMode,
@@ -475,6 +487,7 @@ impl IfaceKey {
             Self::Ipv6Method => "ipv6.method",
             Self::Ipv6Address => "ipv6.address",
             Self::Ipv6Gateway => "ipv6.gateway",
+            Self::DnsServers => "dns.servers",
             Self::Mtu => "mtu",
             Self::BondMembers => "bond.members",
             Self::BondMode => "bond.mode",
@@ -511,6 +524,9 @@ pub enum ConfigError {
     TooManyInterfaces,
     /// A bond enrols more than [`MAX_BOND_MEMBERS`] members.
     TooManyMembers,
+    /// An interface's `dns.servers` list names more than
+    /// [`MAX_DNS_SERVERS`] servers.
+    TooManyDnsServers,
     /// An interface alias name is empty, over-long, or malformed.
     InvalidInterfaceName,
     /// A line has no `<iface>.<suffix>` shape, or names a suffix outside
@@ -536,6 +552,7 @@ impl fmt::Display for ConfigError {
             Self::TooLong => "configuration exceeds the maximum length",
             Self::TooManyInterfaces => "configuration declares too many interfaces",
             Self::TooManyMembers => "a bond enrols too many members",
+            Self::TooManyDnsServers => "an interface names too many DNS servers",
             Self::InvalidInterfaceName => "an interface name is empty, too long, or malformed",
             Self::UnknownKey => "configuration names an unknown key",
             Self::MissingValue => "a configuration key is missing its value",
@@ -620,6 +637,11 @@ pub struct InterfaceConfig {
     pub ipv6_address: Option<Ipv6Cidr>,
     /// `<iface>.ipv6.gateway`.
     pub ipv6_gateway: Option<Ipv6Addr>,
+    /// `<iface>.dns.servers` — the recursive DNS servers to use on this
+    /// interface, in declared order (each an IPv4 or IPv6 address). These
+    /// join the DHCP-learned servers in the host's active resolver set
+    /// (`plans/DNS.md`).
+    pub dns_servers: Option<Vec<IpAddr>>,
     /// `<iface>.mtu`.
     pub mtu: Option<u16>,
     /// `<iface>.bond.members` (order preserved as written).
@@ -675,6 +697,12 @@ impl InterfaceConfig {
         self.bond_members.as_deref().unwrap_or(&[])
     }
 
+    /// The statically configured recursive DNS servers (empty when unset).
+    #[must_use]
+    pub fn dns_servers(&self) -> &[IpAddr] {
+        self.dns_servers.as_deref().unwrap_or(&[])
+    }
+
     /// Whether any addressing key was explicitly set on this interface. A
     /// bond member relies on the implicit defaults (which the owning bond
     /// overrides), so it may set none of these.
@@ -686,6 +714,7 @@ impl InterfaceConfig {
             || self.ipv6_method.is_some()
             || self.ipv6_address.is_some()
             || self.ipv6_gateway.is_some()
+            || self.dns_servers.is_some()
     }
 
     /// The canonical rendered value of `key` on this interface, or `None`
@@ -702,6 +731,7 @@ impl InterfaceConfig {
             IfaceKey::Ipv6Method => String::from(self.ipv6_method?.as_str()),
             IfaceKey::Ipv6Address => self.ipv6_address?.render(),
             IfaceKey::Ipv6Gateway => render_display(&self.ipv6_gateway?),
+            IfaceKey::DnsServers => render_dns_servers(self.dns_servers.as_ref()?),
             IfaceKey::Mtu => render_display(&self.mtu?),
             IfaceKey::BondMembers => self.bond_members.as_ref()?.join(","),
             IfaceKey::BondMode => String::from(self.bond_mode?.as_str()),
@@ -749,6 +779,9 @@ impl InterfaceConfig {
             }
             IfaceKey::Ipv6Gateway => {
                 self.ipv6_gateway = Some(value.parse().map_err(|_| ConfigError::InvalidValue)?);
+            }
+            IfaceKey::DnsServers => {
+                self.dns_servers = Some(parse_dns_servers(value)?);
             }
             IfaceKey::Mtu => {
                 let mtu = parse_bounded_u32(value, u32::from(MIN_MTU), u32::from(MAX_MTU))?;
@@ -875,6 +908,67 @@ fn parse_member_list(value: &str) -> Result<Vec<String>, ConfigError> {
         members.push(String::from(segment));
     }
     Ok(members)
+}
+
+/// Parse a `,`-separated recursive-DNS-server list into validated, distinct
+/// unicast addresses (IPv4 and/or IPv6), preserving declaration order.
+///
+/// A recursive resolver is a specific host, so each entry must be a genuine
+/// unicast address: the unspecified address, any multicast group, and the
+/// IPv4 limited broadcast are refused (a resolver could never live there).
+/// The loopback address is allowed — a local resolver at `127.0.0.1` / `::1`
+/// is legitimate.
+///
+/// # Errors
+///
+/// [`ConfigError::TooManyDnsServers`] above [`MAX_DNS_SERVERS`], and
+/// [`ConfigError::InvalidValue`] for an empty segment, a malformed or
+/// non-unicast address, or a duplicate.
+fn parse_dns_servers(value: &str) -> Result<Vec<IpAddr>, ConfigError> {
+    let mut servers: Vec<IpAddr> = Vec::new();
+    for segment in value.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return Err(ConfigError::InvalidValue);
+        }
+        let addr: IpAddr = segment.parse().map_err(|_| ConfigError::InvalidValue)?;
+        if !is_unicast_resolver(addr) {
+            return Err(ConfigError::InvalidValue);
+        }
+        if servers.contains(&addr) {
+            return Err(ConfigError::InvalidValue);
+        }
+        if servers.len() == MAX_DNS_SERVERS {
+            return Err(ConfigError::TooManyDnsServers);
+        }
+        servers.push(addr);
+    }
+    Ok(servers)
+}
+
+/// Whether `addr` is a plausible recursive-resolver address: a unicast host
+/// address, not the unspecified address, a multicast group, or the IPv4
+/// limited broadcast. Loopback is permitted (a local resolver).
+fn is_unicast_resolver(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(a) => !(a.is_unspecified() || a.is_multicast() || a.is_broadcast()),
+        IpAddr::V6(a) => !(a.is_unspecified() || a.is_multicast()),
+    }
+}
+
+/// Render a DNS-server list as its canonical `,`-joined spelling (each
+/// address in its `core::net` canonical form), the exact form
+/// [`parse_dns_servers`] round-trips.
+fn render_dns_servers(servers: &[IpAddr]) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    for (index, addr) in servers.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{addr}");
+    }
+    out
 }
 
 /// A parsed, validated network configuration: the ordered set of managed
@@ -1534,6 +1628,93 @@ outer.bond.members inner,eth0
         let rendered = config.render();
         assert!(rendered.contains("wan.ipv6.method dhcp"));
         assert_eq!(NetworkConfig::parse(&rendered).expect("re-parses"), config);
+    }
+
+    #[test]
+    fn dns_servers_parse_render_round_trip_a_mixed_list() {
+        let text = "wan.dns.servers 9.9.9.9,2606:4700:4700::1111,127.0.0.1\n";
+        let config = NetworkConfig::parse(text).expect("parses");
+        let wan = config.interface("wan").expect("wan");
+        assert_eq!(
+            wan.dns_servers(),
+            &[
+                IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+                IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ]
+        );
+        // Round-trips exactly (canonical spelling, declaration order kept).
+        let rendered = config.render();
+        assert!(rendered.contains("wan.dns.servers 9.9.9.9,2606:4700:4700::1111,127.0.0.1"));
+        assert_eq!(NetworkConfig::parse(&rendered).expect("re-parses"), config);
+    }
+
+    #[test]
+    fn dns_servers_tolerate_whitespace_between_entries() {
+        let config = NetworkConfig::parse("wan.dns.servers 1.1.1.1, 8.8.8.8\n").expect("parses");
+        assert_eq!(
+            config.interface("wan").expect("wan").dns_servers(),
+            &[
+                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_servers_fail_closed_on_bad_or_non_unicast_or_duplicate_entries() {
+        // A malformed address, an empty segment, and a duplicate all fail.
+        assert_eq!(
+            err("wan.dns.servers not-an-ip\n"),
+            ConfigError::InvalidValue
+        );
+        assert_eq!(err("wan.dns.servers 1.1.1.1,\n"), ConfigError::InvalidValue);
+        assert_eq!(
+            err("wan.dns.servers 1.1.1.1,1.1.1.1\n"),
+            ConfigError::InvalidValue
+        );
+        // Non-unicast resolver addresses are refused: unspecified, multicast,
+        // and the IPv4 limited broadcast (a resolver could never live there).
+        assert_eq!(err("wan.dns.servers 0.0.0.0\n"), ConfigError::InvalidValue);
+        assert_eq!(
+            err("wan.dns.servers 224.0.0.1\n"),
+            ConfigError::InvalidValue
+        );
+        assert_eq!(
+            err("wan.dns.servers 255.255.255.255\n"),
+            ConfigError::InvalidValue
+        );
+        assert_eq!(err("wan.dns.servers ::\n"), ConfigError::InvalidValue);
+        assert_eq!(err("wan.dns.servers ff02::1\n"), ConfigError::InvalidValue);
+    }
+
+    #[test]
+    fn too_many_dns_servers_fails_closed() {
+        // One past MAX_DNS_SERVERS distinct servers is refused.
+        use core::fmt::Write as _;
+        let mut value = String::new();
+        for index in 0..=MAX_DNS_SERVERS {
+            if index != 0 {
+                value.push(',');
+            }
+            let _ = write!(value, "10.0.0.{index}");
+        }
+        let text = format!("wan.dns.servers {value}\n");
+        assert_eq!(err(&text), ConfigError::TooManyDnsServers);
+    }
+
+    #[test]
+    fn a_bond_member_may_not_carry_dns_servers() {
+        // DNS servers are addressing the bond owns, so a member carrying
+        // them is inconsistent (like a member carrying an address).
+        let text = "\
+eth0.match.mac 52:54:00:00:00:01
+eth0.dns.servers 1.1.1.1
+eth1.match.mac 52:54:00:00:00:02
+bond0.kind bond
+bond0.bond.members eth0,eth1
+";
+        assert_eq!(err(text), ConfigError::InconsistentInterface);
     }
 
     #[test]

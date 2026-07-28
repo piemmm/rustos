@@ -114,10 +114,11 @@ way — TAIRiX's equivalent of reading `/etc/resolv.conf`:
   the host will query (V4 as dotted-quad, V6 in RFC 5952 form, in the
   stack's order), or `none` when it has learned none.
 
-The set is the DHCP-learned servers (DHCPv4 option 6, DHCPv6 option 23),
-aggregated across every managed interface, deduplicated, and — once the
-static `network.conf` key lands — unioned with any statically configured
-servers. Unlike the socket, counter, and bond reads above, this is **not**
+The set is each managed interface's statically configured servers
+(`<iface>.dns.servers`) followed by its DHCP-learned servers (DHCPv4
+option 6, DHCPv6 option 23), aggregated across every interface,
+deduplicated, and bounded — static servers rank first as the operator's
+explicit choice. Unlike the socket, counter, and bond reads above, this is **not**
 privileged: the recursive-server list is public host configuration and
 exposes no per-principal secret, so the `NET_RESOLVER_SERVERS` query is
 ungated (no capability, no audit). It resolves through the same
@@ -135,7 +136,9 @@ addressing (`<iface>.ipv4.method static|dhcp|disabled` — `static` with
 `ipv4.address`/`ipv4.gateway`, `dhcp` leasing them over RFC 2131 DHCPv4;
 `<iface>.ipv6.method slaac|static|dhcp|disabled` — `static` with
 `ipv6.address`/`ipv6.gateway`, `dhcp` leasing an address over RFC 8415
-stateful DHCPv6) and an optional `<iface>.mtu`.
+stateful DHCPv6), an optional comma-separated `<iface>.dns.servers` list of
+recursive DNS servers (which join the interface's DHCP-learned servers in the
+active resolver set), and an optional `<iface>.mtu`.
 
 ```
 wan.match.mac    52:54:00:12:34:56

@@ -5,9 +5,9 @@ Stability tier: **experimental**.
 The network interface-configuration store engine: the one definition of the
 `/System/Settings/Network/network.conf` document — its per-interface
 `<iface>.<key>` line grammar, the closed key registry (`kind`, `match.mac` /
-`match.node`, `ipv4.*` / `ipv6.*`, `mtu`, and the `bond.*` aggregation keys),
-each key's typed value set, the bounded fail-closed parser, and the canonical
-render.
+`match.node`, `ipv4.*` / `ipv6.*`, `dns.servers`, `mtu`, and the `bond.*`
+aggregation keys), each key's typed value set, the bounded fail-closed parser,
+and the canonical render.
 
 The `configure` command app and the installer write the store through this
 engine; the one reader — the `netstack` service, at start and on a typed

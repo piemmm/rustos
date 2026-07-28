@@ -14,9 +14,9 @@ use tairix_abi::net::{
 };
 use tairix_abi::net_ipc::{
     decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode,
-    NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
-    NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
+    NetDnsServers, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
+    NetIpv6Config, NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
     NetworkSettings, IF_NAME_LEN, NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
 };
 use tairix_abi::reply::decode_status_reply;
@@ -2421,6 +2421,52 @@ fn resolver_servers_is_a_broker_read_and_frames_a_page() {
     );
 }
 
+#[test]
+fn statically_configured_dns_servers_join_the_resolver_set() {
+    // Applying an interface config with a static DNS list surfaces those
+    // servers, in order, in the active resolver set.
+    let mut ns = managed_stack();
+    let dns = NetDnsServers::from_servers(&[
+        NetResolverServer {
+            family: NetAddrFamily::V4,
+            addr: {
+                let mut a = [0u8; 16];
+                a[..4].copy_from_slice(&[9, 9, 9, 9]);
+                a
+            },
+        },
+        NetResolverServer {
+            family: NetAddrFamily::V6,
+            addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets(),
+        },
+    ])
+    .expect("two fit");
+    let msg = NetInterfaceConfigMsg {
+        alias: name("wan"),
+        match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+        dns,
+    };
+    ns.apply_interface_config(&msg, t(2)).expect("applied");
+    let servers = ns.resolver_servers();
+    assert_eq!(servers.len(), 2);
+    assert_eq!(servers[0].family, NetAddrFamily::V4);
+    assert_eq!(&servers[0].addr[..4], &[9, 9, 9, 9]);
+    assert_eq!(servers[1].family, NetAddrFamily::V6);
+
+    // Re-applying with no DNS list clears the static servers (the last
+    // delivered list wins), so the set empties (no DHCP lease here).
+    let cleared = NetInterfaceConfigMsg {
+        dns: NetDnsServers::EMPTY,
+        ..msg
+    };
+    ns.apply_interface_config(&cleared, t(3)).expect("applied");
+    assert!(ns.resolver_servers().is_empty());
+}
+
 // --- N9b-2: net.* settings delivery + enforcement -------------------
 
 #[test]
@@ -2607,6 +2653,7 @@ fn interface_config_matches_by_mac_and_renames() {
         },
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&msg, t(2)).expect("applied");
     // The MAC-matched interface was renamed to the admin alias.
@@ -2646,6 +2693,7 @@ fn interface_config_matches_by_hardware_node_and_renames() {
         },
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&msg, t(1)).expect("applied");
     assert!(stack.interface(name("net0")).is_none());
@@ -2663,6 +2711,7 @@ fn interface_config_matches_by_hardware_node_and_renames() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     assert_eq!(
         stack.apply_interface_config(&miss, t(1)),
@@ -2684,6 +2733,7 @@ fn interface_config_applies_by_alias_and_overrides_mtu() {
         },
         ipv6: NetIpv6Config::Slaac,
         mtu: 9000,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&msg, t(2)).expect("applied");
     let iface = stack.interface(name("wan")).expect("still wan");
@@ -2704,6 +2754,7 @@ fn interface_config_dhcp_starts_and_stops_the_client() {
         ipv4: NetIpv4Config::Dhcp,
         ipv6: NetIpv6Config::Disabled,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&dhcp, t(1)).expect("applied");
     {
@@ -2732,6 +2783,7 @@ fn interface_config_dhcp_starts_and_stops_the_client() {
         },
         ipv6: NetIpv6Config::Disabled,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack
         .apply_interface_config(&static_cfg, t(3))
@@ -2756,6 +2808,7 @@ fn interface_config_dhcp6_starts_and_stops_the_client() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Dhcp,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&dhcp6, t(1)).expect("applied");
     assert!(
@@ -2783,6 +2836,7 @@ fn interface_config_dhcp6_starts_and_stops_the_client() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack
         .apply_interface_config(&slaac, t(3))
@@ -2812,6 +2866,7 @@ fn interface_config_assigns_a_static_ipv6_address() {
             gateway: None,
         },
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&msg, t(2)).expect("applied");
     let has_addr = stack
@@ -2850,6 +2905,7 @@ fn interface_config_reports_the_rename_it_performs() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Disabled,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     // The first apply renames the MAC-matched `net0` to its admin alias.
     let renamed = stack.apply_interface_config(&msg, t(2)).expect("applied");
@@ -2877,6 +2933,7 @@ fn interface_config_disables_both_families() {
                 },
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             t(2),
         )
@@ -2890,6 +2947,7 @@ fn interface_config_disables_both_families() {
                 ipv4: NetIpv4Config::Disabled,
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             t(3),
         )
@@ -2909,6 +2967,7 @@ fn interface_config_not_found_for_an_unknown_mac() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     assert_eq!(
         stack.apply_interface_config(&msg, t(2)),
@@ -2933,6 +2992,7 @@ fn interface_config_leaves_state_untouched_on_a_refusal() {
                 },
                 ipv6: NetIpv6Config::Slaac,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             t(2),
         )
@@ -2950,6 +3010,7 @@ fn interface_config_leaves_state_untouched_on_a_refusal() {
         },
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     assert_eq!(
         stack.apply_interface_config(&bad, t(3)),
@@ -2986,6 +3047,7 @@ fn interface_config_is_idempotent() {
             gateway: None,
         },
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     stack.apply_interface_config(&msg, t(2)).expect("first");
     stack
@@ -3036,6 +3098,7 @@ fn interface_config_rejects_an_alias_already_taken() {
         ipv4: NetIpv4Config::Disabled,
         ipv6: NetIpv6Config::Slaac,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     assert_eq!(
         stack.apply_interface_config(&msg, t(1)),
@@ -3168,6 +3231,7 @@ fn two_member_bond() -> Netstack {
                 },
                 ipv6: NetIpv6Config::Disabled,
                 mtu: 0,
+                dns: NetDnsServers::EMPTY,
             },
             t(0),
         )
@@ -3302,6 +3366,7 @@ fn a_bond_member_refuses_direct_addressing() {
         },
         ipv6: NetIpv6Config::Disabled,
         mtu: 0,
+        dns: NetDnsServers::EMPTY,
     };
     assert_eq!(
         stack.apply_interface_config(&msg, t(3)),

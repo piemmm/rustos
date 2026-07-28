@@ -252,6 +252,10 @@ pub fn interface_configs_from_config(
                     plan.rejected.push(alias);
                     continue;
                 };
+                let Some(dns) = dns_of(iface) else {
+                    plan.rejected.push(alias);
+                    continue;
+                };
                 plan.bonds.push(bond);
                 plan.messages.push(NetInterfaceConfigMsg {
                     alias,
@@ -260,6 +264,7 @@ pub fn interface_configs_from_config(
                     ipv4,
                     ipv6,
                     mtu: iface.mtu.unwrap_or(0),
+                    dns,
                 });
             }
             IfaceKind::Ethernet => {
@@ -277,7 +282,8 @@ pub fn interface_configs_from_config(
                 }
                 if members.contains(iface.name.as_str()) {
                     // A bond member: rename the NIC to the member alias with
-                    // no addressing (the bond owns the addresses).
+                    // no addressing (the bond owns the addresses and its
+                    // own DNS servers; `netconfig` forbids a member DNS key).
                     plan.messages.push(NetInterfaceConfigMsg {
                         alias,
                         match_mac,
@@ -285,10 +291,15 @@ pub fn interface_configs_from_config(
                         ipv4: tairix_abi::net_ipc::NetIpv4Config::Disabled,
                         ipv6: tairix_abi::net_ipc::NetIpv6Config::Disabled,
                         mtu: iface.mtu.unwrap_or(0),
+                        dns: tairix_abi::net_ipc::NetDnsServers::EMPTY,
                     });
                     continue;
                 }
                 let Some((ipv4, ipv6)) = addressing_of(iface) else {
+                    plan.rejected.push(alias);
+                    continue;
+                };
+                let Some(dns) = dns_of(iface) else {
                     plan.rejected.push(alias);
                     continue;
                 };
@@ -299,6 +310,7 @@ pub fn interface_configs_from_config(
                     ipv4,
                     ipv6,
                     mtu: iface.mtu.unwrap_or(0),
+                    dns,
                 });
             }
         }
@@ -343,6 +355,44 @@ fn addressing_of(
         Ipv6Method::Dhcp => tairix_abi::net_ipc::NetIpv6Config::Dhcp,
     };
     Some((ipv4, ipv6))
+}
+
+/// Map an interface's `<iface>.dns.servers` list onto the ABI
+/// [`NetDnsServers`](tairix_abi::net_ipc::NetDnsServers), or [`None`] when
+/// the list is somehow larger than the wire bound (`netconfig` enforces the
+/// same [`MAX_DNS_SERVERS`](tairix_netconfig::MAX_DNS_SERVERS) bound, so this
+/// only trips on a corrupt in-memory config — the caller refuses it, fail
+/// closed). An interface with no static servers yields the empty list.
+#[cfg(feature = "program")]
+fn dns_of(iface: &tairix_netconfig::InterfaceConfig) -> Option<tairix_abi::net_ipc::NetDnsServers> {
+    let records: Vec<tairix_abi::net_ipc::NetResolverServer> = iface
+        .dns_servers()
+        .iter()
+        .map(|addr| dns_record_of(*addr))
+        .collect();
+    tairix_abi::net_ipc::NetDnsServers::from_servers(&records).ok()
+}
+
+/// Project a configured [`IpAddr`](core::net::IpAddr) onto the ABI
+/// [`NetResolverServer`](tairix_abi::net_ipc::NetResolverServer) wire shape
+/// (family plus sixteen address bytes; a V4 server uses the first four).
+#[cfg(feature = "program")]
+fn dns_record_of(addr: core::net::IpAddr) -> tairix_abi::net_ipc::NetResolverServer {
+    use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer};
+    match addr {
+        core::net::IpAddr::V4(a) => {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&a.octets());
+            NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: bytes,
+            }
+        }
+        core::net::IpAddr::V6(a) => NetResolverServer {
+            family: NetAddrFamily::V6,
+            addr: a.octets(),
+        },
+    }
 }
 
 /// Map a bond interface's `bond.*` keys onto a [`NetBondConfigMsg`], or
@@ -836,6 +886,7 @@ mod tests {
             ipv4: tairix_abi::net_ipc::NetIpv4Config::Disabled,
             ipv6: tairix_abi::net_ipc::NetIpv6Config::Slaac,
             mtu: 0,
+            dns: tairix_abi::net_ipc::NetDnsServers::EMPTY,
         }
     }
 
@@ -1023,6 +1074,37 @@ wan.ipv6.method dhcp
             .find(|m| m.alias == iface_name("wan"))
             .expect("wan");
         assert!(matches!(wan.ipv6, tairix_abi::net_ipc::NetIpv6Config::Dhcp));
+        assert!(plan.rejected.is_empty());
+    }
+
+    #[cfg(feature = "program")]
+    #[test]
+    fn static_dns_servers_map_onto_the_interface_config() {
+        use tairix_abi::net_ipc::NetAddrFamily;
+        // A `wan` interface names a mixed static DNS-server list; the
+        // delivered message carries both servers, in order.
+        let text = "\
+wan.match.mac aa:bb:cc:dd:ee:ff
+wan.ipv4.method dhcp
+wan.dns.servers 9.9.9.9,2606:4700:4700::1111
+";
+        let config = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
+        let plan = interface_configs_from_config(&config);
+        let wan = plan
+            .messages
+            .iter()
+            .find(|m| m.alias == iface_name("wan"))
+            .expect("wan");
+        let servers = wan.dns.as_slice();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].family, NetAddrFamily::V4);
+        assert_eq!(&servers[0].addr[..4], &[9, 9, 9, 9]);
+        assert_eq!(servers[1].family, NetAddrFamily::V6);
+        // Round-trips through the wire codec unchanged.
+        assert_eq!(
+            tairix_abi::net_ipc::NetInterfaceConfigMsg::from_bytes(&wan.to_le_bytes()),
+            Ok(*wan)
+        );
         assert!(plan.rejected.is_empty());
     }
 
