@@ -28,8 +28,14 @@
 //! the charter forbids flaky tests and forbids retries. The runner
 //! therefore:
 //!
-//! * Enforces a hard wall-clock deadline supplied by the caller. A test that
-//!   does not signal completion before the deadline is `Outcome::Timeout`,
+//! * Enforces an *inactivity* deadline supplied by the caller: a guest is
+//!   declared hung only once it produces no new serial output for the whole
+//!   budget. This is deliberately **not** a total-runtime deadline — every
+//!   line the guest prints resets it — so a guest that is merely slow (heavily
+//!   co-scheduled, or on a slow host core) is never killed while it keeps
+//!   making progress. That immunity to host load is what lets the matrix run
+//!   many guests at once without a slow one degrading into a flaky timeout. A
+//!   guest that genuinely falls silent for the budget is `Outcome::Timeout`,
 //!   which the runner converts into a failure — never into a retry.
 //! * Kills (`SIGKILL`) the QEMU child if the deadline is hit so a wedged VM
 //!   cannot block subsequent tests.
@@ -105,9 +111,11 @@ pub enum Outcome {
         /// Captured QEMU stdout (serial-over-stdio), best-effort.
         serial: String,
     },
-    /// The runner's deadline expired before QEMU exited; QEMU was killed.
+    /// The guest produced no new serial output for the whole inactivity
+    /// budget before exiting; it was treated as hung and QEMU was killed.
     Timeout {
-        /// Wall-clock budget the test was given.
+        /// No-progress (inactivity) budget the test was given: the longest
+        /// the guest may fall silent before it is declared hung.
         budget: Duration,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
@@ -507,7 +515,11 @@ pub struct Spec {
     pub kernel: PathBuf,
     /// Number of emulated CPUs (`-smp`). Must be `>= 1`.
     pub cpus: u32,
-    /// Hard wall-clock deadline. The runner kills QEMU if this elapses.
+    /// Inactivity (no-progress) budget: the longest the guest may produce no
+    /// new serial output before the runner treats it as hung and kills QEMU.
+    /// It is *not* a total-runtime deadline — every line the guest prints
+    /// resets it — so a guest that is merely slow (co-scheduled, or on a slow
+    /// host core) is never killed while it keeps making progress.
     pub timeout: Duration,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
@@ -593,8 +605,8 @@ pub enum SessionKind {
 
 impl Spec {
     /// Minimal x86_64 UEFI-boot spec suitable for a Stage-2 QEMU integration
-    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM and
-    /// firmware come from the [`x86_64`] module.
+    /// test. Defaults: single CPU, 60 s inactivity budget. The default guest
+    /// RAM and firmware come from the [`x86_64`] module.
     #[must_use]
     pub fn for_x86_64_kernel(kernel: impl Into<PathBuf>) -> Self {
         Self {
@@ -625,7 +637,7 @@ impl Spec {
         self
     }
 
-    /// Override the timeout.
+    /// Override the inactivity (no-progress) budget.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -633,8 +645,8 @@ impl Spec {
     }
 
     /// Minimal riscv64 `virt`-board spec suitable for a QEMU integration
-    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM
-    /// and firmware come from the [`riscv64`] module.
+    /// test. Defaults: single CPU, 60 s inactivity budget. The default guest
+    /// RAM and firmware come from the [`riscv64`] module.
     #[must_use]
     pub fn for_riscv64_kernel(kernel: impl Into<PathBuf>) -> Self {
         Self {
@@ -658,8 +670,8 @@ impl Spec {
     }
 
     /// Minimal aarch64 `virt`-board spec suitable for a QEMU integration
-    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM,
-    /// CPU model, and result protocol come from the [`aarch64`] module.
+    /// test. Defaults: single CPU, 60 s inactivity budget. The default guest
+    /// RAM, CPU model, and result protocol come from the [`aarch64`] module.
     #[must_use]
     pub fn for_aarch64_kernel(kernel: impl Into<PathBuf>) -> Self {
         Self {
@@ -1080,7 +1092,8 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
 
 /// Supervise a spawned QEMU child to completion: drain its serial output
 /// on a background thread, inject a key once the guest signals readiness
-/// (if requested), enforce the deadline, and assemble the [`Outcome`].
+/// (if requested), enforce the inactivity deadline, and assemble the
+/// [`Outcome`].
 ///
 /// Split out of [`Runner::run`] so the spawn-and-validate path and the
 /// wait loop each stay within one screen.
@@ -1089,7 +1102,17 @@ fn supervise(
     spec: &Spec,
     monitor: Option<&MonitorSocket>,
 ) -> io::Result<Outcome> {
-    let deadline = Instant::now() + spec.timeout;
+    // The guest is supervised on an *inactivity* deadline, not an absolute
+    // one: it is declared hung only once `spec.timeout` elapses with no new
+    // serial output. A guest that is merely running slowly — co-scheduled with
+    // the rest of the matrix, or landed on a slow host core — keeps emitting
+    // boot and progress output, so its heartbeat keeps resetting and it is
+    // never killed for being slow. That is what makes the budget immune to
+    // host load, and in turn lets the matrix run guests concurrently up to the
+    // host core count without a slow guest degrading into a flaky timeout. A
+    // genuinely stalled guest still produces nothing for `spec.timeout` and is
+    // killed, with no retry.
+    let mut heartbeat = ProgressClock::new(Instant::now());
 
     let SerialDrain {
         captured,
@@ -1182,7 +1205,16 @@ fn supervise(
                 serial_script.step
             ));
         }
-        if Instant::now() >= deadline {
+        // Any new serial output is forward progress: reset the heartbeat so a
+        // guest that is alive but slow is never mistaken for a hung one. The
+        // captured log only ever grows, so its length is a cheap, monotonic
+        // progress signal.
+        let serial_len = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        heartbeat.observe(serial_len, Instant::now());
+        if heartbeat.idle_for(Instant::now()) >= spec.timeout {
             // Strict, no-retry kill. `wait` afterwards is best
             // effort so we don't leave a zombie behind.
             let _ = child.kill();
@@ -1214,6 +1246,51 @@ fn supervise(
         .clone();
     append_stderr(&mut serial, &captured_err);
     Ok(outcome_from_done(done, spec, serial))
+}
+
+/// Inactivity heartbeat for the supervision loop.
+///
+/// Tracks the high-water mark of the guest's captured serial length and the
+/// instant it last grew. Because the guest's serial log only ever grows, its
+/// length is a cheap monotonic proxy for "the guest is doing something": every
+/// increase resets the heartbeat. [`idle_for`](Self::idle_for) then reports how
+/// long the guest has produced nothing, which the loop compares against
+/// `spec.timeout`. This makes the deadline a *no-progress* ceiling rather than
+/// a total-runtime one, so a guest that is merely slow (co-scheduled, or on a
+/// slow host core) is never killed while it keeps emitting output.
+struct ProgressClock {
+    /// Largest captured serial length observed so far.
+    seen_len: usize,
+    /// Instant the captured length last increased (the last sign of life).
+    last_progress: Instant,
+}
+
+impl ProgressClock {
+    /// Start the heartbeat at `now` with no output yet observed.
+    fn new(now: Instant) -> Self {
+        Self {
+            seen_len: 0,
+            last_progress: now,
+        }
+    }
+
+    /// Record the current captured serial length. Returns `true` and resets
+    /// the heartbeat to `now` when the length grew (the guest made progress);
+    /// returns `false` and leaves the heartbeat untouched otherwise.
+    fn observe(&mut self, len: usize, now: Instant) -> bool {
+        if len > self.seen_len {
+            self.seen_len = len;
+            self.last_progress = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// How long the guest has produced no new serial output as of `now`.
+    fn idle_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_progress)
+    }
 }
 
 /// Convert the completed supervision reason and captured output into the
@@ -2086,6 +2163,44 @@ mod tests {
     fn spec_with_timeout_overrides_the_default() {
         let s = Spec::for_x86_64_kernel("/tmp/k").with_timeout(Duration::from_secs(7));
         assert_eq!(s.timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn progress_clock_resets_the_heartbeat_only_when_output_grows() {
+        let start = Instant::now();
+        let mut clock = ProgressClock::new(start);
+        // Growth is progress: the heartbeat moves to the observation instant.
+        assert!(clock.observe(10, start + Duration::from_secs(1)));
+        assert_eq!(
+            clock.idle_for(start + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        // No growth (equal or shorter) is not progress and never moves it.
+        assert!(!clock.observe(10, start + Duration::from_secs(2)));
+        assert!(!clock.observe(3, start + Duration::from_secs(3)));
+        // Idle is measured from the last growth, not the last observation.
+        assert_eq!(
+            clock.idle_for(start + Duration::from_secs(4)),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn progress_clock_idle_only_reaches_the_budget_after_real_silence() {
+        let start = Instant::now();
+        let budget = Duration::from_secs(60);
+        let mut clock = ProgressClock::new(start);
+        // A guest that keeps emitting output, however slowly, never lets the
+        // idle time reach the budget — this is what makes a slow guest safe
+        // to co-schedule without a flaky timeout.
+        let mut now = start;
+        for _ in 0..100 {
+            now += Duration::from_secs(30);
+            assert!(clock.observe(clock.seen_len + 1, now));
+            assert!(clock.idle_for(now) < budget);
+        }
+        // Once the output truly stops, the idle time crosses the budget.
+        assert!(clock.idle_for(now + budget) >= budget);
     }
 
     #[test]

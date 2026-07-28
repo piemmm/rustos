@@ -11,11 +11,17 @@
 //! runner ([`super::parallel`]): each enrolment is independent (its own
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
-//! runner charges one-vCPU guests for the vCPU plus emulator/I/O work against
-//! one sixth of the host's effective logical capacity. SMP TCG guests reserve
-//! that complete budget and therefore run alone: their synchronising vCPUs must
-//! make simultaneous host progress and cannot safely share a wall-clock budget
-//! with other CPU-bound emulators. See [`run_once`].
+//! runner charges a uniprocessor guest two units (its vCPU plus emulator/I/O
+//! work) and an SMP guest the whole budget — so an SMP guest runs alone,
+//! because a co-scheduled SMP guest starves so badly it trips its own in-guest
+//! lockup watchdog. The budget is one third of the host's logical CPUs:
+//! deliberate headroom (a QEMU guest is far heavier than its lone vCPU thread,
+//! and each guest runs its own real-time watchdogs) so guests are never
+//! oversubscribed into missing their internal deadlines. Within that budget a
+//! few uniprocessor guests overlap; each guest's deadline is itself an
+//! *inactivity* budget, not a total-runtime one ([`tairix_qemu`]), so a guest
+//! that runs a little slower co-scheduled keeps emitting serial output and is
+//! never mistaken for a hung one. See [`run_once`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,7 +47,10 @@ struct QemuTest {
     target: &'static str,
     /// Number of emulated CPUs.
     cpus: u32,
-    /// Hard wall-clock budget.
+    /// Inactivity (no-progress) budget: the longest the guest may fall silent
+    /// on the serial console before the runner treats it as hung. Not a
+    /// total-runtime deadline, so it is immune to how heavily the matrix is
+    /// co-scheduled.
     timeout: Duration,
     /// When `Some(n)`, attach an `n`-sector raw virtio-blk backing
     /// image whose sector 0 carries the deterministic pattern
@@ -5989,11 +5998,15 @@ fn build_targets() -> Vec<&'static str> {
 
 /// Host-capacity weight for one QEMU guest within `host_budget`.
 ///
-/// A uniprocessor guest consumes its vCPU plus one unit for QEMU's emulator/I/O
-/// work. An SMP TCG guest consumes the entire budget and therefore runs alone:
-/// its mutually synchronising vCPU threads need simultaneous host progress,
-/// and co-scheduling it with other CPU-bound emulators can starve the whole
-/// guest even when the aggregate thread count fits the nominal host capacity.
+/// A uniprocessor guest charges two units — its vCPU plus one for QEMU's
+/// emulator/main-loop/I/O threads. An SMP TCG guest charges the entire budget
+/// and therefore runs alone: its mutually synchronising vCPU threads need
+/// simultaneous host progress, and a full-boot SMP guest co-scheduled with a
+/// busy matrix starves so badly it trips its *own* in-guest lockup watchdog
+/// (observed: the four-vCPU scheduler-stress guest hard-locked when the whole
+/// matrix ran at once). Isolating SMP guests keeps every one of their vCPUs on
+/// a real core. A guest heavier than the whole budget still runs — alone, when
+/// nothing else is in flight — rather than deadlocking ([`parallel::run`]).
 #[must_use]
 pub(crate) fn qemu_job_weight(cpus: u32, host_budget: usize) -> usize {
     let budget = host_budget.max(1);
@@ -6004,21 +6017,28 @@ pub(crate) fn qemu_job_weight(cpus: u32, host_budget: usize) -> usize {
     }
 }
 
-/// QEMU matrix capacity derived from effective logical host parallelism.
+/// QEMU matrix capacity: one **third** of the host's logical-CPU count.
 ///
-/// TCG vCPU threads are sustained compute workloads, so SMT siblings do not
-/// provide independent wall-clock capacity and QEMU's emulator/I/O threads
-/// still compete with cargo and the host. A single full-boot guest is heavier
-/// than its lone vCPU thread (translation, the RCU/main-loop and I/O threads),
-/// so a full-boot aarch64 guest observably starved under the one-quarter cap
-/// when the whole matrix was active. Use at most one **sixth** of reported
-/// logical capacity, leaving each co-scheduled guest more host headroom; the
-/// weighted runner still lets a heavier guest run alone when its weight
-/// exceeds this budget, so the four-vCPU stress and migration guests keep
-/// their solo-reachable deadlines.
+/// The budget bounds the sum of in-flight guest weights ([`qemu_job_weight`]),
+/// so on this hybrid 22-thread host it admits ~3 co-scheduled uniprocessor
+/// guests (weight 2 each) while an SMP guest runs alone. A third is deliberate
+/// headroom, not a full-host cap: a QEMU guest is far heavier than its lone
+/// vCPU thread (translation, the RCU/main-loop and I/O threads), and every
+/// guest also runs its *own* real-time watchdogs and timers. Admitting one
+/// guest per logical CPU oversubscribes the host so badly that guests miss
+/// those internal deadlines and hard-lock — observed directly when the matrix
+/// ran near core-count wide. A third keeps the host comfortably
+/// under-subscribed so no guest is starved of TCG time.
+///
+/// This modest concurrency is safe against *wall-clock* flakiness because the
+/// runner's deadline is an *inactivity* budget, not a total-runtime one
+/// (`tairix_qemu`): a guest that runs a little slower co-scheduled keeps
+/// emitting serial output and is never killed for being slow. Raising the
+/// budget further is a timing change that must be validated on the dedicated
+/// soak host (`tools/ci/soak.sh`), never from a single green developer run.
 #[must_use]
 pub(crate) fn qemu_host_budget_for(logical_cpus: usize) -> usize {
-    logical_cpus.max(1).div_ceil(6)
+    (logical_cpus / 3).max(1)
 }
 
 /// QEMU matrix capacity for this host.
@@ -6037,16 +6057,20 @@ pub(crate) fn qemu_host_budget() -> usize {
 /// images and drives a guest whose serial console is `-serial stdio` and
 /// whose QEMU monitor is a unique per-run unix socket, so two guests share
 /// no host resource except CPU. They are therefore run through the shared
-/// weighted-concurrency runner ([`super::parallel`]): one-vCPU guests reserve
-/// one emulator/I/O unit beyond their vCPU, while an SMP guest reserves the
-/// complete budget and runs alone. The budget is one sixth of the host's
-/// effective logical-CPU count, so QEMU's non-vCPU work, cargo, and the host
-/// retain capacity without treating SMT siblings as full independent TCG
-/// cores.
-/// That keeps every guest's wall-clock deadline as reachable as it is for a
-/// solo run (no TCG starvation), so co-scheduling does not make a test flaky.
-/// On a single-core host the budget collapses to one and the matrix runs
-/// strictly sequentially.
+/// weighted-concurrency runner ([`super::parallel`]): a uniprocessor guest is
+/// charged two units and an SMP guest the whole budget (so it runs alone),
+/// against a budget of one third of the host's logical CPUs
+/// ([`qemu_host_budget_for`]). That deliberate headroom keeps the host
+/// under-subscribed so no guest — least of all a full-boot SMP one — is
+/// starved into missing its own internal real-time deadlines. On a single-core
+/// host the budget collapses to one and the matrix runs strictly sequentially.
+///
+/// Within that budget a few uniprocessor guests overlap, and that does not
+/// make a slow guest flaky because the deadline the runner enforces is an
+/// *inactivity* budget, not a total-runtime one ([`tairix_qemu`]): a guest
+/// that runs a little slower co-scheduled keeps emitting serial output and
+/// resets its heartbeat, so it is killed only if it genuinely produces nothing
+/// for its whole budget.
 /// `only` restricts the pass to the enrolments whose package name contains
 /// it — the `--only` debugging filter ([`enrolled`]).
 pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
@@ -6321,15 +6345,16 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     } else {
         Spec::for_x86_64_kernel(&kernel)
     };
-    // One budget everywhere: the enrolment's own reachable wall-clock ceiling,
-    // enforced identically on a developer machine and a CI runner. There is no
-    // developer-only clamp — a budget that is reachable running solo but missed
-    // under the parallel matrix would be a load-dependent (flaky) timeout, and
-    // the charter forbids that. Concurrency, not the budget, is what bounds
-    // local run time: the weighted-concurrency runner (`super::parallel`) caps
-    // the sum of concurrently-running guest vCPUs at the host's logical-CPU
-    // count, so no guest is starved of TCG time and every enrolled budget stays
-    // as reachable co-scheduled as it is solo.
+    // One budget everywhere: the enrolment's own inactivity (no-progress)
+    // ceiling, enforced identically on a developer machine and a CI runner.
+    // There is no developer-only clamp. Because the runner's deadline counts
+    // *silence* rather than wall-clock (`tairix_qemu`), a guest that runs a
+    // little slower under the modest co-scheduling the 1/3 budget allows keeps
+    // emitting output and resets its heartbeat, so the budget can never turn
+    // into a load-dependent (flaky) timeout, which the charter forbids. Guest
+    // *internal* real-time deadlines are protected separately, by that
+    // headroom budget (`qemu_host_budget_for`): SMP guests run alone and the
+    // host is never oversubscribed, so no guest is starved into a hard lockup.
     let mut spec = base.with_cpus(t.cpus).with_timeout(t.timeout);
 
     // Attach a planted raw backing image for storage tests. Sector 0
@@ -7566,47 +7591,57 @@ mod tests {
     }
 
     #[test]
-    fn qemu_weight_reserves_emulator_capacity_and_isolates_smp() {
+    fn qemu_weight_charges_process_headroom_and_isolates_smp() {
+        // A uniprocessor guest charges its vCPU plus one emulator/I/O unit.
         assert_eq!(
             qemu_job_weight(1, 16),
             2,
-            "one-vCPU guest needs process headroom"
+            "one-vCPU guest charges vCPU + process headroom"
         );
+        // An SMP guest charges the whole budget, so it runs alone — a
+        // co-scheduled SMP guest starves into its own in-guest lockup.
         assert_eq!(
             qemu_job_weight(4, 16),
             16,
-            "SMP guest must reserve the complete host budget"
+            "SMP guest reserves the whole budget and runs alone"
         );
         assert_eq!(
             qemu_job_weight(0, 16),
             2,
-            "invalid zero still fails safe to one vCPU"
+            "a mis-recorded zero-CPU enrolment still fails safe to one vCPU"
         );
+        // Clamps: on a tiny budget a uniprocessor guest still fits, and an
+        // SMP guest never charges below one.
         assert_eq!(qemu_job_weight(1, 1), 1);
         assert_eq!(qemu_job_weight(4, 0), 1);
     }
 
     #[test]
-    fn qemu_budget_reserves_smt_headroom() {
+    fn qemu_budget_is_one_third_of_the_logical_cpus() {
+        // One third of the host's logical CPUs, clamped to one — deliberate
+        // headroom so guests are never oversubscribed into missing their own
+        // internal deadlines. On a 22-thread host that is 7, admitting ~3
+        // co-scheduled uniprocessor guests (weight 2 each) while an SMP guest
+        // (weight = budget) runs alone.
         assert_eq!(qemu_host_budget_for(0), 1);
         assert_eq!(qemu_host_budget_for(1), 1);
-        assert_eq!(qemu_host_budget_for(2), 1);
-        assert_eq!(qemu_host_budget_for(6), 1);
-        assert_eq!(qemu_host_budget_for(12), 2);
-        assert_eq!(qemu_host_budget_for(13), 3);
-        assert_eq!(qemu_host_budget_for(64), 11);
+        assert_eq!(qemu_host_budget_for(3), 1);
+        assert_eq!(qemu_host_budget_for(6), 2);
+        assert_eq!(qemu_host_budget_for(22), 7);
+        assert_eq!(qemu_host_budget_for(64), 21);
     }
 
-    /// The smallest wall-clock budget any enrolment may carry.
+    /// The smallest inactivity (no-progress) budget any enrolment may carry.
     ///
-    /// Every enrolled QEMU test is a boot-then-do-fixed-work vertical whose
-    /// budget is sized to be reachable when the guest runs co-scheduled with
-    /// the rest of the matrix (the weighted-concurrency runner gives SMP
-    /// guests exclusive admission), not merely when it runs solo. This
-    /// floor is the reachable minimum the guard below enforces; the runner
-    /// applies each enrolment's own [`super::QemuTest::timeout`] verbatim on
-    /// both a developer machine and a CI runner, with no split that could
-    /// shorten it.
+    /// Every enrolled QEMU test is a boot-then-do-fixed-work vertical, and its
+    /// budget is the longest it may fall silent before the runner treats it as
+    /// hung — not a total-runtime deadline. Because the budget is measured
+    /// against *silence* rather than wall-clock, it is immune to how many
+    /// guests are co-scheduled: a slow guest keeps emitting output and is
+    /// never killed. This floor is the reachable minimum the guard below
+    /// enforces; the runner applies each enrolment's own
+    /// [`super::QemuTest::timeout`] verbatim on a developer machine and a CI
+    /// runner alike, with no split that could shorten it.
     const MIN_REACHABLE_BUDGET: Duration = Duration::from_secs(60);
 
     #[test]
@@ -7628,21 +7663,21 @@ mod tests {
         }
     }
 
-    /// Regression guard for the removed developer-only timeout clamp. Every
-    /// enrolment must carry a budget at least [`MIN_REACHABLE_BUDGET`], and
-    /// that budget is what the runner enforces verbatim — there is no
-    /// developer-vs-CI split that could shorten it. A previous 30 s
-    /// developer cap halved these budgets locally and turned a guest that was
-    /// merely slow under the parallel matrix into a load-dependent (flaky)
-    /// timeout; nothing may re-introduce a budget, or a clamp, below this
-    /// floor.
+    /// Regression guard for the enrolment budgets. Every enrolment must carry
+    /// an inactivity budget of at least [`MIN_REACHABLE_BUDGET`], and that
+    /// budget is what the runner enforces verbatim — there is no
+    /// developer-vs-CI split that could shorten it. The budget bounds how long
+    /// a guest may fall *silent*, so it must comfortably exceed the longest
+    /// gap between two consecutive lines of a healthy guest's output; nothing
+    /// may re-introduce a budget, or a clamp, below this floor.
     #[test]
     fn every_enrolment_budget_is_at_least_the_reachable_floor() {
         for t in TESTS {
             assert!(
                 t.timeout >= MIN_REACHABLE_BUDGET,
-                "enrolment {} budget {:?} is below the reachable floor {:?}; a \
-                 budget reachable solo but missed under load is a flaky timeout",
+                "enrolment {} budget {:?} is below the reachable floor {:?}; the \
+                 inactivity budget must exceed the longest gap in a healthy \
+                 guest's serial output",
                 t.package,
                 t.timeout,
                 MIN_REACHABLE_BUDGET,

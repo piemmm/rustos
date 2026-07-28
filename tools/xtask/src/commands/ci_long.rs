@@ -36,14 +36,17 @@
 //! * host / crypto / fuzz / proptest replicas are deadline-free host
 //!   processes — a slow run merely finishes later, it does not fail — so all
 //!   [`REPS`] replicas run at once (budget = `reps`).
-//! * QEMU replicas are weighted by their emulated-CPU count against a budget
-//!   of the host's logical CPUs, exactly as [`super::qemu_tests::run_once`]
-//!   does. A QEMU guest has a hard wall-clock deadline, and oversubscribing
-//!   the host's cores with more concurrent vCPUs than it has would starve the
-//!   guests of TCG time and turn the run into a *load-dependent* timeout — the
-//!   very flakiness the charter forbids manufacturing. So the [`REPS`] QEMU
-//!   replicas still all get submitted; they simply overlap as far as the host
-//!   can honestly sustain rather than all at once.
+//! * QEMU replicas are weighted exactly as [`super::qemu_tests::run_once`]
+//!   does — a uniprocessor guest charges two units, an SMP guest the whole
+//!   budget (so it runs alone) — against a budget of one third of the host's
+//!   logical CPUs. That headroom keeps the host under-subscribed so no guest
+//!   is starved into missing its own internal real-time deadlines, and the
+//!   guest deadline is itself an *inactivity* budget rather than a
+//!   total-runtime one (`tairix_qemu`), so a replica that runs a little slower
+//!   under contention keeps emitting output and is never falsely timed out —
+//!   the very flakiness the charter forbids manufacturing. So the [`REPS`]
+//!   QEMU replicas still all get submitted; they simply overlap as far as the
+//!   headroom budget allows rather than all at once.
 
 use crate::commands::parallel::{self, Job};
 use crate::commands::{fuzz, proptest, qemu_tests};
@@ -150,9 +153,10 @@ fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
 }
 
 /// One unit per QEMU integration test, using the same host-capacity admission
-/// as the pull-request matrix: one-vCPU replicas retain emulator/I/O headroom,
-/// while an SMP TCG replica runs alone so its synchronising vCPUs cannot be
-/// starved into a load-dependent timeout (see the module docs).
+/// as the pull-request matrix: uniprocessor replicas charge two units and SMP
+/// replicas the whole budget (running alone), against the one-third-of-logical
+/// -CPUs headroom budget, so no guest is starved of TCG time (see the module
+/// docs).
 fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
     let budget = qemu_tests::qemu_host_budget();
     qemu_tests::enrolments()

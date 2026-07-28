@@ -17,16 +17,21 @@
 //! harnesses every job weighs `1` and the budget is a job *count*, so the
 //! model collapses to "run at most N at a time" — its historical behaviour.
 //!
-//! The QEMU matrix uses weight as **host-capacity demand**. One-vCPU guests
-//! charge their vCPU and emulator/I/O work; SMP TCG guests charge the complete
-//! host-derived budget and therefore run alone because their synchronising
-//! vCPU threads require simultaneous progress. That is what makes guest
-//! scheduling safe under TCG: a guest is not starved of host CPU, so its
-//! wall-clock deadline
-//! ([`tairix_qemu::Runner::run`]) stays as reachable as it is for a solo run,
-//! and the no-flaky-tests / no-retry rules hold. (A single job heavier than
-//! the whole budget — a guest with more vCPUs than the host has cores — still
-//! runs, alone, when nothing else is in flight, rather than deadlocking.)
+//! The QEMU matrix uses weight as **host-capacity demand**. A uniprocessor
+//! guest charges two units (its vCPU plus emulator/I/O work); an SMP TCG guest
+//! charges the complete budget and therefore runs alone, because a co-scheduled
+//! SMP guest starves so badly it trips its own in-guest lockup watchdog. The
+//! budget is one third of the host's logical CPUs — deliberate headroom, since
+//! a QEMU guest is far heavier than its lone vCPU thread and each guest runs
+//! its own real-time watchdogs, so admitting one guest per logical CPU
+//! oversubscribes the host into missing those internal deadlines. Within that
+//! headroom a few uniprocessor guests overlap; the guest deadline
+//! ([`tairix_qemu::Runner::run`]) is itself an *inactivity* budget, not a
+//! total-runtime one, so a guest that merely runs a little slower keeps
+//! emitting output and is never falsely timed out — the no-flaky-tests /
+//! no-retry rules hold. (A single job heavier than the whole budget — a guest
+//! with more vCPUs than the budget — still runs, alone, when nothing else is
+//! in flight, rather than deadlocking.)
 //!
 //! # Output handling
 //!
