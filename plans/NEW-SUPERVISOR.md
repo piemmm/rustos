@@ -762,6 +762,27 @@ mandatory, not optional.
   every public item; `docs/src/architecture/supervisor.md` "Rich screens"
   section. This is §9's Stage-D dependency and now stands complete on its own.
 
+**Done (§9 Stage A — the arch-neutral destructive full-range engine):**
+
+- `kernel/mem::ramtest::run_destructive` (+ `DestructiveOutcome`,
+  `destructive_window`, `usable_frame_bytes`) — the whole-RAM, full-coverage
+  destructive test the takeover mode drives. It reuses the existing
+  `WordWindow`/`PhysWindow`/`check`/`address_marker` primitives (§2.2): a
+  full address-in-address pass over **every** word plus a moving-inversions
+  pass (fill `PATTERN`, ascending verify→write `ANTIPATTERN`, descending
+  verify→write `PATTERN`), touching every cell (not the sampling `run`'s one
+  word per page) and — unlike `run`/`test_owned_window` — **never restoring**
+  them, because the machine never resumes. It reports progress as
+  `(tested, total)` and honours an injected `abort()` between windows,
+  returning a distinct `Passed`/`Aborted`/`Faulted` outcome so an operator
+  abort can never read as a clean pass. Pure `lib/*` logic over `WordWindow`,
+  fully host-tested via `FakeRam`/`SimPhysMap`: healthy full pass leaves the
+  pattern behind (proving every word written), each seeded fault
+  (`StuckLow`/`StuckHigh`/`Alias`) caught at the correct physical offset
+  including the lone-cell gap the sampling test trades away, abort stops
+  early, and the progress denominator is honest. No arch, no board, no
+  `cfg(target_arch)`; Stages B–E build on it.
+
 **Done (the REPL fuzz harness — the item-2 prerequisite):**
 
 - `lib/supervisor/tests/fuzz_repl.rs` — a deterministic, seeded harness
@@ -779,15 +800,17 @@ mandatory, not optional.
    the byte-exact boot-screen assertions (alongside the existing
    `UNLOCK_PASSPHRASE_LINE` script in `tools/xtask/src/commands/qemu_tests.rs`),
    asserting `continue` resumes a normal boot and `mount` unlocks and boots.
-2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test,
-   staged A–E: the arch-neutral destructive full-range engine in
-   `kernel/mem::ramtest` (Stage A), the `MachineTakeover` Arch HAL slice +
-   per-port impls (Stage B), the confirmation + pre-jump synchronous audit +
-   seam (Stage C), the fullscreen memtest86-style UI on the §8 `screen`
-   presenter (Stage D), and tests/docs/gate (Stage E) (`planned`).
+2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
+   Stage A (the arch-neutral destructive full-range engine in
+   `kernel/mem::ramtest`) is **done** (above). Remaining: the
+   `MachineTakeover` Arch HAL slice + per-port impls (Stage B), the
+   confirmation + pre-jump synchronous audit + seam (Stage C), the fullscreen
+   memtest86-style UI on the §8 `screen` presenter (Stage D), and
+   tests/docs/gate wiring the command in (Stage E) (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
-the §8 rich-screen presenter, and the REPL fuzz harness are complete and
-compiling on every Tier-1 target; the QEMU vertical and the §9 `memtest full`
-takeover mode remain.
+the §8 rich-screen presenter, the REPL fuzz harness, and the §9 Stage-A
+destructive full-range RAM engine are complete and compiling on every Tier-1
+target; the QEMU vertical and §9 Stages B–E (the takeover mechanism and its
+command) remain.

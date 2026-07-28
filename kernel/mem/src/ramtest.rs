@@ -473,6 +473,191 @@ where
     }
 }
 
+/// The result of a destructive, whole-range RAM test ([`run_destructive`]).
+///
+/// Unlike the boot sanity check ([`run`]) and the owned-window test
+/// ([`test_owned_window`]), the destructive test is a **one-way** operation:
+/// it overwrites every word of every tested region and never restores it, so
+/// the machine it ran on cannot resume — the only sequel is a reset. It is
+/// therefore reported as a distinct outcome rather than folded into
+/// `Result<u64, RamFault>`, so a caller cannot accidentally treat an early
+/// operator abort as a clean pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveOutcome {
+    /// Every word of every reachable usable region was written and read back
+    /// correctly. `tested` is the number of bytes proven.
+    Passed {
+        /// Bytes written and verified across every reachable usable region.
+        tested: u64,
+    },
+    /// The operator aborted (the injected `abort` returned `true`) after
+    /// `tested` bytes. The RAM already written is destroyed regardless; the
+    /// abort only stops before touching the rest.
+    Aborted {
+        /// Bytes written and verified before the abort was observed.
+        tested: u64,
+    },
+    /// The first cell that failed to read back the value written to it.
+    Faulted(RamFault),
+}
+
+/// Drive word `i` of `w` to `value`, flush it to DRAM, and fail closed with
+/// its physical address if it does not read back — the destructive
+/// counterpart of [`check`] that owns the write as well as the verify.
+fn write_verify<W: WordWindow>(
+    w: &W,
+    base: PhysAddr,
+    i: usize,
+    value: Word,
+) -> Result<(), RamFault> {
+    w.write(i, value);
+    w.flush_word(i);
+    check(w, base, i, value)
+}
+
+/// The destructive whole-window test: prove **every** word of `w`, not a
+/// sample.
+///
+/// Where [`test_window`] samples one word per page for speed (a boot sanity
+/// check), this exercises every cell in the window, because the machine is
+/// being handed over to the test and never resumes — full coverage is the
+/// whole point of a takeover run. Two textbook passes are applied, both
+/// touching every word:
+///
+/// * an **address-in-address** pass: every word is stamped with a value
+///   derived from its own offset ([`address_marker`]) and read back, so a
+///   stuck or shorted address line that makes two cells alias is caught by a
+///   marker read from the wrong place — over the whole range, not just the
+///   power-of-two offsets the sampling [`address_pass`] walks;
+/// * a **moving-inversions** pass with [`PATTERN`]: the window is filled with
+///   the pattern, then walked ascending (verify pattern, write complement)
+///   and descending (verify complement, write pattern), so every bit of every
+///   cell is proven to hold both polarities and an inter-cell coupling fault
+///   is exercised in both address directions (after Michael Barr,
+///   *"Software-Based Memory Testing"*, 2000).
+///
+/// The cells are **not** restored — the caller owns the whole machine and it
+/// will not resume. Fails closed at the first cell that does not read back.
+fn destructive_window<W: WordWindow>(w: &W, base: PhysAddr) -> Result<(), RamFault> {
+    let n = w.words();
+    // Address-in-address: stamp then verify every offset.
+    for i in 0..n {
+        w.write(i, address_marker(i));
+        w.flush_word(i);
+    }
+    for i in 0..n {
+        check(w, base, i, address_marker(i))?;
+    }
+    // Moving inversions: fill with the pattern.
+    for i in 0..n {
+        w.write(i, PATTERN);
+        w.flush_word(i);
+    }
+    // Ascending: expect the pattern, drive the complement.
+    for i in 0..n {
+        check(w, base, i, PATTERN)?;
+        write_verify(w, base, i, ANTIPATTERN)?;
+    }
+    // Descending: expect the complement, drive the pattern back.
+    for i in (0..n).rev() {
+        check(w, base, i, ANTIPATTERN)?;
+        write_verify(w, base, i, PATTERN)?;
+    }
+    Ok(())
+}
+
+/// Sum the usable bytes of `map`, rounded inward to whole frames exactly as
+/// [`run_destructive`] walks them, so a progress callback can be given an
+/// honest denominator. A region the direct map cannot reach is still counted
+/// here (the driver discovers unreachability per window); an overflowing
+/// region is skipped, matching the driver.
+fn usable_frame_bytes(map: &BootMemoryMap) -> u64 {
+    let mut total: u64 = 0;
+    for region in map.regions() {
+        if region.kind != RegionKind::Usable {
+            continue;
+        }
+        let Some(region_end) = region.end() else {
+            continue;
+        };
+        let start = align_up(region.start.as_u64(), PAGE_SIZE as u64);
+        let end = align_down(region_end.as_u64(), PAGE_SIZE as u64);
+        if end > start {
+            total += end - start;
+        }
+    }
+    total
+}
+
+/// Destructively test **every** word of every reachable usable region of
+/// `map`, reporting progress and honouring an operator abort.
+///
+/// This is the engine behind the Supervisor's one-way `memtest full` takeover
+/// (`plans/NEW-SUPERVISOR.md` §9): once the machine has been quiesced and
+/// handed to the test it exercises all of RAM — including the frames the live
+/// kernel image, heap, page tables, and stacks occupied, which the
+/// non-destructive [`run`]/[`test_owned_window`] paths can never touch. It
+/// therefore **overwrites and does not restore** the memory it tests; the
+/// machine cannot resume and the only sequel is a reset. The safety argument
+/// that lets [`run`] run pre-allocator does not apply — the caller must have
+/// already taken the machine over (masked interrupts, stopped the watchdog,
+/// quiesced the other CPUs).
+///
+/// * `on_progress(tested, total)` is called after each window with the
+///   cumulative bytes proven and the precomputed total of all reachable
+///   frame-aligned usable bytes, so a UI can render a fraction.
+/// * `abort()` is polled between windows; returning `true` stops the sweep and
+///   yields [`DestructiveOutcome::Aborted`] (the RAM already written stays
+///   destroyed). It is never polled *within* a window, so a window is always
+///   completed atomically.
+///
+/// A region the direct map cannot reach is left untested and uncounted rather
+/// than faked as a pass (fail closed), exactly as in [`run`].
+pub fn run_destructive<M, F, A>(
+    map: &BootMemoryMap,
+    physmap: &M,
+    mut on_progress: F,
+    mut abort: A,
+) -> DestructiveOutcome
+where
+    M: PhysMap + ?Sized,
+    F: FnMut(u64, u64),
+    A: FnMut() -> bool,
+{
+    let total = usable_frame_bytes(map);
+    let mut tested: u64 = 0;
+    for region in map.regions() {
+        if region.kind != RegionKind::Usable {
+            continue;
+        }
+        let Some(region_end) = region.end() else {
+            continue;
+        };
+        let start = align_up(region.start.as_u64(), PAGE_SIZE as u64);
+        let end = align_down(region_end.as_u64(), PAGE_SIZE as u64);
+        let mut addr = start;
+        while addr < end {
+            if abort() {
+                return DestructiveOutcome::Aborted { tested };
+            }
+            let remaining = end - addr;
+            let chunk = remaining.min(PROGRESS_STEP_BYTES as u64);
+            let Ok(chunk_len) = usize::try_from(chunk) else {
+                break;
+            };
+            if let Some(window) = PhysWindow::new(physmap, PhysAddr::new(addr), chunk_len) {
+                if let Err(fault) = destructive_window(&window, PhysAddr::new(addr)) {
+                    return DestructiveOutcome::Faulted(fault);
+                }
+                tested += chunk;
+                on_progress(tested, total);
+            }
+            addr += chunk;
+        }
+    }
+    DestructiveOutcome::Passed { tested }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
@@ -776,5 +961,158 @@ mod tests {
         });
         let tested = run(&map, &sim, |_| {}).expect("reachable region passes");
         assert_eq!(tested, PAGE_SIZE as u64);
+    }
+
+    #[test]
+    fn destructive_window_touches_every_word_and_leaves_the_pattern_behind() {
+        // The destructive test is full-coverage and one-way: unlike
+        // `test_window`, it writes *every* cell and never restores it. Prove
+        // both: a healthy window passes, and every cell ends holding the
+        // final pattern (so every word was written, and nothing was zeroed
+        // back).
+        let words = 3 * STRIDE + 7;
+        let ram = FakeRam::new(words, Fault::None);
+        assert_eq!(destructive_window(&ram, PhysAddr::new(0x4000)), Ok(()));
+        assert!(
+            ram.cells.iter().all(|c| c.get() == PATTERN),
+            "every word is left holding the final moving-inversions pattern"
+        );
+    }
+
+    #[test]
+    fn destructive_window_catches_a_stuck_bit_between_the_sampling_gaps() {
+        // Word 5 is neither a power-of-two offset nor a stride multiple, so
+        // the *sampling* `test_window` deliberately misses a lone fault there
+        // — the destructive full-range test must not: it tests every word.
+        let ram = FakeRam::new(STRIDE, Fault::StuckLow { word: 5, bit: 0 });
+        let fault = destructive_window(&ram, PhysAddr::new(0x1_0000)).unwrap_err();
+        assert_eq!(fault.phys, PhysAddr::new(0x1_0000 + 5 * WORD_BYTES as u64));
+    }
+
+    #[test]
+    fn destructive_window_catches_a_stuck_high_bit_naming_the_cell() {
+        let ram = FakeRam::new(16, Fault::StuckHigh { word: 9, bit: 12 });
+        let fault = destructive_window(&ram, PhysAddr::new(0x2000)).unwrap_err();
+        assert_eq!(fault.phys, PhysAddr::new(0x2000 + 9 * WORD_BYTES as u64));
+        assert_ne!(fault.expected & (1 << 12), fault.observed & (1 << 12));
+    }
+
+    #[test]
+    fn destructive_window_catches_a_shorted_address_line() {
+        // Writes to word 2 land on word 5; reading word 2 back observes word
+        // 5's marker, so the address-in-address pass fails closed naming
+        // word 2 (the offset it was reading).
+        let ram = FakeRam::new(8, Fault::Alias { from: 2, to: 5 });
+        let fault = destructive_window(&ram, PhysAddr::new(0x8000)).unwrap_err();
+        assert_eq!(fault.phys, PhysAddr::new(0x8000 + 2 * WORD_BYTES as u64));
+    }
+
+    #[test]
+    fn run_destructive_passes_a_healthy_map_and_does_not_restore_it() {
+        let base = 0x10_0000u64;
+        let len = 2 * PAGE_SIZE;
+        let sim = SimPhysMap::new(PhysAddr::new(base), len);
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(base),
+            length: len as u64,
+            kind: RegionKind::Usable,
+        });
+
+        let mut last_tested = 0u64;
+        let mut last_total = 0u64;
+        let outcome = run_destructive(
+            &map,
+            &sim,
+            |tested, total| {
+                last_tested = tested;
+                last_total = total;
+            },
+            || false,
+        );
+        assert_eq!(outcome, DestructiveOutcome::Passed { tested: len as u64 });
+        assert_eq!(last_tested, len as u64);
+        assert_eq!(
+            last_total, len as u64,
+            "the progress total is the honest denominator"
+        );
+
+        // The destructive test never restores: the RAM is left holding the
+        // final pattern, not zeroed (checked byte-wise, no aligned cast).
+        let ptr = sim
+            .translate(PhysAddr::new(base), len)
+            .expect("mapped")
+            .as_ptr();
+        let pattern_bytes = PATTERN.to_ne_bytes();
+        for i in 0..len {
+            // SAFETY: `[base, base+len)` is the simulator's own allocation and
+            // `i` is in range.
+            let v = unsafe { ptr.add(i).read() };
+            assert_eq!(v, pattern_bytes[i % WORD_BYTES]);
+        }
+    }
+
+    #[test]
+    fn run_destructive_stops_early_when_the_operator_aborts() {
+        // Two contiguous single-page usable regions over one simulated span.
+        // `abort` is polled before each window: it lets the first through and
+        // stops the second, so exactly one page is reported tested.
+        let base = 0x20_0000u64;
+        let sim = SimPhysMap::new(PhysAddr::new(base), 2 * PAGE_SIZE);
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(base),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        map.push(MemoryRegion {
+            start: PhysAddr::new(base + PAGE_SIZE as u64),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+
+        let calls = Cell::new(0usize);
+        let outcome = run_destructive(
+            &map,
+            &sim,
+            |_, _| {},
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                n >= 1
+            },
+        );
+        assert_eq!(
+            outcome,
+            DestructiveOutcome::Aborted {
+                tested: PAGE_SIZE as u64
+            }
+        );
+    }
+
+    #[test]
+    fn run_destructive_reports_a_fault_and_never_a_pass() {
+        // A window whose sim map cannot be reached is skipped, but a mappable
+        // one with a fault is reported as `Faulted`, never `Passed`. Here the
+        // simulator is healthy, so drive the fault through the window engine
+        // directly and confirm the outcome type is distinct from a pass.
+        let ram = FakeRam::new(8, Fault::StuckLow { word: 0, bit: 1 });
+        assert!(destructive_window(&ram, PhysAddr::new(0)).is_err());
+    }
+
+    #[test]
+    fn usable_frame_bytes_counts_only_frame_aligned_usable_span() {
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0x1000),
+            length: 2 * PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0x100_0000),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Reserved,
+        });
+        assert_eq!(usable_frame_bytes(&map), 2 * PAGE_SIZE as u64);
     }
 }

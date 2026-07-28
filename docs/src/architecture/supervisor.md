@@ -92,6 +92,29 @@ Two properties make it safe at the floor:
 The presenter stands alone; the destructive `memtest full` takeover UI
 (`plans/NEW-SUPERVISOR.md` §9) is its first full-screen consumer.
 
+## The whole-RAM destructive test engine
+
+The safe `memtest` command tests only RAM the running kernel does not hold: it
+allocates free frames, tests each, and frees them, so it can never exercise the
+memory the kernel image, heap, page tables, or stacks occupy. Testing *all* of
+RAM needs a one-way takeover — the machine is handed to the test and only a
+reset follows — which the future `memtest full` command will drive.
+
+The arch-neutral core of that takeover already exists as
+`tairix_kernel_mem::ramtest::run_destructive`. Where the boot sanity check
+(`run`) samples one word per page and restores every cell it touches, the
+destructive engine tests **every** word of every reachable usable region —
+a full address-in-address pass plus a two-direction moving-inversions pass —
+and, because the machine never resumes, does **not** restore them. It reports
+progress as `(tested, total)`, honours an operator `abort` polled between
+windows, and returns a `DestructiveOutcome` (`Passed` / `Aborted` / `Faulted`)
+so an early abort can never be mistaken for a clean pass. It reuses the same
+`WordWindow` / `PhysWindow` primitives and safe, range-checked physical-map
+access as the non-destructive path — no raw pointer arithmetic — and is fully
+host-tested over a fault-injecting fake. The takeover *mechanism* that quiesces
+the machine before it runs (an Arch HAL slice) and the confirmed command that
+drives it are the remaining stages of `plans/NEW-SUPERVISOR.md` §9.
+
 ## The retained boot audit log
 
 The `log` command tails the boot audit trail even after the serial console has
