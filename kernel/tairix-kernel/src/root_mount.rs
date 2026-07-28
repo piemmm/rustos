@@ -1031,7 +1031,9 @@ impl SupReport for ConsoleReport<'_> {
 
 /// A `lib/supervisor` [`SupInput`] backed by the primary console's raw read
 /// half. [`read_byte`](SupInput::read_byte) parks until a key arrives (never a
-/// busy-spin — it is the interrupt-driven reader in production);
+/// busy-spin — the bootstrap-floor console reader wakes on the RX interrupt's
+/// `console_wake` and re-polls on a bounded timed backstop, see
+/// [`KthreadConsoleRead`](crate::unlock_service::KthreadConsoleRead));
 /// [`poll_byte`](SupInput::poll_byte) is a non-blocking zero-deadline read the
 /// REPL uses to poll for an `ESC` abort during a long command.
 struct ConsoleInput<'a> {

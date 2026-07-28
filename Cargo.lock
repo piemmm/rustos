@@ -4038,6 +4038,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-supervisor-esc-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-syscall-dispatch-qemu"
 version = "0.0.0"
 dependencies = [

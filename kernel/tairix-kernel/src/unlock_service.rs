@@ -535,6 +535,22 @@ pub fn note_stage(
     );
 }
 
+/// The bounded re-poll interval, in nanoseconds, a [`KthreadConsoleRead`]
+/// empty park falls back to when no secret-marker animation is scheduling a
+/// timed wake — the timed fallback for the poll-backed bootstrap-floor console
+/// whose RX interrupt is not guaranteed to be routed this early
+/// (`plans/NEW-SUPERVISOR.md`).
+///
+/// The reader is event-driven first: `console_wake` unparks it the instant a
+/// byte lands, so a port whose receive interrupt is routed sees no added
+/// latency. This only bounds the *fallback* park so a read whose sole wake
+/// would be an interrupt that never fires (an echoed Supervisor REPL prompt,
+/// or the first byte of a passphrase before the marker animation begins) still
+/// re-polls the poll-backed FIFO — a tickless one-shot timed park, never a
+/// busy-spin. Fifty milliseconds is imperceptible to an operator yet costs a
+/// quiet prompt only a handful of wakes per second.
+const CONSOLE_READ_REPOLL_NS: u64 = 50_000_000;
+
 /// An interrupt-driven blocking console reader for the unlock kthread.
 ///
 /// The kthread analogue of kernel-core's `BlockingConsoleRead` (which parks
@@ -554,9 +570,21 @@ pub fn note_stage(
 /// `console_wake` arriving in the window between an empty poll and the park
 /// is not lost — the scheduler's wake-pending token converts a concurrent
 /// park into a re-ready, exactly the lost-wakeup interlock
-/// `BlockingConsoleRead` and `serve_system_store` rely on. The device backing must be the interrupt-fed console queue
-/// (the UART's `UART_INPUT`-backed read half, or the video keyboard queue),
-/// not a raw hardware-FIFO poll, so the wake source exists.
+/// `BlockingConsoleRead` and `serve_system_store` rely on. The device backing
+/// is the poll-backed console read half (the UART's queue-backed reader that
+/// also drains the hardware FIFO on every poll, or the video keyboard queue).
+///
+/// The RX interrupt's `console_wake` is the *fast* wake, but it is not relied
+/// upon as the *only* one: the bootstrap-floor console's receive interrupt is
+/// not guaranteed to be routed this early on every port (arming it is a
+/// fail-closed no-op when the console IRQ could not be resolved), so an empty
+/// park always carries a wake deadline — a secret-marker animation tick while
+/// a passphrase read is animating, else the bounded `CONSOLE_READ_REPOLL_NS`
+/// backstop — and re-polls the poll-backed FIFO at the deadline if no
+/// `console_wake` came. That is a tickless one-shot timed park (the CPU idles
+/// between polls), never a busy-spin: a read whose only wake would be an
+/// interrupt that never fires (an echoed REPL prompt, or the first byte of a
+/// passphrase before the animation starts) still makes progress.
 ///
 /// Architecture-neutral: the one blocking console-read
 /// shape every port's unlock kthread reads the passphrase through — the
@@ -612,13 +640,22 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             // at construction would leave the whole passphrase entry on the
             // cooperative-yield fallback — a busy loop — for its lifetime.
             let task = self.task.or_else(unlock_console_task);
-            // The secret feedback's one-shot animation deadline, when the
-            // passphrase marker is animating; `NO_DEADLINE` the rest of the
-            // time, so an ordinary wait takes no timer wake-ups (tickless).
-            let deadline = self
-                .secret
-                .and_then(SecretFeedback::deadline_ns)
-                .unwrap_or(tairix_kernel_core::NO_DEADLINE);
+            // The wake deadline for this poll's park: the secret marker's
+            // one-shot animation tick while a passphrase read is animating,
+            // else the bounded re-poll backstop. The backstop matters because
+            // the animation only supplies timed wakes *after* the first byte
+            // is consumed, and a bootstrap-floor console whose RX interrupt is
+            // not routed delivers no `console_wake` — so a read that waited
+            // only on the interrupt (an echoed REPL prompt, or the first byte
+            // of a passphrase) would park forever. Either way the park is a
+            // tickless one-shot, never a spin, and `console_wake` still
+            // unparks it the instant a byte lands.
+            let deadline = match self.secret.and_then(SecretFeedback::deadline_ns) {
+                Some(tick) => tick,
+                None => tairix_kernel_core::wait_now_ns()
+                    .unwrap_or(0)
+                    .saturating_add(CONSOLE_READ_REPOLL_NS),
+            };
             // Register before polling so a `console_wake` arriving between an
             // empty poll and the park is not lost (the register-before-poll
             // interlock).
@@ -656,9 +693,11 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 // releases the registered deadline — then re-poll.
                 // The CPU idles meanwhile.
                 Some(task) => {
-                    if deadline != tairix_kernel_core::NO_DEADLINE {
-                        tairix_kernel_core::rearm_timed_wakeup();
-                    }
+                    // `deadline` is always a real instant (a secret tick or
+                    // the re-poll backstop), so arm the one-shot timer for it
+                    // before parking; the CPU idles until then or until a
+                    // `console_wake`.
+                    tairix_kernel_core::rearm_timed_wakeup();
                     self.yielder.park();
                     tairix_kernel_core::console_deregister(task, deadline);
                     // A timed wake: advance (or pause) the marker, then

@@ -857,36 +857,54 @@ zero total and a narrow geometry never panic.
   tests, rustdoc on every public item, and the `docs/src/architecture/supervisor.md`
   full-screen-display section.
 
-**Done (the ESC boot-screen QEMU vertical — item 1):**
+**Done (the ESC boot-screen QEMU verticals — aarch64 + x86_64 siblings):**
 
-- `tests/integration/supervisor_esc_qemu_aarch64`
-  (`tairix-test-supervisor-esc-qemu-aarch64`) boots the **production** aarch64
-  pipeline over the shared planted encrypted-root image (so the real
-  `SupervisorHost` is installed and the byte-exact ESC boot screen is drawn),
-  and its `QemuTest` serial script (added beside the `UNLOCK_PASSPHRASE_LINE`
-  entries in `tools/xtask/src/commands/qemu_tests.rs`) drives the boot-screen
-  states in order: `ESC` at the `[Press ESC for supervisor]` window →
-  `help` at the `Supervisor` banner's `*` prompt → `commands:` (the
-  dispatcher's `Supervisor commands:` header) → `continue` → the typed
-  passphrase at the redrawn `ARXFS passphrase: `. Reaching each marker in
-  order is the byte-exact assertion (the run fails loud if the guest exits
-  before every step is sent), and PASS keys on the unlock-service install
-  witness (`EventId(4139)`), which can only follow `continue` resuming the
-  normal unlock and that unlock mounting the root — proving a Supervisor
-  session is transparent to boot. It mirrors the root-unlock-admission
-  vertical (same boot pipeline, only the audit sink swapped, §2.2). The
-  vertical passes; `docs/src/architecture/supervisor.md` documents it.
+- Two sibling verticals prove the byte-exact ESC boot-screen contract on the
+  **production** boot path, one per PC-class arch, each booting its pipeline
+  over the shared planted encrypted-root image (so the real `SupervisorHost`
+  is installed and the boot screen is drawn) and swapping only the audit sink
+  (§2.2): `tests/integration/supervisor_esc_qemu_aarch64`
+  (`tairix-test-supervisor-esc-qemu-aarch64`, over the UART) and
+  `tests/integration/supervisor_esc_qemu_x86_64`
+  (`tairix-test-supervisor-esc-qemu-x86-64`, over COM1 — the
+  `plans/ARCHSUPPORT.md` parity sibling, reusing the x86_64 admission
+  vertical's `boot_x86_64::boot` bin body).
+- Both drive the **one** shared serial script `SUPERVISOR_ESC_SCRIPT` in
+  `tools/xtask/src/commands/qemu_tests.rs` (the frozen boot-screen contract
+  has a single definition, never a per-arch copy, §2.2): `ESC` at the
+  `[Press ESC for supervisor]` window → `help` at the `Supervisor` banner's
+  `*` prompt → `commands:` (the dispatcher's `Supervisor commands:` header) →
+  `continue` → the typed passphrase at the redrawn `ARXFS passphrase: `.
+  Reaching each marker in order is the byte-exact assertion (the run fails
+  loud if the guest exits before every step is sent), and PASS keys on the
+  unlock-service install witness (`EventId(4139)`), which can only follow
+  `continue` resuming the normal unlock and that unlock mounting the root —
+  proving a Supervisor session is transparent to boot.
+  `docs/src/architecture/supervisor.md` documents both.
+- **Enabling fix — the unlock kthread reader has a timed backstop.**
+  `unlock_service::KthreadConsoleRead::read` now bounds an empty park with a
+  one-shot re-poll deadline (`CONSOLE_READ_REPOLL_NS`) when no secret-marker
+  animation is scheduling a wake, instead of parking solely on the RX
+  interrupt's `console_wake`. The bootstrap-floor console is poll-backed and
+  its receive interrupt is not guaranteed to be routed this early on every
+  port (it is a fail-closed no-op when the console IRQ is unresolved, as on the
+  x86_64 QEMU PC target), so a read whose only wake would be that interrupt —
+  the echoed REPL prompt, or the first byte of a passphrase before the marker
+  animates — would otherwise hang forever. The fix is the one shared reader
+  definition (§2.2), so it covers both the REPL and the passphrase read on
+  every port; the fast `console_wake` path is unchanged and it is a tickless
+  one-shot park, never a busy-spin (§2.23).
 
 **Remaining:**
 
-1. QEMU coverage of the *other* trigger points, still open: an x86_64 sibling
-   vertical; a deterministic drive of the lone-`ESC`-at-the-live-passphrase-
-   prompt entry point (the aarch64 vertical enters via the announcement window
-   and is only *incidentally* robust to that path via the 2 s-window race, and
+1. QEMU coverage of the *other* trigger points, still open: a deterministic
+   drive of the lone-`ESC`-at-the-live-passphrase-prompt entry point (both
+   landed verticals enter via the announcement window and are only
+   *incidentally* robust to that path via the 2 s-window race, and
    `read_passphrase_line`'s `Escape` arm is host-tested); and a `mount`-from-
    REPL vertical (the REPL's real unlock path, distinct from `continue` +
-   normal unlock). The host unit tests and the landed aarch64 vertical already
-   cover the core contract.
+   normal unlock). The host unit tests and the landed aarch64 + x86_64
+   verticals already cover the core contract on both PC-class arches.
 2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
    Stage A (the arch-neutral destructive full-range engine), the **arch-neutral
    half of Stage B** (the `MachineTakeover` Arch HAL slice + `TakeoverError` +
@@ -905,8 +923,8 @@ destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
 slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
 seam), the §9 Stage-C `memtest full` command (confirmation + supervisor-only
 `TakeoverGrant` gate + pre-jump audit + `memtest_takeover` seam), and the §9
-Stage-D fullscreen memtest86-style UI, and the aarch64 ESC boot-screen QEMU
-vertical are complete and compiling on every Tier-1 target; the per-port
-takeover mechanisms, the §9 destructive-run QEMU vertical, and the remaining
-ESC-entry QEMU coverage (x86_64 sibling, the passphrase-prompt entry, and
+Stage-D fullscreen memtest86-style UI, and the aarch64 + x86_64 ESC
+boot-screen QEMU verticals are complete and compiling on every Tier-1 target;
+the per-port takeover mechanisms, the §9 destructive-run QEMU vertical, and the
+remaining ESC-entry QEMU coverage (the passphrase-prompt entry and
 `mount`-from-REPL) remain.

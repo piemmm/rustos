@@ -387,6 +387,37 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
 /// The passphrase line the admission vertical types at `ARXFS passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
 
+/// The pre-boot-Supervisor ESC boot-screen serial script
+/// (`plans/NEW-SUPERVISOR.md` §7), shared by every arch's Supervisor ESC
+/// vertical so the byte-exact boot-screen contract has one definition, never
+/// a per-arch copy (`AGENTS.md` §2.2). Each `(marker, delay, input)` step
+/// waits for the frozen boot-screen `marker` on the console, then types
+/// `input`:
+///
+/// 1. `[Press ESC for supervisor]` (`root_mount::SUPERVISOR_ANNOUNCE`) → a
+///    lone `ESC` (`0x1b`), dropping into the REPL (race-robust: if the 2 s
+///    window elapses first, the same `ESC` is read as the passphrase line's
+///    first byte and still drops in via `PassphraseReadError::Escape`).
+/// 2. `Supervisor` (`root_mount::SUPERVISOR_ENTER_BANNER`, the collapse to
+///    `ARXFS` then the `Supervisor` banner) → `help`, exercising a real
+///    command at the `*` prompt.
+/// 3. `commands:` (the dispatcher's host-independent `Supervisor commands:`
+///    header that `help` renders) → `continue`, leaving the REPL.
+/// 4. `ARXFS passphrase: ` (`root_mount::FS_UNLOCK_PROMPT`, redrawn *after*
+///    the REPL exited) → the fixture passphrase, proving a Supervisor session
+///    is transparent to boot.
+///
+/// PASS is keyed by the vertical's own audit sink on the unlock-service
+/// install witness (`EventId(4139)`), which can only follow `continue`
+/// resuming the normal unlock and that unlock mounting the encrypted `ARXFS`
+/// root.
+const SUPERVISOR_ESC_SCRIPT: &[(&str, Duration, &str)] = &[
+    ("[Press ESC for supervisor]", Duration::ZERO, "\x1b"),
+    ("Supervisor", Duration::ZERO, "help\n"),
+    ("commands:", Duration::ZERO, "continue\n"),
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+];
+
 /// Serial marker after which the autoload-input vertical begins typing the
 /// unlock passphrase at the virtio keyboard.
 ///
@@ -3914,12 +3945,7 @@ const TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
-        serial: &[
-            ("[Press ESC for supervisor]", Duration::ZERO, "\x1b"),
-            ("Supervisor", Duration::ZERO, "help\n"),
-            ("commands:", Duration::ZERO, "continue\n"),
-            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
-        ],
+        serial: SUPERVISOR_ESC_SCRIPT,
     },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
     // and two-kthread-admission regression. It boots the *production* x86_64
@@ -3965,6 +3991,43 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
+    },
+    // `plans/NEW-SUPERVISOR.md` §7 / `plans/ARCHSUPPORT.md`: the x86_64
+    // sibling of the aarch64 pre-boot **Supervisor** ESC vertical above.
+    // `tairix-test-supervisor-esc-qemu-x86-64` boots the *production* x86_64
+    // `tairix-kernel` pipeline (`boot_x86_64::boot`) over the same planted
+    // whole-disk encrypted-root image the x86_64 admission vertical uses
+    // (`FsDisk::EncryptedRootDisk`), so the real `SupervisorHost` is installed
+    // and the byte-exact ESC boot screen is drawn on COM1. It runs the shared
+    // `SUPERVISOR_ESC_SCRIPT` — the one definition of the frozen boot-screen
+    // contract, never a per-arch copy (`AGENTS.md` §2.2) — walking the same
+    // ordered states as the aarch64 sibling: `ESC` at the announcement drops
+    // into the REPL, `help` renders the `Supervisor commands:` header,
+    // `continue` leaves the REPL, and the fixture passphrase then unlocks the
+    // redrawn `ARXFS passphrase: ` prompt. The guest audit sink reports PASS
+    // through the `isa-debug-exit` device the instant it sees the
+    // unlock-service install message (`EventId(4139)`) — which can only follow
+    // `continue` resuming the normal unlock and that unlock mounting the
+    // encrypted `ARXFS` root, proving a Supervisor session is transparent to
+    // boot on x86_64. A run where ESC never enters the REPL, `continue` never
+    // resumes, or the resumed unlock never mounts never reaches the message
+    // and the harness times out. 120 s matches the aarch64 sibling; single CPU
+    // like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-supervisor-esc-qemu-x86-64",
+        binary: "tairix-test-supervisor-esc-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: SUPERVISOR_ESC_SCRIPT,
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
     // `tairix-test-session-ceiling-qemu-aarch64` boots the *production*
