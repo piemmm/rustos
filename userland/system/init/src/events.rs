@@ -56,16 +56,42 @@ pub const NOTIFY_REJECTED: EventId = EventId(9_010);
 /// (fail closed) rather than started. The security-relevant decision is
 /// audited so an operator can see a present-but-inactive service.
 pub const SERVICE_NOT_ENROLLED: EventId = EventId(9_011);
+/// An on-demand service was **activated**: a client connected to its
+/// endpoint while it was down, and the manager started it (as its sandboxed
+/// service account) to satisfy the connection.
+pub const SERVICE_ACTIVATED: EventId = EventId(9_012);
+/// A connecting client was **queued**: the service it connected to is not
+/// yet ready, so the client is parked and will be woken when the service
+/// announces readiness (never busy-polled).
+pub const ACTIVATION_QUEUED: EventId = EventId(9_013);
+/// An endpoint-activation connect was **refused**: the named service is not
+/// registered, the client lacks the capability the endpoint requires, the
+/// service cannot be activated in its current state, or its pending-connection
+/// queue is full. A security-relevant denial, audited with its reason and
+/// failing closed (the client is granted nothing).
+pub const ACTIVATION_DENIED: EventId = EventId(9_014);
+/// An idle-linger timer was **armed**: the last client of an on-demand
+/// service disconnected, so the manager armed a single one-shot timer after
+/// which the service is idle-stopped unless a new client connects first.
+pub const SERVICE_LINGER_ARMED: EventId = EventId(9_015);
+/// A graceful **stop** was initiated: the manager asked the service to exit
+/// (for example after its idle-linger expired) and is awaiting its grace
+/// period before forcing it down.
+pub const SERVICE_STOPPING: EventId = EventId(9_016);
+/// A service was **force-terminated**: it did not exit within its graceful
+/// stop grace period, so the manager forced the process down.
+pub const SERVICE_FORCE_TERMINATED: EventId = EventId(9_017);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END, INIT_RANGE_START, NOTIFY_REJECTED,
-        ORPHAN_REAPED, SERVICE_DENIED, SERVICE_EXITED, SERVICE_NOT_ENROLLED, SERVICE_READY,
-        SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED,
+        ACTIVATION_DENIED, ACTIVATION_QUEUED, CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END,
+        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED, SERVICE_DENIED,
+        SERVICE_EXITED, SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED,
+        SERVICE_READY, SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
     };
 
-    const ALL: [u32; 11] = [
+    const ALL: [u32; 17] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_DENIED.0,
@@ -77,6 +103,12 @@ mod tests {
         CONDITION_SATISFIED.0,
         NOTIFY_REJECTED.0,
         SERVICE_NOT_ENROLLED.0,
+        SERVICE_ACTIVATED.0,
+        ACTIVATION_QUEUED.0,
+        ACTIVATION_DENIED.0,
+        SERVICE_LINGER_ARMED.0,
+        SERVICE_STOPPING.0,
+        SERVICE_FORCE_TERMINATED.0,
     ];
 
     #[test]

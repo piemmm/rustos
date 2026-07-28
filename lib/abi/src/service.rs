@@ -33,7 +33,7 @@
 //! self-announceable signal) rather than in an `abi-v2`.
 
 use crate::le::{put_u32, read_u32};
-use crate::Errno;
+use crate::{Duration64, Errno};
 
 /// Magic number identifying an `abi-v1` service readiness notice (`"SVC1"`
 /// little-endian).
@@ -279,6 +279,77 @@ impl ReadinessKind {
     }
 }
 
+/// How the service manager decides *when* a service runs — the analogue of
+/// systemd's permanently-enabled unit versus a socket-activated one.
+///
+/// This is unit metadata (it is read from a service's signed manifest,
+/// `plans/NEW-SERVICEMANAGER.md` §3.5): it tells the manager whether a
+/// service stays up for the whole life of the system or is started on demand
+/// when a client first connects to its reserved endpoint and idle-stopped
+/// again after a period with no connected clients. The linger period is
+/// carried here rather than hard-coded, so the same engine serves a
+/// permanent web server and a short-lived shared helper.
+///
+/// Like the rest of this module it is versioned and freezes on the first
+/// release; `abi-v1` is not frozen yet, so the set may still grow in place.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum ActivationMode {
+    /// The service runs for the whole life of the system: the manager brings
+    /// it up during boot and never idle-stops it. The right choice for a
+    /// service that must always be reachable (a network stack, a web
+    /// server). The default.
+    #[default]
+    Permanent,
+    /// The service is started on demand — when a client first connects to
+    /// its reserved endpoint — and idle-stopped once it has had no connected
+    /// clients for `linger`. The right choice for a shared, sandboxed helper
+    /// only needed while something is using it (the font service `fontd`).
+    OnDemand {
+        /// How long the manager waits, after the last client disconnects,
+        /// before it idle-stops the service. The manager arms a single
+        /// one-shot timer for it (never a poll); a new connection before it
+        /// expires cancels the pending stop. A non-positive span means "stop
+        /// as soon as idle".
+        linger: Duration64,
+    },
+}
+
+impl ActivationMode {
+    /// Construct an on-demand mode with the given idle-linger span.
+    #[must_use]
+    pub const fn on_demand(linger: Duration64) -> Self {
+        Self::OnDemand { linger }
+    }
+
+    /// `true` for [`OnDemand`](Self::OnDemand) — a service the manager may
+    /// start on connect and idle-stop when its client count falls to zero.
+    #[must_use]
+    pub const fn is_on_demand(self) -> bool {
+        matches!(self, Self::OnDemand { .. })
+    }
+
+    /// The idle-linger span for an [`OnDemand`](Self::OnDemand) service, or
+    /// `None` for a [`Permanent`](Self::Permanent) one (which never lingers).
+    #[must_use]
+    pub const fn linger(self) -> Option<Duration64> {
+        match self {
+            Self::OnDemand { linger } => Some(linger),
+            Self::Permanent => None,
+        }
+    }
+
+    /// The stable identifier used in manifests, audit records, and status
+    /// output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Permanent => "permanent",
+            Self::OnDemand { .. } => "on-demand",
+        }
+    }
+}
+
 /// The lifecycle transition a service may **announce about itself** through
 /// a [`ReadyNotice`].
 ///
@@ -418,6 +489,23 @@ mod tests {
         assert_eq!(ReadinessKind::from_u8(2), None);
         assert_eq!(ReadinessKind::Immediate.as_str(), "immediate");
         assert_eq!(ReadinessKind::Notify.as_str(), "notify");
+    }
+
+    #[test]
+    fn activation_mode_defaults_permanent_and_carries_linger() {
+        use super::ActivationMode;
+        use crate::Duration64;
+
+        assert_eq!(ActivationMode::default(), ActivationMode::Permanent);
+        assert!(!ActivationMode::Permanent.is_on_demand());
+        assert_eq!(ActivationMode::Permanent.linger(), None);
+        assert_eq!(ActivationMode::Permanent.as_str(), "permanent");
+
+        let linger = Duration64::from_secs(30);
+        let mode = ActivationMode::on_demand(linger);
+        assert!(mode.is_on_demand());
+        assert_eq!(mode.linger(), Some(linger));
+        assert_eq!(mode.as_str(), "on-demand");
     }
 
     #[test]

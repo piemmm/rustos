@@ -12,10 +12,18 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    decode_capability_ids, CapabilityId, Errno, ManifestHeader, ReadinessKind, ReadyCondition,
-    MANIFEST_MAX_CAPABILITIES,
+    decode_capability_ids, ActivationMode, CapabilityId, Duration64, Errno, ManifestHeader,
+    ReadinessKind, ReadyCondition, MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
+
+/// Default graceful-stop grace period a service is given to exit on its own
+/// before the manager force-terminates it, when its manifest declares none.
+///
+/// This is a policy default, not a resource capacity: it is the interval a
+/// well-behaved service needs to flush and exit cleanly. A service with a
+/// longer or shorter shutdown declares its own grace in its manifest.
+pub const DEFAULT_STOP_GRACE: Duration64 = Duration64::from_secs(5);
 
 /// Decode a service binary's signed manifest into the capability set it
 /// requests.
@@ -99,6 +107,9 @@ pub struct ServiceSpec {
     readiness: ReadinessKind,
     requires: Vec<ReadyCondition>,
     provides: Vec<ReadyCondition>,
+    activation: ActivationMode,
+    stop_grace: Duration64,
+    connect_capability: Option<CapabilityId>,
 }
 
 impl ServiceSpec {
@@ -132,7 +143,41 @@ impl ServiceSpec {
             readiness: ReadinessKind::Immediate,
             requires: Vec::new(),
             provides: Vec::new(),
+            activation: ActivationMode::Permanent,
+            stop_grace: DEFAULT_STOP_GRACE,
+            connect_capability: None,
         }
+    }
+
+    /// Set the service's activation mode (permanent versus on-demand with an
+    /// idle-linger span), consuming and returning `self` for chaining.
+    #[must_use]
+    pub fn with_activation(mut self, activation: ActivationMode) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    /// Set the graceful-stop grace period this service is given to exit on
+    /// its own before a forced terminate, consuming and returning `self`.
+    #[must_use]
+    pub fn with_stop_grace(mut self, stop_grace: Duration64) -> Self {
+        self.stop_grace = stop_grace;
+        self
+    }
+
+    /// Set the capability a client must hold to connect to this service's
+    /// reserved endpoint, consuming and returning `self`.
+    ///
+    /// `None` (the default) means the endpoint requires no capability beyond
+    /// being a principal that can address the manager — the right choice for
+    /// a broadly shared helper like the font service. A service guarding a
+    /// privileged endpoint names the capability here, and the manager
+    /// refuses a connect from a client that does not hold it before touching
+    /// any state (fail closed).
+    #[must_use]
+    pub fn with_connect_capability(mut self, capability: CapabilityId) -> Self {
+        self.connect_capability = Some(capability);
+        self
     }
 
     /// Set how this service reaches readiness (spawn-implies-ready versus
@@ -200,6 +245,27 @@ impl ServiceSpec {
     pub fn provides(&self) -> &[ReadyCondition] {
         &self.provides
     }
+
+    /// How this service is activated — permanent, or on-demand with an
+    /// idle-linger span.
+    #[must_use]
+    pub fn activation(&self) -> ActivationMode {
+        self.activation
+    }
+
+    /// The graceful-stop grace period this service is given to exit on its
+    /// own before a forced terminate.
+    #[must_use]
+    pub fn stop_grace(&self) -> Duration64 {
+        self.stop_grace
+    }
+
+    /// The capability a client must hold to connect to this service's
+    /// reserved endpoint, or `None` if the endpoint requires none.
+    #[must_use]
+    pub fn connect_capability(&self) -> Option<CapabilityId> {
+        self.connect_capability
+    }
 }
 
 /// Launches a verified service binary with a fixed capability ceiling.
@@ -221,6 +287,62 @@ pub trait Spawner {
     /// [`StartFailure::SpawnFailed`](crate::StartFailure::SpawnFailed) and
     /// skips the dependents of the failed service.
     fn spawn(&self, spec: &ServiceSpec, granted: &CapabilitySet) -> Result<Pid, Errno>;
+}
+
+/// Identifier of a client connected (or waiting to connect) to a service's
+/// reserved endpoint through on-demand activation.
+///
+/// Like [`Pid`] it is a newtype rather than a bare `u64` so a connection id
+/// cannot be confused with any other identifier. It is issued and attested
+/// by the kernel/IPC layer for the connecting principal, never chosen by the
+/// client, so a client can only ever refer to its *own* connection when it
+/// asks the manager to connect or disconnect.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct ClientId(u64);
+
+impl ClientId {
+    /// Construct a [`ClientId`] from its raw kernel-attested value.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Raw kernel-attested value.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Stops a running service that the manager supervises.
+///
+/// Idle-stop and shutdown are two-phase and never a blind kill: the manager
+/// first asks the service to exit on its own ([`request_stop`](Self::request_stop),
+/// the graceful phase), and only if it has not exited within its grace
+/// period does it force the process down ([`force_terminate`](Self::force_terminate)).
+/// On a running kernel both are backed by the `signal` syscall; in tests
+/// they are recorded by an in-memory fixture.
+pub trait Stopper {
+    /// Ask the service running as `pid` to exit gracefully (the analogue of
+    /// `SIGTERM`). The service is expected to flush and exit within its
+    /// grace period, at which point the [`Reaper`] observes the exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the implementation's [`Errno`] verbatim if the request could
+    /// not be delivered (for example the process is already gone).
+    fn request_stop(&self, pid: Pid) -> Result<(), Errno>;
+
+    /// Force the service running as `pid` down immediately (the analogue of
+    /// `SIGKILL`), used only after the graceful grace period has elapsed
+    /// without the service exiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns the implementation's [`Errno`] verbatim if the process could
+    /// not be terminated (for example it has already exited).
+    fn force_terminate(&self, pid: Pid) -> Result<(), Errno>;
 }
 
 /// One child process that has exited and is ready to be reaped.

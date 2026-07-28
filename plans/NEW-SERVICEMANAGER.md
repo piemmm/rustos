@@ -387,12 +387,52 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   wire; the boot floor still comes from the compiled-in `DEFAULT_CONFIG`
   until the growable registered tier lands on the `lib/rt` heap (§3.10).
 
-### SVC-4 — On-demand endpoint activation + idle linger
-- Capability-brokered connect → start-if-down → park-until-ready → hand back
-  endpoint; sink refcount; one-shot tickless linger stop; bounded
-  starting-request queue.
-- Host + QEMU tests: connect starts a down service and parks until ready;
-  last disconnect lingers then stops; a new connect cancels the linger.
+### SVC-4 — On-demand endpoint activation + idle linger — DONE (engine core)
+- `lib/abi/src/service.rs` gains `ActivationMode` (`Permanent` |
+  `OnDemand { linger: Duration64 }`) — unit metadata carried in the signed
+  manifest, IPC-protocol module so no `abi-check`/`c-header` change.
+  `ServiceSpec` gains `activation`, `stop_grace` (default `DEFAULT_STOP_GRACE`
+  = 5 s), and `connect_capability` builders/accessors.
+- New seams in `service.rs`: `ClientId` (kernel-attested connection id) and
+  `Stopper` (`request_stop` graceful + `force_terminate`), wired through
+  `InitConfig`.
+- `Init` engine (`manager.rs`): the one capability-brokered activation entry
+  `connect(name, client_caps, client)` — capability check **before** any
+  state (fail closed), then connect-now if ready, activate-if-down (start as
+  the service account, fail closed when a required readiness condition is
+  unmet — the headless case), or park behind a **bounded** per-service queue
+  (`MAX_PENDING_PER_SERVICE`, a §24.4 anti-flood security bound → `QueueFull`).
+  Parked clients are released into the sink and reported via
+  `take_ready_clients` when the service reaches ready (through boot admission,
+  a readiness notice, or a satisfied condition) — woken by the event, never
+  polled. `disconnect(name, client, now)` refcounts the sink and arms a single
+  one-shot idle-linger deadline when the last interest leaves an on-demand
+  service; a new `connect` cancels it. `expire_linger`/`expire_grace` are the
+  one-shot-timer callbacks the transport arms from `linger_deadline`/
+  `grace_deadline`. `pump` now **skips on-demand services** so they are never
+  eagerly started at boot.
+- The graceful-stop primitive (request → `Stopping` → grace deadline →
+  `force_terminate`, and `reap` mapping a stopping service's exit to
+  `Stopped` regardless of code) landed here because idle-stop is a special
+  case of it (§2.2/§2.19); SVC-7 builds restart policy and reverse-dependency
+  ordering on top of it rather than reinventing it.
+- New audit IDs (9012–9017): `SERVICE_ACTIVATED`, `ACTIVATION_QUEUED`,
+  `ACTIVATION_DENIED` (unknown/capability/unavailable/queue-full),
+  `SERVICE_LINGER_ARMED`, `SERVICE_STOPPING`, `SERVICE_FORCE_TERMINATED`.
+- Host tests cover: on-demand not started at boot; connect activates a down
+  immediate service and connects now (shared by a second client); a notify
+  service parks until it announces ready then wakes the parked client once;
+  the full idle → linger → graceful stop → grace → force → reap-to-`Stopped`
+  lifecycle; a new connect cancels a pending linger; the capability check runs
+  before any state; unknown-service and condition-gated (headless) connects
+  fail closed; the pending queue is bounded and fails closed; `add_duration`
+  carry/saturation.
+- Not yet wired to a live transport: binding the reserved endpoint, mapping a
+  kernel-attested connecting principal to a `ClientId`, and arming the real
+  one-shot timers off `linger_deadline`/`grace_deadline` is the loader/kernel
+  seam SVC-5/SVC-8 wire (the QEMU vertical lands with the live `fontd`
+  activation in SVC-5). The growable registered tier past the floor still
+  waits on the `lib/rt` heap (§3.10).
 
 ### SVC-5 — Delete the `login`-starts-`fontd` hack
 - `fontd` becomes an on-demand, `display-present`-gated service; remove the
@@ -408,8 +448,10 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
 
 ### SVC-7 — Restart policy + health-check; stop/shutdown ordering
 - `restart = never|on-failure|always` + bounded backoff + optional
-  health-check (`plans/WATCHDOG.md`); graceful stop with grace timeout;
-  reverse-dependency stop/shutdown ordering; system-shutdown sequence.
+  health-check (`plans/WATCHDOG.md`); reverse-dependency stop/shutdown
+  ordering; system-shutdown sequence. Builds on the graceful single-service
+  stop primitive (`Stopper`, `Stopping` state, grace deadline → force) already
+  landed in SVC-4 — do not reinvent it (§2.2).
 
 ### SVC-8 — Control API + tool + audit + rlimits + docs/gate
 - The versioned capability-checked control `lib/abi` surface, status via

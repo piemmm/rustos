@@ -58,7 +58,10 @@
 //!   decision without ever widening authority.
 //! * [`manager`] — the [`Init`] state machine: `register`,
 //!   `register_enrolled`, `start_all`, the readiness admission engine
-//!   (`notify`, `satisfy_condition`), and `reap`.
+//!   (`notify`, `satisfy_condition`), on-demand endpoint activation
+//!   (`connect` / `disconnect`, the idle-linger `expire_linger` /
+//!   `expire_grace` one-shot callbacks, and `take_ready_clients`), and
+//!   `reap`.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
@@ -87,7 +90,12 @@ pub mod manager;
 pub mod registry;
 pub mod service;
 
-pub use error::{InitError, NotifyError, StartFailure};
-pub use manager::{FailedService, Init, InitConfig, StartReport, StartedService};
+pub use error::{ActivateError, InitError, NotifyError, StartFailure};
+pub use manager::{
+    ActivationOutcome, FailedService, Init, InitConfig, ReadyClient, StartReport, StartedService,
+};
 pub use registry::{enrol, unenrol, EnrolError, Enrolment};
-pub use service::{decode_manifest_capabilities, Pid, ReapedChild, Reaper, ServiceSpec, Spawner};
+pub use service::{
+    decode_manifest_capabilities, ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner,
+    Stopper, DEFAULT_STOP_GRACE,
+};

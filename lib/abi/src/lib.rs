@@ -156,7 +156,7 @@ pub use rxe::{
     SEG_FLAG_READ, SEG_FLAG_WRITE,
 };
 pub use service::{
-    LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, ServiceState,
+    ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, ServiceState,
     SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
 };
 pub use stdinfo::{

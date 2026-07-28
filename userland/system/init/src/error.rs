@@ -104,6 +104,52 @@ impl fmt::Display for NotifyError {
     }
 }
 
+/// Why an on-demand endpoint-activation connect request was refused.
+///
+/// Every variant is a fail-closed refusal audited by the manager: a connect
+/// that does not succeed grants the client nothing (no partial connection,
+/// no ambient authority). The capability check runs before any state is
+/// touched, so [`Denied`](Self::Denied) is reported without the service
+/// being started.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ActivateError {
+    /// The connect named a service the manager does not have registered.
+    /// Presence on disk never grants activation, and an unregistered name
+    /// is never activated (fail closed).
+    UnknownService,
+    /// The client does not hold the capability the service's endpoint
+    /// requires. Refused before the service is touched (capability check
+    /// before state).
+    Denied,
+    /// The service cannot be activated right now: a readiness condition it
+    /// requires is unsatisfied (for example a GUI-only service on a headless
+    /// system), or it is mid-teardown or terminally failed. The client fails
+    /// closed and may retry once the condition holds.
+    Unavailable,
+    /// The service's pending-connection queue is full. Bounded and
+    /// fail-closed against a connect flood: the request is refused rather
+    /// than growing the queue without limit (never dropped silently, never
+    /// spun on).
+    QueueFull,
+    /// The service could not be launched: its manifest failed to decode,
+    /// requested authority the manager lacks, or the spawn was refused. The
+    /// underlying [`StartFailure`] is recorded in the audit log.
+    NotActivatable,
+}
+
+impl fmt::Display for ActivateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnknownService => "connect names an unregistered service",
+            Self::Denied => "client lacks the capability the endpoint requires",
+            Self::Unavailable => "the service cannot be activated in its current state",
+            Self::QueueFull => "the service's pending-connection queue is full",
+            Self::NotActivatable => "the service could not be launched",
+        };
+        f.write_str(message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InitError, StartFailure};
