@@ -432,11 +432,44 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   a corrupt store and a missing store both leave nothing eligible; enrolment
   refuses a manifest exceeding the ceiling; strict-name/duplicate rejection;
   the canonical-text round trip; idempotent enrol; fail-closed unenrol.
-- Not yet wired to a live boot path: discovery (the `/System/Services` scan
-  into `ServiceSpec`s, incl. the `AppInfo` unit-metadata parse) and reading
-  the store off `/System` are done by the loader/kernel seam that SVC-4/SVC-5
-  wire; the boot floor still comes from the compiled-in `DEFAULT_CONFIG`
-  until the growable registered tier lands on the `lib/rt` heap (§3.10).
+- The `AppInfo` unit-metadata **parse** is SVC-3b (below): a discovered
+  bundle's signed unit metadata decodes into a `ServiceSpec` via
+  `ServiceSpec::from_manifest`. Not yet wired to a live boot path: the
+  `/System/Services` **scan** itself, and reading the store off `/System`,
+  are done by the loader/kernel seam that SVC-4/SVC-5 wire; the boot floor
+  still comes from the compiled-in `DEFAULT_CONFIG` until the growable
+  registered tier lands on the `lib/rt` heap (§3.10).
+
+### SVC-3b — Service unit-metadata record + discovery parser — DONE
+- `lib/abi/src/service.rs` gains the `ServiceManifest`/`ServiceUnit` pair —
+  the compact, versioned, fail-closed binary record of a service's unit
+  metadata (`SERVICE_MANIFEST_MAGIC` = `"SUM1"`, `SERVICE_VERSION_V1`): the
+  service account, readiness kind, activation mode + idle-linger, restart
+  policy, stop grace, connect capability, and the dependency names and
+  required/provided `ReadyCondition`s. `ServiceUnit` is the allocation-free
+  encoder input; `ServiceManifest` is the borrowed decoder view whose
+  `from_bytes` validates the *whole* record up front (magic, version,
+  reserved bytes, known flag bits, every enum discriminant, every count
+  against its bound, every dependency name as bounded UTF-8, an exact overall
+  length, and the canonical forms — reserved/connect-cap/linger forced to
+  zero unless their flag says otherwise) so every accessor is infallible and
+  a malformed byte fails closed. It is an IPC-protocol module like
+  `ReadyNotice`, so it is outside the generated C header (no `abi-check`/
+  `c-header` change), and its decoder has a `fuzz_decode` arm asserting the
+  never-panic + canonical-round-trip contract (§19.6). The metadata is the
+  data that lives in the service's **signed** `AppInfo` bundle manifest (§2),
+  so tampering is a load refusal upstream.
+- `ServiceSpec::from_manifest(name, binary_path, &ServiceManifest)` is the
+  bridge from a decoded manifest to the `ServiceSpec` the manager consumes,
+  applying the manager's strict **name policy** (`registry::validate_service_name`,
+  §2.2 — one authoritative check, not duplicated in the ABI) to the service
+  name and every dependency name, so a manifest can never smuggle a
+  path-traversal-shaped dependency into the graph. Fails closed on a name
+  defect. Host tests cover the full round trip of every field and the
+  name-policy rejection of a bad service or dependency name.
+- Still deferred to the loader/kernel seam (SVC-4/SVC-5): reading the
+  `ServiceManifest` bytes out of a discovered `/System/Services` bundle's
+  signed `AppInfo` and calling `from_manifest` on the live boot path.
 
 ### SVC-4 — On-demand endpoint activation + idle linger — DONE (engine core)
 - `lib/abi/src/service.rs` gains `ActivationMode` (`Permanent` |

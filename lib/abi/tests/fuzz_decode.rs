@@ -56,7 +56,7 @@ use tairix_abi::users_admin::{
 use tairix_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
-    SYSCALL_TABLE_HASH_LEN,
+    ReadyCondition, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
@@ -195,6 +195,41 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
         let redecoded = CpuLoadRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
+    }
+}
+
+/// Drive the service unit-metadata decoder on `bytes` (one arm of
+/// [`exercise`]): the manager parses this record out of a service's signed
+/// bundle, so it must refuse a corrupt one cleanly, never panic. The record
+/// has a canonical encoding — the reserved field, the connect-capability
+/// field, and the linger span are all forced to zero unless their flag says
+/// otherwise — so an accepted record re-encodes to exactly the accepted
+/// bytes and decodes back to an equal view.
+fn exercise_service_manifest(bytes: &[u8]) {
+    if let Ok(manifest) = ServiceManifest::from_bytes(bytes) {
+        let requires: Vec<ReadyCondition> = manifest.requires().collect();
+        let provides: Vec<ReadyCondition> = manifest.provides().collect();
+        let dependencies: Vec<&str> = manifest.dependencies().collect();
+        let unit = ServiceUnit {
+            account: manifest.account(),
+            readiness: manifest.readiness(),
+            activation: manifest.activation(),
+            restart: manifest.restart(),
+            stop_grace: manifest.stop_grace(),
+            connect_capability: manifest.connect_capability(),
+            requires: &requires,
+            provides: &provides,
+            dependencies: &dependencies,
+        };
+        let mut buf = vec![0u8; unit.encoded_len().expect("an accepted record has a length")];
+        let len = unit
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted record must succeed");
+        let redecoded = ServiceManifest::from_bytes(&buf[..len])
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(manifest, redecoded);
+        // The encoding is canonical, so it reproduces the accepted bytes.
+        assert_eq!(&buf[..len], bytes);
     }
 }
 
@@ -362,6 +397,7 @@ fn exercise(bytes: &[u8]) {
             .expect("round-trip of an accepted header must succeed");
         assert_eq!(header, redecoded);
     }
+    exercise_service_manifest(bytes);
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
     exercise_seatmgr(bytes);

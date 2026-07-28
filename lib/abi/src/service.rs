@@ -32,8 +32,8 @@
 //! yet, so the enums may still grow in place (a new named condition, a new
 //! self-announceable signal) rather than in an `abi-v2`.
 
-use crate::le::{put_u32, read_u32};
-use crate::{Duration64, Errno};
+use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use crate::{CapabilityId, Duration64, Errno};
 
 /// Magic number identifying an `abi-v1` service readiness notice (`"SVC1"`
 /// little-endian).
@@ -559,13 +559,542 @@ impl ReadyNotice {
     }
 }
 
+/// Magic number identifying an `abi-v1` service unit-metadata record
+/// (`"SUM1"` little-endian).
+pub const SERVICE_MANIFEST_MAGIC: u32 = u32::from_le_bytes(*b"SUM1");
+
+/// Maximum number of dependency names a service unit-metadata record may
+/// carry.
+///
+/// A fixed **validation bound** (an anti-flood limit on untrusted encoded
+/// input), not a scalable capacity: a service with a genuinely unbounded
+/// dependency list is a packaging defect, not a workload to grow for. The
+/// value is generous relative to any real service's fan-out.
+pub const SERVICE_MANIFEST_MAX_DEPENDENCIES: usize = 64;
+
+/// Maximum number of named readiness conditions a service unit-metadata
+/// record may `require` (and, independently, `provide`).
+///
+/// A fixed validation bound. There are only a handful of named
+/// [`ReadyCondition`]s, so a record naming more than this is malformed
+/// rather than a workload to grow for.
+pub const SERVICE_MANIFEST_MAX_CONDITIONS: usize = 16;
+
+/// Maximum encoded byte length of one dependency name in a service
+/// unit-metadata record.
+///
+/// A **structural** validation bound on the wire (anti-flood), deliberately
+/// looser than the manager's own strict service-name policy: the manager
+/// re-validates every decoded name against that policy before it registers a
+/// service, so this bound only caps how many bytes the decoder will walk, it
+/// does not decide which names are admissible.
+pub const SERVICE_MANIFEST_MAX_NAME_LEN: usize = 128;
+
+/// Fixed prefix byte length of a [`ServiceManifest`] record (everything
+/// before the variable `requires`/`provides`/dependency body).
+const SERVICE_MANIFEST_PREFIX_LEN: usize = 48;
+
+/// `flags` bit set when the record's activation mode is on-demand (a linger
+/// span applies); clear for a permanent service.
+const SERVICE_MANIFEST_FLAG_ON_DEMAND: u16 = 1 << 0;
+/// `flags` bit set when the record carries a non-null connect capability.
+const SERVICE_MANIFEST_FLAG_CONNECT_CAP: u16 = 1 << 1;
+/// The bits `flags` may legally set; any other bit fails the record closed.
+const SERVICE_MANIFEST_FLAGS_KNOWN: u16 =
+    SERVICE_MANIFEST_FLAG_ON_DEMAND | SERVICE_MANIFEST_FLAG_CONNECT_CAP;
+
+// Prefix field offsets.
+const SM_OFF_VERSION: usize = 4;
+const SM_OFF_FLAGS: usize = 6;
+const SM_OFF_ACCOUNT: usize = 8;
+const SM_OFF_READINESS: usize = 12;
+const SM_OFF_RESTART: usize = 13;
+const SM_OFF_RESERVED0: usize = 14;
+const SM_OFF_CONNECT_CAP: usize = 16;
+const SM_OFF_REQUIRES_COUNT: usize = 18;
+const SM_OFF_PROVIDES_COUNT: usize = 20;
+const SM_OFF_DEPENDENCY_COUNT: usize = 22;
+const SM_OFF_LINGER: usize = 24;
+const SM_OFF_STOP_GRACE: usize = 36;
+
+/// The unit metadata one service declares in its signed bundle manifest — the
+/// analogue of a systemd `.service` unit file, but a compact, fail-closed
+/// binary record rather than a hand-parsed text file.
+///
+/// It is the description the service manager needs to *manage* a discovered
+/// service — how it reaches readiness, whether it is permanent or on-demand,
+/// what it does when it exits, how long it may take to stop, which endpoint
+/// capability a client must hold to connect, the account it runs as, and the
+/// dependencies and named readiness conditions it needs and provides — as
+/// opposed to the *capability request* the [`ManifestHeader`](crate::ManifestHeader)
+/// body carries. Because it lives inside the service's signed manifest, any
+/// tampering with a service's activation or restart policy breaks the
+/// signature and is a load refusal, never a silent privilege or behaviour
+/// change.
+///
+/// [`ServiceUnit`] is the owned-by-reference **encoder** input; a
+/// [`ServiceManifest`] is a **decoder** view borrowing an already-validated
+/// byte buffer, so the same record round-trips between the trusted tooling
+/// that writes a bundle and the manager that reads one. The decoder validates
+/// the *whole* record up front (magic, version, reserved bytes, known flag
+/// bits, every enum discriminant, every count against its bound, every
+/// dependency name as bounded UTF-8, and an exact overall length), so every
+/// accessor below is infallible and the record fails closed on the first
+/// malformed byte.
+///
+/// The wire layout (little-endian) is a fixed 48-byte prefix followed by the
+/// variable body:
+///
+/// ```text
+///  0  magic u32              = SERVICE_MANIFEST_MAGIC
+///  4  version u16            = SERVICE_VERSION_V1
+///  6  flags u16              (on-demand, connect-cap-present; other bits 0)
+///  8  account u32
+/// 12  readiness u8           (ReadinessKind)
+/// 13  restart u8             (RestartPolicy)
+/// 14  reserved0 u16          = 0
+/// 16  connect_capability u16 (0 unless the connect-cap flag is set)
+/// 18  requires_count u16
+/// 20  provides_count u16
+/// 22  dependency_count u16
+/// 24  linger     Duration64  (12 bytes; must be zero unless on-demand)
+/// 36  stop_grace Duration64  (12 bytes)
+/// --- body ---
+///     requires:      requires_count × u16 (ReadyCondition discriminants)
+///     provides:      provides_count × u16
+///     dependencies:  dependency_count × (u16 name_len ‖ name_len UTF-8 bytes)
+/// ```
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceUnit<'a> {
+    /// uid of the service account the service runs as (the kernel resolves
+    /// its capability ceiling and derives the grant at load time).
+    pub account: u32,
+    /// How the service reaches readiness (spawn-implies-ready versus notify).
+    pub readiness: ReadinessKind,
+    /// How the manager activates the service (permanent versus on-demand with
+    /// an idle-linger span).
+    pub activation: ActivationMode,
+    /// What the manager does when the service's process exits.
+    pub restart: RestartPolicy,
+    /// Graceful-stop grace period the service is given to exit on its own
+    /// before a forced terminate.
+    pub stop_grace: Duration64,
+    /// Capability a client must hold to connect to the service's reserved
+    /// endpoint, or `None` for an endpoint that requires none.
+    pub connect_capability: Option<CapabilityId>,
+    /// Named readiness conditions that must be satisfied before the service
+    /// may start.
+    pub requires: &'a [ReadyCondition],
+    /// Named readiness conditions the service satisfies once it becomes ready.
+    pub provides: &'a [ReadyCondition],
+    /// Names of the services that must start before this one.
+    pub dependencies: &'a [&'a str],
+}
+
+impl ServiceUnit<'_> {
+    /// The exact number of bytes [`encode`](Self::encode) will write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] if a count exceeds its bound
+    /// ([`SERVICE_MANIFEST_MAX_CONDITIONS`] /
+    /// [`SERVICE_MANIFEST_MAX_DEPENDENCIES`]) or a dependency name is empty or
+    /// longer than [`SERVICE_MANIFEST_MAX_NAME_LEN`] — the same fail-closed
+    /// checks [`encode`](Self::encode) applies, surfaced without a buffer so a
+    /// caller can size one exactly.
+    pub fn encoded_len(&self) -> Result<usize, Errno> {
+        self.validate()?;
+        let mut len = SERVICE_MANIFEST_PREFIX_LEN;
+        len += self.requires.len() * 2;
+        len += self.provides.len() * 2;
+        for name in self.dependencies {
+            len += 2 + name.len();
+        }
+        Ok(len)
+    }
+
+    /// Validate the record's bounds without encoding it.
+    fn validate(&self) -> Result<(), Errno> {
+        if self.requires.len() > SERVICE_MANIFEST_MAX_CONDITIONS
+            || self.provides.len() > SERVICE_MANIFEST_MAX_CONDITIONS
+            || self.dependencies.len() > SERVICE_MANIFEST_MAX_DEPENDENCIES
+        {
+            return Err(Errno::OutOfRange);
+        }
+        for name in self.dependencies {
+            if name.is_empty() || name.len() > SERVICE_MANIFEST_MAX_NAME_LEN {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    /// Encode `self` little-endian into `buf`, returning the number of bytes
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — a count exceeds its bound, or a dependency
+    ///   name is empty or too long (see [`encoded_len`](Self::encoded_len)).
+    /// * [`Errno::BufferTooSmall`] — `buf` cannot hold the whole record.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let total = self.encoded_len()?;
+        if buf.len() < total {
+            return Err(Errno::BufferTooSmall);
+        }
+        let out = &mut buf[..total];
+        out.fill(0);
+        put_u32(out, 0, SERVICE_MANIFEST_MAGIC);
+        put_u16(out, SM_OFF_VERSION, SERVICE_VERSION_V1);
+        let mut flags = 0u16;
+        if self.activation.is_on_demand() {
+            flags |= SERVICE_MANIFEST_FLAG_ON_DEMAND;
+        }
+        if self.connect_capability.is_some() {
+            flags |= SERVICE_MANIFEST_FLAG_CONNECT_CAP;
+        }
+        put_u16(out, SM_OFF_FLAGS, flags);
+        put_u32(out, SM_OFF_ACCOUNT, self.account);
+        out[SM_OFF_READINESS] = self.readiness.as_u8();
+        out[SM_OFF_RESTART] = self.restart.as_u8();
+        if let Some(cap) = self.connect_capability {
+            put_u16(out, SM_OFF_CONNECT_CAP, cap.as_u16());
+        }
+        // Counts are bounded by `validate` (well under `u16::MAX`); the
+        // `try_from` never fails here but keeps the narrowing checked rather
+        // than a truncating cast.
+        let requires_len = u16::try_from(self.requires.len()).map_err(|_| Errno::OutOfRange)?;
+        let provides_len = u16::try_from(self.provides.len()).map_err(|_| Errno::OutOfRange)?;
+        let dependency_len =
+            u16::try_from(self.dependencies.len()).map_err(|_| Errno::OutOfRange)?;
+        put_u16(out, SM_OFF_REQUIRES_COUNT, requires_len);
+        put_u16(out, SM_OFF_PROVIDES_COUNT, provides_len);
+        put_u16(out, SM_OFF_DEPENDENCY_COUNT, dependency_len);
+        let linger = self.activation.linger().unwrap_or(Duration64::ZERO);
+        out[SM_OFF_LINGER..SM_OFF_LINGER + Duration64::WIRE_LEN]
+            .copy_from_slice(&linger.to_le_bytes());
+        out[SM_OFF_STOP_GRACE..SM_OFF_STOP_GRACE + Duration64::WIRE_LEN]
+            .copy_from_slice(&self.stop_grace.to_le_bytes());
+
+        let mut off = SERVICE_MANIFEST_PREFIX_LEN;
+        for condition in self.requires {
+            put_u16(out, off, condition.as_u16());
+            off += 2;
+        }
+        for condition in self.provides {
+            put_u16(out, off, condition.as_u16());
+            off += 2;
+        }
+        for name in self.dependencies {
+            // Bounded by `validate` to `SERVICE_MANIFEST_MAX_NAME_LEN`; the
+            // checked narrowing never fails here.
+            let name_len = u16::try_from(name.len()).map_err(|_| Errno::OutOfRange)?;
+            put_u16(out, off, name_len);
+            off += 2;
+            out[off..off + name.len()].copy_from_slice(name.as_bytes());
+            off += name.len();
+        }
+        Ok(total)
+    }
+}
+
+/// A validated, borrowed view over a service unit-metadata record — the
+/// decoder counterpart of [`ServiceUnit`].
+///
+/// [`from_bytes`](Self::from_bytes) validates the whole record up front and
+/// fails closed on any malformed byte, so every accessor is infallible.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceManifest<'a> {
+    bytes: &'a [u8],
+    account: u32,
+    readiness: ReadinessKind,
+    restart: RestartPolicy,
+    activation: ActivationMode,
+    connect_capability: Option<CapabilityId>,
+    stop_grace: Duration64,
+    requires_start: usize,
+    requires_count: usize,
+    provides_start: usize,
+    provides_count: usize,
+    dependencies_start: usize,
+    dependencies_count: usize,
+}
+
+impl<'a> ServiceManifest<'a> {
+    /// Decode and fully validate a record from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Every failure is fail-closed — a record that does not decode cleanly
+    /// yields no partial metadata:
+    ///
+    /// * [`Errno::BufferTooSmall`] — shorter than the fixed prefix, or a
+    ///   declared section runs past the end of `bytes`.
+    /// * [`Errno::BadMagic`] — wrong magic, or a reserved byte/field or an
+    ///   unknown flag bit is non-zero, or the connect-capability field is
+    ///   non-zero while its flag is clear, or `linger` is non-zero for a
+    ///   permanent service.
+    /// * [`Errno::AbiVersionUnsupported`] — not `service-v1`.
+    /// * [`Errno::OutOfRange`] — an enum discriminant is outside its closed
+    ///   set, a count exceeds its bound, a dependency name is empty or too
+    ///   long, or trailing bytes remain after the record.
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Errno> {
+        if bytes.len() < SERVICE_MANIFEST_PREFIX_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != SERVICE_MANIFEST_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, SM_OFF_VERSION) != SERVICE_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if read_u16(bytes, SM_OFF_RESERVED0) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let flags = read_u16(bytes, SM_OFF_FLAGS);
+        if flags & !SERVICE_MANIFEST_FLAGS_KNOWN != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let account = read_u32(bytes, SM_OFF_ACCOUNT);
+        let readiness = ReadinessKind::from_u8(bytes[SM_OFF_READINESS]).ok_or(Errno::OutOfRange)?;
+        let restart = RestartPolicy::from_u8(bytes[SM_OFF_RESTART]).ok_or(Errno::OutOfRange)?;
+
+        let connect_raw = read_u16(bytes, SM_OFF_CONNECT_CAP);
+        let connect_capability = if flags & SERVICE_MANIFEST_FLAG_CONNECT_CAP != 0 {
+            Some(CapabilityId::from_raw(connect_raw)?)
+        } else {
+            if connect_raw != 0 {
+                return Err(Errno::BadMagic);
+            }
+            None
+        };
+
+        let linger = Duration64::from_bytes(&bytes[SM_OFF_LINGER..])?;
+        let stop_grace = Duration64::from_bytes(&bytes[SM_OFF_STOP_GRACE..])?;
+        let activation = if flags & SERVICE_MANIFEST_FLAG_ON_DEMAND != 0 {
+            ActivationMode::on_demand(linger)
+        } else {
+            if linger != Duration64::ZERO {
+                return Err(Errno::BadMagic);
+            }
+            ActivationMode::Permanent
+        };
+
+        let requires_count = usize::from(read_u16(bytes, SM_OFF_REQUIRES_COUNT));
+        let provides_count = usize::from(read_u16(bytes, SM_OFF_PROVIDES_COUNT));
+        let dependencies_count = usize::from(read_u16(bytes, SM_OFF_DEPENDENCY_COUNT));
+        if requires_count > SERVICE_MANIFEST_MAX_CONDITIONS
+            || provides_count > SERVICE_MANIFEST_MAX_CONDITIONS
+            || dependencies_count > SERVICE_MANIFEST_MAX_DEPENDENCIES
+        {
+            return Err(Errno::OutOfRange);
+        }
+
+        let mut off = SERVICE_MANIFEST_PREFIX_LEN;
+        let requires_start = off;
+        off = validate_conditions(bytes, off, requires_count)?;
+        let provides_start = off;
+        off = validate_conditions(bytes, off, provides_count)?;
+        let dependencies_start = off;
+        off = validate_dependencies(bytes, off, dependencies_count)?;
+        if off != bytes.len() {
+            return Err(Errno::OutOfRange);
+        }
+
+        Ok(Self {
+            bytes,
+            account,
+            readiness,
+            restart,
+            activation,
+            connect_capability,
+            stop_grace,
+            requires_start,
+            requires_count,
+            provides_start,
+            provides_count,
+            dependencies_start,
+            dependencies_count,
+        })
+    }
+
+    /// uid of the service account the service runs as.
+    #[must_use]
+    pub const fn account(&self) -> u32 {
+        self.account
+    }
+
+    /// How the service reaches readiness.
+    #[must_use]
+    pub const fn readiness(&self) -> ReadinessKind {
+        self.readiness
+    }
+
+    /// What the manager does when the service's process exits.
+    #[must_use]
+    pub const fn restart(&self) -> RestartPolicy {
+        self.restart
+    }
+
+    /// How the manager activates the service.
+    #[must_use]
+    pub const fn activation(&self) -> ActivationMode {
+        self.activation
+    }
+
+    /// The capability a client must hold to connect to the service's reserved
+    /// endpoint, or `None` if the endpoint requires none.
+    #[must_use]
+    pub const fn connect_capability(&self) -> Option<CapabilityId> {
+        self.connect_capability
+    }
+
+    /// The graceful-stop grace period the service is given to exit on its own.
+    #[must_use]
+    pub const fn stop_grace(&self) -> Duration64 {
+        self.stop_grace
+    }
+
+    /// The named readiness conditions that gate this service's start.
+    #[must_use]
+    pub fn requires(&self) -> Conditions<'a> {
+        Conditions {
+            bytes: self.bytes,
+            off: self.requires_start,
+            remaining: self.requires_count,
+        }
+    }
+
+    /// The named readiness conditions this service satisfies once ready.
+    #[must_use]
+    pub fn provides(&self) -> Conditions<'a> {
+        Conditions {
+            bytes: self.bytes,
+            off: self.provides_start,
+            remaining: self.provides_count,
+        }
+    }
+
+    /// The names of the services that must start before this one.
+    #[must_use]
+    pub fn dependencies(&self) -> Dependencies<'a> {
+        Dependencies {
+            bytes: self.bytes,
+            off: self.dependencies_start,
+            remaining: self.dependencies_count,
+        }
+    }
+}
+
+/// Walk a `count`-long `u16` condition section, validating each discriminant,
+/// and return the offset just past it. Fails closed if the section runs off
+/// the end or a discriminant is outside the closed [`ReadyCondition`] set.
+fn validate_conditions(bytes: &[u8], mut off: usize, count: usize) -> Result<usize, Errno> {
+    for _ in 0..count {
+        let end = off.checked_add(2).ok_or(Errno::OutOfRange)?;
+        if end > bytes.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        ReadyCondition::from_u16(read_u16(bytes, off)).ok_or(Errno::OutOfRange)?;
+        off = end;
+    }
+    Ok(off)
+}
+
+/// Walk a `count`-long length-prefixed dependency-name section, validating
+/// each name as non-empty, in-bound, valid UTF-8, and return the offset just
+/// past it. Fails closed on a truncated section or a malformed name.
+fn validate_dependencies(bytes: &[u8], mut off: usize, count: usize) -> Result<usize, Errno> {
+    for _ in 0..count {
+        let len_end = off.checked_add(2).ok_or(Errno::OutOfRange)?;
+        if len_end > bytes.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        let name_len = usize::from(read_u16(bytes, off));
+        if name_len == 0 || name_len > SERVICE_MANIFEST_MAX_NAME_LEN {
+            return Err(Errno::OutOfRange);
+        }
+        let name_end = len_end.checked_add(name_len).ok_or(Errno::OutOfRange)?;
+        if name_end > bytes.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        core::str::from_utf8(&bytes[len_end..name_end]).map_err(|_| Errno::OutOfRange)?;
+        off = name_end;
+    }
+    Ok(off)
+}
+
+/// Iterator over a [`ServiceManifest`]'s `requires`/`provides` conditions.
+///
+/// The backing bytes were validated by
+/// [`ServiceManifest::from_bytes`], so iteration is total; the decode below
+/// never fails for a value that survived validation.
+#[derive(Clone, Debug)]
+pub struct Conditions<'a> {
+    bytes: &'a [u8],
+    off: usize,
+    remaining: usize,
+}
+
+impl Iterator for Conditions<'_> {
+    type Item = ReadyCondition;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let value = read_u16(self.bytes, self.off);
+        self.off += 2;
+        self.remaining -= 1;
+        ReadyCondition::from_u16(value)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+/// Iterator over a [`ServiceManifest`]'s dependency names.
+///
+/// The backing bytes were validated by
+/// [`ServiceManifest::from_bytes`] (each name is non-empty, in-bound, valid
+/// UTF-8), so iteration is total.
+#[derive(Clone, Debug)]
+pub struct Dependencies<'a> {
+    bytes: &'a [u8],
+    off: usize,
+    remaining: usize,
+}
+
+impl<'a> Iterator for Dependencies<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let name_len = usize::from(read_u16(self.bytes, self.off));
+        let start = self.off + 2;
+        let end = start + name_len;
+        self.off = end;
+        self.remaining -= 1;
+        core::str::from_utf8(self.bytes.get(start..end)?).ok()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, ServiceState,
-        SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
+        ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, RestartPolicy,
+        ServiceManifest, ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC,
+        SERVICE_MANIFEST_MAX_CONDITIONS, SERVICE_MANIFEST_MAX_DEPENDENCIES,
+        SERVICE_MANIFEST_MAX_NAME_LEN, SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
     };
-    use crate::Errno;
+    use crate::{CapabilityId, Duration64, Errno};
 
     #[test]
     fn readiness_kind_round_trips_and_defaults_immediate() {
@@ -703,6 +1232,265 @@ mod tests {
         dirty_reserved[7] = 1;
         assert_eq!(
             ReadyNotice::from_bytes(&dirty_reserved),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    /// Encode `unit` into a generously sized stack buffer, returning the
+    /// exact-length encoded slice.
+    fn encode<'b>(unit: &ServiceUnit<'_>, buf: &'b mut [u8]) -> &'b [u8] {
+        let len = unit.encode(buf).expect("encode");
+        assert_eq!(len, unit.encoded_len().expect("encoded_len"));
+        &buf[..len]
+    }
+
+    #[test]
+    fn service_manifest_magic_and_bounds_are_frozen() {
+        assert_eq!(SERVICE_MANIFEST_MAGIC, u32::from_le_bytes(*b"SUM1"));
+        assert_eq!(SERVICE_MANIFEST_MAX_DEPENDENCIES, 64);
+        assert_eq!(SERVICE_MANIFEST_MAX_CONDITIONS, 16);
+        assert_eq!(SERVICE_MANIFEST_MAX_NAME_LEN, 128);
+    }
+
+    #[test]
+    fn service_manifest_round_trips_a_full_on_demand_record() {
+        let unit = ServiceUnit {
+            account: 42,
+            readiness: ReadinessKind::Notify,
+            activation: ActivationMode::on_demand(Duration64::from_secs(30)),
+            restart: RestartPolicy::OnFailure,
+            stop_grace: Duration64::from_secs(7),
+            connect_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+            requires: &[
+                ReadyCondition::NetworkUp,
+                ReadyCondition::FilesystemsMounted,
+            ],
+            provides: &[ReadyCondition::BootComplete],
+            dependencies: &["netstack", "sysinfod"],
+        };
+        let mut buf = [0u8; 256];
+        let bytes = encode(&unit, &mut buf);
+
+        let manifest = ServiceManifest::from_bytes(bytes).expect("decode");
+        assert_eq!(manifest.account(), 42);
+        assert_eq!(manifest.readiness(), ReadinessKind::Notify);
+        assert_eq!(manifest.restart(), RestartPolicy::OnFailure);
+        assert_eq!(
+            manifest.activation(),
+            ActivationMode::on_demand(Duration64::from_secs(30))
+        );
+        assert_eq!(
+            manifest.connect_capability(),
+            Some(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert_eq!(manifest.stop_grace(), Duration64::from_secs(7));
+        assert!(manifest.requires().eq([
+            ReadyCondition::NetworkUp,
+            ReadyCondition::FilesystemsMounted
+        ]));
+        assert!(manifest.provides().eq([ReadyCondition::BootComplete]));
+        assert!(manifest.dependencies().eq(["netstack", "sysinfod"]));
+    }
+
+    #[test]
+    fn service_manifest_round_trips_a_minimal_permanent_record() {
+        let unit = ServiceUnit {
+            account: 0,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+        };
+        let mut buf = [0u8; 64];
+        let bytes = encode(&unit, &mut buf);
+        // A minimal record is exactly the fixed prefix.
+        assert_eq!(bytes.len(), super::SERVICE_MANIFEST_PREFIX_LEN);
+
+        let manifest = ServiceManifest::from_bytes(bytes).expect("decode");
+        assert_eq!(manifest.account(), 0);
+        assert_eq!(manifest.readiness(), ReadinessKind::Immediate);
+        assert_eq!(manifest.restart(), RestartPolicy::Never);
+        assert_eq!(manifest.activation(), ActivationMode::Permanent);
+        assert_eq!(manifest.connect_capability(), None);
+        assert_eq!(manifest.stop_grace(), Duration64::ZERO);
+        assert_eq!(manifest.requires().count(), 0);
+        assert_eq!(manifest.provides().count(), 0);
+        assert_eq!(manifest.dependencies().count(), 0);
+    }
+
+    #[test]
+    fn service_manifest_encode_rejects_a_short_buffer() {
+        let unit = ServiceUnit {
+            account: 1,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+        };
+        let mut small = [0u8; 8];
+        assert_eq!(unit.encode(&mut small), Err(Errno::BufferTooSmall));
+    }
+
+    #[test]
+    fn service_manifest_encode_rejects_over_bound_input() {
+        let base = ServiceUnit {
+            account: 1,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+        };
+        let mut buf = [0u8; 512];
+
+        // Too many required conditions.
+        let many = [ReadyCondition::NetworkUp; SERVICE_MANIFEST_MAX_CONDITIONS + 1];
+        let over_conditions = ServiceUnit {
+            requires: &many,
+            ..base
+        };
+        assert_eq!(over_conditions.encode(&mut buf), Err(Errno::OutOfRange));
+
+        // An empty dependency name is refused (a name must be present).
+        let empty_dep = ServiceUnit {
+            dependencies: &[""],
+            ..base
+        };
+        assert_eq!(empty_dep.encode(&mut buf), Err(Errno::OutOfRange));
+
+        // A dependency name past the structural bound is refused.
+        let long = [b'a'; SERVICE_MANIFEST_MAX_NAME_LEN + 1];
+        let long_name = core::str::from_utf8(&long).expect("ascii");
+        let over_name = ServiceUnit {
+            dependencies: &[long_name],
+            ..base
+        };
+        assert_eq!(over_name.encode(&mut buf), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn service_manifest_decode_fails_closed() {
+        let unit = ServiceUnit {
+            account: 3,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::on_demand(Duration64::from_secs(1)),
+            restart: RestartPolicy::Always,
+            stop_grace: Duration64::from_secs(2),
+            connect_capability: Some(CapabilityId::FS_MOUNT),
+            requires: &[ReadyCondition::NetworkUp],
+            provides: &[],
+            dependencies: &["dep"],
+        };
+        let mut buf = [0u8; 256];
+        let len = unit.encode(&mut buf).expect("encode");
+        let good = &buf[..len];
+        assert!(ServiceManifest::from_bytes(good).is_ok());
+
+        // Truncated below the fixed prefix.
+        assert_eq!(
+            ServiceManifest::from_bytes(&good[..super::SERVICE_MANIFEST_PREFIX_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+
+        let tamper = |edit: &mut dyn FnMut(&mut [u8])| {
+            let mut copy = [0u8; 256];
+            copy[..len].copy_from_slice(good);
+            edit(&mut copy[..len]);
+            ServiceManifest::from_bytes(&copy[..len]).err()
+        };
+
+        // Bad magic.
+        assert_eq!(tamper(&mut |b| b[0] ^= 0xFF), Some(Errno::BadMagic));
+        // Unsupported version.
+        assert_eq!(
+            tamper(&mut |b| b[super::SM_OFF_VERSION] = 9),
+            Some(Errno::AbiVersionUnsupported)
+        );
+        // Non-zero reserved0.
+        assert_eq!(
+            tamper(&mut |b| b[super::SM_OFF_RESERVED0] = 1),
+            Some(Errno::BadMagic)
+        );
+        // An unknown flag bit set.
+        assert_eq!(
+            tamper(&mut |b| b[super::SM_OFF_FLAGS] |= 1 << 4),
+            Some(Errno::BadMagic)
+        );
+        // A readiness discriminant outside the closed set.
+        assert_eq!(
+            tamper(&mut |b| b[super::SM_OFF_READINESS] = 7),
+            Some(Errno::OutOfRange)
+        );
+        // A restart discriminant outside the closed set.
+        assert_eq!(
+            tamper(&mut |b| b[super::SM_OFF_RESTART] = 7),
+            Some(Errno::OutOfRange)
+        );
+
+        // Trailing bytes after an otherwise-valid record.
+        let mut trailing = [0u8; 256];
+        trailing[..len].copy_from_slice(good);
+        assert_eq!(
+            ServiceManifest::from_bytes(&trailing[..=len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn service_manifest_rejects_linger_on_a_permanent_record() {
+        // A permanent service must carry a zero linger; a non-zero one is a
+        // malformed record, not a silently-ignored field.
+        let unit = ServiceUnit {
+            account: 0,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+        };
+        let mut buf = [0u8; 64];
+        let len = unit.encode(&mut buf).expect("encode");
+        // Write a non-zero linger while leaving the on-demand flag clear.
+        buf[super::SM_OFF_LINGER] = 1;
+        assert_eq!(
+            ServiceManifest::from_bytes(&buf[..len]),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn service_manifest_rejects_connect_cap_without_its_flag() {
+        // The connect-capability field must be zero unless its flag is set.
+        let unit = ServiceUnit {
+            account: 0,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[],
+            provides: &[],
+            dependencies: &[],
+        };
+        let mut buf = [0u8; 64];
+        let len = unit.encode(&mut buf).expect("encode");
+        buf[super::SM_OFF_CONNECT_CAP] = 5; // non-zero, flag still clear
+        assert_eq!(
+            ServiceManifest::from_bytes(&buf[..len]),
             Err(Errno::BadMagic)
         );
     }

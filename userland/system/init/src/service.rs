@@ -21,9 +21,11 @@ use alloc::vec::Vec;
 
 use tairix_abi::{
     decode_capability_ids, ActivationMode, CapabilityId, Duration64, Errno, ManifestHeader,
-    ReadinessKind, ReadyCondition, RestartPolicy, MANIFEST_MAX_CAPABILITIES,
+    ReadinessKind, ReadyCondition, RestartPolicy, ServiceManifest, MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
+
+use crate::registry::{validate_service_name, EnrolError};
 
 /// Default graceful-stop grace period a service is given to exit on its own
 /// before the manager force-terminates it, when its manifest declares none.
@@ -158,6 +160,62 @@ impl ServiceSpec {
             stop_grace: DEFAULT_STOP_GRACE,
             connect_capability: None,
         }
+    }
+
+    /// Build a [`ServiceSpec`] from a service's decoded signed unit-metadata
+    /// record (`plans/NEW-SERVICEMANAGER.md` §3.1 discovery).
+    ///
+    /// This is the bridge from *discovery* — a bundle scanned off
+    /// `/System/Services` whose [`ServiceManifest`] has been decoded and
+    /// validated by the ABI layer — to the *registration* the manager
+    /// consumes ([`Init::register_enrolled`](crate::Init::register_enrolled)).
+    /// The caller supplies the service's `name` and its `binary_path` (the
+    /// loader knows both from the discovered bundle); every other field —
+    /// account, readiness, activation, restart policy, stop grace, connect
+    /// capability, dependencies, and the required/provided readiness
+    /// conditions — comes from the signed manifest, so a tampered unit
+    /// setting is a load refusal upstream, never a silent behaviour change
+    /// here.
+    ///
+    /// The manifest's *structure* was already validated when it was decoded;
+    /// this additionally applies the manager's **name policy**
+    /// ([`validate_service_name`]) to the service name and to every
+    /// dependency name, so a manifest can never smuggle a path-traversal- or
+    /// case-collision-shaped dependency into the dependency graph. The
+    /// structural [`ServiceManifest`] name bound is looser than this policy on
+    /// purpose; the policy is the one authoritative check, applied here rather
+    /// than duplicated.
+    ///
+    /// # Errors
+    ///
+    /// [`EnrolError::NameEmpty`], [`EnrolError::NameTooLong`], or
+    /// [`EnrolError::NameInvalid`] if the service name or any dependency name
+    /// violates the name policy. Fails closed — no partial spec is produced.
+    pub fn from_manifest(
+        name: impl Into<String>,
+        binary_path: impl Into<String>,
+        manifest: &ServiceManifest<'_>,
+    ) -> Result<Self, EnrolError> {
+        let name = name.into();
+        validate_service_name(&name)?;
+        let mut dependencies: Vec<String> = Vec::new();
+        for dependency in manifest.dependencies() {
+            validate_service_name(dependency)?;
+            dependencies.push(String::from(dependency));
+        }
+        let requires: Vec<ReadyCondition> = manifest.requires().collect();
+        let provides: Vec<ReadyCondition> = manifest.provides().collect();
+        let mut spec = Self::new(name, binary_path, manifest.account(), dependencies)
+            .with_readiness(manifest.readiness())
+            .with_activation(manifest.activation())
+            .with_restart(manifest.restart())
+            .with_stop_grace(manifest.stop_grace())
+            .requiring(requires)
+            .providing(provides);
+        if let Some(capability) = manifest.connect_capability() {
+            spec = spec.with_connect_capability(capability);
+        }
+        Ok(spec)
     }
 
     /// Set the service's activation mode (permanent versus on-demand with an
@@ -449,5 +507,92 @@ mod tests {
         };
         assert_eq!(c.pid.as_u64(), 7);
         assert_eq!(c.exit_code, -1);
+    }
+
+    #[test]
+    fn from_manifest_builds_a_spec_from_signed_unit_metadata() {
+        use tairix_abi::{
+            ActivationMode, CapabilityId, Duration64, ReadinessKind, ReadyCondition, RestartPolicy,
+            ServiceManifest, ServiceUnit,
+        };
+
+        let unit = ServiceUnit {
+            account: 12,
+            readiness: ReadinessKind::Notify,
+            activation: ActivationMode::on_demand(Duration64::from_secs(20)),
+            restart: RestartPolicy::OnFailure,
+            stop_grace: Duration64::from_secs(9),
+            connect_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+            requires: &[ReadyCondition::NetworkUp],
+            provides: &[ReadyCondition::SeatAvailable],
+            dependencies: &["netstack", "sysinfod"],
+        };
+        let mut buf = [0u8; 256];
+        let len = unit.encode(&mut buf).expect("encode");
+        let manifest = ServiceManifest::from_bytes(&buf[..len]).expect("decode");
+
+        let spec = ServiceSpec::from_manifest("fontd", "/System/Services/fontd.app/Run", &manifest)
+            .expect("well-formed manifest builds a spec");
+        assert_eq!(spec.name(), "fontd");
+        assert_eq!(spec.binary_path(), "/System/Services/fontd.app/Run");
+        assert_eq!(spec.account(), 12);
+        assert_eq!(spec.readiness(), ReadinessKind::Notify);
+        assert_eq!(
+            spec.activation(),
+            ActivationMode::on_demand(Duration64::from_secs(20))
+        );
+        assert_eq!(spec.restart(), RestartPolicy::OnFailure);
+        assert_eq!(spec.stop_grace(), Duration64::from_secs(9));
+        assert_eq!(
+            spec.connect_capability(),
+            Some(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert_eq!(spec.dependencies(), &["netstack", "sysinfod"]);
+        assert_eq!(spec.requires(), &[ReadyCondition::NetworkUp]);
+        assert_eq!(spec.provides(), &[ReadyCondition::SeatAvailable]);
+    }
+
+    #[test]
+    fn from_manifest_applies_the_name_policy_to_the_service_and_dependencies() {
+        use tairix_abi::{
+            ActivationMode, Duration64, ReadinessKind, ReadyCondition, RestartPolicy,
+            ServiceManifest, ServiceUnit,
+        };
+
+        // A manifest whose *structure* is valid but whose dependency name
+        // violates the manager's name policy (a path-traversal shape) is
+        // refused: the structural ABI bound is looser than the policy, and
+        // the policy is applied here, fail closed.
+        let bad_dep = ServiceUnit {
+            account: 0,
+            readiness: ReadinessKind::Immediate,
+            activation: ActivationMode::Permanent,
+            restart: RestartPolicy::Never,
+            stop_grace: Duration64::ZERO,
+            connect_capability: None,
+            requires: &[] as &[ReadyCondition],
+            provides: &[] as &[ReadyCondition],
+            dependencies: &["../escape"],
+        };
+        let mut buf = [0u8; 128];
+        let len = bad_dep.encode(&mut buf).expect("encode");
+        let manifest = ServiceManifest::from_bytes(&buf[..len]).expect("decode");
+        assert_eq!(
+            ServiceSpec::from_manifest("svc", "/System/Services/svc.app/Run", &manifest),
+            Err(super::EnrolError::NameInvalid),
+        );
+
+        // An invalid *service* name is likewise refused, before the spec is
+        // assembled.
+        let ok = ServiceUnit {
+            dependencies: &[] as &[&str],
+            ..bad_dep
+        };
+        let len = ok.encode(&mut buf).expect("encode");
+        let manifest = ServiceManifest::from_bytes(&buf[..len]).expect("decode");
+        assert_eq!(
+            ServiceSpec::from_manifest("Bad Name", "/System/Services/x.app/Run", &manifest),
+            Err(super::EnrolError::NameInvalid),
+        );
     }
 }
