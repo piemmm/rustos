@@ -1,0 +1,316 @@
+# FIX-IO.md — Storage/media I/O fault isolation and recovery grace
+
+Binding plan under `AGENTS.md`. One failing, stalling, or resetting storage
+device — or a wedged hub/controller serving several of them — MUST NEVER lock
+up the filesystem "strata" or the system. A faulting device is contained to
+its own fault domain; every other mount, and the rest of the system, keeps
+running unimpeded. A device that is only *briefly* unwell (a comms blip, a bus
+reset, a hub that is mid-reset) is given a bounded **grace window** to come
+back before anything is failed closed, because such blips are transient far
+more often than they are terminal. This is the storage-side realisation of the
+operating-conditions floor (§26, especially §26.5 "a disk may be failing" and
+§26.1 "a slow device must never stall a fast one") and the no-busy-wait
+mandate (§2.23).
+
+This plan is staged so an AI can action **one full stage at a time** with no
+surprises: each stage is self-contained, lands with its own tests, and leaves
+the whole-project validation gate (§7) green on its own. Stages are ordered so
+that the earliest ones already stop the lockup; the later ones deepen the
+model. The plan states the current design and what remains (§13); it is not a
+changelog.
+
+---
+
+## 0. Root cause (why the strata can lock up today)
+
+The lockup is **structural**, not a bug in one driver. Verified against the
+tree:
+
+- **The block seam is an unbounded synchronous call.** A consumer drives a
+  device through `tairix_abi::driver::block::Block`, implemented by
+  `RemoteBlock` over the `BlkCall` seam (`drivers/storage/volmgr/src/blk.rs`).
+  `BlkCall::call(request, reply, window)` issues `ipc_call` on the granted
+  block endpoint. `ipc_call` (`lib/abi/src/syscalls.rs`, 5 args: endpoint,
+  request ptr, request len, reply ptr, reply cap) has **no `timeout_ns`/
+  deadline argument**, so the caller parks until the driver replies.
+- **A wedged device never replies.** The per-LUN serve path
+  (`drivers/storage/usb_msd/src/serve.rs`, `serve_request`/`serve_decoded`) is
+  a pure one-request-in / one-completion-out function. If the underlying
+  SCSI/BOT/UAS transfer to the medium stalls, no `BlkCompletion` is ever
+  framed and `call_reply` is never issued — the consumer waits forever.
+- **The completion vocabulary has no health axis.** `BlkCompletion`
+  (`lib/abi/src/blkio.rs`) is either a geometry/success payload or a negated
+  `Errno` (`encode_error_completion` / `decode_completion`). There is no
+  "transient vs permanent", "retrying", "resetting", or "degraded" outcome, so
+  a consumer cannot tell a disk that will come back from one that is dead, and
+  cannot make an isolation decision. `errno_to_driver` (`blk.rs`) collapses
+  everything it does not specifically recognise to `DriverError::DeviceFault`.
+- **Fault domains are not modelled for I/O stalls.** The hardware tree
+  (`lib/abi/src/hwtree.rs`) captures topology and the D4 surprise-removal path
+  (`plans/DEVICES.md`; `MountAvailability::{UnavailableDirty,UnavailableLost,
+  RecoveryConflict}` in `lib/abi/src/sysinfo.rs`) handles a device that
+  physically *vanishes* — but nothing handles a device that is still present
+  yet unresponsive, and nothing ties a hub/controller reset to a coherent
+  quiesce/resume of the block endpoints beneath it. A hub serving several
+  disks blipping looks like N independent, permanent disk failures.
+
+The primitives to fix this already exist and are reused, not reinvented (§2.2):
+per-driver user-space processes (§4 isolation), wait-sets
+(`lib/abi/src/waitset.rs`; `waitset_wait(handle, timeout_ns, token_out)`,
+`u64::MAX` = no timeout), `irq_bind`/`irq_wait(handle, timeout_ns)`, the
+`-TimedOut` errno convention (`hw_tree_wait`/`irq_wait`/`waitset_wait`), the D4
+retained-writes/verified-re-insert machine, the `lib/log` hash-chained audit
+trail (§19.4), the `sysinfo` health precedents (bond members; surprise-removed
+volumes that "never masquerade as healthy"), and the watchdog's driver-restart
+recovery (`plans/WATCHDOG.md`).
+
+---
+
+## 1. Invariants (hold in every stage, on every Tier-1 target)
+
+1. **Every I/O is time-bounded, end to end.** No consumer path may block
+   indefinitely on hardware. A per-request deadline turns an infinite wait into
+   a deterministic, fail-closed event — the mechanism, not a hack (§2.1's ban
+   on "retry-until-it-works", §26.5).
+2. **Isolation by construction.** Each block device is served by its own
+   user-space process (§4); a fault is contained to that address space
+   (§19.5 blast-radius). The consumer side never serialises unrelated devices
+   behind one blocking thread (§26.1 head-of-line freedom).
+3. **A blip is ridden out, not punished — within a bounded grace window.** A
+   device that stalls, resets, or whose hub is mid-reset is held `Recovering`
+   for a bounded, event-timed grace period; if it returns inside the window,
+   I/O resumes and the episode is logged as a recovery, not a failure. Only
+   after the window expires without recovery is the device failed closed. The
+   grace window is *policy* (Stage IO3), sized per device class — never one
+   global `const` (§24.1) and never a security/validation bound (§24.4).
+4. **Health is first-class and honest.** A device has an explicit state
+   machine distinguishing transient from permanent and recovering from failed.
+   A returning disk is a normal, logged transition (§26.5). A device that has
+   faulted stays quarantined-but-recoverable until it *demonstrably* recovers,
+   so a flapping disk cannot masquerade as healthy (the `sysinfo` precedent),
+   yet recovery never needs a reboot (§18.4).
+5. **Fault domains are a discovered tree.** A device node's parent bus/hub/
+   controller is its fault-domain owner, read from the hardware tree, never
+   hard-coded (§18.1, §2.20). USB hub, SAS/JBOD expander, and PCIe root complex
+   are all just interior nodes.
+6. **Never busy-wait (§2.23).** All waiting — per-request deadline, grace-window
+   timing, retry backoff — is event-driven (`waitset_wait`/`irq_wait` relative
+   timeout, one-shot timer). Backoff parks on a timer; it never spins.
+7. **Fail closed, degrade gracefully (§5.4, §2.24).** At the boundary of what we
+   can vouch for (timeout, corrupt reply, checksum failure) we return a typed
+   error and never serve data we cannot trust; the *session/system* survives,
+   only the *operation* fails.
+8. **No self-compat, no dead code (§2.13, §2.14).** The deadline-less block
+   path and the success-or-`errno`-only `BlkCompletion` are replaced in place,
+   with every consumer updated in the same change. No v1/v2 seam, no shim.
+
+---
+
+## 2. Stage plan
+
+Each stage is complete and green on its own (§2.19). IO1–IO2 already stop the
+lockup; IO3 adds the grace window this issue is about; IO4–IO6 deepen the
+model. IO6 depends on RustFS existing and is gated on it.
+
+### Stage IO1 — Bounded, cancellable block transport. **planned**
+
+Give the block seam a deadline so a consumer is *never* parked forever on a
+wedged device. The ABI is unfrozen (§9), so change it in place (§2.13).
+
+Deliverables:
+- **A per-request deadline on the block call.** Two shapes; the reviewer picks
+  one and this plan is updated to the chosen one before IO2 starts:
+  - *(Preferred)* an **async submit/complete** seam: `blk_submit(request,
+    deadline)` returns a ticket, completions arrive on a **wait-set** the
+    consumer already owns, and `blk_cancel(ticket)` withdraws an outstanding
+    request. This is the scalable, head-of-line-free shape (§26.1, §27
+    "implement the abstraction, not the caller's slice") and mirrors the
+    existing async HCD event loop (`plans/USB.md`, `lib/abi/src/waitset.rs`).
+  - *(Minimum)* extend the synchronous call with a `deadline_ns` so the block
+    endpoint returns `-TimedOut` instead of parking forever, reusing the
+    `waitset_wait`/`irq_wait` convention.
+- **`BlkCompletion` gains an explicit outcome/health axis** in
+  `lib/abi/src/blkio.rs`, replacing the bare success-or-`-errno` frame with a
+  status enum: `Ok`, `TransientError` (retryable — recovered ECC, comms
+  glitch), `Timeout`, `Reset` (aborted by a device/hub reset; safe to
+  reissue), `Degraded` (served, but the device reports itself unhealthy),
+  `MediumError` (permanent bad-sector), `Offline`/`Removed` (surprise removal,
+  already precedented in `sysinfo.rs`), `Fatal`. The consumer isolates on the
+  class rather than guessing from an `Errno`.
+- **`errno_to_driver` / `DriverError` grow the matching typed classes** so the
+  filesystem layer can act (transient/reset → reissue; medium/offline →
+  surface as I/O error).
+- **Per-device bounds are policy, not a global `const`** (§24.1 vs §24.4): the
+  deadline, retry count, and queue depth are derived from the device's
+  discovered class (a rotational SATA disk ≠ an NVMe namespace) and fail closed
+  under pressure (§26.1).
+
+Tests (§7): extend the `blk.rs` host doubles — a `BlkCall` that stalls past the
+deadline returns `-TimedOut`/`Timeout` and the consumer unblocks; round-trip and
+fail-closed decode of every new status class; fuzz the completion/status decode
+and the deadline path (§19.6).
+
+### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **planned**
+
+Stop the "entire strata locks up": no shared blocking thread across devices.
+
+Deliverables:
+- Each volume/filesystem attachment drives its device through the IO1 seam and
+  multiplexes completions/timeouts on a **wait-set** (§2.23). One device's
+  stall parks only the tasks waiting on *that* device; unrelated volumes keep
+  running. Any single serialised worker fanning out to all disks is removed.
+- `RemoteBlock`/`Block` become fault-aware: a timeout/offline on a non-root
+  (even empty) disk surfaces to *its* callers only; the root and every other
+  mount are unaffected.
+- The mount stays up; the op fails. A wedged device yields `-TimedOut`/`Offline`
+  to its callers, and the volume is marked degraded (Stage IO3 state), not torn
+  out.
+
+Tests (§7): a host harness with two devices where one stalls forever and the
+other keeps serving, asserting the live device's completions are unaffected
+(head-of-line isolation); a QEMU vertical with a wedged/removed virtio-blk or
+USB MSD device beside a live volume.
+
+### Stage IO3 — Per-device health state machine + the recovery grace window. **planned**
+
+This is the core of the issue: a bounded grace window to ride out a blip
+before failing closed.
+
+Deliverables:
+- **A per-device health state machine, owned by the block driver process:**
+  `Healthy → Degraded → Recovering(grace) → { Healthy | Faulted } → Offline/
+  Removed → Failed`. Transitions are logged (Stage IO5).
+- **The grace window.** On the first stall/reset/comms error, the device enters
+  `Recovering` and arms a **one-shot grace timer** (a relative-timeout
+  `waitset_wait`, never a spin). While inside the window:
+  - In-flight requests complete with `Reset`/`TransientError` (reissuable) or
+    are held up to their per-request deadline (IO1) — never a hard `Fatal`.
+  - New requests are briefly parked on the same event-timed budget rather than
+    failed immediately, so a blip that resolves in milliseconds is invisible to
+    the workload.
+  - The driver runs its bounded recovery escalation, each step time-boxed and
+    event-driven: retry-with-backoff → LUN reset → device/port reset → (escalate
+    to the fault-domain owner for, Stage IO4) hub reset → controller reset. No
+    unbounded retries (§2.1); backoff parks on a one-shot timer (§2.23).
+  - **If the device returns inside the window** → `Recovering → Healthy`, held
+    requests complete normally, and a recovery event is logged (§26.5 "disks can
+    come back to life; note it in the health log"). This is the explicit
+    ride-out-the-blip behaviour.
+  - **If the window expires without recovery** → `Faulted`/`Offline`, and only
+    *then* does the device fail closed to its consumers, feeding the existing D4
+    retained-writes / verified-re-insert path (`plans/DEVICES.md`) so
+    uncommitted data is preserved for a later verified return.
+- **The grace duration is per-device-class policy** derived from discovered
+  hardware (a rotational disk's spin-up/reset budget ≠ a bus glitch), with a
+  sane default for desktop *and* server (§24.2), documented in the driver crate
+  and its `docs/src/` page — never one global `const` (§24.1) and never a
+  security/validation bound (§24.4).
+- **Sticky-but-recoverable.** A device that has faulted stays degraded/
+  quarantined until it demonstrably recovers, so a flapping disk cannot present
+  as healthy (the `sysinfo` "never masquerades as healthy" precedent), yet a
+  genuine return always recovers it without a reboot (§18.4).
+- The driver owns its own timers/IRQ waits and never blocks the consumer: it
+  either completes, or replies with a `Timeout`/`Reset`/`Degraded` completion
+  within the per-request deadline while the device works through its grace
+  window behind the scenes. The pure per-request logic in `usb_msd/src/serve.rs`
+  stays host-testable; the serve path grows a recovery arm around it.
+
+Tests (§7): drive the state machine over a fault-injecting `Block` double
+through fault → degrade → grace(recovering) → **return-inside-window →
+Healthy** (I/O resumes, recovery logged) *and* fault → grace expiry → Faulted →
+fail-closed → D4 retention; assert the grace timer is event-timed (no busy
+spin) and that requests inside the window are held/reissued, not hard-failed;
+assert a flapping device stays sticky-degraded until a real recovery.
+
+### Stage IO4 — Fault-domain tree (hub/controller quiesce/resume). **planned**
+
+A hub or controller blip is *one* fault-domain event, not N spurious disk
+failures.
+
+Deliverables:
+- A **fault-domain** object mirroring the hardware tree (`hwtree.rs`): a device
+  node's parent bus/hub/controller node is its fault-domain owner, discovered,
+  not hard-coded (§18.1, §2.20). USB hub, JBOD/SAS expander, and PCIe root
+  complex are all interior nodes.
+- **Coherent quiesce/resume.** When an owner must reset, it transitions all
+  children to `Recovering(grace)` under one shared grace window (Stage IO3): in-
+  flight requests complete with `Reset` (reissuable), new requests park on the
+  event-timed budget, and on success the children resume — so one hub reset is
+  one recovery episode, not N failures. If the owner cannot recover within its
+  grace budget, its subtree goes `Offline` and consumers are told, fail-closed.
+- Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
+  `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
+  *degrade/reset/restore* health transitions alongside add/remove.
+
+Tests (§7): a modelled hub with several children where the hub resets — assert
+one fault-domain recovery episode, children reissue and resume within the grace
+window, and only a genuine expiry takes the subtree `Offline`.
+
+### Stage IO5 — Health observability (audit log + `sysinfo`). **planned**
+
+Deliverables:
+- **Health events through `lib/log`** (`plans/SYSLOG.md`) with stable event IDs
+  on the hash-chained audit trail (§19.4): every fault, retry, reset (naming the
+  fault-domain node), degrade, grace-window entry/expiry, and — importantly —
+  every *recovery* ("disk came back"). Security-relevant decisions (driver
+  quarantine/restart) stay on the audit log; routine advisories may also use
+  `stdinfo` (§20) but never *instead of* the audit log.
+- **Device/volume/array health via `sysinfo`** (§16.6) behind a capability,
+  following the bond-member and surprise-removed-volume precedents in
+  `sysinfo.rs` — never a `/proc`-style scrape (§16.1). Extend
+  `MountAvailability` (or a sibling health field) to distinguish
+  `Recovering`/`Degraded` from the existing `Unavailable*`/`RecoveryConflict`
+  states, so a tool can show "recovering (grace)" distinctly from "lost".
+- **Watchdog tie-in** (`plans/WATCHDOG.md`): a driver process that itself wedges
+  is a lockup the watchdog detects and recovers (restart the driver, mark the
+  device `Failed`) — closing the loop where the *driver*, not the disk, is the
+  problem.
+
+Tests (§7): assert the health-log events for each transition (including the
+returning-disk recovery event) and the `sysinfo` health read; a wedged driver
+process is detected and recovered.
+
+### Stage IO6 — RAID / mirror / RustFS composition. **planned, gated on RustFS**
+
+Deliverables:
+- A RAID/mirror/RustFS volume is a **virtual block device that composes child
+  block endpoints** through the same fault-aware `Block` seam (§2.2 one seam,
+  §27 complete abstraction). It consumes health/status; it does not re-invent
+  it.
+- A child going `Faulted`/`Offline` **degrades the array, not the system**:
+  mirrors/parity serve from surviving members and the array reports `Degraded`
+  upward. A returning disk (via the IO3 grace window) triggers **resync/rebuild**
+  (bounded, incremental, interruptible per §26.6), and its transition back to
+  `Healthy` is logged.
+- Multi-layered sets nest naturally because fault domains (IO4) and the block
+  seam (IO1) are recursive.
+
+Tests (§7): a composed mirror over fault-injecting children — one child faults
+and recovers inside its grace window (array degrades then resyncs), one child
+expires (array stays degraded, system unaffected).
+
+---
+
+## 3. Cross-cutting test floor (§26.7 / §7)
+
+Woven through the stages, and asserted as a combined vertical once IO1–IO3 land:
+small discovered RAM (on the order of 1 GiB) with several large volumes mounted,
+one of them stalling/faulting — assert bounded resident metadata, no panic, no
+busy-spin, the live volumes' throughput unaffected, the faulting device ridden
+through its grace window (recovered if it returns, failed closed to *its*
+callers only if it does not), and the whole system responsive throughout.
+
+---
+
+## 4. Scope / escalation (§15.7)
+
+This spans `lib/abi` (block seam + status/health enum + fault-domain), the
+kernel IPC/timer path (deadlined/async call + cancel), every block driver
+(`usb_msd`, `virtio_blk`, `emmc2`), `volmgr`, the filesystem drivers,
+`sysinfo`, and `lib/log`. It is larger than one change, hence the staging above:
+each stage lands complete and green on its own. The exact IO1 transport shape
+(async submit/complete vs deadlined synchronous call) is the one open decision
+that touches everything downstream — if it turns out to conflict with the
+in-flight HCD async event loop (`plans/USB.md`), that is a stop-and-ask point,
+not a place to pick a "for now" compromise (§2.19). IO6 is gated on RustFS
+existing; IO1–IO5 do not depend on it and land first.
