@@ -125,6 +125,34 @@ ungated (no capability, no audit). It resolves through the same
 `tairix_procinfo` resolver onto that query, which the `sysinfod` broker
 forwards to `netstack`'s `NetstackRequest::ResolverServers` broker read.
 
+## `host` — DNS lookups
+
+`host` resolves a name over DNS from the shell, in the familiar
+`bind-utils` shape:
+
+```
+$ host example.com
+example.com has address 93.184.216.34
+example.com has IPv6 address 2606:2800:220::1
+```
+
+With no `-t` it looks up both the `A` (IPv4) and `AAAA` (IPv6) records the
+stub resolver supports; `-t A` / `-t AAAA` (case-insensitive) restricts the
+lookup to one. Other record types (`MX`, `TXT`, …) are rejected rather than
+silently treated as `A` — the stub resolver looks up only address records.
+A name that does not exist prints `Host <name> not found: 3(NXDOMAIN)`; when
+no server can be reached, the timeout is reported on standard error. `host`
+exits `0` when at least one address was found, `1` when the name resolved to
+no address, and `2` on a usage or output error.
+
+`host` is a client of the shared userland stub resolver (`lib/resolver`): it
+reads the active recursive-server set through the same ungated
+`NET_RESOLVER_SERVERS` query the `state:net/resolver/servers` read exposes,
+then drives the pure RFC 1035 / RFC 5452-hardened DNS engine in `lib/net`
+over an ordinary `CAP_NET` UDP socket (with CSPRNG source-port
+randomisation and a random query id). There is no `/etc/resolv.conf` and no
+local host file.
+
 ## Configuring interfaces (`network.conf`)
 
 Per-interface addressing is declarative, not imperative: it lives in one

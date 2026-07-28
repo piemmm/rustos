@@ -382,6 +382,21 @@ impl Default for AddrList {
 }
 
 impl AddrList {
+    /// Build a list from `addrs`, keeping at most [`MAX_ADDRESSES`] (a longer
+    /// slice is truncated to the fixed capacity).
+    ///
+    /// Lets a caller construct the public [`Resolution`] type — e.g. a test
+    /// double standing in for a real lookup, or a future synthetic resolver —
+    /// without reaching into the private layout.
+    #[must_use]
+    pub fn from_addrs(addrs: &[IpAddr]) -> Self {
+        let mut list = Self::default();
+        for addr in addrs {
+            list.push(*addr);
+        }
+        list
+    }
+
     /// The addresses collected, in wire order.
     #[must_use]
     pub fn as_slice(&self) -> &[IpAddr] {

@@ -1398,6 +1398,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-host"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-net",
+ "tairix-resolver",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-icon"
 version = "0.0.0"
 dependencies = [
@@ -1936,6 +1947,16 @@ dependencies = [
  "tairix-rt",
  "tairix-termcap",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-resolver"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-net",
+ "tairix-procinfo",
+ "tairix-rt",
 ]
 
 [[package]]

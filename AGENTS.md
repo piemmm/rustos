@@ -569,6 +569,7 @@ tairix/
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
 │   ├── raster/          # Shared software rasterisation.
+│   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
 │   ├── resref/          # Shared resource-reference parser.
 │   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.
 │   ├── rt/              # The pure-Rust userland runtime.

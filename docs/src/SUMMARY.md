@@ -67,6 +67,7 @@
   - [`tairix-net`](./lib/net.md)
   - [`tairix-netconfig`](./lib/netconfig.md)
   - [`tairix-path`](./lib/path.md)
+  - [`tairix-resolver`](./lib/resolver.md)
   - [`tairix-resref`](./lib/resref.md)
   - [`tairix-rng`](./lib/rng.md)
   - [`tairix-rt` I/O](./lib/rt-io.md)

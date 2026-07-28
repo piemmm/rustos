@@ -5482,7 +5482,13 @@ configured declaratively: the fail-closed
 keys, with interface bonding (`active-backup` failover + flow-hashed
 `balance`) as a stack-composed virtual interface over unmodified NIC
 drivers (N9). See `plans/NETWORK.md` for the binding design and
-per-increment guarantees.
+per-increment guarantees. Name resolution is a consumer of that socket
+ABI, staged in `plans/DNS.md`: the pure RFC 1035 / RFC 5452 stub-resolver
+engine in `lib/net::dns`, the userland client `lib/resolver` (drives the
+engine over a `netsock-v1` UDP socket, reading the active recursive-server
+set from the ungated `NET_RESOLVER_SERVERS` sysinfo query), and the `host`
+command app as its first consumer; the live 3-arch DNS QEMU verticals
+remain.
 
 ---
 

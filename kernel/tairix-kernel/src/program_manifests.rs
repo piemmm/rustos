@@ -929,6 +929,19 @@ mod tests {
         CapabilityId::NET_RAW,
     ];
 
+    // The `host` DNS-lookup tool (plans/DNS.md DNS3): console write for its
+    // answers and diagnostics, filesystem access for its own Help/ documents,
+    // and CAP_NET for the ordinary UDP socket the stub resolver queries the
+    // recursive DNS servers with (the stack re-checks it and audits the open).
+    // The active-server set is read through the ungated NET_RESOLVER_SERVERS
+    // query, so no CAP_SYSINFO_* is requested. Not an embedded spawn-floor
+    // program, so the list lives only in this pin.
+    const HOST_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
+    ];
+
     // The `widgets` gallery (plans/GUI-CONTROLS-DESIGN.md): console write for
     // its fail-loud stderr diagnostics, and `CAP_SHM` for the zero-copy window
     // frame region it creates and grants to the desktop session. It reads no
@@ -974,6 +987,7 @@ mod tests {
             ("fstree", AppKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("head", AppKind::Command, FILE_TOOL_REQUEST),
+            ("host", AppKind::Command, HOST_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
             ("lspci", AppKind::Command, HW_LIST_TOOL_REQUEST),

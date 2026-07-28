@@ -635,6 +635,7 @@ mod tests {
                 "fstree",
                 "groupadd",
                 "head",
+                "host",
                 "login",
                 "ls",
                 "lspci",

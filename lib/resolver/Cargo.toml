@@ -1,0 +1,46 @@
+[package]
+name = "tairix-resolver"
+description = "TAIRiX userland DNS stub-resolver client: drives the pure `tairix-net` DNS engine over a `netsock-v1` UDP socket, fetching the active recursive-server set from the System Information API (`plans/DNS.md` DNS2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The production socket-backed transport (`RtDnsTransport`) and the
+# convenience `resolve` entry point are an optional build feature that pulls
+# the freestanding userland runtime `tairix-rt`. It is enabled only when a
+# bare-metal program binary that resolves names is built; the pure
+# `resolve_name` orchestration and its host tests never pull the runtime, so
+# they stay testable against in-memory fakes with no kernel. Mirrors the
+# `program` split of `lib/procinfo`.
+[features]
+program = ["dep:tairix-rt"]
+
+[dependencies]
+# The audited ABI vocabulary: `Errno`, the socket wire types, `Origin`, and
+# the `NetResolverServer` record the server-set query returns.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one pure DNS engine: the RFC 1035 codec, the RFC 5452-hardened resolver
+# state machine, and the shared `DnsTransport`/`resolve` driver this crate
+# supplies I/O for — never a second DNS implementation (§2.2).
+tairix-net = { path = "../net", version = "=0.0.0" }
+# The single shared System Information API client: the ungated
+# `NET_RESOLVER_SERVERS` paging walk (`for_each_resolver_server`) that surfaces
+# the active recursive-server set — never a second sysinfo query client (§2.2).
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0" }
+
+# For the `program` feature only: the userland runtime `tairix-rt`, which
+# supplies the `netsock-v1` datagram-socket wrappers, the delivery-port
+# wait-set, the monotonic clock, and the CSPRNG draw the socket-backed
+# transport is built on. Pulled only for the bare-metal targets a resolving
+# program is actually built for; on the host it is never linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# The `program`-feature production sysinfo transport (`IpcTransport`) the
+# server-set fetch uses is behind `tairix-procinfo`'s own `program` feature.
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0", features = ["program"] }

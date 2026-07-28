@@ -142,24 +142,43 @@ Done so far — the active-server aggregation and its observability surface:
   (the operator's explicit choice) then its DHCP-learned servers, so the same
   broker read now surfaces both sources.
 
-Remaining, in order:
+Done — the `lib/resolver` client crate, landed with its first consumer (DNS3):
 
-1. **`lib/resolver` client crate** — a freestanding+host-stub crate driving
-   `DnsTransport` over `tairix_rt::net` (a datagram socket, port-0 bind for
-   RFC 5452 source-port randomisation, `waitset_wait` delivery — the `ping`
-   `RtPingIo` pattern) whose `resolve()` first fetches the servers (via the
-   ungated `NET_RESOLVER_SERVERS` query) then drives `tairix_net::dns::resolve`.
-   Landed **with** its first consumer (DNS3), never consumer-less (§2.4).
-2. **3-arch live QEMU verticals** — `netstack_dns_qemu_{aarch64,x86_64,riscv64}`
+- `lib/resolver` is a `lib/*` crate (`no_std`, `#![forbid(unsafe_code)]`, deps
+  `tairix-abi`/`tairix-net`/`tairix-procinfo`, and `tairix-rt` under a
+  `program` feature). Its pure, host-tested `resolve_name(name, record_type,
+  sysinfo, udp, rng)` fetches the configured servers via
+  `for_each_resolver_server` (the ungated `NET_RESOLVER_SERVERS` query) and
+  drives `tairix_net::dns::resolve` over an injected `DnsTransport`; both
+  seams are injected so the whole path runs against fakes. `ResolveError`
+  distinguishes `InvalidName`/`NoServers`/`ServerSource`/`Transport` (a
+  negative/timeout lookup is a `Resolution`, not an error).
+- The `program`-feature `RtDnsTransport` implements `DnsTransport` over
+  `tairix_rt::net`: an app-local bound delivery port, a per-family datagram
+  socket opened on demand with a port-0 (CSPRNG ephemeral) bind for RFC 5452
+  source-port randomisation, `waitset_wait` delivery with a kernel-attested
+  stack-origin check (fail closed), and no busy spin. `RtDnsTransport::resolve`
+  reuses one bound port across the record types of a single lookup.
+
+Remaining:
+
+1. **3-arch live QEMU verticals** — `netstack_dns_qemu_{aarch64,x86_64,riscv64}`
    mirroring DHCP D3: a `NetPeerMode::V*DnsEcho` host DNS server in
    `tools/xtask` `netpeer`, a planted `network.conf` naming the server, a tiny
    guest resolver client, and witnesses.
 
-### DNS3 — a `host`/`nslookup`-class command app `[ ]`
+### DNS3 — a `host`/`nslookup`-class command app `[x]`
 
-A system command app that resolves a name from the shell over DNS2,
-GNU/`bind-utils`-compatible in options and output where it maps (§16.7), with
-its `Help/` bundle and docs.
+The `host` command app (`userland/apps/host`) is landed as `lib/resolver`'s
+first consumer: `host [-t type] name` resolves the `A`+`AAAA` records the stub
+resolver supports (or one, with `-t A`/`-t AAAA`) and prints the `bind-utils`
+shape (`<name> has address …` / `has IPv6 address …`, `has no <TYPE> record`,
+`Host <name> not found: 3(NXDOMAIN)`, a timed-out diagnostic on stderr).
+Exit `0` on a found address (or help), `1` on no address, `2` on a usage or
+output error. Pure `parse`/`run` engine with injected `Resolver`/`Output`
+seams (host-tested), an `AppInfo` requesting `CAP_CONSOLE_WRITE`/
+`CAP_FS_ACCESS`/`CAP_NET`, and a 13-locale `Help/` bundle. A future
+`nslookup`-class tool would reuse the same `lib/resolver` client.
 
 ## 4. Tests, docs, and gate (binding)
 
