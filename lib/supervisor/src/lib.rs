@@ -137,6 +137,11 @@ pub enum SupervisorEvent {
     MountOk,
     /// An in-Supervisor `mount` failed (wrong passphrase or structural).
     MountFailed,
+    /// The operator confirmed the one-way, destructive `memtest full`
+    /// whole-RAM takeover test. Recorded immediately before the takeover is
+    /// attempted, because a successful takeover destroys the in-memory audit
+    /// ring and never returns — this is the last record the ring can hold.
+    MemtestTakeover,
 }
 
 /// A byte sink the Supervisor renders its output into.
@@ -314,6 +319,18 @@ pub trait SupervisorHost {
     /// Power the machine off / halt. On success this never returns; if it
     /// returns, the platform has no power-off and the engine reports it.
     fn poweroff(&mut self);
+
+    /// Attempt the one-way, destructive `memtest full` whole-RAM takeover
+    /// test. The engine calls this **only** after an explicit typed
+    /// confirmation and after auditing [`SupervisorEvent::MemtestTakeover`].
+    ///
+    /// On a platform that can take the machine over this never returns: it
+    /// stops every CPU, tests all of RAM (overwriting it), and resets. If it
+    /// returns, the takeover did not proceed — the platform has no takeover
+    /// mechanism, or a step failed closed — and the machine is unchanged; the
+    /// reason has already been rendered to `out` and the engine stays in the
+    /// REPL. It never partially tears the machine down.
+    fn takeover_memtest(&mut self, out: &mut dyn Report);
 
     /// Record a security-relevant Supervisor decision on the audit log.
     fn audit(&mut self, event: SupervisorEvent);

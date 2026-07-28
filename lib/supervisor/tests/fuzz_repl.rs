@@ -175,6 +175,11 @@ impl SupervisorHost for FuzzHost {
     }
     fn reboot(&mut self) {}
     fn poweroff(&mut self) {}
+    fn takeover_memtest(&mut self, out: &mut dyn Report) {
+        // Return (as an unsupported platform would) so the REPL stays and the
+        // fuzz run terminates rather than diverging into a real takeover.
+        out.line("takeover");
+    }
     fn audit(&mut self, _event: SupervisorEvent) {}
 }
 

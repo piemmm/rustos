@@ -209,6 +209,20 @@ pub trait KernelArch: SchedulerArch {
     /// pre-jump audit. Like [`Self::watchdog_recovery`] the reference is
     /// `'static` and shared, so it is `Sync`.
     ///
+    /// # Supervisor-only access
+    ///
+    /// This accessor is the **single** gate to the destructive takeover
+    /// mechanism, and it is deliberately not callable from just any holder of
+    /// a `&dyn KernelArch`: it demands a
+    /// [`TakeoverGrant`](crate::supervisor_system::TakeoverGrant), a witness
+    /// that can be minted only inside `crate::supervisor_system` — the
+    /// confirmed, audited `memtest full` path. No other kernel subsystem,
+    /// driver, or userland caller can construct the grant, so none can obtain
+    /// the [`MachineTakeover`](tairix_arch_api::MachineTakeover) handle or
+    /// invoke its `unsafe` steps. A port implements this by handing back its
+    /// own `'static` takeover static, which it keeps private so the handle is
+    /// reachable *only* through this gated accessor.
+    ///
     /// # Default
     ///
     /// The default returns [`None`]: a port that has not wired the takeover
@@ -216,7 +230,10 @@ pub trait KernelArch: SchedulerArch {
     /// takeover mechanism lands) honestly reports "not supported", so the
     /// Supervisor stays in the REPL and changes nothing rather than
     /// half-tearing-down the machine (fail closed, never a panic).
-    fn machine_takeover(&self) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
+    fn machine_takeover(
+        &self,
+        _grant: &crate::supervisor_system::TakeoverGrant,
+    ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
         None
     }
 

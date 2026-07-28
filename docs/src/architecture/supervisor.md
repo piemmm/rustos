@@ -112,8 +112,10 @@ so an early abort can never be mistaken for a clean pass. It reuses the same
 `WordWindow` / `PhysWindow` primitives and safe, range-checked physical-map
 access as the non-destructive path — no raw pointer arithmetic — and is fully
 host-tested over a fault-injecting fake. The takeover *mechanism* that quiesces
-the machine before it runs (an Arch HAL slice) and the confirmed command that
-drives it are the remaining stages of `plans/NEW-SUPERVISOR.md` §9.
+the machine before it runs (an Arch HAL slice) and the confirmed `memtest full`
+command that drives it exist (see *Machine takeover* below); the per-port
+takeover bodies and the full-screen progress UI are the remaining stages of
+`plans/NEW-SUPERVISOR.md` §9.
 
 ## The retained boot audit log
 
@@ -147,7 +149,8 @@ Control: `help`, `continue` (alias `boot`), `mount`, `reboot`, `poweroff`
 (alias `halt`). Information: `version`, `mem` / `mem map`, `cpu`, `hw` (alias
 `lsdev`), `disk`, `partitions`, `arxfs`, `ls`, `uptime`, `date`, `echo`,
 `clear`. Diagnostics: `log`, `panic-log` (alias `last`), the interruptible
-`memtest`, and the read-only `test disk`.
+`memtest` (and its destructive one-way variant `memtest full`, alias
+`memtest --takeover`), and the read-only `test disk`.
 
 ## Security
 
@@ -186,9 +189,34 @@ Both steps fail closed (`TakeoverError`), never panic, and leave the machine
 running and recoverable on any error. `KernelArch::machine_takeover` defaults
 to `None`, so a port that has not wired the mechanism (and `wasm32`, which owns
 no physical RAM to take over) honestly reports "not supported" and the
-Supervisor stays in the REPL. The arch-neutral destructive sweep the mechanism
-will drive already exists (`tairix_kernel_mem::ramtest::run_destructive`). The
-operator-facing `memtest full` command, its explicit typed confirmation, and
-the synchronous pre-jump audit are staged with the per-port takeover
-implementations (`plans/NEW-SUPERVISOR.md` §9); until a port wires them the
-safe, bounded, interruptible in-system `memtest` is the only RAM test offered.
+Supervisor stays in the REPL.
+
+### The operator command and its supervisor-only gate
+
+The destructive test is driven by a distinct command, `memtest full` (alias
+`memtest --takeover`), kept separate from the safe `memtest`. Because it is
+irreversible it demands an explicit typed confirmation — the operator must
+type `DESTROY` exactly; anything else (a mistyped, blank, or over-long entry)
+cancels fail-closed and changes nothing. Only once confirmed is the decision
+audited (`4157 supervisor: destructive memtest-full machine takeover
+confirmed`, a `Warn` on the hash-chained boot log) — recorded *before* the
+attempt, synchronously, because a successful takeover destroys the in-memory
+audit ring and never returns.
+
+The takeover handle is reachable **only** from this path. Obtaining it through
+`KernelArch::machine_takeover` requires a
+`tairix_kernel_core::supervisor_system::TakeoverGrant` — a witness whose
+constructor is private to `supervisor_system`, the module that drives the
+confirmed `memtest full`. No other kernel subsystem, driver, or userland
+caller can mint the grant, so none can obtain the `MachineTakeover` handle or
+invoke its `unsafe` steps: the accessor is the single gate and the grant is
+its only key. Once the ordered `quiesce_secondaries` → `prepare_takeover`
+handshake succeeds, the arch-neutral `run_destructive` sweep runs over the
+direct physical map and the machine is reset; it never returns.
+
+The arch-neutral destructive sweep already exists
+(`tairix_kernel_mem::ramtest::run_destructive`). Until a port wires the
+per-port takeover mechanism, `memtest full` reports "not supported" and stays
+in the REPL, and the safe, bounded, interruptible in-system `memtest` is the
+only RAM test that actually runs; the full-screen progress UI is the last
+remaining stage (`plans/NEW-SUPERVISOR.md` §9).

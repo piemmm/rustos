@@ -72,6 +72,13 @@ const SUPERVISOR_MOUNT_OK: EventId = EventId(4155);
 /// structural fault). Never an oracle: a wrong passphrase logs exactly this.
 const SUPERVISOR_MOUNT_FAILED: EventId = EventId(4156);
 
+/// Audit event: the operator confirmed the destructive, one-way `memtest
+/// full` whole-RAM takeover test. Recorded loudly *before* the takeover is
+/// attempted, because a successful takeover destroys the in-memory audit ring
+/// and never returns — this synchronous record is the last one the ring can
+/// hold. No memory content is ever logged.
+const SUPERVISOR_MEMTEST_TAKEOVER: EventId = EventId(4157);
+
 /// The number of logical blocks a single [`scan_disk`](KernelSupervisorHost::scan_disk)
 /// read covers. A surface scan reads the device sequentially in chunks so it
 /// can poll the abort seam and report progress between reads without holding
@@ -492,6 +499,17 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         }
     }
 
+    fn takeover_memtest(&mut self, out: &mut dyn Report) {
+        let Some(sys) = supervisor_system() else {
+            out.line("memtest full: system state provider not installed");
+            return;
+        };
+        // On a platform that wired the takeover slice this never returns; on
+        // every current port it renders "not supported" and returns, so the
+        // engine stays in the REPL fail-closed.
+        sys.memtest_takeover(out);
+    }
+
     fn audit(&mut self, event: SupervisorEvent) {
         let (id, level, message) = match event {
             SupervisorEvent::Entered => (
@@ -528,6 +546,11 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
                 SUPERVISOR_MOUNT_FAILED,
                 Level::Warn,
                 "supervisor: in-console root mount failed",
+            ),
+            SupervisorEvent::MemtestTakeover => (
+                SUPERVISOR_MEMTEST_TAKEOVER,
+                Level::Warn,
+                "supervisor: destructive memtest-full machine takeover confirmed",
             ),
         };
         self.record(id, level, message);

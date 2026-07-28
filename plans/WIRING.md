@@ -113,6 +113,10 @@ optional machine-takeover slice the pre-boot Supervisor's one-way destructive
 `TakeoverError`, and its host `takeover::conformance` vertical have landed and
 `KernelArch::machine_takeover` defaults to `None` (fail closed), so every port
 honestly reports "not supported" until it wires the quiesce/relocate mechanism.
+The accessor is **supervisor-gated**: it requires a
+`kernel/core::supervisor_system::TakeoverGrant` witness that only the confirmed
+`memtest full` path can mint, so a port hands its takeover `static` back only
+through this one accessor and no other caller can reach the handle.
 `wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
 impls are staged with the Supervisor `memtest full` command, not part of the
 §17.2 parity guarantee.

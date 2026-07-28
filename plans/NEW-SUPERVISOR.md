@@ -723,7 +723,7 @@ sandbox owns no physical RAM to take over).
   `mount_root_disk_and_load_users` + `finish_install` (no oracle, no
   fail-open) through the *same* `UnlockInstall` cells the interactive prompt
   fills. Every state-changing decision audits a stable `41xx` id
-  (`4150..=4156`). `panic-log` honestly reports "no persisted record" until a
+  (`4150..=4157`). `panic-log` honestly reports "no persisted record" until a
   cross-boot panic store exists (`FIX-PANICS.md`/`WATCHDOG.md` record live,
   not persistently) — it never fabricates one.
 - The ESC boot-screen window at the top of
@@ -783,6 +783,38 @@ sandbox owns no physical RAM to take over).
   early, and the progress denominator is honest. No arch, no board, no
   `cfg(target_arch)`; Stages B–E build on it.
 
+**Done (§9 Stage C — the `memtest full` command + the supervisor-only takeover gate):**
+
+- **`memtest full` (alias `memtest --takeover`)** — a distinct `lib/supervisor`
+  command (`commands/diag.rs`), separate from the safe `memtest`, that demands
+  an explicit typed `DESTROY` confirmation (a mistyped/blank/over-long entry
+  cancels fail-closed and changes nothing), audits the confirmed decision
+  through the new `SupervisorEvent::MemtestTakeover`, then drives the
+  `SupervisorHost::takeover_memtest` seam. Host-tested: confirm → audited +
+  seam driven; decline/blank → no audit, no drive; the alias; and that plain
+  `memtest` never triggers it. The REPL fuzz harness covers the parsing.
+- **Supervisor-only gate on the takeover handle.** `KernelArch::machine_takeover`
+  now requires a `kernel/core::supervisor_system::TakeoverGrant` — a witness
+  with a private field whose only constructor (`TakeoverGrant::mint`) is
+  module-private to `supervisor_system`, the module that drives the confirmed
+  `memtest full`. Holding a `&dyn KernelArch` is therefore no longer enough to
+  obtain the `MachineTakeover` handle: no other kernel subsystem, driver, or
+  userland caller can mint the grant, so the destructive mechanism is
+  reachable **only** from the Supervisor. Ports keep their takeover `static`
+  private and hand it back only through this gated accessor.
+- **The kernel seam** `SupervisorSystem::memtest_takeover`
+  (`kernel/core::supervisor_system`) mints the grant, reads the gated handle,
+  and drives the ordered `quiesce_secondaries` → `prepare_takeover` handshake
+  through the host-tested, fail-closed `prepare_machine_takeover` helper; on
+  success it runs the Stage-A `run_destructive` sweep over the direct physical
+  map and resets (never returns), and on any refusal (unsupported / quiesce
+  timeout / prepare failed) it renders the reason and returns so the REPL
+  stays. `KernelSupervisorHost::takeover_memtest` wires it in and audits id
+  `4157 SUPERVISOR_MEMTEST_TAKEOVER` (`Warn`) synchronously before the
+  attempt. Because every current port's `machine_takeover` is `None`, the
+  command reports "not supported" fail-closed on all Tier-1 targets today; the
+  supported path is proven end-to-end by the per-port QEMU vertical (Stage E).
+
 **Done (the REPL fuzz harness — the item-2 prerequisite):**
 
 - `lib/supervisor/tests/fuzz_repl.rs` — a deterministic, seeded harness
@@ -801,19 +833,22 @@ sandbox owns no physical RAM to take over).
    `UNLOCK_PASSPHRASE_LINE` script in `tools/xtask/src/commands/qemu_tests.rs`),
    asserting `continue` resumes a normal boot and `mount` unlocks and boots.
 2. **§9 `memtest full` takeover** — the destructive, one-way whole-RAM test.
-   Stage A (the arch-neutral destructive full-range engine in
-   `kernel/mem::ramtest`) and the **arch-neutral half of Stage B** (the
-   `MachineTakeover` Arch HAL slice + `TakeoverError` + `takeover::conformance`
-   + the fail-closed `KernelArch::machine_takeover` seam) are **done** (above).
-   Remaining: the per-port `MachineTakeover` bodies + their QEMU conformance
-   (rest of Stage B), the confirmation + pre-jump synchronous audit + seam
-   (Stage C), the fullscreen memtest86-style UI on the §8 `screen` presenter
-   (Stage D), and tests/docs/gate wiring the command in (Stage E) (`planned`).
+   Stage A (the arch-neutral destructive full-range engine), the **arch-neutral
+   half of Stage B** (the `MachineTakeover` Arch HAL slice + `TakeoverError` +
+   `takeover::conformance` + the now supervisor-gated
+   `KernelArch::machine_takeover` seam), and **Stage C** (the confirmed
+   `memtest full` command + the `TakeoverGrant` gate + the pre-jump audit +
+   the `memtest_takeover` seam) are **done** (above). Remaining: the per-port
+   `MachineTakeover` bodies + their QEMU conformance (rest of Stage B); the
+   fullscreen memtest86-style UI on the §8 `screen` presenter (Stage D); and
+   the destructive-run QEMU vertical (Stage E) (`planned`).
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
 the §8 rich-screen presenter, the REPL fuzz harness, the §9 Stage-A
-destructive full-range RAM engine, and the §9 Stage-B `MachineTakeover` Arch
-HAL slice (arch-neutral surface + conformance + fail-closed `KernelArch` seam)
-are complete and compiling on every Tier-1 target; the QEMU vertical, the
-per-port takeover mechanisms, and §9 Stages C–E (the takeover command) remain.
+destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
+slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
+seam), and the §9 Stage-C `memtest full` command (confirmation + supervisor-
+only `TakeoverGrant` gate + pre-jump audit + `memtest_takeover` seam) are
+complete and compiling on every Tier-1 target; the per-port takeover
+mechanisms, the Stage-D fullscreen UI, and the QEMU verticals remain.

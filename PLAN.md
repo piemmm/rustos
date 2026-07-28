@@ -6233,9 +6233,14 @@ can see *why* a rule exists without diffing the charter's history.
   defaults to `None`) rather than blocking the boot floor, so `wasm32` (a
   sandbox owning no physical RAM) and any not-yet-ported target simply decline.
   Landed: the arch-neutral trait + `TakeoverError` + host
-  `takeover::conformance` vertical + the `KernelArch` seam; the per-port bodies
-  and the `memtest full` command are staged (`plans/NEW-SUPERVISOR.md` §9
-  Stages B–E, `plans/WIRING.md` parity row).
+  `takeover::conformance` vertical + the `KernelArch` seam, and the confirmed
+  `memtest full` command (Stage C) that drives it. The `KernelArch::machine_takeover`
+  accessor is **supervisor-gated** — it requires a
+  `kernel/core::supervisor_system::TakeoverGrant` witness only the confirmed
+  `memtest full` path can mint — so the destructive mechanism is reachable from
+  nowhere else. The per-port takeover bodies, the fullscreen UI, and the
+  destructive-run QEMU vertical remain staged (`plans/NEW-SUPERVISOR.md` §9
+  Stages B/D/E, `plans/WIRING.md` parity row).
 
 - **2026-07-27 — Arch HAL `CoreClock` live-frequency slice.** Amended §17.2 to
   enumerate a new closed Arch HAL slice, `CoreClock`, after the System

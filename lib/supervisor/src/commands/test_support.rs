@@ -77,6 +77,8 @@ pub struct MockHost {
     pub rebooted: bool,
     /// Whether `poweroff` was called.
     pub powered_off: bool,
+    /// Whether the destructive `memtest full` takeover seam was invoked.
+    pub takeover_requested: bool,
     mount_result: Option<MountOutcome>,
     memtest_result: Option<TestOutcome>,
     last_memtest_passes: Option<u32>,
@@ -212,6 +214,14 @@ impl SupervisorHost for MockHost {
         self.powered_off = true;
     }
 
+    fn takeover_memtest(&mut self, out: &mut dyn Report) {
+        // The test host owns no machine to take over; record the request and
+        // return so the caller exercises the fail-closed "did not proceed"
+        // path exactly as an unsupported real platform would.
+        self.takeover_requested = true;
+        out.line("memtest full: takeover not supported on the test host.");
+    }
+
     fn audit(&mut self, event: SupervisorEvent) {
         self.audits.push(event);
     }
@@ -279,6 +289,12 @@ impl MockSession {
     #[must_use]
     pub fn powered_off(&self) -> bool {
         self.host.powered_off
+    }
+
+    /// Whether the destructive `memtest full` takeover seam was invoked.
+    #[must_use]
+    pub fn takeover_requested(&self) -> bool {
+        self.host.takeover_requested
     }
 
     /// Set the next `mount` result.

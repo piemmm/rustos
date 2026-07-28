@@ -17,7 +17,11 @@
 //! panics on any input (`AGENTS.md` §2.9).
 
 use tairix_abi::ABI_VERSION_CURRENT;
-use tairix_kernel_mem::{ram_test_owned_window, BootMemoryMap, Frame, RegionKind, PAGE_SIZE};
+use tairix_arch_api::{MachineTakeover, TakeoverError};
+use tairix_kernel_mem::{
+    ram_test_owned_window, run_destructive, BootMemoryMap, DestructiveOutcome, Frame, RegionKind,
+    PAGE_SIZE,
+};
 use tairix_supervisor::{Report, TestOutcome};
 use tairix_sync::once::OnceCell;
 
@@ -41,6 +45,76 @@ const MIB: u64 = 1024 * 1024;
 /// early if the allocator runs out. It is a safety bound on a borrowed
 /// resource, not a scalable capacity.
 const MEMTEST_MAX_BYTES: u64 = 64 * MIB;
+
+/// A supervisor-only authorization witness for reading the machine-takeover
+/// handle ([`KernelArch::machine_takeover`]).
+///
+/// The destructive whole-RAM takeover mechanism is irreversible: it stops
+/// every CPU, overwrites all of RAM, and can only end in a reset. It must be
+/// reachable **only** from the confirmed, audited `memtest full` path in this
+/// module and nowhere else. Holding a `&dyn KernelArch` is deliberately *not*
+/// enough to obtain the [`MachineTakeover`] handle: the accessor demands a
+/// `&TakeoverGrant`, and this type carries a private field so it can be
+/// constructed only inside this module through its module-private `mint`
+/// constructor. No other kernel subsystem, driver, or userland
+/// path can mint one, so the takeover mechanism cannot be invoked from outside
+/// the Supervisor — the accessor is the single gate and this witness is its
+/// only key.
+pub struct TakeoverGrant {
+    /// Private, so the witness cannot be constructed by a struct literal
+    /// outside this module; [`TakeoverGrant::mint`] is the only constructor.
+    _seal: (),
+}
+
+impl TakeoverGrant {
+    /// Mint the witness. Module-private on purpose: only the takeover drive in
+    /// this file calls it, so no code elsewhere can authorize a takeover.
+    const fn mint() -> Self {
+        Self { _seal: () }
+    }
+}
+
+/// Whether the ordered two-step takeover handshake left the machine ready for
+/// the destructive sweep, or refused fail-closed.
+///
+/// Extracted from [`KernelSupervisorSystem::memtest_takeover`] so the pure
+/// decision — quiesce, then prepare, in order, both fail-closed — is
+/// host-testable against a mock [`MachineTakeover`] without a real machine.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TakeoverReady {
+    /// Both steps succeeded; the caller is now the only running CPU and paging
+    /// is flattened, so the destructive sweep may run (and never return).
+    Ready,
+    /// A step refused; the machine is unchanged and recoverable, and the
+    /// reason is carried for the operator report.
+    Refused(TakeoverError),
+}
+
+/// Drive the ordered two-step machine-takeover handshake up to the point the
+/// destructive sweep may run: [`MachineTakeover::quiesce_secondaries`] then
+/// [`MachineTakeover::prepare_takeover`], in that order, each failing closed.
+///
+/// On [`TakeoverReady::Refused`] no destructive step has been taken and the
+/// machine is left running and recoverable (the trait contract).
+fn prepare_machine_takeover(handle: &dyn MachineTakeover) -> TakeoverReady {
+    // SAFETY: reached only from the confirmed, audited `memtest full` path
+    // holding the supervisor `TakeoverGrant`; the operator has decided to tear
+    // the machine down, so quiescing every other CPU and then flattening
+    // paging is the intended, deliberate action. The two steps are driven in
+    // the required order and both fail closed without a destructive step on
+    // error.
+    match unsafe { handle.quiesce_secondaries() } {
+        Ok(()) => {}
+        Err(err) => return TakeoverReady::Refused(err),
+    }
+    // SAFETY: `quiesce_secondaries` succeeded, so the caller is the only
+    // running CPU — the precondition `prepare_takeover` requires — and the
+    // same deliberate-tear-down justification holds.
+    match unsafe { handle.prepare_takeover() } {
+        Ok(()) => TakeoverReady::Ready,
+        Err(err) => TakeoverReady::Refused(err),
+    }
+}
 
 /// The live system state the pre-boot Supervisor presents and the two
 /// machine-control actions it drives.
@@ -87,6 +161,19 @@ pub trait SupervisorSystem: Sync {
     /// Power the machine off / halt. Returns only if the platform has no
     /// power-off primitive.
     fn poweroff(&self);
+
+    /// Attempt the one-way, destructive `memtest full` whole-RAM takeover
+    /// test.
+    ///
+    /// Called only from the confirmed, audited engine path. On a platform
+    /// that wired the machine-takeover slice this never returns: it stops
+    /// every CPU, tests all of RAM (overwriting it), and resets. It **returns**
+    /// only when the takeover did not proceed — the platform has no takeover
+    /// mechanism, or the quiesce/prepare handshake failed closed — having
+    /// rendered the reason to `out` and left the machine unchanged, so the
+    /// engine stays in the REPL (fail closed, never a panic, never a partial
+    /// tear-down).
+    fn memtest_takeover(&self, out: &mut dyn Report);
 }
 
 /// The production [`SupervisorSystem`] over the running kernel's own state.
@@ -140,6 +227,50 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
     fn write_mib(out: &mut dyn Report, bytes: u64) {
         out.write_u64(bytes / MIB);
         out.write_str(" MiB");
+    }
+
+    /// Run the destructive whole-RAM sweep over the direct physical map, then
+    /// reset the machine. Never returns.
+    ///
+    /// Reached only once the takeover handshake has succeeded
+    /// ([`prepare_machine_takeover`] returned [`TakeoverReady::Ready`]): every
+    /// other CPU is halted, interrupts and the watchdog are masked, and paging
+    /// is flattened, so the machine will not resume and the only sequel is a
+    /// reset. The sweep therefore overwrites all of RAM — including the frames
+    /// the live kernel occupies — through the safe, range-checked
+    /// [`run_destructive`] engine over the [`BootMemoryMap`], never raw pointer
+    /// arithmetic. Progress and the outcome are rendered best-effort to the
+    /// serial console (the in-memory audit ring is already gone). There is no
+    /// abort seam: once committed the machine is already destroyed.
+    fn run_destructive_and_reset(&self, out: &mut dyn Report) -> ! {
+        if let Some(physmap) = self.state.arch.direct_phys_map() {
+            let outcome = run_destructive(self.memory_map, physmap, |_tested, _total| {}, || false);
+            match outcome {
+                DestructiveOutcome::Passed { tested } => {
+                    out.write_str("memtest full: PASSED — ");
+                    out.write_u64(tested / MIB);
+                    out.line(" MiB tested. Resetting.");
+                }
+                DestructiveOutcome::Faulted(fault) => {
+                    out.write_str("memtest full: RAM FAULT at physical 0x");
+                    out.write_hex(fault.phys.as_u64());
+                    out.line(". Resetting.");
+                }
+                DestructiveOutcome::Aborted { .. } => {
+                    out.line("memtest full: run did not complete. Resetting.");
+                }
+            }
+        } else {
+            out.line("memtest full: no direct physical map; RAM cannot be addressed. Resetting.");
+        }
+        // The machine cannot resume; the only sequel is a reset.
+        self.state.arch.reboot();
+        // A port whose reset returned (or none is wired) must not fall back
+        // into a machine whose paging we have already flattened; halt
+        // deterministically instead (never a busy task, just a dead CPU).
+        loop {
+            core::hint::spin_loop();
+        }
     }
 }
 
@@ -339,6 +470,28 @@ impl<A: KernelArch + 'static> SupervisorSystem for KernelSupervisorSystem<A> {
     fn poweroff(&self) {
         self.state.arch.poweroff();
     }
+
+    fn memtest_takeover(&self, out: &mut dyn Report) {
+        // Minting the supervisor-only witness here is the sole authorization
+        // for reading the takeover handle: the accessor cannot be called
+        // without a `&TakeoverGrant`, and nothing outside this module can mint
+        // one, so the destructive mechanism is reachable only from here.
+        let grant = TakeoverGrant::mint();
+        let Some(handle) = self.state.arch.machine_takeover(&grant) else {
+            out.line("memtest full: machine takeover is not supported on this platform.");
+            return;
+        };
+        match prepare_machine_takeover(handle) {
+            TakeoverReady::Refused(err) => {
+                out.write_str("memtest full: takeover could not proceed (");
+                out.write_str(err.as_str());
+                out.line("); the machine is unchanged.");
+            }
+            // The handshake succeeded: the machine is ours and cannot resume.
+            // Run the sweep and reset; this never returns.
+            TakeoverReady::Ready => self.run_destructive_and_reset(out),
+        }
+    }
 }
 
 /// A non-destructive, read-only view of the retained boot audit-log ring the
@@ -420,4 +573,78 @@ pub fn install_boot_log_tail(
 #[must_use]
 pub fn boot_log_tail() -> Option<&'static (dyn BootLogTail + 'static)> {
     BOOT_LOG_TAIL.get().ok().flatten().copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prepare_machine_takeover, TakeoverReady};
+    use core::cell::Cell;
+    use tairix_arch_api::{MachineTakeover, TakeoverError};
+
+    /// A takeover handle whose two steps return scripted outcomes without
+    /// touching any hardware, recording whether `prepare` was reached so the
+    /// ordered, fail-closed handshake is fully host-testable.
+    struct MockTakeover {
+        quiesce: Result<(), TakeoverError>,
+        prepare: Result<(), TakeoverError>,
+        prepare_called: Cell<bool>,
+    }
+
+    impl MockTakeover {
+        fn new(quiesce: Result<(), TakeoverError>, prepare: Result<(), TakeoverError>) -> Self {
+            Self {
+                quiesce,
+                prepare,
+                prepare_called: Cell::new(false),
+            }
+        }
+    }
+
+    impl MachineTakeover for MockTakeover {
+        unsafe fn quiesce_secondaries(&self) -> Result<(), TakeoverError> {
+            self.quiesce
+        }
+        unsafe fn prepare_takeover(&self) -> Result<(), TakeoverError> {
+            self.prepare_called.set(true);
+            self.prepare
+        }
+    }
+
+    #[test]
+    fn both_steps_succeeding_reports_ready() {
+        let handle = MockTakeover::new(Ok(()), Ok(()));
+        assert_eq!(prepare_machine_takeover(&handle), TakeoverReady::Ready);
+        assert!(handle.prepare_called.get());
+    }
+
+    #[test]
+    fn a_quiesce_timeout_refuses_before_prepare() {
+        let handle = MockTakeover::new(Err(TakeoverError::CpuQuiesceTimeout { cpu: 2 }), Ok(()));
+        assert_eq!(
+            prepare_machine_takeover(&handle),
+            TakeoverReady::Refused(TakeoverError::CpuQuiesceTimeout { cpu: 2 }),
+        );
+        // The destructive `prepare` step must never run once quiesce failed.
+        assert!(!handle.prepare_called.get());
+    }
+
+    #[test]
+    fn an_unsupported_quiesce_refuses_before_prepare() {
+        let handle = MockTakeover::new(Err(TakeoverError::NotSupported), Ok(()));
+        assert_eq!(
+            prepare_machine_takeover(&handle),
+            TakeoverReady::Refused(TakeoverError::NotSupported),
+        );
+        assert!(!handle.prepare_called.get());
+    }
+
+    #[test]
+    fn a_prepare_failure_refuses_fail_closed() {
+        let handle = MockTakeover::new(Ok(()), Err(TakeoverError::PrepareFailed(-5)));
+        assert_eq!(
+            prepare_machine_takeover(&handle),
+            TakeoverReady::Refused(TakeoverError::PrepareFailed(-5)),
+        );
+        assert!(handle.prepare_called.get());
+    }
 }

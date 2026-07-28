@@ -92,8 +92,8 @@ pub use pressure::{
     FreeMemorySource, MemoryPressure, PressureBand, PressureThresholds, RamzipHandoff,
 };
 pub use ramtest::{
-    run as ram_selftest, test_owned_window as ram_test_owned_window, RamFault, Word as RamTestWord,
-    PROGRESS_STEP_BYTES,
+    run as ram_selftest, run_destructive, test_owned_window as ram_test_owned_window,
+    DestructiveOutcome, RamFault, Word as RamTestWord, PROGRESS_STEP_BYTES,
 };
 pub use ramzip::{
     eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,
