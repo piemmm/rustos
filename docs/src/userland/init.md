@@ -15,9 +15,11 @@ and the account, never a capability set.
 > place* (`AGENTS.md` §2.2) — it is not a parallel manager. The service
 > **lifecycle and readiness protocol** (`NEW-SERVICEMANAGER.md` SVC-2) and
 > **discovery + the fail-closed enrolment registry** (SVC-3) described
-> below have landed; on-demand endpoint activation, system- and
-> per-user-scope managers, idle linger, and stop/shutdown ordering are
-> still ahead.
+> below have landed, as has the **authority-scope boundary** that confines
+> a per-user manager to its own user (SVC-6, *Authority scope* below). The
+> engine cores of on-demand endpoint activation, idle linger, and
+> stop/shutdown ordering are in place; binding them to a live transport
+> (and spawning the per-user manager at session start) is still ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
@@ -188,6 +190,37 @@ shared decoder `tairix_abi::decode_capability_ids` (the same decoder
 `drvhost` uses — one implementation of the manifest-body format,
 `AGENTS.md` §2.2). That is a decision about *eligibility*, recorded ahead
 of time; the authoritative grant is still the kernel's at load.
+
+## Authority scope (`NEW-SERVICEMANAGER.md` SVC-6)
+
+TAIRiX runs **one policy engine at two authority scopes**, never two
+codebases (`AGENTS.md` §2.2): the single **system** service manager (PID 1's
+role) and one **per-user** manager instance per logged-in user, spawned by
+the system manager at session start and delegated only that user's
+authority. Each `Init` instance carries its `tairix_init::AuthorityScope`
+(`System`, or `User { uid }`) — chosen once at construction and never
+changed — and it is the fixed security boundary between the two roles.
+
+Because a service is always launched **as a service account** (a uid) and
+the kernel derives its grant from that account's ceiling (above), a manager
+confined to one user can only be permitted to manage services that run **as
+that user**. `Init::register` enforces this before it touches any state
+(capability check before state, `AGENTS.md` §5.4): a `User { uid }` manager
+registers a service only if the spec's account equals `uid`, and the system
+manager permits any account. A spec naming a different account — a system
+service account, or another user's uid — is refused (`ScopeViolation`) and
+audited (`SERVICE_SCOPE_REJECTED`), so a per-user manager can neither raise
+a service to system authority nor reach into another user's services
+(`AGENTS.md` §4, §5.2). `register_enrolled` inherits the same check, so even
+a positively-enrolled bundle whose account is out of scope fails closed
+before any service starts.
+
+This is deliberately an **identity** check on the account the spec already
+names, not a capability computation: the engine never decodes a manifest or
+derives a grant on the launch path, so there is no second
+capability-derivation path to drift from the kernel's authoritative one (the
+enrolment-ceiling check above is the only place init reads a manifest, and
+it governs eligibility, not the grant).
 
 ## Reaping
 

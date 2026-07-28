@@ -59,6 +59,10 @@
 //!   to be brought up ([`Enrolment`]), and the ceiling-checked `enable` /
 //!   `disable` operations ([`enrol`] / [`unenrol`]) that record that
 //!   decision without ever widening authority.
+//! * [`scope`] — the [`AuthorityScope`] a manager instance wields (the
+//!   single system manager versus a per-user manager), the fixed security
+//!   boundary that confines a per-user manager to services running as its
+//!   own user.
 //! * [`manager`] — the [`Init`] state machine: `register`,
 //!   `register_enrolled`, `start_all`, the readiness admission engine
 //!   (`notify`, `satisfy_condition`), on-demand endpoint activation
@@ -91,6 +95,7 @@ pub mod error;
 pub mod events;
 pub mod manager;
 pub mod registry;
+pub mod scope;
 pub mod service;
 
 pub use error::{ActivateError, InitError, NotifyError, StartFailure};
@@ -98,6 +103,7 @@ pub use manager::{
     ActivationOutcome, FailedService, Init, InitConfig, ReadyClient, StartReport, StartedService,
 };
 pub use registry::{enrol, unenrol, EnrolError, Enrolment};
+pub use scope::AuthorityScope;
 pub use service::{
     decode_manifest_capabilities, ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec,
     Spawner, Stopper, DEFAULT_STOP_GRACE,

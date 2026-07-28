@@ -22,6 +22,7 @@ use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use crate::error::{ActivateError, InitError, NotifyError, StartFailure};
 use crate::events;
 use crate::registry::Enrolment;
+use crate::scope::AuthorityScope;
 use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper};
 
 /// Number of distinct named readiness conditions, sized from the closed
@@ -121,6 +122,14 @@ pub struct InitConfig<'a> {
     pub reaper: &'a dyn Reaper,
     /// Structured audit log sink.
     pub sink: &'a dyn Sink,
+    /// The authority scope this manager instance wields — the fixed security
+    /// boundary between the single system manager and a per-user manager.
+    ///
+    /// A per-user manager ([`AuthorityScope::User`]) may manage only services
+    /// that run as its own user; the system manager
+    /// ([`AuthorityScope::System`]) may manage any account. The scope is
+    /// chosen once when the instance is created and never changes.
+    pub scope: AuthorityScope,
 }
 
 /// A service that was successfully started during [`Init::start_all`].
@@ -290,6 +299,12 @@ impl<'a> Init<'a> {
         self.services.len()
     }
 
+    /// The [`AuthorityScope`] this manager instance wields.
+    #[must_use]
+    pub fn scope(&self) -> AuthorityScope {
+        self.cfg.scope
+    }
+
     /// Number of services with a live process — spawned and not yet reaped.
     #[must_use]
     pub fn running_count(&self) -> usize {
@@ -318,11 +333,37 @@ impl<'a> Init<'a> {
 
     /// Register a service.
     ///
+    /// The service account the spec names must be permitted by this
+    /// manager's [`AuthorityScope`]: the system
+    /// manager may register any account, but a per-user manager may register
+    /// only services that run as its own user. This authority boundary is
+    /// enforced before any state is touched (fail closed).
+    ///
     /// # Errors
     ///
-    /// Returns [`InitError::DuplicateService`] if a service with the same
-    /// name is already registered.
+    /// * [`InitError::ScopeViolation`] if the spec's service account is
+    ///   outside this manager's scope (a per-user manager naming a system
+    ///   account or another user's uid). Audited as
+    ///   [`events::SERVICE_SCOPE_REJECTED`].
+    /// * [`InitError::DuplicateService`] if a service with the same name is
+    ///   already registered.
     pub fn register(&mut self, spec: ServiceSpec) -> Result<(), InitError> {
+        // The authority boundary is checked before any state is touched: a
+        // per-user manager may manage only services that run as its own user,
+        // so a spec naming a system service account or another user's uid is
+        // refused (fail closed) before it can be recorded. The system manager
+        // permits any account. This is an identity check on the account the
+        // spec already names, never a capability derivation — the kernel
+        // remains the single capability authority.
+        if !self.cfg.scope.permits_account(spec.account()) {
+            self.audit(
+                events::SERVICE_SCOPE_REJECTED,
+                Level::Warn,
+                spec.name(),
+                "service account outside manager scope",
+            );
+            return Err(InitError::ScopeViolation);
+        }
         if self.index_of(spec.name()).is_some() {
             return Err(InitError::DuplicateService);
         }
@@ -362,8 +403,13 @@ impl<'a> Init<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`InitError::DuplicateService`] if two enrolled bundles share
-    /// a name (a packaging defect), failing closed before any is brought up.
+    /// * [`InitError::ScopeViolation`] if an enrolled bundle's service
+    ///   account is outside this manager's scope (a per-user enrolment
+    ///   naming a system account or another user's uid) — failing closed
+    ///   before any service is brought up, so a mis-scoped enrolment can
+    ///   never boot a surprising, over-privileged service.
+    /// * [`InitError::DuplicateService`] if two enrolled bundles share a
+    ///   name (a packaging defect), failing closed before any is brought up.
     pub fn register_enrolled(
         &mut self,
         discovered: Vec<ServiceSpec>,
@@ -1471,6 +1517,7 @@ impl<'a> Init<'a> {
             InitError::DuplicateService => "duplicate service",
             InitError::DependencyMissing => "dependency missing",
             InitError::DependencyCycle => "dependency cycle",
+            InitError::ScopeViolation => "scope violation",
         };
         self.emit(
             Level::Error,
@@ -1503,6 +1550,7 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_FORCE_TERMINATED => "service force-terminated",
         events::SERVICE_RESTART_SCHEDULED => "service restart scheduled",
         events::SERVICE_RESTART_EXHAUSTED => "service restart budget spent",
+        events::SERVICE_SCOPE_REJECTED => "service account outside manager scope",
         _ => "init event",
     }
 }
@@ -1591,8 +1639,8 @@ impl fmt::Write for DecWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_duration, event_message, ActivateError, ActivationOutcome, DecBuf, Init, InitConfig,
-        InitError, NotifyError, ServiceSpec, StartFailure,
+        add_duration, event_message, ActivateError, ActivationOutcome, AuthorityScope, DecBuf,
+        Init, InitConfig, InitError, NotifyError, ServiceSpec, StartFailure,
     };
     use crate::events;
     use crate::service::{ClientId, Pid, ReapedChild, Reaper, Spawner, Stopper};
@@ -1628,6 +1676,17 @@ mod tests {
             alloc::format!("/System/Services/{name}"),
             TEST_ACCOUNT,
             deps,
+        )
+    }
+
+    /// A dependency-free service that runs as a chosen service `account`, for
+    /// the authority-scope boundary tests.
+    fn spec_account(name: &str, account: u32) -> ServiceSpec {
+        ServiceSpec::new(
+            name,
+            alloc::format!("/System/Services/{name}"),
+            account,
+            Vec::new(),
         )
     }
 
@@ -1773,6 +1832,25 @@ mod tests {
             stopper: &NOOP_STOPPER,
             reaper,
             sink,
+            scope: AuthorityScope::System,
+        }
+    }
+
+    /// Like [`cfg`] but for a **per-user** manager confined to `uid`, so the
+    /// authority-scope boundary tests can assert what a user's manager may
+    /// and may not manage.
+    fn cfg_user<'a>(
+        spawner: &'a MockSpawner,
+        reaper: &'a dyn Reaper,
+        sink: &'a RecordingSink,
+        uid: u32,
+    ) -> InitConfig<'a> {
+        InitConfig {
+            spawner,
+            stopper: &NOOP_STOPPER,
+            reaper,
+            sink,
+            scope: AuthorityScope::User { uid },
         }
     }
 
@@ -1789,6 +1867,7 @@ mod tests {
             stopper,
             reaper,
             sink,
+            scope: AuthorityScope::System,
         }
     }
 
@@ -1902,6 +1981,106 @@ mod tests {
 
         assert_eq!(init.registered_count(), 0);
         assert_eq!(sink.count(events::SERVICE_NOT_ENROLLED), 2);
+        assert!(spawner.launched.borrow().is_empty());
+    }
+
+    // --- Authority-scope boundary (plans/NEW-SERVICEMANAGER.md §3.2) -------
+
+    #[test]
+    fn scope_accessor_reports_the_configured_scope() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let system = Init::new(cfg(&spawner, &reaper, &sink));
+        assert_eq!(system.scope(), AuthorityScope::System);
+
+        let s2 = MockSpawner::new();
+        let r2 = IdleReaper;
+        let k2 = RecordingSink::new();
+        let user = Init::new(cfg_user(&s2, &r2, &k2, 1000));
+        assert_eq!(user.scope(), AuthorityScope::User { uid: 1000 });
+    }
+
+    #[test]
+    fn system_scope_manages_any_account() {
+        // The system manager holds system authority and may register a
+        // service running under any account — a system service account and a
+        // user account alike.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec_account("sysinfod", 8)).unwrap();
+        init.register(spec_account("a-user-service", 1000)).unwrap();
+        assert_eq!(init.registered_count(), 2);
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 0);
+    }
+
+    #[test]
+    fn user_scope_manages_only_its_own_user() {
+        // A per-user manager confined to uid 1000 may register a service that
+        // runs as uid 1000.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
+        init.register(spec_account("my-service", 1000)).unwrap();
+        assert_eq!(init.registered_count(), 1);
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 0);
+    }
+
+    #[test]
+    fn user_scope_cannot_bring_up_a_system_service() {
+        // A per-user manager must never be able to bring a system-authority
+        // service to life: a spec naming a system service account is refused
+        // (fail closed) before it is recorded, and the refusal is audited.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
+        assert_eq!(
+            init.register(spec_account("fontd", 15)),
+            Err(InitError::ScopeViolation),
+        );
+        assert_eq!(init.registered_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 1);
+    }
+
+    #[test]
+    fn user_scope_cannot_touch_another_users_service() {
+        // A per-user manager confined to uid 1000 cannot manage a service
+        // that runs as a different user (uid 1001).
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
+        assert_eq!(
+            init.register(spec_account("their-service", 1001)),
+            Err(InitError::ScopeViolation),
+        );
+        assert_eq!(init.registered_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 1);
+    }
+
+    #[test]
+    fn register_enrolled_fails_closed_on_out_of_scope_account() {
+        // Even a positively-enrolled bundle whose account is outside the
+        // per-user scope is refused: enrolment records a decision but can
+        // never raise a service above the manager's own authority. The whole
+        // bring-up fails closed rather than booting a surprising service.
+        use crate::registry::Enrolment;
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
+        let enrolment = Enrolment::parse("privileged\n").expect("parses");
+        let discovered = alloc::vec![spec_account("privileged", 0)];
+        assert_eq!(
+            init.register_enrolled(discovered, &enrolment),
+            Err(InitError::ScopeViolation),
+        );
+        assert_eq!(init.registered_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 1);
         assert!(spawner.launched.borrow().is_empty());
     }
 

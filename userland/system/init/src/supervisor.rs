@@ -13,7 +13,7 @@
 //!
 //! The long-running **services** (the System Information, network-stack,
 //! device-manager, and seat-manager services, today) are **not** supervised
-//! here: they are the [`Init`](crate::Init) service-manager engine's job
+//! here: they are the [`Init`](tairix_init::Init) service-manager engine's job
 //! (`plans/NEW-SERVICEMANAGER.md` SVC-A). PID 1 registers them with the
 //! engine, brings them up in dependency order, and drives the engine's
 //! readiness-gated admission and restart-policy state machine — the model
@@ -29,7 +29,7 @@
 //! is host-tested without a kernel, mirroring the `startup` config parser's
 //! split. The freestanding `run` binary backs [`Sessions`] with the real
 //! `tairix-rt` syscall wrappers and [`Services`] with the live
-//! [`Init`](crate::Init) engine; the per-console session table is a fixed
+//! [`Init`](tairix_init::Init) engine; the per-console session table is a fixed
 //! stack array, so the session half itself allocates nothing.
 
 /// Most consoles PID 1 supervises in the bootstrap (allocation-free)
@@ -57,7 +57,7 @@ pub const SESSION_SPAWN_BUDGET: u32 = 3;
 /// The service-manager engine, as a seam the session supervisor routes
 /// non-session child exits into.
 ///
-/// PID 1's long-running services are owned by the [`Init`](crate::Init)
+/// PID 1's long-running services are owned by the [`Init`](tairix_init::Init)
 /// engine, not by this module. The one wait-any loop cannot tell a service's
 /// pid from an inherited orphan's by itself, so every reaped pid that is not
 /// one of its own login sessions is handed to [`on_child_exit`](Self::on_child_exit),
@@ -70,7 +70,7 @@ pub const SESSION_SPAWN_BUDGET: u32 = 3;
 ///
 /// The seam keeps the session-supervision policy host-testable without
 /// constructing a full engine; the freestanding binary backs it with the
-/// live [`Init`](crate::Init) engine over the real syscall seams.
+/// live [`Init`](tairix_init::Init) engine over the real syscall seams.
 pub trait Services {
     /// Route a reaped child that is **not** one of PID 1's login sessions to
     /// the service engine. The engine reaps a service it started (moving its
@@ -146,7 +146,7 @@ pub struct Launch<'a> {
 /// account it runs as, the console it attaches to, its live PID, and how
 /// many launches it has consumed. One slot per text console.
 ///
-/// The long-running services are **not** slots here — the [`Init`](crate::Init)
+/// The long-running services are **not** slots here — the [`Init`](tairix_init::Init)
 /// engine owns them (`plans/NEW-SERVICEMANAGER.md` SVC-A); this table is only
 /// the per-console login sessions.
 #[derive(Copy, Clone)]
@@ -186,7 +186,7 @@ impl Slot<'_> {
 /// console, routing every other reaped child to the service engine.
 ///
 /// The long-running services are already registered with, and brought up
-/// by, the [`Init`](crate::Init) engine before this is called
+/// by, the [`Init`](tairix_init::Init) engine before this is called
 /// (`plans/NEW-SERVICEMANAGER.md` SVC-A); `services` here is that engine
 /// behind the [`Services`] seam, not a launch list.
 ///

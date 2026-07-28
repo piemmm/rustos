@@ -546,10 +546,39 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
 - QEMU: graphical login/`desktop` still gets fonts (via activation); a
   headless boot never activates `fontd`.
 
-### SVC-6 — Per-user manager scope
-- The per-user manager instance spawned at session start with the user's
-  sub-ceiling; parents/supervises/reaps the user's services; logout stops
-  them in reverse-dep order. Boundary invariants (§3.2) tested.
+### SVC-6 — Per-user manager scope — DONE (engine core)
+- **Authority scope is a first-class engine value.** `init/src/scope.rs`
+  defines `AuthorityScope` (`System` | `User { uid }`) with `permits_account`;
+  `InitConfig` carries it, `Init` stores it, and `Init::scope()` exposes it.
+  It is the "one engine, two scopes" of §3.2 realised as data, not a forked
+  codebase (§2.2): PID 1 (`run.rs`) is `System`; a per-user manager instance
+  is `User { uid }`.
+- **The boundary is an identity check, enforced before state (§5.4), never a
+  capability derivation.** Because a service always launches as a service
+  account and the kernel derives the grant from that account's ceiling
+  (SVC-A), a per-user manager may manage only services running as its own
+  `uid`. `Init::register` refuses (`InitError::ScopeViolation`, audit
+  `SERVICE_SCOPE_REJECTED` 9020) any spec whose account is outside scope, so a
+  user's manager can neither raise a service to system authority nor reach
+  another user's services; the system scope permits any account.
+  `register_enrolled` inherits the check, so even a positively-enrolled but
+  out-of-scope bundle fails closed before any service starts. This stays
+  consistent with SVC-A — the engine decodes no manifest and computes no grant
+  on the launch path; the enrolment-ceiling check (registry) remains the only
+  manifest read, governing eligibility not the grant.
+- Host tests cover the §3.2 invariants: system scope manages any account; a
+  user scope manages only its own uid; a user scope cannot bring up a system
+  service nor another user's service (fail closed + audited); an out-of-scope
+  enrolment fails closed; and `permits_account`/`scope()` behaviour. Docs
+  updated (`docs/src/userland/init.md` *Authority scope*).
+- **Remaining (transport, deferred like the sibling stages).** Spawning the
+  per-user manager at session start with the user's sub-ceiling, parenting/
+  supervising/reaping the user's services, and logout teardown in
+  reverse-dependency order ride with the loader/kernel transport seam
+  (SVC-5/SVC-8) and the `lib/rt` heap for the growable tier (§3.10). The
+  *shared sandboxed service* case (a user activation of system-scoped `fontd`
+  is brokered a connection, never the service's authority, §3.2) lands with
+  that live activation transport (SVC-5).
 
 ### SVC-7 — Restart policy + reverse-dependency stop/shutdown ordering — DONE (engine core)
 - `lib/abi/src/service.rs` gains `RestartPolicy` (`never` | `on-failure` |

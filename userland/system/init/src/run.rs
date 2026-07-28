@@ -44,7 +44,8 @@ mod program {
 
     use tairix_abi::{Duration64, Errno, Signal};
     use tairix_init::{
-        Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner, Stopper,
+        AuthorityScope, Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner,
+        Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
@@ -286,6 +287,11 @@ mod program {
             stopper: &stopper,
             reaper: &reaper,
             sink: &sink,
+            // PID 1 is the single system service manager: it holds system
+            // authority and manages the boot-floor services under their own
+            // system service accounts. A per-user manager instance runs at
+            // the confined `AuthorityScope::User` scope instead.
+            scope: AuthorityScope::System,
         });
         for entry in config.services() {
             let spec =

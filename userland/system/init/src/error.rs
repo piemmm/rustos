@@ -31,6 +31,14 @@ pub enum InitError {
     DependencyMissing,
     /// The dependency graph contains a cycle, so no total start order exists.
     DependencyCycle,
+    /// A service was registered whose service account is outside the
+    /// manager's [`AuthorityScope`](crate::AuthorityScope): a per-user
+    /// manager may manage only services that run as its own user, so naming
+    /// a system service account or another user's uid is refused. This stops
+    /// a per-user manager from bringing a system-authority service — or
+    /// another user's service — to life (fail closed, no privilege
+    /// escalation).
+    ScopeViolation,
 }
 
 impl fmt::Display for InitError {
@@ -39,6 +47,7 @@ impl fmt::Display for InitError {
             Self::DuplicateService => "a service with this name is already registered",
             Self::DependencyMissing => "a service depends on an unregistered service",
             Self::DependencyCycle => "the service dependency graph contains a cycle",
+            Self::ScopeViolation => "a service's account is outside this manager's authority scope",
         };
         f.write_str(message)
     }
