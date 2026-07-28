@@ -270,7 +270,11 @@ The open items, in priority order:
     growth is implemented and fail-closed (chain-a-block via `FrameArenaGrow`,
     else the software-canary `BoxStack`); the startup-config parser fails
     closed at `> MAX_SERVICES` (`ConfigError::TooManyServices`). There is no
-    silent overflow.
+    silent overflow. `startup::MAX_SERVICES` is now *derived* from the
+    boot floor (`DEFAULT_CONFIG`'s own `service`-directive count) rather than
+    a magic `4`, and `supervisor::MAX_SUPERVISED_SERVICES` imports it — so the
+    floor can never overrun its own bound and the two constants cannot drift
+    (`plans/NEW-SERVICEMANAGER.md` SVC-1).
   - **Standing regression coverage (no new vertical — §2.2/§2.3).** Concurrent
     early-boot service bring-up during root-mount is exercised by
     `spawn_session_qemu_*` (4 services + session); EL0 multitasking under the

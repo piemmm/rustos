@@ -25,8 +25,10 @@ PID 1 (`userland/system/init`) is already an embryonic service manager:
   crash-loop budget** (never `spawn`-in-a-loop, §2.1).
 - `startup.rs` — the boot service set as a parsed, fail-closed
   `StartupConfig` (`DEFAULT_CONFIG`: `sysinfod`, `netstack`, `devmgr`,
-  `seatmgr`, then `login` as the session), currently **compiled in** with a
-  `MAX_SERVICES = 4` bound.
+  `seatmgr`, then `login` as the session), currently **compiled in**. Its
+  `MAX_SERVICES` bound is **derived from the floor text** (`DEFAULT_CONFIG`'s
+  own `service`-directive count), so it tracks the floor rather than a magic
+  cap (SVC-1, done).
 - `events.rs` — reserved audit event IDs in `9000..10000`
   (`SERVICE_STARTED/START_FAILED/DENIED/SKIPPED/EXITED`, `ORPHAN_REAPED`,
   `GRAPH_REJECTED`).
@@ -271,9 +273,10 @@ a feature.
 
 ## 5. Scope audit (surprises checked in the tree)
 
-- **`MAX_SERVICES = 4`** (`startup.rs:65`) and its two tests
-  (`more_than_max_services_fails_closed`, `exactly_max_services_is_accepted`)
-  must move from a magic cap to a floor-sized fail-closed bound.
+- **`MAX_SERVICES`** (`startup.rs`) is a floor-sized fail-closed bound derived
+  from `DEFAULT_CONFIG` (not a magic `4`), and `supervisor::MAX_SUPERVISED_SERVICES`
+  imports it rather than carrying a second copy; the bound tests assert the
+  floor exactly fills it and that a longer config fails closed (SVC-1, done).
 - **`login` starts `fontd`** (`FONT-SERVICE.md` §3; `login`'s start path,
   the x86_64/riscv64 compiled-in `FONTD_PATH`/`FONTD_MANIFEST`/
   `SPAWN_PROGRAMS` fallbacks): deleted in favour of readiness-condition
@@ -297,10 +300,16 @@ a feature.
 
 Each stage leaves the whole-project §7 gate green before it is reported done.
 
-### SVC-1 — Kill the `MAX_SERVICES` cap; floor-sized fail-closed bound
-- Size the floor parser to the actual boot-floor set; a config exceeding the
-  floor fails closed. Update the two `startup.rs` tests. No behaviour change
-  for the shipped floor.
+### SVC-1 — Kill the `MAX_SERVICES` cap; floor-sized fail-closed bound — DONE
+- `startup::MAX_SERVICES` is derived from `DEFAULT_CONFIG` by a `const fn`
+  service-directive counter, so the floor sizes its own bound and a stale
+  magic number can neither silently truncate a floor entry nor drift.
+  `supervisor::MAX_SUPERVISED_SERVICES` imports it (one definition, §2.2). A
+  config exceeding the floor fails closed (`ConfigError::TooManyServices`);
+  no behaviour change for the shipped floor. Tests assert the floor exactly
+  fills the bound and that the `const` counter agrees with the runtime parser.
+  The growable, discovery-registered tier past the floor is SVC-3/SVC-4 and
+  waits on the `lib/rt` heap (§3.10).
 
 ### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine)
 - The `inactive → … → failed` state machine in the `init` policy core;

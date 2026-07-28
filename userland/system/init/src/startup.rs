@@ -53,16 +53,22 @@ use core::fmt;
 /// unboundedly large one is a defect, not a workload.
 pub const MAX_CONFIG_LEN: usize = 4096;
 
-/// Maximum number of `service` directives a startup config may declare.
+/// The boot service floor: how many `service` directives the compiled-in
+/// [`DEFAULT_CONFIG`] declares, and thus the size of the allocation-free
+/// array [`StartupConfig::parse`] borrows the parsed service paths into for
+/// the no-heap PID 1 (`plans/SPAWN.md` `SP5b` — the userland heap producer is
+/// still staged).
 ///
-/// A fixed, allocation-free bound for the no-heap PID 1 (`plans/SPAWN.md`
-/// `SP5b` — the userland heap producer is still staged): the parsed service
-/// paths live in a stack array borrowing the config text. The compiled-in
-/// [`DEFAULT_CONFIG`] declares one (`devmgr`); the small headroom leaves
-/// room for the session/login-adjacent services later stages add without a
-/// heap. A config that declares more fails closed
-/// ([`ConfigError::TooManyServices`]) rather than overrunning the array.
-pub const MAX_SERVICES: usize = 4;
+/// This is a **bound dictated by the floor**, not a hand-picked cap: it is
+/// derived from the floor text itself by [`count_service_directives`], so
+/// adding a `service` directive to [`DEFAULT_CONFIG`] grows the bound with it
+/// — the floor can never overrun the array nor be silently truncated by a
+/// stale magic number. A config that declares *more* `service` directives
+/// than the floor does fails closed ([`ConfigError::TooManyServices`]) rather
+/// than overrunning the array; the growable, discovery-registered tier past
+/// the floor lands with the userland heap (`plans/NEW-SERVICEMANAGER.md`
+/// §3.10).
+pub const MAX_SERVICES: usize = count_service_directives(DEFAULT_CONFIG);
 
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
@@ -375,6 +381,81 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// Count the `service` directives a startup config `text` declares.
+///
+/// This mirrors [`StartupConfig::parse`]'s tokenisation — each line has any
+/// `#`-comment stripped, its surrounding whitespace trimmed, and its first
+/// whitespace-delimited token taken as the keyword — closely enough for the
+/// ASCII [`DEFAULT_CONFIG`] it is used on. It runs in `const` context so
+/// [`MAX_SERVICES`] is the boot floor's own size rather than a hand-picked
+/// number; a unit test asserts it agrees with the real parser on
+/// [`DEFAULT_CONFIG`], so the two tokenisers can never silently drift for the
+/// floor.
+const fn count_service_directives(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut count = 0;
+    let mut line_start = 0;
+    let mut i = 0;
+    while i <= len {
+        if i == len || bytes[i] == b'\n' {
+            if line_keyword_is_service(bytes, line_start, i) {
+                count += 1;
+            }
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Whether the config line `bytes[start..end]` is a `service` directive: its
+/// keyword — the first whitespace-delimited token, after a `#`-comment is
+/// stripped and surrounding whitespace trimmed — is exactly `service`.
+const fn line_keyword_is_service(bytes: &[u8], start: usize, end: usize) -> bool {
+    const SERVICE: &[u8] = b"service";
+    let mut lo = start;
+    let mut hi = end;
+    // Strip an inline or whole-line comment beginning at the first `#`.
+    let mut j = lo;
+    while j < hi {
+        if bytes[j] == b'#' {
+            hi = j;
+            break;
+        }
+        j += 1;
+    }
+    // Trim surrounding ASCII whitespace.
+    while lo < hi && is_ascii_whitespace(bytes[lo]) {
+        lo += 1;
+    }
+    while hi > lo && is_ascii_whitespace(bytes[hi - 1]) {
+        hi -= 1;
+    }
+    // The keyword runs to the first whitespace (or the line's end).
+    let mut keyword_end = lo;
+    while keyword_end < hi && !is_ascii_whitespace(bytes[keyword_end]) {
+        keyword_end += 1;
+    }
+    if keyword_end - lo != SERVICE.len() {
+        return false;
+    }
+    let mut k = 0;
+    while k < SERVICE.len() {
+        if bytes[lo + k] != SERVICE[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// The ASCII bytes `char::is_whitespace` matches, for the `const` floor-sizing
+/// tokeniser (which cannot call the `str` methods the runtime parser uses).
+const fn is_ascii_whitespace(b: u8) -> bool {
+    matches!(b, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ')
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_SERVICES};
@@ -501,7 +582,23 @@ mod tests {
     }
 
     #[test]
-    fn more_than_max_services_fails_closed() {
+    fn max_services_is_the_boot_floor_service_count() {
+        // The bound is derived from the floor itself, so the compiled-in
+        // floor exactly fills it: the `const` tokeniser and the real parser
+        // agree on how many `service` directives the floor declares, and the
+        // floor is never truncated by a stale magic cap.
+        let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
+        assert_eq!(floor.services().len(), MAX_SERVICES);
+        // The current floor is sysinfod, netstack, devmgr, seatmgr; this
+        // pins the derived value so a change to the floor is a conscious one.
+        assert_eq!(MAX_SERVICES, 4);
+    }
+
+    #[test]
+    fn more_than_the_floor_bound_fails_closed() {
+        // A config declaring more `service` directives than the floor sizes
+        // for is refused outright rather than overrunning the array or
+        // dropping entries (fail closed).
         let mut text = String::from("console\nsession /x login\n");
         for n in 0..=MAX_SERVICES {
             let _ = writeln!(text, "service /System/Services/s{n} devmgr");
@@ -513,7 +610,9 @@ mod tests {
     }
 
     #[test]
-    fn exactly_max_services_is_accepted() {
+    fn exactly_the_floor_bound_is_accepted() {
+        // A config filling the floor bound exactly parses; every declared
+        // service is kept.
         let mut text = String::from("console\nsession /x login\n");
         for n in 0..MAX_SERVICES {
             let _ = writeln!(text, "service /System/Services/s{n} devmgr");

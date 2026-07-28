@@ -53,14 +53,15 @@ pub const SESSION_SPAWN_BUDGET: u32 = 3;
 /// Maximum number of long-running services PID 1 supervises in the
 /// bootstrap (allocation-free) supervisor.
 ///
-/// A stack-array sizing for the no-heap PID 1, matching the startup
-/// config's `service`-directive bound (`startup::MAX_SERVICES`): the slot
-/// table must live on `main`'s stack until the userland heap lands
-/// (`plans/SPAWN.md` `SP5b`). Services beyond the bound are not launched
-/// rather than overrunning the table (fail closed); the caller's
-/// configured list is itself capped at the same bound, so this is never
-/// reached in practice.
-pub const MAX_SUPERVISED_SERVICES: usize = 4;
+/// A stack-array sizing for the no-heap PID 1: the slot table must live on
+/// `main`'s stack until the userland heap lands (`plans/SPAWN.md` `SP5b`).
+/// It **is** the startup config's boot-floor `service`-directive bound
+/// ([`crate::startup::MAX_SERVICES`]) — the same value, defined once and
+/// imported, never a second copy that could drift. Because the caller's
+/// configured service list is itself capped at that bound by the config
+/// parser, the clamp below can never truncate a config the parser accepted;
+/// the clamp remains as fail-closed defence in depth.
+pub const MAX_SUPERVISED_SERVICES: usize = crate::startup::MAX_SERVICES;
 
 /// The syscalls the supervisor drives, as a seam so the policy is
 /// host-testable (`plans/PI.md` P11; the `Spawner`/`Reaper` split's
