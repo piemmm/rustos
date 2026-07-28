@@ -184,6 +184,13 @@ exercise.
   single send/wait/fold/retransmit/failover loop bounded by
   `MAX_MESSAGE_LEN` (512), which the socket client, the QEMU vertical, and
   the tests all share (no second orchestration). Host-tested and fuzzed.
+  `Stack::dhcp_dns_servers()` surfaces the recursive DNS servers an
+  interface's DHCP clients learned from their current leases (the IPv4
+  lease's option-6 servers, then the IPv6 lease's option-23 servers),
+  derived from each client's live lease so it tracks acquisition and
+  withdrawal — the pure source the `netstack` service aggregates with any
+  static configuration into the interface's active resolver set
+  (`plans/DNS.md` DNS2).
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

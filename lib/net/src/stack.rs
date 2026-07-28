@@ -808,6 +808,32 @@ impl Stack {
         &self.iface
     }
 
+    /// The recursive DNS servers this interface's DHCP client(s) learned
+    /// from their current lease(s), in wire order: the IPv4 lease's servers
+    /// (RFC 2132 option 6) first, then the IPv6 lease's (RFC 3646 option
+    /// 23).
+    ///
+    /// This is the pure `lib/net` source the `netstack` service aggregates
+    /// with any statically configured servers into an interface's active
+    /// resolver set (`plans/DNS.md` DNS2). The set is derived from each
+    /// client's *current* lease, so it tracks acquisition and withdrawal
+    /// exactly: it is empty when neither family holds a lease (INIT, or a
+    /// lost/expired lease returns the client to INIT), and a lease that
+    /// carried no servers contributes none. The result is bounded by the
+    /// two leases' fixed-capacity option lists, so a hostile server can
+    /// never size the allocation.
+    #[must_use]
+    pub fn dhcp_dns_servers(&self) -> Vec<IpAddr> {
+        let mut servers = Vec::new();
+        if let Some(lease) = self.dhcp.as_ref().and_then(|d| d.client.lease()) {
+            servers.extend(lease.dns_servers.as_slice().iter().copied().map(IpAddr::V4));
+        }
+        if let Some(lease) = self.dhcp6.as_ref().and_then(|d| d.client.lease()) {
+            servers.extend(lease.dns_servers.as_slice().iter().copied().map(IpAddr::V6));
+        }
+        servers
+    }
+
     /// Configure the static IPv4 assignment: address, subnet, and
     /// optional default gateway. Replaces any previous v4
     /// configuration (connected and gateway routes included).

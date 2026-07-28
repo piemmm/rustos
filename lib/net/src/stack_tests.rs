@@ -130,6 +130,9 @@ fn dhcp_client() -> Stack {
 const DHCP_SERVER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 const DHCP_LEASED: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 50);
 const DHCP_MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+/// The two recursive DNS servers the test server leases (option 6).
+const DHCP_DNS_1: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
+const DHCP_DNS_2: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 4);
 
 /// The DHCP message bytes carried by a single emitted frame (Ethernet +
 /// IPv4 + UDP stripped), plus the UDP ports, or `None` if it is not a
@@ -166,6 +169,11 @@ fn dhcp_server_frame(msg: u8, xid: u32, lease_secs: Option<u32>) -> Vec<u8> {
     opt(54, &DHCP_SERVER.octets());
     opt(1, &DHCP_MASK.octets());
     opt(3, &DHCP_SERVER.octets());
+    // DNS servers (option 6): two addresses, concatenated four-octet each.
+    let mut dns = [0u8; 8];
+    dns[..4].copy_from_slice(&DHCP_DNS_1.octets());
+    dns[4..].copy_from_slice(&DHCP_DNS_2.octets());
+    opt(6, &dns);
     if let Some(l) = lease_secs {
         opt(51, &l.to_be_bytes());
     }
@@ -315,6 +323,34 @@ fn disable_dhcp_withdraws_the_lease_and_stops_the_client() {
     assert!(c.iface().ipv4().is_none(), "its lease is withdrawn");
 }
 
+#[test]
+fn dhcp_dns_servers_are_surfaced_from_the_lease() {
+    let mut c = dhcp_client();
+    assert!(
+        c.dhcp_dns_servers().is_empty(),
+        "no learned servers before a lease"
+    );
+    let xid = discover_xid(&c.advance_collect(t(0)).frames[0].bytes);
+    c.on_frame_collect(&dhcp_server_frame(2, xid, Some(3600)), t(0));
+    c.on_frame_collect(&dhcp_server_frame(5, xid, Some(3600)), t(0));
+    assert_eq!(
+        c.dhcp_dns_servers(),
+        alloc::vec![IpAddr::V4(DHCP_DNS_1), IpAddr::V4(DHCP_DNS_2)],
+        "the lease's DNS servers are surfaced in wire order"
+    );
+
+    // Withdrawal (a lost lease) returns the client to INIT and clears the
+    // learned servers — they are derived from the current lease, not a
+    // stale copy.
+    c.advance_collect(t(1800));
+    c.advance_collect(t(3150));
+    c.advance_collect(t(3600));
+    assert!(
+        c.dhcp_dns_servers().is_empty(),
+        "the learned servers are gone once the lease is withdrawn"
+    );
+}
+
 // --- DHCPv6 (RFC 8415) --------------------------------------------------
 
 /// A DHCPv6-configured client stack (IPv6 enabled — DHCPv6 rides on the
@@ -328,6 +364,9 @@ fn dhcp6_client() -> Stack {
 
 /// The leased IA_NA address the test server hands out.
 const DHCP6_LEASED: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1234);
+/// The two recursive DNS servers the test server leases (RFC 3646 option 23).
+const DHCP6_DNS_1: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x53);
+const DHCP6_DNS_2: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x54);
 /// The client's IA identifier (derived from `MAC_A`'s low four octets).
 const DHCP6_IAID: u32 = 1;
 /// The test server's DUID (a DUID-LL of `MAC_B`).
@@ -389,6 +428,11 @@ fn dhcp6_server_frame(mt: u8, xid: u32, preferred: u32, valid: u32, t1: u32, t2:
     iaddr.extend_from_slice(&valid.to_be_bytes());
     push_opt6(&mut ia, 5, &iaddr);
     push_opt6(&mut msg, 3, &ia);
+    // DNS Recursive Name Server (option 23): two addresses, 16 octets each.
+    let mut dns = [0u8; 32];
+    dns[..16].copy_from_slice(&DHCP6_DNS_1.octets());
+    dns[16..].copy_from_slice(&DHCP6_DNS_2.octets());
+    push_opt6(&mut msg, 23, &dns);
     // UDP 547 → 546 over IPv6, server link-local → client link-local.
     let src = link_local(IID_B);
     let dst = link_local(IID_A);
@@ -531,6 +575,58 @@ fn disable_dhcp6_withdraws_the_lease_and_stops_the_client() {
     c.disable_dhcp6();
     assert!(!c.dhcp6_active(), "the client is stopped");
     assert!(!has_dhcp6_addr(&c), "its lease is withdrawn");
+}
+
+#[test]
+fn dhcp6_dns_servers_are_surfaced_from_the_lease() {
+    let mut c = dhcp6_client();
+    assert!(
+        c.dhcp_dns_servers().is_empty(),
+        "no learned servers before a lease"
+    );
+    dhcp6_drive_to_bound(&mut c);
+    assert_eq!(
+        c.dhcp_dns_servers(),
+        alloc::vec![IpAddr::V6(DHCP6_DNS_1), IpAddr::V6(DHCP6_DNS_2)],
+        "the DHCPv6 lease's DNS servers are surfaced in wire order"
+    );
+    c.disable_dhcp6();
+    assert!(
+        c.dhcp_dns_servers().is_empty(),
+        "the learned servers are gone once the lease is withdrawn"
+    );
+}
+
+#[test]
+fn dhcp_dns_servers_are_v4_then_v6_across_both_families() {
+    // A dual-stack interface running both DHCP clients surfaces the IPv4
+    // lease's servers first, then the IPv6 lease's (the aggregation order
+    // the netstack resolver set relies on).
+    let mut c = stack(MAC_A, IID_A);
+    c.enable_dhcp(dhcp_counter());
+    c.enable_dhcp6(dhcp_counter(), t(0));
+    // With IPv6 enabled the first advance also emits link-local bring-up
+    // frames, so locate the DISCOVER rather than assume a frame index.
+    let out = c.advance_collect(t(0));
+    let discover = out
+        .frames
+        .iter()
+        .find(|f| dhcp_out(&f.bytes).map(|(s, d, _)| (s, d)) == Some((68, 67)))
+        .expect("a DISCOVER frame");
+    let xid = discover_xid(&discover.bytes);
+    c.on_frame_collect(&dhcp_server_frame(2, xid, Some(3600)), t(0));
+    c.on_frame_collect(&dhcp_server_frame(5, xid, Some(3600)), t(0));
+    dhcp6_drive_to_bound(&mut c);
+    assert_eq!(
+        c.dhcp_dns_servers(),
+        alloc::vec![
+            IpAddr::V4(DHCP_DNS_1),
+            IpAddr::V4(DHCP_DNS_2),
+            IpAddr::V6(DHCP6_DNS_1),
+            IpAddr::V6(DHCP6_DNS_2),
+        ],
+        "v4 servers precede v6 servers"
+    );
 }
 
 #[test]

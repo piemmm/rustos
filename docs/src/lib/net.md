@@ -461,6 +461,16 @@ vertical, and the unit tests all drive this *same* loop (no second copy of
 the orchestration). The engine and driver are host-tested and fuzzed
 (`fuzz_net_dns`).
 
+`Stack::dhcp_dns_servers()` is the pure source that feeds a real resolver
+its servers (`plans/DNS.md` DNS2): it surfaces the recursive DNS servers an
+interface's DHCP clients learned from their current leases — the IPv4
+lease's option-6 servers first, then the IPv6 lease's option-23 servers —
+derived from each client's *live* lease, so the set tracks acquisition and
+withdrawal exactly (empty before a lease, empty once one is lost, never a
+stale copy) and is bounded by the leases' fixed-capacity option lists. The
+`netstack` service aggregates it with any statically configured servers into
+the interface's active resolver set.
+
 ### `igmp`, `mld` — multicast group-membership message codecs
 
 The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership
