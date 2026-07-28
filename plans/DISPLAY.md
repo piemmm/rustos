@@ -513,7 +513,8 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `lib/display/tests/framebuffer.rs`; the three framebuffer QEMU
   verticals drive it as legal non-driver consumers);
   `drivers/display/framebuffer` is the bin-only `Run` crate (build.rs
-  `freestanding` cfg, `Run.ld`, host stub — the `virtio_kbd` shape)
+  `freestanding` cfg, the shared `lib/rt/Run.ld`, host stub — the
+  `virtio_kbd` shape)
   wiring `RtDriverHost` grants → `sole_framebuffer` → surface, the
   reserved `DISPLAY_ENDPOINT` bind under `CAP_IPC_BIND_PRIVILEGED`, an
   `RtSeatCheck` over `call_peer_seat`, and an `RtShmMapper` over

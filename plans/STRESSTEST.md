@@ -100,7 +100,8 @@ Facts the stages below build on, so no stage re-derives them:
   API"; no `mem_pin`/`mlock`-equivalent syscall, capability, or resource
   limit exists anywhere in the tree yet.
 - **The TUI template is `top`.** `userland/apps/top` is the model: a full
-  command-app bundle (AppInfo, `Help/` locales, `Run.ld`) drawing through
+  command-app bundle (AppInfo, `Help/` locales, a `Run` binary linked with
+  the shared `lib/rt/Run.ld`) drawing through
   `lib/curses` with an I/O-free `model` + `app` split, event-driven loop,
   alternate screen, and capability refusals rendered as refusals while the
   session continues (fail closed, degrade gracefully).

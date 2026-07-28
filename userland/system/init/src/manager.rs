@@ -22,9 +22,7 @@ use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use crate::error::{ActivateError, InitError, NotifyError, StartFailure};
 use crate::events;
 use crate::registry::Enrolment;
-use crate::service::{
-    decode_manifest_capabilities, ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper,
-};
+use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper};
 
 /// Number of distinct named readiness conditions, sized from the closed
 /// [`ReadyCondition`] set so the satisfied-conditions bitmap tracks the
@@ -49,15 +47,13 @@ const MAX_PENDING_PER_SERVICE: usize = 64;
 /// `drvhost` host configuration: one config per PID 1 process, alive for
 /// the whole run.
 pub struct InitConfig<'a> {
-    /// The capability set init itself was granted. Every service's grant is
-    /// the intersection of its manifest request with this authority; a
-    /// service may never exceed it.
-    pub authority: CapabilitySet,
-    /// ABI version the manager accepts in service manifests. A manifest
-    /// targeting a different version is refused
-    /// ([`StartFailure::ManifestInvalid`]).
-    pub accepted_abi_version: u32,
-    /// Seam that launches a verified service binary.
+    /// Seam that launches a verified service binary as its service account.
+    ///
+    /// The kernel is the single capability authority: it derives each
+    /// service's grant from the signed bundle manifest intersected with the
+    /// account's ceiling at load time. The manager names only the binary and
+    /// the account, never a capability set, so no init-side derivation can
+    /// drift from the kernel's authoritative one.
     pub spawner: &'a dyn Spawner,
     /// Seam that stops a running service (graceful request, then force).
     pub stopper: &'a dyn Stopper,
@@ -74,9 +70,6 @@ pub struct StartedService {
     pub name: String,
     /// Process identifier the [`Spawner`] returned.
     pub pid: Pid,
-    /// Capability set granted to the service (the manifest request
-    /// intersected with the system authority).
-    pub granted: CapabilitySet,
 }
 
 /// A client whose parked connection request has been satisfied because its
@@ -277,10 +270,10 @@ impl<'a> Init<'a> {
     /// grants no eligibility (no ambient authority). Each skip emits
     /// [`events::SERVICE_NOT_ENROLLED`].
     ///
-    /// Registration only records the service; the capability grant is still
-    /// intersected with the system authority at start
-    /// ([`Init::start_all`]), so enrolling a service can never widen the
-    /// authority it ultimately runs with.
+    /// Registration only records the service; the kernel still derives the
+    /// capability grant from the signed bundle and the service account's
+    /// ceiling at start ([`Init::start_all`]), so enrolling a service can
+    /// never widen the authority it ultimately runs with.
     ///
     /// # Errors
     ///
@@ -309,11 +302,11 @@ impl<'a> Init<'a> {
     /// Start every registered service in dependency order.
     ///
     /// Services are brought up so that each one starts only after all of
-    /// its dependencies. Each service's capability grant is the
-    /// intersection of its manifest request with the system authority; a
-    /// service that over-requests is refused, and a service whose
-    /// dependency failed is skipped — neither aborts the independent
-    /// services.
+    /// its dependencies. Each service is launched as its own service account
+    /// and the kernel grants it `bundle-manifest ∩ account-ceiling` from the
+    /// signed bundle; a service whose dependency failed is skipped, and a
+    /// service whose spawn is refused is recorded failed — neither aborts the
+    /// independent services.
     ///
     /// # Errors
     ///
@@ -432,7 +425,7 @@ impl<'a> Init<'a> {
     /// * [`ActivateError::QueueFull`] — the service's bounded pending-connection
     ///   queue is full.
     /// * [`ActivateError::NotActivatable`] — the service could not be
-    ///   launched (manifest, capability, or spawn failure).
+    ///   launched (the kernel's load gate refused the spawn).
     ///
     /// Every refusal is audited with its reason and the client is granted
     /// nothing.
@@ -745,8 +738,7 @@ impl<'a> Init<'a> {
                 }
             }
             // `try_start` already set the service `Failed` and audited the
-            // specific reason (manifest invalid / capability denied / spawn
-            // failed); the client is granted nothing.
+            // spawn failure; the client is granted nothing.
             Err(_) => Err(ActivateError::NotActivatable),
         }
     }
@@ -986,48 +978,17 @@ impl<'a> Init<'a> {
         }
     }
 
-    /// Spawn service `idx`: decode and cap-check its manifest, launch it with
-    /// its capability ceiling, and transition it to [`ServiceState::Starting`]
-    /// with its live [`Pid`]. On any failure the service is transitioned to
+    /// Spawn service `idx`: launch it as its own service account and
+    /// transition it to [`ServiceState::Starting`] with its live [`Pid`]. The
+    /// kernel derives the service's capability grant from the signed bundle
+    /// (`manifest ∩ account-ceiling`) at load time — the manager never
+    /// computes one. On a spawn failure the service is transitioned to
     /// [`ServiceState::Failed`] and the reason recorded, so a failed service
     /// is never left resting in `Inactive` where `pump` would retry it.
     fn try_start(&mut self, idx: usize) -> Result<StartedService, FailedService> {
         let name = self.services[idx].spec.name().to_string();
 
-        let requested = match self.requested_capabilities(idx) {
-            Ok(set) => set,
-            Err(failure) => {
-                self.services[idx].state = ServiceState::Failed;
-                self.audit(
-                    events::SERVICE_START_FAILED,
-                    Level::Warn,
-                    &name,
-                    "manifest invalid",
-                );
-                return Err(FailedService { name, failure });
-            }
-        };
-
-        if !requested.is_subset_of(&self.cfg.authority) {
-            self.services[idx].state = ServiceState::Failed;
-            self.audit(
-                events::SERVICE_DENIED,
-                Level::Warn,
-                &name,
-                "capability escalation",
-            );
-            return Err(FailedService {
-                name,
-                failure: StartFailure::CapabilityEscalation,
-            });
-        }
-
-        // granted == requested here (it is a subset of the authority); the
-        // intersection is computed explicitly to make the grant rule
-        // visible rather than implied.
-        let granted = requested.intersection(&self.cfg.authority);
-
-        let pid = match self.cfg.spawner.spawn(&self.services[idx].spec, &granted) {
+        let pid = match self.cfg.spawner.spawn(&self.services[idx].spec) {
             Ok(pid) => pid,
             Err(err) => {
                 self.services[idx].state = ServiceState::Failed;
@@ -1046,17 +1007,8 @@ impl<'a> Init<'a> {
 
         self.services[idx].state = ServiceState::Starting;
         self.services[idx].pid = Some(pid);
-        self.audit_started(&name, pid, &granted);
-        Ok(StartedService { name, pid, granted })
-    }
-
-    /// Decode a service manifest into the capability set it requests.
-    fn requested_capabilities(&self, idx: usize) -> Result<CapabilitySet, StartFailure> {
-        decode_manifest_capabilities(
-            self.services[idx].spec.manifest(),
-            self.cfg.accepted_abi_version,
-        )
-        .map_err(StartFailure::ManifestInvalid)
+        self.audit_started(&name, pid);
+        Ok(StartedService { name, pid })
     }
 
     fn emit(&self, level: Level, id: EventId, fields: &[Field<'_>]) {
@@ -1110,9 +1062,8 @@ impl<'a> Init<'a> {
         );
     }
 
-    fn audit_started(&self, name: &str, pid: Pid, granted: &CapabilitySet) {
+    fn audit_started(&self, name: &str, pid: Pid) {
         let mut pid_buf = DecBuf::new();
-        let mut cap_buf = DecBuf::new();
         self.emit(
             Level::Info,
             events::SERVICE_STARTED,
@@ -1124,10 +1075,6 @@ impl<'a> Init<'a> {
                 Field {
                     key: "pid",
                     value: tairix_log::FieldValue::Str(pid_buf.format(i128::from(pid.as_u64()))),
-                },
-                Field {
-                    key: "granted_caps",
-                    value: tairix_log::FieldValue::Str(cap_buf.format(i128::from(granted.len()))),
                 },
             ],
         );
@@ -1204,7 +1151,6 @@ fn event_message(id: EventId) -> &'static str {
     match id {
         events::SERVICE_STARTED => "service started",
         events::SERVICE_START_FAILED => "service failed to start",
-        events::SERVICE_DENIED => "service denied: capability escalation",
         events::SERVICE_SKIPPED => "service skipped: dependency failed",
         events::SERVICE_EXITED => "service exited",
         events::ORPHAN_REAPED => "orphan reaped",
@@ -1295,31 +1241,17 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ManifestHeader,
-        ReadinessKind, ReadyCondition, ServiceState, ABI_VERSION_CURRENT, MANIFEST_MAGIC,
-        SYSCALL_TABLE_HASH_LEN,
+        ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ReadinessKind,
+        ReadyCondition, ServiceState,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
 
-    /// Build a syntactically valid manifest requesting `requested`.
-    fn manifest(requested: &[CapabilityId]) -> Vec<u8> {
-        let header = ManifestHeader {
-            magic: MANIFEST_MAGIC,
-            abi_version: ABI_VERSION_CURRENT,
-            flags: 0,
-            capability_count: u16::try_from(requested.len()).unwrap(),
-            reserved0: 0,
-            syscall_table_hash: [0u8; SYSCALL_TABLE_HASH_LEN],
-            signer_pubkey: [0u8; 32],
-            signature: [0u8; 64],
-        };
-        let mut out = header.to_le_bytes().to_vec();
-        for cap in requested {
-            out.extend_from_slice(&cap.as_u16().to_le_bytes());
-        }
-        out
-    }
+    /// The service account uid every test service runs as. The concrete value
+    /// is irrelevant to the engine (the kernel derives the grant from it and
+    /// the signed bundle); it exists only so a [`ServiceSpec`] names an
+    /// account like a real one does.
+    const TEST_ACCOUNT: u32 = 10;
 
     fn cap_set(list: &[CapabilityId]) -> CapabilitySet {
         let mut set = CapabilitySet::empty();
@@ -1329,12 +1261,12 @@ mod tests {
         set
     }
 
-    fn spec(name: &str, requested: &[CapabilityId], deps: &[&str]) -> ServiceSpec {
+    fn spec(name: &str, deps: &[&str]) -> ServiceSpec {
         let deps: Vec<String> = deps.iter().map(|d| (*d).to_string()).collect();
         ServiceSpec::new(
             name,
             alloc::format!("/System/Services/{name}"),
-            manifest(requested),
+            TEST_ACCOUNT,
             deps,
         )
     }
@@ -1342,7 +1274,7 @@ mod tests {
     /// A `notify`-readiness service: it stays `starting` until it announces
     /// readiness, so a dependent is genuinely gated on the notice.
     fn notify_spec(name: &str, deps: &[&str]) -> ServiceSpec {
-        spec(name, &[], deps).with_readiness(ReadinessKind::Notify)
+        spec(name, deps).with_readiness(ReadinessKind::Notify)
     }
 
     /// Spawner that records each launch and can be told to fail a named
@@ -1350,7 +1282,7 @@ mod tests {
     struct MockSpawner {
         next: Cell<u64>,
         fail: Option<&'static str>,
-        launched: RefCell<Vec<(String, CapabilitySet)>>,
+        launched: RefCell<Vec<String>>,
     }
     impl MockSpawner {
         fn new() -> Self {
@@ -1368,15 +1300,13 @@ mod tests {
         }
     }
     impl Spawner for MockSpawner {
-        fn spawn(&self, spec: &ServiceSpec, granted: &CapabilitySet) -> Result<Pid, Errno> {
+        fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno> {
             if self.fail == Some(spec.name()) {
                 return Err(Errno::NotFound);
             }
             let raw = self.next.get();
             self.next.set(raw + 1);
-            self.launched
-                .borrow_mut()
-                .push((spec.name().to_string(), *granted));
+            self.launched.borrow_mut().push(spec.name().to_string());
             Ok(Pid::new(raw))
         }
     }
@@ -1474,14 +1404,11 @@ mod tests {
     }
 
     fn cfg<'a>(
-        authority: CapabilitySet,
         spawner: &'a MockSpawner,
         reaper: &'a dyn Reaper,
         sink: &'a RecordingSink,
     ) -> InitConfig<'a> {
         InitConfig {
-            authority,
-            accepted_abi_version: ABI_VERSION_CURRENT,
             spawner,
             stopper: &NOOP_STOPPER,
             reaper,
@@ -1492,15 +1419,12 @@ mod tests {
     /// Like [`cfg`] but with a caller-supplied [`Stopper`], for the tests
     /// that assert a service was asked to stop or forced down.
     fn cfg_stop<'a>(
-        authority: CapabilitySet,
         spawner: &'a MockSpawner,
         stopper: &'a dyn Stopper,
         reaper: &'a dyn Reaper,
         sink: &'a RecordingSink,
     ) -> InitConfig<'a> {
         InitConfig {
-            authority,
-            accepted_abi_version: ABI_VERSION_CURRENT,
             spawner,
             stopper,
             reaper,
@@ -1517,12 +1441,11 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let authority = cap_set(&[CapabilityId::FS_MOUNT]);
-        let mut init = Init::new(cfg(authority, &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         // Register out of order; dependencies: c->b->a.
-        init.register(spec("c", &[], &["b"])).unwrap();
-        init.register(spec("a", &[], &[])).unwrap();
-        init.register(spec("b", &[], &["a"])).unwrap();
+        init.register(spec("c", &["b"])).unwrap();
+        init.register(spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
 
         let report = init.start_all().unwrap();
         assert!(report.all_started());
@@ -1536,8 +1459,8 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("a", &[], &["ghost"])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("a", &["ghost"])).unwrap();
 
         assert_eq!(init.start_all(), Err(InitError::DependencyMissing));
         assert_eq!(init.running_count(), 0);
@@ -1550,9 +1473,9 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("a", &[], &["b"])).unwrap();
-        init.register(spec("b", &[], &["a"])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("a", &["b"])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
 
         assert_eq!(init.start_all(), Err(InitError::DependencyCycle));
         assert_eq!(init.running_count(), 0);
@@ -1564,10 +1487,10 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("a", &[], &[])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("a", &[])).unwrap();
         assert_eq!(
-            init.register(spec("a", &[], &[])),
+            init.register(spec("a", &[])),
             Err(InitError::DuplicateService)
         );
         assert_eq!(init.registered_count(), 1);
@@ -1579,14 +1502,13 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let authority = cap_set(&[CapabilityId::FS_MOUNT]);
-        let mut init = Init::new(cfg(authority, &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
 
         // Three bundles are discovered on disk; only two are enrolled.
         let discovered = alloc::vec![
-            spec("netstack", &[], &[]),
-            spec("sysinfod", &[], &[]),
-            spec("rogue", &[], &[]),
+            spec("netstack", &[]),
+            spec("sysinfod", &[]),
+            spec("rogue", &[]),
         ];
         let enrolment = Enrolment::parse("netstack\nsysinfod\n").expect("parses");
 
@@ -1610,11 +1532,11 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
 
         // A missing or corrupt store resolves to the empty enrolment, so no
         // discovered bundle is eligible — nothing auto-starts, fail closed.
-        let discovered = alloc::vec![spec("netstack", &[], &[]), spec("sysinfod", &[], &[])];
+        let discovered = alloc::vec![spec("netstack", &[]), spec("sysinfod", &[])];
         init.register_enrolled(discovered, &Enrolment::empty())
             .unwrap();
 
@@ -1624,55 +1546,15 @@ mod tests {
     }
 
     #[test]
-    fn grant_is_manifest_request_intersected_with_authority() {
-        let spawner = MockSpawner::new();
-        let reaper = IdleReaper;
-        let sink = RecordingSink::new();
-        let authority = cap_set(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
-        let mut init = Init::new(cfg(authority, &spawner, &reaper, &sink));
-        init.register(spec("svc", &[CapabilityId::NET_RAW], &[]))
-            .unwrap();
-
-        let report = init.start_all().unwrap();
-        assert!(report.all_started());
-        let granted = &report.started[0].granted;
-        assert!(granted.contains(CapabilityId::NET_RAW));
-        assert!(!granted.contains(CapabilityId::FS_MOUNT));
-        assert_eq!(granted.len(), 1);
-        // The spawner saw exactly the granted ceiling.
-        assert_eq!(spawner.launched.borrow()[0].1, *granted);
-    }
-
-    #[test]
-    fn capability_escalation_is_refused() {
-        let spawner = MockSpawner::new();
-        let reaper = IdleReaper;
-        let sink = RecordingSink::new();
-        // Authority lacks NET_RAW, which the manifest requests.
-        let authority = cap_set(&[CapabilityId::FS_MOUNT]);
-        let mut init = Init::new(cfg(authority, &spawner, &reaper, &sink));
-        init.register(spec("svc", &[CapabilityId::NET_RAW], &[]))
-            .unwrap();
-
-        let report = init.start_all().unwrap();
-        assert!(report.started.is_empty());
-        assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].failure, StartFailure::CapabilityEscalation);
-        assert_eq!(init.running_count(), 0);
-        assert_eq!(sink.count(events::SERVICE_DENIED), 1);
-        assert!(spawner.launched.borrow().is_empty());
-    }
-
-    #[test]
     fn spawn_failure_skips_transitive_dependents() {
         let spawner = MockSpawner::failing("b");
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("a", &[], &[])).unwrap();
-        init.register(spec("b", &[], &[])).unwrap();
-        init.register(spec("c", &[], &["b"])).unwrap();
-        init.register(spec("d", &[], &["c"])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("a", &[])).unwrap();
+        init.register(spec("b", &[])).unwrap();
+        init.register(spec("c", &["b"])).unwrap();
+        init.register(spec("d", &["c"])).unwrap();
 
         let report = init.start_all().unwrap();
         assert_eq!(started_names(&report), ["a"]);
@@ -1696,31 +1578,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_manifest_is_reported() {
-        let spawner = MockSpawner::new();
-        let reaper = IdleReaper;
-        let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        let mut bad = manifest(&[]);
-        bad[0] ^= 0xFF; // corrupt the magic
-        init.register(ServiceSpec::new(
-            "svc",
-            "/System/Services/svc",
-            bad,
-            Vec::new(),
-        ))
-        .unwrap();
-
-        let report = init.start_all().unwrap();
-        assert_eq!(report.failed.len(), 1);
-        assert_eq!(
-            report.failed[0].failure,
-            StartFailure::ManifestInvalid(Errno::BadMagic)
-        );
-        assert_eq!(sink.count(events::SERVICE_START_FAILED), 1);
-    }
-
-    #[test]
     fn reap_distinguishes_service_exit_from_orphan() {
         let spawner = MockSpawner::new();
         let sink = RecordingSink::new();
@@ -1735,8 +1592,8 @@ mod tests {
                 exit_code: 7,
             },
         ]);
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("svc", &[], &[])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
         init.start_all().unwrap();
         assert_eq!(init.running_pid("svc"), Some(Pid::new(100)));
 
@@ -1764,10 +1621,10 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         // `a` is a notify service; `b` (immediate) depends on it.
         init.register(notify_spec("a", &[])).unwrap();
-        init.register(spec("b", &[], &["a"])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
 
         // The initial pass spawns `a` (now `starting`) but must NOT start
         // `b`: a spawned-but-not-ready dependency does not release it.
@@ -1794,9 +1651,9 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(notify_spec("a", &[])).unwrap();
-        init.register(spec("b", &[], &["a"])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
 
         init.start_all().unwrap();
         // With no readiness notice, `b` never comes up — fail closed, no
@@ -1811,8 +1668,8 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("client", &[], &[]).requiring([ReadyCondition::NetworkUp]))
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
             .unwrap();
 
         // The condition is unmet, so `client` stays inactive.
@@ -1834,12 +1691,12 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         // `netstack` provides network-up on readiness; `client` requires it.
         // Neither names the other — the condition decouples them.
         init.register(notify_spec("netstack", &[]).providing([ReadyCondition::NetworkUp]))
             .unwrap();
-        init.register(spec("client", &[], &[]).requiring([ReadyCondition::NetworkUp]))
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
             .unwrap();
 
         init.start_all().unwrap();
@@ -1857,9 +1714,9 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(notify_spec("a", &[])).unwrap();
-        init.register(spec("b", &[], &["a"])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
 
         init.start_all().unwrap();
         // `a` reports it could not come up; `b` must be skipped, not started.
@@ -1885,8 +1742,8 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
-        init.register(spec("a", &[], &[])).unwrap();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("a", &[])).unwrap();
         init.start_all().unwrap();
 
         // A notice for a service the manager does not know is refused.
@@ -1908,7 +1765,7 @@ mod tests {
 
     /// An immediate-readiness on-demand service with the given idle-linger.
     fn on_demand_spec(name: &str, linger_secs: i64) -> ServiceSpec {
-        spec(name, &[], &[]).with_activation(ActivationMode::on_demand(Duration64::from_secs(
+        spec(name, &[]).with_activation(ActivationMode::on_demand(Duration64::from_secs(
             linger_secs,
         )))
     }
@@ -1924,7 +1781,7 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_spec("fontd", 30)).unwrap();
 
         let report = init.start_all().unwrap();
@@ -1939,7 +1796,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
@@ -1965,7 +1822,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_notify_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
@@ -1997,13 +1854,7 @@ mod tests {
         let reaper = ScriptedReaper::new(&[]);
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg_stop(
-            CapabilitySet::empty(),
-            &spawner,
-            &stopper,
-            &reaper,
-            &sink,
-        ));
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
@@ -2063,13 +1914,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg_stop(
-            CapabilitySet::empty(),
-            &spawner,
-            &stopper,
-            &reaper,
-            &sink,
-        ));
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
@@ -2098,7 +1943,7 @@ mod tests {
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_spec("secure", 30).with_connect_capability(CapabilityId::FS_MOUNT))
             .unwrap();
         init.start_all().unwrap();
@@ -2132,7 +1977,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.start_all().unwrap();
 
         assert_eq!(
@@ -2148,7 +1993,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         // A GUI helper that requires a display: on a headless system nothing
         // satisfies `display-present`, so a connect fails closed.
         init.register(on_demand_spec("fontd", 30).requiring([ReadyCondition::DisplayPresent]))
@@ -2176,7 +2021,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let caps = CapabilitySet::empty();
-        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_notify_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 

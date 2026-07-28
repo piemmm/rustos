@@ -123,34 +123,10 @@ fn build_bundle(
     bind_keys: &[tairix_abi::DriverBindKey],
     profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
-    // Map the package name to its source directory under `drivers/`. Only
-    // the crates installed into the image are listed; an unknown package is
-    // a programming error in the image pipeline, never a runtime input.
-    let rel_dir = match package {
-        "tairix-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
-        "tairix-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
-        "tairix-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
-        "tairix-drv-bus-usb" => "drivers/bus/usb/xhci",
-        "tairix-drv-input-usb-kbd" => "drivers/input/usb_kbd",
-        "tairix-drv-input-usb-mouse" => "drivers/input/usb_mouse",
-        "tairix-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
-        "tairix-drv-network-virtio-net-driver" => "drivers/network/virtio_net_driver",
-        "tairix-drv-display-framebuffer" => "drivers/display/framebuffer",
-        "tairix-drv-storage-usb-msd" => "drivers/storage/usb_msd",
-        "tairix-drv-storage-volmgr" => "drivers/storage/volmgr",
-        other => return Err(format!("image: no source dir mapped for driver {other}")),
-    };
-    // A driver crate's `Run` binary shares the package name.
-    let crate_dir = ctx.workspace_root.join(rel_dir);
-    let elf = cross_compile_pie_elf(
-        ctx,
-        arch,
-        "image-drivers",
-        package,
-        package,
-        &crate_dir,
-        profile,
-    )?;
+    // A driver crate's `Run` binary shares the package name; cargo resolves
+    // the crate from `-p <package>`, and every program links the one shared
+    // PIE script, so no per-crate source directory is needed here.
+    let elf = cross_compile_pie_elf(ctx, arch, "image-drivers", package, package, profile)?;
     let rxe = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,

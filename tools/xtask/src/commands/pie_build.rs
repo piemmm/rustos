@@ -5,11 +5,15 @@
 //! guard, and the artefact resolution live in one definition.
 //!
 //! The recipe mirrors the kernel `build.rs` embedded-program build: the
-//! crate's `Run` binary is compiled position-independent against the
-//! crate's own `Run.ld` into a private target directory (so it never
-//! collides with the outer build), with `core`/`compiler_builtins`/`alloc`
-//! built PIC alongside it (`-Z build-std`) and the outer build's
-//! `RUSTFLAGS` cleared so the target-scoped PIE link recipe wins.
+//! crate's `Run` binary is compiled position-independent against the one
+//! shared `tairix_itest_harness::pie::RUN_LD_WORKSPACE_RELPATH` link script
+//! into a target directory shared by every program of the same
+//! `(group, triple)` (so it never collides with the outer build), with
+//! `core`/`compiler_builtins`/`alloc` built PIC alongside it (`-Z build-std`)
+//! and the outer build's `RUSTFLAGS` cleared so the target-scoped PIE link
+//! recipe wins. Because every program hands `rustc` the identical link recipe,
+//! that build-std sysroot and the shared user-space libraries are compiled
+//! once and reused across all of them rather than rebuilt per program.
 //!
 //! Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
 //! by path) but not the script's *content*, so a `Run.ld` edit alone would
@@ -32,23 +36,28 @@ use tairix_mkimage::ImageProfile;
 use crate::Context;
 
 /// Compile `package`'s binary `bin` position-independent for the
-/// freestanding target `arch` against `crate_dir/Run.ld` and return the
-/// linked ELF bytes.
+/// freestanding target `arch` against the one shared
+/// `tairix_itest_harness::pie::RUN_LD_WORKSPACE_RELPATH` link script and
+/// return the linked ELF bytes.
 ///
-/// `group` names the private target-directory family under the workspace
-/// `target/` (e.g. `image-drivers`, `image-apps`), keeping each pipeline's
-/// artefacts apart; the arch's triple is a further segment so the same
-/// package cross-compiled for two architectures never shares a private
-/// target directory.
+/// `group` names the target-directory family under the workspace `target/`
+/// (e.g. `image-drivers`, `image-apps`), keeping each pipeline's artefacts
+/// apart; the arch's triple is a further segment so the same group
+/// cross-compiled for two architectures never shares a target directory.
+/// Every program in one `(group, triple)` shares that one directory: because
+/// they all link the identical script, the `RUSTFLAGS` string `rustc` sees is
+/// identical for each, so cargo builds the `-Z build-std` sysroot and the
+/// shared user-space libraries once and reuses them for every subsequent
+/// program instead of rebuilding them per program (Cargo namespaces the
+/// `debug`/`release` profiles under distinct subdirectories, so the two
+/// profiles coexist).
 ///
 /// `profile` selects the Cargo build profile the program compiles in — the
 /// same image → Cargo-profile mapping the kernel build uses
 /// ([`ImageProfile::cargo_build_args`] / [`ImageProfile::cargo_profile_dir`]),
 /// so the shippable `installer` image builds its user-space `Run` binaries
 /// `--release` while the `debug` and QEMU-test images stay in Cargo's `dev`
-/// profile. Cargo namespaces the two profiles under distinct `debug/` and
-/// `release/` subdirectories of the one private target directory, so the two
-/// coexist without clobbering each other.
+/// profile.
 ///
 /// # Errors
 ///
@@ -59,18 +68,19 @@ pub fn cross_compile_pie_elf(
     group: &str,
     package: &str,
     bin: &str,
-    crate_dir: &Path,
     profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
     let triple = arch.target_triple();
-    let run_ld = crate_dir.join("Run.ld");
+    let run_ld = ctx
+        .workspace_root
+        .join(tairix_itest_harness::pie::RUN_LD_WORKSPACE_RELPATH);
     if !run_ld.is_file() {
         return Err(format!(
-            "image: {package} has no Run.ld at {}",
+            "image: the shared PIE link script is missing at {}",
             run_ld.display()
         ));
     }
-    let target_dir = ctx.target_dir().join(group).join(triple).join(package);
+    let target_dir = ctx.target_dir().join(group).join(triple);
     wipe_target_dir_on_linker_change(&run_ld, &target_dir);
 
     // Every bundle the pipeline cross-compiles is part of the generic per-arch

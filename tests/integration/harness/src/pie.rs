@@ -15,6 +15,21 @@
 //! type is the one definition every builder draws from, so the arch selection
 //! cannot drift between them.
 
+/// The one PIE link script every pure-Rust `Run` program links against,
+/// as a path relative to the workspace root.
+///
+/// Every `Run` program — PID 1, the system services, and every `/Apps` /
+/// `/System/Drivers` bundle — shares this single layout (it names only
+/// architecture-neutral section classes), so it lives in exactly one file
+/// rather than being copied beside each program crate. Both PIE build
+/// recipes — the kernel `build.rs` embedded-program build and the
+/// `tools/xtask` image pipeline — resolve the script through this one
+/// constant, so the layout cannot drift between them and, because the script
+/// path they hand `rustc` is now identical for every program, the
+/// `-Z build-std` artefacts are built once and shared across all of them
+/// instead of being rebuilt per program.
+pub const RUN_LD_WORKSPACE_RELPATH: &str = "lib/rt/Run.ld";
+
 /// A freestanding Tier-1 target the image pipeline can cross-compile a
 /// position-independent `Run` binary for.
 ///

@@ -1332,7 +1332,8 @@ the service binds.
 - **Install (P10 D4).** The signed bundle ships in the flashable image's
   read-only `/System/Drivers/` store at `Drivers/bus_mailbox/vcmailbox/Run`.
   `cargo xtask image` cross-compiles the driver position-independent for
-  `aarch64-unknown-none` (its own `Run.ld`), converts the linked PIE ELF to an
+  `aarch64-unknown-none` (the one shared `lib/rt/Run.ld` every `Run` program
+  links), converts the linked PIE ELF to an
   `rxe` relocated for the production user-image bias and stamped with the
   kernel's `SYSCALL_TABLE_HASH`, and wraps it as a `kind = UserSpace`
   `DriverManifest` requesting `CAP_MMIO_MAP` + `CAP_MEM_DMA` +

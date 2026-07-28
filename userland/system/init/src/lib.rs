@@ -2,16 +2,18 @@
 //!
 //! `init` is the first user-space process the kernel starts. It owns the
 //! lifecycle of every long-running system service (
-//! `/System/Services`): it brings them up in dependency order, grants each
-//! one exactly the capability set its signed manifest requests intersected
-//! with the authority init was itself granted, and reaps children — both
-//! its own services and the orphaned zombies that any PID 1 inherits.
+//! `/System/Services`): it brings them up in dependency order, launches each
+//! one as its own **service account**, and reaps children — both its own
+//! services and the orphaned zombies that any PID 1 inherits. The **kernel**
+//! is the single authority over a service's capabilities: it grants
+//! `manifest ∩ account-ceiling` from the signed bundle at load time; init
+//! names the binary and the account, never a capability set.
 //!
 //! # What this crate is
 //!
-//! This crate is the **orchestrator**, not a loader. It owns four
-//! responsibilities and holds no privileged state of its own beyond the
-//! capability authority handed to it at construction:
+//! This crate is the **orchestrator**, not a loader, and it is **not** the
+//! capability authority. It owns four responsibilities and holds no
+//! privileged state of its own:
 //!
 //! 1. Maintain a registry of [`ServiceSpec`]s, rejecting a duplicate name.
 //! 2. Order the registered services by their declared dependencies and
@@ -21,11 +23,11 @@
 //!    dependent is released only once every dependency it names has
 //!    actually reported *ready* (and every named readiness condition it
 //!    requires is satisfied), never merely spawned.
-//! 3. For each service, decode its signed manifest into a requested
-//!    capability set and grant the intersection of that request with the
-//!    [`InitConfig::authority`]. A service whose manifest
-//!    requests authority init does not hold is refused, never silently
-//!    widened.
+//! 3. Launch each admitted service as the **service account** its
+//!    [`ServiceSpec`] names; the kernel derives and enforces its capability
+//!    grant (`manifest ∩ account-ceiling`) from the signed bundle at load
+//!    time. init passes no capability set, so no init-side derivation can
+//!    drift from the kernel's authoritative one.
 //! 4. Reap exited children, distinguishing a known service's exit from an
 //!    inherited orphan, and audit both.
 //!
@@ -38,10 +40,11 @@
 //! exhaustively testable.
 //!
 //! Verifying a service binary's signature, syscall-table hash, and `rxe`
-//! envelope is the loader's job (the same pipeline `drvhost` runs for
-//! drivers); init computes the capability ceiling and hands
-//! it to the [`Spawner`], which performs that verification before it
-//! executes anything.
+//! envelope — and granting `manifest ∩ account-ceiling` — is the
+//! loader/kernel's job (the same pipeline `drvhost` runs for drivers); init
+//! hands the binary and the account to the [`Spawner`], which performs that
+//! verification and the kernel's capability derivation before it executes
+//! anything.
 //!
 //! # Module map
 //!
