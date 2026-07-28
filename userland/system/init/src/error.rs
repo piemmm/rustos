@@ -48,16 +48,18 @@ impl fmt::Display for InitError {
 ///
 /// Recorded in [`StartReport::failed`](crate::StartReport); never aborts the
 /// services that do not depend on the failed one.
+///
+/// The manager does not decode manifests or check capabilities itself: the
+/// kernel is the single capability authority and derives each service's grant
+/// from the signed bundle at load time. A launch therefore fails here only
+/// because the spawn was refused (the kernel's load gate, which includes that
+/// capability derivation, said no) or because a dependency failed first.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StartFailure {
-    /// The service's signed manifest could not be decoded into a requested
-    /// capability set; the wrapped [`Errno`] is the decode error verbatim.
-    ManifestInvalid(Errno),
-    /// The manifest requests a capability the system authority does not
-    /// hold. Granting it would widen authority, so the service is refused.
-    CapabilityEscalation,
     /// The [`Spawner`](crate::Spawner) refused to launch the service; the
-    /// wrapped [`Errno`] is the spawner's error verbatim.
+    /// wrapped [`Errno`] is the spawner's error verbatim. This subsumes a
+    /// bad manifest or a capability the account's ceiling does not hold: the
+    /// kernel rejects such a load and the refusal surfaces here.
     SpawnFailed(Errno),
     /// A dependency of this service failed to start, so it was skipped.
     DependencyFailed,
@@ -66,10 +68,6 @@ pub enum StartFailure {
 impl fmt::Display for StartFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ManifestInvalid(e) => write!(f, "manifest invalid: {e}"),
-            Self::CapabilityEscalation => {
-                f.write_str("manifest requests capabilities the system authority does not hold")
-            }
             Self::SpawnFailed(e) => write!(f, "spawn failed: {e}"),
             Self::DependencyFailed => f.write_str("a dependency failed to start"),
         }
@@ -131,9 +129,10 @@ pub enum ActivateError {
     /// than growing the queue without limit (never dropped silently, never
     /// spun on).
     QueueFull,
-    /// The service could not be launched: its manifest failed to decode,
-    /// requested authority the manager lacks, or the spawn was refused. The
-    /// underlying [`StartFailure`] is recorded in the audit log.
+    /// The service could not be launched: the kernel's load gate refused the
+    /// spawn (a bad manifest, a capability beyond the account's ceiling, or
+    /// another load failure). The underlying [`StartFailure`] is recorded in
+    /// the audit log.
     NotActivatable,
 }
 
@@ -173,8 +172,8 @@ mod tests {
             "spawn failed: not found",
         );
         assert_eq!(
-            format!("{}", StartFailure::CapabilityEscalation),
-            "manifest requests capabilities the system authority does not hold",
+            format!("{}", StartFailure::DependencyFailed),
+            "a dependency failed to start",
         );
     }
 }

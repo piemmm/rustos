@@ -1,12 +1,20 @@
 //! Service descriptions and the seams init uses to reach the outside world.
 //!
 //! A [`ServiceSpec`] is the static description of one system service: its
-//! name, the binary that runs it, the signed manifest that declares the
-//! capabilities it requests, and the services it must start after. The
-//! [`Spawner`] and [`Reaper`] traits are the two seams through which the
-//! otherwise-pure [`Init`](crate::Init) manager launches a verified binary
-//! and learns that a child has exited. On a running kernel they are backed
-//! by syscalls; in tests they are in-memory fixtures.
+//! name, the binary that runs it, the service account it runs as, and the
+//! services it must start after. The [`Spawner`] and [`Reaper`] traits are
+//! the two seams through which the otherwise-pure [`Init`](crate::Init)
+//! manager launches a verified binary and learns that a child has exited. On
+//! a running kernel they are backed by syscalls; in tests they are in-memory
+//! fixtures.
+//!
+//! The **kernel is the single authority over a service's capabilities**: it
+//! reads the service binary's signed bundle manifest at load time and grants
+//! the intersection of the manifest's request with the service account's
+//! ceiling. The manager names only *what* to run and *as whom* (the
+//! [`ServiceSpec::account`] uid); it never decodes a manifest or computes a
+//! grant on the launch path, so there is no second capability-derivation
+//! path to drift from the kernel's authoritative one.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -93,16 +101,16 @@ impl Pid {
 
 /// Static description of one long-running system service.
 ///
-/// The `manifest` is the signed manifest bytes of the service binary (the
-/// [`ManifestHeader`] prefix followed by its
-/// capability body). [`Init`](crate::Init) decodes it to learn the
-/// capabilities the service requests; it does **not** verify the signature
-/// — that is the [`Spawner`]'s responsibility at launch time.
+/// `account` is the uid of the compiled-in service account the service runs
+/// as. The kernel resolves that account's capability ceiling and grants the
+/// service `bundle-manifest ∩ ceiling` at load time, so the [`ServiceSpec`]
+/// carries no manifest bytes: the manager names the binary and the account,
+/// and the kernel — the single capability authority — decides the grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceSpec {
     name: String,
     binary_path: String,
-    manifest: Vec<u8>,
+    account: u32,
     dependencies: Vec<String>,
     readiness: ReadinessKind,
     requires: Vec<ReadyCondition>,
@@ -125,20 +133,21 @@ impl ServiceSpec {
     ///   label audit records.
     /// * `binary_path` — logical path of the service binary handed to the
     ///   [`Spawner`] (e.g. `/System/Services/sysinfod.app/Run`).
-    /// * `manifest` — the service binary's signed manifest bytes.
+    /// * `account` — uid of the service account the service runs as; the
+    ///   kernel resolves its capability ceiling at load time.
     /// * `dependencies` — names of services that must be started before
     ///   this one.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
         binary_path: impl Into<String>,
-        manifest: impl Into<Vec<u8>>,
+        account: u32,
         dependencies: impl Into<Vec<String>>,
     ) -> Self {
         Self {
             name: name.into(),
             binary_path: binary_path.into(),
-            manifest: manifest.into(),
+            account,
             dependencies: dependencies.into(),
             readiness: ReadinessKind::Immediate,
             requires: Vec::new(),
@@ -216,10 +225,11 @@ impl ServiceSpec {
         &self.binary_path
     }
 
-    /// Signed manifest bytes of the service binary.
+    /// The uid of the service account this service runs as; the kernel
+    /// resolves its capability ceiling and derives the grant at load time.
     #[must_use]
-    pub fn manifest(&self) -> &[u8] {
-        &self.manifest
+    pub fn account(&self) -> u32 {
+        self.account
     }
 
     /// Names of services that must start before this one.
@@ -268,17 +278,20 @@ impl ServiceSpec {
     }
 }
 
-/// Launches a verified service binary with a fixed capability ceiling.
+/// Launches a verified service binary as its own service account.
 ///
-/// The implementation owns the trusted load pipeline (`rxe` envelope
-/// decode, signature verification, syscall-table-hash match — the same
-/// checks `drvhost` runs for drivers) and executes the
-/// binary with **at most** the `granted` capability set. [`Init`](crate::Init)
-/// has already intersected the manifest's request with the system authority,
-/// so `granted` is the ceiling, never a floor: the spawner must not add to
-/// it (no ambient authority).
+/// The implementation owns the trusted load pipeline (`rxe` envelope decode,
+/// signature verification, syscall-table-hash match — the same checks
+/// `drvhost` runs for drivers) and switches the child onto the service
+/// account [`ServiceSpec::account`] names. The **kernel** is the single
+/// capability authority: at load time it reads the signed bundle manifest and
+/// grants the intersection of the manifest's request with that account's
+/// ceiling. The manager therefore names only *what* to run and *as whom*; it
+/// never computes or passes a capability set, so no second, divergent
+/// capability-derivation path can fall out of step with the kernel's (and the
+/// account's ceiling still bounds the grant — no ambient authority).
 pub trait Spawner {
-    /// Launch `spec`'s binary with the capability set `granted`.
+    /// Launch `spec`'s binary as the service account it names.
     ///
     /// # Errors
     ///
@@ -286,7 +299,7 @@ pub trait Spawner {
     /// be loaded, verified, or executed. [`Init`](crate::Init) records it as
     /// [`StartFailure::SpawnFailed`](crate::StartFailure::SpawnFailed) and
     /// skips the dependents of the failed service.
-    fn spawn(&self, spec: &ServiceSpec, granted: &CapabilitySet) -> Result<Pid, Errno>;
+    fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno>;
 }
 
 /// Identifier of a client connected (or waiting to connect) to a service's
@@ -384,10 +397,10 @@ mod tests {
     #[test]
     fn service_spec_exposes_fields() {
         let deps: Vec<_> = vec!["a".into(), "b".into()];
-        let spec = ServiceSpec::new("svc", "/System/Services/svc", vec![1u8, 2, 3], deps);
+        let spec = ServiceSpec::new("svc", "/System/Services/svc", 10, deps);
         assert_eq!(spec.name(), "svc");
         assert_eq!(spec.binary_path(), "/System/Services/svc");
-        assert_eq!(spec.manifest(), &[1, 2, 3]);
+        assert_eq!(spec.account(), 10);
         assert_eq!(spec.dependencies(), &["a", "b"]);
         // A bare spec is immediate-readiness with no conditions.
         assert_eq!(spec.readiness(), super::ReadinessKind::Immediate);
@@ -398,7 +411,7 @@ mod tests {
     #[test]
     fn service_spec_readiness_builders_set_metadata() {
         use super::{ReadinessKind, ReadyCondition};
-        let spec = ServiceSpec::new("net", "/System/Services/net", Vec::new(), Vec::new())
+        let spec = ServiceSpec::new("net", "/System/Services/net", 11, Vec::new())
             .with_readiness(ReadinessKind::Notify)
             .requiring([ReadyCondition::FilesystemsMounted])
             .providing([ReadyCondition::NetworkUp]);

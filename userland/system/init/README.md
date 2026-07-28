@@ -2,17 +2,25 @@
 
 Stage 6 deliverable (`AGENTS.md` §5.2, §16.2). The first user-space
 process the kernel starts. It owns the lifecycle of every long-running
-system service under `/System/Services`: dependency-ordered start,
-capability granting from each service's signed manifest, and reaping.
+system service under `/System/Services`: dependency-ordered, readiness-gated
+start; reaping the whole system's zombies; and on-demand activation.
 Installed to `/System/Services/init`.
+
+**The kernel is the single capability authority.** init names a service's
+binary and its **service account** (a uid); the kernel loads the signed
+bundle and grants `manifest ∩ account-ceiling` at load time — the same gate
+`drvhost` runs for drivers (`AGENTS.md` §8/§18.6). init never decodes a
+manifest or computes a grant on the launch path, so no second
+capability-derivation path can drift from the kernel's.
 
 ## What this crate is
 
-The **orchestrator** — it decides what runs, in what order, and with what
-authority. It is *not* a loader: verifying a service binary's signature,
-syscall-table hash, and `rxe` envelope is the `Spawner`'s job (the same
-pipeline `drvhost` runs for drivers, `AGENTS.md` §8). `init` computes the
-capability ceiling and hands it, with the binary, to the `Spawner`.
+The **orchestrator** — it decides what runs, in what order, and when. It is
+*not* a loader and *not* the capability authority: verifying a service
+binary's signature, syscall-table hash, and `rxe` envelope, and granting
+`manifest ∩ account-ceiling`, are all the kernel's job at load time (the same
+pipeline `drvhost` runs for drivers, `AGENTS.md` §8). `init` names the binary
+and the service account; the kernel derives and enforces the grant.
 
 ## Bring-up pipeline (`Init::start_all`)
 
@@ -24,25 +32,28 @@ Fails closed at the first problem (`AGENTS.md` §5.4.5):
 2. Reject the whole graph — starting nothing — if a dependency names an
    unregistered service (`DependencyMissing`) or the graph has a cycle
    (`DependencyCycle`).
-3. Per service, in order: decode its manifest into a requested capability
-   set, gate the request against init's authority, spawn it, audit the
-   outcome.
+3. Per service, in order (once its dependencies are ready and its required
+   readiness conditions hold): spawn it as its service account and audit the
+   outcome. The kernel derives and enforces its capability grant from the
+   signed bundle; init passes no capability set.
 
 When the graph is sound, init starts every service it can; a service that
 fails is recorded and its transitive dependents are skipped, without
 aborting independent services. The outcome is a `StartReport`
 (`started` + `failed`).
 
-## Capability granting (`AGENTS.md` §5.2)
+## Capability authority (`AGENTS.md` §5.2)
 
-A service's grant is the intersection of its manifest's requested
-capability set with the authority init itself holds. The request is
-decoded with the single shared decoder `tairix_abi::decode_capability_ids`
-(the same decoder `drvhost` uses — one implementation of the manifest-body
-format, `AGENTS.md` §2.2). A service whose request is not a subset of the
-authority is refused (`CapabilityEscalation`), never silently narrowed.
-The `Spawner` receives the computed ceiling and may never add to it
-(`AGENTS.md` §4 — no ambient authority).
+The **kernel** is the single authority over a service's capabilities. When
+it loads the service binary it reads the signed bundle manifest and grants
+the intersection of the manifest's request with the **service account's**
+ceiling — exactly the model `drvhost` uses for drivers (`AGENTS.md` §8,
+§18.6). init names only the binary and the account uid, so there is no
+init-side derivation to keep in step with the kernel's and no ambient
+authority (`AGENTS.md` §4). The enrolment path (`registry::enrol`, the
+registered/user tier) still decodes a manifest it is *given* to refuse
+enabling a service whose request exceeds the enroller's ceiling, using the
+shared `service::decode_manifest_capabilities` decoder (`AGENTS.md` §2.2).
 
 ## Reaping (`Init::reap`)
 
@@ -55,11 +66,13 @@ Neither path panics (`AGENTS.md` §2.9).
 
 Injected, mirroring the `drvhost` host configuration:
 
-- `Spawner::spawn(&ServiceSpec, &CapabilitySet) -> Result<Pid, Errno>` —
-  the trusted loader that verifies and executes a service binary with at
-  most the granted capability set.
-- `Reaper::collect() -> Option<ReapedChild>` — exited-child
-  notifications.
+- `Spawner::spawn(&ServiceSpec) -> Result<Pid, Errno>` — the trusted loader
+  that verifies and executes a service binary as the account the spec names;
+  the kernel derives its capability grant from the signed bundle (init passes
+  no capability set).
+- `Stopper::{request_stop, force_terminate}(Pid)` — the two-phase graceful
+  stop (request, then force after the grace period).
+- `Reaper::collect() -> Option<ReapedChild>` — exited-child notifications.
 
 On a running kernel both are syscall-backed; in tests they are in-memory
 fixtures.
@@ -68,13 +81,21 @@ fixtures.
 
 Reserved `EventId` range `9000..10000`:
 
-- `9001 SERVICE_STARTED` — a service was launched with its grant (Info).
-- `9002 SERVICE_START_FAILED` — manifest decode failed or spawn refused (Warn).
-- `9003 SERVICE_DENIED` — manifest over-requested authority (Warn).
+- `9001 SERVICE_STARTED` — a service was launched as its account; the kernel
+  granted its capabilities from the signed bundle (Info).
+- `9002 SERVICE_START_FAILED` — the kernel's load gate refused the spawn (a
+  bad manifest, a capability beyond the account's ceiling, or another load
+  failure) (Warn).
 - `9004 SERVICE_SKIPPED` — a dependency failed, so the service was skipped (Warn).
 - `9005 SERVICE_EXITED` — a registered service exited and was reaped (Info).
 - `9006 ORPHAN_REAPED` — an inherited orphan was reaped (Info).
 - `9007 GRAPH_REJECTED` — the service graph was structurally invalid (Error).
+
+(Readiness, on-demand-activation, and stop/linger events `9008`–`9017` are
+documented in `src/events.rs`. `9003` is retired: init no longer decides
+capability grants, so there is no separate init-side capability-denial
+event — the kernel records its own denial. The number is left a gap, never
+reused.)
 
 ## The `Run` entry-point binary (`plans/PI.md` P6b)
 
@@ -127,14 +148,18 @@ service never links a kernel or driver crate (`AGENTS.md` §17.4). No
 
 ## Test surface
 
-`cargo test -p tairix-init` (27 unit tests): the 17 orchestrator tests —
+`cargo test -p tairix-init` covers the orchestrator engine —
 dependency-ordered start; fail-closed missing-dependency and cycle paths;
-duplicate registration; the grant as `request ∩ authority`; an escalation
-denial; a spawn failure cascading to transitive dependents; an invalid
-manifest; the reaper distinguishing a service exit from an inherited
-orphan; plus the `EventId` range/uniqueness invariants and the numeric
-audit-field formatter — and 10 startup-config tests covering the default
-config, comments/blank/inline-comment handling, surrounding whitespace,
-and every fail-closed rejection (unknown/duplicate directive, console with
-an argument, a missing or non-absolute `session` path, a missing required
-directive, and an over-long config).
+duplicate registration; enrolment filtering (only enrolled bundles start);
+a spawn failure cascading to transitive dependents; readiness gating
+(`notify` dependency, required/provided conditions, explicit-failure skip,
+fail-closed notify rejection); on-demand endpoint activation and the idle
+linger → graceful stop → force → reap lifecycle; and the reaper
+distinguishing a service exit from an inherited orphan — plus the `EventId`
+range/uniqueness invariants and the numeric audit-field formatter. Because
+the kernel is the capability authority, there are no init-side
+capability-intersection or escalation-denial tests (that logic is the
+kernel's). The `Run` binary's startup-config and session-supervisor logic
+are host-tested in `src/startup.rs` and `src/supervisor.rs` (the default
+config, comment/whitespace handling, every fail-closed config rejection,
+and per-console session launch/relaunch/exhaustion).

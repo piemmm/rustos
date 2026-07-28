@@ -3,9 +3,11 @@
 `tairix-init` is the first user-space process the kernel starts. It owns
 the lifecycle of every long-running system service under
 `/System/Services` (`AGENTS.md` §16.2): it brings them up in dependency
-order, grants each one the capability set its signed manifest requests
-intersected with init's own authority (`AGENTS.md` §5.2), and reaps the
-children that any PID 1 inherits.
+order, launches each one as its own **service account**, and reaps the
+children that any PID 1 inherits. The **kernel** is the single authority
+over a service's capabilities — it grants `manifest ∩ account-ceiling` from
+the signed bundle at load time (`AGENTS.md` §5.2, §8); init names the binary
+and the account, never a capability set.
 
 > **Planned evolution.** This page describes the PID 1 service manager as
 > it stands. The first-class service manager it is growing into is
@@ -25,13 +27,13 @@ so a userland service never links a kernel or driver crate
 
 ## The orchestrator, not a loader
 
-`init` decides *what* runs, *in what order*, and *with what authority*. It
-deliberately does **not** verify a service binary's signature, syscall-table
-hash, or `rxe` envelope — that is the loader's job, the same pipeline
-[`drvhost`](../drivers/host.md) runs for drivers (`AGENTS.md` §8). `init`
-computes the capability ceiling and hands it, with the binary, to the
-`Spawner` seam, which performs that verification before it executes
-anything.
+`init` decides *what* runs, *in what order*, and *when*. It deliberately
+does **not** verify a service binary's signature, syscall-table hash, or
+`rxe` envelope, and it is **not** the capability authority: verifying the
+binary and granting `manifest ∩ account-ceiling` are the loader/kernel's
+job, the same pipeline [`drvhost`](../drivers/host.md) runs for drivers
+(`AGENTS.md` §8). `init` names the binary and the service account and hands
+both to the `Spawner` seam; the kernel derives and enforces the grant.
 
 ## Bring-up pipeline
 
@@ -46,15 +48,16 @@ that **fails closed** (`AGENTS.md` §5.4.5):
    (`DependencyMissing`) or the graph contains a cycle
    (`DependencyCycle`). The system never boots a partial, surprising
    configuration.
-3. **Admit** each service whose prerequisites are met, in order:
-   **decode** its manifest into a requested capability set, **gate** that
-   request against init's authority, **spawn** it, and **audit** the
-   outcome. Bring-up is an admission engine, not a single
+3. **Admit** each service whose prerequisites are met, in order: **spawn**
+   it as its service account and **audit** the outcome. The kernel derives
+   and enforces its capability grant from the signed bundle; init passes no
+   capability set. Bring-up is an admission engine, not a single
    spawn-everything pass — see *Lifecycle and readiness* below.
 
 When the graph is sound, init brings up every service whose prerequisites
-can be met. A single service that fails — its manifest will not decode, it
-over-requests authority, or the `Spawner` refuses it — is recorded, and the
+can be met. A single service that fails — the kernel's load gate refuses
+the spawn (a bad manifest, a capability beyond the account's ceiling, or
+another load failure) — is recorded, and the
 services that *transitively depend on it* are skipped; services
 independent of the failure still start. Each admission pass returns a
 `StartReport` (`started` + `failed`), so a caller can see what came up and
@@ -161,21 +164,30 @@ identically.
   no capability — removing eligibility only narrows authority — but fails
   closed if the service was not enrolled. Both are pure transforms that
   return the new record for the caller to write back through the
-  appropriate trusted-path store; the grant is still intersected with the
-  system authority at start regardless (below).
+  appropriate trusted-path store; the kernel still derives the grant
+  (`manifest ∩ account-ceiling`) from the signed bundle at start regardless
+  (below).
 
-## Capability granting (`AGENTS.md` §5.2)
+## Capability authority (`AGENTS.md` §5.2)
 
-A service's grant is the intersection of the capability set its signed
-manifest requests with the authority init itself holds. init decodes the
-manifest request with the single shared decoder
-`tairix_abi::decode_capability_ids` (the same decoder `drvhost` uses, so
-the manifest-body format has exactly one implementation — `AGENTS.md`
-§2.2) and refuses any service whose request is **not a subset** of its
-authority. Granting it would widen authority, so the service is denied
-rather than narrowed silently (`AGENTS.md` §5.4.5). There is no ambient
-authority: the `Spawner` receives the computed ceiling and may never add
-to it (`AGENTS.md` §4).
+The **kernel** is the single authority over a service's capabilities. When
+it loads the service binary it reads the signed bundle manifest and grants
+the intersection of the manifest's request with the **service account's**
+ceiling — the very model [`drvhost`](../drivers/host.md) uses for drivers
+(`AGENTS.md` §8, §18.6). `init` names only the binary and the account uid;
+it never decodes a manifest or computes a grant on the launch path, so no
+second capability-derivation path can drift from the kernel's and there is
+no ambient authority (`AGENTS.md` §4). A load the kernel refuses (a bad
+manifest, or a request beyond the account's ceiling) surfaces to init as a
+`SpawnFailed`, exactly like any other refused load.
+
+The one place init decodes a manifest is the **enrolment** path
+(`registry::enrol`, the registered/user tier): it refuses to *enable* a
+service whose request exceeds the enroller's ceiling, using the single
+shared decoder `tairix_abi::decode_capability_ids` (the same decoder
+`drvhost` uses — one implementation of the manifest-body format,
+`AGENTS.md` §2.2). That is a decision about *eligibility*, recorded ahead
+of time; the authoritative grant is still the kernel's at load.
 
 ## Reaping
 
@@ -191,9 +203,12 @@ panics (`AGENTS.md` §2.9).
 The two operations that touch the outside world are injected, mirroring
 the `drvhost` host configuration:
 
-- `Spawner::spawn(&ServiceSpec, &CapabilitySet) -> Result<Pid, Errno>` —
-  the trusted loader that verifies and executes a service binary with at
-  most the granted capability set.
+- `Spawner::spawn(&ServiceSpec) -> Result<Pid, Errno>` — the trusted loader
+  that verifies and executes a service binary as the account the spec
+  names; the kernel derives its capability grant from the signed bundle
+  (init passes no capability set).
+- `Stopper::{request_stop, force_terminate}(Pid)` — the two-phase graceful
+  stop: ask the service to exit, then force it down after its grace period.
 - `Reaper::collect() -> Option<ReapedChild>` — the source of
   exited-child notifications, draining the kernel wait queue on a running
   system.
@@ -210,9 +225,8 @@ plumbing and exhaustively testable.
 
 | Id   | Constant               | Level | Meaning                                       |
 |------|------------------------|-------|-----------------------------------------------|
-| 9001 | `SERVICE_STARTED`      | Info  | a service was launched with its grant         |
-| 9002 | `SERVICE_START_FAILED` | Warn  | manifest decode failed, or the spawn was refused |
-| 9003 | `SERVICE_DENIED`       | Warn  | manifest over-requested authority             |
+| 9001 | `SERVICE_STARTED`      | Info  | a service was launched as its account (the kernel granted its caps) |
+| 9002 | `SERVICE_START_FAILED` | Warn  | the kernel's load gate refused the spawn      |
 | 9004 | `SERVICE_SKIPPED`      | Warn  | a dependency failed, so the service was skipped |
 | 9005 | `SERVICE_EXITED`       | Info  | a registered service exited and was reaped    |
 | 9006 | `ORPHAN_REAPED`        | Info  | an inherited orphan was reaped                |
@@ -221,6 +235,12 @@ plumbing and exhaustively testable.
 | 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
 | 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice named an unknown or non-starting service |
 | 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
+
+(On-demand-activation and stop/linger events `9012`–`9017` are defined in
+`src/events.rs`. `9003` is retired: init no longer decides capability
+grants — the kernel is the single authority and records its own denial — so
+there is no init-side capability-denial event; the number is left a gap,
+never reused.)
 
 ## The `Run` entry-point binary and startup config (`plans/PI.md` P6b)
 
@@ -322,9 +342,8 @@ that ran long enough) awaits a clock/session-state ABI.
 `cargo test -p tairix-init` drives the manager against an in-memory
 `Spawner`/`Reaper` and a recording log sink, covering dependency-ordered
 start, the fail-closed missing-dependency and cycle paths, duplicate
-registration, the capability grant as `request ∩ authority`, an
-escalation denial, a spawn failure cascading to its transitive
-dependents, an invalid manifest, and the reaper distinguishing a service
+registration, a spawn failure (the kernel's refused load) cascading to its
+transitive dependents, and the reaper distinguishing a service
 exit from an inherited orphan, and `register_enrolled` registering only
 enrolled bundles while auditing (and never starting) a present-but-
 unenrolled one. The enrolment registry has its own unit tests: fail-closed

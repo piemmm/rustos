@@ -16,11 +16,21 @@ request, and fails closed (§4, §5.4).
 
 PID 1 (`userland/system/init`) is already an embryonic service manager:
 
-- `service.rs` — `ServiceSpec { name, binary_path, manifest, dependencies }`
-  and the `Spawner` / `Reaper` seams (pure core, host-tested).
+- `service.rs` — `ServiceSpec { name, binary_path, account, dependencies,
+  readiness, requires, provides, activation, stop_grace, connect_capability }`
+  and the `Spawner` / `Reaper` / `Stopper` seams (pure core, host-tested). The
+  spec names the service **account** (a uid), not manifest bytes: the kernel
+  derives the grant (SVC-A).
 - `manager.rs` (`Init`) — dependency **topological ordering**, `register`,
-  `start_all`, `reap`, capability **intersection** (`ceiling ∩ manifest`,
-  escalation refused), audit emission. `RunningService` tracks live PIDs.
+  `start_all`, readiness-gated admission, `reap`, and audit emission.
+  **The kernel is the single capability authority** (SVC-A): the manager
+  names only a service's binary and its **service account** (`ServiceSpec`
+  carries a `binary_path` + `account` uid, never manifest bytes), and the
+  kernel derives `manifest ∩ account-ceiling` from the signed bundle at load
+  time — exactly as `drvhost` does for drivers. The `Spawner` seam is
+  therefore `spawn(spec) -> Pid` (path + account, no capability set), so no
+  init-side capability derivation can drift from the kernel's authoritative
+  one. `RunningService` tracks live PIDs.
 - `supervisor.rs` — wait-any supervision with a **bounded per-entry
   crash-loop budget** (never `spawn`-in-a-loop, §2.1).
 - `startup.rs` — the boot service set as a parsed, fail-closed
@@ -30,7 +40,7 @@ PID 1 (`userland/system/init`) is already an embryonic service manager:
   own `service`-directive count), so it tracks the floor rather than a magic
   cap (SVC-1, done).
 - `events.rs` — reserved audit event IDs in `9000..10000`
-  (`SERVICE_STARTED/START_FAILED/DENIED/SKIPPED/EXITED`, `ORPHAN_REAPED`,
+  (`SERVICE_STARTED/START_FAILED/SKIPPED/EXITED`, `ORPHAN_REAPED`,
   `GRAPH_REJECTED`, `SERVICE_READY/CONDITION_SATISFIED/NOTIFY_REJECTED`,
   `SERVICE_NOT_ENROLLED`).
 - `registry.rs` — the fail-closed enrolment registry (SVC-3): `Enrolment`
@@ -317,6 +327,46 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   The growable, discovery-registered tier past the floor is SVC-3/SVC-4 and
   waits on the `lib/rt` heap (§3.10).
 
+### SVC-A — Capability authority + the live PID 1 engine
+
+**Decision (confirmed): the kernel is the single capability authority.** A
+service is launched by naming its binary and its **service account** uid; the
+kernel loads the signed bundle and grants `manifest ∩ account-ceiling` (the
+same gate `drvhost` runs for drivers, §8/§18.6). The manager never decodes a
+manifest or computes a grant on the launch path, so there is no second,
+divergent capability-derivation path to keep in step with the kernel's. This
+resolves the mismatch between the earlier engine design (init decodes the
+manifest, intersects with its own authority, and passes an explicit `granted`
+set) and the live `spawn_as(path, uid)` model (the kernel derives the grant):
+the live model wins, and the engine is reshaped to it in place (§2.13).
+
+- **Engine reshaped to the kernel-authority model — DONE.** `ServiceSpec`
+  carries `account: u32` instead of manifest bytes; `Spawner::spawn(spec)`
+  drops the `granted` argument; the manager drops `InitConfig.authority` /
+  `accepted_abi_version`, `requested_capabilities`, the init-side
+  intersection, `StartedService.granted`, and the retired
+  `SERVICE_DENIED` (9003) audit id / `StartFailure::{ManifestInvalid,
+  CapabilityEscalation}` (a refused load now surfaces as the kernel's own
+  `SpawnFailed`). The enrolment ceiling check (`registry::enrol`) keeps
+  decoding a manifest it is *given* — that is the registered/user tier, where
+  a manifest genuinely exists — via the still-shared
+  `service::decode_manifest_capabilities`. Host tests updated; the 3 tests
+  that asserted init-side intersection/escalation are deleted (§2.14). The
+  live boot is unchanged (the engine is still only reached from tests), so
+  the existing boot behaviour and QEMU verticals are untouched by this step.
+- **Wire the engine into live PID 1 — TODO (the meat of "Stage A").**
+  Replace the no-heap bootstrap `supervise` / `StartupConfig` service path in
+  `userland/system/init/src/run.rs` with the heap-backed `Init` engine
+  driving the boot-floor services (all `Permanent`/`Immediate`), backing the
+  `Spawner`/`Reaper`/`Stopper`/`Sink` seams on the real syscalls
+  (`spawn_as(path, 0, account)`, `wait`, `signal`, `lib/log`). Per-console
+  **session** supervision (one `login` per console, crash-loop relaunch)
+  stays a distinct concern layered over the engine; the single wait loop
+  routes each reaped pid to the session table or to the engine
+  (`reap` handles service exits + orphans). No parallel manager (§2.2): the
+  old flat service handling is deleted in the same change. This step owns
+  the 3-arch QEMU boot verticals and the full §7 gate.
+
 ### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine) — DONE
 - `lib/abi/src/service.rs` (versioned/fail-closed, frozen on first release):
   the `ServiceState` lifecycle (`inactive → starting → ready → running →
@@ -375,8 +425,9 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
 - Activation wiring: `Init::register_enrolled(discovered, &Enrolment)`
   registers a discovered `ServiceSpec` **only** if enrolled; a
   present-but-unenrolled bundle is never registered and its skip audits
-  `SERVICE_NOT_ENROLLED` (9011). The grant is still `ceiling ∩ manifest` at
-  start (`start_all`), so enrolment records a decision and never grants power.
+  `SERVICE_NOT_ENROLLED` (9011). The kernel still derives the grant
+  (`manifest ∩ account-ceiling`) from the signed bundle at start (SVC-A), so
+  enrolment records a decision and never grants power.
 - Host tests cover: a present-but-unregistered bundle never registers/starts;
   a corrupt store and a missing store both leave nothing eligible; enrolment
   refuses a manifest exceeding the ceiling; strict-name/duplicate rejection;

@@ -16,17 +16,19 @@ pub const INIT_RANGE_START: u32 = 9_000;
 /// Range end (exclusive) reserved for `init` event identifiers.
 pub const INIT_RANGE_END: u32 = 10_000;
 
-/// A service was started: its manifest decoded, its capability ceiling
-/// computed and granted, and its binary handed to the [`Spawner`](crate::Spawner).
+/// A service was started: its binary was handed to the
+/// [`Spawner`](crate::Spawner) as its service account, and the kernel derived
+/// and granted its capabilities from the signed bundle at load time.
 pub const SERVICE_STARTED: EventId = EventId(9_001);
-/// A service could not be started: its manifest failed to decode, or the
-/// [`Spawner`](crate::Spawner) refused to launch it. Its dependents are
-/// skipped.
+/// A service could not be started: the kernel's load gate refused to launch
+/// it (a bad manifest, a capability beyond the account's ceiling, or another
+/// load failure). Its dependents are skipped.
+///
+/// `9_003` is retired: the manager no longer decides capability grants (the
+/// kernel is the single authority and records its own denial), so there is
+/// no separate init-side capability-escalation event. The value is left a
+/// gap rather than reused.
 pub const SERVICE_START_FAILED: EventId = EventId(9_002);
-/// A service was refused because its manifest requests a capability the
-/// system authority does not hold — a denial is a security-relevant
-/// decision in its own right.
-pub const SERVICE_DENIED: EventId = EventId(9_003);
 /// A service was skipped because a dependency failed to start; it is never
 /// brought up against a missing prerequisite.
 pub const SERVICE_SKIPPED: EventId = EventId(9_004);
@@ -86,15 +88,14 @@ pub const SERVICE_FORCE_TERMINATED: EventId = EventId(9_017);
 mod tests {
     use super::{
         ACTIVATION_DENIED, ACTIVATION_QUEUED, CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END,
-        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED, SERVICE_DENIED,
-        SERVICE_EXITED, SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED,
-        SERVICE_READY, SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
+        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED, SERVICE_EXITED,
+        SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED, SERVICE_READY,
+        SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
     };
 
-    const ALL: [u32; 17] = [
+    const ALL: [u32; 16] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
-        SERVICE_DENIED.0,
         SERVICE_SKIPPED.0,
         SERVICE_EXITED.0,
         ORPHAN_REAPED.0,
