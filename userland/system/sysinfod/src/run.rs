@@ -50,8 +50,9 @@ mod program {
 
     use tairix_abi::net_ipc::{
         decode_page_reply, NetBondMemberRecord, NetInterfaceCountersRecord,
-        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
-        NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord,
+        NetResolverServer, NetSocketRecord, NetstackRequest, NETSTACK_ENDPOINT,
+        NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
@@ -299,6 +300,10 @@ mod program {
             page_netstack(NetstackBondMembersPage)
         }
 
+        fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetResolverServer>, Errno> {
+            page_netstack(NetstackResolverServersPage)
+        }
+
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
@@ -445,6 +450,21 @@ mod program {
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetBondMemberRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The resolver-servers page. The set is small and closed, so the
+    /// request carries no page window (the stack answers it whole); the
+    /// generic pager still terminates after the single short page.
+    struct NetstackResolverServersPage;
+    impl NetstackPage for NetstackResolverServersPage {
+        type Record = NetResolverServer;
+        const RECORD_LEN: usize = NetResolverServer::WIRE_LEN;
+        fn request(&self, _offset: u32, _limit: u16) -> NetstackRequest {
+            NetstackRequest::ResolverServers
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetResolverServer::from_bytes(chunk)
         }
     }
 

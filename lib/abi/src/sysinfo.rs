@@ -300,6 +300,22 @@ impl SysinfoQueryId {
     /// are scheduler internals gated on `CAP_SYSINFO_KERNEL`.)
     pub const CPU_INFO: Self = Self(25);
 
+    /// Report the host's active recursive-resolver server set: one
+    /// [`NetResolverServer`](crate::net_ipc::NetResolverServer) per server
+    /// (family and address), paged by a [`NetInterfaceListRequest`]. The
+    /// aggregated, deduplicated DHCP-learned ∪ statically-configured DNS
+    /// servers the stack maintains (`plans/DNS.md` DNS2), the one source
+    /// both a userland resolver client and this read share.
+    ///
+    /// Ungated: the recursive DNS servers a host queries are public host
+    /// configuration — the TAIRiX analogue of a world-readable
+    /// `/etc/resolv.conf` — and expose no per-principal secret, so like
+    /// [`Self::CPU_INFO`] any principal may read them. (The `netstack`
+    /// broker still gates its own `ResolverServers` read on the sysinfo
+    /// broker's `CAP_SYSINFO_INTROSPECT` grant; this ungated query is the
+    /// *client* surface the broker fronts.)
+    pub const NET_RESOLVER_SERVERS: Self = Self(26);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -633,6 +649,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::CPU_INFO,
         name: "cpu_info",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_RESOLVER_SERVERS,
+        name: "net_resolver_servers",
         required_capability: None,
         audit: false,
     },
@@ -4081,6 +4103,21 @@ mod tests {
             None
         );
         assert!(!spec_for(SysinfoQueryId::CPU_INFO).unwrap().audit);
+        assert_eq!(SysinfoQueryId::NET_RESOLVER_SERVERS.as_u16(), 26);
+        // The active resolver-server set is public host configuration (the
+        // resolv.conf analogue): ungated and unaudited, no per-principal
+        // secret.
+        assert_eq!(
+            spec_for(SysinfoQueryId::NET_RESOLVER_SERVERS)
+                .unwrap()
+                .required_capability,
+            None
+        );
+        assert!(
+            !spec_for(SysinfoQueryId::NET_RESOLVER_SERVERS)
+                .unwrap()
+                .audit
+        );
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 

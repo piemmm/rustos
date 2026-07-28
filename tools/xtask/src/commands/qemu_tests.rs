@@ -4798,13 +4798,19 @@ static TESTS: &[QemuTest] = &[
     // *leased* address has been answered; the peer's own verdict (it offered,
     // acked, and got the echo reply at the leased address) is required too, so
     // a broken lease cannot pass on an address the guest formed itself (it
-    // forms none). Single CPU and the same 240-second budget as its siblings.
+    // forms none). Single CPU. Budgeted at 360 s — not the 240 s its
+    // aarch64/x86_64 siblings use: riscv64 is the slowest TCG target, and the
+    // full boot + autoload + service bring-up + bind + DHCP exchange takes
+    // materially longer on it, so under the full parallel matrix a 240 s
+    // budget was a load-dependent miss. 360 s is the budget its riscv64
+    // DHCPv6 sibling already proves sufficient for strictly more guest work,
+    // so this is a budget sized to the work, not a retry.
     QemuTest {
         package: "tairix-test-netstack-dhcp-qemu-riscv64",
         binary: "tairix-test-netstack-dhcp-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
-        timeout: Duration::from_secs(240),
+        timeout: Duration::from_secs(360),
         disk_sectors: None,
         netstack_peer: NetPeerMode::V4DhcpEcho,
         ramfb: false,

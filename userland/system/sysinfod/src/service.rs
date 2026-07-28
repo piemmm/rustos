@@ -4,7 +4,7 @@
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
     spec_for, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
@@ -191,6 +191,8 @@ fn dispatch(
         net_sockets_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_BOND_MEMBERS {
         net_bond_members_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_RESOLVER_SERVERS {
+        net_resolver_servers_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
@@ -436,6 +438,28 @@ fn net_bond_members_list(
     )
 }
 
+/// Decode the [`NetInterfaceListRequest`] and page the resolver-server
+/// records into `response`. The active set is small and closed, so a
+/// single page always suffices, but it shares the one paging codec
+/// rather than inventing a bespoke reply shape.
+fn net_resolver_servers_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceListRequest::from_bytes(payload)?;
+    let records = source.net_resolver_servers(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetResolverServer::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`ReclaimListRequest`], apply paging, and pack the selected
 /// [`ReclaimClassRecord`]s into `response`.
 fn reclaim_list(
@@ -666,8 +690,8 @@ mod tests {
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSockProto, NetSockState,
-        NetSocketRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSockProto,
+        NetSockState, NetSocketRecord,
     };
     use tairix_abi::sysinfo::{
         CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
@@ -1051,6 +1075,12 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetBondMemberRecord>, Errno> {
             Ok(alloc::vec![fixture_net_bond_member()])
+        }
+        fn net_resolver_servers(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetResolverServer>, Errno> {
+            Ok(fixture_resolver_servers())
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
             Ok(alloc::vec![
@@ -1659,6 +1689,23 @@ mod tests {
         }
     }
 
+    /// The active resolver-server set the fixture serves: one V4 and one
+    /// V6 recursive server.
+    fn fixture_resolver_servers() -> alloc::vec::Vec<NetResolverServer> {
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[10, 0, 2, 3]);
+        alloc::vec![
+            NetResolverServer {
+                family: tairix_abi::net_ipc::NetAddrFamily::V4,
+                addr: v4,
+            },
+            NetResolverServer {
+                family: tairix_abi::net_ipc::NetAddrFamily::V6,
+                addr: [0x26; 16],
+            },
+        ]
+    }
+
     /// The bond-member record the fixture serves.
     fn fixture_net_bond_member() -> NetBondMemberRecord {
         let mut bond = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
@@ -1745,6 +1792,37 @@ mod tests {
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    #[test]
+    fn net_resolver_servers_is_ungated_and_round_trips() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_RESOLVER_SERVERS, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Served with *no* capability: the recursive resolver set is public
+        // host configuration (the resolv.conf analogue), and — being
+        // ungated — emits no audit record.
+        let none = Caps(&[]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).unwrap();
+        let expected = fixture_resolver_servers();
+        assert_eq!(n, expected.len() * NetResolverServer::WIRE_LEN);
+        for (index, want) in expected.iter().enumerate() {
+            let base = index * NetResolverServer::WIRE_LEN;
+            let got = NetResolverServer::from_bytes(&resp[base..]).unwrap();
+            assert_eq!(&got, want);
+        }
+        assert!(
+            sink.events.borrow().as_slice().is_empty(),
+            "an ungated read emits no audit record"
         );
     }
 

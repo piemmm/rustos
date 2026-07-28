@@ -468,8 +468,13 @@ lease's option-6 servers first, then the IPv6 lease's option-23 servers —
 derived from each client's *live* lease, so the set tracks acquisition and
 withdrawal exactly (empty before a lease, empty once one is lost, never a
 stale copy) and is bounded by the leases' fixed-capacity option lists. The
-`netstack` service aggregates it with any statically configured servers into
-the interface's active resolver set.
+`netstack` service aggregates it across every managed interface (with any
+statically configured servers) into the host's active resolver set,
+deduplicated and bounded by `tairix_abi::net_ipc::MAX_RESOLVER_SERVERS`, and
+serves it as the `ResolverServers` broker read. The System Information API
+surfaces that same set as the ungated `NET_RESOLVER_SERVERS` query — the
+resolv.conf-analogue `state:net/resolver/servers` reading — so a resolver
+client and an operator see one source of truth (`plans/DNS.md` DNS2).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

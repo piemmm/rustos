@@ -105,6 +105,25 @@ which the `sysinfod` broker forwards to `netstack`'s capability-gated
 broker read (the `NetstackRequest::BondMembers` operation); they require
 `CAP_SYSINFO_GLOBAL` and are audited, and a non-bond alias fails closed.
 
+## Observing the resolver servers
+
+The host's active recursive-resolver (DNS) servers are addressable the same
+way — TAIRiX's equivalent of reading `/etc/resolv.conf`:
+
+- `state:net/resolver/servers` — the comma-separated recursive DNS servers
+  the host will query (V4 as dotted-quad, V6 in RFC 5952 form, in the
+  stack's order), or `none` when it has learned none.
+
+The set is the DHCP-learned servers (DHCPv4 option 6, DHCPv6 option 23),
+aggregated across every managed interface, deduplicated, and — once the
+static `network.conf` key lands — unioned with any statically configured
+servers. Unlike the socket, counter, and bond reads above, this is **not**
+privileged: the recursive-server list is public host configuration and
+exposes no per-principal secret, so the `NET_RESOLVER_SERVERS` query is
+ungated (no capability, no audit). It resolves through the same
+`tairix_procinfo` resolver onto that query, which the `sysinfod` broker
+forwards to `netstack`'s `NetstackRequest::ResolverServers` broker read.
+
 ## Configuring interfaces (`network.conf`)
 
 Per-interface addressing is declarative, not imperative: it lives in one

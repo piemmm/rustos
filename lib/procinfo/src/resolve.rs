@@ -38,7 +38,7 @@ use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, IF_NAME_LEN,
+    NetInterfaceStateRecord, NetResolverServer, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord,
@@ -58,6 +58,7 @@ use crate::resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
     ResourceResponse, ResponsePayload, Sensitivity, Unit,
 };
+use crate::resolver::for_each_resolver_server;
 use crate::transport::Transport;
 
 /// Why resolving an `info:`/`stats:` reference did not produce a value.
@@ -206,6 +207,15 @@ fn resolve_state(
                 Authorization::Capability(CapabilityId::SYSINFO_HW),
             )
         }
+        // The host's active recursive-resolver servers, comma-separated in
+        // the stack's order, or `none` when it has learned none. The
+        // aggregated DHCP-learned ∪ statically-configured DNS servers the
+        // stack maintains (the resolv.conf analogue): public host
+        // configuration, so it is served ungated.
+        ["net", "resolver", "servers"] => (
+            InfoValue::new_str(Sensitivity::Public, &render_resolver_servers(transport)?),
+            Authorization::Unprivileged,
+        ),
         _ => return Err(ResolveInfoError::UnknownSelector),
     };
     envelope(
@@ -1143,6 +1153,59 @@ fn net_bond_members_for(
     Ok(members)
 }
 
+/// Collect the host's active recursive-resolver server set, in the stack's
+/// order, over the shared [`for_each_resolver_server`] walk.
+///
+/// Unlike the bond helper, an empty set is a valid answer (`none`), not an
+/// unknown selector: a host that has learned no DNS servers legitimately
+/// has none.
+fn net_resolver_servers_all(
+    transport: &dyn Transport,
+) -> Result<Vec<NetResolverServer>, ResolveInfoError> {
+    let mut servers = Vec::new();
+    for_each_resolver_server(transport, |record| {
+        servers.push(*record);
+        Ok(())
+    })
+    .map_err(map_list_error)?;
+    Ok(servers)
+}
+
+/// Render the host's active resolver servers as a comma-separated list in
+/// the stack's order, or `none` when it has learned none.
+fn render_resolver_servers(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
+    let servers = net_resolver_servers_all(transport)?;
+    let mut rendered = String::new();
+    for server in &servers {
+        if !rendered.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&resolver_server_string(server));
+    }
+    if rendered.is_empty() {
+        rendered.push_str("none");
+    }
+    Ok(rendered)
+}
+
+/// Render one resolver server's address as plain text (dotted-quad for a
+/// V4 server, RFC 5952 canonical text for a V6 server).
+fn resolver_server_string(server: &NetResolverServer) -> String {
+    match server.family {
+        NetAddrFamily::V4 => {
+            let mut out = String::new();
+            for (index, byte) in server.addr[..4].iter().enumerate() {
+                if index > 0 {
+                    out.push('.');
+                }
+                out.push_str(&byte.to_string());
+            }
+            out
+        }
+        NetAddrFamily::V6 => ipv6_string(&server.addr),
+    }
+}
+
 /// The NUL-padded interface-alias field as an owned display string.
 fn if_name_string(name: &[u8; IF_NAME_LEN]) -> String {
     let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
@@ -1785,7 +1848,7 @@ mod tests {
     use tairix_abi::net_ipc::{
         NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
         NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-        NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+        NetInterfaceStateRecord, NetResolverServer, IF_NAME_LEN, NET_IF_MAX_ADDRS,
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
@@ -1814,6 +1877,7 @@ mod tests {
         cpu_loads: Vec<CpuLoadRecord>,
         cpu_infos: Vec<CpuInfoRecord>,
         irqs: Vec<IrqRecord>,
+        resolver_servers: Vec<NetResolverServer>,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -1849,6 +1913,26 @@ mod tests {
                 misses: i as u64,
             })
             .collect()
+    }
+
+    /// The active recursive-resolver set the fixture serves: a V4 and a V6
+    /// recursive server, so the render test exercises both address forms.
+    fn fixture_resolver_servers() -> Vec<NetResolverServer> {
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[10, 0, 2, 3]);
+        let mut v6 = [0u8; 16];
+        v6[..2].copy_from_slice(&[0x20, 0x01]);
+        v6[15] = 0x53;
+        alloc::vec![
+            NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4,
+            },
+            NetResolverServer {
+                family: NetAddrFamily::V6,
+                addr: v6,
+            },
+        ]
     }
 
     /// The `ramzip` snapshot the fixture serves.
@@ -2000,6 +2084,7 @@ mod tests {
                 cpu_loads: fixture_cpu_loads(),
                 cpu_infos: fixture_cpu_infos(),
                 irqs: fixture_irqs(),
+                resolver_servers: fixture_resolver_servers(),
                 deny: None,
                 seen: RefCell::new(Vec::new()),
             }
@@ -2139,6 +2224,15 @@ mod tests {
                     let req = NetInterfaceListRequest::from_bytes(payload)?;
                     let records = fixture_bond_members();
                     let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_RESOLVER_SERVERS => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let encoders: Vec<_> = self
+                        .resolver_servers
                         .iter()
                         .map(|record| move || record.to_le_bytes())
                         .collect();
@@ -3260,6 +3354,36 @@ mod tests {
             ResponsePayload::State(v) => {
                 assert_eq!(v.value(), "10.0.2.15/24, fe80::b2/64 (tentative)");
             }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn state_net_resolver_servers_render_ungated() {
+        let fixture = Fixture::new();
+        let servers = resolve_str("state:net/resolver/servers", &fixture).expect("ok");
+        // The resolver set is public host configuration (the resolv.conf
+        // analogue): served ungated.
+        assert_eq!(servers.authorization, Authorization::Unprivileged);
+        assert_eq!(servers.query(), "state:net/resolver/servers");
+        match servers.payload {
+            ResponsePayload::State(v) => {
+                // V4 as dotted-quad, V6 in RFC 5952 canonical form, in the
+                // stack's order.
+                assert_eq!(v.value(), "10.0.2.3, 2001::53");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn state_net_resolver_servers_render_none_when_empty() {
+        let mut fixture = Fixture::new();
+        fixture.resolver_servers = Vec::new();
+        let servers = resolve_str("state:net/resolver/servers", &fixture).expect("ok");
+        match servers.payload {
+            ResponsePayload::State(v) => assert_eq!(v.value(), "none"),
             _ => panic!("expected state value"),
         }
     }

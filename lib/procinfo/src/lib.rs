@@ -31,6 +31,8 @@
 //!   its `source on target type fstype (options)` row rendering.
 //! * [`for_each_net_socket`], the paged open-socket-table walk the `ss`
 //!   socket-statistics tool renders.
+//! * [`for_each_resolver_server`], the active recursive-resolver-server walk
+//!   the `state:net/resolver/servers` read renders.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor.
@@ -62,6 +64,7 @@
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
 //! * [`netsock`] — the open-socket-table paging walk.
+//! * [`resolver`] — the active recursive-resolver-server paging walk.
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
 //!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
 //! * [`mod@resolve`] — the `info:`/`stats:` resource-reference resolver.
@@ -97,6 +100,7 @@ pub mod process;
 pub mod request;
 pub mod resinfo;
 pub mod resolve;
+pub mod resolver;
 pub mod transport;
 pub mod users;
 
@@ -123,5 +127,6 @@ pub use resinfo::{
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
 pub use resolve::{resolve, ResolveInfoError};
+pub use resolver::{for_each_resolver_server, RESOLVER_SERVER_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_names, USER_DIRECTORY_PAGE};

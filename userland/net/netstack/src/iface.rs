@@ -18,8 +18,8 @@ use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
     NetBondMode, NetCounters, NetIfAddr, NetIfKind, NetInterfaceConfigMsg,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetworkSettings, IF_NAME_LEN,
-    NET_IF_MAX_ADDRS,
+    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetResolverServer, NetworkSettings,
+    IF_NAME_LEN, MAX_RESOLVER_SERVERS, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
@@ -954,6 +954,34 @@ impl Netstack {
             .collect()
     }
 
+    /// The host's active recursive-resolver server set (`plans/DNS.md`
+    /// DNS2): every managed interface's DHCP-learned recursive DNS
+    /// servers, walked in table order, deduplicated, and bounded by
+    /// [`MAX_RESOLVER_SERVERS`].
+    ///
+    /// This is the one source of truth the `ResolverServers` broker read
+    /// serves — to the system-information `net_resolver_servers` query and
+    /// to a userland resolver client alike, so the two can never disagree.
+    /// The set is derived on demand from each interface's *current* DHCP
+    /// lease(s) (`Stack::dhcp_dns_servers`), so it tracks acquisition and
+    /// withdrawal exactly and needs no stored copy to drift. Statically
+    /// configured servers join this same union once that config source
+    /// lands (a later `plans/DNS.md` DNS2 step); the aggregation shape is
+    /// already the union, so adding them is a source, not a reshape.
+    #[must_use]
+    pub fn resolver_servers(&self) -> Vec<NetResolverServer> {
+        let mut out: Vec<NetResolverServer> = Vec::new();
+        for iface in &self.interfaces {
+            for server in iface.stack.dhcp_dns_servers() {
+                let record = resolver_server_of(server);
+                if out.len() < MAX_RESOLVER_SERVERS && !out.contains(&record) {
+                    out.push(record);
+                }
+            }
+        }
+        out
+    }
+
     /// Pump one interface's frames through the frame service `fs` once:
     /// queue the engine's due output into the TX ring, doorbell the device,
     /// and feed every delivered frame back through the engine (whose replies
@@ -1741,6 +1769,22 @@ fn flow_of(dest: IpAddr, port_a: u16, port_b: u16) -> u32 {
     match dest {
         IpAddr::V4(v4) => flow_hash(&[], &v4.octets(), port_a, port_b),
         IpAddr::V6(v6) => flow_hash(&[], &v6.octets(), port_a, port_b),
+    }
+}
+
+/// Project a resolved [`IpAddr`] onto the ABI [`NetResolverServer`] wire
+/// shape (family plus the sixteen address bytes, a V4 server using the
+/// first four).
+fn resolver_server_of(addr: IpAddr) -> NetResolverServer {
+    match addr {
+        IpAddr::V4(a) => NetResolverServer {
+            family: NetAddrFamily::V4,
+            addr: v4_bytes(a),
+        },
+        IpAddr::V6(a) => NetResolverServer {
+            family: NetAddrFamily::V6,
+            addr: a.octets(),
+        },
     }
 }
 

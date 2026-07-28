@@ -53,6 +53,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_INTERFACE_RATES`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_SOCKETS`           | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_BOND_MEMBERS`      | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_RESOLVER_SERVERS`  | none                   | no      |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are

@@ -15,9 +15,9 @@ use tairix_abi::net::{
 use tairix_abi::net_ipc::{
     decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode,
     NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetSockProto,
-    NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
-    NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
+    NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
+    NetworkSettings, IF_NAME_LEN, NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -2376,6 +2376,48 @@ fn socket_listing_reports_open_sockets_and_is_broker_gated() {
         ),
         Err(Errno::PermissionDenied),
         "an admin capability does not open the socket listing"
+    );
+}
+
+#[test]
+fn resolver_servers_is_a_broker_read_and_frames_a_page() {
+    // With no DHCP lease learned, the active resolver set is empty; the
+    // dispatcher still frames a well-formed (count 0) page.
+    let mut ns = managed_stack();
+    let sockets = SocketService::new();
+    let request = NetstackRequest::ResolverServers;
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+
+    let sink = RecordingSink::new();
+    let len = serve(
+        &mut ns,
+        &sockets,
+        &broker(),
+        &sink,
+        &request.to_le_bytes(),
+        &mut reply,
+        t(2),
+    )
+    .expect("broker read");
+    let (count, body) =
+        decode_page_reply(&reply[..len], NetResolverServer::WIRE_LEN).expect("page");
+    assert_eq!(count, 0, "no servers learned yet");
+    assert!(body.is_empty());
+
+    // It is a broker read (SYSINFO_INTROSPECT), not an admin op: an admin
+    // capability does not open it.
+    assert_eq!(
+        serve(
+            &mut ns,
+            &sockets,
+            &admin(),
+            &sink,
+            &request.to_le_bytes(),
+            &mut reply,
+            t(2),
+        ),
+        Err(Errno::PermissionDenied),
+        "an admin capability does not open the resolver-server read"
     );
 }
 

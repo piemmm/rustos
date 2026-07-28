@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetSocketRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
 };
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
@@ -315,6 +315,19 @@ pub trait SysinfoSource {
     /// the owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging.
     fn net_bond_members(&self, caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno>;
+
+    /// Return the host's active recursive-resolver server set: the
+    /// aggregated, deduplicated DHCP-learned ∪ statically-configured DNS
+    /// servers, in the stack's stable order (`plans/DNS.md` DNS2).
+    ///
+    /// Ungated at this broker: the recursive DNS servers a host queries are
+    /// public host configuration (the resolv.conf analogue), exposing no
+    /// per-principal secret — like [`cpu_info`](Self::cpu_info). On a
+    /// running system the source forwards to the `netstack` service's
+    /// broker read (itself gated on this broker's `CAP_SYSINFO_INTROSPECT`
+    /// grant); the owned list is returned whole and [`crate::serve`]
+    /// applies the `offset`/`limit` paging (the small set fits one page).
+    fn net_resolver_servers(&self, caller: &Caller) -> Result<Vec<NetResolverServer>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

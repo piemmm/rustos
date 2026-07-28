@@ -188,9 +188,13 @@ exercise.
   interface's DHCP clients learned from their current leases (the IPv4
   lease's option-6 servers, then the IPv6 lease's option-23 servers),
   derived from each client's live lease so it tracks acquisition and
-  withdrawal — the pure source the `netstack` service aggregates with any
-  static configuration into the interface's active resolver set
-  (`plans/DNS.md` DNS2).
+  withdrawal — the pure source the `netstack` service aggregates across every
+  interface (with any static configuration) into the host's active resolver
+  set, deduplicated and bounded by `MAX_RESOLVER_SERVERS`, served as the
+  `ResolverServers` broker read and surfaced by the ungated
+  `NET_RESOLVER_SERVERS` System Information query
+  (`state:net/resolver/servers`, the resolv.conf analogue) — one source of
+  truth for a resolver client and an operator alike (`plans/DNS.md` DNS2).
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

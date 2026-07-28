@@ -101,7 +101,8 @@ pub fn serve(
         | NetstackRequest::InterfaceCounters { .. }
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
-        | NetstackRequest::BondMembers { .. } => CapabilityId::SYSINFO_INTROSPECT,
+        | NetstackRequest::BondMembers { .. }
+        | NetstackRequest::ResolverServers => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -146,7 +147,8 @@ pub fn serve(
         | NetstackRequest::InterfaceCounters { .. }
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
-        | NetstackRequest::BondMembers { .. } => serve_read(stack, sockets, decoded, response, now),
+        | NetstackRequest::BondMembers { .. }
+        | NetstackRequest::ResolverServers => serve_read(stack, sockets, decoded, response, now),
         NetstackRequest::ApplyNetworkSettings(settings) => {
             // Pure state mutation (no I/O), so unlike `BindDriver` it is
             // served here: store the policy and re-apply the family
@@ -242,6 +244,17 @@ fn serve_read(
                 .collect();
             encode_page_reply(&records, response)
         }
+        NetstackRequest::ResolverServers => {
+            // The active resolver set is small and closed, so it is served
+            // whole in one page (never larger than `MAX_RESOLVER_SERVERS`);
+            // the shared page codec carries it like every other broker read.
+            let records: alloc::vec::Vec<_> = stack
+                .resolver_servers()
+                .iter()
+                .map(tairix_abi::net_ipc::NetResolverServer::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
+        }
         // The dispatcher only routes the paged read ops here.
         _ => Err(Errno::NotSupported),
     }
@@ -311,6 +324,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::BondMembers { .. } => "bond members",
         NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
+        NetstackRequest::ResolverServers => "resolver servers",
     };
     Field {
         key: "op",

@@ -48,6 +48,16 @@ pub const IF_NAME_LEN: usize = 16;
 /// bound on the reply size, not an interface-count capacity.
 pub const NETSTACK_LIST_LIMIT_MAX: u16 = 32;
 
+/// Most recursive DNS servers the active resolver set carries in one
+/// [`ResolverServers`](NetstackRequest::ResolverServers) reply — a fixed
+/// validation bound on the reply, not a capacity a hostile lease could ever
+/// grow (`plans/DNS.md` DNS2).
+/// Four covers a dual-stack host's DHCPv4 (RFC 2132 option 6) and DHCPv6
+/// (RFC 3646 option 23) servers with room for a static pair; a resolver
+/// only ever needs a handful, and the extras add nothing but attack
+/// surface. Any surplus beyond this is dropped when the set is aggregated.
+pub const MAX_RESOLVER_SERVERS: usize = 4;
+
 /// Largest request the [`NETSTACK_ENDPOINT`] accepts.
 ///
 /// Three distinct fixed-width framed messages arrive on the admin
@@ -337,6 +347,22 @@ pub enum NetstackRequest {
     /// mutation the dispatcher applies (family enable at socket `open`
     /// and interface auto-config, SYN-cookie mode at `listen`).
     ApplyNetworkSettings(NetworkSettings),
+    /// Report the host's active recursive-resolver server set (broker
+    /// read).
+    ///
+    /// The one source of truth for the recursive DNS servers the host
+    /// should query — the DHCPv4/DHCPv6-learned servers unioned with any
+    /// statically configured ones, aggregated across every managed
+    /// interface, deduplicated, and bounded by [`MAX_RESOLVER_SERVERS`].
+    /// The reply is the shared paged frame ([`encode_page_reply`]) of
+    /// [`NetResolverServer`] records — the same count-plus-records shape
+    /// every broker read uses, so no second reply codec exists; the small,
+    /// closed set fits one page. Both the system-information
+    /// `net_resolver_servers` read and a userland resolver client consume
+    /// this one answer, so the two can never disagree (`plans/DNS.md`
+    /// DNS2). It carries no argument: the caller names no interface, the
+    /// stack answers with the whole host's active set.
+    ResolverServers,
 }
 
 /// Wire operation discriminant of [`NetstackRequest::InterfaceList`].
@@ -361,6 +387,8 @@ const OP_SOCKETS: u16 = 9;
 const OP_APPLY_NET_SETTINGS: u16 = 10;
 /// Wire operation discriminant of [`NetstackRequest::BondMembers`].
 const OP_BOND_MEMBERS: u16 = 11;
+/// Wire operation discriminant of [`NetstackRequest::ResolverServers`].
+const OP_RESOLVER_SERVERS: u16 = 12;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -459,6 +487,9 @@ impl NetstackRequest {
                 out[11] = u8::from(settings.ipv6_privacy);
                 out[12] = u8::from(settings.tcp_keepalive);
                 out[13] = u8::from(settings.tcp_ecn);
+            }
+            Self::ResolverServers => {
+                put_u16(&mut out, 6, OP_RESOLVER_SERVERS);
             }
         }
         out
@@ -567,6 +598,10 @@ impl NetstackRequest {
             }
             OP_BIND_DRIVER => decode_bind_driver(bytes),
             OP_APPLY_NET_SETTINGS => Ok(Self::ApplyNetworkSettings(decode_settings(bytes)?)),
+            OP_RESOLVER_SERVERS => {
+                reserved_zero(bytes, 8)?;
+                Ok(Self::ResolverServers)
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2115,6 +2150,56 @@ impl NetBondMemberRecord {
     }
 }
 
+/// One recursive-resolver server in the host's active resolver set: the
+/// address family and the address (`plans/DNS.md` DNS2).
+///
+/// A record of the [`NetstackRequest::ResolverServers`] broker read,
+/// carried in the shared paged reply ([`encode_page_reply`]) exactly like
+/// every other broker record — there is no bespoke reply codec (§2.2). The
+/// value is the recursive DNS server a stub resolver sends its queries to;
+/// it is public host configuration (the resolv.conf analogue), never a
+/// secret.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetResolverServer {
+    /// The address family of [`addr`](Self::addr).
+    pub family: NetAddrFamily,
+    /// The server address; a [`NetAddrFamily::V4`] server uses the first
+    /// four bytes and leaves the rest zero.
+    pub addr: [u8; 16],
+}
+
+impl NetResolverServer {
+    /// Encoded size: the family byte followed by the sixteen address
+    /// bytes.
+    pub const WIRE_LEN: usize = 17;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.family.as_u8();
+        out[1..17].copy_from_slice(&self.addr);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::OutOfRange`] — the family byte names no family.
+    /// * [`Errno::BadMagic`] — a [`NetAddrFamily::V4`] server carries a
+    ///   dirty (non-zero) tail past its four significant bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let family = NetAddrFamily::from_u8(bytes[0])?;
+        let addr = address(bytes, 1, family)?;
+        Ok(Self { family, addr })
+    }
+}
+
 /// Largest reply the [`NETSTACK_ENDPOINT`] emits: the status word, the
 /// page header, and a full page of state records (the widest reply).
 pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
@@ -2306,10 +2391,97 @@ mod tests {
                 iface: name("wan"),
                 node_location: 0x1_0a00_0000,
             },
+            NetstackRequest::ResolverServers,
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn resolver_servers_fails_closed_on_a_dirty_reserved_tail() {
+        let mut bytes = NetstackRequest::ResolverServers.to_le_bytes();
+        // The request carries no operation block, so any non-zero byte
+        // past the op word is a smuggled payload and must be refused.
+        bytes[8] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic),
+            "a dirty reserved tail must fail closed"
+        );
+    }
+
+    #[test]
+    fn resolver_server_record_round_trips_and_fails_closed() {
+        for record in [
+            NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4(10, 0, 2, 3),
+            },
+            NetResolverServer {
+                family: NetAddrFamily::V6,
+                addr: [0x20; 16],
+            },
+        ] {
+            let bytes = record.to_le_bytes();
+            assert_eq!(NetResolverServer::from_bytes(&bytes), Ok(record));
+        }
+        // Too short.
+        assert_eq!(
+            NetResolverServer::from_bytes(&[4u8; NetResolverServer::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Unknown family byte.
+        let mut bad = [0u8; NetResolverServer::WIRE_LEN];
+        bad[0] = 7;
+        assert_eq!(NetResolverServer::from_bytes(&bad), Err(Errno::OutOfRange));
+        // A V4 server with a dirty address tail.
+        let mut dirty = NetResolverServer {
+            family: NetAddrFamily::V4,
+            addr: v4(1, 1, 1, 1),
+        }
+        .to_le_bytes();
+        dirty[16] = 0xFF;
+        assert_eq!(NetResolverServer::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn resolver_servers_reply_reuses_the_page_codec() {
+        // The resolver-servers reply is the shared paged frame of
+        // `NetResolverServer` records — no bespoke codec.
+        let servers = [
+            NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4(9, 9, 9, 9),
+            }
+            .to_le_bytes(),
+            NetResolverServer {
+                family: NetAddrFamily::V6,
+                addr: [0x26; 16],
+            }
+            .to_le_bytes(),
+        ];
+        let mut out = [0u8; NETSTACK_MAX_REPLY];
+        let written = encode_page_reply(&servers, &mut out).expect("encode");
+        let (count, body) =
+            decode_page_reply(&out[..written], NetResolverServer::WIRE_LEN).expect("decode");
+        assert_eq!(count, 2);
+        let mut chunks = body.chunks_exact(NetResolverServer::WIRE_LEN);
+        assert_eq!(
+            NetResolverServer::from_bytes(chunks.next().expect("first")),
+            Ok(NetResolverServer {
+                family: NetAddrFamily::V4,
+                addr: v4(9, 9, 9, 9)
+            })
+        );
+        assert_eq!(
+            NetResolverServer::from_bytes(chunks.next().expect("second")),
+            Ok(NetResolverServer {
+                family: NetAddrFamily::V6,
+                addr: [0x26; 16]
+            })
+        );
+        assert!(chunks.next().is_none());
     }
 
     #[test]

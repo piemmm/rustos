@@ -104,7 +104,7 @@ NXDOMAIN/NODATA/ServFail handling, TC soft-fail, the retransmit/backoff/
 failover/timeout lifecycle) and the `fuzz_net_dns` harness. Pure, no netstack
 change — the engine stands alone, exactly as DHCP D1 did.
 
-### DNS2 — the resolver over the socket ABI `[ ]`
+### DNS2 — the resolver over the socket ABI `[~]`
 
 A small userland resolver seam that opens an unprivileged UDP socket to a
 configured server on port 53, drives the `DnsResolver` engine over it
@@ -114,6 +114,40 @@ sourced from the DHCP-learned servers and/or a `network.conf` key; a
 `state:net/resolver/servers` read makes the active set observable (§5). Its
 own live QEMU vertical (a host DNS peer answering a query) across the Tier-1
 arches, mirroring the DHCP D3 pattern.
+
+Done so far — the active-server aggregation and its observability surface:
+
+- `Stack::dhcp_dns_servers()` surfaces an interface's DHCP-learned servers
+  (IPv4 option 6, then IPv6 option 23) from the *live* lease.
+- `Netstack::resolver_servers()` aggregates those across every managed
+  interface, deduplicated and bounded by
+  `tairix_abi::net_ipc::MAX_RESOLVER_SERVERS` (4), and serves them as the
+  `NetstackRequest::ResolverServers` broker read (gated `CAP_SYSINFO_INTROSPECT`
+  like the other `netstack` broker reads), framed as a shared page of
+  `NetResolverServer` records (no bespoke reply codec).
+- The System Information API exposes the same set as the **ungated**
+  `SysinfoQueryId::NET_RESOLVER_SERVERS` query (the recursive-server list is
+  public host configuration, the resolv.conf analogue), served by `sysinfod`
+  (forwarding to the `netstack` broker) and read by `lib/procinfo`
+  (`for_each_resolver_server` + the `state:net/resolver/servers` resolver
+  branch, rendering the comma-separated set or `none`).
+
+Remaining, in order:
+
+1. **Static config key** — a per-interface `network.conf` `<iface>.dns.servers`
+   key in `lib/netconfig`, mapped by devmgr-style delivery into netstack and
+   unioned with the DHCP-learned set (the aggregation shape is already the
+   union; this is a source, not a reshape).
+2. **`lib/resolver` client crate** — a freestanding+host-stub crate driving
+   `DnsTransport` over `tairix_rt::net` (a datagram socket, port-0 bind for
+   RFC 5452 source-port randomisation, `waitset_wait` delivery — the `ping`
+   `RtPingIo` pattern) whose `resolve()` first fetches the servers (via the
+   ungated `NET_RESOLVER_SERVERS` query) then drives `tairix_net::dns::resolve`.
+   Landed **with** its first consumer (DNS3), never consumer-less (§2.4).
+3. **3-arch live QEMU verticals** — `netstack_dns_qemu_{aarch64,x86_64,riscv64}`
+   mirroring DHCP D3: a `NetPeerMode::V*DnsEcho` host DNS server in
+   `tools/xtask` `netpeer`, a planted `network.conf` naming the server, a tiny
+   guest resolver client, and witnesses.
 
 ### DNS3 — a `host`/`nslookup`-class command app `[ ]`
 
