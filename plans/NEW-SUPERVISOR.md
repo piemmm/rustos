@@ -571,11 +571,25 @@ vertical (Stage E). Precise per-port design:
   SBI reset ecall) — then SBI System-Reset (cold reboot). Proven by
   `tests/integration/supervisor_memtest_takeover_qemu_riscv64` (guest ends in a
   reset → QEMU `-no-reboot` exit 0).
-- **aarch64 (remaining)**: quiesce via PSCI `CPU_OFF`/held secondaries; mask `DAIF`; stop
-  the watchdog slice; flatten by clearing `SCTLR_EL1.M` (MMU off → flat physical,
-  non-cacheable — clean+invalidate D-cache first); reserved-stack sweep; relocated
-  stub over the kernel image (never the PSCI/firmware + DTB reserved region);
-  PSCI `SYSTEM_RESET`.
+- **aarch64 (done).** `kernel/arch/aarch64/src/takeover.rs` + `takeover.s`: quiesce
+  verifies the single-core image installed no secondary entry
+  (`smp::secondary_entry_addr() == 0`, else fail-closed `CpuQuiesceTimeout`); mask
+  `DAIF` (all of debug/SError/IRQ/FIQ) and stop the watchdog cadence (`CNTV_CTL_EL0
+  = 0`); clean+invalidate the kernel-image cache lines to PoC (reusing
+  `paging::clean_invalidate_range_to_poc`), then flatten by writing the known
+  MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, M/C/I clear — the kernel is
+  identity-mapped so `virt==phys` survives) with `tlbi vmalle1`/`ic iallu`; switch
+  `sp` to a reserved 64 KiB `.bss` stack (`_takeover_switch_stack`); run the
+  arch-neutral `sweep` over usable RAM; then a relocated register-only PIC stub
+  (a §1 asm carve-out, copied into the first swept usable page
+  `align_up(__kernel_end)`) tests the kernel-image region `[__kernel_start,
+  __kernel_end)` — **never** the firmware/DTB reserved region below it — and issues
+  PSCI `SYSTEM_RESET` through the discovered conduit (threaded into the handle by
+  `machine_takeover_handle(PsciMethod)` as the stub's `x2` argument, since aarch64
+  has no fixed reset instruction the way riscv64 has the SBI ecall). Wired into
+  `Aarch64BinArch::machine_takeover` behind the supervisor-only `TakeoverGrant`.
+  Proven by `tests/integration/supervisor_memtest_takeover_qemu_aarch64` (guest
+  ends in a reset → QEMU `-no-reboot` exit 0).
 - **x86_64 (remaining)**: quiesce APs via INIT IPI (or `hlt` park); mask `RFLAGS.IF`; flatten
   by switching `CR3` to an identity page table built in the reserved arena
   (long mode requires paging); reserved-stack sweep; relocated stub over the
@@ -1021,21 +1035,57 @@ zero total and a narrow geometry never panic.
   *returned* writes a fail finisher, so a regression that stops resetting fails
   loud. Registered in `tools/xtask` and the workspace.
 
+**Done (§9 Stage B/E — the aarch64 destructive takeover body + QEMU vertical):**
+
+- `kernel/arch/aarch64/src/takeover.rs` + `takeover.s` — the real aarch64
+  `MachineTakeover::take_over` body. In order and never returning on success:
+  **quiesce** (the production images are single-core and install no secondary
+  entry, so `smp::secondary_entry_addr()` is `0`; a non-zero entry means SMP was
+  wired without teaching the takeover to stop the secondaries, and it refuses
+  fail-closed `CpuQuiesceTimeout`); **resolve** the reset conduit the boot path
+  published (fail-closed `NotSupported` if none); **mask** `DAIF` (debug/SError/
+  IRQ/FIQ) and stop the watchdog cadence (`CNTV_CTL_EL0 = 0`);
+  **clean+invalidate** the kernel-image cache lines to PoC
+  (`paging::clean_invalidate_range_to_poc`) then **flatten** paging by writing
+  the known MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, M/C/I clear — the
+  kernel is identity-mapped so `virt==phys` survives) with `tlbi vmalle1`/`ic
+  iallu`; **switch** onto a reserved 64 KiB `.bss` stack
+  (`_takeover_switch_stack`) the sweep cannot overwrite; run the caller's
+  arch-neutral **sweep** (Stage-A `run_destructive` + Stage-D `MemtestUi`); then
+  copy the register-only PIC `_takeover_stub` into the first swept usable page
+  (`align_up(__kernel_end)`) and jump to it to destructively test the
+  kernel-image region `[__kernel_start, __kernel_end)` — never the firmware/DTB
+  reserved region below it — and issue **PSCI `SYSTEM_RESET`** through the
+  conduit (in the stub's `x2`). The handle is a private `static` reached only
+  through `machine_takeover_handle(PsciMethod)` (which also publishes the
+  conduit), wired into `Aarch64BinArch::machine_takeover` behind the
+  supervisor-only `TakeoverGrant`.
+- `tests/integration/supervisor_memtest_takeover_qemu_aarch64` — the Stage E
+  destructive QEMU vertical, the aarch64 sibling of the riscv64 one. It reuses
+  the production aarch64 `boot_aarch64::boot` pipeline (embedded `virt` DTB) and,
+  on `AuditEvent::BootCompleted`, drives the real
+  `supervisor_system().memtest_takeover(...)` seam directly (a destructive run
+  cannot return to key the REPL; the confirmation/command parsing is host-tested
+  in `lib/supervisor`). On the wired port this never returns: the guest sweeps
+  all of RAM on the reserved stack, tests the kernel-image region with the
+  relocated stub, and PSCI-resets, so QEMU (`-no-reboot`) exits status 0 = PASS;
+  a takeover that *returned* writes a fail finisher. Registered in `tools/xtask`
+  and the workspace.
+
 **Remaining:**
 
-1. **§9 `memtest full` takeover — the x86_64 and aarch64 destructive bodies
-   (Stage B bodies + Stage E).** The arch-neutral surface and the **riscv64**
-   body + vertical are done (above). Remaining is the same destructive per-port
-   work for the two PC-class arches, specified in Stage B: **aarch64** (quiesce
-   via PSCI `CPU_OFF`, mask `DAIF`, stop the watchdog slice, flatten by clearing
-   `SCTLR_EL1.M` with a D-cache clean+invalidate, reserved-stack sweep, relocated
-   stub over the kernel image never the PSCI/DTB reserved region, PSCI
-   `SYSTEM_RESET`) and **x86_64** (quiesce APs via INIT IPI, mask `RFLAGS.IF`,
-   flatten via a `CR3` identity table built in a reserved arena, reserved-stack
-   sweep, relocated stub, `reset::reboot`), each wiring `machine_takeover()` to
-   hand back its private takeover `static` plus its destructive-run QEMU vertical
-   whose guest ends in a reset. `wasm32` stays `NotSupported`. Each is a large,
-   per-arch, destructive effort and is `planned`, one port per change.
+1. **§9 `memtest full` takeover — the x86_64 destructive body (Stage B body +
+   Stage E).** The arch-neutral surface and the **riscv64** and **aarch64**
+   bodies + verticals are done (above). Remaining is the same destructive work
+   for **x86_64** (quiesce APs via INIT IPI, mask `RFLAGS.IF`, flatten via a
+   `CR3` identity table built in a reserved arena — long mode requires paging,
+   so it cannot simply drop paging like the other two ports — reserved-stack
+   sweep, relocated stub over the kernel image never the arena or low
+   firmware/ACPI reserved RAM, reset via the existing `reset::reboot`
+   (8042/`0xCF9`)), wiring `machine_takeover()` to hand back its private
+   takeover `static` plus its destructive-run QEMU vertical whose guest ends in
+   a reset. `wasm32` stays `NotSupported`. It is a large, destructive effort and
+   is `planned`.
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
@@ -1044,7 +1094,7 @@ destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
 slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
 seam), the §9 Stage-C `memtest full` command, the §9 Stage-D fullscreen
 memtest86-style UI, the aarch64 + x86_64 ESC boot-screen QEMU verticals and
-the two further aarch64 trigger-point verticals, and the **§9 riscv64
-destructive takeover body + its Stage E QEMU vertical** are complete and
-compiling on every Tier-1 target; the x86_64 and aarch64 takeover bodies
-remain.
+the two further aarch64 trigger-point verticals, and the **§9 riscv64 and
+aarch64 destructive takeover bodies + their Stage E QEMU verticals** are
+complete and compiling on every Tier-1 target; only the x86_64 takeover body
+remains.

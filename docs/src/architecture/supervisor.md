@@ -280,16 +280,21 @@ presentational, and nothing it does panics on any input.
 
 The arch-neutral destructive sweep and this UI already exist
 (`tairix_kernel_mem::ramtest::run_destructive`,
-`tairix_supervisor::memtest_ui`). **riscv64** wires the real per-port mechanism
-(`kernel/arch/riscv64/src/takeover.rs` + `takeover.s`): quiesce (single-hart
-verified), mask `sstatus.SIE`/`sie`, flatten to bare mode (`satp = 0`), switch
-to a reserved `.bss` stack, run the sweep, then relocate a register-only stub
-into a swept usable page to test `[__kernel_image_start, __kernel_end)` and
-SBI-reset. It is proven end-to-end by
-`tests/integration/supervisor_memtest_takeover_qemu_riscv64`, which boots the
-production pipeline and drives the real `memtest_takeover` seam (the SBI console
-has no interactive input, so the confirmation/command parsing is host-tested in
-`lib/supervisor`); the guest renders the display to 100% and ends in a machine
-reset (QEMU `-no-reboot` exit 0). On **x86_64** and **aarch64** `memtest full`
-still reports "not supported" and stays in the REPL until their bodies land;
-those are the last remaining stages (`plans/NEW-SUPERVISOR.md` §9).
+`tairix_supervisor::memtest_ui`). **riscv64** and **aarch64** wire the real
+per-port mechanism (`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce
+(single-core verified), mask interrupts (`sstatus.SIE`/`sie`; `DAIF` plus the
+`CNTV_CTL_EL0` watchdog cadence), flatten paging (bare mode `satp = 0`; the
+MMU-off `SCTLR_EL1` after a cache clean+invalidate — both ports are
+identity-mapped so `virt==phys` survives), switch to a reserved `.bss` stack,
+run the sweep, then relocate a register-only stub into a swept usable page to
+test the kernel-image region and reset (SBI System-Reset; PSCI `SYSTEM_RESET`
+through the conduit the boot path discovered, threaded into the stub because
+aarch64 has no fixed reset instruction). Each is proven end-to-end by
+`tests/integration/supervisor_memtest_takeover_qemu_<t>`, which boots the
+production pipeline and drives the real `memtest_takeover` seam (neither serial
+console has interactive input this early, so the confirmation/command parsing is
+host-tested in `lib/supervisor`); the guest sweeps all of RAM and ends in a
+machine reset (QEMU `-no-reboot` exit 0). On **x86_64** `memtest full` still
+reports "not supported" and stays in the REPL until its body lands (long mode
+requires paging, so it flattens via a `CR3` identity table rather than dropping
+paging); that is the last remaining stage (`plans/NEW-SUPERVISOR.md` §9).

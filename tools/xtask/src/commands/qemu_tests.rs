@@ -1578,6 +1578,40 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/NEW-SUPERVISOR.md` §9 Stage E (aarch64 sibling of the riscv64
+    // takeover above): `tairix-test-supervisor-memtest-takeover-qemu-aarch64`
+    // boots the production aarch64 `virt` pipeline and, on
+    // `AuditEvent::BootCompleted` (the point where the Supervisor system is
+    // published and the kernel state is fully built), drives the pre-boot
+    // Supervisor's one-way destructive `memtest full` takeover through the real
+    // published `SupervisorSystem::memtest_takeover` seam. On the wired aarch64
+    // port the `MachineTakeover` body quiesces (single-core), masks interrupts
+    // and stops the watchdog cadence, flattens paging (MMU off), destructively
+    // tests all of RAM on a reserved stack, tests the kernel-image region with
+    // the relocated stub, and issues PSCI `SYSTEM_RESET` through the discovered
+    // conduit — so QEMU (`-no-reboot`) exits status 0 and the runner registers
+    // `Outcome::Pass`. A normal boot that idled would time out; a takeover that
+    // *returned* (refused/unsupported) writes a fail finisher — so a regression
+    // that stops the port resetting fails loud. Single CPU (the port is
+    // single-core) and a 60-second budget match the riscv64 sibling; the
+    // destructive sweep over the `virt` board's 256 MiB is comfortably bounded
+    // within it.
+    QemuTest {
+        package: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
+        binary: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PI Stage RV-P3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-riscv64`
     // boots the *production* riscv64 `tairix-kernel` pipeline
     // (`boot_riscv64::boot`) on the `virt` board, then drops into PID 1

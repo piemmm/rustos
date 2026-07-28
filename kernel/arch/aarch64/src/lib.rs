@@ -79,6 +79,15 @@ core::arch::global_asm!(include_str!("vectors.s"));
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(include_str!("smp.s"));
 
+// The machine-takeover stack-switch trampoline and relocatable
+// kernel-image self-test + reset stub (`plans/NEW-SUPERVISOR.md` §9) are
+// meaningful only on the bare-metal target; the whole `takeover` module is
+// freestanding-only (it is all system-register/assembly and destroys the
+// machine, so it is proven by the destructive QEMU vertical, never a host
+// test).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(include_str!("takeover.s"));
+
 /// BCM2711 PCIe root-complex MSI controller (Raspberry Pi 4): the
 /// register-level driver for the root complex's internal MSI controller,
 /// which demultiplexes the VL805 xHCI's message-signalled interrupts onto
@@ -216,6 +225,13 @@ pub mod panic;
 /// pure ring discipline and the buffered-drain decision logic are
 /// host-unit-tested under `cargo test`.
 pub mod serial;
+/// aarch64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the
+/// Arch HAL [`tairix_arch_api::MachineTakeover`] body driving the pre-boot
+/// Supervisor's one-way destructive whole-RAM `memtest full`. Freestanding
+/// only — it is all system-register/assembly and destroys the machine, so it
+/// is proven by the destructive QEMU vertical, never a host test.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod takeover;
 
 pub use kernel_arch::{halt_current_cpu, Aarch64Arch, Aarch64ArchStorage};
 

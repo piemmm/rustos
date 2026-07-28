@@ -366,6 +366,7 @@ members = [
     "tests/integration/root_unlock_admission_qemu_x86_64",
     "tests/integration/supervisor_esc_qemu_aarch64",
     "tests/integration/supervisor_esc_qemu_x86_64",
+    "tests/integration/supervisor_memtest_takeover_qemu_aarch64",
     "tests/integration/supervisor_memtest_takeover_qemu_riscv64",
     "tests/integration/session_ceiling_qemu_aarch64",
     "tests/integration/service_ceiling_program",
