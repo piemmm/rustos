@@ -14,14 +14,20 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
 use tairix_abi::{
-    decode_capability_ids, CapabilityId, Errno, ManifestHeader, MANIFEST_MAX_CAPABILITIES,
+    decode_capability_ids, CapabilityId, Errno, LifecycleSignal, ManifestHeader, ReadinessKind,
+    ReadyCondition, ServiceState, MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
-use crate::error::{InitError, StartFailure};
+use crate::error::{InitError, NotifyError, StartFailure};
 use crate::events;
 use crate::service::{Pid, ReapedChild, Reaper, ServiceSpec, Spawner};
+
+/// Number of distinct named readiness conditions, sized from the closed
+/// [`ReadyCondition`] set so the satisfied-conditions bitmap tracks the
+/// vocabulary rather than a hand-picked constant.
+const CONDITION_COUNT: usize = ReadyCondition::ALL.len();
 
 /// Construction-time configuration for an [`Init`] instance.
 ///
@@ -87,17 +93,38 @@ impl StartReport {
     }
 }
 
-/// A currently-running service tracked for reaping.
-struct RunningService {
-    name: String,
-    pid: Pid,
+/// One registered service and its live lifecycle state.
+///
+/// The `pid` is `Some` for exactly the window between a successful spawn and
+/// the reap of the process, so it doubles as the "is a process live for this
+/// service" flag the reaper matches against.
+struct Service {
+    spec: ServiceSpec,
+    state: ServiceState,
+    pid: Option<Pid>,
 }
 
-/// PID 1 service manager (Stage 6).
+/// PID 1 service manager.
+///
+/// Bring-up is an event-driven admission engine rather than a single
+/// spawn-everything pass: a service is admitted only once every dependency
+/// it names is [`ServiceState::is_ready`] and every named readiness
+/// condition it requires is satisfied. An [`ReadinessKind::Immediate`]
+/// service is ready the instant its spawn succeeds; a
+/// [`ReadinessKind::Notify`] service stays `starting` until it announces
+/// readiness through [`notify`](Self::notify), so a dependent that needs the
+/// service *functional* is never released against one that is merely
+/// spawned.
 pub struct Init<'a> {
     cfg: InitConfig<'a>,
-    services: Vec<ServiceSpec>,
-    running: Vec<RunningService>,
+    services: Vec<Service>,
+    /// Dependency-respecting start order, computed and validated by
+    /// [`start_all`](Self::start_all) and reused by the readiness-driven
+    /// admission passes.
+    order: Vec<usize>,
+    /// Which named readiness conditions are currently satisfied, indexed by
+    /// [`ReadyCondition::as_u16`].
+    satisfied: [bool; CONDITION_COUNT],
 }
 
 impl<'a> Init<'a> {
@@ -107,7 +134,8 @@ impl<'a> Init<'a> {
         Self {
             cfg,
             services: Vec::new(),
-            running: Vec::new(),
+            order: Vec::new(),
+            satisfied: [false; CONDITION_COUNT],
         }
     }
 
@@ -117,16 +145,30 @@ impl<'a> Init<'a> {
         self.services.len()
     }
 
-    /// Number of services currently tracked as running.
+    /// Number of services with a live process — spawned and not yet reaped.
     #[must_use]
     pub fn running_count(&self) -> usize {
-        self.running.len()
+        self.services.iter().filter(|s| s.pid.is_some()).count()
     }
 
-    /// The [`Pid`] of a running service, or `None` if it is not running.
+    /// The [`Pid`] of a service with a live process, or `None` if it has no
+    /// live process (not started, or already reaped).
     #[must_use]
     pub fn running_pid(&self, name: &str) -> Option<Pid> {
-        self.running.iter().find(|r| r.name == name).map(|r| r.pid)
+        self.index_of(name).and_then(|idx| self.services[idx].pid)
+    }
+
+    /// The current [`ServiceState`] of a registered service, or `None` if
+    /// no service by that name is registered.
+    #[must_use]
+    pub fn state_of(&self, name: &str) -> Option<ServiceState> {
+        self.index_of(name).map(|idx| self.services[idx].state)
+    }
+
+    /// Whether a named readiness condition is currently satisfied.
+    #[must_use]
+    pub fn condition_satisfied(&self, condition: ReadyCondition) -> bool {
+        self.satisfied[condition.as_u16() as usize]
     }
 
     /// Register a service.
@@ -139,7 +181,11 @@ impl<'a> Init<'a> {
         if self.index_of(spec.name()).is_some() {
             return Err(InitError::DuplicateService);
         }
-        self.services.push(spec);
+        self.services.push(Service {
+            spec,
+            state: ServiceState::Inactive,
+            pid: None,
+        });
         Ok(())
     }
 
@@ -159,55 +205,102 @@ impl<'a> Init<'a> {
     /// service ([`InitError::DependencyMissing`]) or the graph contains a
     /// cycle ([`InitError::DependencyCycle`]).
     pub fn start_all(&mut self) -> Result<StartReport, InitError> {
-        let order = match self.topological_order() {
+        self.order = match self.topological_order() {
             Ok(order) => order,
             Err(err) => {
                 self.audit_graph_rejected(err);
                 return Err(err);
             }
         };
+        Ok(self.pump())
+    }
 
-        let mut failed = vec![false; self.services.len()];
-        let mut report = StartReport::default();
-        for &idx in &order {
-            if self.dependency_failed(idx, &failed) {
-                failed[idx] = true;
-                let name = self.services[idx].name().to_string();
+    /// Record that a named readiness condition is satisfied and admit any
+    /// services that were waiting only on it.
+    ///
+    /// Idempotent: satisfying an already-satisfied condition changes
+    /// nothing and audits nothing. This is the seam for a condition a
+    /// providing service does not itself announce — for example the kernel
+    /// signalling [`ReadyCondition::FilesystemsMounted`]. The returned
+    /// [`StartReport`] lists the services this newly admitted.
+    pub fn satisfy_condition(&mut self, condition: ReadyCondition) -> StartReport {
+        self.satisfy_condition_inner(condition);
+        self.pump()
+    }
+
+    /// Apply a readiness notification a service sent about itself.
+    ///
+    /// In production the manager maps the kernel-attested sender of a
+    /// [`ReadyNotice`](tairix_abi::ReadyNotice) to the service it started
+    /// and calls this with that name; the notice never carries the name
+    /// itself. A [`LifecycleSignal::Ready`] releases the service's
+    /// dependents and satisfies the conditions it provides; a
+    /// [`LifecycleSignal::Failed`] marks it failed and skips the dependents
+    /// blocked on it. The returned [`StartReport`] lists whatever the
+    /// resulting admission pass started or failed.
+    ///
+    /// # Errors
+    ///
+    /// * [`NotifyError::UnknownService`] if `name` is not registered.
+    /// * [`NotifyError::NotStarting`] if the service is not in
+    ///   [`ServiceState::Starting`] — a notice cannot resolve a readiness
+    ///   edge that does not exist. The notice is dropped and audited; it is
+    ///   never trusted to move the service anyway (fail closed).
+    pub fn notify(
+        &mut self,
+        name: &str,
+        signal: LifecycleSignal,
+    ) -> Result<StartReport, NotifyError> {
+        let Some(idx) = self.index_of(name) else {
+            self.audit(
+                events::NOTIFY_REJECTED,
+                Level::Warn,
+                name,
+                "unknown service",
+            );
+            return Err(NotifyError::UnknownService);
+        };
+        if self.services[idx].state != ServiceState::Starting {
+            self.audit(events::NOTIFY_REJECTED, Level::Warn, name, "not starting");
+            return Err(NotifyError::NotStarting);
+        }
+        match signal {
+            LifecycleSignal::Ready => self.mark_ready(idx),
+            LifecycleSignal::Failed => {
+                self.services[idx].state = ServiceState::Failed;
+                self.services[idx].pid = None;
+                let owned = name.to_string();
                 self.audit(
-                    events::SERVICE_SKIPPED,
+                    events::SERVICE_START_FAILED,
                     Level::Warn,
-                    &name,
-                    "dependency failed",
+                    &owned,
+                    "reported failure",
                 );
-                report.failed.push(FailedService {
-                    name,
-                    failure: StartFailure::DependencyFailed,
-                });
-                continue;
-            }
-            match self.try_start(idx) {
-                Ok(started) => report.started.push(started),
-                Err(failure) => {
-                    failed[idx] = true;
-                    report.failed.push(failure);
-                }
             }
         }
-        Ok(report)
+        Ok(self.pump())
     }
 
     /// Reap every child that has exited, returning the number reaped.
     ///
-    /// A reaped process that matches a running service is logged as a
-    /// service exit and removed from the running set; any other reaped
-    /// process is an inherited orphan and is logged as such (PID 1 reaps the whole system's zombies).
+    /// A reaped process that matches a started service is logged as a
+    /// service exit and its lifecycle moved to a terminal state (a clean
+    /// exit is [`ServiceState::Stopped`], a non-zero exit
+    /// [`ServiceState::Failed`]); any other reaped process is an inherited
+    /// orphan and is logged as such (PID 1 reaps the whole system's zombies).
     pub fn reap(&mut self) -> usize {
         let mut reaped = 0;
         while let Some(child) = self.cfg.reaper.collect() {
             reaped += 1;
-            if let Some(pos) = self.running.iter().position(|r| r.pid == child.pid) {
-                let service = self.running.remove(pos);
-                self.audit_exit(&service.name, child);
+            if let Some(pos) = self.services.iter().position(|s| s.pid == Some(child.pid)) {
+                let name = self.services[pos].spec.name().to_string();
+                self.services[pos].pid = None;
+                self.services[pos].state = if child.exit_code == 0 {
+                    ServiceState::Stopped
+                } else {
+                    ServiceState::Failed
+                };
+                self.audit_exit(&name, child);
             } else {
                 self.audit_orphan(child);
             }
@@ -215,8 +308,119 @@ impl<'a> Init<'a> {
         reaped
     }
 
+    /// Drive the admission engine to a fixpoint: repeatedly admit every
+    /// service whose dependencies are all ready and whose required
+    /// conditions are all satisfied, and skip every service a failed
+    /// dependency blocks, until no service changes state. An
+    /// [`ReadinessKind::Immediate`] service is marked ready the moment it
+    /// spawns, so a chain of immediate services comes up in a single pass;
+    /// a [`ReadinessKind::Notify`] service pauses the chain until it
+    /// announces readiness. Finally, promote every service still resting in
+    /// the transient [`ServiceState::Ready`] to [`ServiceState::Running`]
+    /// now that its dependents have been released.
+    fn pump(&mut self) -> StartReport {
+        let mut report = StartReport::default();
+        loop {
+            let mut changed = false;
+            for i in 0..self.order.len() {
+                let idx = self.order[i];
+                if self.services[idx].state != ServiceState::Inactive {
+                    continue;
+                }
+                if self.dependency_failed(idx) {
+                    let name = self.services[idx].spec.name().to_string();
+                    self.services[idx].state = ServiceState::Failed;
+                    self.audit(
+                        events::SERVICE_SKIPPED,
+                        Level::Warn,
+                        &name,
+                        "dependency failed",
+                    );
+                    report.failed.push(FailedService {
+                        name,
+                        failure: StartFailure::DependencyFailed,
+                    });
+                    changed = true;
+                    continue;
+                }
+                if !self.admissible(idx) {
+                    continue;
+                }
+                match self.try_start(idx) {
+                    Ok(started) => {
+                        if self.services[idx].spec.readiness() == ReadinessKind::Immediate {
+                            self.mark_ready(idx);
+                        }
+                        report.started.push(started);
+                    }
+                    Err(failure) => report.failed.push(failure),
+                }
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+        for service in &mut self.services {
+            if service.state == ServiceState::Ready {
+                service.state = ServiceState::Running;
+            }
+        }
+        report
+    }
+
+    /// Whether service `idx` may start now: every dependency it names has
+    /// reached readiness and every named condition it requires is satisfied.
+    fn admissible(&self, idx: usize) -> bool {
+        let service = &self.services[idx];
+        let deps_ready = service.spec.dependencies().iter().all(|dep| {
+            self.index_of(dep)
+                .is_some_and(|d| self.services[d].state.is_ready())
+        });
+        let conditions_met = service
+            .spec
+            .requires()
+            .iter()
+            .all(|cond| self.satisfied[cond.as_u16() as usize]);
+        deps_ready && conditions_met
+    }
+
+    /// Whether any dependency of service `idx` has reached the terminal
+    /// [`ServiceState::Failed`] state, so `idx` can never be admitted and is
+    /// skipped.
+    fn dependency_failed(&self, idx: usize) -> bool {
+        self.services[idx].spec.dependencies().iter().any(|dep| {
+            self.index_of(dep)
+                .is_some_and(|d| self.services[d].state == ServiceState::Failed)
+        })
+    }
+
+    /// Transition service `idx` across its readiness edge: mark it
+    /// [`ServiceState::Ready`] (the [`pump`](Self::pump) promotes it to
+    /// `Running` once its dependents are released), audit the readiness, and
+    /// satisfy every named condition it provides.
+    fn mark_ready(&mut self, idx: usize) {
+        self.services[idx].state = ServiceState::Ready;
+        let name = self.services[idx].spec.name().to_string();
+        self.audit_ready(&name);
+        let provides: Vec<ReadyCondition> = self.services[idx].spec.provides().to_vec();
+        for condition in provides {
+            self.satisfy_condition_inner(condition);
+        }
+    }
+
+    /// Mark a condition satisfied and audit the transition, unless it was
+    /// already satisfied (idempotent, no duplicate audit).
+    fn satisfy_condition_inner(&mut self, condition: ReadyCondition) {
+        let slot = condition.as_u16() as usize;
+        if !self.satisfied[slot] {
+            self.satisfied[slot] = true;
+            self.audit_condition(condition);
+        }
+    }
+
     fn index_of(&self, name: &str) -> Option<usize> {
-        self.services.iter().position(|s| s.name() == name)
+        self.services.iter().position(|s| s.spec.name() == name)
     }
 
     /// Compute a dependency-respecting start order, or report a structural
@@ -226,8 +430,8 @@ impl<'a> Init<'a> {
         let n = self.services.len();
         let mut indegree = vec![0usize; n];
         let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, spec) in self.services.iter().enumerate() {
-            for dep in spec.dependencies() {
+        for (i, service) in self.services.iter().enumerate() {
+            for dep in service.spec.dependencies() {
                 let d = self.index_of(dep).ok_or(InitError::DependencyMissing)?;
                 dependents[d].push(i);
                 indegree[i] += 1;
@@ -259,19 +463,18 @@ impl<'a> Init<'a> {
         }
     }
 
-    fn dependency_failed(&self, idx: usize, failed: &[bool]) -> bool {
-        self.services[idx]
-            .dependencies()
-            .iter()
-            .any(|dep| self.index_of(dep).is_some_and(|d| failed[d]))
-    }
-
+    /// Spawn service `idx`: decode and cap-check its manifest, launch it with
+    /// its capability ceiling, and transition it to [`ServiceState::Starting`]
+    /// with its live [`Pid`]. On any failure the service is transitioned to
+    /// [`ServiceState::Failed`] and the reason recorded, so a failed service
+    /// is never left resting in `Inactive` where `pump` would retry it.
     fn try_start(&mut self, idx: usize) -> Result<StartedService, FailedService> {
-        let name = self.services[idx].name().to_string();
+        let name = self.services[idx].spec.name().to_string();
 
         let requested = match self.requested_capabilities(idx) {
             Ok(set) => set,
             Err(failure) => {
+                self.services[idx].state = ServiceState::Failed;
                 self.audit(
                     events::SERVICE_START_FAILED,
                     Level::Warn,
@@ -283,6 +486,7 @@ impl<'a> Init<'a> {
         };
 
         if !requested.is_subset_of(&self.cfg.authority) {
+            self.services[idx].state = ServiceState::Failed;
             self.audit(
                 events::SERVICE_DENIED,
                 Level::Warn,
@@ -300,9 +504,10 @@ impl<'a> Init<'a> {
         // visible rather than implied.
         let granted = requested.intersection(&self.cfg.authority);
 
-        let pid = match self.cfg.spawner.spawn(&self.services[idx], &granted) {
+        let pid = match self.cfg.spawner.spawn(&self.services[idx].spec, &granted) {
             Ok(pid) => pid,
             Err(err) => {
+                self.services[idx].state = ServiceState::Failed;
                 self.audit(
                     events::SERVICE_START_FAILED,
                     Level::Warn,
@@ -316,17 +521,15 @@ impl<'a> Init<'a> {
             }
         };
 
+        self.services[idx].state = ServiceState::Starting;
+        self.services[idx].pid = Some(pid);
         self.audit_started(&name, pid, &granted);
-        self.running.push(RunningService {
-            name: name.clone(),
-            pid,
-        });
         Ok(StartedService { name, pid, granted })
     }
 
     /// Decode a service manifest into the capability set it requests.
     fn requested_capabilities(&self, idx: usize) -> Result<CapabilitySet, StartFailure> {
-        let manifest = self.services[idx].manifest();
+        let manifest = self.services[idx].spec.manifest();
         let header = ManifestHeader::from_bytes(manifest).map_err(StartFailure::ManifestInvalid)?;
         if header.abi_version != self.cfg.accepted_abi_version {
             return Err(StartFailure::ManifestInvalid(Errno::AbiVersionUnsupported));
@@ -371,6 +574,28 @@ impl<'a> Init<'a> {
                     value: tairix_log::FieldValue::Str(reason),
                 },
             ],
+        );
+    }
+
+    fn audit_ready(&self, name: &str) {
+        self.emit(
+            Level::Info,
+            events::SERVICE_READY,
+            &[Field {
+                key: "service",
+                value: tairix_log::FieldValue::Str(name),
+            }],
+        );
+    }
+
+    fn audit_condition(&self, condition: ReadyCondition) {
+        self.emit(
+            Level::Info,
+            events::CONDITION_SATISFIED,
+            &[Field {
+                key: "condition",
+                value: tairix_log::FieldValue::Str(condition.as_str()),
+            }],
         );
     }
 
@@ -473,6 +698,9 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_EXITED => "service exited",
         events::ORPHAN_REAPED => "orphan reaped",
         events::GRAPH_REJECTED => "service graph rejected",
+        events::SERVICE_READY => "service ready",
+        events::CONDITION_SATISFIED => "readiness condition satisfied",
+        events::NOTIFY_REJECTED => "readiness notice rejected",
         _ => "init event",
     }
 }
@@ -519,7 +747,9 @@ impl fmt::Write for DecWriter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_message, DecBuf, Init, InitConfig, InitError, ServiceSpec, StartFailure};
+    use super::{
+        event_message, DecBuf, Init, InitConfig, InitError, NotifyError, ServiceSpec, StartFailure,
+    };
     use crate::events;
     use crate::service::{Pid, ReapedChild, Reaper, Spawner};
     use alloc::collections::VecDeque;
@@ -527,8 +757,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
-        CapabilityId, Errno, ManifestHeader, ABI_VERSION_CURRENT, MANIFEST_MAGIC,
-        SYSCALL_TABLE_HASH_LEN,
+        CapabilityId, Errno, LifecycleSignal, ManifestHeader, ReadinessKind, ReadyCondition,
+        ServiceState, ABI_VERSION_CURRENT, MANIFEST_MAGIC, SYSCALL_TABLE_HASH_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -568,6 +798,12 @@ mod tests {
             manifest(requested),
             deps,
         )
+    }
+
+    /// A `notify`-readiness service: it stays `starting` until it announces
+    /// readiness, so a dependent is genuinely gated on the notice.
+    fn notify_spec(name: &str, deps: &[&str]) -> ServiceSpec {
+        spec(name, &[], deps).with_readiness(ReadinessKind::Notify)
     }
 
     /// Spawner that records each launch and can be told to fail a named
@@ -868,5 +1104,150 @@ mod tests {
         // Every emitted id has a dedicated message; unknown ids fall back.
         assert_eq!(event_message(events::SERVICE_STARTED), "service started");
         assert_eq!(event_message(EventId(1)), "init event");
+    }
+
+    #[test]
+    fn notify_dependency_gates_dependent_until_ready() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        // `a` is a notify service; `b` (immediate) depends on it.
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(spec("b", &[], &["a"])).unwrap();
+
+        // The initial pass spawns `a` (now `starting`) but must NOT start
+        // `b`: a spawned-but-not-ready dependency does not release it.
+        let report = init.start_all().unwrap();
+        assert_eq!(started_names(&report), ["a"]);
+        assert_eq!(init.state_of("a"), Some(ServiceState::Starting));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Inactive));
+        assert!(init.running_pid("a").is_some());
+        assert_eq!(init.running_pid("b"), None);
+        assert_eq!(sink.count(events::SERVICE_READY), 0);
+
+        // Once `a` announces readiness, `b` is admitted and both are running.
+        let report = init.notify("a", LifecycleSignal::Ready).unwrap();
+        assert_eq!(started_names(&report), ["b"]);
+        assert_eq!(init.state_of("a"), Some(ServiceState::Running));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Running));
+        assert_eq!(init.running_count(), 2);
+        // One readiness edge for `a`, one for the immediate `b`.
+        assert_eq!(sink.count(events::SERVICE_READY), 2);
+    }
+
+    #[test]
+    fn never_ready_notify_dependency_leaves_dependent_inactive() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(spec("b", &[], &["a"])).unwrap();
+
+        init.start_all().unwrap();
+        // With no readiness notice, `b` never comes up — fail closed, no
+        // guessing that a spawned dependency is good enough.
+        assert_eq!(init.state_of("a"), Some(ServiceState::Starting));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Inactive));
+        assert_eq!(init.running_pid("b"), None);
+    }
+
+    #[test]
+    fn required_condition_gates_start() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        init.register(spec("client", &[], &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+
+        // The condition is unmet, so `client` stays inactive.
+        let report = init.start_all().unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+        assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
+
+        // Satisfying it externally (e.g. a kernel signal) admits `client`.
+        let report = init.satisfy_condition(ReadyCondition::NetworkUp);
+        assert_eq!(started_names(&report), ["client"]);
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+        assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(sink.count(events::CONDITION_SATISFIED), 1);
+    }
+
+    #[test]
+    fn provided_condition_is_satisfied_when_provider_becomes_ready() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        // `netstack` provides network-up on readiness; `client` requires it.
+        // Neither names the other — the condition decouples them.
+        init.register(notify_spec("netstack", &[]).providing([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.register(spec("client", &[], &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+        assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
+
+        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(started_names(&report), ["client"]);
+        assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn explicit_failure_signal_skips_dependents() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(spec("b", &[], &["a"])).unwrap();
+
+        init.start_all().unwrap();
+        // `a` reports it could not come up; `b` must be skipped, not started.
+        let report = init.notify("a", LifecycleSignal::Failed).unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(init.state_of("a"), Some(ServiceState::Failed));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Failed));
+        assert_eq!(init.running_pid("a"), None);
+        assert_eq!(
+            report
+                .failed
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(report.failed[0].failure, StartFailure::DependencyFailed);
+        assert_eq!(sink.count(events::SERVICE_SKIPPED), 1);
+    }
+
+    #[test]
+    fn notify_fails_closed_on_unknown_and_non_starting() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+        init.register(spec("a", &[], &[])).unwrap();
+        init.start_all().unwrap();
+
+        // A notice for a service the manager does not know is refused.
+        assert_eq!(
+            init.notify("ghost", LifecycleSignal::Ready),
+            Err(NotifyError::UnknownService)
+        );
+        // `a` is immediate, so it is already `running`, not `starting`: a
+        // readiness notice for it has no pending edge to resolve.
+        assert_eq!(init.state_of("a"), Some(ServiceState::Running));
+        assert_eq!(
+            init.notify("a", LifecycleSignal::Ready),
+            Err(NotifyError::NotStarting)
+        );
+        assert_eq!(sink.count(events::NOTIFY_REJECTED), 2);
     }
 }

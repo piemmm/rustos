@@ -11,7 +11,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ReadinessKind, ReadyCondition};
 use tairix_caps::CapabilitySet;
 
 /// Process identifier issued by the kernel when a service is spawned.
@@ -49,10 +49,19 @@ pub struct ServiceSpec {
     binary_path: String,
     manifest: Vec<u8>,
     dependencies: Vec<String>,
+    readiness: ReadinessKind,
+    requires: Vec<ReadyCondition>,
+    provides: Vec<ReadyCondition>,
 }
 
 impl ServiceSpec {
     /// Describe a service.
+    ///
+    /// The service is created with the default readiness kind
+    /// ([`ReadinessKind::Immediate`]) and no required or provided readiness
+    /// conditions; use [`with_readiness`](Self::with_readiness),
+    /// [`requiring`](Self::requiring), and [`providing`](Self::providing) to
+    /// set them.
     ///
     /// * `name` — unique identifier used to express dependencies and to
     ///   label audit records.
@@ -73,7 +82,34 @@ impl ServiceSpec {
             binary_path: binary_path.into(),
             manifest: manifest.into(),
             dependencies: dependencies.into(),
+            readiness: ReadinessKind::Immediate,
+            requires: Vec::new(),
+            provides: Vec::new(),
         }
+    }
+
+    /// Set how this service reaches readiness (spawn-implies-ready versus
+    /// notify), consuming and returning `self` for chaining.
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: ReadinessKind) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    /// Declare the named readiness conditions that must be satisfied before
+    /// this service may start, consuming and returning `self`.
+    #[must_use]
+    pub fn requiring(mut self, requires: impl Into<Vec<ReadyCondition>>) -> Self {
+        self.requires = requires.into();
+        self
+    }
+
+    /// Declare the named readiness conditions this service satisfies once it
+    /// becomes ready, consuming and returning `self`.
+    #[must_use]
+    pub fn providing(mut self, provides: impl Into<Vec<ReadyCondition>>) -> Self {
+        self.provides = provides.into();
+        self
     }
 
     /// Unique service name.
@@ -98,6 +134,24 @@ impl ServiceSpec {
     #[must_use]
     pub fn dependencies(&self) -> &[String] {
         &self.dependencies
+    }
+
+    /// How this service reaches readiness.
+    #[must_use]
+    pub fn readiness(&self) -> ReadinessKind {
+        self.readiness
+    }
+
+    /// The named readiness conditions that gate this service's start.
+    #[must_use]
+    pub fn requires(&self) -> &[ReadyCondition] {
+        &self.requires
+    }
+
+    /// The named readiness conditions this service satisfies once ready.
+    #[must_use]
+    pub fn provides(&self) -> &[ReadyCondition] {
+        &self.provides
     }
 }
 
@@ -166,6 +220,22 @@ mod tests {
         assert_eq!(spec.binary_path(), "/System/Services/svc");
         assert_eq!(spec.manifest(), &[1, 2, 3]);
         assert_eq!(spec.dependencies(), &["a", "b"]);
+        // A bare spec is immediate-readiness with no conditions.
+        assert_eq!(spec.readiness(), super::ReadinessKind::Immediate);
+        assert!(spec.requires().is_empty());
+        assert!(spec.provides().is_empty());
+    }
+
+    #[test]
+    fn service_spec_readiness_builders_set_metadata() {
+        use super::{ReadinessKind, ReadyCondition};
+        let spec = ServiceSpec::new("net", "/System/Services/net", Vec::new(), Vec::new())
+            .with_readiness(ReadinessKind::Notify)
+            .requiring([ReadyCondition::FilesystemsMounted])
+            .providing([ReadyCondition::NetworkUp]);
+        assert_eq!(spec.readiness(), ReadinessKind::Notify);
+        assert_eq!(spec.requires(), &[ReadyCondition::FilesystemsMounted]);
+        assert_eq!(spec.provides(), &[ReadyCondition::NetworkUp]);
     }
 
     #[test]

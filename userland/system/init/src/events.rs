@@ -38,15 +38,28 @@ pub const ORPHAN_REAPED: EventId = EventId(9_006);
 /// a dependency names an unregistered service, or the graph contains a
 /// cycle. The whole bring-up fails closed.
 pub const GRAPH_REJECTED: EventId = EventId(9_007);
+/// A service reached readiness: an `immediate` service whose spawn
+/// succeeded, or a `notify` service that announced itself up. This is the
+/// point the manager releases the service's dependents.
+pub const SERVICE_READY: EventId = EventId(9_008);
+/// A named readiness condition became satisfied (a providing service reached
+/// readiness, or the manager/kernel signalled it), releasing any services
+/// that were waiting on it.
+pub const CONDITION_SATISFIED: EventId = EventId(9_009);
+/// A readiness notification was rejected: it named no known service, or it
+/// arrived for a service that was not in the `starting` state (a protocol
+/// violation). Fails closed — the notice is ignored, never trusted.
+pub const NOTIFY_REJECTED: EventId = EventId(9_010);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        GRAPH_REJECTED, INIT_RANGE_END, INIT_RANGE_START, ORPHAN_REAPED, SERVICE_DENIED,
-        SERVICE_EXITED, SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED,
+        CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END, INIT_RANGE_START, NOTIFY_REJECTED,
+        ORPHAN_REAPED, SERVICE_DENIED, SERVICE_EXITED, SERVICE_READY, SERVICE_SKIPPED,
+        SERVICE_STARTED, SERVICE_START_FAILED,
     };
 
-    const ALL: [u32; 7] = [
+    const ALL: [u32; 10] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_DENIED.0,
@@ -54,6 +67,9 @@ mod tests {
         SERVICE_EXITED.0,
         ORPHAN_REAPED.0,
         GRAPH_REJECTED.0,
+        SERVICE_READY.0,
+        CONDITION_SATISFIED.0,
+        NOTIFY_REJECTED.0,
     ];
 
     #[test]

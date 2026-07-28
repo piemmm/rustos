@@ -16,7 +16,11 @@
 //! 1. Maintain a registry of [`ServiceSpec`]s, rejecting a duplicate name.
 //! 2. Order the registered services by their declared dependencies and
 //!    **fail closed** ([`InitError`]) on a missing dependency or a cycle —
-//!    a malformed service graph never boots a partial, surprising system.
+//!    a malformed service graph never boots a partial, surprising system —
+//!    then bring them up through a readiness-gated admission engine: a
+//!    dependent is released only once every dependency it names has
+//!    actually reported *ready* (and every named readiness condition it
+//!    requires is satisfied), never merely spawned.
 //! 3. For each service, decode its signed manifest into a requested
 //!    capability set and grant the intersection of that request with the
 //!    [`InitConfig::authority`]. A service whose manifest
@@ -47,7 +51,8 @@
 //! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, and the
 //!   [`Spawner`] / [`Reaper`] seams.
 //! * [`manager`] — the [`Init`] state machine: `register`, `start_all`,
-//!   and `reap`.
+//!   the readiness admission engine (`notify`, `satisfy_condition`), and
+//!   `reap`.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
@@ -75,6 +80,6 @@ pub mod events;
 pub mod manager;
 pub mod service;
 
-pub use error::{InitError, StartFailure};
+pub use error::{InitError, NotifyError, StartFailure};
 pub use manager::{FailedService, Init, InitConfig, StartReport, StartedService};
 pub use service::{Pid, ReapedChild, Reaper, ServiceSpec, Spawner};

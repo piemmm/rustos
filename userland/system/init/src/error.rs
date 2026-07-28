@@ -76,6 +76,34 @@ impl fmt::Display for StartFailure {
     }
 }
 
+/// Why a readiness notification was refused.
+///
+/// A notice is only ever *attributed* to a service the manager already
+/// spawned; these are the fail-closed reasons a well-formed notice is still
+/// not acted on. The notice is ignored (never trusted), the reason audited.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NotifyError {
+    /// The notice was attributed to a name the manager does not know. In
+    /// production the manager maps the kernel-attested sender to a service,
+    /// so this is wire corruption or a stale sender, never a normal path.
+    UnknownService,
+    /// The named service is not in the `starting` state, so it has no
+    /// pending readiness edge to resolve — a service cannot become ready
+    /// before it is spawned, nor announce readiness twice. The notice is a
+    /// protocol violation and is dropped.
+    NotStarting,
+}
+
+impl fmt::Display for NotifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnknownService => "readiness notice names an unknown service",
+            Self::NotStarting => "readiness notice for a service that is not starting",
+        };
+        f.write_str(message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InitError, StartFailure};

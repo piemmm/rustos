@@ -7,14 +7,14 @@ order, grants each one the capability set its signed manifest requests
 intersected with init's own authority (`AGENTS.md` §5.2), and reaps the
 children that any PID 1 inherits.
 
-> **Planned evolution.** This page describes the current PID 1 service
-> orchestrator. The first-class service manager that grows out of it —
-> a service lifecycle + readiness protocol, discovery-vs-registration
-> vs on-demand endpoint activation, system- and per-user-scope
-> managers, idle linger, and stop/shutdown ordering, with service
-> configuration under `/System/Settings` — is specified in
-> `plans/NEW-SERVICEMANAGER.md`. That plan evolves this model *in
-> place* (`AGENTS.md` §2.2); it is not a parallel manager.
+> **Planned evolution.** This page describes the PID 1 service manager as
+> it stands. The first-class service manager it is growing into is
+> specified in `plans/NEW-SERVICEMANAGER.md`, which evolves this model *in
+> place* (`AGENTS.md` §2.2) — it is not a parallel manager. The service
+> **lifecycle and readiness protocol** described below has landed
+> (`NEW-SERVICEMANAGER.md` SVC-2); discovery-vs-registration vs on-demand
+> endpoint activation, system- and per-user-scope managers, idle linger,
+> and stop/shutdown ordering are still ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
@@ -45,17 +45,62 @@ that **fails closed** (`AGENTS.md` §5.4.5):
    (`DependencyMissing`) or the graph contains a cycle
    (`DependencyCycle`). The system never boots a partial, surprising
    configuration.
-3. For each service, in order: **decode** its manifest into a requested
-   capability set, **gate** that request against init's authority,
-   **spawn** it, and **audit** the outcome.
+3. **Admit** each service whose prerequisites are met, in order:
+   **decode** its manifest into a requested capability set, **gate** that
+   request against init's authority, **spawn** it, and **audit** the
+   outcome. Bring-up is an admission engine, not a single
+   spawn-everything pass — see *Lifecycle and readiness* below.
 
-When the graph is sound, init brings up every service it can. A single
-service that fails — its manifest will not decode, it over-requests
-authority, or the `Spawner` refuses it — is recorded, and the services
-that *transitively depend on it* are skipped; services independent of the
-failure still start. The full outcome is returned as a `StartReport`
-(`started` + `failed`), so a caller can see which optional services are
-absent without the boot aborting.
+When the graph is sound, init brings up every service whose prerequisites
+can be met. A single service that fails — its manifest will not decode, it
+over-requests authority, or the `Spawner` refuses it — is recorded, and the
+services that *transitively depend on it* are skipped; services
+independent of the failure still start. Each admission pass returns a
+`StartReport` (`started` + `failed`), so a caller can see what came up and
+which optional services are absent without the boot aborting.
+
+## Lifecycle and readiness (`NEW-SERVICEMANAGER.md` SVC-2)
+
+A service manager that treats *spawned* as *up* cannot honestly start a
+dependent that needs "the network is up" — the dependency may be running
+but not yet functional. `init` therefore tracks each service through the
+lifecycle `tairix_abi::ServiceState`
+(`inactive → starting → ready → running → stopping → stopped | failed`)
+and releases a dependent only once every dependency it names is
+`ServiceState::is_ready` (`ready` or `running`), never merely spawned.
+
+- **Readiness kind.** A service declares how it reaches readiness
+  (`tairix_abi::ReadinessKind`, unit metadata read from its manifest). An
+  `immediate` service (the default, the analogue of systemd `Type=simple`)
+  is `ready` the instant its spawn succeeds; a `notify` service
+  (`Type=notify`) stays `starting` until it announces itself up.
+- **Readiness notification.** A `notify` service sends a
+  `tairix_abi::ReadyNotice` — an `sd_notify` analogue carrying a
+  `LifecycleSignal` (`ready` or `failed`) and **no identity**: the manager
+  attributes the notice to the kernel-attested sender, never a
+  caller-supplied name (`AGENTS.md` §5.4). `Init::notify` applies it —
+  `ready` releases the service's dependents, `failed` marks it failed and
+  skips the dependents blocked on it — and fails closed (`NotifyError`) on
+  an unknown service or a notice for one that is not `starting`.
+- **Named readiness conditions.** A service may `require` and `provide`
+  named conditions (`tairix_abi::ReadyCondition`: `network-up`,
+  `filesystems-mounted`, `boot-complete`, `display-present`,
+  `seat-available`). The manager admits a service only once every
+  condition it requires is satisfied; a condition is satisfied when a
+  providing service becomes ready or when the manager/kernel signals it
+  through `Init::satisfy_condition`. Conditions decouple readiness from a
+  service name — a client requires `network-up` without naming
+  `netstack` — and generalise the headless case: a GUI-only service that
+  requires `display-present` simply never activates on a headless boot,
+  because nothing ever satisfies that condition (`AGENTS.md` §17.3).
+
+Bring-up runs this as an admission fixpoint: it repeatedly admits every
+service whose dependencies are ready and whose required conditions are
+satisfied, and skips every service a failed dependency blocks, until
+nothing changes. A chain of `immediate` services comes up in one pass; a
+`notify` service pauses the chain until it announces readiness, and a
+dependency that never reports ready simply leaves its dependents
+`inactive` — fail closed, never a guess (`AGENTS.md` §5.4).
 
 ## Capability granting (`AGENTS.md` §5.2)
 
@@ -110,6 +155,9 @@ plumbing and exhaustively testable.
 | 9005 | `SERVICE_EXITED`       | Info  | a registered service exited and was reaped    |
 | 9006 | `ORPHAN_REAPED`        | Info  | an inherited orphan was reaped                |
 | 9007 | `GRAPH_REJECTED`       | Error | the service graph was structurally invalid    |
+| 9008 | `SERVICE_READY`        | Info  | a service reached readiness, releasing dependents |
+| 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
+| 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice named an unknown or non-starting service |
 
 ## The `Run` entry-point binary and startup config (`plans/PI.md` P6b)
 
@@ -214,7 +262,13 @@ start, the fail-closed missing-dependency and cycle paths, duplicate
 registration, the capability grant as `request ∩ authority`, an
 escalation denial, a spawn failure cascading to its transitive
 dependents, an invalid manifest, and the reaper distinguishing a service
-exit from an inherited orphan — plus the `EventId` range and uniqueness
+exit from an inherited orphan. The readiness protocol is covered too: a
+`notify` dependency gates its dependent until it reports ready, a
+never-ready dependency leaves its dependent `inactive`, a required named
+condition gates a start until satisfied, a provided condition is satisfied
+when its provider becomes ready, an explicit `failed` signal skips
+dependents, and a notice for an unknown or non-starting service fails
+closed. These sit alongside the `EventId` range and uniqueness
 invariants and the numeric audit-field formatter. The same run also
 covers the `Run` binary's startup-config parser: the default config, the
 comment/blank-line/inline-comment and whitespace handling, and every

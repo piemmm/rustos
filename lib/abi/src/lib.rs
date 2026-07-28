@@ -47,6 +47,7 @@ pub mod reply;
 pub mod rlimit;
 pub mod rxe;
 pub mod seat;
+pub mod service;
 pub mod stdinfo;
 pub mod syscall;
 pub mod syscalls;
@@ -153,6 +154,10 @@ pub use rxe::{
     kaslr_bias, LoadHeader, LoadImage, NeededLibrary, RxeError, RxePermission, Segment, LIBREF_MAX,
     LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
     SEG_FLAG_READ, SEG_FLAG_WRITE,
+};
+pub use service::{
+    LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, ServiceState,
+    SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
 };
 pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,

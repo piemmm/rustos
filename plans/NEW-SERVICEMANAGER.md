@@ -311,13 +311,35 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   The growable, discovery-registered tier past the floor is SVC-3/SVC-4 and
   waits on the `lib/rt` heap (§3.10).
 
-### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine)
-- The `inactive → … → failed` state machine in the `init` policy core;
-  the readiness-notification `lib/abi` call and named readiness conditions
-  (`network-up`, `filesystems-mounted`, `boot-complete`, `display-present`,
-  `seat-available`). Dependencies gate on `ready`, not `spawned`.
-- Host tests: a dependent starts only after its dependency reports ready; a
-  never-ready dependency leaves its dependent inactive (fail closed).
+### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine) — DONE
+- `lib/abi/src/service.rs` (versioned/fail-closed, frozen on first release):
+  the `ServiceState` lifecycle (`inactive → starting → ready → running →
+  stopping → stopped | failed`) with `is_ready`/`is_terminal`; the closed
+  `ReadyCondition` set (`network-up`, `filesystems-mounted`, `boot-complete`,
+  `display-present`, `seat-available`); `ReadinessKind` (`immediate` default
+  vs `notify`); and the `ReadyNotice` (`sd_notify` analogue) carrying a
+  `LifecycleSignal` (`ready`/`failed`) and **no identity** — the manager
+  binds it to the kernel-attested sender. It is an IPC-protocol module like
+  `font_ipc`, so it is outside the generated C header (no `abi-check`/
+  `c-header` change).
+- `init` engine (`manager.rs`): per-service `ServiceState`+pid; `ServiceSpec`
+  gains `readiness`/`requires`/`provides`. Bring-up is a readiness-gated
+  admission fixpoint — a dependent is released only when every dependency is
+  `is_ready()` and every required condition is satisfied, never on merely
+  spawned. `immediate` services reach ready on spawn success; `notify`
+  services wait for `Init::notify`. `satisfy_condition` records
+  externally/kernel-signalled conditions; a provider satisfies its `provides`
+  on readiness. Everything fails closed: a never-ready dependency leaves its
+  dependent `inactive`, and `notify` is refused (`NotifyError`) for an
+  unknown or non-`starting` service. New audit IDs `SERVICE_READY` (9008),
+  `CONDITION_SATISFIED` (9009), `NOTIFY_REJECTED` (9010).
+- Because `immediate` is the readiness default, the existing bring-up
+  semantics (and their tests) are preserved unchanged; new host tests cover
+  the `notify`/condition gating, the never-ready and explicit-failure paths,
+  and the fail-closed notify rejections.
+- Not yet wired to a live transport: the manager consumes decoded notices
+  through its engine seam; binding the readiness/control endpoint and mapping
+  a kernel-attested sender to a service is SVC-4/SVC-8 work.
 
 ### SVC-3 — Discovery + registration store under `/System/Settings`
 - Service discovery over `/System/Services/*.app`; the enrolment-record
