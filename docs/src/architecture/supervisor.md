@@ -219,19 +219,25 @@ small self-contained test routine can address physical RAM — which is a
 one-way trip whose only exits are reset or power-off.
 
 That takeover mechanism is irreducibly per-architecture, so it lives behind an
-Arch HAL slice, `MachineTakeover` (`kernel/arch/api/src/takeover.rs`):
+Arch HAL slice, `MachineTakeover` (`kernel/arch/api/src/takeover.rs`). It is a
+**single** operation, `take_over(&self, sweep: &mut dyn FnMut())`, that owns the
+whole irreversible sequence and never returns on success: quiesce every other
+CPU (a bounded tear-down handshake, never an unbounded spin — `CpuQuiesceTimeout`
+if a core does not halt in budget), mask interrupts, stop the watchdog, flatten
+paging, **switch onto a reserved stack the sweep cannot overwrite**, run the
+caller's `sweep` (the arch-neutral destructive test of every usable frame), then
+test the region the sweep executed from — the kernel image and that stack — with
+a small relocated per-port stub that never touches the firmware, and reset. A
+two-step "quiesce, then let the caller sweep and reboot on its own stack" split
+could never be correct: the Supervisor runs on a kthread stack drawn from RAM
+the sweep destroys, so the port must own the stack switch and the reset itself.
 
-- `quiesce_secondaries` stops every other CPU into a bounded, controlled halt
-  (a bounded tear-down handshake, never an unbounded spin) and fails closed
-  with `CpuQuiesceTimeout` if a core does not acknowledge in budget.
-- `prepare_takeover` masks interrupts, stops the watchdog, and
-  relocates/flattens paging for the destructive sweep.
-
-Both steps fail closed (`TakeoverError`), never panic, and leave the machine
-running and recoverable on any error. `KernelArch::machine_takeover` defaults
-to `None`, so a port that has not wired the mechanism (and `wasm32`, which owns
-no physical RAM to take over) honestly reports "not supported" and the
-Supervisor stays in the REPL.
+`take_over` **returns** only on a pre-destructive refusal (`TakeoverError`:
+`NotSupported`, `CpuQuiesceTimeout`, `PrepareFailed`), leaving the machine
+running and recoverable and `sweep` un-run; it never panics.
+`KernelArch::machine_takeover` defaults to `None`, so a port that has not wired
+the mechanism (and `wasm32`, which owns no physical RAM to take over) honestly
+reports "not supported" and the Supervisor stays in the REPL.
 
 ### The operator command and its supervisor-only gate
 
@@ -251,11 +257,10 @@ The takeover handle is reachable **only** from this path. Obtaining it through
 constructor is private to `supervisor_system`, the module that drives the
 confirmed `memtest full`. No other kernel subsystem, driver, or userland
 caller can mint the grant, so none can obtain the `MachineTakeover` handle or
-invoke its `unsafe` steps: the accessor is the single gate and the grant is
-its only key. Once the ordered `quiesce_secondaries` → `prepare_takeover`
-handshake succeeds, the arch-neutral `run_destructive` sweep runs over the
-direct physical map, rendering to the memtest86-style full-screen UI, and the
-machine is reset; it never returns.
+invoke its `unsafe` step: the accessor is the single gate and the grant is
+its only key. Once `take_over` succeeds, the arch-neutral `run_destructive`
+sweep runs over the direct physical map, rendering to the memtest86-style
+full-screen UI, and the machine is reset; it never returns.
 
 ### The full-screen progress display
 
@@ -275,8 +280,16 @@ presentational, and nothing it does panics on any input.
 
 The arch-neutral destructive sweep and this UI already exist
 (`tairix_kernel_mem::ramtest::run_destructive`,
-`tairix_supervisor::memtest_ui`). Until a port wires the per-port takeover
-mechanism, `memtest full` reports "not supported" and stays in the REPL, and
-the safe, bounded, interruptible in-system `memtest` is the only RAM test that
-actually runs; the per-port takeover bodies and the end-to-end QEMU vertical
-are the last remaining stages (`plans/NEW-SUPERVISOR.md` §9).
+`tairix_supervisor::memtest_ui`). **riscv64** wires the real per-port mechanism
+(`kernel/arch/riscv64/src/takeover.rs` + `takeover.s`): quiesce (single-hart
+verified), mask `sstatus.SIE`/`sie`, flatten to bare mode (`satp = 0`), switch
+to a reserved `.bss` stack, run the sweep, then relocate a register-only stub
+into a swept usable page to test `[__kernel_image_start, __kernel_end)` and
+SBI-reset. It is proven end-to-end by
+`tests/integration/supervisor_memtest_takeover_qemu_riscv64`, which boots the
+production pipeline and drives the real `memtest_takeover` seam (the SBI console
+has no interactive input, so the confirmation/command parsing is host-tested in
+`lib/supervisor`); the guest renders the display to 100% and ends in a machine
+reset (QEMU `-no-reboot` exit 0). On **x86_64** and **aarch64** `memtest full`
+still reports "not supported" and stays in the REPL until their bodies land;
+those are the last remaining stages (`plans/NEW-SUPERVISOR.md` §9).

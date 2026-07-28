@@ -413,6 +413,20 @@ impl KernelArch for RiscvBinArch {
         let _ = table;
     }
 
+    fn machine_takeover(
+        &self,
+        _grant: &tairix_kernel_core::supervisor_system::TakeoverGrant,
+    ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
+        // The riscv64 destructive whole-RAM takeover the Supervisor's
+        // confirmed `memtest full` drives (`plans/NEW-SUPERVISOR.md` §9). The
+        // handle is minted only through the arch port's gated accessor, and
+        // this override is itself reachable only with the supervisor-only
+        // `TakeoverGrant`, so the mechanism stays confined to that one path.
+        // Off the freestanding target this module does not compile; boot.rs
+        // is freestanding-only, so the handle is always available here.
+        Some(tairix_arch_riscv64::takeover::machine_takeover_handle())
+    }
+
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
         // The identity direct map (`virtual == physical` over the configured
         // `[0, IDENTITY_GIB GiB)` window, covering RAM) the shared-memory

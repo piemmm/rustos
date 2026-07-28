@@ -4048,6 +4048,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-supervisor-memtest-takeover-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-supervisor",
+ "tairix-test-riscv64-boot",
+]
+
+[[package]]
 name = "tairix-test-syscall-dispatch-qemu"
 version = "0.0.0"
 dependencies = [

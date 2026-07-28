@@ -30,6 +30,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x80200000;
+    __kernel_image_start = .;
 
     .text : ALIGN(4K)
     {
