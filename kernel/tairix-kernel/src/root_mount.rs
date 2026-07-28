@@ -81,6 +81,9 @@ use tairix_kernel_core::{
 use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
+use tairix_supervisor::{
+    run_supervisor, Report as SupReport, SupInput, SupervisorExit, SupervisorHost,
+};
 use tairix_users::{GroupsDb, UsersDb};
 
 use crate::kernel_fs::KernelFs;
@@ -804,6 +807,48 @@ const FS_UNLOCK_PROMPT: &[u8] = concat!("\r\n", fs_label!(), " passphrase: ").as
 /// separating the unlock from the login `Username:` prompt that follows.
 const FS_UNLOCKED_LINE: &[u8] = concat!("\r", fs_label!(), "\x1b[K\r\n\r\n").as_bytes();
 
+/// The interactive unlock prompt drawn **in place** over the boot-screen
+/// announcement line, used for the first prompt after the ESC window has
+/// already drawn on the line (`plans/NEW-SUPERVISOR.md` §2 step 3). The `\r`
+/// returns to column 0, the label overwrites `[Press ESC for supervisor]`,
+/// and `\x1b[K` erases the longer announcement's tail — the same in-place
+/// technique [`FS_UNLOCKED_LINE`] uses. Built from the one [`fs_label!`] token
+/// so the two prompt spellings can never drift.
+const FS_UNLOCK_PROMPT_INPLACE: &[u8] =
+    concat!("\r", fs_label!(), " passphrase: \x1b[K").as_bytes();
+
+/// The byte-exact boot-screen announcement the ESC window draws
+/// (`plans/NEW-SUPERVISOR.md` §2 step 1). The leading `\r\n` opens a fresh
+/// line, so one blank line separates the boot banner (the machine-summary
+/// line userland `init` printed beneath the `TAIRiX <v> <RAM>MiB` counter)
+/// from the announcement — the same one-blank-line spacing the passphrase
+/// prompt draws on its own fresh line ([`FS_UNLOCK_PROMPT`]), so the operator
+/// sees an identically laid-out screen whether the window is entered, skipped,
+/// or times out. The in-place prompt and the enter-banner below return to
+/// column 0 of *this* announcement line and overwrite its text. Frozen
+/// wording — asserted by the QEMU vertical; do not "improve" it.
+const SUPERVISOR_ANNOUNCE: &[u8] = b"\r\n[Press ESC for supervisor]";
+
+/// The byte-exact line collapse + banner drawn when the operator drops into
+/// the Supervisor (`plans/NEW-SUPERVISOR.md` §2 step 5): the prompt/announce
+/// line is overwritten with the bare label, ended, one blank line follows,
+/// then the `Supervisor` banner. `run_supervisor` draws its own `* ` prompt
+/// after this. Frozen wording — asserted by the QEMU vertical.
+const SUPERVISOR_ENTER_BANNER: &[u8] =
+    concat!("\r", fs_label!(), "\x1b[K\r\n\r\nSupervisor\r\n").as_bytes();
+
+/// The 2-second boot-screen window during which a lone `ESC` drops to the
+/// Supervisor (`plans/NEW-SUPERVISOR.md` §2 step 2), in nanoseconds. A
+/// deliberate fixed operator-facing delay, not a scalable capacity.
+const SUPERVISOR_WINDOW_NS: u64 = 2_000_000_000;
+
+/// The short bounded re-poll, in nanoseconds, that disambiguates a lone `ESC`
+/// (drop to Supervisor) from an `ESC [ …` CSI sequence (an editor key)
+/// (`plans/NEW-SUPERVISOR.md` §3). Tens of milliseconds is long enough that a
+/// terminal's CSI bytes, sent back-to-back after the `ESC`, arrive within it,
+/// yet short enough not to make a genuine lone `ESC` feel sluggish.
+const SUPERVISOR_ESC_REPOLL_NS: u64 = 50_000_000;
+
 /// The one set-once credential cell the production dispatch hook reads
 /// and the in-kernel root-unlock kthread writes.
 ///
@@ -878,6 +923,11 @@ enum PassphraseReadError {
     /// remainder was drained to the newline so the next read starts clean.
     /// Treated as a wrong attempt, never a truncated secret.
     TooLong,
+    /// A lone `ESC` was pressed as the **first** byte of the line: not a
+    /// read failure but a request to drop into the Supervisor from the live
+    /// passphrase prompt (`plans/NEW-SUPERVISOR.md` §2 step 4). No passphrase
+    /// byte was collected.
+    Escape,
 }
 
 /// Publish a successfully unlocked database into `late_db` and audit it.
@@ -889,7 +939,7 @@ enum PassphraseReadError {
 /// ([`LateUsersDb::install`]) is set-once: a refusal means a database was
 /// already published (the kthread runs once, so that is a logic error),
 /// and the rejected holder is zeroed inside `install`.
-fn finish_install(
+pub(crate) fn finish_install(
     unlocked: UnlockedRoot,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
@@ -967,6 +1017,182 @@ fn finish_install(
     UnlockOutcome::Installed
 }
 
+/// A `lib/supervisor` [`Report`](SupReport) backed by the primary console's
+/// write half, so the Supervisor renders straight to the boot console.
+struct ConsoleReport<'a> {
+    console: &'a dyn ConsoleWrite,
+}
+
+impl SupReport for ConsoleReport<'_> {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        write_all(self.console, bytes);
+    }
+}
+
+/// A `lib/supervisor` [`SupInput`] backed by the primary console's raw read
+/// half. [`read_byte`](SupInput::read_byte) parks until a key arrives (never a
+/// busy-spin — it is the interrupt-driven reader in production);
+/// [`poll_byte`](SupInput::poll_byte) is a non-blocking zero-deadline read the
+/// REPL uses to poll for an `ESC` abort during a long command.
+struct ConsoleInput<'a> {
+    input: &'a dyn ConsoleRead,
+}
+
+impl SupInput for ConsoleInput<'_> {
+    fn read_byte(&mut self) -> Option<u8> {
+        let mut byte = [0u8; 1];
+        match self.input.read(&mut byte) {
+            Ok(1) => Some(byte[0]),
+            _ => None,
+        }
+    }
+
+    fn poll_byte(&mut self) -> Option<u8> {
+        let mut byte = [0u8; 1];
+        match self.input.read_timeout(&mut byte, 0) {
+            Ok(1) => Some(byte[0]),
+            _ => None,
+        }
+    }
+}
+
+/// The outcome of the pre-unlock ESC boot-screen window.
+enum EscWindow {
+    /// The operator mounted the root from inside the Supervisor: the unlock is
+    /// already resolved (the users database is installed), so the caller
+    /// returns [`UnlockOutcome::Installed`] without prompting.
+    Mounted,
+    /// No Supervisor entry; proceed to the normal unlock. `prompt_drawn` is
+    /// `true` when the window already redrew the `ARXFS passphrase: ` prompt
+    /// in place of the announcement (a timed-out / typed / CSI fall-through),
+    /// so the interactive loop must not draw a second, fresh prompt line.
+    /// `initial` carries a byte the window already consumed when the operator
+    /// began typing the passphrase before the window elapsed: it is the first
+    /// character of the passphrase line and MUST be fed to the read rather than
+    /// dropped, or the typed secret would be silently corrupted.
+    Continue {
+        prompt_drawn: bool,
+        initial: Option<u8>,
+    },
+}
+
+/// Resolve a just-read `ESC` byte into a lone `ESC` (drop to the Supervisor)
+/// or the start of a CSI editor sequence (`ESC [ …` — an arrow / Delete key),
+/// the classic terminal disambiguation (`plans/NEW-SUPERVISOR.md` §3).
+///
+/// Re-polls once, briefly and bounded, for a follow-on byte:
+/// * a follow-on `[` opens a CSI sequence — the rest of it is drained so its
+///   bytes cannot leak into the passphrase, and this reports **not** a lone
+///   `ESC`;
+/// * no follow-on within the window, or any non-`[` byte, is a lone `ESC`.
+///
+/// The re-poll is a genuine bounded timed park (never a busy-spin); a backing
+/// that cannot honour the deadline degrades to treating `ESC` as lone.
+fn esc_is_lone_escape(input: &dyn ConsoleRead) -> bool {
+    let mut byte = [0u8; 1];
+    match input.read_timeout(&mut byte, SUPERVISOR_ESC_REPOLL_NS) {
+        Ok(1) if byte[0] == b'[' => {
+            drain_csi_sequence(input);
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Drain the remainder of a CSI sequence whose `ESC [` prefix was already
+/// consumed, up to and including its final byte (`0x40..=0x7e`), so no
+/// sequence byte leaks into a later read. Bounded by a short per-byte re-poll
+/// and stops on the final byte, a read failure, or an idle window — never
+/// spins.
+fn drain_csi_sequence(input: &dyn ConsoleRead) {
+    for _ in 0..16 {
+        let mut byte = [0u8; 1];
+        match input.read_timeout(&mut byte, SUPERVISOR_ESC_REPOLL_NS) {
+            Ok(1) => {
+                if (0x40..=0x7e).contains(&byte[0]) {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// Draw the boot-screen announcement, wait a bounded window for `ESC`, and —
+/// on a lone `ESC` — run the Supervisor REPL. Byte-exact per
+/// `plans/NEW-SUPERVISOR.md` §2.
+///
+/// The timed read and the re-poll are genuine bounded parks on the
+/// interrupt-driven console reader (never a busy-spin).
+///
+/// A lone `ESC` inside the window drops to the Supervisor. An `ESC [ …` CSI
+/// editor sequence is drained and ignored (it is a stray arrow/Delete key, not
+/// passphrase content). **Any other key is the operator starting to type the
+/// passphrase before the window elapsed**: it is carried out as
+/// [`EscWindow::Continue::initial`] and fed to the passphrase read as the
+/// line's first character — never discarded, which would silently corrupt a
+/// quickly-typed secret (the defect this window must not have).
+fn esc_boot_window(
+    console: &dyn ConsoleWrite,
+    input: &dyn ConsoleRead,
+    supervisor: &mut dyn SupervisorHost,
+) -> EscWindow {
+    write_all(console, SUPERVISOR_ANNOUNCE);
+    let mut byte = [0u8; 1];
+    let got = input
+        .read_timeout(&mut byte, SUPERVISOR_WINDOW_NS)
+        .unwrap_or(0);
+    if got == 1 && byte[0] == 0x1b {
+        if esc_is_lone_escape(input) {
+            // Lone ESC: enter the REPL.
+            return match enter_supervisor(console, input, supervisor) {
+                // The operator unlocked and mounted the root from the REPL.
+                SupervisorExit::Mounted => EscWindow::Mounted,
+                // The operator asked to resume boot: the REPL redrew the
+                // screen, so the normal unlock draws a fresh prompt.
+                SupervisorExit::ContinueBoot => EscWindow::Continue {
+                    prompt_drawn: false,
+                    initial: None,
+                },
+            };
+        }
+        // A CSI editor sequence (arrow/Delete): its bytes were drained by
+        // `esc_is_lone_escape`, so nothing is carried forward. Draw the prompt
+        // in place and fall through to the normal unlock.
+        write_all(console, FS_UNLOCK_PROMPT_INPLACE);
+        return EscWindow::Continue {
+            prompt_drawn: true,
+            initial: None,
+        };
+    }
+    // Either the window timed out (`got == 0`) or the operator typed a
+    // non-`ESC` key — the first character of the passphrase. Draw the prompt in
+    // place and carry any typed byte forward so it becomes that line's first
+    // character rather than being lost.
+    let initial = (got == 1).then_some(byte[0]);
+    write_all(console, FS_UNLOCK_PROMPT_INPLACE);
+    EscWindow::Continue {
+        prompt_drawn: true,
+        initial,
+    }
+}
+
+/// Collapse the current prompt/announcement line to the bare label, draw the
+/// `Supervisor` banner, and run the REPL to its exit (byte-exact per
+/// `plans/NEW-SUPERVISOR.md` §2 step 5). Shared by both entry points — the
+/// ESC boot-screen window and a lone `ESC` at the live passphrase prompt — so
+/// the banner and the REPL invocation have one definition.
+fn enter_supervisor(
+    console: &dyn ConsoleWrite,
+    input: &dyn ConsoleRead,
+    supervisor: &mut dyn SupervisorHost,
+) -> SupervisorExit {
+    write_all(console, SUPERVISOR_ENTER_BANNER);
+    let mut report = ConsoleReport { console };
+    let mut sup_input = ConsoleInput { input };
+    run_supervisor(&mut report, &mut sup_input, supervisor)
+}
+
 /// Unlock the root disk and publish the loaded database into `late_db`,
 /// prompting for the passphrase only when the root is not unlockable
 /// without one — re-prompting a wrong typed passphrase **indefinitely**,
@@ -1036,6 +1262,12 @@ fn finish_install(
 ///   in-kernel kthread passes the console-0 hand-off (open the gate, arm
 ///   the UART receive interrupt, resolve the `LateUsersDb` pending wait);
 ///   coupling it here makes forgetting it impossible.
+/// * `supervisor` — the optional pre-boot Supervisor host. When present, a
+///   bounded ESC boot-screen window is drawn *before* the blank-passphrase
+///   probe; a lone `ESC` drops into the Supervisor REPL, and if the operator
+///   mounts the root from there the unlock returns
+///   [`UnlockOutcome::Installed`] with no further prompt. [`None`] (host
+///   tests) skips the window entirely, leaving behaviour unchanged.
 ///
 /// Driver loading is **not** part of this policy: under design B the
 /// user-space `devmgr` loads drivers over the driver-store endpoint served
@@ -1043,6 +1275,13 @@ fn finish_install(
 /// [`crate::driver_store_server`]), independent of this encrypted-root
 /// (user-data) prompt — the store volume is reachable without this
 /// passphrase.
+// Each parameter is a distinct, irreducible boot seam the unlock threads
+// through — the disk, the console write/read halves, the install cells, the
+// audit sink, the anti-brute-force delay, the console-release callback, and
+// the optional pre-boot Supervisor host. Bundling them into a struct would
+// only rename the same fields without removing any, so the argument list is
+// the honest shape of the seam.
+#[allow(clippy::too_many_arguments)]
 pub fn unlock_root_disk_interactively<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
@@ -1051,6 +1290,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     audit: &dyn Sink,
     delay: &dyn Fn(),
     on_resolved: &dyn Fn(),
+    supervisor: Option<&mut dyn SupervisorHost>,
 ) -> UnlockOutcome {
     // Run the interactive unlock to a terminal outcome, then hand the
     // console back to `login` — *exactly once, on every outcome and every
@@ -1065,7 +1305,9 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // fail-closed branches ran it), wedging both the keyboard and serial
     // `login` after a good unlock; threading it through `on_resolved` makes
     // forgetting it impossible.
-    let outcome = unlock_root_disk_interactively_impl(disk, console, input, install, audit, delay);
+    let outcome = unlock_root_disk_interactively_impl(
+        disk, console, input, install, audit, delay, supervisor,
+    );
     on_resolved();
     outcome
 }
@@ -1081,11 +1323,41 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
     delay: &dyn Fn(),
+    supervisor: Option<&mut dyn SupervisorHost>,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
     // `impl Block for &mut B` forwarding, so one device is reused across
     // retries without re-acquiring it.
     let mut disk = disk;
+
+    // The pre-unlock boot screen: give the operator a bounded window to drop
+    // into the Supervisor before the passphrase prompt. Shown on **every**
+    // image (including the blank-passphrase installer image, which otherwise
+    // auto-unlocks with no prompt). When no host is threaded (host tests),
+    // the window is skipped and behaviour is exactly as before. If the
+    // operator mounts from inside the Supervisor, the unlock is already
+    // resolved and this returns installed.
+    let mut prompt_drawn = false;
+    // A byte the ESC window consumed when the operator began typing the
+    // passphrase before it elapsed: the first character of the first
+    // passphrase line, fed to that read below rather than dropped.
+    let mut initial_byte: Option<u8> = None;
+    // Kept reusable (reborrowed via `as_deref_mut`) so the *same* host serves
+    // both entry points: the boot-screen window here and a lone `ESC` at the
+    // live passphrase prompt in the loop below.
+    let mut supervisor = supervisor;
+    if let Some(host) = supervisor.as_deref_mut() {
+        match esc_boot_window(console, input, host) {
+            EscWindow::Mounted => return UnlockOutcome::Installed,
+            EscWindow::Continue {
+                prompt_drawn: drawn,
+                initial,
+            } => {
+                prompt_drawn = drawn;
+                initial_byte = initial;
+            }
+        }
+    }
 
     // Try the blank passphrase silently first, before drawing any prompt.
     // An installer image is provisioned with a **blank** root passphrase
@@ -1122,12 +1394,21 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // cannot satisfy, or a dead console, fails closed — re-prompting those
     // could never succeed.
     loop {
-        write_all(console, FS_UNLOCK_PROMPT);
+        // The ESC window already redrew the prompt in place of its
+        // announcement, so the first interactive prompt must not draw a second
+        // fresh line over it; every subsequent re-prompt draws normally.
+        if prompt_drawn {
+            prompt_drawn = false;
+        } else {
+            write_all(console, FS_UNLOCK_PROMPT);
+        }
 
         // A zeroized, fixed-length buffer: the typed secret never reaches
         // the heap and is wiped when this attempt's buffer drops.
         let mut passphrase = Zeroizing::new([0u8; MAX_PASSPHRASE_LEN]);
-        let len = match read_passphrase_line(input, &mut passphrase[..]) {
+        // Only the *first* prompt inherits a byte the ESC window pre-read;
+        // every re-prompt starts empty.
+        let len = match read_passphrase_line(input, &mut passphrase[..], initial_byte.take()) {
             Ok(len) => len,
             Err(PassphraseReadError::TooLong) => {
                 // An over-long line is a wrong attempt, not a fatal console
@@ -1141,6 +1422,21 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // than retry against a dead input.
                 gave_up(audit, "console_unreadable");
                 return UnlockOutcome::GaveUp;
+            }
+            Err(PassphraseReadError::Escape) => {
+                // A lone `ESC` at the live prompt drops into the Supervisor
+                // (when a host is threaded). If the operator mounts from
+                // there the unlock is already resolved; otherwise the REPL
+                // redrew the screen, so re-prompt on a fresh line. With no
+                // host (host tests) an `ESC` is a no-op that simply
+                // re-prompts.
+                if let Some(host) = supervisor.as_deref_mut() {
+                    match enter_supervisor(console, input, host) {
+                        SupervisorExit::Mounted => return UnlockOutcome::Installed,
+                        SupervisorExit::ContinueBoot => {}
+                    }
+                }
+                continue;
             }
         };
 
@@ -1204,6 +1500,34 @@ fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
     }
 }
 
+/// Arms a console's secret-entry activity marker for the lifetime of the
+/// guard, disarming it on drop.
+///
+/// A passphrase read brackets itself with one of these so the `[input active…]`
+/// marker is shown only while the secret line is being typed and is cleared on
+/// *every* exit path — a completed line, a too-long line, a console fault, or a
+/// lone-`ESC` drop to the Supervisor. Because the disarm runs from [`Drop`], no
+/// return path can leak an armed marker into an ordinary echoed read (the
+/// pre-boot Supervisor REPL) that shares the same console reader. A backing
+/// with no secret feedback (the host test consoles) treats both calls as
+/// no-ops.
+struct SecretScope<'a> {
+    input: &'a dyn ConsoleRead,
+}
+
+impl<'a> SecretScope<'a> {
+    fn new(input: &'a dyn ConsoleRead) -> Self {
+        input.set_secret(true);
+        Self { input }
+    }
+}
+
+impl Drop for SecretScope<'_> {
+    fn drop(&mut self) {
+        self.input.set_secret(false);
+    }
+}
+
 /// Read one passphrase line from `input` into `buf`, returning its length.
 ///
 /// Reads byte by byte so the read never consumes past the line terminator
@@ -1223,9 +1547,35 @@ fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
 fn read_passphrase_line(
     input: &dyn ConsoleRead,
     buf: &mut [u8],
+    initial: Option<u8>,
 ) -> Result<usize, PassphraseReadError> {
+    // Arm the console's secret-entry activity marker for the span of *this*
+    // read only, so the `[input active…]` indicator appears while the operator
+    // types a passphrase and is cleared the instant the line resolves — on
+    // every return path, including the lone-`ESC` Supervisor drop below. The
+    // guard's drop disarms it, so an echoed command prompt read through the
+    // same console reader (the pre-boot Supervisor REPL) never inherits the
+    // marker.
+    let _secret = SecretScope::new(input);
     let mut editor = tairix_vt::line::LineEditor::new();
     let mut len = 0usize;
+    // A byte the ESC boot window already consumed (the operator began typing
+    // the passphrase before the window elapsed) is this line's first
+    // character: fold it in before reading the rest, so a quickly-typed secret
+    // is never corrupted by a lost leading byte. The window never forwards an
+    // `ESC` (it resolves the Supervisor drop itself), so this byte is ordinary
+    // line content and the lone-`ESC` handling below applies only to a byte
+    // this function reads first-hand.
+    if let Some(byte) = initial {
+        match editor.push(buf, &mut len, byte) {
+            tairix_vt::line::LineFeed::Pending | tairix_vt::line::LineFeed::Escape => {}
+            tairix_vt::line::LineFeed::Complete => return Ok(len),
+            tairix_vt::line::LineFeed::TooLong => {
+                drain_to_newline(input);
+                return Err(PassphraseReadError::TooLong);
+            }
+        }
+    }
     loop {
         let mut byte = [0u8; 1];
         let read = input
@@ -1241,12 +1591,19 @@ fn read_passphrase_line(
                 Ok(len)
             };
         }
+        // A lone `ESC` as the **first** byte of the line drops into the
+        // Supervisor from the live prompt; an `ESC [ …` CSI editor sequence
+        // is consumed and ignored (its bytes never land in the passphrase).
+        // Mid-line, `ESC` is held inertly by the editor exactly as before.
+        if len == 0 && byte[0] == 0x1b {
+            if esc_is_lone_escape(input) {
+                return Err(PassphraseReadError::Escape);
+            }
+            continue;
+        }
         match editor.push(buf, &mut len, byte[0]) {
-            // The passphrase reader does not drive the reader-side lone-`ESC`
-            // re-poll (`LineEditor::resolve_escape`), so `push` never yields
-            // `Escape` here; a bare `ESC` is held exactly as before. Dropping
-            // into the Supervisor on `ESC` is handled ahead of the prompt by
-            // the boot-screen window, not inside this line read.
+            // A bare mid-line `ESC` is held by the editor exactly as before;
+            // the first-byte lone-`ESC` Supervisor drop is handled above.
             tairix_vt::line::LineFeed::Pending | tairix_vt::line::LineFeed::Escape => {}
             tairix_vt::line::LineFeed::Complete => return Ok(len),
             tairix_vt::line::LineFeed::TooLong => {
@@ -1986,7 +2343,7 @@ mod tests {
 
     // --- unlock_root_disk_interactively (the prompt + retry policy) -----
 
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tairix_abi::Errno;
 
@@ -2058,6 +2415,14 @@ mod tests {
         bytes: Vec<u8>,
         cursor: AtomicUsize,
         fail_at: Option<usize>,
+        /// The reader's current secret-entry state, as last set through
+        /// [`ConsoleRead::set_secret`]; the passphrase read arms it and every
+        /// exit path must clear it again.
+        secret: AtomicBool,
+        /// Latches `true` the first time the reader is armed, so a test can
+        /// prove the passphrase read *did* arm the marker (not merely that it
+        /// ended cleared).
+        secret_ever_armed: AtomicBool,
     }
 
     impl ScriptInput {
@@ -2066,6 +2431,8 @@ mod tests {
                 bytes,
                 cursor: AtomicUsize::new(0),
                 fail_at: None,
+                secret: AtomicBool::new(false),
+                secret_ever_armed: AtomicBool::new(false),
             }
         }
 
@@ -2074,6 +2441,8 @@ mod tests {
                 bytes: Vec::new(),
                 cursor: AtomicUsize::new(0),
                 fail_at: Some(0),
+                secret: AtomicBool::new(false),
+                secret_ever_armed: AtomicBool::new(false),
             }
         }
     }
@@ -2093,6 +2462,13 @@ mod tests {
             buf[0] = self.bytes[i];
             self.cursor.store(i + 1, Ordering::Relaxed);
             Ok(1)
+        }
+
+        fn set_secret(&self, secret: bool) {
+            self.secret.store(secret, Ordering::Relaxed);
+            if secret {
+                self.secret_ever_armed.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -2130,6 +2506,85 @@ mod tests {
     }
 
     #[test]
+    fn the_esc_announcement_opens_a_fresh_line_for_the_blank_line_gap() {
+        // The boot screen must show one blank line between the machine-summary
+        // banner and the passphrase prompt. The announcement (which the
+        // in-place prompt overwrites in situ) carries that spacing by opening a
+        // fresh line, exactly as the standalone prompt does — so a regression
+        // that drops the leading newline (and with it the blank line) fails
+        // here.
+        assert!(
+            SUPERVISOR_ANNOUNCE.starts_with(b"\r\n"),
+            "the announcement opens a fresh line so a blank line precedes it: {SUPERVISOR_ANNOUNCE:?}",
+        );
+        assert!(
+            FS_UNLOCK_PROMPT.starts_with(b"\r\n"),
+            "the standalone prompt draws the same one-blank-line spacing",
+        );
+    }
+
+    #[test]
+    fn a_passphrase_read_arms_the_secret_marker_only_across_its_own_read() {
+        // The `[input active…]` marker must appear only while a passphrase line
+        // is being typed. `read_passphrase_line` arms the reader for the span
+        // of its read and clears it on return, so an echoed command prompt read
+        // through the same console reader (the pre-boot Supervisor REPL) never
+        // inherits the marker. A regression that armed the marker for the whole
+        // unlock window (or forgot to clear it) leaves `secret` set here.
+        let input = ScriptInput::new(script(&[PASSPHRASE]));
+        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let len =
+            read_passphrase_line(&input, &mut buf[..], None).expect("the scripted line reads");
+        assert_eq!(len, PASSPHRASE.len(), "the whole passphrase was read");
+        assert!(
+            input.secret_ever_armed.load(Ordering::Relaxed),
+            "the marker was armed while the passphrase was typed",
+        );
+        assert!(
+            !input.secret.load(Ordering::Relaxed),
+            "the marker is cleared again the instant the read resolves",
+        );
+    }
+
+    #[test]
+    fn a_byte_pre_read_by_the_esc_window_leads_the_passphrase_line() {
+        // The ESC boot window consumes one byte while it waits. If the operator
+        // began typing the passphrase before the window elapsed, that byte is
+        // the line's first character and must be folded into the read — never
+        // discarded, which would silently corrupt the secret and doom the
+        // unlock to endless wrong-passphrase retries (the boot-hang defect).
+        let first = PASSPHRASE[0];
+        let rest = ScriptInput::new(script(&[&PASSPHRASE[1..]]));
+        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let len = read_passphrase_line(&rest, &mut buf[..], Some(first))
+            .expect("the remainder of the line reads");
+        assert_eq!(
+            &buf[..len],
+            PASSPHRASE,
+            "the pre-read byte leads the reconstructed passphrase, nothing lost",
+        );
+    }
+
+    #[test]
+    fn a_lone_escape_clears_the_secret_marker_before_the_supervisor_drop() {
+        // A lone `ESC` at the live prompt drops to the Supervisor. The marker
+        // must be cleared before the (echoed) REPL runs, so it does not paint
+        // over the REPL's own echo — the drop-guard clears it on this early
+        // return exactly as on a completed line.
+        let input = ScriptInput::new(alloc::vec![0x1b]);
+        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let outcome = read_passphrase_line(&input, &mut buf[..], None);
+        assert!(
+            matches!(outcome, Err(PassphraseReadError::Escape)),
+            "a lone ESC as the first byte requests the Supervisor drop",
+        );
+        assert!(
+            !input.secret.load(Ordering::Relaxed),
+            "the marker is cleared before the Supervisor REPL runs",
+        );
+    }
+
+    #[test]
     fn the_typed_passphrase_unlocks_and_installs_into_the_late_cell() {
         // The whole interactive path: the operator types the correct
         // passphrase at the first prompt, the disk unlocks, and the loaded
@@ -2155,6 +2610,7 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2219,6 +2675,7 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2275,6 +2732,7 @@ mod tests {
                 delays.fetch_add(1, Ordering::Relaxed);
             },
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2342,6 +2800,7 @@ mod tests {
                 delays.fetch_add(1, Ordering::Relaxed);
             },
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -2387,6 +2846,7 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -2428,6 +2888,7 @@ mod tests {
             &RecordingSink::new(),
             &|| {},
             &|| releases.set(releases.get() + 1),
+            None,
         );
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert_eq!(
@@ -2452,6 +2913,7 @@ mod tests {
             &RecordingSink::new(),
             &|| {},
             &|| releases.set(releases.get() + 1),
+            None,
         );
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert_eq!(
@@ -2485,6 +2947,7 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -2522,6 +2985,7 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
+            None,
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);

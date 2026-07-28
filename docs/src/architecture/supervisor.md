@@ -14,12 +14,16 @@ it adds no user-facing ABI, syscall, or `lib/abi` type.
 
 The on-screen wording is fixed and byte-exact:
 
-1. `[Press ESC for supervisor]` is shown for two seconds.
-2. If no key is pressed, it is replaced **in place** by the `ARXFS
-   passphrase: ` prompt and boot proceeds normally.
+1. `[Press ESC for supervisor]` is shown for two seconds on its own line, one
+   blank line below the boot banner — the same one-blank-line spacing the
+   `ARXFS passphrase: ` prompt uses, so the screen is laid out identically
+   whether or not the operator enters the console.
+2. If no key is pressed, the announcement is replaced **in place** by the
+   `ARXFS passphrase: ` prompt (the blank line above it is preserved) and boot
+   proceeds normally.
 3. If `ESC` is pressed — during the window or at the passphrase prompt — the
    prompt/message line collapses to `ARXFS`, then a blank line, then
-   `Supervisor`, and the REPL opens with the prompt `* `:
+   `Supervisor`, and the REPL opens with the prompt `*`:
 
    ```
    ARXFS
@@ -27,6 +31,11 @@ The on-screen wording is fixed and byte-exact:
    Supervisor
    *
    ```
+
+The REPL echoes what the operator types like an ordinary command prompt: the
+`[input active…]` secret-entry marker is shown **only** while a passphrase is
+being typed (the `mount` command or the live unlock prompt), never for the
+command line itself.
 
 Leaving the REPL with `continue` resumes the normal boot (the passphrase
 prompt is redrawn); `mount` performs the real unlock now and continues

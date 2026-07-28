@@ -282,12 +282,12 @@ pub fn finish_unlock<B: Block + 'static>(
         let (console_write, raw_read) = console.acquire_console0();
         // The passphrase prompt's secret-entry feedback: the same
         // `[input active...]` marker a user-space password read shows, drawn
-        // to this console's own output. Armed for the whole unlock window —
-        // the marker only ever appears while a passphrase line is partially
-        // typed (it hides on Enter and on a full erase), so the silent blank
-        // probe and the mount attempts render nothing.
+        // to this console's own output. It is armed only for the span of an
+        // actual passphrase read (`read_passphrase_line` brackets its read
+        // through the reader's `set_secret` seam) and stays disarmed for the
+        // ESC boot-screen window and the echoed Supervisor REPL that share
+        // this reader, so the marker never paints over the REPL's own echo.
         let secret = SecretFeedback::new(console_write);
-        secret.arm();
         // The kthread's own scheduler id (published at admission), so the
         // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
         // by id.
@@ -327,25 +327,38 @@ pub fn finish_unlock<B: Block + 'static>(
                 crate::unlock_service::WRONG_PASSPHRASE_RETRY_DELAY_NS,
             );
         };
+        // The set-once publish destinations a successful unlock fills. Bound
+        // by name so the pre-unlock Supervisor's `mount` command publishes
+        // through the *same* cells the interactive prompt would — one install,
+        // no second definition.
+        let install = UnlockInstall {
+            users: &LATE_USERS_DB,
+            identity: &LATE_IDENTITY,
+            writable: &writable,
+            admin: Some(AdminInstall {
+                cell: &LATE_USERS_ADMIN,
+                users: &LATE_USERS_DB,
+                identity: &LATE_IDENTITY,
+                audit,
+            }),
+            storage_gid: &crate::volume_policy::LATE_STORAGE_GID,
+        };
+        // The pre-boot Supervisor console the ESC boot-screen window drops
+        // into: it presents the already-computed bootstrap-floor state and,
+        // on `mount`, runs the real unlock through `install`. It reads the
+        // shared boot disk through its own windows, so it never contends with
+        // the passphrase prompt's window.
+        let mut supervisor =
+            crate::supervisor_host::KernelSupervisorHost::new(store, &install, audit);
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
             &reader,
-            &UnlockInstall {
-                users: &LATE_USERS_DB,
-                identity: &LATE_IDENTITY,
-                writable: &writable,
-                admin: Some(AdminInstall {
-                    cell: &LATE_USERS_ADMIN,
-                    users: &LATE_USERS_DB,
-                    identity: &LATE_IDENTITY,
-                    audit,
-                }),
-                storage_gid: &crate::volume_policy::LATE_STORAGE_GID,
-            },
+            &install,
             audit,
             &retry_delay,
             &release,
+            Some(&mut supervisor),
         ) {
             UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
             UnlockOutcome::GaveUp => note(

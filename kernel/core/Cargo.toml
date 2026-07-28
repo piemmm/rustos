@@ -58,6 +58,11 @@ test-arch = ["tairix-kernel-sched-api/test-arch"]
 # shared lib/* crates `abi`, `caps`, `crypto`, `log`, `rng`, and `util`
 # (`AGENTS.md` §17.4 — kernel/* may depend on lib/*). Nothing else.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+# The arch-neutral pre-boot Supervisor console engine (`plans/NEW-SUPERVISOR.md`):
+# kernel/core hosts the live `SupervisorSystem` provider (`src/supervisor_system.rs`)
+# the Supervisor's version/mem/cpu/uptime/memtest/reboot commands read through,
+# built once over the leaked `KernelState`. A `lib/*` crate (`AGENTS.md` §17.4).
+tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }

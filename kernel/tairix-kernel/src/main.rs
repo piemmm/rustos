@@ -81,6 +81,9 @@ mod kernel {
         // Log stream: the raw COM1 sink. Audit stream: the fan-out that both
         // renders to COM1 and retains the trail in the tail-able boot audit
         // ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
+        let _ = tairix_kernel_core::install_boot_log_tail(
+            &tairix_kernel::x86_64::boot::BOOT_AUDIT_RING,
+        );
         boot(
             boot_info,
             &SERIAL_SINK,
@@ -156,6 +159,7 @@ mod kernel {
         // Log stream: the raw PL011 sink. Audit stream: the fan-out that both
         // renders to the PL011 and retains the trail in the tail-able boot
         // audit ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
+        let _ = tairix_kernel_core::install_boot_log_tail(&boot::BOOT_AUDIT_RING);
         boot::boot(
             dtb,
             &SERIAL_SINK,
@@ -235,6 +239,7 @@ mod kernel {
         // renders to the SBI console and retains the trail in the tail-able
         // boot audit ring the pre-boot Supervisor reads
         // (`plans/NEW-SUPERVISOR.md`).
+        let _ = tairix_kernel_core::install_boot_log_tail(&boot::BOOT_AUDIT_RING);
         boot::boot(
             hartid,
             dtb,

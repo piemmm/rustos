@@ -40,7 +40,7 @@ exception.
   1. `[Press ESC for supervisor]` — shown for 2 seconds.
   2. `ARXFS passphrase: ` — replaces (1) in place after the window.
   3. On ESC: the prompt/message line collapses to `ARXFS`, then a **blank
-     line**, then `Supervisor`, then the REPL prompt `* `.
+     line**, then `Supervisor`, then the REPL prompt `*`.
 - **Reuse, never re-derive (§2.2).** Every datum the Supervisor shows is
   already computed elsewhere: `kernel/core::memtest` over
   `tairix_kernel_mem::ramtest` (RAM test), `kernel/core::introspect_source`
@@ -113,26 +113,40 @@ everywhere.)
 
 State machine (all timed reads are parks, never spins):
 
-1. **Announce.** `write_all(console, b"[Press ESC for supervisor]")`.
+1. **Announce.** `write_all(console, b"\r\n[Press ESC for supervisor]")`. The
+   leading `\r\n` opens a fresh line, so one blank line separates the boot
+   banner (userland `init`'s machine-summary line beneath the
+   `TAIRiX <v> <RAM>MiB` counter) from the announcement — the same
+   one-blank-line spacing the standalone `FS_UNLOCK_PROMPT` draws, so the
+   screen is laid out identically whether the window is entered, skipped, or
+   times out.
 2. **Timed read window.** Loop until a 2-second deadline
    (`park_for_ns`-style: register a timed wakeup on `CONSOLE_WAITQ`, park,
    re-check the clock), polling `input` for one byte on each wake:
    - `ESC` (`0x1b`) → **enter Supervisor** (step 5). But `ESC` also opens
      CSI sequences (arrow/Delete keys the `LineEditor` consumes), so a lone
-     `ESC` must be disambiguated from `ESC [ …` — see §3.
-   - any other byte → discard it (so it cannot leak into the passphrase)
-     and fall through to the prompt.
-   - deadline reached with no byte → fall through.
-3. **Redraw in place.** Overwrite the message with the passphrase prompt on
-   the same line: `write_all(console, b"\rARXFS passphrase: \x1b[K")`. (The
-   `\r` returns to column 0 and `\x1b[K` erases the longer message's tail —
-   the same in-place technique `FS_UNLOCKED_LINE` already uses.) The unlock
-   then proceeds exactly as today (silent blank probe, then the interactive
-   loop). **Note:** the existing `FS_UNLOCK_PROMPT` opens with `\r\n`; when
-   the ESC window has already drawn the line, use the CR-in-place redraw
-   above instead of re-emitting `\r\n`, so the prompt lands on the message's
-   line rather than a fresh one. Keep both spellings built from the single
-   `fs_label!()` macro (§2.2) — extend it, do not add a second literal.
+     `ESC` must be disambiguated from `ESC [ …` — see §3. A CSI editor
+     sequence is drained and ignored (it is a stray key, not passphrase
+     content), then falls through to the prompt.
+   - any other byte → the operator has begun typing the passphrase before
+     the window elapsed, so it is the **first character of the passphrase
+     line**: carry it out of the window (`EscWindow::Continue { initial }`)
+     and feed it to `read_passphrase_line` as that line's first byte, then
+     fall through to the prompt. It must **never** be discarded — dropping it
+     silently corrupts a quickly-typed secret and dooms the unlock to endless
+     wrong-passphrase retries (the boot-hang the QEMU verticals caught).
+   - deadline reached with no byte → fall through with no carried byte.
+3. **Redraw in place.** Overwrite the announcement with the passphrase prompt
+   on the same line: `write_all(console, b"\rARXFS passphrase: \x1b[K")`. (The
+   `\r` returns to column 0 of the announcement line and `\x1b[K` erases the
+   longer message's tail — the same in-place technique `FS_UNLOCKED_LINE`
+   already uses.) The unlock then proceeds exactly as today (silent blank
+   probe, then the interactive loop). Because the announcement already opened a
+   fresh line (step 1), the CR-in-place redraw leaves the prompt on that line
+   with the blank line still above it — identical to the standalone
+   `FS_UNLOCK_PROMPT`'s own-line spacing, so no line gap is lost. Keep both
+   spellings built from the single `fs_label!()` macro (§2.2) — extend it, do
+   not add a second literal.
 4. **ESC at the live passphrase prompt.** ESC must *also* drop to the
    Supervisor while the `ARXFS passphrase: ` prompt is up. `read_passphrase_line`
    gains a new outcome: a lone `ESC` as the **first** byte of a line returns
@@ -145,13 +159,13 @@ State machine (all timed reads are parks, never spins):
    \r\n                  (one blank line)
    Supervisor\r\n
    ```
-   Then call `lib/supervisor::run_supervisor(...)`, whose prompt is `* `.
+   Then call `lib/supervisor::run_supervisor(...)`, whose prompt is `*`.
    On-screen result:
    ```
    ARXFS
 
    Supervisor
-   * 
+   *
    ```
 6. **Supervisor exit resumes boot.** `continue` (§4) returns from
    `run_supervisor`; control falls back into the normal unlock path
@@ -323,7 +337,7 @@ Land in the **same change**:
 - **QEMU integration vertical**: drive ESC at *both* trigger points and
   assert the **byte-exact** boot-screen strings (`[Press ESC for
   supervisor]` → in-place redraw to `ARXFS passphrase: ` on timeout; ESC →
-  `ARXFS`, blank line, `Supervisor`, `* `). Add the script alongside the
+  `ARXFS`, blank line, `Supervisor`, `*`). Add the script alongside the
   existing `UNLOCK_PASSPHRASE_LINE` script in
   `tools/xtask/src/commands/qemu_tests.rs`. Assert `continue` resumes to a
   normal boot and `mount` unlocks and boots.
@@ -363,7 +377,7 @@ Land in the **same change**:
   `SupervisorHost` seams and the `SupervisorExit` / `TestOutcome` /
   `MountOutcome` / `SupervisorEvent` vocabulary (`src/lib.rs`); the `&'static`
   command table + tokeniser + case-insensitive dispatcher + `help`
-  (`src/dispatch.rs`); the `* ` REPL + line reader/echo (`src/repl.rs`); every
+  (`src/dispatch.rs`); the `*` REPL + line reader/echo (`src/repl.rs`); every
   built-in command over the seams (`src/commands/{control,info,diag}.rs`); and
   full host tests via the in-memory mocks (`src/commands/test_support.rs`).
   `no_std`, alloc-free, clippy-clean under `-D warnings`.
@@ -449,27 +463,53 @@ Land in the **same change**:
     QEMU boot verticals inject their own audit sink, so retention is
     production-only and never disturbs a test's audit interception.
 
-**Remaining (the kernel consumer):**
+**Done (the kernel consumer — the `SupervisorHost` and the ESC boot-screen):**
 
-1. A kernel `SupervisorHost` wiring each command to its existing source
-   (introspect/version/mem/uptime/date, `tairix_kernel_mem::ram_selftest`
-   for `memtest`, `lib/partition`, the `lib/abi` hardware tree, the ARXFS
-   descriptor read, the `/System` `FilesystemRead` for `ls`,
-   `KernelArch::reboot`/`poweroff` for control, and the real
-   `mount_root_disk_and_load_users` for `mount`), plus the `41xx`
-   `SupervisorEvent` audit ids. Its `log_tail` reads the `BOOT_AUDIT_RING`
-   composed above (`seq_range()`/`record(seq)`); `panic-log` reads the
-   `WATCHDOG.md` / `FIX-PANICS.md` records, not this ring.
-2. The ESC boot-screen window at the top of
-   `root_mount.rs :: unlock_root_disk_interactively_impl` (byte-exact
-   `[Press ESC for supervisor]` → 2 s timed park → in-place redraw to
-   `ARXFS passphrase: `; ESC → `ARXFS`, blank line, `Supervisor`, `* `),
-   including the timed-read/non-blocking-poll primitive and the ESC-vs-CSI
-   re-poll driving `LineEditor::resolve_escape`, threading the
-   `SupervisorHost` through the unlock path from `unlock_orchestrate.rs`.
-3. The QEMU integration vertical driving ESC at both trigger points with the
-   byte-exact boot-screen assertions, and a fuzz harness over the REPL parser.
+- `kernel/tairix-kernel/src/supervisor_host.rs :: KernelSupervisorHost<'a, B>`
+  — the binding kernel's `SupervisorHost`. Rendering/control/`memtest`
+  delegate to the boot-published `SupervisorSystem`
+  (`tairix_kernel_core::supervisor_system()`); `log_tail` reads the retained
+  `BOOT_AUDIT_RING` through `boot_log_tail()` (`seq_range()`/`record(seq)`);
+  `hardware` reads `HW_TREE.snapshot()`; `disks`/`partitions`/`arxfs`/`ls`/
+  `scan_disk` read the shared boot disk through independent `store.window()`
+  windows + `lib/partition` + `with_system_volume`; `mount` runs the **real**
+  `mount_root_disk_and_load_users` + `finish_install` (no oracle, no
+  fail-open) through the *same* `UnlockInstall` cells the interactive prompt
+  fills. Every state-changing decision audits a stable `41xx` id
+  (`4150..=4156`). `panic-log` honestly reports "no persisted record" until a
+  cross-boot panic store exists (`FIX-PANICS.md`/`WATCHDOG.md` record live,
+  not persistently) — it never fabricates one.
+- The ESC boot-screen window at the top of
+  `root_mount.rs :: unlock_root_disk_interactively_impl`, byte-exact:
+  `[Press ESC for supervisor]` → 2 s timed park (`ConsoleRead::read_timeout`,
+  a genuine bounded park) → in-place redraw `\rARXFS passphrase: \x1b[K`; a
+  lone `ESC` → `\rARXFS\x1b[K\r\n\r\nSupervisor\r\n` then `run_supervisor`.
+  ESC-vs-CSI disambiguation is a bounded re-poll (`esc_is_lone_escape` /
+  `drain_csi_sequence`). ESC **also** drops in at the live passphrase prompt
+  (`read_passphrase_line` returns `PassphraseReadError::Escape` on a
+  first-byte lone `ESC`); both entry points share one `enter_supervisor`
+  banner+REPL definition. The host is built in `unlock_orchestrate.rs`'s
+  unlock body and threaded as `Option<&mut dyn SupervisorHost>`
+  (`None` in host tests, so their behaviour is unchanged); on
+  `SupervisorExit::Mounted` the unlock returns `Installed` with no further
+  prompt. `install_boot_log_tail(&BOOT_AUDIT_RING)` is published on each
+  Tier-1 `kernel_main`.
+- Compiles clean on the host and all three freestanding Tier-1 targets;
+  clippy `-D warnings` clean; the 27 `root_mount` host tests pass with the
+  new signature.
 
-The engine layer, the machine-control seam, and the boot audit-log
-composition are complete and green; items 1–3 are the remaining kernel
-wiring (the `SupervisorHost` first, as items 2–3 depend on it).
+**Remaining:**
+
+1. The QEMU integration vertical driving `ESC` at both trigger points with
+   the byte-exact boot-screen assertions (alongside the existing
+   `UNLOCK_PASSPHRASE_LINE` script in `tools/xtask/src/commands/qemu_tests.rs`),
+   asserting `continue` resumes a normal boot and `mount` unlocks and boots.
+2. A `cargo xtask fuzz` harness over the REPL line/command parser (untrusted
+   console input, §19.6).
+3. The full whole-workspace validation gate (`cargo xtask ci` + `fuzz
+   --secs 5` + `soak.sh both --secs 20`) run to green.
+
+The arch-neutral engine, the machine-control seam, the boot audit-log
+composition, the `SupervisorHost`, and the ESC boot-screen (both entry
+points) are complete and compiling on every Tier-1 target; the QEMU
+vertical, the REPL fuzz harness, and the full gate remain.

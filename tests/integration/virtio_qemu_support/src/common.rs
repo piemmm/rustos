@@ -791,6 +791,10 @@ mod root_unlock {
             // wrong-passphrase delay is never invoked; a no-op stands in.
             &|| {},
             &|| released.store(true, Ordering::Release),
+            // No pre-boot Supervisor host: this vertical drives the unlock
+            // *policy* over a scripted passphrase, not the ESC boot-screen
+            // window, so the window is skipped exactly as on a host test.
+            None,
         );
         if outcome != UnlockOutcome::Installed {
             return Err("interactive unlock did not install a database");

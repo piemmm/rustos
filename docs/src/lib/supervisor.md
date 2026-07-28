@@ -31,7 +31,7 @@ to the world only through object-safe seams:
   the interruptible `memtest`/`test disk`, and the audited control actions
   `mount`, `reboot`, `poweroff`).
 
-`run_supervisor` drives the `* ` REPL to a `SupervisorExit` (`ContinueBoot` or
+`run_supervisor` drives the `*` REPL to a `SupervisorExit` (`ContinueBoot` or
 `Mounted`) the boot path acts on. Nothing allocates and nothing panics on any
 input.
 

@@ -1811,9 +1811,14 @@ fn run_phases<A: KernelArch>(
     // to the free RAM it tests; it leaves every tested region zeroed, and a
     // detected fault halts the boot rather than run on memory the kernel
     // could not trust (fail closed).
-    crate::memtest::run(arch.as_ref(), &memory_map, installed_memory_bytes, consoles);
+    // Retain the boot memory map `'static`: the frame allocator is built from
+    // it here, and the pre-boot Supervisor's `mem map` command lists its
+    // usable/reserved regions later (`plans/NEW-SUPERVISOR.md`) — one owner,
+    // no second copy.
+    let memory_map: &'static tairix_kernel_mem::BootMemoryMap = Box::leak(Box::new(memory_map));
+    crate::memtest::run(arch.as_ref(), memory_map, installed_memory_bytes, consoles);
     let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
-        FrameAllocator::new(&memory_map).map_err(InitError::Mem)?,
+        FrameAllocator::new(memory_map).map_err(InitError::Mem)?,
     ));
     // Activate growable kernel-heap backing at the first point both required
     // components exist. Scheduler/runtime initialization allocates from the
@@ -2144,6 +2149,26 @@ fn run_phases<A: KernelArch>(
             kernel_heap_bytes,
         )),
     );
+
+    // The pre-boot Supervisor's live system-state provider
+    // (`plans/NEW-SUPERVISOR.md`): built over the same leaked `KernelState`
+    // (arch handle, frame allocator, scheduler), the retained boot memory
+    // map, and the wall clock, then published set-once for the binding
+    // kernel's Supervisor host to read through
+    // `crate::supervisor_system::supervisor_system`. Leaked for the same
+    // one-shot-publish reason as the introspection source. A second install
+    // fails closed rather than re-pointing the live provider; the boot path
+    // installs it exactly once, so the result is discarded.
+    let supervisor_system: &'static (dyn crate::supervisor_system::SupervisorSystem + 'static) =
+        Box::leak(Box::new(
+            crate::supervisor_system::KernelSupervisorSystem::new(
+                state,
+                memory_map,
+                wall_clock,
+                kernel_heap_bytes,
+            ),
+        ));
+    let _ = crate::supervisor_system::install_supervisor_system(supervisor_system);
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for

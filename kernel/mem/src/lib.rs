@@ -91,7 +91,10 @@ pub use pressure::{
     escalation, ramzip_handoff, ramzip_reclaim_batch, shrink_target, EscalationStep,
     FreeMemorySource, MemoryPressure, PressureBand, PressureThresholds, RamzipHandoff,
 };
-pub use ramtest::{run as ram_selftest, RamFault, Word as RamTestWord, PROGRESS_STEP_BYTES};
+pub use ramtest::{
+    run as ram_selftest, test_owned_window as ram_test_owned_window, RamFault, Word as RamTestWord,
+    PROGRESS_STEP_BYTES,
+};
 pub use ramzip::{
     eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,
     PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipFaultOutcome, RamzipLedger,
