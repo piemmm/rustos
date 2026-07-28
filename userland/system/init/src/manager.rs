@@ -13,16 +13,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
-use tairix_abi::{
-    decode_capability_ids, CapabilityId, Errno, LifecycleSignal, ManifestHeader, ReadinessKind,
-    ReadyCondition, ServiceState, MANIFEST_MAX_CAPABILITIES,
-};
+use tairix_abi::{LifecycleSignal, ReadinessKind, ReadyCondition, ServiceState};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::error::{InitError, NotifyError, StartFailure};
 use crate::events;
-use crate::service::{Pid, ReapedChild, Reaper, ServiceSpec, Spawner};
+use crate::registry::Enrolment;
+use crate::service::{
+    decode_manifest_capabilities, Pid, ReapedChild, Reaper, ServiceSpec, Spawner,
+};
 
 /// Number of distinct named readiness conditions, sized from the closed
 /// [`ReadyCondition`] set so the satisfied-conditions bitmap tracks the
@@ -186,6 +186,49 @@ impl<'a> Init<'a> {
             state: ServiceState::Inactive,
             pid: None,
         });
+        Ok(())
+    }
+
+    /// Register the discovered service bundles that are **enrolled**,
+    /// skipping (and auditing) those that are present on disk but not.
+    ///
+    /// This is the discovery → registration → activation split
+    /// (`plans/NEW-SERVICEMANAGER.md` §3.1): `discovered` is what a scan of
+    /// `/System/Services` turned up (each already parsed into a
+    /// [`ServiceSpec`] by the loader seam), and `enrolment` is the
+    /// fail-closed enrolment record read from the registration store. A
+    /// bundle is registered for bring-up **only** if
+    /// [`Enrolment::is_enabled`] returns `true` for its name; a discovered
+    /// bundle that is not enrolled is never registered — presence on disk
+    /// grants no eligibility (no ambient authority). Each skip emits
+    /// [`events::SERVICE_NOT_ENROLLED`].
+    ///
+    /// Registration only records the service; the capability grant is still
+    /// intersected with the system authority at start
+    /// ([`Init::start_all`]), so enrolling a service can never widen the
+    /// authority it ultimately runs with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InitError::DuplicateService`] if two enrolled bundles share
+    /// a name (a packaging defect), failing closed before any is brought up.
+    pub fn register_enrolled(
+        &mut self,
+        discovered: Vec<ServiceSpec>,
+        enrolment: &Enrolment,
+    ) -> Result<(), InitError> {
+        for spec in discovered {
+            if enrolment.is_enabled(spec.name()) {
+                self.register(spec)?;
+            } else {
+                self.audit(
+                    events::SERVICE_NOT_ENROLLED,
+                    Level::Info,
+                    spec.name(),
+                    "not enrolled",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -529,23 +572,11 @@ impl<'a> Init<'a> {
 
     /// Decode a service manifest into the capability set it requests.
     fn requested_capabilities(&self, idx: usize) -> Result<CapabilitySet, StartFailure> {
-        let manifest = self.services[idx].spec.manifest();
-        let header = ManifestHeader::from_bytes(manifest).map_err(StartFailure::ManifestInvalid)?;
-        if header.abi_version != self.cfg.accepted_abi_version {
-            return Err(StartFailure::ManifestInvalid(Errno::AbiVersionUnsupported));
-        }
-        let count = usize::from(header.capability_count);
-        let body = manifest
-            .get(ManifestHeader::WIRE_LEN..)
-            .ok_or(StartFailure::ManifestInvalid(Errno::BufferTooSmall))?;
-        let mut scratch = [CapabilityId::FS_MOUNT; MANIFEST_MAX_CAPABILITIES as usize];
-        let decoded = decode_capability_ids(body, count, &mut scratch)
-            .map_err(StartFailure::ManifestInvalid)?;
-        let mut set = CapabilitySet::empty();
-        for cap in &scratch[..decoded] {
-            set.insert(*cap);
-        }
-        Ok(set)
+        decode_manifest_capabilities(
+            self.services[idx].spec.manifest(),
+            self.cfg.accepted_abi_version,
+        )
+        .map_err(StartFailure::ManifestInvalid)
     }
 
     fn emit(&self, level: Level, id: EventId, fields: &[Field<'_>]) {
@@ -701,6 +732,7 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_READY => "service ready",
         events::CONDITION_SATISFIED => "readiness condition satisfied",
         events::NOTIFY_REJECTED => "readiness notice rejected",
+        events::SERVICE_NOT_ENROLLED => "service not enrolled: skipped",
         _ => "init event",
     }
 }
@@ -968,6 +1000,56 @@ mod tests {
             Err(InitError::DuplicateService)
         );
         assert_eq!(init.registered_count(), 1);
+    }
+
+    #[test]
+    fn register_enrolled_registers_only_enrolled_bundles_and_audits_skips() {
+        use crate::registry::Enrolment;
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let authority = cap_set(&[CapabilityId::FS_MOUNT]);
+        let mut init = Init::new(cfg(authority, &spawner, &reaper, &sink));
+
+        // Three bundles are discovered on disk; only two are enrolled.
+        let discovered = alloc::vec![
+            spec("netstack", &[], &[]),
+            spec("sysinfod", &[], &[]),
+            spec("rogue", &[], &[]),
+        ];
+        let enrolment = Enrolment::parse("netstack\nsysinfod\n").expect("parses");
+
+        init.register_enrolled(discovered, &enrolment).unwrap();
+
+        // The present-but-unenrolled `rogue` bundle is never registered:
+        // presence on disk grants no eligibility. The skip is audited.
+        assert_eq!(init.registered_count(), 2);
+        assert_eq!(sink.count(events::SERVICE_NOT_ENROLLED), 1);
+
+        let report = init.start_all().unwrap();
+        let mut started = started_names(&report);
+        started.sort_unstable();
+        assert_eq!(started, ["netstack", "sysinfod"]);
+        assert!(init.running_pid("rogue").is_none());
+    }
+
+    #[test]
+    fn register_enrolled_with_an_empty_enrolment_registers_nothing() {
+        use crate::registry::Enrolment;
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(CapabilitySet::empty(), &spawner, &reaper, &sink));
+
+        // A missing or corrupt store resolves to the empty enrolment, so no
+        // discovered bundle is eligible — nothing auto-starts, fail closed.
+        let discovered = alloc::vec![spec("netstack", &[], &[]), spec("sysinfod", &[], &[])];
+        init.register_enrolled(discovered, &Enrolment::empty())
+            .unwrap();
+
+        assert_eq!(init.registered_count(), 0);
+        assert_eq!(sink.count(events::SERVICE_NOT_ENROLLED), 2);
+        assert!(spawner.launched.borrow().is_empty());
     }
 
     #[test]

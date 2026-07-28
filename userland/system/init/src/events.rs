@@ -50,16 +50,22 @@ pub const CONDITION_SATISFIED: EventId = EventId(9_009);
 /// arrived for a service that was not in the `starting` state (a protocol
 /// violation). Fails closed — the notice is ignored, never trusted.
 pub const NOTIFY_REJECTED: EventId = EventId(9_010);
+/// A discovered `/System/Services` bundle was **not** registered for
+/// bring-up because it is not enrolled in the registration store: presence
+/// on disk never implies eligibility, so an unenrolled bundle is skipped
+/// (fail closed) rather than started. The security-relevant decision is
+/// audited so an operator can see a present-but-inactive service.
+pub const SERVICE_NOT_ENROLLED: EventId = EventId(9_011);
 
 #[cfg(test)]
 mod tests {
     use super::{
         CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END, INIT_RANGE_START, NOTIFY_REJECTED,
-        ORPHAN_REAPED, SERVICE_DENIED, SERVICE_EXITED, SERVICE_READY, SERVICE_SKIPPED,
-        SERVICE_STARTED, SERVICE_START_FAILED,
+        ORPHAN_REAPED, SERVICE_DENIED, SERVICE_EXITED, SERVICE_NOT_ENROLLED, SERVICE_READY,
+        SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED,
     };
 
-    const ALL: [u32; 10] = [
+    const ALL: [u32; 11] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_DENIED.0,
@@ -70,6 +76,7 @@ mod tests {
         SERVICE_READY.0,
         CONDITION_SATISFIED.0,
         NOTIFY_REJECTED.0,
+        SERVICE_NOT_ENROLLED.0,
     ];
 
     #[test]

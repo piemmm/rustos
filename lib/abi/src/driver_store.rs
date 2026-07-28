@@ -62,16 +62,17 @@ const OP_READ_CONFIG: u8 = 4;
 pub const READ_CONFIG_REQUEST_LEN: usize = 1 + 1;
 
 /// One of the closed set of `/System/Settings/` configuration files the
-/// read-only `/System` store service will read on the device manager's
+/// read-only `/System` store service will read on a bootstrap client's
 /// behalf.
 ///
-/// The device manager needs these *before the encrypted root is unlocked*,
-/// so it cannot reach them through the general VFS (which is not mounted
-/// until unlock); the store service already owns the `/System` volume and
-/// serves them from there. The set is **closed and whitelisted** — the
-/// service reads exactly these two files and nothing else, so the endpoint
-/// never becomes a general `/System` file-read primitive (fail closed, no
-/// arbitrary path).
+/// A bootstrap client needs these *before the encrypted root is unlocked*
+/// (the device manager needs the network configuration; PID 1 needs the
+/// service enrolment record), so it cannot reach them through the general
+/// VFS (which is not mounted until unlock); the store service already owns
+/// the `/System` volume and serves them from there. The set is **closed and
+/// whitelisted** — the service reads exactly these files and nothing else,
+/// so the endpoint never becomes a general `/System` file-read primitive
+/// (fail closed, no arbitrary path).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SystemConfigFile {
@@ -82,6 +83,16 @@ pub enum SystemConfigFile {
     /// `/System/Settings/Network/network.conf` — the per-interface network
     /// configuration (`match.*` binding, static addressing, bonds).
     Network = 1,
+    /// `/System/Settings/Services/enabled` — the system service **enrolment
+    /// record**: the fail-closed list of discovered `/System/Services`
+    /// bundles that trusted tooling (image build / install / the signed
+    /// update path) has made *eligible* to auto-start or be
+    /// on-demand-activated. PID 1 reads it off the always-mounted read-only
+    /// `/System` before the encrypted root is unlocked, exactly as it reads
+    /// the two config files above. It is only an enablement decision keyed to
+    /// a bundle — never a copy of the bundle's signed unit metadata, and
+    /// never a place a service's authority can be raised.
+    SystemServices = 2,
 }
 
 impl SystemConfigFile {
@@ -98,6 +109,7 @@ impl SystemConfigFile {
         match value {
             0 => Some(Self::System),
             1 => Some(Self::Network),
+            2 => Some(Self::SystemServices),
             _ => None,
         }
     }
@@ -109,6 +121,7 @@ impl SystemConfigFile {
         match self {
             Self::System => "/System/Settings/Configuration/system.conf",
             Self::Network => "/System/Settings/Network/network.conf",
+            Self::SystemServices => "/System/Settings/Services/enabled",
         }
     }
 }
@@ -791,7 +804,11 @@ mod tests {
 
     #[test]
     fn read_config_request_round_trips_each_file() {
-        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+        for which in [
+            SystemConfigFile::System,
+            SystemConfigFile::Network,
+            SystemConfigFile::SystemServices,
+        ] {
             let req = StoreRequest::ReadConfig { which };
             let mut buf = [0u8; READ_CONFIG_REQUEST_LEN];
             let n = req.encode(&mut buf).expect("encodes");
@@ -826,12 +843,17 @@ mod tests {
     fn system_config_file_discriminants_and_paths_are_stable() {
         assert_eq!(SystemConfigFile::System.as_u8(), 0);
         assert_eq!(SystemConfigFile::Network.as_u8(), 1);
+        assert_eq!(SystemConfigFile::SystemServices.as_u8(), 2);
         assert_eq!(SystemConfigFile::from_u8(0), Some(SystemConfigFile::System));
         assert_eq!(
             SystemConfigFile::from_u8(1),
             Some(SystemConfigFile::Network)
         );
-        assert_eq!(SystemConfigFile::from_u8(2), None);
+        assert_eq!(
+            SystemConfigFile::from_u8(2),
+            Some(SystemConfigFile::SystemServices)
+        );
+        assert_eq!(SystemConfigFile::from_u8(3), None);
         assert_eq!(
             SystemConfigFile::System.path(),
             "/System/Settings/Configuration/system.conf"
@@ -839,6 +861,10 @@ mod tests {
         assert_eq!(
             SystemConfigFile::Network.path(),
             "/System/Settings/Network/network.conf"
+        );
+        assert_eq!(
+            SystemConfigFile::SystemServices.path(),
+            "/System/Settings/Services/enabled"
         );
     }
 

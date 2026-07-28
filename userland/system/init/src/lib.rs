@@ -48,11 +48,17 @@
 //! * [`events`] — stable [`tairix_log::EventId`] constants (`9000` range).
 //! * [`error`] — [`InitError`] (graph-level, fail-closed) and the
 //!   per-service [`StartFailure`] recorded in a [`StartReport`].
-//! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, and the
-//!   [`Spawner`] / [`Reaper`] seams.
-//! * [`manager`] — the [`Init`] state machine: `register`, `start_all`,
-//!   the readiness admission engine (`notify`, `satisfy_condition`), and
-//!   `reap`.
+//! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, the
+//!   [`Spawner`] / [`Reaper`] seams, and the shared manifest →
+//!   capability-set decode.
+//! * [`registry`] — service **discovery** and the fail-closed **enrolment
+//!   registry**: which discovered `/System/Services` bundles are *eligible*
+//!   to be brought up ([`Enrolment`]), and the ceiling-checked `enable` /
+//!   `disable` operations ([`enrol`] / [`unenrol`]) that record that
+//!   decision without ever widening authority.
+//! * [`manager`] — the [`Init`] state machine: `register`,
+//!   `register_enrolled`, `start_all`, the readiness admission engine
+//!   (`notify`, `satisfy_condition`), and `reap`.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
@@ -78,8 +84,10 @@ extern crate alloc;
 pub mod error;
 pub mod events;
 pub mod manager;
+pub mod registry;
 pub mod service;
 
 pub use error::{InitError, NotifyError, StartFailure};
 pub use manager::{FailedService, Init, InitConfig, StartReport, StartedService};
-pub use service::{Pid, ReapedChild, Reaper, ServiceSpec, Spawner};
+pub use registry::{enrol, unenrol, EnrolError, Enrolment};
+pub use service::{decode_manifest_capabilities, Pid, ReapedChild, Reaper, ServiceSpec, Spawner};

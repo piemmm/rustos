@@ -11,8 +11,55 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, ReadinessKind, ReadyCondition};
+use tairix_abi::{
+    decode_capability_ids, CapabilityId, Errno, ManifestHeader, ReadinessKind, ReadyCondition,
+    MANIFEST_MAX_CAPABILITIES,
+};
 use tairix_caps::CapabilitySet;
+
+/// Decode a service binary's signed manifest into the capability set it
+/// requests.
+///
+/// This is the one place a manifest's [`ManifestHeader`] prefix and
+/// capability body are turned into a [`CapabilitySet`]; both the bring-up
+/// path ([`Init::start_all`](crate::Init::start_all), which intersects the
+/// request with the system authority) and the enrolment path
+/// ([`registry::enrol`](crate::registry::enrol), which refuses a request that
+/// exceeds the enroller's ceiling) decode through it, so the two can never
+/// disagree about what a manifest asks for (no second copy of the decode).
+///
+/// It does **not** verify the manifest's signature — that is the
+/// [`Spawner`]'s job at launch time; this reads only the already-trusted
+/// bytes to learn the *requested* authority.
+///
+/// # Errors
+///
+/// * [`Errno::AbiVersionUnsupported`] if the manifest targets an ABI version
+///   other than `accepted_abi_version`.
+/// * The [`Errno`] from [`ManifestHeader::from_bytes`] /
+///   [`decode_capability_ids`] if the header or capability body is malformed
+///   or truncated. Every failure is fail-closed: a manifest that does not
+///   decode cleanly grants nothing.
+pub fn decode_manifest_capabilities(
+    manifest: &[u8],
+    accepted_abi_version: u32,
+) -> Result<CapabilitySet, Errno> {
+    let header = ManifestHeader::from_bytes(manifest)?;
+    if header.abi_version != accepted_abi_version {
+        return Err(Errno::AbiVersionUnsupported);
+    }
+    let count = usize::from(header.capability_count);
+    let body = manifest
+        .get(ManifestHeader::WIRE_LEN..)
+        .ok_or(Errno::BufferTooSmall)?;
+    let mut scratch = [CapabilityId::FS_MOUNT; MANIFEST_MAX_CAPABILITIES as usize];
+    let decoded = decode_capability_ids(body, count, &mut scratch)?;
+    let mut set = CapabilitySet::empty();
+    for cap in &scratch[..decoded] {
+        set.insert(*cap);
+    }
+    Ok(set)
+}
 
 /// Process identifier issued by the kernel when a service is spawned.
 ///
@@ -39,7 +86,7 @@ impl Pid {
 /// Static description of one long-running system service.
 ///
 /// The `manifest` is the signed manifest bytes of the service binary (the
-/// [`ManifestHeader`](tairix_abi::ManifestHeader) prefix followed by its
+/// [`ManifestHeader`] prefix followed by its
 /// capability body). [`Init`](crate::Init) decodes it to learn the
 /// capabilities the service requests; it does **not** verify the signature
 /// — that is the [`Spawner`]'s responsibility at launch time.

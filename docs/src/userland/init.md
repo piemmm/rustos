@@ -11,10 +11,11 @@ children that any PID 1 inherits.
 > it stands. The first-class service manager it is growing into is
 > specified in `plans/NEW-SERVICEMANAGER.md`, which evolves this model *in
 > place* (`AGENTS.md` §2.2) — it is not a parallel manager. The service
-> **lifecycle and readiness protocol** described below has landed
-> (`NEW-SERVICEMANAGER.md` SVC-2); discovery-vs-registration vs on-demand
-> endpoint activation, system- and per-user-scope managers, idle linger,
-> and stop/shutdown ordering are still ahead.
+> **lifecycle and readiness protocol** (`NEW-SERVICEMANAGER.md` SVC-2) and
+> **discovery + the fail-closed enrolment registry** (SVC-3) described
+> below have landed; on-demand endpoint activation, system- and
+> per-user-scope managers, idle linger, and stop/shutdown ordering are
+> still ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
@@ -102,6 +103,67 @@ nothing changes. A chain of `immediate` services comes up in one pass; a
 dependency that never reports ready simply leaves its dependents
 `inactive` — fail closed, never a guess (`AGENTS.md` §5.4).
 
+## Discovery and the enrolment registry (`NEW-SERVICEMANAGER.md` SVC-3)
+
+Unlike a driver, a service has no natural activation gate — a driver's is
+"the hardware is physically present and matched" (`AGENTS.md` §18.3), but
+merely dropping a signed service bundle on disk must **not** make a live
+service appear (that would be an ambient-authority-shaped risk). The
+lifecycle is therefore split into three distinct steps (the systemd
+*present-vs-enabled* split, given the capability framing):
+
+1. **Discovery** — *what bundles exist*: a scan of `/System/Services/*.app`
+   reading each signed `AppInfo`, reusing the same store walk drivers use
+   (`AGENTS.md` §18.5/§18.6) — no compiled-in list of which services exist
+   beyond the boot floor.
+2. **Registration / enablement** — *is a discovered bundle eligible* to be
+   brought up. This is an explicit, recorded decision in the **enrolment
+   registry** (`tairix_init::registry`), never implied by presence.
+3. **Activation** — actually starting an eligible service, through the
+   bring-up engine above.
+
+The enrolment registry (`registry::Enrolment`) is the parsed set of
+enabled service names for one scope. The **system** store is read from
+`/System/Settings/Services/enabled`
+(`tairix_abi::driver_store::SystemConfigFile::SystemServices`) off the
+always-mounted read-only `/System` through the same confined, fail-closed
+pre-unlock read path the device manager already uses for its
+configuration — no new read primitive (`AGENTS.md` §16.2). A **per-user**
+store lives under the user's own `/Users/<u>/Settings/Services/` and parses
+identically.
+
+- **The store holds only enrolment records — not unit metadata.** A
+  service's restart policy, activation mode, linger, dependencies,
+  readiness conditions, and rlimits live in its **signed `AppInfo`
+  manifest** (`AGENTS.md` §16.5), so tampering is a load refusal rather
+  than a silent behaviour change. The store records only the decision
+  "this bundle is enabled", keyed to the bundle; duplicating unit metadata
+  into a separately-writable store would be both the duplication
+  `AGENTS.md` §2.2 forbids and a place authority could be raised.
+- **`Init::register_enrolled` registers only enrolled bundles.** Given the
+  discovered set (each parsed into a `ServiceSpec` by the loader seam) and
+  the enrolment record, it registers a bundle for bring-up **only** if it
+  is enabled; a present-but-unenrolled bundle is never registered and its
+  skip is audited (`SERVICE_NOT_ENROLLED`). Presence on disk grants no
+  eligibility (`AGENTS.md` §4).
+- **Fail closed.** The store text is untrusted input: parsing rejects a
+  malformed name (a strict lowercase-`[a-z0-9._-]` bundle identifier, so a
+  `..`- or path-traversal-shaped token can never be enrolled) or a
+  duplicate, and the caller resolves both a **corrupt** and a **missing**
+  store to the empty enrolment — nothing is eligible, never a guess
+  (`AGENTS.md` §5.4, §2.9).
+- **`enable` / `disable` never widen authority.** `registry::enrol` takes
+  the enroller's capability ceiling and the service's signed manifest and
+  **refuses** (`CapabilityEscalation`) to enable a service whose manifest
+  requests authority beyond that ceiling, so a user enabling a service in
+  their own scope can never make it eligible to run with more authority
+  than they hold (`AGENTS.md` §5.2). `disable` (`registry::unenrol`) needs
+  no capability — removing eligibility only narrows authority — but fails
+  closed if the service was not enrolled. Both are pure transforms that
+  return the new record for the caller to write back through the
+  appropriate trusted-path store; the grant is still intersected with the
+  system authority at start regardless (below).
+
 ## Capability granting (`AGENTS.md` §5.2)
 
 A service's grant is the intersection of the capability set its signed
@@ -158,6 +220,7 @@ plumbing and exhaustively testable.
 | 9008 | `SERVICE_READY`        | Info  | a service reached readiness, releasing dependents |
 | 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
 | 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice named an unknown or non-starting service |
+| 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
 
 ## The `Run` entry-point binary and startup config (`plans/PI.md` P6b)
 
@@ -262,7 +325,14 @@ start, the fail-closed missing-dependency and cycle paths, duplicate
 registration, the capability grant as `request ∩ authority`, an
 escalation denial, a spawn failure cascading to its transitive
 dependents, an invalid manifest, and the reaper distinguishing a service
-exit from an inherited orphan. The readiness protocol is covered too: a
+exit from an inherited orphan, and `register_enrolled` registering only
+enrolled bundles while auditing (and never starting) a present-but-
+unenrolled one. The enrolment registry has its own unit tests: fail-closed
+parsing of a corrupt store, the empty (missing-store) case, strict name
+validation rejecting path-traversal and case-collision shapes, the
+canonical-text round trip, idempotent `enrol`, `enrol` refusing a request
+that exceeds the enroller's ceiling, and `unenrol` failing closed on an
+absent service. The readiness protocol is covered too: a
 `notify` dependency gates its dependent until it reports ready, a
 never-ready dependency leaves its dependent `inactive`, a required named
 condition gates a start until satisfied, a provided condition is satisfied

@@ -31,7 +31,13 @@ PID 1 (`userland/system/init`) is already an embryonic service manager:
   cap (SVC-1, done).
 - `events.rs` — reserved audit event IDs in `9000..10000`
   (`SERVICE_STARTED/START_FAILED/DENIED/SKIPPED/EXITED`, `ORPHAN_REAPED`,
-  `GRAPH_REJECTED`).
+  `GRAPH_REJECTED`, `SERVICE_READY/CONDITION_SATISFIED/NOTIFY_REJECTED`,
+  `SERVICE_NOT_ENROLLED`).
+- `registry.rs` — the fail-closed enrolment registry (SVC-3): `Enrolment`
+  (the enabled-service-name set), strict `validate_service_name`, and the
+  ceiling-checked `enrol`/`unenrol` record transforms. `service.rs` also
+  now owns the one shared `decode_manifest_capabilities` the manager and the
+  enrolment ceiling check both use (§2.2).
 
 Two mechanisms already in the tree that this plan reuses rather than
 reinvents (§2.2):
@@ -341,14 +347,45 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   through its engine seam; binding the readiness/control endpoint and mapping
   a kernel-attested sender to a service is SVC-4/SVC-8 work.
 
-### SVC-3 — Discovery + registration store under `/System/Settings`
-- Service discovery over `/System/Services/*.app`; the enrolment-record
-  store at `/System/Settings/Services/` read fail-closed through the
-  existing whitelisted `/System/Settings` read path; the `enable`/`disable`
-  actions (system: build/install/update-path; user: per-user, ceiling-bound).
-- Host tests: a present-but-unregistered bundle never auto-starts; a
-  corrupt/missing store leaves nothing eligible; enrolment never widens
-  authority.
+### SVC-3 — Discovery + registration store under `/System/Settings` — DONE
+- The enrolment engine is `userland/system/init/src/registry.rs` (pure,
+  host-tested, `no_std`+alloc): `Enrolment` is the fail-closed parsed set of
+  enabled service names for one scope (`startup.rs`-style line parser: `#`
+  comments, blank lines ignored, one name per line). `validate_service_name`
+  is a strict lowercase-`[a-z0-9._-]` (alnum-first) identifier check — a
+  security control, so a `..`/path-traversal- or case-collision-shaped token
+  can never be enrolled. The enabled set is a **growable capacity** (no
+  fixed `const` cap on the number of services, §24.1); only a single-name
+  length bound (`MAX_SERVICE_NAME_LEN`, a validation bound §24.4) is fixed.
+- The store path is the closed-whitelist entry
+  `SystemConfigFile::SystemServices` → `/System/Settings/Services/enabled`
+  (`lib/abi/src/driver_store.rs`), read through the **existing** confined
+  pre-unlock `read_system_config` path — no new read primitive (§2.2). A
+  per-user store lives under `/Users/<u>/Settings/Services/`, parsed
+  identically. Both a **corrupt** (`parse` → `EnrolError`) and a **missing**
+  store resolve to `Enrolment::empty()` — nothing eligible, never a guess.
+- `enrol`/`unenrol` are pure record transforms returning the new
+  `Enrolment` for the caller to write back through the appropriate
+  trusted-path store. `enrol` decodes the service's signed manifest (the
+  shared `service::decode_manifest_capabilities`, hoisted out of the
+  manager, §2.2) and **refuses** (`CapabilityEscalation`) any request beyond
+  the enroller's ceiling, so enrolment can never widen authority; it is
+  idempotent. `unenrol` needs no capability (removal only narrows) but fails
+  closed on an absent service.
+- Activation wiring: `Init::register_enrolled(discovered, &Enrolment)`
+  registers a discovered `ServiceSpec` **only** if enrolled; a
+  present-but-unenrolled bundle is never registered and its skip audits
+  `SERVICE_NOT_ENROLLED` (9011). The grant is still `ceiling ∩ manifest` at
+  start (`start_all`), so enrolment records a decision and never grants power.
+- Host tests cover: a present-but-unregistered bundle never registers/starts;
+  a corrupt store and a missing store both leave nothing eligible; enrolment
+  refuses a manifest exceeding the ceiling; strict-name/duplicate rejection;
+  the canonical-text round trip; idempotent enrol; fail-closed unenrol.
+- Not yet wired to a live boot path: discovery (the `/System/Services` scan
+  into `ServiceSpec`s, incl. the `AppInfo` unit-metadata parse) and reading
+  the store off `/System` are done by the loader/kernel seam that SVC-4/SVC-5
+  wire; the boot floor still comes from the compiled-in `DEFAULT_CONFIG`
+  until the growable registered tier lands on the `lib/rt` heap (§3.10).
 
 ### SVC-4 — On-demand endpoint activation + idle linger
 - Capability-brokered connect → start-if-down → park-until-ready → hand back
