@@ -442,9 +442,24 @@ address of the queried type), `NoData` (NoError with no such record),
 `NonExistent` (NXDOMAIN, RFC 8020), or `Timeout` (no server answered within
 the budget); a `ServFail`/`Refused`/truncated answer fails the current
 server over to the next. A datagram that does not match the outstanding
-query is ignored and the resolver keeps waiting. There is no netstack wiring
-yet — the engine stands alone (DNS2 threads it over the UDP socket ABI). It
-is host-tested and fuzzed (`fuzz_net_dns`).
+query is ignored and the resolver keeps waiting.
+
+The `DnsTransport` trait and the `resolve(name, record_type, servers,
+transport, rng)` function are the one shared driver that runs that engine
+over a real datagram socket (`plans/DNS.md` DNS2). `DnsTransport` is the
+object-safe seam to the outside world — `now` (the monotonic clock the
+resolver's deadlines read against), `send(server, query)`, and
+`wait(deadline, buf)` returning `Wait::Datagram(len)` or `Wait::TimedOut` —
+each failing closed with a typed `Errno`. `resolve` is the single "send /
+wait / fold / retransmit / fail over" loop: it performs only the I/O the
+engine's `Action`s ask for (the engine still owns the timers and failover),
+drops unmatched or fail-closed transport-errored datagrams without inventing
+an answer, and bounds every reception to `MAX_MESSAGE_LEN` (512, the classic
+RFC 1035 UDP ceiling — a larger answer sets TC, which the engine treats as a
+per-server soft failure). The live `netsock-v1` socket client, the QEMU
+vertical, and the unit tests all drive this *same* loop (no second copy of
+the orchestration). The engine and driver are host-tested and fuzzed
+(`fuzz_net_dns`).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

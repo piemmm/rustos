@@ -175,9 +175,15 @@ exercise.
   (NXDOMAIN) / Timeout. Pure and event-driven like `dhcp` (`poll` /
   `on_response` take `now`, emit `Action`s, re-arm from a tickless
   `next_deadline`); the query id and retransmit jitter are caller-supplied
-  CSPRNG draws (the `tcp::conn` `iss` precedent). No netstack wiring yet —
-  the engine stands alone (`plans/DNS.md` DNS2 threads it over the socket
-  ABI). Host-tested and fuzzed.
+  CSPRNG draws (the `tcp::conn` `iss` precedent). The `DnsTransport` trait
+  and `resolve(name, record_type, servers, transport, rng)` function are the
+  one shared driver (`plans/DNS.md` DNS2) that runs the engine over a real
+  datagram socket: `DnsTransport` is the object-safe I/O seam (`now`,
+  `send(server, query)`, and `wait(deadline, buf) -> Wait::{Datagram,
+  TimedOut}`, each fail-closed with a typed `Errno`) and `resolve` is the
+  single send/wait/fold/retransmit/failover loop bounded by
+  `MAX_MESSAGE_LEN` (512), which the socket client, the QEMU vertical, and
+  the tests all share (no second orchestration). Host-tested and fuzzed.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

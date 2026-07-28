@@ -647,3 +647,186 @@ fn resolver_with_no_servers_times_out_immediately() {
     assert_eq!(res.status, ResolveStatus::Timeout);
     assert!(r.is_done());
 }
+
+// -- The blocking transport driver (`resolve`) ---------------------------
+
+use alloc::boxed::Box;
+
+/// A scripted server's reaction to one query: the datagrams to deliver.
+type Responder = Box<dyn FnMut(IpAddr, &[u8]) -> Vec<Vec<u8>>>;
+
+/// A scripted fake network for driving [`resolve`] in tests. On each
+/// [`DnsTransport::send`] it calls `responder(server, query_bytes)`, whose
+/// returned datagrams are queued for delivery on the following
+/// [`DnsTransport::wait`]s (an empty return drops the query, forcing the
+/// retransmit deadline to fire). It counts sends and can inject a fatal
+/// send error to prove the driver aborts fail-closed.
+struct MockTransport {
+    clock: Duration64,
+    responder: Responder,
+    inbox: Vec<Vec<u8>>,
+    sends: usize,
+    send_err: Option<Errno>,
+}
+
+impl MockTransport {
+    fn new(responder: impl FnMut(IpAddr, &[u8]) -> Vec<Vec<u8>> + 'static) -> Self {
+        Self {
+            clock: secs(0),
+            responder: Box::new(responder),
+            inbox: Vec::new(),
+            sends: 0,
+            send_err: None,
+        }
+    }
+}
+
+impl DnsTransport for MockTransport {
+    fn now(&mut self) -> Duration64 {
+        self.clock
+    }
+
+    fn send(&mut self, server: IpAddr, query: &[u8]) -> Result<(), Errno> {
+        if let Some(err) = self.send_err {
+            return Err(err);
+        }
+        self.sends += 1;
+        let mut produced = (self.responder)(server, query);
+        self.inbox.append(&mut produced);
+        Ok(())
+    }
+
+    fn wait(&mut self, deadline: Duration64, buf: &mut [u8]) -> Result<Wait, Errno> {
+        if self.inbox.is_empty() {
+            // Nothing queued: the retransmit deadline fires.
+            self.clock = deadline;
+            Ok(Wait::TimedOut)
+        } else {
+            // Deliver the next queued datagram before the deadline (the
+            // clock does not advance, so the query is still outstanding).
+            let datagram = self.inbox.remove(0);
+            let len = datagram.len().min(buf.len());
+            buf[..len].copy_from_slice(&datagram[..len]);
+            Ok(Wait::Datagram(len))
+        }
+    }
+}
+
+/// Build a positive A-record answer that echoes the id of the encoded query
+/// `q`, exactly as a real recursive server would.
+fn a_answer_for(q: &[u8], qname: &str, addr: [u8; 4]) -> Vec<u8> {
+    let id = u16::from_be_bytes([q[0], q[1]]);
+    ok_response(
+        id,
+        qname,
+        TYPE_A,
+        &[(qname, TYPE_A, CLASS_IN, 300, addr.to_vec())],
+    )
+}
+
+#[test]
+fn driver_resolves_on_first_server() {
+    let mut rng = counter();
+    let mut transport = MockTransport::new(|_server, q| {
+        alloc::vec![a_answer_for(q, "example.com", [93, 184, 216, 34])]
+    });
+    let res = resolve(
+        Name::encode("example.com").unwrap(),
+        RecordType::A,
+        &SERVERS,
+        &mut transport,
+        &mut rng,
+    )
+    .expect("transport ok");
+    assert_eq!(res.status, ResolveStatus::Success);
+    assert_eq!(res.addresses.first().unwrap(), v4(93, 184, 216, 34));
+    assert_eq!(transport.sends, 1, "one query, one answer");
+}
+
+#[test]
+fn driver_retransmits_and_fails_over() {
+    let mut rng = counter();
+    // The first server is a black hole; the second answers.
+    let mut transport = MockTransport::new(|server, q| {
+        if server == SERVERS[1] {
+            alloc::vec![a_answer_for(q, "example.com", [1, 1, 1, 1])]
+        } else {
+            Vec::new()
+        }
+    });
+    let res = resolve(
+        Name::encode("example.com").unwrap(),
+        RecordType::A,
+        &SERVERS,
+        &mut transport,
+        &mut rng,
+    )
+    .expect("transport ok");
+    assert_eq!(res.status, ResolveStatus::Success);
+    assert_eq!(res.addresses.first().unwrap(), v4(1, 1, 1, 1));
+    // Two attempts to the dead server (initial + one retransmit), then one to
+    // the live one.
+    assert_eq!(transport.sends, 3);
+}
+
+#[test]
+fn driver_drops_spoofed_datagram_then_accepts_real_answer() {
+    let mut rng = counter();
+    let mut first = true;
+    let mut transport = MockTransport::new(move |_server, q| {
+        if first {
+            first = false;
+            // An off-path spoof (wrong id) arrives ahead of the real answer;
+            // the engine must discard it and accept only the matching reply.
+            alloc::vec![
+                ok_response(0xDEAD, "example.com", TYPE_A, &[]),
+                a_answer_for(q, "example.com", [203, 0, 113, 7]),
+            ]
+        } else {
+            Vec::new()
+        }
+    });
+    let res = resolve(
+        Name::encode("example.com").unwrap(),
+        RecordType::A,
+        &SERVERS,
+        &mut transport,
+        &mut rng,
+    )
+    .expect("transport ok");
+    assert_eq!(res.status, ResolveStatus::Success);
+    assert_eq!(res.addresses.first().unwrap(), v4(203, 0, 113, 7));
+    assert_eq!(transport.sends, 1, "no retransmit was needed");
+}
+
+#[test]
+fn driver_times_out_with_no_servers() {
+    let mut rng = counter();
+    let mut transport = MockTransport::new(|_server, _q| Vec::new());
+    let res = resolve(
+        Name::encode("example.com").unwrap(),
+        RecordType::A,
+        &[],
+        &mut transport,
+        &mut rng,
+    )
+    .expect("transport ok");
+    assert_eq!(res.status, ResolveStatus::Timeout);
+    assert_eq!(transport.sends, 0, "no server means nothing is sent");
+}
+
+#[test]
+fn driver_aborts_fail_closed_on_transport_send_error() {
+    let mut rng = counter();
+    let mut transport = MockTransport::new(|_server, _q| Vec::new());
+    transport.send_err = Some(Errno::NetworkUnreachable);
+    let err = resolve(
+        Name::encode("example.com").unwrap(),
+        RecordType::A,
+        &SERVERS,
+        &mut transport,
+        &mut rng,
+    )
+    .expect_err("a transport send failure aborts the resolution");
+    assert_eq!(err, Errno::NetworkUnreachable);
+}

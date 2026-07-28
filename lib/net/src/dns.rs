@@ -22,6 +22,7 @@
 //! discarded.
 
 use tairix_abi::time::Duration64;
+use tairix_abi::Errno;
 
 use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::timeutil::{from_nanos, nanos, NEVER, ONE_SEC_NANOS};
@@ -859,6 +860,144 @@ impl DnsResolver {
             addresses,
             ttl_secs,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking driver over an abstract datagram transport
+// ---------------------------------------------------------------------------
+
+/// The largest DNS message this resolver receives over UDP. Classic RFC
+/// 1035 §4.2.1 messages are capped at 512 octets (no EDNS0 here — a larger
+/// answer sets the TC bit, which the engine treats as a per-server soft
+/// failure), so a fixed 512-octet reception buffer is a fixed validation
+/// bound: a datagram longer than this is truncated to it before parsing,
+/// and a hostile server can never size an allocation.
+pub const MAX_MESSAGE_LEN: usize = 512;
+
+/// The outcome of a single [`DnsTransport::wait`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Wait {
+    /// A datagram arrived; its first `usize` octets were written into the
+    /// buffer `wait` was given.
+    Datagram(usize),
+    /// The armed deadline elapsed with no datagram (drive a retransmit).
+    TimedOut,
+}
+
+/// The datagram transport a [`resolve`] loop drives the pure [`DnsResolver`]
+/// over.
+///
+/// The engine owns no I/O; this trait is the seam between it and a real
+/// UDP socket (the `netsock-v1` client of `lib/resolver`) or a test double.
+/// It carries the monotonic clock the resolver's deadlines are read against,
+/// so a single implementation controls time and I/O coherently. Every
+/// method fails closed with a typed [`Errno`]; a transport error aborts the
+/// resolution rather than being silently ignored.
+pub trait DnsTransport {
+    /// The current monotonic instant, on the same clock the resolver's
+    /// deadlines use.
+    fn now(&mut self) -> Duration64;
+
+    /// Send an already-encoded `query` datagram to `server` on UDP
+    /// [`PORT`].
+    ///
+    /// # Errors
+    ///
+    /// The transport's own typed [`Errno`] (e.g. an unreachable network),
+    /// which aborts the resolution.
+    fn send(&mut self, server: IpAddr, query: &[u8]) -> Result<(), Errno>;
+
+    /// Block until a datagram arrives or `deadline` passes, writing an
+    /// arriving datagram's bytes into `buf` (truncated to its length).
+    ///
+    /// `deadline` is the absolute instant the caller must not wait past; it
+    /// is always `Some` in the driver loop (the engine always arms a
+    /// retransmit deadline while a query is outstanding).
+    ///
+    /// # Errors
+    ///
+    /// The transport's own typed [`Errno`], which aborts the resolution.
+    fn wait(&mut self, deadline: Duration64, buf: &mut [u8]) -> Result<Wait, Errno>;
+}
+
+/// Resolve `name`/`record_type` against `servers` by driving the pure
+/// [`DnsResolver`] over `transport`, blocking until the resolution
+/// concludes (success, negative answer, or the retry budget is spent) and
+/// returning the [`Resolution`].
+///
+/// This is the one shared driver loop: the live socket client and the unit
+/// tests exercise the *same* code, so there is no second copy of the
+/// "send / wait / fold / retransmit / fail over" orchestration (the engine
+/// itself owns the timers and failover; this loop only performs the I/O the
+/// engine's [`Action`]s ask for). `rng` supplies the CSPRNG draws the engine
+/// needs (the query id and retransmit jitter) and is kept distinct from the
+/// transport so neither aliases the other.
+///
+/// # Errors
+///
+/// A transport [`Errno`] from [`DnsTransport::send`] or
+/// [`DnsTransport::wait`]; the resolution is abandoned fail-closed rather
+/// than reported as a spurious answer.
+pub fn resolve<T: DnsTransport + ?Sized>(
+    name: Name,
+    record_type: RecordType,
+    servers: &[IpAddr],
+    transport: &mut T,
+    rng: &mut dyn FnMut() -> u32,
+) -> Result<Resolution, Errno> {
+    let mut resolver = DnsResolver::new(name, record_type, servers);
+    let mut query_buf = [0u8; MAX_QUERY_LEN];
+    let mut rx = [0u8; MAX_MESSAGE_LEN];
+
+    let now = transport.now();
+    // The Idle poll always acts (a first send, or an immediate timeout finish
+    // when no server is configured); a `None` here would be an engine
+    // contract break, so fail closed to a timeout rather than looping.
+    let Some(mut action) = resolver.poll(now, rng) else {
+        return Ok(Resolution {
+            status: ResolveStatus::Timeout,
+            addresses: AddrList::default(),
+            ttl_secs: 0,
+        });
+    };
+
+    loop {
+        match action {
+            Action::Send { query, server } => {
+                // MAX_QUERY_LEN always suffices, so encoding cannot fail; a
+                // BufferTooSmall would be a construction bug, not runtime
+                // input, so surface it fail-closed rather than panic.
+                let len = write_query(&query, &mut query_buf).map_err(|_| Errno::OutOfRange)?;
+                transport.send(server, &query_buf[..len])?;
+            }
+            Action::Finished(resolution) => return Ok(resolution),
+        }
+
+        // Await a response or the retransmit/failover deadline. Unmatched
+        // datagrams (spoofed, stale, or malformed) are dropped by the engine
+        // and we keep waiting against the *same* deadline; a fired deadline
+        // that yields no action (a spurious early wakeup) also re-waits.
+        action = loop {
+            // The engine always arms a deadline while waiting; if it somehow
+            // did not, treat "no deadline" as due now so we re-poll rather
+            // than block forever.
+            let deadline = resolver.next_deadline().unwrap_or_else(|| transport.now());
+            match transport.wait(deadline, &mut rx)? {
+                Wait::Datagram(len) => {
+                    let now = transport.now();
+                    if let Some(next) = resolver.on_response(now, &rx[..len], rng) {
+                        break next;
+                    }
+                }
+                Wait::TimedOut => {
+                    let now = transport.now();
+                    if let Some(next) = resolver.poll(now, rng) {
+                        break next;
+                    }
+                }
+            }
+        };
     }
 }
 
