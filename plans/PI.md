@@ -666,7 +666,8 @@ on its own before the next.
   A self-contained `build.rs` sets the `freestanding` cfg from `target_os`
   only (no `target_arch`, so `cfg-check` stays clean; no dependency on the
   tests harness, so §17.4 layering stays clean); `Run.ld` mirrors the proven
-  PIE link layout the userland runtimes share. Host DoD green (3 new
+  PIE link layout — the one shared `lib/rt/Run.ld` the userland runtimes
+  link. Host DoD green (3 new
   `tairix-rt` tests + 10 startup-config tests + the freestanding aarch64 build
   via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0 spawn of
   this binary is P6c.
@@ -724,7 +725,8 @@ on its own before the next.
     passes no `x0`). `boot.rs::main` passes `&SERIAL_SINK` as both sinks.
   - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[x]`.** The
     `tairix-kernel` build script compiles the pure-Rust `tairix-init-run`
-    `Run` binary PIE (its own `Run.ld`) and converts the linked ELF to an
+    `Run` binary PIE (the one shared `lib/rt/Run.ld`) and converts the linked
+    ELF to an
     embedded `rxe` blob with `tairix_itest_harness::elf2rxe` (stamped with
     the kernel's `SYSCALL_TABLE_HASH`, biased to 64 GiB) — the same path the
     cc3/spawn fixtures use (§2.2; host-only build glue, TAIRiX stays
@@ -3944,8 +3946,8 @@ table, so a new board is match **data**, not new code. Sub-increments
           sink reports PASS on `AuditEvent::InputDelivered` (`EventId(4050)`).
           The `image_drivers` pipeline (`build_virtio_kbd_bundle`, the one
           definition every image consumer shares, §2.2) cross-compiles
-          `drivers/input/virtio_kbd` PIE (its `drivers/input/virtio_kbd/Run.ld`),
-          converts it to an `rxe` relocated for the shared
+          `drivers/input/virtio_kbd` PIE (the one shared `lib/rt/Run.ld` every
+          `Run` program links), converts it to an `rxe` relocated for the shared
           `tairix_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
           `tairix_itest_harness::driver_image` composer with
           `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own

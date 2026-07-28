@@ -582,15 +582,7 @@ fn build_bundle(
     // back fail-closed, so a crate that breaks the convention fails the
     // build loudly.
     let bin = format!("{}-run", app.package);
-    let elf = cross_compile_pie_elf(
-        ctx,
-        arch,
-        "image-apps",
-        &app.package,
-        &bin,
-        &app.crate_dir,
-        profile,
-    )?;
+    let elf = cross_compile_pie_elf(ctx, arch, "image-apps", &app.package, &bin, profile)?;
     let run = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,

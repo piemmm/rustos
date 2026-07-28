@@ -1,23 +1,23 @@
-/* Link script for the `cp` tool `Run` binary
- * (`userland/apps/cp/src/run.rs`).
+/* The one PIE link script shared by every pure-Rust `Run` program the kernel
+ * spawn/autoload path loads — PID 1 `init`, the system services, and every
+ * `/Apps` and `/System/Drivers` bundle alike.
  *
- * The `Run` program is a position-independent **pure-Rust** program whose
- * entry point is the `tairix-rt` runtime's `_start`. It links no architecture
- * crate, so nothing in the default object graph references `_start`; this
- * script makes `_start` the entry GC root and lays the loadable sections out
- * at a fixed, non-zero base so the consuming boot path maps the image at its
- * link addresses with the chosen relocation bias (`AGENTS.md` §9, §19.2 — the
- * image is genuinely PIE). One script serves every native target: it names
- * only architecture-neutral section classes (`AGENTS.md` §2.2). It is the
- * same proven PIE layout `userland/system/init/Run.ld`,
- * `userland/shell/elsh/Run.ld`, `userland/session/login/Run.ld`, and
- * `userland/system/devmgr/Run.ld` use; the section bodies are kept identical
- * so the userland program runtimes share one layout.
+ * A `Run` program's entry point is the `tairix-rt` runtime's `_start`. It
+ * links no architecture crate, so nothing in the default object graph
+ * references `_start`; this script makes `_start` the entry GC root and lays
+ * the loadable sections out at a fixed, non-zero base so the consuming boot
+ * path maps the image at its link addresses with the chosen relocation bias
+ * (the image is genuinely position-independent).
+ *
+ * The layout is architecture-neutral — it names only architecture-neutral
+ * section classes — so one script serves every native target, and every
+ * program links against this single definition rather than carrying its own
+ * copy. Its home is the runtime crate that provides `_start`.
  *
  * Every loadable segment is page-aligned in both file offset and virtual
  * address: the kernel `rxe` loader maps whole pages with per-segment
  * permissions, so a `PT_LOAD` whose virtual address is not a multiple of the
- * page size is refused (W^X page granularity, §19.2). The explicit
+ * page size is refused (write-xor-execute page granularity). The explicit
  * `. = ALIGN(CONSTANT(MAXPAGESIZE))` between permission groups — together with
  * naming the PIE metadata sections so no orphan lands mid-page — is what keeps
  * each segment on its own page boundary. */

@@ -93,15 +93,13 @@ fn program_rustflags_var(target: &str) -> Option<&'static str> {
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// One embedded `Run` program the boot path builds into an `rxe` image: the
-/// crate package, its `Run` bin, the absolute source dir, the generated
-/// fixture file name, and the `const`-name prefix the fixture emits under.
+/// crate package, its `Run` bin, the generated fixture file name, and the
+/// `const`-name prefix the fixture emits under.
 struct Program {
     /// Cargo package name (`-p <pkg>`).
     pkg: &'static str,
     /// `Run` binary name (`--bin <bin>`).
     bin: &'static str,
-    /// Path to the program crate dir, relative to this crate's manifest dir.
-    rel_dir: &'static str,
     /// Generated fixture file name written under `OUT_DIR`.
     fixture: &'static str,
     /// Prefix for the emitted `const`s (`<PREFIX>_RXE`, `<PREFIX>_USER_BIAS`).
@@ -117,133 +115,114 @@ const PROGRAMS: &[Program] = &[
     Program {
         pkg: "tairix-init",
         bin: "tairix-init-run",
-        rel_dir: "../../userland/system/init",
         fixture: "init_rxe.rs",
         prefix: "INIT",
     },
     Program {
         pkg: "tairix-elsh",
         bin: "tairix-elsh-run",
-        rel_dir: "../../userland/shell/elsh",
         fixture: "shell_rxe.rs",
         prefix: "SHELL",
     },
     Program {
         pkg: "tairix-login",
         bin: "tairix-login-run",
-        rel_dir: "../../userland/session/login",
         fixture: "login_rxe.rs",
         prefix: "LOGIN",
     },
     Program {
         pkg: "tairix-devmgr",
         bin: "tairix-devmgr-run",
-        rel_dir: "../../userland/system/devmgr",
         fixture: "devmgr_rxe.rs",
         prefix: "DEVMGR",
     },
     Program {
         pkg: "tairix-sysinfod",
         bin: "tairix-sysinfod-run",
-        rel_dir: "../../userland/system/sysinfod",
         fixture: "sysinfod_rxe.rs",
         prefix: "SYSINFOD",
     },
     Program {
         pkg: "tairix-seatmgr",
         bin: "tairix-seatmgr-run",
-        rel_dir: "../../userland/system/seatmgr",
         fixture: "seatmgr_rxe.rs",
         prefix: "SEATMGR",
     },
     Program {
         pkg: "tairix-netstack",
         bin: "tairix-netstack-run",
-        rel_dir: "../../userland/net/netstack",
         fixture: "netstack_rxe.rs",
         prefix: "NETSTACK",
     },
     Program {
         pkg: "tairix-fontd",
         bin: "tairix-fontd-run",
-        rel_dir: "../../userland/system/fontd",
         fixture: "fontd_rxe.rs",
         prefix: "FONTD",
     },
     Program {
         pkg: "tairix-ps",
         bin: "tairix-ps-run",
-        rel_dir: "../../userland/apps/ps",
         fixture: "ps_rxe.rs",
         prefix: "PS",
     },
     Program {
         pkg: "tairix-sysinfo",
         bin: "tairix-sysinfo-run",
-        rel_dir: "../../userland/shell/sysinfo",
         fixture: "sysinfo_rxe.rs",
         prefix: "SYSINFO",
     },
     Program {
         pkg: "tairix-sysmon",
         bin: "tairix-sysmon-run",
-        rel_dir: "../../userland/apps/sysmon",
         fixture: "sysmon_rxe.rs",
         prefix: "SYSMON",
     },
     Program {
         pkg: "tairix-stress",
         bin: "tairix-stress-run",
-        rel_dir: "../../userland/apps/stress",
         fixture: "stress_rxe.rs",
         prefix: "STRESS",
     },
     Program {
         pkg: "tairix-top",
         bin: "tairix-top-run",
-        rel_dir: "../../userland/apps/top",
         fixture: "top_rxe.rs",
         prefix: "TOP",
     },
     Program {
         pkg: "tairix-ls",
         bin: "tairix-ls-run",
-        rel_dir: "../../userland/apps/ls",
         fixture: "ls_rxe.rs",
         prefix: "LS",
     },
     Program {
         pkg: "tairix-cat",
         bin: "tairix-cat-run",
-        rel_dir: "../../userland/apps/cat",
         fixture: "cat_rxe.rs",
         prefix: "CAT",
     },
     Program {
         pkg: "tairix-man",
         bin: "tairix-man-run",
-        rel_dir: "../../userland/apps/man",
         fixture: "man_rxe.rs",
         prefix: "MAN",
     },
     Program {
         pkg: "tairix-clear",
         bin: "tairix-clear-run",
-        rel_dir: "../../userland/apps/clear",
         fixture: "clear_rxe.rs",
         prefix: "CLEAR",
     },
     Program {
         pkg: "tairix-reset",
         bin: "tairix-reset-run",
-        rel_dir: "../../userland/apps/reset",
         fixture: "reset_rxe.rs",
         prefix: "RESET",
     },
     Program {
         pkg: "tairix-users-cli",
         bin: "tairix-users-cli-run",
-        rel_dir: "../../userland/shell/users",
         fixture: "users_cli_rxe.rs",
         prefix: "USERS_CLI",
     },
@@ -707,25 +686,52 @@ fn emit_program_rxes(target: &str, embed_spawn_rows: bool) {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
 
+    // Every embedded program links the one shared PIE script (this crate lives
+    // two levels below the workspace root), and they all build into one shared
+    // target directory. Because the link recipe `rustc` sees is then identical
+    // for every program, cargo builds the `-Z build-std` sysroot and the
+    // shared user-space libraries once and reuses them for each subsequent
+    // program instead of rebuilding them per program. The single staleness
+    // guard is therefore run once, before the loop, against that shared
+    // directory.
+    let run_ld = format!(
+        "{manifest_dir}/../../{}",
+        tairix_itest_harness::pie::RUN_LD_WORKSPACE_RELPATH
+    );
+    let target_dir = format!("{out_dir}/programs-target");
+    wipe_target_dir_on_linker_change(&run_ld, &target_dir, &out_dir);
+
     for program in PROGRAMS {
         // Only PID 1 `init` is embedded on a target whose runtime `spawn`
         // resolves the on-disk store bundles instead of embedded rows.
         if !embed_spawn_rows && program.prefix != "INIT" {
             continue;
         }
-        emit_program_rxe(target, manifest_dir, &out_dir, program);
+        emit_program_rxe(
+            target,
+            manifest_dir,
+            &out_dir,
+            &run_ld,
+            &target_dir,
+            program,
+        );
     }
 }
 
 /// Build one [`Program`] and write its generated fixture under `OUT_DIR`.
-fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &Program) {
-    let prog_dir = format!("{manifest_dir}/{}", program.rel_dir);
-
+fn emit_program_rxe(
+    target: &str,
+    manifest_dir: &str,
+    out_dir: &str,
+    run_ld: &str,
+    target_dir: &str,
+    program: &Program,
+) {
     let rxe = match program_rustflags_var(target) {
         Some(rustflags_var) => build_and_convert(
             manifest_dir,
-            out_dir,
-            &prog_dir,
+            run_ld,
+            target_dir,
             program,
             target,
             rustflags_var,
@@ -736,25 +742,21 @@ fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &P
     write_fixture(&fixture_path, program, &rxe);
 }
 
-/// Wipe a program's private `target_dir` — forcing a clean relink — when its
-/// `Run.ld` content has changed since the last build, and otherwise leave it
-/// intact so the nested `cargo` builds incrementally.
+/// Wipe the shared programs `target_dir` — forcing a clean relink — when the
+/// shared `Run.ld` content has changed since the last build, and otherwise
+/// leave it intact so the nested `cargo` builds incrementally.
 ///
 /// Cargo fingerprints the linker script by *path* (through the RUSTFLAGS
 /// string), not content, so a `Run.ld` edit would otherwise leave a stale
-/// linked ELF in place. The previous in-tree `Run.ld` of every program is
-/// kept as a sidecar copy under `OUT_DIR`; the wipe fires only on a real
-/// content change (or first build / missing sidecar), so this build script
-/// re-running on every build does not rebuild `build-std` each time. A read failure compares as different and simply
-/// forces the (correct, safe) clean rebuild — fail safe, never silently stale.
-fn wipe_target_dir_on_linker_change(
-    run_ld: &str,
-    target_dir: &str,
-    out_dir: &str,
-    program: &Program,
-) {
+/// linked ELF in place. The script content is kept as a single sidecar copy
+/// under `OUT_DIR`; the wipe fires only on a real content change (or first
+/// build / missing sidecar), so this build script re-running on every build
+/// does not rebuild `build-std` each time. A read failure compares as
+/// different and simply forces the (correct, safe) clean rebuild — fail safe,
+/// never silently stale.
+fn wipe_target_dir_on_linker_change(run_ld: &str, target_dir: &str, out_dir: &str) {
     let current = fs::read(run_ld).ok();
-    let sidecar = PathBuf::from(out_dir).join(format!("{}.run_ld", program.pkg));
+    let sidecar = PathBuf::from(out_dir).join("programs-target.run_ld");
     let previous = fs::read(&sidecar).ok();
     if current.is_none() || current != previous {
         let _ = fs::remove_dir_all(target_dir);
@@ -770,30 +772,12 @@ fn wipe_target_dir_on_linker_change(
 /// PIE link recipe (one build path for every production target).
 fn build_and_convert(
     manifest_dir: &str,
-    out_dir: &str,
-    prog_dir: &str,
+    run_ld: &str,
+    target_dir: &str,
     program: &Program,
     target: &str,
     rustflags_var: &str,
 ) -> Vec<u8> {
-    let run_ld = format!("{prog_dir}/Run.ld");
-    let target_dir = format!("{out_dir}/{}-target", program.pkg);
-
-    // Cargo fingerprints the RUSTFLAGS *string* (which names the linker
-    // script by path) but not the script's *content*, so a `Run.ld` edit
-    // alone would not trigger a relink and the converter could read a stale
-    // ELF. This build script always re-runs (see `main`), so we cannot lean
-    // on a `rerun-if-changed` to fire only on a `Run.ld` change; instead
-    // detect that change ourselves against a sidecar copy under `OUT_DIR` and
-    // wipe the private target directory — forcing a clean rebuild against the
-    // current script — *only* then. An unchanged script leaves the directory
-    // intact so the nested `cargo` no-ops incrementally rather than rebuilding
-    // `build-std` on every outer build. The program's own
-    // source changes need no help here: because the outer script always
-    // re-runs, the nested `cargo` is always invoked and fingerprints them
-    // itself.
-    wipe_target_dir_on_linker_change(&run_ld, &target_dir, out_dir, program);
-
     // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
     // roots the `tairix-rt` runtime trampoline; it is built
     // position-independent, with `core` /
@@ -829,7 +813,7 @@ fn build_and_convert(
             "-Z",
             "build-std=core,compiler_builtins,alloc",
             "--target-dir",
-            &target_dir,
+            target_dir,
         ])
         .status()
         .unwrap_or_else(|e| panic!("spawn cargo to build the {} Run program: {e}", program.pkg));
