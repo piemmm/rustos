@@ -14,8 +14,14 @@ This crate is pure theme *data*. A `Theme` is a table of:
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
   consumes (`AGENTS.md` §2.2).
-- `Fonts` — the UI and monospace `FontSpec`s, referencing faces under
-  `/System/Fonts`.
+- `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing
+  faces under `/System/Fonts`. A theme sizes text by the *job* it does
+  (`Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`, `Caption`,
+  `SectionHeader`, `Monospace`), and every role's size is a percentage of one
+  authored base size measured from the design boards, so a theme states one
+  number and the whole scale follows (`AGENTS.md` §2.2). `Fonts::ladder`
+  clamps that base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so text can be
+  neither too small to read nor too large to rasterise (`AGENTS.md` §5.4).
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
   under `/System/Graphics`.
 

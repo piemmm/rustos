@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use std::path::PathBuf;
 
 use tairix_abi::font_ipc::{
-    decode_glyph_reply, decode_metrics_reply, FontRequest, FONT_MAX_CELL_HEIGHT,
+    decode_glyph_reply, decode_metrics_reply, FontRequest, FontWeight, FONT_MAX_CELL_HEIGHT,
     FONT_MAX_GLYPH_REPLY, FONT_MIN_CELL_HEIGHT,
 };
 use tairix_abi::Errno;
@@ -72,6 +72,7 @@ fn a_glyph_request_round_trips_with_ink() {
         &FontRequest::Glyph {
             scalar: 'A',
             cell_height: 28,
+            weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
@@ -101,6 +102,7 @@ fn a_wide_scalar_advances_two_cells_and_inks_the_continuation() {
         &FontRequest::Glyph {
             scalar: '漢',
             cell_height: 28,
+            weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
@@ -129,6 +131,7 @@ fn an_uncovered_scalar_falls_back_to_the_replacement_glyph() {
         &FontRequest::Glyph {
             scalar: '\u{10FFFF}',
             cell_height: 28,
+            weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
@@ -147,6 +150,7 @@ fn a_second_request_is_served_from_cache_identically() {
     let request = FontRequest::Glyph {
         scalar: 'g',
         cell_height: 24,
+        weight: FontWeight::Regular,
     }
     .to_le_bytes();
     let mut first = vec![0u8; FONT_MAX_GLYPH_REPLY];
@@ -155,6 +159,65 @@ fn a_second_request_is_served_from_cache_identically() {
     let n2 = svc.handle(&request, &mut second);
     assert_eq!(n1, n2);
     assert_eq!(first[..n1], second[..n2], "cache hit differs from miss");
+}
+
+/// The total ink (summed 8-bit coverage) and the geometry of one glyph reply.
+///
+/// Summing rather than holding the bitmap lets a weight test compare two
+/// rasters without keeping the borrowed reply buffer alive.
+fn render_ink(
+    svc: &mut FontService<'_>,
+    scalar: char,
+    cell_height: u32,
+    weight: FontWeight,
+) -> (u32, u32, u32, u32) {
+    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let n = svc.handle(
+        &FontRequest::Glyph {
+            scalar,
+            cell_height,
+            weight,
+        }
+        .to_le_bytes(),
+        &mut reply,
+    );
+    let glyph = decode_glyph_reply(&reply[..n]).expect("glyph reply decodes");
+    let ink = glyph.coverage.iter().map(|&c| u32::from(c)).sum();
+    (ink, glyph.width, glyph.height, glyph.advance)
+}
+
+#[test]
+fn a_heavier_weight_inks_more_of_the_same_cell() {
+    let bytes = face_bytes();
+    let mut svc = service(&bytes);
+    let regular = render_ink(&mut svc, 'H', 28, FontWeight::Regular);
+    let medium = render_ink(&mut svc, 'H', 28, FontWeight::Medium);
+    let bold = render_ink(&mut svc, 'H', 28, FontWeight::Bold);
+
+    assert!(
+        regular.0 < medium.0 && medium.0 < bold.0,
+        "weights do not read as a rising progression: {regular:?} {medium:?} {bold:?}"
+    );
+    // The geometry a client laid out with must not move with the weight.
+    assert_eq!(regular.1, bold.1);
+    assert_eq!(regular.2, bold.2);
+    assert_eq!(regular.3, bold.3);
+}
+
+#[test]
+fn weight_keys_the_cache_so_a_regular_run_is_never_served_bold() {
+    let bytes = face_bytes();
+    let mut mixed = service(&bytes);
+    let _ = render_ink(&mut mixed, 'g', 24, FontWeight::Bold);
+    let after_bold = render_ink(&mut mixed, 'g', 24, FontWeight::Regular);
+
+    let mut fresh = service(&bytes);
+    let alone = render_ink(&mut fresh, 'g', 24, FontWeight::Regular);
+
+    assert_eq!(
+        after_bold, alone,
+        "a cached bold raster leaked into Regular"
+    );
 }
 
 #[test]
@@ -189,6 +252,7 @@ fn a_malformed_request_fails_closed_with_an_error_frame() {
     let mut request = FontRequest::Glyph {
         scalar: 'A',
         cell_height: 28,
+        weight: FontWeight::Regular,
     }
     .to_le_bytes();
     request[0] ^= 0xFF;

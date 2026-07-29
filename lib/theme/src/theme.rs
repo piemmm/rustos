@@ -13,7 +13,7 @@ use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
 use crate::motion::{Contrast, Density, MotionTheme};
 use crate::palette::Palette;
-use crate::typography::{FontSpec, FontWeight, Fonts};
+use crate::typography::Fonts;
 use crate::Rgba;
 
 /// A stable identifier for a theme.
@@ -302,12 +302,17 @@ fn common_motion() -> MotionTheme {
 }
 
 /// The fonts shared by both built-in themes.
+///
+/// One authored base size drives the whole role ladder, and both appearances
+/// use the same type — the boards change colour between light and dark, never
+/// the type scale. The base is measured from the reference boards, where body
+/// text fills a little under two thirds of a control's height.
 fn common_fonts() -> Fonts {
-    Fonts {
-        ui: FontSpec::new("TAIRiX Sans", 28, FontWeight::Regular),
-        monospace: FontSpec::new("TAIRiX Mono", 28, FontWeight::Regular),
-    }
+    Fonts::ladder("TAIRiX Sans", "TAIRiX Mono", BASE_TEXT_SIZE_PX)
 }
+
+/// The logical-pixel body size both built-in themes author their ladder at.
+const BASE_TEXT_SIZE_PX: u16 = 18;
 
 /// The cursor set shared by both built-in themes.
 fn common_cursors() -> CursorSet {

@@ -5,7 +5,7 @@ use tairix_controls::{
 };
 use tairix_font::BitmapFont;
 use tairix_input::{InputEvent, Key};
-use tairix_theme::{CursorKind, Theme};
+use tairix_theme::{CursorKind, TextRole, Theme};
 
 use crate::color::{div255, Pixel};
 use crate::corner::Corners;
@@ -549,11 +549,10 @@ impl Window {
             return;
         };
         let outer = Rect::new(0, 0, ow, oh);
-        // The title-bar text renders at the theme's logical font size scaled to
-        // physical pixels, like every other desktop length, rather than a size
-        // hard-coded here.
-        let font =
-            BitmapFont::with_pixel_height(scale.scale_length(u32::from(theme.fonts().ui.size_px)));
+        // Window furniture is titling text, so it draws in the theme's window
+        // title role — the role resolves its own size and weight, and the one
+        // shared logical-to-physical conversion happens inside `for_role`.
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::WindowTitle, scale);
         frame.render(&mut surface, outer, scale, theme, font);
 
         let furniture = frame.furniture();

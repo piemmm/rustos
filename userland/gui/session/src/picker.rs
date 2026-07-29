@@ -32,7 +32,8 @@ use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_co
 use tairix_browse::ManagerToolModel;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_font::BitmapFont;
-use tairix_theme::Theme;
+use tairix_geometry::Scale;
+use tairix_theme::{TextRole, Theme};
 use tairix_wm::{Compositor, Point, Rect, WindowId};
 
 use crate::shell::DesktopShell;
@@ -397,11 +398,16 @@ fn render_surface<S: DirectorySource>(
     )
 }
 
-/// The picker's text font, resolved from the active theme's logical UI font
-/// size (the picker window is not DPI-scaled today, so logical is physical) —
-/// the one place the render and hit-test paths agree on a size.
-fn picker_font(theme: &Theme) -> BitmapFont {
-    BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px))
+/// The picker's text font: the theme's ordinary interface-text role resolved
+/// through the one shared role-to-font conversion, so the picker's rows are
+/// sized and weighted exactly like every other list of interface text.
+///
+/// The window's own extents are authored in unscaled pixels ([`WIN_WIDTH`],
+/// [`WIN_HEIGHT`]), so the role resolves at [`Scale::ONE`] to keep the text and
+/// the box it must fit in on one density. It is the one place the render and
+/// hit-test paths agree on a font.
+pub(crate) fn picker_font(theme: &Theme) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
 }
 
 /// Repaint the picker window after a navigation change. A surface that

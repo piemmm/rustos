@@ -41,7 +41,7 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
@@ -148,7 +148,7 @@ mod program {
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let font = gallery_font(theme);
         let mut surface = tairix_raster::Surface::new(mode.width_px, mode.height_px)
             .ok_or(Errno::LengthOutOfRange)?;
         gallery.render(&mut surface, viewport, Scale::ONE, theme, font);
@@ -172,7 +172,7 @@ mod program {
         event: &WindowEvent,
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let font = gallery_font(theme);
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
@@ -205,6 +205,18 @@ mod program {
     /// Route one wire pointer event: a move to `(x, y)` to sync the pointer,
     /// then the press/release the action names. Returns whether the view
     /// changed.
+    /// The gallery's text font: the theme's ordinary interface-text role
+    /// resolved through the one shared role-to-font conversion, so the gallery
+    /// reads like every other list of interface text.
+    ///
+    /// The window's extents are authored in unscaled pixels ([`WIN_WIDTH`],
+    /// [`WIN_HEIGHT`]), so the role resolves at [`Scale::ONE`] to keep the text
+    /// and the box it must fit in on one density. It is the one place the
+    /// render and hit-test paths agree on a font.
+    fn gallery_font(theme: &Theme) -> BitmapFont {
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+    }
+
     fn apply_pointer(
         gallery: &mut Gallery,
         x: u32,

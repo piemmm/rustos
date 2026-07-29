@@ -28,11 +28,13 @@ use alloc::collections::{BTreeMap, VecDeque};
 
 use tairix_abi::font_ipc::{
     encode_glyph_error_reply, encode_glyph_reply, encode_metrics_reply, FontMetrics, FontRequest,
-    FONT_METRICS_REPLY_LEN,
+    FontWeight, FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_fontface::{CellGeometry, FontFamily, Repertoire, ATLAS_EM_PX};
 use tairix_vt::char_width;
+
+use crate::embolden::{embolden, stroke_subpixels, SUBPIXEL};
 
 /// The largest number of distinct `(face, glyph, cell height)` bitmaps the
 /// cache retains before evicting the oldest.
@@ -56,10 +58,12 @@ pub const FACE_REPERTOIRES: [Repertoire; 4] = [
     Repertoire::Full,
 ];
 
-/// The cache key: the resolved face index, glyph id, and the cell height the
+/// The cache key: the resolved face index, glyph id, the cell height the
 /// glyph was rasterised at (cell width and baseline are a fixed function of
-/// the height, so the height alone keys the geometry).
-type Key = (u32, u32, u32);
+/// the height, so the height alone keys the geometry), and the weight it was
+/// emboldened to — a heavier weight is a different raster of the same outline,
+/// so it must not collide with the regular one.
+type Key = (u32, u32, u32, u16);
 
 /// A bounded FIFO map from [`Key`] to a rasterised 8-bit coverage bitmap.
 struct GlyphCache {
@@ -157,6 +161,18 @@ impl<'a> FontService<'a> {
         f64::from(ATLAS_EM_PX) * f64::from(cell_height) / f64::from(self.native.height)
     }
 
+    /// The same rasterised em size in 1/256 px, which is what the weight
+    /// stroke is derived from.
+    ///
+    /// The em is an exact rational of the cell height, so this is computed in
+    /// integers: the stroke a weight adds is a fixed-point pixel count and has
+    /// no use for a rounded float.
+    fn em_subpixels(&self, cell_height: u32) -> u32 {
+        let numerator = u64::from(ATLAS_EM_PX) * u64::from(cell_height) * u64::from(SUBPIXEL);
+        let em = numerator / u64::from(self.native.height.max(1));
+        u32::try_from(em).unwrap_or(u32::MAX)
+    }
+
     /// The monospace cell metrics for a `cell_height`-tall cell.
     #[must_use]
     pub fn metrics(&self, cell_height: u32) -> FontMetrics {
@@ -184,7 +200,8 @@ impl<'a> FontService<'a> {
             Ok(FontRequest::Glyph {
                 scalar,
                 cell_height,
-            }) => match self.glyph_reply(scalar, cell_height, reply) {
+                weight,
+            }) => match self.glyph_reply(scalar, cell_height, weight, reply) {
                 Ok(len) => len,
                 Err(err) => error_frame(reply, err),
             },
@@ -206,6 +223,7 @@ impl<'a> FontService<'a> {
         &mut self,
         scalar: char,
         cell_height: u32,
+        weight: FontWeight,
         reply: &mut [u8],
     ) -> Result<usize, Errno> {
         let geometry = self.geometry_for(cell_height);
@@ -225,6 +243,7 @@ impl<'a> FontService<'a> {
             u32::try_from(face).unwrap_or(u32::MAX),
             u32::from(glyph),
             cell_height,
+            weight.to_wire(),
         );
         let advance = geometry
             .width
@@ -246,10 +265,12 @@ impl<'a> FontService<'a> {
             )
             .map_err(|_| Errno::NotFound)?;
         // 4-bit engine coverage (`0..=15`) → 8-bit protocol sample; `15 → 255`.
-        let coverage: Box<[u8]> = raw
+        let mut coverage: Box<[u8]> = raw
             .iter()
             .map(|&nibble| nibble.saturating_mul(17))
             .collect();
+        let stroke = stroke_subpixels(self.em_subpixels(cell_height), weight);
+        embolden(&mut coverage, bitmap_width as usize, stroke);
         let len = encode_glyph_reply(reply, bitmap_width, cell_height, advance, &coverage)?;
         self.cache.insert(key, coverage);
         Ok(len)

@@ -19,17 +19,26 @@ client that asks; nothing requires it.
 
 - **`FontService` (the library, host-testable).** Owns the parsed
   [`FontFamily`](../../../lib/fontface) and a bounded
-  `(face, glyph, cell height)` cache of already-rasterised coverage.
+  `(face, glyph, cell height, weight)` cache of already-rasterised coverage.
   `FontService::handle` is the whole request pipeline: decode one
   `tairix_abi::font_ipc::FontRequest`, resolve the scalar to its covering face
   (Inconsolata EX → M PLUS 1 Code → `D2Coding` → Noto Sans Hebrew → U+FFFD),
-  rasterise once through the shared `lib/fontface` engine, and frame the reply.
+  rasterise once through the shared `lib/fontface` engine, thicken the coverage
+  to the requested weight, and frame the reply.
   The face bytes are *injected* (borrowed), so the whole rasterise + cache path
   is unit-tested against the committed repository faces with no on-disk
   `/System/Fonts`.
 - **`Run` (the program).** Reads the faces, builds the `FontService`, binds the
   endpoint, and serves. A pure-Rust freestanding program on the native Tier-1
   targets, an inert stub on the host.
+- **`embolden` (the weight transform).** The committed faces ship one weight
+  each, so `Medium` (em/48) and `Bold` (em/24) are synthesised by thickening
+  the rasterised 8-bit coverage *horizontally only*, in 1/256 px fixed point.
+  That leaves the baseline, cell height, and pen advance untouched — a bold run
+  occupies exactly the cells its regular twin would, so layout is
+  weight-independent — and `Regular` adds a zero stroke, keeping body text
+  byte-identical. The weight is part of the cache key, so each
+  (glyph, size, weight) is emboldened once.
 
 ## Byte-identical rendering
 
@@ -61,6 +70,13 @@ after the startup read.
 `cargo test -p tairix-fontd --no-default-features` runs the host dispatcher
 tests (geometry derivation, glyph round-trip, wide two-cell glyphs, U+FFFD
 fallback, cache determinism, metrics scaling, malformed-request fail-closed,
-and truncated-face construction failure). The TrueType parser the service
-runs is fuzzed in `lib/fontface`; the request/reply framing is fuzzed in
-`lib/abi` (`fuzz_decode`).
+and truncated-face construction failure), the weight dispatcher tests (a
+heavier weight inks more of the same cell; the weight keys the cache, so a
+regular run is never served bold), and the emboldening unit tests (a zero
+stroke leaves coverage byte-identical, ink never wraps into the next row, a
+fractional stroke darkens the edge proportionally, coverage never exceeds full
+opacity, a degenerate bitmap is left alone rather than indexed out of range,
+the stroke scales with the rendered em, and an absurd stroke request is bounded
+rather than wrapping). The TrueType parser the service runs is fuzzed in
+`lib/fontface`; the request/reply framing is fuzzed in `lib/abi`
+(`fuzz_decode`).
