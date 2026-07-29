@@ -3,7 +3,8 @@
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
 use tairix_abi::blkio::{
-    BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
+    serve_request_recovering, BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN, BLK_DATA_LEN,
+    BLK_REQUEST_LEN,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -18,7 +19,7 @@ use tairix_drv_storage_usb_msd::desc::{
 use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
-use tairix_drv_storage_usb_msd::serve::{blk_block_for, serve_request_recovering};
+use tairix_drv_storage_usb_msd::serve::blk_block_for;
 use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};

@@ -83,12 +83,23 @@ consumer read (`blkio::BlkHealth`), never a per-driver copy (`AGENTS.md`
   is not an SSD's. It is scaling policy, never one global `const` (`AGENTS.md`
   §24.1) and never a security/validation bound (§24.4).
 
-The `usb_msd` serve path is the first consumer: its `serve_request_recovering`
-wraps each per-LUN request with a `BlkHealth` (the `Removable` class) driven
-by the monotonic clock. The volume-manager consumer marking the affected
-volume degraded, the fault-domain (hub/controller) quiesce/resume, health
-observability through `lib/log`/`sysinfo`, and the `virtio_blk`/`emmc2` serve
-adoption are the staged remainder (`plans/FIX-IO.md` IO3–IO6).
+The request engine is **one shared definition** every block driver reuses:
+`tairix_abi::blkio::serve_request_recovering` decodes and validates a request,
+drives the device through the `Block` trait, folds the outcome into a
+`BlkHealth`, and frames the completion — so the validation, the fail-closed
+refusals, the success paths, and the recovery grace window cannot diverge
+between drivers (`AGENTS.md` §2.2, §27). It is pure and alloc-free, proven
+host-side over in-memory `Block` doubles in `lib/abi`. `usb_msd` is the first
+consumer: its wait-set serve loop hands each per-LUN request to the engine with
+that LUN's `BlkHealth` (the `Removable` class) driven by the monotonic clock;
+only the usb_msd-specific block-service endpoint-id derivation
+(`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and `emmc2`
+are currently consumed in-kernel (root-unlock) and expose only their `Block`
+implementation; when either is brought up as a user-space serving process it
+reuses the same engine rather than copying it. The volume-manager consumer
+marking the affected volume degraded, the fault-domain (hub/controller)
+quiesce/resume, and health observability through `lib/log`/`sysinfo` are the
+staged remainder (`plans/FIX-IO.md` IO3–IO6).
 
 ## `BufferClass` and zero-on-free
 

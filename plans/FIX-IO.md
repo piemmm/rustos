@@ -293,10 +293,18 @@ reissuable** recovery model (not inline parking) is the one this stage adopts,
 so one unit's blip never stalls the serve loop's other units (head-of-line
 freedom, §26.1) — exactly the "reply within the per-request deadline while the
 device works its grace window behind the scenes" option the design below
-allows. The first serving consumer is `usb_msd`: `serve_request_recovering`
-(a `Served{Device,Refused}` split so a request refusal is never fed to health)
-wraps each per-LUN request with a `BlkHealth` (the `Removable` class) driven by
-`clock_get`, host-tested over a fault-injecting `Block` double. The state
+allows. The whole request engine is one shared definition every block driver
+reuses — `blkio::serve_request_recovering` in `lib/abi` (§2.2, §27): it decodes
+and validates a request, drives the device through the `Block` trait, folds the
+outcome into a `BlkHealth`, and frames the completion, with a
+`Served{Device,Refused}` split so a request refusal is never fed to health.
+Validation, the fail-closed refusals, the success paths, and the grace window
+thus cannot diverge between drivers, and the engine is pure/alloc-free and
+proven host-side over fault-injecting `Block` doubles in `lib/abi`. The first
+consumer is `usb_msd`: its wait-set serve loop hands each per-LUN request to the
+engine with that LUN's `BlkHealth` (the `Removable` class) driven by
+`clock_get`; only the usb_msd-specific block-service endpoint-id derivation
+(`serve::blk_block_for`) lives in the driver crate. The state
 machine is also complete for the *quiet-device* case (§27): `BlkHealth::
 grace_deadline_ns` gives the absolute one-shot deadline a driver arms its idle
 timer to while `Recovering`, and `BlkHealth::poll(now_ns)` is the pure,
@@ -307,9 +315,13 @@ diverging (§2.2). Wiring a driver's one-shot timer to call `poll` is the
 remaining IO4 idle-timer work below.
 
 Remaining:
-- Adopt the same `serve_request_recovering` shape in the `virtio_blk` and
-  `emmc2` serve paths (they have their own serve loops; the shared `BlkHealth`
-  keeps them from diverging, §2.2).
+- `virtio_blk` and `emmc2` are currently consumed **in-kernel** (root-unlock)
+  and expose only their `Block` implementation — they are not yet brought up as
+  user-space serving processes with their own serve loops. When either is, it
+  reuses the shared `blkio::serve_request_recovering` engine (above) rather than
+  copying it, so there is nothing to "adopt" separately; the shared engine is
+  the single definition (§2.2). Bringing those serve processes up is tracked
+  with their user-space driver-process work, not this stage.
 - The bounded recovery *escalation* (retry-with-backoff → LUN/device/port
   reset) as an explicit driver action behind the reply-reissuable reporting.
   The background grace-window expiry for a `Recovering` device that receives no
@@ -359,8 +371,9 @@ Deliverables (design):
 - The driver owns its own timers/IRQ waits and never blocks the consumer: it
   either completes, or replies with a `Timeout`/`Reset`/`Degraded` completion
   within the per-request deadline while the device works through its grace
-  window behind the scenes. The pure per-request logic in `usb_msd/src/serve.rs`
-  stays host-testable; the serve path grows a recovery arm around it.
+  window behind the scenes. The pure per-request logic is the shared
+  `blkio::serve_request_recovering` engine in `lib/abi`, host-tested; each
+  driver's serve loop wraps a recovery arm around it.
 
 Tests (§7): drive the state machine over a fault-injecting `Block` double
 through fault → degrade → grace(recovering) → **return-inside-window →
