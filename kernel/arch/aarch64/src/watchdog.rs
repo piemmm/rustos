@@ -62,6 +62,53 @@ use tairix_arch_api::{
 /// independent.
 pub const WATCHDOG_PPI: u32 = 27;
 
+/// GIC priority byte for the debug watchdog self-sample when it is routed
+/// to **Group 0 (FIQ)**.
+///
+/// A numerically *higher* value than the mid-range `0x80`
+/// [`crate::gic::enable_ppi`] gives every other PPI (including the
+/// preemption-timer IRQ [`crate::preempt::TIMER_PPI`]), i.e. a strictly
+/// *lower* priority. This is load-bearing on a GICv2 CPU interface running
+/// with `GICC_CTLR.FIQEn` set: when the highest-priority *pending*
+/// interrupt is a Group-0 (FIQ) line and FIQ is masked (`DAIF.F`, e.g.
+/// while an EL0 task runs), the interface withholds the FIQ **and** will
+/// not signal a lower-or-equal-priority Group-1 IRQ behind it — so an
+/// equal-priority watchdog FIQ left pending-and-masked would hold off the
+/// preemption-timer IRQ and stall scheduling entirely. Making the
+/// observational self-sample strictly lower priority than the timer means a
+/// pending, masked watchdog FIQ can never block preemption. It stays below
+/// the fully-open `GICC_PMR` (`0xFF`) so it is still delivered, and a
+/// Group-0 FIQ is signalled independently of any pending Group-1 IRQ, so
+/// the masked-section self-sample still fires in the `DAIF.I`-masked kernel
+/// wedge it exists to observe.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+pub const WATCHDOG_FIQ_PRIORITY: u8 = 0xC0;
+
+// Compile-time guard for the invariant WATCHDOG_FIQ_PRIORITY documents: the
+// self-sample FIQ must be a strictly lower priority (numerically greater) than
+// the mid-range priority the preemption-timer IRQ gets, yet stay below the
+// fully-open GICC_PMR (0xFF) so it is still delivered. Regressing the ordering
+// (e.g. back to an equal priority) fails the build here rather than silently
+// reintroducing the stress-load preemption stall.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+const _: () = assert!(
+    WATCHDOG_FIQ_PRIORITY > crate::gic::MID_RANGE_PRIORITY && WATCHDOG_FIQ_PRIORITY < 0xFF
+);
+
 /// `CNTV_CTL_EL0.ENABLE` (bit 0): start the virtual timer counting down.
 pub const CNTV_CTL_ENABLE: u64 = 1 << 0;
 
@@ -649,6 +696,11 @@ unsafe fn route_watchdog_group0() {
     // route them all to the unserviced FIQ vector and storm the core).
     unsafe {
         crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
+        // Drop the self-sample below the preemption timer's priority so a
+        // pending-and-masked Group-0 FIQ can never hold off the timer IRQ
+        // and stall scheduling (see [`WATCHDOG_FIQ_PRIORITY`]). Banked per
+        // CPU, so set on every core that routes its own cadence to Group 0.
+        crate::gic::set_ppi_priority(WATCHDOG_PPI, WATCHDOG_FIQ_PRIORITY);
     }
 }
 
@@ -726,6 +778,10 @@ pub unsafe fn probe_fiq_deliverability(counter_hz: u64) -> FeatureSupport {
     unsafe {
         crate::gic::enable_ppi(WATCHDOG_PPI);
         crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
+        // Same priority discipline as the steady-state routing: keep the
+        // self-sample below the timer so probing never perturbs preemption
+        // (see [`WATCHDOG_FIQ_PRIORITY`]).
+        crate::gic::set_ppi_priority(WATCHDOG_PPI, WATCHDOG_FIQ_PRIORITY);
     }
 
     FIQ_TAKEN.store(false, Ordering::Relaxed);

@@ -218,6 +218,13 @@ const GICD_ISPENDR: usize = 0x200;
 const GICD_ISACTIVER: usize = 0x300;
 /// `GICD_IPRIORITYR<n>` — priority, one byte per interrupt (base 0x400).
 const GICD_IPRIORITYR: usize = 0x400;
+
+/// The mid-range GIC priority [`Gicv2::enable_intid`] gives every enabled
+/// interrupt by default (the preemption-timer IRQ included). A numerically
+/// *lower* value is a *higher* priority. The debug watchdog's Group-0/FIQ
+/// self-sample is deliberately set *below* this so a pending-and-masked FIQ
+/// can never hold off the timer IRQ (`crate::watchdog::WATCHDOG_FIQ_PRIORITY`).
+pub const MID_RANGE_PRIORITY: u8 = 0x80;
 /// `GICD_ITARGETSR<n>` — interrupt processor targets, one byte per
 /// interrupt (base 0x800). The byte is a CPU-interface bitmask: bit `c`
 /// routes the interrupt to CPU `c`. The first 32 bytes (SGIs/PPIs) are
@@ -490,10 +497,11 @@ impl<M: GicMmio> Gicv2<M> {
         self.mmio.gicd_write(GICD_CTLR, 1);
     }
 
-    /// Give `intid` a mid-range priority and set its enable bit.
+    /// Give `intid` the mid-range priority ([`MID_RANGE_PRIORITY`]) and set
+    /// its enable bit.
     pub fn enable_intid(&self, intid: u32) {
         self.mmio
-            .gicd_write_byte(GICD_IPRIORITYR + intid as usize, 0x80);
+            .gicd_write_byte(GICD_IPRIORITYR + intid as usize, MID_RANGE_PRIORITY);
         self.mmio
             .gicd_write(isenabler_offset(intid), isenabler_bit(intid));
     }
@@ -502,6 +510,15 @@ impl<M: GicMmio> Gicv2<M> {
     pub fn disable_intid(&self, intid: u32) {
         self.mmio
             .gicd_write(icenabler_offset(intid), isenabler_bit(intid));
+    }
+
+    /// Set `intid`'s GIC priority byte (`GICD_IPRIORITYR`); a numerically
+    /// *lower* value is a *higher* priority. For an SGI/PPI (`intid < 32`)
+    /// the priority register is banked per CPU, so this sets the **calling**
+    /// CPU's copy — call it on every CPU that needs the value.
+    pub fn set_priority(&self, intid: u32, priority: u8) {
+        self.mmio
+            .gicd_write_byte(GICD_IPRIORITYR + intid as usize, priority);
     }
 
     /// Route shared-peripheral interrupt `intid` to the CPU interfaces
@@ -842,6 +859,21 @@ pub unsafe fn init() {
 pub unsafe fn enable_ppi(intid: u32) {
     // SAFETY: as `init` — the fixed windows are mapped and owned.
     unsafe { volatile_gic() }.enable_intid(intid);
+}
+
+/// Set the GIC priority of `intid` on the calling CPU (a numerically
+/// *lower* value is a *higher* priority). For an SGI/PPI (`intid < 32`)
+/// the priority register is banked per CPU, so this configures only the
+/// calling core's copy.
+///
+/// # Safety
+///
+/// The distributor must already be enabled ([`init`]); the fixed
+/// `virt`-board windows are mapped and owned by the kernel.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn set_ppi_priority(intid: u32, priority: u8) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.set_priority(intid, priority);
 }
 
 /// Route shared-peripheral interrupt `intid` to the CPU interfaces named
@@ -1189,11 +1221,25 @@ mod tests {
     fn enable_intid_sets_priority_and_enable_bit() {
         let gic = Gicv2::new(MockGicMmio::new());
         gic.enable_intid(42);
-        assert_eq!(gic.mmio.gicd_read(GICD_IPRIORITYR + 42), 0x80);
+        assert_eq!(
+            gic.mmio.gicd_read(GICD_IPRIORITYR + 42),
+            u32::from(MID_RANGE_PRIORITY)
+        );
         assert_eq!(
             gic.mmio.gicd_read(isenabler_offset(42)) & isenabler_bit(42),
             isenabler_bit(42)
         );
+    }
+
+    #[test]
+    fn set_priority_writes_the_priority_byte() {
+        // The watchdog self-sample lowers its FIQ below the timer priority
+        // through this primitive; it must write exactly the requested byte
+        // into the INTID's `GICD_IPRIORITYR` slot, over the enable default.
+        let gic = Gicv2::new(MockGicMmio::new());
+        gic.enable_intid(27);
+        gic.set_priority(27, 0xC0);
+        assert_eq!(gic.mmio.gicd_read(GICD_IPRIORITYR + 27), 0xC0);
     }
 
     #[test]

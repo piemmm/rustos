@@ -998,11 +998,35 @@ probe, never guessed (§2.1/§2.16/§2.19).
   self-sample captured a live in-kernel PC (interrupted `SPSR_EL1.I` masked)
   whose value and `capture_sample_backtrace` top land inside the marker
   (`sampled=live`).
-- **B4 (use the sampler to fix D13) — REMAINING.** The tool is proven (B3) and
-  active on the QEMU debug image; reproducing the nondeterministic
-  `stress --cpu N` multi-core wedge and fixing the SMP defect structurally
-  (with a regression test, never a timeout/limit bump §2.17) is the open work.
-  Not yet reproduced/fixed.
+- **B4 (use the sampler to fix D13) — one cause found and fixed; the metal
+  FIQ-`Unsupported` path is separate and still open.** A **deterministic**
+  `stress --cpu 20` wedge was reproduced on the **QEMU-`virt` debug image**
+  (full RPi image + `ramfb`, i.e. the video framebuffer console active — it
+  does **not** reproduce over a UART-only console): all cores end up in EL0
+  workers with the preemption timer (`CNTP`) *fired but never delivered* by the
+  GIC, so nothing preempts and the shell can no longer even spawn a command.
+  Root cause: `Gicv2::enable_intid` gave **every** PPI the same mid-range GIC
+  priority (`0x80`), so the debug watchdog's Group-0/FIQ self-sample
+  (`WATCHDOG_PPI` 27) equalled the preemption-timer IRQ (`TIMER_PPI` 30). On a
+  GICv2 CPU interface with `GICC_CTLR.FIQEn` set, a pending-but-masked
+  (`DAIF.F`, e.g. while an EL0 task runs) Group-0 FIQ of priority ≥ the
+  timer IRQ **holds off** that IRQ — permanently once the level-triggered
+  watchdog `CNTV` has fired on every core — so preemption dies. **Fix:** the
+  self-sample FIQ is dropped strictly below the timer
+  (`watchdog::WATCHDOG_FIQ_PRIORITY = 0xC0`, applied via the new
+  `gic::set_ppi_priority` in both the boot probe and per-CPU
+  `route_watchdog_group0`); a masked Group-0 FIQ can no longer block the
+  Group-1 timer, and a Group-0 FIQ is still signalled independently of a
+  pending Group-1, so the masked-section self-sample still fires. Verified:
+  the ramfb repro stays responsive under `stress --cpu 20` and
+  `fiq_selfsample_qemu_aarch64` still passes; host regression guards
+  `self_sample_fiq_is_strictly_lower_priority_than_the_preemption_timer`
+  (`kernel/arch/aarch64` watchdog) and `set_priority_writes_the_priority_byte`
+  (gic). This is **debug-image only** and QEMU-`virt`-only: on the real Pi 4
+  GIC-400 the FIQ probe returns `Unsupported` (Group 0 secure), so
+  `route_watchdog_group0` never runs and this priority path is inert — the
+  real-Pi masked-section hard lockup is therefore a *separate* defect (below)
+  that this fix does not claim to close.
 
 The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
 for `plans/FIX-HARDWARE-FEATURES.md`.
