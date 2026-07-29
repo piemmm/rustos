@@ -46,13 +46,16 @@ pub const INTERIOR_OFFSET: u64 = PAGE + 17;
 // time so a careless edit to the constants above cannot silently break
 // the probes' page classification.
 const _: () = {
-    assert!(PATH_OFFSET % PAGE == 0, "path copy must start a page");
+    assert!(
+        PATH_OFFSET.is_multiple_of(PAGE),
+        "path copy must start a page"
+    );
     assert!(
         INTERIOR_OFFSET > PAGE && INTERIOR_OFFSET < 2 * PAGE,
         "interior probe must sit in page 1"
     );
     assert!(
-        FILE_LEN / PAGE == 3 && FILE_LEN % PAGE != 0,
+        FILE_LEN / PAGE == 3 && !FILE_LEN.is_multiple_of(PAGE),
         "the last page must straddle EOF"
     );
 };

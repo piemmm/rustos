@@ -197,7 +197,7 @@ impl HvsConfig {
         if self.plane_count == 0 || self.plane_count > MAX_PLANES {
             return Err(DriverError::LengthOutOfRange);
         }
-        if self.dlist_len_bytes % 4 != 0 {
+        if !self.dlist_len_bytes.is_multiple_of(4) {
             return Err(DriverError::LengthOutOfRange);
         }
         let needed_words = self.plane_count * WORDS_PER_PLANE + 1;

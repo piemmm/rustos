@@ -136,7 +136,7 @@ mod program {
         ) -> Result<Vec<ProcessRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Processes, ProcessRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(ProcessRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ ProcessRecord::WIRE_LEN }>().0 {
                 let record = ProcessRecord::from_bytes(chunk)?;
                 // Self-scope narrowing happens here in the broker: the kernel
                 // returns every process, and a self-scoped query keeps only
@@ -192,7 +192,7 @@ mod program {
         fn mount_records(&self, _caller: &Caller) -> Result<Vec<MountRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Mounts, MountRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(MountRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ MountRecord::WIRE_LEN }>().0 {
                 records.push(MountRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -204,7 +204,7 @@ mod program {
                 UserDirectoryRecord::WIRE_LEN,
             )?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(UserDirectoryRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ UserDirectoryRecord::WIRE_LEN }>().0 {
                 records.push(UserDirectoryRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -213,7 +213,7 @@ mod program {
         fn cpu_times(&self, _caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::CpuTimes, CpuTimeRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(CpuTimeRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ CpuTimeRecord::WIRE_LEN }>().0 {
                 records.push(CpuTimeRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -222,7 +222,7 @@ mod program {
         fn seats(&self, _caller: &Caller) -> Result<Vec<SeatRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Seats, SeatRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(SeatRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ SeatRecord::WIRE_LEN }>().0 {
                 records.push(SeatRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -235,7 +235,7 @@ mod program {
         fn reclaim_records(&self, _caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Reclaim, ReclaimClassRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ ReclaimClassRecord::WIRE_LEN }>().0 {
                 records.push(ReclaimClassRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -248,7 +248,7 @@ mod program {
         fn cpu_load(&self, _caller: &Caller) -> Result<Vec<CpuLoadRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::CpuLoad, CpuLoadRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(CpuLoadRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ CpuLoadRecord::WIRE_LEN }>().0 {
                 records.push(CpuLoadRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -257,7 +257,7 @@ mod program {
         fn cpu_info(&self, _caller: &Caller) -> Result<Vec<CpuInfoRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::CpuInfo, CpuInfoRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(CpuInfoRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
                 records.push(CpuInfoRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -307,7 +307,7 @@ mod program {
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(IrqRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ IrqRecord::WIRE_LEN }>().0 {
                 records.push(IrqRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -316,7 +316,7 @@ mod program {
         fn crashes(&self, _caller: &Caller) -> Result<Vec<CrashRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Crashes, CrashRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.chunks_exact(CrashRecord::WIRE_LEN) {
+            for chunk in bytes.as_chunks::<{ CrashRecord::WIRE_LEN }>().0 {
                 records.push(CrashRecord::from_bytes(chunk)?);
             }
             Ok(records)
@@ -483,8 +483,9 @@ mod program {
             let request = page.request(offset, NETSTACK_LIST_LIMIT_MAX);
             let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
                 .map_err(errno_from)?;
-            let (count, body) = decode_page_reply(&reply[..n], P::RECORD_LEN)?;
-            for chunk in body.chunks_exact(P::RECORD_LEN) {
+            let record_len = P::RECORD_LEN;
+            let (count, body) = decode_page_reply(&reply[..n], record_len)?;
+            for chunk in body.chunks_exact(record_len) {
                 records.push(P::decode(chunk)?);
             }
             if count < NETSTACK_LIST_LIMIT_MAX {

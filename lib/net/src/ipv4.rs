@@ -173,12 +173,13 @@ impl Ipv4Header {
         out: &mut [u8],
         payload_len: usize,
     ) -> Option<usize> {
-        if options.len() % 4 != 0 || options.len() > IPV4_MAX_HEADER_LEN - IPV4_HEADER_LEN {
+        if !options.len().is_multiple_of(4) || options.len() > IPV4_MAX_HEADER_LEN - IPV4_HEADER_LEN
+        {
             return None;
         }
         let header_len = IPV4_HEADER_LEN + options.len();
         let total_length = u16::try_from(header_len.checked_add(payload_len)?).ok()?;
-        if self.fragment_offset % 8 != 0 {
+        if !self.fragment_offset.is_multiple_of(8) {
             return None;
         }
         let mut flags_offset = self.fragment_offset / 8;

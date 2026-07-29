@@ -191,7 +191,7 @@ impl DiscRecord {
         if self.format_version > 1 {
             return Err(DriverError::BadMagic);
         }
-        if self.disc_size == 0 || self.disc_size % (1u64 << self.log2secsize) != 0 {
+        if self.disc_size == 0 || !self.disc_size.is_multiple_of(1u64 << self.log2secsize) {
             return Err(DriverError::BadMagic);
         }
         // Sector count must be representable in 32 bits.

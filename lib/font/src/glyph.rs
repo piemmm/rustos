@@ -69,7 +69,7 @@ impl Glyph {
             .get(y as usize * BYTES_PER_ROW + x as usize / 2)
             .copied()
             .unwrap_or(0);
-        if x % 2 == 0 {
+        if x.is_multiple_of(2) {
             byte >> 4
         } else {
             byte & 0x0F

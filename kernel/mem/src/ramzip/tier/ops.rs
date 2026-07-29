@@ -406,9 +406,8 @@ impl Ramzip {
             .range((space, low)..=(space, high))
             .filter(|((_, number), entry)| {
                 *number != center
-                    && sealed_near.map_or(true, |near| {
-                        entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW
-                    })
+                    && sealed_near
+                        .is_none_or(|near| entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW)
             })
             .map(|((_, number), _)| *number)
             .collect();

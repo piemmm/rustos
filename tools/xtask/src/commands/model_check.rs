@@ -413,8 +413,9 @@ pub fn parse(args: &[std::ffi::OsString]) -> Result<Options, String> {
             }
             _ => {
                 return Err(format!(
-                    "model-check: unexpected argument {arg:?}; usage: \
-                     cargo xtask model-check [--target NAME] [--list]"
+                    "model-check: unexpected argument {}; usage: \
+                     cargo xtask model-check [--target NAME] [--list]",
+                    arg.display()
                 ));
             }
         }

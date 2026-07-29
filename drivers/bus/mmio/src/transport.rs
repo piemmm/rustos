@@ -84,7 +84,7 @@ impl MmioRead for VolatileMmioRead {
             return 0;
         }
         let offset = physical_address - self.base_phys;
-        if offset % 4 != 0 || offset.checked_add(4).map_or(true, |e| e > self.len) {
+        if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|e| e > self.len) {
             return 0;
         }
         let words = offset / 4;

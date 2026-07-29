@@ -300,7 +300,7 @@ mod tests {
 
         fn span(&self, lba: u64, len: usize) -> Result<usize, DriverError> {
             let bs = self.geo.block_size as usize;
-            if len == 0 || len % bs != 0 {
+            if len == 0 || !len.is_multiple_of(bs) {
                 return Err(DriverError::BufferTooSmall);
             }
             let blocks = (len / bs) as u64;

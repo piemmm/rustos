@@ -292,7 +292,7 @@ impl<T: DmaAddressRegister> FwCfg<T> {
 /// its big-endian selector key. Pure helper, separated for host
 /// unit-testing.
 fn find_selector(entries: &[u8], name: &str) -> Option<u16> {
-    for entry in entries.chunks_exact(DIR_ENTRY_LEN) {
+    for entry in entries.as_chunks::<DIR_ENTRY_LEN>().0 {
         let name_bytes = &entry[DIR_NAME_OFFSET..];
         let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(0);
         if &name_bytes[..end] == name.as_bytes() {

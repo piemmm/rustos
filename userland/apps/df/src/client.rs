@@ -339,12 +339,12 @@ fn block_unit_name(unit: u64) -> String {
         (1_000, "kB"),
     ];
     for (value, letter) in BINARY {
-        if unit >= value && unit % value == 0 {
+        if unit >= value && unit.is_multiple_of(value) {
             return format!("{}{letter}", unit / value);
         }
     }
     for (value, letters) in DECIMAL {
-        if unit >= value && unit % value == 0 {
+        if unit >= value && unit.is_multiple_of(value) {
             return format!("{}{letters}", unit / value);
         }
     }

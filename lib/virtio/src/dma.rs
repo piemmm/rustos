@@ -25,6 +25,7 @@
 //! (zero-on-free).
 
 use tairix_abi::driver::BufferClass;
+use tairix_abi::DriverError;
 
 // `PoolId`, `SlabFreeFn`, and `DmaSlab` moved into `lib/abi` at Stage
 // 4.D Item 0-tail so the host trait (`tairix_abi::DriverHost`) can
@@ -100,11 +101,11 @@ impl BounceBuffer {
     ///
     /// # Errors
     ///
-    /// Returns `Err(())` if `payload` does not fit. Callers
-    /// translate this into the appropriate `DriverError`.
-    pub fn stage(&mut self, payload: &[u8]) -> Result<(), ()> {
+    /// [`DriverError::BufferTooSmall`] if `payload` does not fit the
+    /// staging window.
+    pub fn stage(&mut self, payload: &[u8]) -> Result<(), DriverError> {
         if payload.len() > self.slab.len() {
-            return Err(());
+            return Err(DriverError::BufferTooSmall);
         }
         self.slab.as_bytes_mut()[..payload.len()].copy_from_slice(payload);
         self.used = payload.len();
@@ -116,11 +117,11 @@ impl BounceBuffer {
     ///
     /// # Errors
     ///
-    /// Returns `Err(())` if `n` exceeds the underlying region's
-    /// capacity.
-    pub fn fill_from_device(&mut self, n: usize) -> Result<&[u8], ()> {
+    /// [`DriverError::BufferTooSmall`] if `n` exceeds the underlying
+    /// region's capacity.
+    pub fn fill_from_device(&mut self, n: usize) -> Result<&[u8], DriverError> {
         if n > self.slab.len() {
-            return Err(());
+            return Err(DriverError::BufferTooSmall);
         }
         self.used = n;
         Ok(&self.slab.as_bytes()[..n])
@@ -149,7 +150,7 @@ impl BounceBuffer {
         // `slab` out by a single byte-copy of the field. The
         // remaining fields (`class`, `used`) are `Copy` and have no
         // destructors that need running.
-        unsafe { core::ptr::read(&md.slab) }
+        unsafe { core::ptr::read(&raw const md.slab) }
     }
 
     fn scrub_if_sensitive(&mut self) {
@@ -369,7 +370,7 @@ mod tests {
     fn bounce_buffer_rejects_overflow() {
         let slab = leaked_slab(4, PoolId::MOCK, 0, 0);
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
-        assert_eq!(bb.stage(&[0u8; 8]), Err(()));
+        assert_eq!(bb.stage(&[0u8; 8]), Err(DriverError::BufferTooSmall));
     }
 
     #[test]
@@ -418,6 +419,6 @@ mod tests {
         let view = bb.fill_from_device(5).expect("fit");
         assert_eq!(view, b"hello");
         assert_eq!(bb.used(), 5);
-        assert_eq!(bb.fill_from_device(64), Err(()));
+        assert_eq!(bb.fill_from_device(64), Err(DriverError::BufferTooSmall));
     }
 }

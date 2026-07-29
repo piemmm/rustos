@@ -104,7 +104,7 @@ fn clear_dispatch_for_tests() {
 #[must_use]
 pub fn dispatch_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> Option<u64> {
     let cb = dispatch_callback()?;
-    Some(cb(number, &args))
+    Some(cb(number, &raw const args))
 }
 
 #[cfg(test)]

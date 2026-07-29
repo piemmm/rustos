@@ -80,7 +80,7 @@ const STACK_REGION_BYTES: u64 = STACK_GUARD_BYTES + KTHREAD_STACK_BYTES as u64;
 /// The region is a whole number of 4 KiB pages so each region's guard page
 /// lands on a clean page boundary the block split can clear.
 const _STACK_REGION_PAGE_ALIGNED: () = {
-    assert!(STACK_REGION_BYTES % 4096 == 0);
+    assert!(STACK_REGION_BYTES.is_multiple_of(4096));
 };
 
 /// Bytes reserved at each block's base for its intrusive [`BlockHeader`]:
@@ -501,7 +501,7 @@ impl StackArena {
             let header = store.read(cur);
             let first = BlockHeader::first_region(cur);
             if guard >= first && guard < header.block_end {
-                if (guard - first) % STACK_REGION_BYTES != 0 {
+                if !(guard - first).is_multiple_of(STACK_REGION_BYTES) {
                     return FreeOutcome::ForeignAddress;
                 }
                 if header.live == 0 {

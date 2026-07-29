@@ -321,7 +321,7 @@ fn count_free_clusters<B: Block>(
             fat_start_byte + u64::from(cluster) * 4,
             &mut chunk[..take_usize],
         )?;
-        for entry in chunk[..take_usize].chunks_exact(4) {
+        for entry in chunk[..take_usize].as_chunks::<4>().0 {
             if le32(entry, 0) & FAT32_CLUSTER_MASK == 0 {
                 free_clusters += 1;
             }

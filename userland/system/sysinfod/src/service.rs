@@ -1282,7 +1282,9 @@ mod tests {
         let body = &reply[HwTreeHeader::WIRE_LEN..];
         assert_eq!(body.len() % HwNode::WIRE_LEN, 0);
         let nodes = body
-            .chunks_exact(HwNode::WIRE_LEN)
+            .as_chunks::<{ HwNode::WIRE_LEN }>()
+            .0
+            .iter()
             .map(|chunk| HwNode::from_bytes(chunk).unwrap())
             .collect();
         (header, nodes)

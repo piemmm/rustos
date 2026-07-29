@@ -388,14 +388,14 @@ impl TagRange {
     pub fn matches(&self, size: u64, modified: Time64) -> bool {
         match self {
             Self::Size { min, max } => {
-                min.map_or(true, |m| size >= m) && max.map_or(true, |m| size <= m)
+                min.is_none_or(|m| size >= m) && max.is_none_or(|m| size <= m)
             }
             Self::Date { min, max } => {
                 if modified == Time64::UNIX_EPOCH {
                     return false;
                 }
                 let secs = modified.secs();
-                min.map_or(true, |m| secs >= m) && max.map_or(true, |m| secs < m)
+                min.is_none_or(|m| secs >= m) && max.is_none_or(|m| secs < m)
             }
         }
     }

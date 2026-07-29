@@ -80,7 +80,7 @@ fn rate_limiter_accounts_every_drop_and_never_panics() {
                 now = now.saturating_add(prng.next_u64() % 5_000_000);
                 let stream = stream_of(prng.next_u64());
 
-                if prng.next_u64() % 4 == 0 {
+                if prng.next_u64().is_multiple_of(4) {
                     // A report request. A non-gated stream returns `None`; a
                     // gated one returns a report only once due — the
                     // `expect` below would fire if a non-gated stream ever

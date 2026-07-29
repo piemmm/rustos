@@ -274,7 +274,7 @@ pub fn write_fragment_header(
     more: bool,
     identification: u32,
 ) -> Option<usize> {
-    if offset % 8 != 0 || offset > MAX_FRAGMENT_OFFSET {
+    if !offset.is_multiple_of(8) || offset > MAX_FRAGMENT_OFFSET {
         return None;
     }
     let header = out.get_mut(..FRAGMENT_HEADER_LEN)?;

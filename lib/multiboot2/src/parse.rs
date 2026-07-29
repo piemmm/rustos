@@ -71,7 +71,7 @@ impl<'a> BootInfo<'a> {
     /// Returns a [`ParseError`] for any structural defect; see the enum
     /// for the closed-fail conditions.
     pub fn parse(buf: &'a [u8]) -> Result<Self, ParseError> {
-        if (buf.as_ptr() as usize) % 8 != 0 {
+        if !(buf.as_ptr() as usize).is_multiple_of(8) {
             return Err(ParseError::Misaligned);
         }
         if buf.len() < size_of::<Header>() {
@@ -373,7 +373,7 @@ impl<'a> MemoryMap<'a> {
             return None;
         }
         let body = &payload[8..];
-        if body.len() % entry_size != 0 {
+        if !body.len().is_multiple_of(entry_size) {
             return None;
         }
         Some(Self {
@@ -569,7 +569,7 @@ impl<'a> EfiMemoryMap<'a> {
             return None;
         }
         let body = &payload[16..];
-        if body.len() % descriptor_size != 0 {
+        if !body.len().is_multiple_of(descriptor_size) {
             return None;
         }
         Some(Self {

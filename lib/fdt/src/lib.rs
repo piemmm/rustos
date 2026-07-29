@@ -119,7 +119,7 @@ impl<'a> Fdt<'a> {
             return Err(FdtError::OutOfBounds);
         }
         // The structure block is a sequence of 4-byte tokens.
-        if struct_off % 4 != 0 || struct_size % 4 != 0 {
+        if !struct_off.is_multiple_of(4) || !struct_size.is_multiple_of(4) {
             return Err(FdtError::Malformed);
         }
         Ok(Self {

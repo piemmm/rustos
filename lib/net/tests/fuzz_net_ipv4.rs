@@ -43,7 +43,7 @@ fn exercise_fragment(rng: &mut Lcg) {
         Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
         (rng.next_u64() & 0xFF) as u8,
     );
-    header.dont_fragment = rng.next_u64() % 4 == 0;
+    header.dont_fragment = rng.next_u64().is_multiple_of(4);
     header.identification = (rng.next_u64() & 0xFFFF) as u16;
     let payload_len = (rng.next_u64() & 0x1_FFFF) as usize;
     let mtu = (rng.next_u64() & 0xFFF) as usize;
@@ -72,7 +72,7 @@ fn exercise_reassembler(rng: &mut Lcg, reassembler: &mut Reassembler, config: &R
     };
     let offset = (rng.next_u64() & 0x1_FFFF) as usize;
     let len = (rng.next_u64() & 0x7FF) as usize;
-    let more = rng.next_u64() % 2 == 0;
+    let more = rng.next_u64().is_multiple_of(2);
     let data = vec![0xA5u8; len];
     let now = Duration64::from_secs(i64::try_from(rng.next_u64() & 0x3FF).expect("bounded"));
     match reassembler.push(key, offset, more, &data, now) {

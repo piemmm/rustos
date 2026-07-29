@@ -478,7 +478,7 @@ impl DmaWindowMap {
         if addr_limit != 0 {
             let data_len = (data_pages as u64) * PAGE_SIZE as u64;
             let block_end = start_frame.start().as_u64().checked_add(data_len);
-            if block_end.map_or(true, |end| end > addr_limit) {
+            if block_end.is_none_or(|end| end > addr_limit) {
                 let _ = frames.free_order(start_frame, order);
                 return Err(DmaError::AddrLimitExceeded);
             }

@@ -880,7 +880,7 @@ impl<H: SdhciHost> Emmc2<H> {
     /// count the controller takes.
     fn validate_transfer(&self, lba: u64, buf_len: usize) -> Result<(u32, u16), DriverError> {
         let bs = BLOCK_SIZE as usize;
-        if buf_len == 0 || buf_len % bs != 0 {
+        if buf_len == 0 || !buf_len.is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let blocks = buf_len / bs;

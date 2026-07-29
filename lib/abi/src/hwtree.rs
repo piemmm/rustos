@@ -756,7 +756,7 @@ impl HwResource {
         if width_px == 0 || height_px == 0 {
             return Err(Errno::LengthOutOfRange);
         }
-        if self.len % u64::from(height_px) != 0 {
+        if !self.len.is_multiple_of(u64::from(height_px)) {
             return Err(Errno::LengthOutOfRange);
         }
         let stride = self.len / u64::from(height_px);

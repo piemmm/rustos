@@ -56,7 +56,7 @@ impl ContextSwitch for TestContextSwitch {
         if stack_top == 0 {
             return Err(PrepareError::NullStack);
         }
-        if stack_top % 16 != 0 {
+        if !stack_top.is_multiple_of(16) {
             return Err(PrepareError::Misaligned);
         }
         if stack_top < TEST_FRAME_BYTES {

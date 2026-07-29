@@ -419,7 +419,7 @@ fn bulk_transfer_survives_reordering_and_loss() {
             // Deliver some in-flight frames, occasionally dropping/reordering.
             if !in_flight.is_empty() {
                 // Randomly drop the head 1-in-8.
-                if rng.next() % 8 == 0 {
+                if rng.next().is_multiple_of(8) {
                     in_flight.remove(0);
                 } else {
                     let idx = usize::try_from(rng.next() % in_flight.len() as u64).unwrap();

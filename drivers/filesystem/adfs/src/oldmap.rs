@@ -89,11 +89,7 @@ impl OldMap {
             if start >= ENTRY_LIMIT || len >= ENTRY_LIMIT {
                 return Err(DriverError::BadMagic);
             }
-            if len == 0
-                || start
-                    .checked_add(len)
-                    .map_or(true, |e| e > self.disc_sectors)
-            {
+            if len == 0 || start.checked_add(len).is_none_or(|e| e > self.disc_sectors) {
                 return Err(DriverError::BadMagic);
             }
         }

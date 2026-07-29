@@ -222,7 +222,7 @@ fn parse_sha256(hex: &str) -> Option<[u8; SHA256_OUTPUT_LEN]> {
         return None;
     }
     let mut out = [0u8; SHA256_OUTPUT_LEN];
-    for (i, pair) in hex.chunks_exact(2).enumerate() {
+    for (i, pair) in hex.as_chunks::<2>().0.iter().enumerate() {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out[i] = u8::try_from(hi * 16 + lo).ok()?;

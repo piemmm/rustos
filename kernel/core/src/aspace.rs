@@ -310,7 +310,9 @@ impl StackSpan {
     #[must_use]
     pub fn new(reserve_base: u64, committed_base: u64, top: u64) -> Option<Self> {
         let page = PAGE_SIZE as u64;
-        let aligned = reserve_base % page == 0 && committed_base % page == 0 && top % page == 0;
+        let aligned = reserve_base.is_multiple_of(page)
+            && committed_base.is_multiple_of(page)
+            && top.is_multiple_of(page);
         (aligned && reserve_base <= committed_base && committed_base < top).then_some(Self {
             reserve_base,
             committed_base,

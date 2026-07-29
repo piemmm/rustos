@@ -314,7 +314,7 @@ impl FrameAllocatorState {
         let Some(rel) = start.checked_sub(self.base_frame) else {
             return false;
         };
-        if rel.checked_add(n).map_or(true, |e| e > self.span) {
+        if rel.checked_add(n).is_none_or(|e| e > self.span) {
             return false;
         }
         for i in start..start + n {
@@ -453,7 +453,7 @@ impl FrameAllocatorState {
         let Some(rel) = start.checked_sub(self.base_frame) else {
             return Err(AllocError::OutOfRange);
         };
-        if rel.checked_add(n).map_or(true, |e| e > self.span) {
+        if rel.checked_add(n).is_none_or(|e| e > self.span) {
             return Err(AllocError::OutOfRange);
         }
         if start & (n - 1) != 0 {
@@ -482,7 +482,7 @@ impl FrameAllocatorState {
             let past_end = parent_start
                 .checked_sub(self.base_frame)
                 .and_then(|p| p.checked_add(1usize << (cur_order + 1)))
-                .map_or(true, |e| e > self.span);
+                .is_none_or(|e| e > self.span);
             if past_end {
                 break;
             }

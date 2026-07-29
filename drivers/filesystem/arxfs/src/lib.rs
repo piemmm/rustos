@@ -1492,7 +1492,7 @@ impl<B: Block> ARXFS<B> {
             {
                 continue;
             }
-            if best.map_or(true, |(b, _, _)| sb.generation > b.generation) {
+            if best.is_none_or(|(b, _, _)| sb.generation > b.generation) {
                 best = Some((sb, uuid, slot));
             }
         }
@@ -2715,7 +2715,7 @@ impl<B: Block> ARXFS<B> {
             let bi = pos / cap;
             let within = as_usize(pos % cap);
             if within == 0
-                && bi % COMPRESS_CLUSTER_BLOCKS == 0
+                && bi.is_multiple_of(COMPRESS_CLUSTER_BLOCKS)
                 && data.len() - done >= cluster_bytes
             {
                 self.store_cluster(inode, ino, bi, &data[done..done + cluster_bytes])?;

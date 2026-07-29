@@ -87,7 +87,7 @@ impl TaskCtx {
         if stack_top == 0 {
             return Err(PrepareError::NullStack);
         }
-        if stack_top % 16 != 0 {
+        if !stack_top.is_multiple_of(16) {
             return Err(PrepareError::Misaligned);
         }
         if stack_top < FRAME_BYTES {
@@ -145,7 +145,7 @@ const FRAME_BYTES: u64 = 14 * 8;
 #[allow(dead_code)] // const-assert; never referenced at runtime.
 const TASK_CTX_LAYOUT_PINNED: () = {
     assert!(size_of::<TaskCtx>() == 8);
-    assert!(FRAME_BYTES % 16 == 0);
+    assert!(FRAME_BYTES.is_multiple_of(16));
 };
 
 // --- Context switch primitive ---------------------------------------

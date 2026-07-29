@@ -41,7 +41,7 @@ pub fn secure_clear(slice: &mut [u8]) {
         // (and uninitialised) `u8` representation, so no UB can arise
         // from the value itself.
         unsafe {
-            core::ptr::write_volatile(byte as *mut u8, 0);
+            core::ptr::write_volatile(core::ptr::from_mut::<u8>(byte), 0);
         }
     }
     // Pair the writes with a sequentially-consistent compiler fence so

@@ -152,7 +152,7 @@ impl BlkClient {
             || completion.block_size < MIN_BLOCK_SIZE
             || completion.block_size > MAX_BLOCK_SIZE
             || completion.block_count == 0
-            || BLK_DATA_LEN % completion.block_size as usize != 0
+            || !BLK_DATA_LEN.is_multiple_of(completion.block_size as usize)
         {
             return Err(Errno::OutOfRange);
         }
@@ -282,13 +282,13 @@ impl BlkClient {
     /// re-checks everything against the live device.
     fn check_extent(&self, lba: u64, len: usize) -> Result<usize, DriverError> {
         let block_size = self.geometry.block_size as usize;
-        if len == 0 || len % block_size != 0 {
+        if len == 0 || !len.is_multiple_of(block_size) {
             return Err(DriverError::BufferTooSmall);
         }
         let blocks = (len / block_size) as u64;
         if lba
             .checked_add(blocks)
-            .map_or(true, |end| end > self.geometry.block_count)
+            .is_none_or(|end| end > self.geometry.block_count)
         {
             return Err(DriverError::LengthOutOfRange);
         }

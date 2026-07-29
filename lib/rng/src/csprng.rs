@@ -302,8 +302,8 @@ impl<E: EntropySource> CsRng<E> {
         let mut state = [0u8; 32];
         self.try_fill_bytes(&mut state)?;
         let mut words = [0u64; 4];
-        for (word, chunk) in words.iter_mut().zip(state.chunks_exact(8)) {
-            *word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        for (word, chunk) in words.iter_mut().zip(state.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*chunk);
         }
         state.zeroize();
         Ok(FastRng::from_state(words))

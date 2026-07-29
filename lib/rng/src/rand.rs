@@ -31,11 +31,10 @@ pub trait RandU64 {
 
     /// Fill `out` with uniformly distributed bytes.
     fn fill_bytes(&mut self, out: &mut [u8]) {
-        let mut chunks = out.chunks_exact_mut(8);
-        for chunk in &mut chunks {
+        let (chunks, tail) = out.as_chunks_mut::<8>();
+        for chunk in chunks {
             chunk.copy_from_slice(&self.next_u64().to_le_bytes());
         }
-        let tail = chunks.into_remainder();
         if !tail.is_empty() {
             let bytes = self.next_u64().to_le_bytes();
             tail.copy_from_slice(&bytes[..tail.len()]);

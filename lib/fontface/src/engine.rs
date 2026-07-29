@@ -579,8 +579,8 @@ fn emit_contour(points: &[Point], sink: &mut OutlineSink) {
         let a = points[points.len() - 1];
         let b = points[0];
         let mid = Point {
-            x: (a.x + b.x) / 2.0,
-            y: (a.y + b.y) / 2.0,
+            x: f64::midpoint(a.x, b.x),
+            y: f64::midpoint(a.y, b.y),
             on_curve: true,
         };
         (mid, points.len() - 1)
@@ -602,8 +602,8 @@ fn emit_contour(points: &[Point], sink: &mut OutlineSink) {
             (false, None) => pending_control = Some(p),
             (false, Some(c)) => {
                 let mid = Point {
-                    x: (c.x + p.x) / 2.0,
-                    y: (c.y + p.y) / 2.0,
+                    x: f64::midpoint(c.x, p.x),
+                    y: f64::midpoint(c.y, p.y),
                     on_curve: true,
                 };
                 sink.quad(current.x, current.y, c.x, c.y, mid.x, mid.y);

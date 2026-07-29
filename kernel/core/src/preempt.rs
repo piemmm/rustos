@@ -138,7 +138,7 @@ fn active_gate() -> Option<&'static dyn PreemptCompetitor> {
 /// wake, a queued foreground signal) is waiting for the dispatch loop to
 /// drain it. Absent the gate, defaults to `true` (always reschedule).
 fn reschedule_owed(cpu: CpuId) -> bool {
-    let competitor = active_gate().map_or(true, |gate| gate.has_runnable_competitor(cpu));
+    let competitor = active_gate().is_none_or(|gate| gate.has_runnable_competitor(cpu));
     competitor
         || crate::waitq::has_pending_deferred_wake()
         || crate::waitq::timed_wake_due()

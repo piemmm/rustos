@@ -450,9 +450,7 @@ fn absolute_path_enforces_the_kernel_path_bound() {
     // so the *whole-path* FS_PATH_MAX bound is what trips: enough 250-byte
     // components that the spelled path runs past FS_PATH_MAX.
     let component = "a".repeat(250);
-    let deep: Vec<String> = core::iter::repeat(component)
-        .take(FS_PATH_MAX / 250 + 1)
-        .collect();
+    let deep: Vec<String> = core::iter::repeat_n(component, FS_PATH_MAX / 250 + 1).collect();
     assert_eq!(
         absolute_path(&deep),
         Err(Errno::LengthOutOfRange),

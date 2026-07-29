@@ -93,7 +93,7 @@ impl Mode {
         match self {
             // Mirror the quick floor.
             Mode::Quick => Duration::from_secs(5),
-            Mode::Soak => Duration::from_secs(24 * 60 * 60),
+            Mode::Soak => Duration::from_hours(24),
         }
     }
 }
@@ -126,7 +126,10 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let Some(flag) = arg.to_str() else {
-            return Err(format!("fssoak: argument {arg:?} is not valid UTF-8"));
+            return Err(format!(
+                "fssoak: argument {} is not valid UTF-8",
+                arg.display()
+            ));
         };
         match flag {
             "--quick" => set_mode(&mut mode, Mode::Quick)?,
@@ -148,7 +151,9 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                 let parsed = value
                     .to_str()
                     .and_then(|s| s.parse::<u64>().ok())
-                    .ok_or_else(|| format!("fssoak: `--secs` expects a u64, got {value:?}"))?;
+                    .ok_or_else(|| {
+                        format!("fssoak: `--secs` expects a u64, got {}", value.display())
+                    })?;
                 secs = Some(parsed);
             }
             other => {

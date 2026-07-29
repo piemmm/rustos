@@ -112,7 +112,7 @@ impl VecBlock {
     /// Byte span `[start, end)` for `len` bytes at sector `lba`, or an
     /// error if the access is unaligned or out of range.
     fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
-        if len == 0 || len % SECTOR_BYTES != 0 {
+        if len == 0 || !len.is_multiple_of(SECTOR_BYTES) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)

@@ -40,20 +40,18 @@ pub fn crc32c_hw(data: &[u8]) -> u32 {
 #[target_feature(enable = "crc")]
 unsafe fn crc32c_hw_unchecked(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<8>();
+    for chunk in chunks {
         // Bytes folded low-address-first (`from_le_bytes`) to match the
         // reflected CRC-32C; a mistake is caught by the mandatory self-verify
         // before the candidate can be selected.
-        let word = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+        let word = u64::from_le_bytes(*chunk);
         // The intrinsic is safe to call here: this fn carries the matching
         // `#[target_feature(enable = "crc")]`, so the compiler proves the
         // `crc32cd` instruction is legal in this body.
         crc = __crc32cd(crc, word);
     }
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         crc = __crc32cb(crc, byte);
     }
     !crc

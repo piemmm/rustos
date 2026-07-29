@@ -1311,7 +1311,7 @@ impl<'a> Init<'a> {
         // its last relaunch (or was never restarted — it ran since boot).
         let ran_stably = self.services[idx]
             .relaunched_at
-            .map_or(true, |t| duration_since(now, t) >= RESTART_STABLE_WINDOW);
+            .is_none_or(|t| duration_since(now, t) >= RESTART_STABLE_WINDOW);
         if ran_stably {
             self.services[idx].restart_attempts = 0;
         }

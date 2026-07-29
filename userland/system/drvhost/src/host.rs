@@ -424,13 +424,12 @@ impl<'h> Host<'h> {
         caller_caps: &CapabilitySet,
     ) -> Result<CapabilitySet, HostError> {
         let mut buf = [CapabilityId::DRV_LOAD; DRIVER_MANIFEST_MAX_CAPABILITIES as usize];
-        let n = parsed.decode_capabilities(&mut buf).map_err(|e| {
+        let n = parsed.decode_capabilities(&mut buf).inspect_err(|_e| {
             self.audit_reject(
                 events::DRIVER_LOAD_REJECTED_CAPABILITY,
                 path,
                 "capability decode",
             );
-            e
         })?;
         let mut requested = CapabilitySet::empty();
         for cap in &buf[..n] {
@@ -464,13 +463,12 @@ impl<'h> Host<'h> {
         // never reaches a consumer.
         let mut buf =
             [DriverBindKey::new(0, HwMatchKey::virtio(0)); DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
-        parsed.decode_bind_table(&mut buf).map_err(|e| {
+        parsed.decode_bind_table(&mut buf).inspect_err(|_e| {
             self.audit_reject(
                 events::DRIVER_LOAD_REJECTED_BIND_KEY,
                 path,
                 "bind key decode",
             );
-            e
         })?;
         Ok(())
     }

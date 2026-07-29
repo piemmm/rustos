@@ -457,7 +457,7 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
         let ptr = NonNull::new(addr as *mut u8).ok_or(DriverError::DeviceFault)?;
         let slot = self.next_slot.get();
         self.next_slot.set(slot.wrapping_add(1));
-        let pool_ptr: *const () = (self as *const Self).cast::<()>();
+        let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
         // SAFETY: `dma_alloc` carved exactly `size` bytes of zeroed,
         // physically-contiguous, coherent, `RW` (non-executable),
         // guard-bracketed memory mapped into this process's own address space.

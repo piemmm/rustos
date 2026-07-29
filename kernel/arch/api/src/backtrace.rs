@@ -456,7 +456,7 @@ pub fn walk<R: StackReader + ?Sized>(
         // above the previous one (monotonic — kills cycles). `prev_fp`
         // starts at 0 so the first iteration's only lower bound is
         // non-null.
-        if fp == 0 || fp % 8 != 0 || fp <= prev_fp {
+        if fp == 0 || !fp.is_multiple_of(8) || fp <= prev_fp {
             break;
         }
 

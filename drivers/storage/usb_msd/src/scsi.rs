@@ -529,7 +529,8 @@ impl<T: ScsiTransport> ScsiDevice<T> {
 /// bug cannot issue a torn command.
 fn blocks_spanned(lba: u64, len: usize, block_size: u32) -> Result<u32, Errno> {
     let block_size = usize::try_from(block_size).map_err(|_| Errno::OutOfRange)?;
-    if block_size == 0 || len == 0 || len > MSD_MAX_TRANSFER_LEN || len % block_size != 0 {
+    if block_size == 0 || len == 0 || len > MSD_MAX_TRANSFER_LEN || !len.is_multiple_of(block_size)
+    {
         return Err(Errno::LengthOutOfRange);
     }
     let blocks = u32::try_from(len / block_size).map_err(|_| Errno::LengthOutOfRange)?;
@@ -624,7 +625,7 @@ impl<'a, T: ScsiTransport> LunBlock<'a, T> {
     /// must lie inside the unit (mirrors the virtio-blk validation).
     fn validate(&self, lba: u64, len: usize) -> Result<(), DriverError> {
         let block_size = self.state.geometry.block_size as usize;
-        if len == 0 || len % block_size != 0 {
+        if len == 0 || !len.is_multiple_of(block_size) {
             return Err(DriverError::BufferTooSmall);
         }
         let blocks = u64::try_from(len / block_size).map_err(|_| DriverError::LengthOutOfRange)?;

@@ -101,7 +101,8 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
             Some("--write") => write = true,
             _ => {
                 return Err(format!(
-                    "devids: unexpected argument {arg:?}; usage: cargo xtask devids [--fetch | --write]"
+                    "devids: unexpected argument {}; usage: cargo xtask devids [--fetch | --write]",
+                    arg.display()
                 ));
             }
         }

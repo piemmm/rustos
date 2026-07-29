@@ -402,7 +402,7 @@ fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, Mai
             return Err(MailboxError::MalformedResponse);
         }
         let buf_bytes = words[at + 1];
-        if buf_bytes % 4 != 0 {
+        if !buf_bytes.is_multiple_of(4) {
             return Err(MailboxError::MalformedResponse);
         }
         let buf_words =
@@ -421,7 +421,7 @@ fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, Mai
             // every tag's value buffer to `max(request, response)`, so
             // for our fixed-layout tags this is a fault, not the benign
             // truncation case — fail closed (see the doc comment).
-            if resp_bytes % 4 != 0 || resp_bytes > buf_bytes {
+            if !resp_bytes.is_multiple_of(4) || resp_bytes > buf_bytes {
                 return Err(MailboxError::MalformedResponse);
             }
             let resp_words =
@@ -480,7 +480,7 @@ pub fn decode_framebuffer_response(
         // Anything else is a protocol breach, not a firmware verdict.
         _ => return Err(MailboxError::MalformedResponse),
     }
-    if words[0] % 4 != 0 || words[0] > words_to_bytes(PROPERTY_WORDS) {
+    if !words[0].is_multiple_of(4) || words[0] > words_to_bytes(PROPERTY_WORDS) {
         return Err(MailboxError::MalformedResponse);
     }
 
@@ -634,7 +634,7 @@ pub fn decode_display_size_response(
         CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
         _ => return Err(MailboxError::MalformedResponse),
     }
-    if words[0] % 4 != 0 || words[0] > words_to_bytes(PROPERTY_WORDS) {
+    if !words[0].is_multiple_of(4) || words[0] > words_to_bytes(PROPERTY_WORDS) {
         return Err(MailboxError::MalformedResponse);
     }
     let (width_px, height_px) = tag_pair(words, TAG_GET_PHYSICAL_WH)?;
@@ -1082,14 +1082,13 @@ impl MmioMailbox {
 
         // Ring the doorbell: wait for write room, then post the
         // buffer's bus address tagged with the property channel.
-        let (post_polls, post_status) =
-            self.wait_clear(REG_MBOX0_STATUS, STATUS_FULL)
-                .map_err(|e| {
-                    if e == MailboxError::Timeout {
-                        stats.timeout_stage = TimeoutStage::PostRoom;
-                    }
-                    e
-                })?;
+        let (post_polls, post_status) = self
+            .wait_clear(REG_MBOX0_STATUS, STATUS_FULL)
+            .inspect_err(|&e| {
+                if e == MailboxError::Timeout {
+                    stats.timeout_stage = TimeoutStage::PostRoom;
+                }
+            })?;
         stats.post_room_polls = post_polls;
         stats.last_status = post_status;
         let posted = self.buffer_bus_addr | CHANNEL_PROPERTY;
@@ -1106,14 +1105,13 @@ impl MmioMailbox {
                 return Err(MailboxError::Timeout);
             }
             stats.response_reads += 1;
-            let (_, empty_status) =
-                self.wait_clear(REG_MBOX0_STATUS, STATUS_EMPTY)
-                    .map_err(|e| {
-                        if e == MailboxError::Timeout {
-                            stats.timeout_stage = TimeoutStage::Response;
-                        }
-                        e
-                    })?;
+            let (_, empty_status) = self
+                .wait_clear(REG_MBOX0_STATUS, STATUS_EMPTY)
+                .inspect_err(|&e| {
+                    if e == MailboxError::Timeout {
+                        stats.timeout_stage = TimeoutStage::Response;
+                    }
+                })?;
             stats.last_status = empty_status;
             let word = self
                 .regs

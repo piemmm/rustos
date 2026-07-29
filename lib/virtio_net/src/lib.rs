@@ -761,10 +761,7 @@ impl RxQueue {
             .and_then(|b| b.as_ref())
             .ok_or(DriverError::DeviceFault)?;
         let src = src_slab.slab.as_bytes();
-        if src_offset
-            .checked_add(count)
-            .map_or(true, |e| e > src.len())
-        {
+        if src_offset.checked_add(count).is_none_or(|e| e > src.len()) {
             return Err(DriverError::LengthOutOfRange);
         }
         let src_span = &src[src_offset..src_offset + count];
@@ -1412,9 +1409,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // Stage only the negotiated header length: the 12-byte
         // `virtio_net_hdr_mrg_rxbuf` when mergeable, else the 10-byte
         // legacy header (the trailing zero `num_buffers` is dropped).
-        header_bb
-            .stage(&self.build_header(offload)[..self.rx_hdr_len])
-            .map_err(|()| DriverError::BufferTooSmall)?;
+        header_bb.stage(&self.build_header(offload)[..self.rx_hdr_len])?;
         let frame_len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
             ChainSegment {

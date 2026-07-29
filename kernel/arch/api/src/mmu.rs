@@ -570,7 +570,7 @@ pub mod conformance {
     pub fn run_all<A: AddressSpace + ?Sized>(space: &mut A, va: u64, pa: u64) {
         const PAGE: u64 = 4096;
         assert!(
-            va % PAGE == 0 && pa % PAGE == 0,
+            va.is_multiple_of(PAGE) && pa.is_multiple_of(PAGE),
             "the conformance address pair must be page-aligned"
         );
         root_table_is_non_null(space);

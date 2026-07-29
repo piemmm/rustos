@@ -59,7 +59,7 @@ fn round_trip_run_length_overlap() {
     // A single byte followed by a long run exercises an overlapping
     // back-reference (offset 1, match longer than the offset).
     let mut input = vec![0x7Eu8];
-    input.extend(core::iter::repeat(0x7E).take(500));
+    input.extend(core::iter::repeat_n(0x7E, 500));
     round_trip(&input);
 }
 

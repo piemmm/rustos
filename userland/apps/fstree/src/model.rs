@@ -381,7 +381,7 @@ impl NameFilter {
     /// pattern instead of hiding entries behind it.
     #[must_use]
     pub fn admits(&self, name: &str) -> bool {
-        self.pattern.as_ref().map_or(true, |p| p.matches(name))
+        self.pattern.as_ref().is_none_or(|p| p.matches(name))
     }
 }
 
@@ -672,7 +672,7 @@ impl Model {
         self.files
             .iter()
             .filter(|e| self.show_hidden || !e.name.starts_with('.'))
-            .filter(|e| self.filter.as_ref().map_or(true, |f| f.admits(&e.name)))
+            .filter(|e| self.filter.as_ref().is_none_or(|f| f.admits(&e.name)))
             .collect()
     }
 

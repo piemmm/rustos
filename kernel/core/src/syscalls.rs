@@ -5225,7 +5225,7 @@ where
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
-        if offset % PAGE_SIZE as u64 != 0 {
+        if !offset.is_multiple_of(PAGE_SIZE as u64) {
             return Err(Errno::BadAlignment);
         }
         let charged = len

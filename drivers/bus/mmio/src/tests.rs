@@ -145,7 +145,7 @@ fn build_virt_dtb(slot_count: u32) -> Vec<u8> {
         structs.extend_from_slice(&u32::try_from(compat.len()).unwrap().to_be_bytes());
         structs.extend_from_slice(&off_compatible.to_be_bytes());
         structs.extend_from_slice(compat);
-        while structs.len() % 4 != 0 {
+        while !structs.len().is_multiple_of(4) {
             structs.push(0);
         }
         // reg = <base_hi base_lo length_hi length_lo> (16 bytes).
@@ -402,7 +402,7 @@ fn build_virt_dtb_at(bases: &[u64], length: u64) -> Vec<u8> {
         structs.extend_from_slice(&u32::try_from(compat.len()).unwrap().to_be_bytes());
         structs.extend_from_slice(&off_compatible.to_be_bytes());
         structs.extend_from_slice(compat);
-        while structs.len() % 4 != 0 {
+        while !structs.len().is_multiple_of(4) {
             structs.push(0);
         }
         structs.extend_from_slice(&FDT_PROP.to_be_bytes());

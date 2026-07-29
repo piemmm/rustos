@@ -84,7 +84,7 @@ fn decompress_never_panics_and_codec_round_trips() {
             if next() & 1 == 0 {
                 let run = bounded(next(), 64).min(len - input.len());
                 let byte = low_byte(next());
-                input.extend(std::iter::repeat(byte).take(run));
+                input.extend(std::iter::repeat_n(byte, run));
             } else {
                 input.push(low_byte(next() >> 11));
             }

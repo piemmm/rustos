@@ -718,7 +718,9 @@ mod tests {
     fn rows(bytes: &[u8]) -> Vec<(u32, String)> {
         assert_eq!(bytes.len() % UserDirectoryRecord::WIRE_LEN, 0);
         bytes
-            .chunks_exact(UserDirectoryRecord::WIRE_LEN)
+            .as_chunks::<{ UserDirectoryRecord::WIRE_LEN }>()
+            .0
+            .iter()
             .map(|chunk| {
                 let record = UserDirectoryRecord::from_bytes(chunk).expect("record decodes");
                 (

@@ -320,7 +320,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
 
     fn validate_block_op(&self, lba: u64, buf_len: usize) -> Result<u64, DriverError> {
         let bs = self.block_size as usize;
-        if buf_len == 0 || buf_len % bs != 0 {
+        if buf_len == 0 || !buf_len.is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let blocks = u64::try_from(buf_len / bs).map_err(|_| DriverError::LengthOutOfRange)?;
@@ -402,17 +402,13 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         let payload_len = payload.len();
         let write_outbound = payload.is_write();
         // Stage header.
-        header_bb
-            .stage(&Self::build_header(req_type, lba))
-            .map_err(|()| DriverError::BufferTooSmall)?;
+        header_bb.stage(&Self::build_header(req_type, lba))?;
         // Stage outbound data for writes; a read only needs the device
         // to have a buffer of `payload_len` bytes to fill. Fail closed
         // if the chunk does not fit the staging window (the chunking
         // entry points guarantee it does).
         match &payload {
-            Payload::Write(src) => data_bb
-                .stage(src)
-                .map_err(|()| DriverError::BufferTooSmall)?,
+            Payload::Write(src) => data_bb.stage(src)?,
             Payload::Read(_) => {
                 if payload_len > data_bb.capacity() {
                     return Err(DriverError::BufferTooSmall);
@@ -543,9 +539,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         header_bb: &mut BounceBuffer,
         status_bb: &mut BounceBuffer,
     ) -> Result<(), DriverError> {
-        header_bb
-            .stage(&Self::build_header(wire::VIRTIO_BLK_T_FLUSH, 0))
-            .map_err(|()| DriverError::BufferTooSmall)?;
+        header_bb.stage(&Self::build_header(wire::VIRTIO_BLK_T_FLUSH, 0))?;
         let segments = [
             ChainSegment {
                 phys: header_bb.phys(),

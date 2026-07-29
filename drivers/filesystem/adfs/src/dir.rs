@@ -453,11 +453,11 @@ fn ror13(value: u32) -> u32 {
 /// Accumulate a byte region: little-endian whole words first, then any
 /// trailing bytes individually.
 pub fn accumulate_words(region: &[u8], mut check: u32) -> u32 {
-    let mut chunks = region.chunks_exact(4);
-    for word in &mut chunks {
+    let (chunks, remainder) = region.as_chunks::<4>();
+    for word in chunks {
         check = get_u32(word, 0) ^ ror13(check);
     }
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         check = u32::from(byte) ^ ror13(check);
     }
     check

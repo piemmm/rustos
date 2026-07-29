@@ -3779,7 +3779,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             ));
         }
 
-        if self.devices.get(index).map_or(true, Option::is_some) {
+        if self.devices.get(index).is_none_or(Option::is_some) {
             // The entry must be free: overwriting a live device would leak
             // its slot and rings.
             return Err(DriverError::Busy);

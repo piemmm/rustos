@@ -104,7 +104,7 @@ fn boot_ring_matches_a_shadow_model_and_never_panics() {
 
             let ops = prng.next_u64() % 64;
             for _ in 0..ops {
-                if prng.next_u64() % 3 == 0 {
+                if prng.next_u64().is_multiple_of(3) {
                     drain_and_check(&mut ring, &mut model, &mut scratch);
                 } else {
                     // Body up to a little larger than the ring can hold, so the

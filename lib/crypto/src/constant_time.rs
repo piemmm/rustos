@@ -163,7 +163,7 @@ mod tests {
                 }
             } else {
                 b[..len].copy_from_slice(&a[..len]);
-                if len > 0 && next(&mut state) % 4 == 0 {
+                if len > 0 && next(&mut state).is_multiple_of(4) {
                     let pos = usize::try_from(next(&mut state) % len as u64).expect("pos < len");
                     b[pos] ^= 1 + (next(&mut state) & 0x7F) as u8;
                 }

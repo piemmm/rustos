@@ -329,7 +329,7 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
         let list_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
         let available = outcome.transferred.saturating_sub(8).min(list_len);
         let mut highest = 0u8;
-        for entry in data[8..8 + (available - available % 8)].chunks_exact(8) {
+        for entry in data[8..8 + (available - available % 8)].as_chunks::<8>().0 {
             // Single-level peripheral addressing: byte 0 zero, byte 1 the
             // unit number, the remaining levels zero. Any other structure
             // is a hierarchical LUN this driver does not serve.

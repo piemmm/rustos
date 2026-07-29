@@ -541,7 +541,7 @@ fn connect_device(
     if request
         .first_lba
         .checked_add(request.blocks)
-        .map_or(true, |end| end > geometry.block_count)
+        .is_none_or(|end| end > geometry.block_count)
     {
         return Err(("extent_out_of_range", Errno::LengthOutOfRange));
     }

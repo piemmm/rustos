@@ -19,7 +19,7 @@ use tairix_net::{Ipv4Addr, Ipv6Addr};
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 fn pseudo(rng: &mut Lcg) -> Pseudo {
-    if rng.next_u64() % 2 == 0 {
+    if rng.next_u64().is_multiple_of(2) {
         Pseudo::V4 {
             source: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
             destination: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),

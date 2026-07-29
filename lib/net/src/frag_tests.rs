@@ -370,7 +370,7 @@ fn property_budgets_never_exceeded_under_random_load() {
         };
         let offset = ((rng.next_u64() & 0x1FFF) as usize) & !7;
         let len = 8 + (((rng.next_u64() & 0x1FF) as usize) & !7);
-        let more = rng.next_u64() % 4 != 0;
+        let more = !rng.next_u64().is_multiple_of(4);
         let data = vec![step.to_le_bytes()[0]; len];
         let _ = reassembler.push(key, offset, more, &data, Duration64::from_secs(1 + step));
         // The invariants under test: every budget holds after every

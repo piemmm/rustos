@@ -269,7 +269,7 @@ const fn is_canonical(addr: u64) -> bool {
 /// null, misaligned, non-canonical, or in the user half.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 pub(crate) const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu::InitError> {
-    if rsp0 == 0 || rsp0 % 16 != 0 {
+    if rsp0 == 0 || !rsp0.is_multiple_of(16) {
         return Err(crate::percpu::InitError::InvalidKernelStackPointer);
     }
     // The kernel half is by definition canonical, but check canonicity

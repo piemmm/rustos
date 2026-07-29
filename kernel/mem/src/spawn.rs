@@ -333,7 +333,7 @@ where
     if stack.page_count == 0 {
         return Err(SpawnError::EmptyStack);
     }
-    if stack.base % page != 0 || start_block_base % page != 0 {
+    if !stack.base.is_multiple_of(page) || !start_block_base.is_multiple_of(page) {
         return Err(SpawnError::Misaligned);
     }
 
