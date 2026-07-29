@@ -339,6 +339,25 @@ pub enum DriverError {
     /// class-level recovery and submit fresh transfers immediately. Maps to
     /// [`Errno::EndpointStalled`].
     EndpointStalled = 15,
+    /// The medium reported a permanent, unrecoverable read/write error.
+    ///
+    /// The block seam's [`crate::blkio::BlkStatus::MediumError`] outcome —
+    /// a SCSI `MEDIUM ERROR`-class bad sector the device could neither read
+    /// nor recover. Distinct from [`DeviceFault`](Self::DeviceFault) (the
+    /// whole device faulted) and from the retryable transient classes
+    /// ([`Busy`](Self::Busy), [`EndpointStalled`](Self::EndpointStalled)):
+    /// the data at that block is gone, so the filesystem layer surfaces it
+    /// as a hard I/O error rather than reissuing. Maps to
+    /// [`Errno::MediumError`].
+    MediumError = 16,
+    /// The device is present but unresponsive, or has been surprise-removed.
+    ///
+    /// The block seam's [`crate::blkio::BlkStatus::Offline`] /
+    /// [`crate::blkio::BlkStatus::Removed`] outcome: the target itself is
+    /// gone (unlike a transient stall the driver has already recovered), so
+    /// the filesystem layer fails this device's callers closed while every
+    /// other device keeps running. Maps to [`Errno::DeviceOffline`].
+    DeviceOffline = 17,
 }
 
 impl DriverError {
@@ -375,6 +394,8 @@ impl DriverError {
             13 => Ok(Self::NoSpace),
             14 => Ok(Self::SeatRevoked),
             15 => Ok(Self::EndpointStalled),
+            16 => Ok(Self::MediumError),
+            17 => Ok(Self::DeviceOffline),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -398,6 +419,8 @@ impl DriverError {
             Self::NoSpace => Errno::NoSpace,
             Self::SeatRevoked => Errno::SeatRevoked,
             Self::EndpointStalled => Errno::EndpointStalled,
+            Self::MediumError => Errno::MediumError,
+            Self::DeviceOffline => Errno::DeviceOffline,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -1094,6 +1117,8 @@ mod tests {
         assert_eq!(DriverError::NoSpace.as_i32(), 13);
         assert_eq!(DriverError::SeatRevoked.as_i32(), 14);
         assert_eq!(DriverError::EndpointStalled.as_i32(), 15);
+        assert_eq!(DriverError::MediumError.as_i32(), 16);
+        assert_eq!(DriverError::DeviceOffline.as_i32(), 17);
     }
 
     #[test]
@@ -1112,6 +1137,8 @@ mod tests {
             DriverError::EndpointStalled.as_errno(),
             Errno::EndpointStalled
         );
+        assert_eq!(DriverError::MediumError.as_errno(), Errno::MediumError);
+        assert_eq!(DriverError::DeviceOffline.as_errno(), Errno::DeviceOffline);
     }
 
     #[test]
@@ -1132,12 +1159,14 @@ mod tests {
             DriverError::NoSpace,
             DriverError::SeatRevoked,
             DriverError::EndpointStalled,
+            DriverError::MediumError,
+            DriverError::DeviceOffline,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(16), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(18), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

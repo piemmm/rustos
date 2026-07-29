@@ -446,6 +446,33 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn call_post(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _request: u64,
+        _request_len: usize,
+        _ticket_out: u64,
+        _deadline_ns: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn call_reap(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn call_cancel(&self, _c: &CallerContext<'_>, _endpoint: u64, _ticket: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn wall_time_get(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

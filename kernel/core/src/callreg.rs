@@ -304,7 +304,8 @@ mod tests {
             CapabilitySet::empty(),
             &NullSink,
         );
-        ep.post(&caller, 0, b"q", &NullSink).expect("posted");
+        ep.post(&caller, 0, b"q", u64::MAX, &NullSink)
+            .expect("posted");
         assert!(ep.has_pending());
 
         cancel_posted_by(poster, &NullSink);

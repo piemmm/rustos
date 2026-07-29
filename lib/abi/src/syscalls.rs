@@ -2434,6 +2434,77 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::CALL_POST,
+        name: "call_post",
+        arg_count: 5,
+        args: [
+            // endpoint, request ptr, request len, ticket-out ptr,
+            // deadline_ns (`u64::MAX` = no deadline).
+            AbiType::IpcEndpoint,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::U64,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once posted (the ticket is
+        // written through `ticket_out`), else `-errno`.
+        ret: AbiType::Errno,
+        // No flat dispatcher gate: the endpoint enforces its own required
+        // send capability and per-endpoint grant against the caller before
+        // posting, exactly like `ipc_call`. Audited per call: the async post
+        // is the same security-relevant IPC send as `ipc_call`.
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_REAP,
+        name: "call_reap",
+        arg_count: 4,
+        args: [
+            // endpoint, ticket, reply ptr, reply cap.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the reply-bytes-written-or-`-errno` register
+        // convention `ipc_call` uses; `-WouldBlock`/`-TimedOut`/`-NotFound`
+        // are the non-ready outcomes.
+        ret: AbiType::U64,
+        // No flat gate: the ticket is the unforgeable authority and the reap
+        // is claimant-checked kernel-side. Not audited per call: it is the
+        // high-volume drain step of the client event loop, like `call_recv`.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_CANCEL,
+        name: "call_cancel",
+        arg_count: 2,
+        args: [
+            // endpoint, ticket.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` if the caller's posted call
+        // was withdrawn, else `-errno` (`NotFound` for a foreign/unknown
+        // ticket — no existence oracle).
+        ret: AbiType::Errno,
+        // No flat gate: only the ticket's own poster may cancel it,
+        // claimant-checked kernel-side. Not audited per call: abandoning a
+        // wedged transfer is part of the same client drain loop as the reap
+        // and changes no authority.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

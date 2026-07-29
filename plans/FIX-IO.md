@@ -112,10 +112,30 @@ Each stage is complete and green on its own (§2.19). IO1–IO2 already stop the
 lockup; IO3 adds the grace window this issue is about; IO4–IO6 deepen the
 model. IO6 depends on RustFS existing and is gated on it.
 
-### Stage IO1 — Bounded, cancellable block transport. **planned**
+### Stage IO1 — Bounded, cancellable block transport. **done**
 
 Give the block seam a deadline so a consumer is *never* parked forever on a
 wedged device. The ABI is unfrozen (§9), so change it in place (§2.13).
+
+**Landed (now guaranteed):** the async submit/complete seam exists as three
+non-blocking syscalls on the existing `CallEndpoint` — `call_post` (99,
+posts + arms a per-ticket one-shot deadline + writes the ticket out),
+`call_reap` (100, non-blocking claim: `-WouldBlock`/`-TimedOut`/`-NotFound`),
+`call_cancel` (101, per-ticket withdraw) — plus the `WaitSourceKind::CallReply`
+wait-set source (ready on a landed reply **or** an elapsed deadline). The
+per-ticket deadline is threaded through `PendingCall`/`in_service` and
+`CALL_WAITQ` is now a swept timed queue (`nearest_timed_deadline`), so a wedged
+callee fails closed rather than parking forever. `BlkCompletion` leads with a
+`BlkStatus` health word (`Ok`/`Degraded`/`TransientError`/`Timeout`/`Reset`/
+`MediumError`/`Offline`/`Removed`/`Fatal`) decoded fail-closed to `Fatal`;
+`DriverError` gained `MediumError`/`DeviceOffline` and `Errno` gained
+`MediumError`(39)/`DeviceOffline`(40); `BlkDeviceClass::budget()` is the single
+per-class deadline/retry/queue-depth policy. Consumers rewritten in place: the
+kernel `blkclient` (deadlined, `TimedOut`→fail closed) and volmgr's `RtBlkCall`
+(now `call_post`+`CallReply` wait-set+`call_reap`). `lib/rt` gained the three
+wrappers; the C header and syscall-table hash regenerate through the drift
+guards. The serving drivers (`usb_msd`/`virtio_blk`/`emmc2`) keep working on the
+source-compatible codec and emit explicit health statuses only from IO3 on.
 
 **Chosen transport shape (the reviewer decision this stage reserved): the
 async submit/complete seam.** The deadlined-synchronous alternative is

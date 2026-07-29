@@ -314,6 +314,25 @@ pub enum Errno {
     /// system is healthy, this principal has simply reached its accounted
     /// ceiling and must release before it may allocate more (fail closed).
     LimitExceeded = 38,
+    /// The medium reported a permanent, unrecoverable read/write error.
+    ///
+    /// The TAIRiX equivalent of a SCSI `MEDIUM ERROR` sense: a bad sector
+    /// the device could not read, reallocate, or recover. Distinct from
+    /// [`DeviceFault`](Self::DeviceFault) (the whole device faulted) and
+    /// from the retryable transient classes: the data at that block is
+    /// gone, so the block layer surfaces it as a hard I/O error rather
+    /// than reissuing the transfer. Emitted on the block-service
+    /// completion seam ([`crate::blkio`]).
+    MediumError = 39,
+    /// The device is present but unresponsive, or has been surprise-removed.
+    ///
+    /// The block-service health axis ([`crate::blkio::BlkStatus`]) reports
+    /// a device that is offline or removed with this code, distinct from a
+    /// transient stall (retryable) and from a permanent medium error (the
+    /// device is fine, one block is not): the target itself is gone, so the
+    /// block layer surfaces it as a hard I/O error to that device's callers
+    /// while leaving every other device untouched.
+    DeviceOffline = 40,
 }
 
 impl Errno {
@@ -387,6 +406,8 @@ impl Errno {
             36 => Some(Self::NetworkUnreachable),
             37 => Some(Self::NotConnected),
             38 => Some(Self::LimitExceeded),
+            39 => Some(Self::MediumError),
+            40 => Some(Self::DeviceOffline),
             _ => None,
         }
     }
@@ -433,6 +454,8 @@ impl fmt::Display for Errno {
             Self::NetworkUnreachable => "network unreachable",
             Self::NotConnected => "socket not connected",
             Self::LimitExceeded => "resource limit exceeded",
+            Self::MediumError => "permanent medium error",
+            Self::DeviceOffline => "device offline or removed",
         };
         f.write_str(message)
     }
@@ -483,6 +506,8 @@ mod tests {
         assert_eq!(Errno::NetworkUnreachable.as_i32(), 36);
         assert_eq!(Errno::NotConnected.as_i32(), 37);
         assert_eq!(Errno::LimitExceeded.as_i32(), 38);
+        assert_eq!(Errno::MediumError.as_i32(), 39);
+        assert_eq!(Errno::DeviceOffline.as_i32(), 40);
     }
 
     #[test]
@@ -528,11 +553,13 @@ mod tests {
             Errno::NetworkUnreachable,
             Errno::NotConnected,
             Errno::LimitExceeded,
+            Errno::MediumError,
+            Errno::DeviceOffline,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(39), None);
+        assert_eq!(Errno::from_i32(41), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

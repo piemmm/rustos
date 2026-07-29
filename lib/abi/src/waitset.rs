@@ -154,6 +154,24 @@ pub enum WaitSourceKind {
     /// parks here for its file's growth and its directory's rotation,
     /// never a poll loop).
     File = 7,
+    /// The reply to a request the caller posted with
+    /// [`crate::SyscallNumber::CALL_POST`] on a call endpoint (its `id` is
+    /// that endpoint id). Adding the member is authorised by the caller's
+    /// *send* authority to the endpoint — the same grant
+    /// [`crate::SyscallNumber::IPC_CALL`] / [`crate::SyscallNumber::CALL_POST`]
+    /// check — never the endpoint *owner* check the [`Endpoint`](Self::Endpoint)
+    /// kind applies (the caller here is the client, not the server); an
+    /// endpoint the caller may not post to refuses with the same oracle-free
+    /// `NotFound` the other kinds use. Ready when a reply the caller posted
+    /// has arrived and is unclaimed, **or** its per-request deadline has
+    /// elapsed (so a wedged callee wakes the waiter exactly like a real
+    /// completion). Readiness is a non-consuming peek — the woken owner drains
+    /// with [`crate::SyscallNumber::CALL_REAP`], never the wait — so a caller
+    /// driving many devices multiplexes all their completions on one wait-set
+    /// instead of parking on each in turn (`plans/FIX-IO.md` IO1/IO2: the
+    /// volume manager services many block devices without a blocking thread
+    /// per device, never a poll loop).
+    CallReply = 8,
 }
 
 impl WaitSourceKind {
@@ -179,6 +197,7 @@ impl WaitSourceKind {
             5 => Ok(Self::Stream),
             6 => Ok(Self::Signal),
             7 => Ok(Self::File),
+            8 => Ok(Self::CallReply),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -208,10 +227,11 @@ mod tests {
             WaitSourceKind::Stream,
             WaitSourceKind::Signal,
             WaitSourceKind::File,
+            WaitSourceKind::CallReply,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(8), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(9), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -227,6 +247,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Stream.as_u32(), 5);
         assert_eq!(WaitSourceKind::Signal.as_u32(), 6);
         assert_eq!(WaitSourceKind::File.as_u32(), 7);
+        assert_eq!(WaitSourceKind::CallReply.as_u32(), 8);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

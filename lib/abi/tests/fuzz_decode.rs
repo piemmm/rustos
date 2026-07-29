@@ -617,6 +617,13 @@ fn exercise_blkio(bytes: &[u8]) {
         assert_eq!(req, redecoded);
     }
     let _ = tairix_abi::blkio::decode_completion(bytes);
+    // The full health-axis decoder must also never panic and must fail
+    // closed to `Fatal`/`DeviceFault` on a truncated or unknown-status frame
+    // rather than reading garbage as a valid completion (`plans/FIX-IO.md`
+    // IO1). The returned outcome is always self-consistent: a data-valid
+    // status carries the geometry, every other status carries an error.
+    let outcome = tairix_abi::blkio::decode_outcome(bytes);
+    assert_eq!(outcome.status.data_valid(), outcome.data().is_ok());
 }
 
 /// Drive the resource-limit decoder on `bytes`.

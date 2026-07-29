@@ -113,6 +113,9 @@ const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
 const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
 const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
+const NUM_CALL_POST: u64 = SyscallNumber::CALL_POST.as_u16() as u64;
+const NUM_CALL_REAP: u64 = SyscallNumber::CALL_REAP.as_u16() as u64;
+const NUM_CALL_CANCEL: u64 = SyscallNumber::CALL_CANCEL.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
@@ -1369,6 +1372,82 @@ pub extern "C" fn sys_call_reply(
     }
 }
 
+/// `call_post`: post `request_len` bytes at `request` to the call endpoint
+/// `endpoint` **without blocking**, arm a per-request deadline, and write the
+/// correlating ticket to `*ticket_out` (`SyscallNumber::CALL_POST`; the
+/// asynchronous half of `tairix_sys_ipc_call`). `deadline_ns` is the relative
+/// timeout after which `tairix_sys_call_reap` reports a timeout
+/// (`UINT64_MAX` = no deadline). Returns a `TAIRIX_E_*` code (`0` on success).
+///
+/// The kernel enforces the endpoint's send capability and per-endpoint grant
+/// against the caller (no new authority). The caller reaps the reply with
+/// `tairix_sys_call_reap`, parking between reaps on a `CallReply` wait-set
+/// member, so one wedged callee never blocks it.
+#[must_use]
+#[export_name = "tairix_sys_call_post"]
+pub extern "C" fn sys_call_post(
+    endpoint: u64,
+    request: *mut c_void,
+    request_len: usize,
+    ticket_out: *mut c_void,
+    deadline_ns: u64,
+) -> i32 {
+    // SAFETY: see `sys_ipc_call`; the kernel validates the request `(ptr, len)`
+    // pair and the `ticket_out` pointer against the caller's address space
+    // before touching them.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CALL_POST,
+            [
+                endpoint,
+                ptr_arg(request),
+                request_len as u64,
+                ptr_arg(ticket_out),
+                deadline_ns,
+                0,
+            ],
+        ))
+    }
+}
+
+/// `call_reap`: reap the reply to a request posted with `tairix_sys_call_post`,
+/// **without blocking** (`SyscallNumber::CALL_REAP`). `ticket` is the value
+/// `tairix_sys_call_post` wrote; the reply is copied into the `reply_cap`-byte
+/// buffer at `reply` and its byte count returned (or a `TAIRIX_E_*` code
+/// reinterpreted into the result). `TAIRIX_E_WOULD_BLOCK` means still pending,
+/// `TAIRIX_E_TIMED_OUT` means the deadline elapsed (the ticket is retired),
+/// `TAIRIX_E_NOT_FOUND` a cancelled/torn-down/foreign ticket.
+#[must_use]
+#[export_name = "tairix_sys_call_reap"]
+pub extern "C" fn sys_call_reap(
+    endpoint: u64,
+    ticket: u64,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_call`; the kernel validates the reply `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_CALL_REAP,
+            [endpoint, ticket, ptr_arg(reply), reply_cap as u64, 0, 0],
+        )
+    }
+}
+
+/// `call_cancel`: withdraw one outstanding request posted with
+/// `tairix_sys_call_post` (`SyscallNumber::CALL_CANCEL`). `ticket` is the value
+/// `tairix_sys_call_post` wrote. Returns a `TAIRIX_E_*` code (`0` if the
+/// caller's call was withdrawn; `TAIRIX_E_NOT_FOUND` for a foreign, unknown,
+/// or already-completed ticket).
+#[must_use]
+#[export_name = "tairix_sys_call_cancel"]
+pub extern "C" fn sys_call_cancel(endpoint: u64, ticket: u64) -> i32 {
+    // SAFETY: see `sys_yield`; both arguments are scalars, the call reads no
+    // caller memory.
+    unsafe { ret_i32(raw_syscall(NUM_CALL_CANCEL, [endpoint, ticket, 0, 0, 0, 0])) }
+}
+
 /// `call_peer_origin`: read the kernel-attested `tairix_abi::Origin` of the
 /// caller whose in-service call this server is handling
 /// (`SyscallNumber::CALL_PEER_ORIGIN`). `ticket` is the value
@@ -2455,6 +2534,9 @@ mod tests {
         (NUM_CALL_CREATE, "call_create", 6),
         (NUM_CALL_RECV, "call_recv", 5),
         (NUM_CALL_REPLY, "call_reply", 4),
+        (NUM_CALL_POST, "call_post", 5),
+        (NUM_CALL_REAP, "call_reap", 4),
+        (NUM_CALL_CANCEL, "call_cancel", 2),
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),

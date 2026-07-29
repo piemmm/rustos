@@ -1348,6 +1348,80 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Post a request to a call endpoint without blocking, arming a
+    /// per-request deadline, and write the correlating ticket to
+    /// `ticket_out` (`plans/FIX-IO.md` IO1 — the asynchronous half of
+    /// [`Self::ipc_call`]).
+    ///
+    /// The dispatcher has already checked `request` and `ticket_out` are
+    /// non-null `UserPtr`s. The implementation runs the same endpoint
+    /// resolution, per-endpoint grant, capability, and size checks as
+    /// [`Self::ipc_call`], copies the request in, posts it with the given
+    /// absolute deadline (`u64::MAX` = none — the handler converts the
+    /// caller's relative `deadline_ns` against the monotonic clock), wakes
+    /// the bound server, and writes the minted ticket out. Returns `Ok(0)`.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_post(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _request: u64,
+        _request_len: usize,
+        _ticket_out: u64,
+        _deadline_ns: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Reap the reply to a request posted with [`Self::call_post`], without
+    /// blocking (`plans/FIX-IO.md` IO1).
+    ///
+    /// The dispatcher has already checked `reply` is a non-null `UserPtr`.
+    /// The implementation resolves `endpoint`, claims the reply for `ticket`
+    /// on behalf of the calling task (claimant-checked), and either copies
+    /// the reply out (returning its byte length) or fails closed with
+    /// [`Errno::WouldBlock`] (still pending), [`Errno::TimedOut`] (deadline
+    /// elapsed — the ticket is retired), or [`Errno::NotFound`] (cancelled,
+    /// torn down, or not this caller's ticket). A reply larger than
+    /// `reply_cap` fails closed with [`Errno::BufferTooSmall`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_reap(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Withdraw one outstanding request posted with [`Self::call_post`]
+    /// (`plans/FIX-IO.md` IO1).
+    ///
+    /// The implementation resolves `endpoint` and cancels the caller's own
+    /// `ticket`, returning `Ok(0)` if a call was withdrawn or
+    /// [`Errno::NotFound`] for a foreign, unknown, or already-completed
+    /// ticket (no existence oracle).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_cancel(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Report whether the in-flight caller of a served call endpoint holds a
     /// seat's live lease, returning the lease's generation
     /// (`plans/DISPLAY.md` D7a — the display service's per-present check).
@@ -2728,6 +2802,33 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .call_peer_origin(caller, args.0[0], args.0[1], args.0[2], origin_cap)
             }
+            SyscallNumber::CALL_POST => {
+                // args[0] is the endpoint id; args[1] is a non-null request
+                // `UserPtr` (dispatcher-checked); args[2] the request length;
+                // args[3] a non-null ticket-out `UserPtr`; args[4] the
+                // relative deadline in nanoseconds (`u64::MAX` = none).
+                let request_len = decode_len(args.0[2])?;
+                self.handlers.call_post(
+                    caller,
+                    args.0[0],
+                    args.0[1],
+                    request_len,
+                    args.0[3],
+                    args.0[4],
+                )
+            }
+            SyscallNumber::CALL_REAP => {
+                // args[0] is the endpoint id; args[1] the ticket; args[2] a
+                // non-null reply `UserPtr` (dispatcher-checked); args[3] the
+                // reply-buffer capacity.
+                let reply_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .call_reap(caller, args.0[0], args.0[1], args.0[2], reply_cap)
+            }
+            SyscallNumber::CALL_CANCEL => {
+                // args[0] is the endpoint id; args[1] the ticket to withdraw.
+                self.handlers.call_cancel(caller, args.0[0], args.0[1])
+            }
             SyscallNumber::LOG_EMIT => {
                 // args[0] is the non-null record `UserPtr` (dispatcher-
                 // checked); args[1] is its byte length.
@@ -3857,6 +3958,48 @@ mod tests {
             // dispatcher decoded the four arguments without wiring a real
             // endpoint / in-service call here.
             Ok(origin_cap as u64)
+        }
+
+        fn call_post(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _request: u64,
+            request_len: usize,
+            _ticket_out: u64,
+            _deadline_ns: u64,
+        ) -> SyscallResult {
+            self.record("call_post");
+            // Echo the request length so the reachability test can assert the
+            // dispatcher decoded the five arguments without wiring a real
+            // call-endpoint registry / scheduler here.
+            Ok(request_len as u64)
+        }
+
+        fn call_reap(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _reply: u64,
+            reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("call_reap");
+            // Echo the reply-buffer capacity so the reachability test can
+            // assert the dispatcher decoded the four arguments.
+            Ok(reply_cap as u64)
+        }
+
+        fn call_cancel(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            ticket: u64,
+        ) -> SyscallResult {
+            self.record("call_cancel");
+            // Echo the ticket so the reachability test can assert the
+            // dispatcher decoded both arguments.
+            Ok(ticket)
         }
 
         fn call_peer_seat(

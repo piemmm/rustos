@@ -2,9 +2,10 @@
 //! grant resolution, the blkio probe, and the attach loop
 //! (`plans/DEVICES.md` D3c).
 
-use tairix_abi::blkio::BLK_DATA_LEN;
+use tairix_abi::blkio::{BlkDeviceClass, BLK_DATA_LEN};
 use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
@@ -60,12 +61,68 @@ fn driver_caps() -> CapabilitySet {
     caps
 }
 
-/// The production blkio transport: one synchronous, capability-checked
-/// `ipc_call` on the granted block-service endpoint. The serving driver
-/// fills the shared window during the call, so the window parameter is
-/// untouched here.
+/// Recover an [`Errno`] from a raw negative kernel result (`-errno`).
+fn errno_from(neg: i64) -> Errno {
+    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
+}
+
+/// The production blkio transport: the bounded, capability-checked async
+/// submit/reap seam on the granted block-service endpoint (`plans/FIX-IO.md`
+/// IO1). Each request is `call_post`ed with a per-request deadline, the reply
+/// awaited on a `CallReply` wait-set, and reaped with `call_reap`, so a wedged
+/// device fails this transfer closed at its deadline instead of parking the
+/// probe forever. The serving driver fills the shared window during the call,
+/// so the window parameter is untouched here.
 struct RtBlkCall {
     endpoint: u64,
+    /// The wait-set multiplexing this device's reply completions, created
+    /// lazily on first use and `0` until then. One device needs only one
+    /// member, but using the wait-set seam even here keeps the single
+    /// transport shape the multi-device consumer (IO2) also uses.
+    waitset: u64,
+    /// Per-request deadline (ns). The probe cannot yet discover the device's
+    /// class, so it uses the most generous class budget
+    /// ([`BlkDeviceClass::Rotational`] — a spinning disk's spin-up/reset
+    /// envelope), bounding a genuinely dead device without prematurely failing
+    /// a slow but healthy one.
+    deadline_ns: u64,
+}
+
+impl RtBlkCall {
+    /// A fresh transport for `endpoint` with its wait-set unset (created on
+    /// the first [`BlkCall::call`]).
+    fn new(endpoint: u64) -> Self {
+        Self {
+            endpoint,
+            waitset: 0,
+            deadline_ns: BlkDeviceClass::Rotational.budget().deadline_ns,
+        }
+    }
+
+    /// Mint the reply wait-set and register this endpoint's `CallReply`
+    /// member, once. The wait-set is reclaimed by the kernel when this
+    /// run-to-completion program exits, so it needs no explicit teardown.
+    fn ensure_waitset(&mut self) -> Result<u64, Errno> {
+        if self.waitset == 0 {
+            let set = tairix_rt::waitset_create();
+            if set < 0 {
+                return Err(errno_from(set));
+            }
+            let set = set as u64;
+            let ctl = tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::CallReply,
+                self.endpoint,
+                0,
+            );
+            if ctl < 0 {
+                return Err(errno_from(ctl));
+            }
+            self.waitset = set;
+        }
+        Ok(self.waitset)
+    }
 }
 
 impl BlkCall for RtBlkCall {
@@ -75,9 +132,28 @@ impl BlkCall for RtBlkCall {
         reply: &mut [u8],
         _window: &mut [u8],
     ) -> Result<usize, Errno> {
-        tairix_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
-            Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
-        })
+        let set = self.ensure_waitset()?;
+        let ticket =
+            tairix_rt::call_post(self.endpoint, request, self.deadline_ns).map_err(errno_from)?;
+        loop {
+            match tairix_rt::call_reap(self.endpoint, ticket, reply) {
+                Ok(len) => return Ok(len),
+                Err(neg) => {
+                    let err = errno_from(neg);
+                    // Not ready yet: park on the reply wait-set until the
+                    // reply lands or the per-request deadline elapses (which
+                    // makes the member ready and the next reap `TimedOut`),
+                    // never a busy poll. Every other outcome — a timeout, a
+                    // vanished endpoint — fails closed.
+                    if err == Errno::WouldBlock {
+                        let mut token = 0u64;
+                        let _ = tairix_rt::waitset_wait(set, self.deadline_ns, &mut token);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     }
 }
 
@@ -178,7 +254,7 @@ fn main() -> i32 {
     let window =
         unsafe { core::slice::from_raw_parts_mut(window_base as usize as *mut u8, BLK_DATA_LEN) };
 
-    let mut client = match RemoteBlock::connect(RtBlkCall { endpoint }, window) {
+    let mut client = match RemoteBlock::connect(RtBlkCall::new(endpoint), window) {
         Ok(client) => client,
         Err(err) => {
             log_hex_event(

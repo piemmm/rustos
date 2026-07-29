@@ -240,6 +240,15 @@ const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 /// `call_reply` syscall number (as above).
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 
+/// `call_post` syscall number (as above).
+const NUM_CALL_POST: u64 = SyscallNumber::CALL_POST.as_u16() as u64;
+
+/// `call_reap` syscall number (as above).
+const NUM_CALL_REAP: u64 = SyscallNumber::CALL_REAP.as_u16() as u64;
+
+/// `call_cancel` syscall number (as above).
+const NUM_CALL_CANCEL: u64 = SyscallNumber::CALL_CANCEL.as_u16() as u64;
+
 /// `log_emit` syscall number (as above).
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 
@@ -2428,6 +2437,102 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(reply.len()))
+}
+
+/// Post `request` to the call endpoint `endpoint` **without blocking**, arming
+/// a per-request deadline, and return the ticket correlating its reply
+/// (`SyscallNumber::CALL_POST`; `plans/FIX-IO.md` IO1 — the asynchronous half
+/// of [`ipc_call`]).
+///
+/// `deadline_ns` is the relative timeout after which [`call_reap`] reports a
+/// timeout (`u64::MAX` = no deadline). The caller multiplexes many outstanding
+/// requests on a wait-set ([`waitset_ctl`] with
+/// [`tairix_abi::WaitSourceKind::CallReply`]) and reaps each with
+/// [`call_reap`], so one wedged device never parks the caller (the head-of-line
+/// freedom a single blocking [`ipc_call`] cannot give).
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): a missing send capability
+/// (`PermissionDenied`), an unknown or destroyed endpoint (`NotFound`), an
+/// oversize request (`MessageTooLarge`), an over-capacity endpoint
+/// (`LengthOutOfRange`), or a faulting pointer (`BadAddress`).
+pub fn call_post(endpoint: u64, request: &[u8], deadline_ns: u64) -> Result<u64, i64> {
+    let req_ptr = request.as_ptr() as usize as u64;
+    let mut ticket: u64 = 0;
+    let ticket_ptr = core::ptr::addr_of_mut!(ticket) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // request `(ptr, len)` pair and the `ticket_out` pointer against the
+    // caller's address space before touching them. `request` is a live shared
+    // `&[u8]` and `ticket` a live local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_POST,
+            [
+                endpoint,
+                req_ptr,
+                request.len() as u64,
+                ticket_ptr,
+                deadline_ns,
+                0,
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(ticket)
+}
+
+/// Reap the reply to a request posted with [`call_post`], **without blocking**
+/// (`SyscallNumber::CALL_REAP`; `plans/FIX-IO.md` IO1). Returns the number of
+/// reply bytes copied into `reply`.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the reply is still pending
+/// (`WouldBlock`), the deadline elapsed (`TimedOut` — the ticket is retired), a
+/// cancelled/torn-down/foreign ticket (`NotFound`), or a reply larger than
+/// `reply` (`BufferTooSmall`). The wrapper hides no error, so the caller
+/// distinguishes "retry" (`WouldBlock`) from "fail closed" (the rest).
+pub fn call_reap(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, i64> {
+    let reply_ptr = reply.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // reply `(ptr, len)` pair against the caller's address space before writing
+    // it. `reply` is a live exclusive `&mut [u8]` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_REAP,
+            [endpoint, ticket, reply_ptr, reply.len() as u64, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer, exactly as
+    // [`ipc_call`] does.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(reply.len()))
+}
+
+/// Withdraw one outstanding request posted with [`call_post`]
+/// (`SyscallNumber::CALL_CANCEL`; `plans/FIX-IO.md` IO1). Returns `0` if the
+/// caller's call was cancelled.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): a foreign, unknown, or
+/// already-completed ticket (`NotFound`), or an unknown endpoint (`NotFound`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn call_cancel(endpoint: u64, ticket: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call reads no caller
+    // memory (both arguments are scalars).
+    let ret = unsafe { raw_syscall(NUM_CALL_CANCEL, [endpoint, ticket, 0, 0, 0, 0]) };
+    ret as i64
 }
 
 /// Emit one pre-encoded diagnostic [`tairix_abi::LogRecordRef`] wire image to

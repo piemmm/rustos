@@ -2264,11 +2264,23 @@ where
     /// whose resource was torn down (or never owned) simply is not ready,
     /// and the woken owner's own drain (recv / reap / read / take), never
     /// the wait, consumes the event.
-    fn waitset_member_ready(&self, caller: &CallerContext<'_>, m: &crate::waitset::Member) -> bool {
+    fn waitset_member_ready(
+        &self,
+        caller: &CallerContext<'_>,
+        m: &crate::waitset::Member,
+        now: u64,
+    ) -> bool {
         let sched_task = caller.task_id.0;
         match m.kind {
             WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
                 .is_some_and(|ep| ep.owner() == sched_task && ep.has_pending()),
+            // A reply to a request *this caller posted* has arrived (or its
+            // per-request deadline has elapsed — a timeout the reap surfaces).
+            // Matched on the caller's security task id, the same claimant the
+            // post recorded, so a member only ever reports the caller's own
+            // completions; the woken owner drains with `call_reap`.
+            WaitSourceKind::CallReply => crate::callreg::lookup(EndpointId(m.id))
+                .is_some_and(|ep| ep.has_ready_reply_for(caller.caps.task().0, now)),
             // The IRQ ready flag is *peeked* (`ready_for`), not consumed,
             // so a faulting `token_out` after the scan never drops a
             // delivered edge.
@@ -6047,7 +6059,16 @@ where
         // stable `Errno` for every refusal and otherwise an opaque ticket
         // correlating this caller with its reply. The caller's kernel-held
         // scheduler id rides along so the reply wakes exactly this task.
-        let ticket = ep.post(caller.caps, caller.task_id.0, &payload, self.audit)?;
+        // `ipc_call` carries no deadline, so post with `u64::MAX`: the caller
+        // is released only by the server's reply or the endpoint's teardown,
+        // exactly as before the deadlined async path (`call_post`) existed.
+        let ticket = ep.post(
+            caller.caps,
+            caller.task_id.0,
+            &payload,
+            u64::MAX,
+            self.audit,
+        )?;
 
         // Wake the bound server: an IPC server parks off the run queue on
         // `SERVE_WAITQ` between requests (no busy-yield), so the posted
@@ -6081,11 +6102,17 @@ where
         let claimant = caller.caps.task().0;
         crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let outcome = loop {
-            match ep.take_reply(claimant, ticket) {
+            // `now` is dead input here: this call posted with a `u64::MAX`
+            // deadline, so `take_reply` never yields `TimedOut` — the timeout
+            // path is the async `call_reap` handler's, not `ipc_call`'s.
+            match ep.take_reply(claimant, ticket, 0) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
                 // ours: abandon the call fail-closed.
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                // Unreachable with a `u64::MAX` deadline, but handled
+                // fail-closed rather than silently ignored.
+                ReplyOutcome::TimedOut => break Err(Errno::TimedOut),
                 ReplyOutcome::Pending => {
                     // Park off the run queue until woken, keyed to the CPU
                     // this task occupies right now (`park_current_task` reads
@@ -6128,6 +6155,141 @@ where
             Some(Ok(())) => Ok(bytes.len() as u64),
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn call_post(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        request: u64,
+        request_len: usize,
+        ticket_out: u64,
+        deadline_ns: u64,
+    ) -> SyscallResult {
+        // Resolve, grant-check, and size-check exactly as `ipc_call` does —
+        // the async post carries no new authority (the endpoint re-checks its
+        // send capability in `post`).
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        if ep
+            .required_send_caps()
+            .contains(tairix_abi::CapabilityId::IPC_ENDPOINT)
+            && !self
+                .aspaces
+                .read()
+                .grant_covers(caller.task_id, &HwResource::endpoint(endpoint))
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        if request_len as u64 > u64::from(ep.max_request()) {
+            return Err(Errno::MessageTooLarge);
+        }
+        let mut payload = alloc::vec![0u8; request_len];
+        self.copy_in_user(caller, request, &mut payload)?;
+
+        // Convert the caller's *relative* deadline into the *absolute*
+        // monotonic value the endpoint stores and the reap compares against;
+        // `u64::MAX` stays "no deadline" (a saturating add so a huge relative
+        // value never wraps to a tiny absolute one — fail closed like the
+        // wait-set timeout).
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let deadline_abs = if deadline_ns == u64::MAX {
+            u64::MAX
+        } else {
+            self.arch.monotonic_ns(cpu).saturating_add(deadline_ns)
+        };
+
+        let ticket = ep.post(
+            caller.caps,
+            caller.task_id.0,
+            &payload,
+            deadline_abs,
+            self.audit,
+        )?;
+
+        // Wake the bound server exactly as `ipc_call` does (wake-one, falling
+        // back to a broadcast only before the server has ever received).
+        match ep.server_task() {
+            Some(server) => crate::waitq::serve_wake_task(server),
+            None => crate::waitq::serve_wake(),
+        }
+
+        // Write the minted ticket out. If the caller's `ticket_out` faults it
+        // can never learn — and so never reap — this ticket, so the orphaned
+        // post is withdrawn before failing closed rather than left to hold an
+        // endpoint slot until teardown.
+        let ticket_bytes = ticket.0.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(ticket_out), &ticket_bytes)
+        }) {
+            Some(Ok(())) => Ok(0),
+            Some(Err(err)) => {
+                let _ = ep.cancel_one(caller.caps.task().0, ticket);
+                Err(copy_fault_errno(err))
+            }
+            None => {
+                let _ = ep.cancel_one(caller.caps.task().0, ticket);
+                Err(Errno::BadAddress)
+            }
+        }
+    }
+
+    fn call_reap(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        // The ticket is the unforgeable authority; `take_reply` matches it
+        // against the *security* task id the request was posted under.
+        let claimant = caller.caps.task().0;
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let now = self.arch.monotonic_ns(cpu);
+        match ep.take_reply(claimant, CallTicket(ticket), now) {
+            ReplyOutcome::Ready(bytes) => {
+                // Refuse to truncate: the reply was claimed and the ticket
+                // retired, so the caller re-issues with a larger buffer — each
+                // endpoint's protocol bounds its replies, so a correctly-sized
+                // buffer always fits (the `ipc_call` precedent).
+                if bytes.len() > reply_cap {
+                    return Err(Errno::BufferTooSmall);
+                }
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(reply), &bytes)
+                }) {
+                    Some(Ok(())) => Ok(bytes.len() as u64),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
+            // Non-ready outcomes are the non-blocking signals the client event
+            // loop acts on: retry (still pending), fail closed on a timeout
+            // (the ticket is already retired), abandon on a torn-down or
+            // foreign ticket (no existence oracle).
+            ReplyOutcome::Pending => Err(Errno::WouldBlock),
+            ReplyOutcome::TimedOut => Err(Errno::TimedOut),
+            ReplyOutcome::Cancelled | ReplyOutcome::Unknown => Err(Errno::NotFound),
+        }
+    }
+
+    fn call_cancel(&self, caller: &CallerContext<'_>, endpoint: u64, ticket: u64) -> SyscallResult {
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        // Only the ticket's own poster may withdraw it; a foreign, unknown, or
+        // already-completed ticket removes nothing and fails closed with the
+        // same `NotFound` (no existence oracle).
+        if ep.cancel_one(caller.caps.task().0, CallTicket(ticket)) {
+            Ok(0)
+        } else {
+            Err(Errno::NotFound)
         }
     }
 
@@ -6961,6 +7123,30 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::CallReply => {
+                        // A wait-set may observe a call endpoint's *replies*
+                        // only for a task entitled to *post* to it — the same
+                        // send authority `ipc_call`/`call_post` enforce (the
+                        // caller here is the endpoint's client, not its
+                        // server, so the endpoint-owner check the `Endpoint`
+                        // kind applies does not fit). Unknown endpoints and
+                        // callers lacking the send authority both collapse to
+                        // the same oracle-free `NotFound`.
+                        let may_post = crate::callreg::lookup(EndpointId(id)).is_some_and(|ep| {
+                            (!ep.required_send_caps()
+                                .contains(tairix_abi::CapabilityId::IPC_ENDPOINT)
+                                || self
+                                    .aspaces
+                                    .read()
+                                    .grant_covers(caller.task_id, &HwResource::endpoint(id)))
+                                && ep
+                                    .required_send_caps()
+                                    .is_subset_of(caller.caps.effective())
+                        });
+                        if !may_post {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                     WaitSourceKind::Irq => {
                         if self
                             .irq
@@ -7169,6 +7355,14 @@ where
         // actually holds a `Signal` member, and its wake is targeted at the
         // opted-in task, so signal traffic never disturbs another waiter.
         let observes_signal = members.iter().any(|m| m.kind == WaitSourceKind::Signal);
+        // `CALL_WAITQ` is joined only by a set holding a `CallReply` member: a
+        // reply completing (`call_reply` → `call_wake`) wakes the parked
+        // reaper. A CallReply member also carries a *time* edge — its
+        // per-request deadline — so unlike the other reply/message channels
+        // its registration is armed with the nearest such deadline (folded in
+        // below), letting a wedged callee's timeout wake the reaper exactly
+        // like a real completion, never a busy poll.
+        let observes_callreply = members.iter().any(|m| m.kind == WaitSourceKind::CallReply);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -7180,6 +7374,18 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_callreply {
+            let claimant = caller.caps.task().0;
+            let mut call_deadline = crate::waitq::NO_DEADLINE;
+            for m in &members {
+                if m.kind == WaitSourceKind::CallReply {
+                    if let Some(ep) = crate::callreg::lookup(EndpointId(m.id)) {
+                        call_deadline = call_deadline.min(ep.next_deadline_for(claimant));
+                    }
+                }
+            }
+            crate::waitq::CALL_WAITQ.register(sched_task, call_deadline);
         }
         // A File member has no per-kind wait-queue: the fswatch registry
         // unparks this task directly when the node it watches changes. Register
@@ -7224,7 +7430,7 @@ where
             // drops a delivered event and a torn-down resource simply is
             // not ready.
             for m in &members {
-                if self.waitset_member_ready(caller, m) {
+                if self.waitset_member_ready(caller, m, now) {
                     ready = Some((m.kind, m.id, m.token));
                     break;
                 }
@@ -7286,6 +7492,9 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
+        }
+        if observes_callreply {
+            crate::waitq::CALL_WAITQ.deregister(sched_task);
         }
         for m in &members {
             if m.kind == WaitSourceKind::File {
@@ -24346,6 +24555,189 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
+    /// Read the per-ticket `u64` `call_post` copied out to page 2 (`0x2000`).
+    fn read_ticket(physmap: &dyn PhysMap) -> u64 {
+        let raw = read_reply_page(physmap, 8);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&raw[..8]);
+        u64::from_le_bytes(bytes)
+    }
+
+    /// End-to-end async seam: `call_post` posts without blocking and writes
+    /// the ticket out; once a server replies, `call_reap` copies the reply
+    /// out and returns its length (`plans/FIX-IO.md` IO1).
+    #[test]
+    fn call_post_then_reap_round_trips() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_2003;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Post without blocking; the ticket lands in page 2.
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            read_ticket(physmap)
+        };
+
+        // Before any reply, a reap is a non-blocking `WouldBlock`.
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::WouldBlock)
+        );
+
+        // The server drains the posted call and answers it inline.
+        match ep.recv_call(usize::MAX) {
+            RecvCall::Received(call) => {
+                assert_eq!(call.request, b"ping");
+                ep.reply(call.ticket, b"pong", sink).expect("reply");
+            }
+            other => panic!("expected a received call, got {other:?}"),
+        }
+
+        // The reap now copies the reply out and reports its length.
+        assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
+        let guard = aspaces.read();
+        let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+        assert_eq!(read_reply_page(physmap, 4), b"pong");
+        drop(guard);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A `call_post` whose per-request deadline elapses with no reply reaps
+    /// as `TimedOut`, and the ticket is retired (a second reap is
+    /// `NotFound`) — a wedged device fails closed rather than parking the
+    /// caller forever (`plans/FIX-IO.md` IO1).
+    #[test]
+    fn call_reap_times_out_once_the_deadline_passes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        arch.set_monotonic_ns(0);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_2004;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A 100ns relative deadline (absolute 100, the clock is at 0).
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            read_ticket(physmap)
+        };
+
+        // Inside the deadline, the reap is still `WouldBlock`.
+        arch.set_monotonic_ns(50);
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::WouldBlock)
+        );
+
+        // Past the deadline with no reply, the reap fails closed and retires
+        // the ticket, so a second reap can no longer find it.
+        arch.set_monotonic_ns(200);
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::TimedOut)
+        );
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::NotFound)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_cancel` withdraws the caller's own outstanding request (a later
+    /// reap is `NotFound`); a foreign ticket cancels nothing.
+    #[test]
+    fn call_cancel_withdraws_the_posted_request() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_2005;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        // A ticket the caller never posted cancels nothing (fail closed).
+        assert_eq!(
+            h.call_cancel(&ctx, id, ticket ^ 0xFFFF),
+            Err(Errno::NotFound)
+        );
+        // The rightful poster withdraws it; the reap then finds nothing.
+        assert_eq!(h.call_cancel(&ctx, id, ticket), Ok(0));
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::NotFound)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
     // ---- call_create / call_recv / call_reply (server side) ----------
 
     /// First frame of the three-page server address space the `call_recv` /
@@ -25239,7 +25631,9 @@ mod tests {
 
         // The client (task 7) posts a present request.
         let client_caps = make_caps_record(7, &[], sink);
-        let ticket = ep.post(&client_caps, 7, b"present", sink).expect("posted");
+        let ticket = ep
+            .post(&client_caps, 7, b"present", u64::MAX, sink)
+            .expect("posted");
 
         let ctx = CallerContext {
             task_id: SecTaskId(0x5708),
@@ -25648,9 +26042,9 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
-        // Kind 8 is past the last defined `WaitSourceKind` (`File` = 7).
+        // Kind 9 is past the last defined `WaitSourceKind` (`CallReply` = 8).
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 8, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 9, line, 0),
             Err(Errno::OutOfRange)
         );
 
@@ -25788,7 +26182,8 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
         let poster = make_caps_record(99, &[], sink);
-        ep.post(&poster, 99, b"x", sink).expect("post a request");
+        ep.post(&poster, 99, b"x", u64::MAX, sink)
+            .expect("post a request");
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -25820,6 +26215,148 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
+    }
+
+    /// A `CallReply` wait-set member reports ready when the reply to a
+    /// request the caller posted arrives (a non-consuming peek `call_reap`
+    /// drains), and only for the caller's own reply — the async transport's
+    /// event-loop edge (`plans/FIX-IO.md` IO1/IO2).
+    #[test]
+    fn waitset_reports_a_call_reply_member_when_its_reply_lands() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5B09), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5B09, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5B09),
+            caps: &caps,
+        };
+
+        // An unrestricted endpoint the client (task 0x5B09) may post to.
+        let id = 0xCA11_5009;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Post (no deadline) and add a CallReply member observing this
+        // endpoint's replies.
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(0x5B09)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        let set = h.waitset_create(&ctx).expect("create");
+        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0x99)
+            .expect("add call-reply member");
+
+        // No reply yet and no deadline: the member is not ready, so the wait
+        // times out rather than reporting a phantom completion.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // The server answers the call. The member is now ready and the wait
+        // reports its token (a non-consuming peek).
+        match ep.recv_call(usize::MAX) {
+            RecvCall::Received(call) => {
+                ep.reply(call.ticket, b"pong", sink).expect("reply");
+            }
+            other => panic!("expected a received call, got {other:?}"),
+        }
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5B09))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x99
+        );
+
+        // The wait only peeked; `call_reap` is what drains the reply.
+        assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
+
+        crate::callreg::unregister(EndpointId(id));
+        assert_eq!(crate::waitset::release_owned_by(0x5B09), 1);
+    }
+
+    /// A `CallReply` member also reports ready when its request's per-request
+    /// deadline elapses with no reply, so a wedged device wakes the parked
+    /// reaper exactly like a real completion; the reap then fails closed
+    /// `TimedOut` (`plans/FIX-IO.md` IO1).
+    #[test]
+    fn waitset_reports_a_call_reply_member_when_its_deadline_elapses() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        arch.set_monotonic_ns(0);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5B0A), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5B0A, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5B0A),
+            caps: &caps,
+        };
+        let id = 0xCA11_500A;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A 100ns relative deadline; nobody ever replies.
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(0x5B0A)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        let set = h.waitset_create(&ctx).expect("create");
+        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0xAB)
+            .expect("add call-reply member");
+
+        // Inside the deadline the member is not ready.
+        arch.set_monotonic_ns(50);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // Past the deadline the member is ready (the timeout edge); the reap
+        // then reports the timeout and retires the ticket.
+        arch.set_monotonic_ns(200);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::TimedOut)
+        );
+
+        crate::callreg::unregister(EndpointId(id));
+        assert_eq!(crate::waitset::release_owned_by(0x5B0A), 1);
     }
 
     /// `port_bind` binds a port owned by the kernel-trusted caller, refuses
@@ -26514,7 +27051,9 @@ mod tests {
 
         // A client (task 7) posts a request, awaiting its reply.
         let client_caps = make_caps_record(7, &[], sink);
-        let ticket = ep.post(&client_caps, 7, b"ping", sink).expect("posted");
+        let ticket = ep
+            .post(&client_caps, 7, b"ping", u64::MAX, sink)
+            .expect("posted");
 
         let ctx = CallerContext {
             task_id: SecTaskId(0x5705),
@@ -26541,7 +27080,7 @@ mod tests {
         assert_eq!(h.call_reply(&ctx, id, recv_ticket, 0x3000, 4), Ok(0));
         // The client claims its reply exactly once.
         assert_eq!(
-            ep.take_reply(7, CallTicket(recv_ticket)),
+            ep.take_reply(7, CallTicket(recv_ticket), 0),
             ReplyOutcome::Ready(b"pong".to_vec())
         );
         crate::callreg::unregister(EndpointId(id));
@@ -26604,7 +27143,9 @@ mod tests {
 
         // A queued request is still drained normally in the same mode.
         let client_caps = make_caps_record(7, &[], sink);
-        let _ = ep.post(&client_caps, 7, b"ping", sink).expect("posted");
+        let _ = ep
+            .post(&client_caps, 7, b"ping", u64::MAX, sink)
+            .expect("posted");
         let got = h
             .call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::NON_BLOCKING)
             .expect("received");
@@ -26668,7 +27209,7 @@ mod tests {
         let client = 0x6009_1234;
         let client_caps = make_caps_record(client, &[], sink);
         let _ = ep
-            .post(&client_caps, client, b"stale", sink)
+            .post(&client_caps, client, b"stale", u64::MAX, sink)
             .expect("posted");
         assert!(ep.has_pending());
 
@@ -26733,7 +27274,9 @@ mod tests {
         let client_caps = make_caps_record(7, &[CapabilityId::SYSINFO_GLOBAL], sink)
             .with_proc_id(ProcId::from_raw([0x71; 16]));
         let expected = client_caps.attest_origin();
-        let ticket = ep.post(&client_caps, 7, b"who-am-i", sink).expect("posted");
+        let ticket = ep
+            .post(&client_caps, 7, b"who-am-i", u64::MAX, sink)
+            .expect("posted");
 
         let ctx = CallerContext {
             task_id: SecTaskId(0x5706),

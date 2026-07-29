@@ -118,6 +118,10 @@ pub enum ReplyOutcome {
     Pending,
     /// The reply is ready; its bytes are returned and the ticket retired.
     Ready(Vec<u8>),
+    /// The request's per-ticket deadline elapsed before a reply arrived; the
+    /// ticket is retired so the caller fails closed with a timeout rather
+    /// than parking forever on a wedged callee.
+    TimedOut,
     /// The endpoint was destroyed before a reply arrived; the caller must
     /// abandon the call.
     Cancelled,
@@ -159,6 +163,13 @@ struct PendingCall {
     /// principal that made *this* call, immune to later changes to that
     /// task's capabilities or to PID reuse.
     origin: Origin,
+    /// Absolute monotonic deadline (ns) after which an unanswered request is
+    /// reaped as [`ReplyOutcome::TimedOut`]. [`u64::MAX`] means no deadline
+    /// (the `waitset_wait`/`irq_wait` convention), so `ipc_call`'s
+    /// deadline-less park is unchanged. Time is supplied by the caller
+    /// (`now` in [`CallEndpoint::take_reply`]) because the pure endpoint
+    /// holds no clock.
+    deadline: u64,
     request: Vec<u8>,
 }
 
@@ -174,7 +185,7 @@ struct Inner {
     /// [`CallEndpoint::peer_origin`] hands the server), and its scheduler
     /// id (which [`CallEndpoint::reply`] returns so the syscall layer wakes
     /// exactly the poster).
-    in_service: BTreeMap<u64, (u64, Origin, u64)>,
+    in_service: BTreeMap<u64, (u64, Origin, u64, u64)>,
     /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
     /// value is the posting caller's task id and the reply bytes.
     completed: BTreeMap<u64, (u64, Vec<u8>)>,
@@ -535,7 +546,7 @@ impl CallEndpoint {
             let mut g = self.inner.lock();
             let before = g.outstanding();
             g.pending.retain(|call| call.sender != sender);
-            g.in_service.retain(|_, (owner, _, _)| *owner != sender);
+            g.in_service.retain(|_, (owner, _, _, _)| *owner != sender);
             g.completed.retain(|_, (owner, _)| *owner != sender);
             before - g.outstanding()
         };
@@ -593,6 +604,13 @@ impl CallEndpoint {
     /// to every parked one. An in-kernel poster with no scheduler identity
     /// passes `0`, and the reply path falls back to the broadcast wake.
     ///
+    /// `deadline` is the absolute monotonic time (ns) after which an
+    /// unanswered request is reaped as [`ReplyOutcome::TimedOut`] by
+    /// [`take_reply`](Self::take_reply); [`u64::MAX`] means no deadline (the
+    /// deadline-less `ipc_call` park). The endpoint holds no clock, so the
+    /// deadline is an absolute value the caller computes and later compares
+    /// against `now`.
+    ///
     /// # Errors
     ///
     /// As enumerated above.
@@ -601,6 +619,7 @@ impl CallEndpoint {
         caller: &TaskCapabilities,
         poster_sched: u64,
         request: &[u8],
+        deadline: u64,
         audit: &S,
     ) -> Result<CallTicket, Errno> {
         let mut id_buf = [0u8; 16];
@@ -673,6 +692,7 @@ impl CallEndpoint {
             sender,
             poster_sched,
             origin,
+            deadline,
             request: request.to_vec(),
         });
         drop(g);
@@ -712,8 +732,10 @@ impl CallEndpoint {
             };
         }
         let call = g.pending.pop_front().expect("front was present");
-        g.in_service
-            .insert(call.ticket, (call.sender, call.origin, call.poster_sched));
+        g.in_service.insert(
+            call.ticket,
+            (call.sender, call.origin, call.poster_sched, call.deadline),
+        );
         RecvCall::Received(ReceivedCall {
             ticket: CallTicket(call.ticket),
             sender: call.sender,
@@ -738,7 +760,7 @@ impl CallEndpoint {
             .lock()
             .in_service
             .get(&ticket.0)
-            .map(|(_, origin, _)| *origin)
+            .map(|(_, origin, _, _)| *origin)
     }
 
     /// Deliver `reply` for the in-service call identified by `ticket`.
@@ -796,7 +818,8 @@ impl CallEndpoint {
         }
 
         let mut g = self.inner.lock();
-        let Some((sender, _origin, poster_sched)) = g.in_service.remove(&ticket.0) else {
+        let Some((sender, _origin, poster_sched, _deadline)) = g.in_service.remove(&ticket.0)
+        else {
             drop(g);
             record(
                 audit,
@@ -816,7 +839,7 @@ impl CallEndpoint {
     }
 
     /// Claim the reply for `ticket` on behalf of `claimant` (the task that
-    /// posted it).
+    /// posted it), as of monotonic time `now` (ns).
     ///
     /// This is the caller's poll step; it never blocks (a
     /// parker loops it under the cooperative yield/park seam). The ticket is
@@ -826,11 +849,16 @@ impl CallEndpoint {
     ///
     /// * [`ReplyOutcome::Ready`] — the reply is available; its bytes are
     ///   returned and the ticket retired.
-    /// * [`ReplyOutcome::Pending`] — posted/in service but not yet replied.
+    /// * [`ReplyOutcome::TimedOut`] — the ticket's per-post `deadline` has
+    ///   passed with no reply; the ticket is retired so a wedged callee fails
+    ///   the caller closed rather than parking it forever. (`ipc_call` posts
+    ///   with a [`u64::MAX`] deadline, so it never observes this.)
+    /// * [`ReplyOutcome::Pending`] — posted/in service, not yet replied, and
+    ///   still inside its deadline.
     /// * [`ReplyOutcome::Cancelled`] — the endpoint was destroyed; abandon.
     /// * [`ReplyOutcome::Unknown`] — no such ticket for `claimant`.
     #[must_use]
-    pub fn take_reply(&self, claimant: u64, ticket: CallTicket) -> ReplyOutcome {
+    pub fn take_reply(&self, claimant: u64, ticket: CallTicket, now: u64) -> ReplyOutcome {
         let mut g = self.inner.lock();
         match g.completed.remove(&ticket.0) {
             // A ready reply, but only its poster may claim it.
@@ -846,17 +874,104 @@ impl CallEndpoint {
         if self.is_closed() {
             return ReplyOutcome::Cancelled;
         }
-        let in_service =
-            g.in_service.get(&ticket.0).map(|(sender, _, _)| *sender) == Some(claimant);
-        let pending = g
-            .pending
-            .iter()
-            .any(|c| c.ticket == ticket.0 && c.sender == claimant);
-        if in_service || pending {
-            ReplyOutcome::Pending
-        } else {
-            ReplyOutcome::Unknown
+        // The ticket must belong to `claimant`, whether still pending (never
+        // received) or in service (received, awaiting reply). Its deadline
+        // decides between a timeout and a still-live wait.
+        let deadline = g
+            .in_service
+            .get(&ticket.0)
+            .filter(|(sender, _, _, _)| *sender == claimant)
+            .map(|(_, _, _, deadline)| *deadline)
+            .or_else(|| {
+                g.pending
+                    .iter()
+                    .find(|c| c.ticket == ticket.0 && c.sender == claimant)
+                    .map(|c| c.deadline)
+            });
+        match deadline {
+            Some(deadline) if deadline <= now => {
+                // Retire the timed-out ticket from wherever it sits so a late
+                // reply for it is refused fail-closed and the slot is freed.
+                g.in_service.remove(&ticket.0);
+                g.pending.retain(|c| c.ticket != ticket.0);
+                ReplyOutcome::TimedOut
+            }
+            Some(_) => ReplyOutcome::Pending,
+            None => ReplyOutcome::Unknown,
         }
+    }
+
+    /// Whether a [`take_reply`](Self::take_reply) by `claimant` as of `now`
+    /// would make progress — a reply is ready, or one of the claimant's
+    /// tickets has timed out, or the endpoint is closed. The non-consuming
+    /// peek a [`tairix_abi::WaitSourceKind::CallReply`] wait-set member scans:
+    /// the woken owner drains with `take_reply`, never the wait.
+    #[must_use]
+    pub fn has_ready_reply_for(&self, claimant: u64, now: u64) -> bool {
+        // A torn-down endpoint is "ready" so the parked reaper wakes and
+        // observes `Cancelled`/`NotFound` rather than parking forever.
+        if self.is_closed() {
+            return true;
+        }
+        let g = self.inner.lock();
+        if g.completed.values().any(|(sender, _)| *sender == claimant) {
+            return true;
+        }
+        g.pending
+            .iter()
+            .any(|c| c.sender == claimant && c.deadline <= now)
+            || g.in_service
+                .values()
+                .any(|(sender, _, _, deadline)| *sender == claimant && *deadline <= now)
+    }
+
+    /// The nearest (soonest) per-ticket deadline across every outstanding
+    /// call `claimant` posted, or [`u64::MAX`] if it has none (or all are
+    /// deadline-less). The wait-set layer folds this into its one-shot timer
+    /// arming so a wedged callee's deadline wakes the parked reaper.
+    #[must_use]
+    pub fn next_deadline_for(&self, claimant: u64) -> u64 {
+        let g = self.inner.lock();
+        let mut nearest = u64::MAX;
+        for c in &g.pending {
+            if c.sender == claimant {
+                nearest = nearest.min(c.deadline);
+            }
+        }
+        for (sender, _, _, deadline) in g.in_service.values() {
+            if *sender == claimant {
+                nearest = nearest.min(*deadline);
+            }
+        }
+        nearest
+    }
+
+    /// Withdraw the single call `ticket` that `claimant` posted, wherever it
+    /// sits (pending, in service, or replied-but-unclaimed), returning
+    /// whether anything was removed. A per-ticket form of
+    /// [`cancel_posted_by`](Self::cancel_posted_by): a caller abandoning a
+    /// wedged transfer frees the slot deterministically. Only the ticket's
+    /// own poster may cancel it, so a foreign or unknown ticket removes
+    /// nothing and returns `false` (no existence oracle).
+    #[must_use]
+    pub fn cancel_one(&self, claimant: u64, ticket: CallTicket) -> bool {
+        let mut g = self.inner.lock();
+        let before = g.outstanding();
+        g.pending
+            .retain(|c| !(c.ticket == ticket.0 && c.sender == claimant));
+        if g.in_service
+            .get(&ticket.0)
+            .is_some_and(|(sender, _, _, _)| *sender == claimant)
+        {
+            g.in_service.remove(&ticket.0);
+        }
+        if g.completed
+            .get(&ticket.0)
+            .is_some_and(|(sender, _)| *sender == claimant)
+        {
+            g.completed.remove(&ticket.0);
+        }
+        before != g.outstanding()
     }
 }
 
@@ -1134,7 +1249,7 @@ mod tests {
         .expect("authorised");
         let caller = task_with(7, &[]); // lacks NET_RAW
         let err = ep
-            .post(&caller, POSTER_SCHED, b"hi", &sink)
+            .post(&caller, POSTER_SCHED, b"hi", u64::MAX, &sink)
             .expect_err("denied");
         assert_eq!(err, Errno::PermissionDenied);
         assert!(sink.ids().contains(&AuditEvent::CallPostDenied.id().0));
@@ -1160,7 +1275,7 @@ mod tests {
         .expect("ok");
         let caller = task_with(7, &[]);
         let err = ep
-            .post(&caller, POSTER_SCHED, b"too many bytes", &sink)
+            .post(&caller, POSTER_SCHED, b"too many bytes", u64::MAX, &sink)
             .expect_err("oversize");
         assert_eq!(err, Errno::MessageTooLarge);
         assert!(sink.ids().contains(&AuditEvent::CallRequestTooLarge.id().0));
@@ -1173,7 +1288,7 @@ mod tests {
         ep.destroy(&sink);
         let caller = task_with(7, &[]);
         let err = ep
-            .post(&caller, POSTER_SCHED, b"x", &sink)
+            .post(&caller, POSTER_SCHED, b"x", u64::MAX, &sink)
             .expect_err("closed");
         assert_eq!(err, Errno::NotFound);
         assert!(sink
@@ -1200,10 +1315,12 @@ mod tests {
         )
         .expect("ok");
         let caller = task_with(7, &[]);
-        ep.post(&caller, POSTER_SCHED, b"a", &sink).expect("1");
-        ep.post(&caller, POSTER_SCHED, b"b", &sink).expect("2");
+        ep.post(&caller, POSTER_SCHED, b"a", u64::MAX, &sink)
+            .expect("1");
+        ep.post(&caller, POSTER_SCHED, b"b", u64::MAX, &sink)
+            .expect("2");
         let err = ep
-            .post(&caller, POSTER_SCHED, b"c", &sink)
+            .post(&caller, POSTER_SCHED, b"c", u64::MAX, &sink)
             .expect_err("full");
         assert_eq!(err, Errno::LengthOutOfRange);
         assert!(sink.ids().contains(&AuditEvent::CallQueueFull.id().0));
@@ -1217,28 +1334,28 @@ mod tests {
         let caller = task_with(7, &[]);
 
         let ticket = ep
-            .post(&caller, POSTER_SCHED, b"ping", &sink)
+            .post(&caller, POSTER_SCHED, b"ping", u64::MAX, &sink)
             .expect("posted");
         // Before the server receives it, the caller sees Pending.
-        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
+        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending);
 
         let received = recv_one(&ep).expect("a pending call");
         assert_eq!(received.ticket, ticket);
         assert_eq!(received.sender, 7);
         assert_eq!(received.request, b"ping");
         // Received but unreplied is still Pending for the caller.
-        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
+        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending);
 
         ep.reply(ticket, b"pong", &sink).expect("replied");
         assert!(sink.ids().contains(&AuditEvent::CallReplied.id().0));
 
         // The caller claims the reply exactly once.
         assert_eq!(
-            ep.take_reply(7, ticket),
+            ep.take_reply(7, ticket, 0),
             ReplyOutcome::Ready(b"pong".to_vec())
         );
         // A second claim finds nothing.
-        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown);
         assert_eq!(ep.outstanding(), 0);
     }
 
@@ -1253,7 +1370,7 @@ mod tests {
         caller = caller.with_proc_id(minted);
 
         let ticket = ep
-            .post(&caller, POSTER_SCHED, b"ping", &sink)
+            .post(&caller, POSTER_SCHED, b"ping", u64::MAX, &sink)
             .expect("posted");
         // A pending (not-yet-received) call exposes no origin: the server
         // only learns a caller's identity while actively servicing it.
@@ -1286,8 +1403,12 @@ mod tests {
         let caller = task_with(7, &[]);
         assert!(recv_one(&ep).is_none());
 
-        let t1 = ep.post(&caller, POSTER_SCHED, b"1", &sink).expect("1");
-        let t2 = ep.post(&caller, POSTER_SCHED, b"2", &sink).expect("2");
+        let t1 = ep
+            .post(&caller, POSTER_SCHED, b"1", u64::MAX, &sink)
+            .expect("1");
+        let t2 = ep
+            .post(&caller, POSTER_SCHED, b"2", u64::MAX, &sink)
+            .expect("2");
         assert_ne!(t1, t2);
         assert_eq!(recv_one(&ep).expect("first").ticket, t1);
         assert_eq!(recv_one(&ep).expect("second").ticket, t2);
@@ -1300,7 +1421,7 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
         let ticket = ep
-            .post(&caller, POSTER_SCHED, b"four", &sink)
+            .post(&caller, POSTER_SCHED, b"four", u64::MAX, &sink)
             .expect("posted");
 
         // A buffer too small for the front request reports its size and does
@@ -1339,7 +1460,7 @@ mod tests {
     fn take_reply_for_unknown_ticket_is_unknown() {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
-        assert_eq!(ep.take_reply(7, CallTicket(999)), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(7, CallTicket(999), 0), ReplyOutcome::Unknown);
     }
 
     #[test]
@@ -1347,14 +1468,19 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
+            .expect("posted");
         recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("replied");
 
         // A different task may not claim it, and learns nothing.
-        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
         // The reply is preserved for its rightful owner.
-        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Ready(b"r".to_vec()));
+        assert_eq!(
+            ep.take_reply(7, ticket, 0),
+            ReplyOutcome::Ready(b"r".to_vec())
+        );
     }
 
     #[test]
@@ -1362,11 +1488,13 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
+            .expect("posted");
         // A non-poster polling the ticket while it is pending learns nothing.
-        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
         recv_one(&ep).expect("received");
-        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
     }
 
     #[test]
@@ -1385,7 +1513,9 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
+            .expect("posted");
         recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("first reply");
         // The ticket left the in-service table on the first reply.
@@ -1411,7 +1541,9 @@ mod tests {
         )
         .expect("ok");
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
+            .expect("posted");
         recv_one(&ep).expect("received");
         let err = ep
             .reply(ticket, b"too long", &sink)
@@ -1421,7 +1553,7 @@ mod tests {
         // The call is still in service: a correctly-sized reply still works.
         ep.reply(ticket, b"ok", &sink).expect("retry");
         assert_eq!(
-            ep.take_reply(7, ticket),
+            ep.take_reply(7, ticket, 0),
             ReplyOutcome::Ready(b"ok".to_vec())
         );
     }
@@ -1431,7 +1563,9 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, 0xBEEF, b"q", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, 0xBEEF, b"q", u64::MAX, &sink)
+            .expect("posted");
         recv_one(&ep).expect("received");
         // The reply hands back exactly the scheduler id the post captured,
         // so the syscall layer wakes that one caller and no other.
@@ -1469,12 +1603,14 @@ mod tests {
         // Post three, then drive them into three distinct states: the first
         // received-and-replied (completed), the second received (in service),
         // the third never received (pending).
-        let t_done = ep.post(&caller, POSTER_SCHED, b"d", &sink).expect("done");
+        let t_done = ep
+            .post(&caller, POSTER_SCHED, b"d", u64::MAX, &sink)
+            .expect("done");
         let t_in_service = ep
-            .post(&caller, POSTER_SCHED, b"s", &sink)
+            .post(&caller, POSTER_SCHED, b"s", u64::MAX, &sink)
             .expect("in service");
         let t_pending = ep
-            .post(&caller, POSTER_SCHED, b"p", &sink)
+            .post(&caller, POSTER_SCHED, b"p", u64::MAX, &sink)
             .expect("pending");
         assert_eq!(recv_one(&ep).expect("first").ticket, t_done);
         assert_eq!(recv_one(&ep).expect("second").ticket, t_in_service);
@@ -1484,7 +1620,7 @@ mod tests {
         ep.destroy(&sink);
 
         for t in [t_pending, t_in_service, t_done] {
-            assert_eq!(ep.take_reply(7, t), ReplyOutcome::Cancelled);
+            assert_eq!(ep.take_reply(7, t, 0), ReplyOutcome::Cancelled);
         }
         assert_eq!(ep.outstanding(), 0);
         assert!(sink
@@ -1511,12 +1647,14 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let t_done = ep.post(&caller, POSTER_SCHED, b"d", &sink).expect("done");
+        let t_done = ep
+            .post(&caller, POSTER_SCHED, b"d", u64::MAX, &sink)
+            .expect("done");
         let t_in_service = ep
-            .post(&caller, POSTER_SCHED, b"s", &sink)
+            .post(&caller, POSTER_SCHED, b"s", u64::MAX, &sink)
             .expect("in service");
         let t_pending = ep
-            .post(&caller, POSTER_SCHED, b"p", &sink)
+            .post(&caller, POSTER_SCHED, b"p", u64::MAX, &sink)
             .expect("pending");
         assert_eq!(recv_one(&ep).expect("first").ticket, t_done);
         assert_eq!(recv_one(&ep).expect("second").ticket, t_in_service);
@@ -1534,8 +1672,8 @@ mod tests {
             Errno::NotFound
         );
         // ...and the unclaimed completed reply is discarded.
-        assert_eq!(ep.take_reply(7, t_pending), ReplyOutcome::Unknown);
-        assert_eq!(ep.take_reply(7, t_done), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(7, t_pending, 0), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(7, t_done, 0), ReplyOutcome::Unknown);
         assert_eq!(ep.outstanding(), 0);
         assert!(sink.ids().contains(&AuditEvent::CallPosterVanished.id().0));
     }
@@ -1546,8 +1684,11 @@ mod tests {
         let ep = open_endpoint(&sink);
         let dead = task_with(7, &[]);
         let live = task_with(8, &[]);
-        ep.post(&dead, POSTER_SCHED, b"dead", &sink).expect("dead");
-        let t_live = ep.post(&live, POSTER_SCHED, b"live", &sink).expect("live");
+        ep.post(&dead, POSTER_SCHED, b"dead", u64::MAX, &sink)
+            .expect("dead");
+        let t_live = ep
+            .post(&live, POSTER_SCHED, b"live", u64::MAX, &sink)
+            .expect("live");
 
         assert_eq!(ep.cancel_posted_by(7, &sink), 1);
 
@@ -1556,7 +1697,10 @@ mod tests {
         assert_eq!(got.ticket, t_live);
         assert_eq!(got.sender, 8);
         ep.reply(t_live, b"r", &sink).expect("replied");
-        assert_eq!(ep.take_reply(8, t_live), ReplyOutcome::Ready(b"r".to_vec()));
+        assert_eq!(
+            ep.take_reply(8, t_live, 0),
+            ReplyOutcome::Ready(b"r".to_vec())
+        );
     }
 
     #[test]
@@ -1567,5 +1711,100 @@ mod tests {
         assert_eq!(ep.cancel_posted_by(7, &sink), 0);
         // No calls cancelled: no audit record is emitted.
         assert_eq!(sink.len(), before);
+    }
+
+    #[test]
+    fn a_pending_call_times_out_only_once_its_deadline_passes() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        // A request with an absolute deadline of 100ns.
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"slow", 100, &sink)
+            .expect("posted");
+        // Before the deadline the caller is still pending, even received.
+        assert_eq!(ep.take_reply(7, ticket, 50), ReplyOutcome::Pending);
+        recv_one(&ep).expect("received");
+        assert_eq!(ep.take_reply(7, ticket, 99), ReplyOutcome::Pending);
+        // At/after the deadline with no reply, it fails closed and the ticket
+        // is retired so the endpoint slot is freed.
+        assert_eq!(ep.take_reply(7, ticket, 100), ReplyOutcome::TimedOut);
+        assert_eq!(ep.outstanding(), 0);
+        // A late reply for the retired ticket is refused fail-closed.
+        assert_eq!(
+            ep.reply(ticket, b"late", &sink).expect_err("retired"),
+            Errno::NotFound
+        );
+    }
+
+    #[test]
+    fn a_ready_reply_beats_an_elapsed_deadline() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", 100, &sink)
+            .expect("posted");
+        recv_one(&ep).expect("received");
+        ep.reply(ticket, b"r", &sink).expect("replied");
+        // Even well past the deadline, a delivered reply is returned, never a
+        // spurious timeout that would discard a completed answer.
+        assert_eq!(
+            ep.take_reply(7, ticket, 1_000_000),
+            ReplyOutcome::Ready(b"r".to_vec())
+        );
+    }
+
+    #[test]
+    fn has_ready_reply_for_is_a_faithful_peek() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", 100, &sink)
+            .expect("posted");
+        // Nothing to reap while pending and inside the deadline.
+        assert!(!ep.has_ready_reply_for(7, 50));
+        // A non-poster never sees the reply as ready.
+        assert!(!ep.has_ready_reply_for(8, 50));
+        // The elapsed deadline is itself a reap-worthy event (a timeout).
+        assert!(ep.has_ready_reply_for(7, 100));
+        // A delivered reply is ready regardless of time.
+        recv_one(&ep).expect("received");
+        ep.reply(ticket, b"r", &sink).expect("replied");
+        assert!(ep.has_ready_reply_for(7, 0));
+        assert!(!ep.has_ready_reply_for(8, 0));
+    }
+
+    #[test]
+    fn next_deadline_for_reports_the_soonest_outstanding_deadline() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        assert_eq!(ep.next_deadline_for(7), u64::MAX);
+        ep.post(&caller, POSTER_SCHED, b"a", 300, &sink).expect("a");
+        ep.post(&caller, POSTER_SCHED, b"b", 150, &sink).expect("b");
+        // Both are still pending; the nearest deadline is reported, and only
+        // for the querying poster.
+        assert_eq!(ep.next_deadline_for(7), 150);
+        assert_eq!(ep.next_deadline_for(8), u64::MAX);
+    }
+
+    #[test]
+    fn cancel_one_withdraws_only_the_posters_ticket() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
+            .expect("posted");
+        // A foreign claimant cancels nothing (no existence oracle).
+        assert!(!ep.cancel_one(8, ticket));
+        assert_eq!(ep.outstanding(), 1);
+        // The rightful poster withdraws it, freeing the slot.
+        assert!(ep.cancel_one(7, ticket));
+        assert_eq!(ep.outstanding(), 0);
+        // A second cancel finds nothing.
+        assert!(!ep.cancel_one(7, ticket));
     }
 }

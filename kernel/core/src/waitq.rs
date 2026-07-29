@@ -742,6 +742,13 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     CONSOLE_WAITQ.sweep(arch, now);
     USERS_DB_WAITQ.sweep(arch, now);
     PIPE_WAITQ.sweep(arch, now);
+    // `CALL_WAITQ` holds callers awaiting a reply. Most register with
+    // `NO_DEADLINE` (`ipc_call`/`call_recv` — released only by the reply or
+    // teardown, so the sweep never touches them), but the async `call_post`
+    // path registers a finite per-request deadline: sweeping here releases a
+    // caller whose device wedged so its `call_reap` observes the timeout,
+    // rather than parking it forever.
+    CALL_WAITQ.sweep(arch, now);
     // Re-arm to the soonest pending deadline across *every* timed
     // wait-queue, so no finite timeout is dropped because another queue
     // armed a later one-shot (the nearest armed
@@ -863,7 +870,7 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `PIPE_WAITQ`), or
+/// `PIPE_WAITQ`, `CALL_WAITQ`), or
 /// [`None`] if none has one. A park site arms the one-shot to this so
 /// registering a *later* deadline never delays an already-pending earlier
 /// wake.
@@ -875,6 +882,9 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         CONSOLE_WAITQ.earliest_deadline(),
         USERS_DB_WAITQ.earliest_deadline(),
         PIPE_WAITQ.earliest_deadline(),
+        // A finite per-request deadline armed by `call_post` (the async
+        // block transport). Infinite (`ipc_call`) registrations arm nothing.
+        CALL_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()

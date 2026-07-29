@@ -22,8 +22,8 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{
-    decode_completion, BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_DATA_LEN,
-    BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_completion, BlkCompletion, BlkDeviceClass, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
+    BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -36,7 +36,10 @@ use tairix_log::Sink;
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
 use crate::sharedreg::KernelHold;
-use crate::waitq::{serve_wake, serve_wake_task, wait_arch, CALL_WAITQ, NO_DEADLINE};
+use crate::waitq::{
+    nearest_timed_deadline, serve_wake, serve_wake_task, wait_arch, WaitQueueArch, CALL_WAITQ,
+    NO_DEADLINE,
+};
 
 /// Reserved id space for the kernel blkio clients' claimant identities.
 ///
@@ -71,6 +74,16 @@ pub struct BlkClient {
     geometry: BlockGeometry,
     /// Whether the device reported itself write-protected.
     read_only: bool,
+    /// Per-request deadline (ns) after which a transfer fails closed rather
+    /// than parking the kernel filesystem path forever on a wedged device
+    /// (Invariant 1: every I/O is time-bounded). The kernel-side client
+    /// cannot yet discover the device's class, so it uses the most generous
+    /// class budget ([`BlkDeviceClass::Rotational`] — a spinning disk's
+    /// spin-up/reset envelope), which never prematurely fails a slow but
+    /// healthy device while still bounding a genuinely dead one; a
+    /// class-specific budget threads through with the health state machine
+    /// (`plans/FIX-IO.md` IO3).
+    deadline_ns: u64,
 }
 
 /// Map a transport or service refusal onto the [`Block`] contract's error
@@ -82,7 +95,15 @@ fn errno_to_driver(err: Errno) -> DriverError {
         Errno::OutOfRange => DriverError::OutOfRange,
         Errno::PermissionDenied => DriverError::PermissionDenied,
         Errno::NoSpace => DriverError::NoSpace,
+        // The block health axis (`plans/FIX-IO.md` IO1): a permanent medium
+        // error and a gone device each keep their distinct class so the
+        // filesystem layer can tell a bad sector from a missing disk; a
+        // transient/reset/timeout is a device fault the caller may reissue.
+        Errno::MediumError => DriverError::MediumError,
+        Errno::DeviceOffline => DriverError::DeviceOffline,
+        Errno::WouldBlock | Errno::EndpointStalled => DriverError::Busy,
         // A vanished endpoint (`NotFound` — the driver exited on unplug),
+        // a deadline that elapsed (`TimedOut` — the device never answered),
         // a cancelled call, and every other transport failure is a device
         // fault: the device is gone or misbehaving, not the request.
         _ => DriverError::DeviceFault,
@@ -142,6 +163,7 @@ impl BlkClient {
                 block_count: 0,
             },
             read_only: false,
+            deadline_ns: BlkDeviceClass::Rotational.budget().deadline_ns,
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -207,11 +229,18 @@ impl BlkClient {
         });
 
         // Post under the client's synthetic identity; the reply wakes the
-        // *scheduler* task that is running this operation.
+        // *scheduler* task that is running this operation. The per-request
+        // deadline (absolute monotonic) turns a wedged device from an
+        // infinite park into a deterministic `TimedOut` — the mechanism, not
+        // a spin. Absent a live clock hook (a host test of this path) there
+        // is no deadline and the cooperative fallback below stands in.
         let poster = sched.map_or(0, |(_, task)| task);
-        let ticket = self
-            .endpoint
-            .post(&self.caps, poster, &frame[..len], self.audit)?;
+        let deadline_abs = wait_arch().map_or(NO_DEADLINE, |hook| {
+            hook.now_ns().saturating_add(self.deadline_ns)
+        });
+        let ticket =
+            self.endpoint
+                .post(&self.caps, poster, &frame[..len], deadline_abs, self.audit)?;
 
         // Wake the serving driver parked between requests — exactly the
         // endpoint's recorded server where known, the broadcast fallback
@@ -223,14 +252,23 @@ impl BlkClient {
 
         // Register before the first poll so a reply landing in the
         // check/park window is never lost, then poll-and-park until the
-        // reply (or the endpoint's destruction) releases us.
+        // reply, the deadline, or the endpoint's destruction releases us.
+        // Arming the one-shot to the nearest pending deadline lets the timed
+        // sweep wake this task at its deadline even with nothing else to run.
         if let Some((_, task)) = sched {
-            CALL_WAITQ.register(task, NO_DEADLINE);
+            CALL_WAITQ.register(task, deadline_abs);
+            if let Some(hook) = wait_arch() {
+                hook.set_wakeup(nearest_timed_deadline());
+            }
         }
         let claimant = self.caps.task().0;
         let outcome = loop {
-            match self.endpoint.take_reply(claimant, ticket) {
+            let now = wait_arch().map_or(0, WaitQueueArch::now_ns);
+            match self.endpoint.take_reply(claimant, ticket, now) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
+                // The device did not answer within its budget: fail closed so
+                // the filesystem path is never wedged behind a dead disk.
+                ReplyOutcome::TimedOut => break Err(Errno::TimedOut),
                 // The endpoint was torn down (the driver exited — the
                 // device is gone) or the ticket is no longer ours: abandon
                 // the call fail-closed.
@@ -247,6 +285,9 @@ impl BlkClient {
         };
         if let Some((_, task)) = sched {
             CALL_WAITQ.deregister(task);
+            if let Some(hook) = wait_arch() {
+                hook.set_wakeup(nearest_timed_deadline());
+            }
         }
         decode_completion(&outcome?)
     }

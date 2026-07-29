@@ -142,6 +142,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  96 | `fs_set_owner` | `user_ptr` (path), `len`, `u32 uid`, `u32 gid` | `errno`       | `CAP_FS_ACCESS` (+ `CAP_FS_CHOWN` per-inode) | yes |
 |  97 | `pty_create`   | `user_ptr` (out: two `u32` fds), `u32 rows`, `u32 cols` | `errno` | —           | no    |
 |  98 | `pty_set_size` | `u32 fd` (pty master), `u32 rows`, `u32 cols` | `errno` | —           | no    |
+|  99 | `call_post`    | `IpcEndpoint`, `user_ptr` (req), `len`, `user_ptr` (ticket out), `u64 deadline_ns` | `errno` | — | yes |
+| 100 | `call_reap`    | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len` | `u64` (bytes) | — | no |
+| 101 | `call_cancel`  | `IpcEndpoint`, `Handle` (ticket)        | `errno` | — | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -588,6 +591,27 @@ its production consumer. The first-party Rust wrappers are
 `tairix_rt::{ipc_call, call_create, call_recv, call_reply}`; the C stubs are
 `tairix_sys_ipc_call` / `tairix_sys_call_create` / `tairix_sys_call_recv` /
 `tairix_sys_call_reply`.
+
+`call_post` (no. 99), `call_reap` (no. 100), and `call_cancel` (no. 101) are
+the **asynchronous** caller half — the client-side split of `ipc_call` that
+lets one task drive many endpoints at once and never park forever on a wedged
+callee (`plans/FIX-IO.md` IO1). `call_post` posts a request without blocking,
+arms a per-request one-shot deadline, and writes the correlating ticket out;
+`call_reap` is the non-blocking claim (`WouldBlock` while pending, `TimedOut`
+once the deadline elapses — the ticket is then retired, `NotFound` for a
+cancelled/torn-down/foreign ticket, the reply bytes otherwise); `call_cancel`
+withdraws one outstanding ticket. Between reaps the caller parks on a wait-set
+member of kind `WaitSourceKind::CallReply` (added under the caller's *send*
+authority to the endpoint, ready when a reply the caller posted lands **or**
+its deadline elapses), so a caller multiplexes every device's completions and
+timeouts on one wait-set with no blocking thread per device. They carry the
+same endpoint send-capability and per-endpoint grant checks as `ipc_call` (no
+new authority); `call_post` is audited like `ipc_call`, `call_reap` /
+`call_cancel` are not (the client's high-volume drain loop). The first-party
+Rust wrappers are `tairix_rt::{call_post, call_reap, call_cancel}`; the C
+stubs are `tairix_sys_call_post` / `tairix_sys_call_reap` /
+`tairix_sys_call_cancel`. The volume manager's block transport and the kernel
+filesystem block client are the first consumers.
 
 `call_peer_origin` (no. 58) lets a server read the **kernel-attested
 identity** of the caller whose in-service call it is handling (P-C). After a

@@ -1886,6 +1886,71 @@ impl SyscallNumber {
     /// no authority of its own.
     pub const PTY_SET_SIZE: Self = Self(98);
 
+    /// Post a request to a call endpoint **without blocking**, arming a
+    /// per-request deadline, and receive the opaque ticket correlating its
+    /// reply (`plans/FIX-IO.md` IO1 — the asynchronous half of
+    /// [`SyscallNumber::IPC_CALL`]).
+    ///
+    /// [`SyscallNumber::IPC_CALL`] bundles post + park + reap with no
+    /// deadline, so one wedged callee parks the caller forever and a caller
+    /// can drive only one device at a time. This splits the post out: it
+    /// enqueues the request, wakes the bound server, arms a one-shot deadline,
+    /// and returns immediately so the caller can multiplex many outstanding
+    /// requests (one per device) on a wait-set
+    /// ([`crate::WaitSourceKind::CallReply`]) and reap each with
+    /// [`SyscallNumber::CALL_REAP`].
+    ///
+    /// Arguments: `endpoint: u64` — the call-endpoint id; `request: *const u8`
+    /// and `request_len: usize` — the request payload; `ticket_out: *mut u64`
+    /// — receives the minted ticket; `deadline_ns: u64` — the relative
+    /// timeout after which the reap reports [`crate::Errno::TimedOut`]
+    /// (`u64::MAX` = no deadline, the `waitset_wait`/`irq_wait` convention).
+    /// Returns `0`, or `-errno`.
+    ///
+    /// The same capability, per-endpoint grant, and size checks as
+    /// [`SyscallNumber::IPC_CALL`] are enforced kernel-side before anything is
+    /// posted (no new authority; the endpoint re-checks its send capability).
+    /// A closed or unknown endpoint, a missing capability, or an over-capacity
+    /// endpoint each fail closed. A build with no call-endpoint registry
+    /// wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const CALL_POST: Self = Self(99);
+
+    /// Reap the reply to a request posted with [`SyscallNumber::CALL_POST`],
+    /// **without blocking** (`plans/FIX-IO.md` IO1).
+    ///
+    /// Arguments: `endpoint: u64` — the call-endpoint id; `ticket: u64` — the
+    /// ticket [`SyscallNumber::CALL_POST`] minted; `reply: *mut u8` and
+    /// `reply_cap: usize` — the buffer the reply is copied into. Returns the
+    /// number of reply bytes written (`>= 0`), or `-errno`.
+    ///
+    /// Non-blocking: returns [`crate::Errno::WouldBlock`] while the reply is
+    /// still pending, [`crate::Errno::TimedOut`] once the ticket's deadline
+    /// has elapsed (the kernel retires the ticket and best-effort cancels the
+    /// in-flight request — a wedged device thus fails closed deterministically
+    /// rather than parking the caller forever), and [`crate::Errno::NotFound`]
+    /// for a cancelled ticket, a torn-down endpoint, or a ticket that is not
+    /// this caller's (no existence oracle — a foreign ticket is
+    /// indistinguishable from an unknown one). A reply larger than `reply_cap`
+    /// fails closed with [`crate::Errno::BufferTooSmall`]. The caller parks on
+    /// a [`crate::WaitSourceKind::CallReply`] wait-set member between reaps; the
+    /// reap itself never blocks.
+    pub const CALL_REAP: Self = Self(100);
+
+    /// Withdraw one outstanding request posted with
+    /// [`SyscallNumber::CALL_POST`], freeing the endpoint slot deterministically
+    /// (`plans/FIX-IO.md` IO1).
+    ///
+    /// Arguments: `endpoint: u64` — the call-endpoint id; `ticket: u64` — the
+    /// ticket to withdraw. Returns `0` if a call the caller posted was
+    /// cancelled, else `-errno`.
+    ///
+    /// A per-ticket form of the task-exit call scrub: a consumer abandoning a
+    /// wedged transfer cancels it so the slot is not held until the endpoint
+    /// tears down. Only the ticket's own poster may cancel it; a foreign,
+    /// unknown, or already-completed ticket fails closed with
+    /// [`crate::Errno::NotFound`] (no existence oracle).
+    pub const CALL_CANCEL: Self = Self(101);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -2141,6 +2206,11 @@ mod tests {
         assert_eq!(SyscallNumber::BOOT_FACTS_GET.as_u16(), 89);
         assert_eq!(SyscallNumber::SCHED_SET_REALTIME.as_u16(), 95);
         assert_eq!(SyscallNumber::FS_SET_OWNER.as_u16(), 96);
+        assert_eq!(SyscallNumber::PTY_CREATE.as_u16(), 97);
+        assert_eq!(SyscallNumber::PTY_SET_SIZE.as_u16(), 98);
+        assert_eq!(SyscallNumber::CALL_POST.as_u16(), 99);
+        assert_eq!(SyscallNumber::CALL_REAP.as_u16(), 100);
+        assert_eq!(SyscallNumber::CALL_CANCEL.as_u16(), 101);
     }
 
     #[test]
