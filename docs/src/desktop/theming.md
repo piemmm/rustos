@@ -33,7 +33,18 @@ bundles, under a stable `ThemeId`:
 - `CursorSet` — one asset id per `CursorKind`, referencing assets under
   `/System/Graphics`.
 
-`Theme::dark` is the default; `Theme::light` is its light counterpart.
+`Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
+the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,
+`plans/desktop1-light.png`) read off rather than invented: near-black cool
+surfaces (dark) or warm off-white surfaces (light) under one alloy-orange
+accent family, with the semantic signal hues the boards' own legend fixes.
+
+The two appearances re-tune every role for their own background — except
+`on_accent`, which is deliberately the *same* warm white in both: a primary
+action is one treatment in the boards (a warm white label on the alloy-orange
+plate), so the token is shared rather than restated (`AGENTS.md` §2.2). The
+invariant that matters for it is therefore legibility, not difference, and the
+tests assert a minimum luma separation from the accent fill.
 
 ## No duplicated colour algebra
 
@@ -79,8 +90,10 @@ surfaced to the apps as `SessionEvent::AppearanceChanged`. See
 
 ## Tests
 
-`cargo test -p tairix-theme` covers the built-in palettes (every role
-differs between dark and light, surfaces are opaque and distinct), the shared
+`cargo test -p tairix-theme` covers the built-in palettes (every
+appearance-dependent role differs between dark and light, `on_accent` is shared
+and stays legible on the accent fill, body and muted text clear their own
+minimum contrast, surfaces are opaque and distinct), the shared
 metrics/fonts/cursors, cursor lookup for every kind, and the registry: the
 dark default, runtime dark↔light switching, custom-theme registration and
 activation, and the fail-closed `UnknownTheme`/`DuplicateId` paths. The
