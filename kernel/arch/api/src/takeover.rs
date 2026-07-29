@@ -48,11 +48,18 @@
 //!    step succeeds immediately.
 //! 2. **Mask interrupts and stop the lockup watchdog** (`plans/WATCHDOG.md`),
 //!    so nothing preempts or resets the now-solitary CPU during the sweep.
-//! 3. **Flatten paging** so physical RAM is addressed directly and no
-//!    page-table walk depends on RAM the sweep is about to destroy (riscv64
-//!    `satp = 0` bare mode; aarch64 `SCTLR_EL1.M = 0`; x86_64 an
-//!    identity page table rooted in a reserved arena), and perform the cache
-//!    maintenance the whole-RAM writes require.
+//! 3. **Address physical RAM directly** so no page-table walk depends on RAM
+//!    the sweep is about to destroy, and perform the cache maintenance the
+//!    whole-RAM writes require so the test reaches DRAM rather than a cache.
+//!    How a port does this is a per-silicon decision, not a mandate to drop
+//!    the MMU: riscv64 enters `satp = 0` bare mode; x86_64 installs an
+//!    identity page table rooted in a reserved arena; **aarch64 keeps its
+//!    MMU on** under the kernel's existing identity map, because an MMU-off
+//!    EL1 makes every access Device-nGnRnE (unaligned accesses fault), which
+//!    would wedge a real board — the identity map is already `virtual ==
+//!    physical` and alignment-safe. The arch-neutral engine issues the DRAM
+//!    round-trip itself (`PhysMap::clean_invalidate` between the write and
+//!    the read-back), so a cacheable identity mapping still tests the chips.
 //! 4. **Switch onto a reserved stack the sweep will never overwrite** and run
 //!    the caller-supplied `sweep` — the architecture-neutral phase that tests
 //!    every *usable* frame and renders progress. The port guarantees the

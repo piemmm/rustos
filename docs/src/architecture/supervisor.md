@@ -152,8 +152,8 @@ until the machine is reset. It reports progress as `(tested, total)` and each
 mismatch through a `SweepObserver`, never stopping on a bad cell (so one fault
 never masks the rest). It reuses the same `WordWindow` / `PhysWindow`
 primitives and safe, range-checked physical-map access as the boot path — no
-raw pointer arithmetic — and is fully host-tested over a fault-injecting fake. The takeover *mechanism* that flattens
-and tears the machine down (an Arch HAL slice) after the arch-neutral caller
+raw pointer arithmetic — and is fully host-tested over a fault-injecting fake. The takeover *mechanism* that
+tears the machine down (an Arch HAL slice) after the arch-neutral caller
 has quiesced every other CPU, the `memtest`
 command that drives it, the memtest86-style full-screen progress UI it renders
 through, and the real per-port bodies + end-to-end QEMU verticals for all three
@@ -214,9 +214,9 @@ The response is to audit loudly and fail closed, never to weaken a defence:
 A memory test that runs inside the live kernel can only test RAM it explicitly
 owns; it can never test the frames the kernel image, heap, page tables, or
 stacks occupy. Testing *all* of RAM requires owning the whole machine —
-stopping every other CPU, masking interrupts, stopping the lockup watchdog, and
-flattening paging so a small self-contained test routine can address physical
-RAM — which is a one-way trip whose only exits are reset or power-off.
+stopping every other CPU, masking interrupts, and stopping the lockup watchdog,
+then sweeping physical RAM through the kernel's identity map — which is a
+one-way trip whose only exits are reset or power-off.
 
 **Stopping the other CPUs is architecture-neutral** and lives once in
 `tairix_arch_api::quiesce` (a stop request + boot-published liveness/ack
@@ -229,7 +229,7 @@ That per-architecture tear-down lives behind an Arch HAL slice,
 `MachineTakeover` (`kernel/arch/api/src/takeover.rs`). It is a **single**
 operation, `take_over(&self, sweep: &mut dyn FnMut())`, entered only once this
 CPU is the sole one running; it owns the rest of the irreversible sequence and
-never returns on success: mask interrupts, stop the watchdog, flatten paging,
+never returns on success: mask interrupts, stop the watchdog,
 **switch onto a reserved stack the sweep cannot overwrite**, and run the
 caller's `sweep` (the arch-neutral test of every usable frame — every pattern
 over all of RAM, looping forever until the operator resets the board). The one
@@ -305,12 +305,19 @@ operator resets the board (if a sweep ever returned, the sole CPU parks in a
 masked halt rather than resume kernel code). Each port parks a stopped CPU from
 its own IPI-receive path
 (`on_ipi_interrupt` / the timer dispatch / `on_software_interrupt`).
-**riscv64** and **aarch64** flatten paging (bare mode `satp = 0`; the MMU-off
-`SCTLR_EL1` after a cache clean+invalidate — both ports are identity-mapped so
-`virt==phys` survives), so the sweep addresses physical RAM directly.
-**x86_64** cannot drop paging (long mode requires it), so instead of flattening
-the MMU it switches `%cr3` to the reserved boot page tables (`boot_pml4` in
-`.boot.bss`), whose higher-half window the sweep reaches physical RAM through.
+**riscv64** flattens paging (bare mode `satp = 0` — it is identity-mapped, so
+`virt==phys` survives with no page-table walk), so the sweep addresses physical
+RAM directly. **aarch64 keeps its MMU on**: it is already identity-mapped
+(`virt==phys`, Normal cacheable), and dropping the MMU would be *wrong* on real
+silicon — an MMU-off EL1 makes every access Device-nGnRnE, where an unaligned
+access faults, so an MMU-off sweep wedges the board (the defect that locked a
+real Raspberry Pi 4 while QEMU/TCG, ignoring Device-memory alignment, passed).
+The arch-neutral engine still tests DRAM under a cacheable mapping because it
+flushes each tested word to the point of coherency (`PhysMap::clean_invalidate`,
+real `dc civac`) around the read-back. **x86_64** cannot drop paging (long mode
+requires it), so it switches `%cr3` to the reserved boot page tables
+(`boot_pml4` in `.boot.bss`), whose higher-half window the sweep reaches
+physical RAM through.
 Because the test never resets the machine itself, no port needs a reset conduit.
 Each is proven
 end-to-end by `tests/integration/supervisor_memtest_takeover_qemu_<t>`, which

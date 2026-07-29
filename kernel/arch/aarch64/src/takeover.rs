@@ -28,21 +28,33 @@
 //! 1. **Mask interrupts** (`DAIFSet` — all of debug/SError/IRQ/FIQ) so
 //!    nothing preempts the solitary core, and **stop the lockup watchdog**
 //!    by disabling its `CNTV` virtual-timer cadence (`CNTV_CTL_EL0 = 0`).
-//! 2. **Clean+invalidate** the kernel-image region's cache lines to the
-//!    point of coherency so RAM holds the current bytes, then **flatten
-//!    paging** by writing the known MMU-off `SCTLR_EL1`
-//!    ([`crate::paging::SCTLR_MMU_OFF`], clearing `M`/`C`/`I`). The kernel
-//!    runs under an *identity* map (`virtual == physical`), so dropping the
-//!    MMU leaves every address resolving to the same physical byte; every
-//!    access is then Normal Non-cacheable, so the whole-RAM sweep reaches
-//!    RAM directly.
-//! 3. **Switch onto a reserved stack** the sweep will not overwrite and run
+//! 2. **Switch onto a reserved stack** the sweep will not overwrite and run
 //!    the caller's `sweep` (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console). The Supervisor's
 //!    `memtest` sweep tests all of RAM continuously and never returns; the
 //!    operator ends the run by resetting the board. Should a `sweep` ever
 //!    return, the core parks in a masked `wfi` halt rather than resume kernel
 //!    code — the machine has been torn down.
+//!
+//! # Why the MMU stays on
+//!
+//! The takeover deliberately does **not** disable the stage-1 MMU. The kernel
+//! runs under an *identity* map (`virtual == physical` over the discovered
+//! RAM gigapages), and the sweep reaches every physical frame through that
+//! same identity map (`KernelArch::direct_phys_map`), so no flattening is
+//! needed to address RAM directly. Disabling the MMU would be actively wrong
+//! on real ARMv8-A silicon: with `SCTLR_EL1.M == 0` every data access is
+//! **Device-nGnRnE**, where an unaligned access faults unconditionally — the
+//! framebuffer console, `memcpy`/`memset`, and the sweep's own bookkeeping
+//! all issue unaligned accesses, so an MMU-off sweep takes an alignment fault
+//! with interrupts masked and wedges the board. (A permissive emulator that
+//! ignores Device-memory alignment rules hides this, which is exactly how the
+//! MMU-off form passed under QEMU while locking a Raspberry Pi 4.) Keeping the
+//! MMU on leaves the identity mappings Normal cacheable and alignment-safe;
+//! the arch-neutral engine still tests genuine DRAM cells because it flushes
+//! each tested word to the point of coherency between the write and the
+//! read-back through [`PhysMap::clean_invalidate`](tairix_kernel_mem::PhysMap),
+//! which this port backs with real `dc civac` cache maintenance.
 //!
 //! The one region the sweep cannot test is the memory it executes from — the
 //! kernel image and its reserved stack — because a continuous run must keep
@@ -55,16 +67,6 @@
 //! `/psci` node.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
-
-extern "C" {
-    /// First byte of the kernel image
-    /// (`kernel/arch/aarch64/link/aarch64-*.ld`). Everything below it is
-    /// firmware / DTB / low reserved RAM.
-    static __kernel_start: u8;
-    /// One past the end of the kernel image + boot heap; 4 KiB-aligned by the
-    /// linker.
-    static __kernel_end: u8;
-}
 
 /// Size of the reserved takeover stack, in bytes (64 KiB — the same
 /// generous headroom the boot stack reserves, matching the riscv64 port).
@@ -97,9 +99,8 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
 /// The aarch64 machine-takeover handle (`plans/NEW-SUPERVISOR.md` §9).
 ///
 /// A zero-sized unit: the takeover needs no per-instance state (the
-/// reserved stack and the kernel-image bounds are all `static`/linker-
-/// provided). Held by the downstream `KernelArch` wrapper behind the
-/// supervisor-gated accessor and never constructed elsewhere.
+/// reserved stack is `static`). Held by the downstream `KernelArch` wrapper
+/// behind the supervisor-gated accessor and never constructed elsewhere.
 pub struct Aarch64MachineTakeover;
 
 /// The single `'static` takeover handle. Private to the crate.
@@ -148,39 +149,15 @@ impl MachineTakeover for Aarch64MachineTakeover {
             );
         }
 
-        // 2. Clean+invalidate the kernel-image region's cache lines to the
-        //    point of coherency so RAM holds the current bytes before the
-        //    MMU (and the data cache with it) goes away — after flattening,
-        //    every access is Normal Non-cacheable and would miss a dirty
-        //    line. The usable RAM about to be destroyed needs no cleaning.
-        let start = core::ptr::addr_of!(__kernel_start) as usize;
-        let end = core::ptr::addr_of!(__kernel_end) as usize;
-        crate::paging::clean_invalidate_range_to_poc(start as u64, (end - start) as u64);
+        // The MMU stays on: the kernel's identity map already resolves every
+        // physical frame `virtual == physical` and is Normal cacheable and
+        // alignment-safe, whereas an MMU-off EL1 would make every access
+        // Device-nGnRnE and fault the sweep's unaligned accesses (see the
+        // module docs). The arch-neutral engine still tests real DRAM: it
+        // flushes each tested word to the point of coherency around the
+        // read-back through the direct map's `dc civac` maintenance.
 
-        // Flatten paging: write the known MMU-off `SCTLR_EL1` (M/C/I clear),
-        // then invalidate the stale TLB and instruction cache. The kernel is
-        // identity-mapped, so `pc`/`sp`/MMIO keep their addresses across the
-        // switch; every access afterwards is Normal Non-cacheable.
-        // SAFETY: `SCTLR_MMU_OFF` is the architecturally-defined MMU-off
-        // control value the boot stub itself installs; the barriers order
-        // the disable, and the identity map makes the very next fetch (still
-        // at the same physical address) valid under the bare regime.
-        unsafe {
-            core::arch::asm!(
-                "dsb sy",
-                "msr SCTLR_EL1, {sctlr}",
-                "isb",
-                "tlbi vmalle1",
-                "dsb sy",
-                "ic iallu",
-                "dsb sy",
-                "isb",
-                sctlr = in(reg) crate::paging::SCTLR_MMU_OFF,
-                options(nostack, preserves_flags),
-            );
-        }
-
-        // 3. Switch onto the reserved stack and run the sweep, which never
+        // 2. Switch onto the reserved stack and run the sweep, which never
         //    returns. The sweep handle is reached through a thin pointer to
         //    the caller's `&mut dyn FnMut()`, which lives on the caller's
         //    stack and is read once at entry (before the sweep destroys
@@ -203,9 +180,9 @@ impl MachineTakeover for Aarch64MachineTakeover {
 /// # Safety
 ///
 /// Reached only from [`Aarch64MachineTakeover::take_over`] after interrupts
-/// are masked and paging is flattened. `thin` is a live pointer to the
-/// caller's `&mut dyn FnMut()` sweep handle, whose environment resides in
-/// reserved memory the sweep does not destroy.
+/// are masked (the MMU stays on under the identity map). `thin` is a live
+/// pointer to the caller's `&mut dyn FnMut()` sweep handle, whose environment
+/// resides in reserved memory the sweep does not destroy.
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_aarch64_takeover_continue(thin: usize) -> ! {
     // SAFETY: `thin` points at the live `&mut dyn FnMut()` the caller placed
@@ -215,11 +192,12 @@ unsafe extern "C" fn tairix_arch_aarch64_takeover_continue(thin: usize) -> ! {
     sweep();
     // The Supervisor's `memtest` sweep loops until the operator resets the
     // board, so control never reaches here. If a future finite sweep ever
-    // returned, the machine has been torn down (paging flattened, usable RAM
-    // overwritten) and must not resume kernel code, so park the sole core.
+    // returned, the machine has been torn down (every other CPU quiesced,
+    // usable RAM overwritten) and must not resume kernel code, so park the
+    // sole core.
     loop {
-        // SAFETY: interrupts are masked and paging is flattened; `wfi` merely
-        // idles the parked core until the operator resets the machine.
+        // SAFETY: interrupts are masked; `wfi` merely idles the parked core
+        // until the operator resets the machine.
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
         }

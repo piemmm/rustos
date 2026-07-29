@@ -592,17 +592,24 @@ only if a (future, finite) sweep ever returned. Precise per-port design:
   other core is already parked by the arch-neutral quiesce (the caller's
   `quiesce_others`; each core halts in `preempt::on_ipi_interrupt`), so the body
   masks `DAIF` (all of debug/SError/IRQ/FIQ) and stops the watchdog cadence
-  (`CNTV_CTL_EL0 = 0`); clean+invalidates the kernel-image cache lines to PoC
-  (reusing `paging::clean_invalidate_range_to_poc`), then flattens by writing the
-  known MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, M/C/I clear — the kernel is
-  identity-mapped so `virt==phys` survives) with `tlbi vmalle1`/`ic iallu`;
-  switches `sp` to a reserved 64 KiB `.bss` stack (`_takeover_switch_stack`); and
-  runs the arch-neutral `sweep` over usable RAM (never returns; otherwise parks
-  on `wfi`). Needs **no** PSCI conduit — it never resets the board — so it is
-  available on every aarch64 board, including a spin-table Pi 4 whose firmware
-  tree declares no `/psci` node. Wired into `Aarch64BinArch::machine_takeover`
-  behind the supervisor-only `TakeoverGrant`. Proven by
-  `tests/integration/supervisor_memtest_takeover_qemu_aarch64`.
+  (`CNTV_CTL_EL0 = 0`); switches `sp` to a reserved 64 KiB `.bss` stack
+  (`_takeover_switch_stack`); and runs the arch-neutral `sweep` over usable RAM
+  (never returns; otherwise parks on `wfi`). **The MMU stays on.** aarch64 does
+  **not** flatten paging: with `SCTLR_EL1.M = 0` an EL1 data access is
+  Device-nGnRnE, where an unaligned access faults unconditionally, so an MMU-off
+  sweep (the framebuffer console, `memcpy`/`memset`, the sweep's own
+  bookkeeping all issue unaligned accesses) takes an alignment fault with
+  interrupts masked and wedges the board — the defect that locked a real
+  Raspberry Pi 4 while QEMU/TCG, which ignores Device-memory alignment, passed.
+  The kernel's identity map is already `virtual == physical` and Normal
+  cacheable, so the sweep reaches every frame through it directly; the
+  arch-neutral engine still tests DRAM because it flushes each tested word to
+  the point of coherency (`PhysMap::clean_invalidate`, backed by real
+  `dc civac`) around the read-back. Needs **no** PSCI conduit — it never resets
+  the board — so it is available on every aarch64 board, including a spin-table
+  Pi 4 whose firmware tree declares no `/psci` node. Wired into
+  `Aarch64BinArch::machine_takeover` behind the supervisor-only `TakeoverGrant`.
+  Proven by `tests/integration/supervisor_memtest_takeover_qemu_aarch64`.
 - **x86_64 (done).** `kernel/arch/x86_64/src/takeover.rs` + `takeover.s`:
   every AP is already parked by the arch-neutral quiesce (the caller's
   `quiesce_others` delivers the stop IPI on `TIMER_VECTOR`; each AP halts in
@@ -658,10 +665,9 @@ engine's `on_progress(tested, total)` callback and the final `SweepObserver`
 kernel type); its arithmetic is purely presentational and nothing panics on any
 input. The kernel-side `sweep` closure the port runs (built in
 `kernel/core::supervisor_system::drive_takeover`) builds the `Screen`/`MemtestUi`
-over the takeover console, feeds `ui.progress` from the sweep, and maps
-`Passed`/`Faulted`/`Aborted` to `ui.passed`/`ui.faulted`/`ui.aborted`; the port
-resets after `sweep` returns and its own relocated stub has tested the
-kernel-image region. Three both-mode `Screen`
+over the takeover console and feeds `ui.progress`/`ui.record_fault`/
+`ui.loop_complete` from the continuous sweep, which never returns (the operator
+resets the machine to end the run). Three both-mode `Screen`
 helpers (`write_u64`/`write_hex`/`clear_line_tail`) were added for it. Full host
 tests over the `VecReport` mock: rich fullscreen emits escapes and the title,
 the bar/percentage/figures render, the fault table carries the values, plain
