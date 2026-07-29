@@ -627,6 +627,75 @@ pub struct IoBudget {
     pub grace_ns: u64,
 }
 
+/// The shared recovery **grace-window** timer: a bounded, event-timed window a
+/// stalling storage element — a single served device ([`BlkHealth`]) or a
+/// whole interior fault domain ([`FaultDomain`]) — is held open before it is
+/// failed closed. Both drive their recovery window through this one definition,
+/// so the arm / elapsed / one-shot-deadline arithmetic can never diverge
+/// between the per-device and fault-domain machines.
+///
+/// It holds no clock: the caller supplies the monotonic reading on every
+/// query, so it is pure and provable host-side and there is nothing to spin on
+/// (event-timed via [`GraceWindow::deadline_ns`], never a busy-poll).
+#[derive(Copy, Clone, Debug)]
+struct GraceWindow {
+    /// The window duration in nanoseconds. `u64::MAX` means "ride out
+    /// indefinitely" and never reads as elapsed (no real policy uses it).
+    grace_ns: u64,
+    /// The monotonic reading the current window opened at; meaningful only
+    /// while `open`.
+    opened_at_ns: u64,
+    /// Whether a window is currently open.
+    open: bool,
+}
+
+impl GraceWindow {
+    /// A closed window that, once opened, lasts `grace_ns`.
+    const fn new(grace_ns: u64) -> Self {
+        Self {
+            grace_ns,
+            opened_at_ns: 0,
+            open: false,
+        }
+    }
+
+    /// Open the window at monotonic `now_ns` unless one is already open. A
+    /// window already open keeps its original start, so a *continuing* blip
+    /// cannot extend the window indefinitely and postpone the fail-closed.
+    fn open_at(&mut self, now_ns: u64) {
+        if !self.open {
+            self.open = true;
+            self.opened_at_ns = now_ns;
+        }
+    }
+
+    /// Close the window (the element recovered or was failed closed).
+    fn close(&mut self) {
+        self.open = false;
+        self.opened_at_ns = 0;
+    }
+
+    /// Whether an open window has elapsed at monotonic `now_ns`.
+    /// `saturating_sub` keeps a non-monotonic reading from wrapping the elapsed
+    /// time; a `u64::MAX` window never reads as elapsed.
+    const fn elapsed(&self, now_ns: u64) -> bool {
+        self.open
+            && self.grace_ns != u64::MAX
+            && now_ns.saturating_sub(self.opened_at_ns) >= self.grace_ns
+    }
+
+    /// The absolute monotonic time an open window closes at — the deadline a
+    /// driver arms a **one-shot** timer for. `None` when closed or when the
+    /// window rides out indefinitely (`grace_ns == u64::MAX`), so no timer is
+    /// armed.
+    const fn deadline_ns(&self) -> Option<u64> {
+        if !self.open || self.grace_ns == u64::MAX {
+            return None;
+        }
+        Some(self.opened_at_ns.saturating_add(self.grace_ns))
+    }
+}
+
 /// The health of one served block device: an explicit state distinguishing a
 /// device that is fine from one that is riding out a blip, from one that has
 /// been failed closed, from one that is gone.
@@ -694,9 +763,10 @@ impl BlkHealthState {
 pub struct BlkHealth {
     state: BlkHealthState,
     budget: IoBudget,
-    /// The monotonic reading at which the current `Recovering` episode began;
-    /// meaningful only while `state == Recovering`.
-    recovering_since_ns: u64,
+    /// The recovery grace-window timer, open only while `state ==
+    /// Recovering`; the one shared with [`FaultDomain`] so the timing cannot
+    /// diverge.
+    grace: GraceWindow,
 }
 
 impl BlkHealth {
@@ -706,7 +776,7 @@ impl BlkHealth {
         Self {
             state: BlkHealthState::Healthy,
             budget: class.budget(),
-            recovering_since_ns: 0,
+            grace: GraceWindow::new(class.budget().grace_ns),
         }
     }
 
@@ -734,13 +804,7 @@ impl BlkHealth {
     /// (`grace_ns == u64::MAX`), so the caller arms no timer.
     #[must_use]
     pub const fn grace_deadline_ns(&self) -> Option<u64> {
-        if !matches!(self.state, BlkHealthState::Recovering) || self.budget.grace_ns == u64::MAX {
-            return None;
-        }
-        Some(
-            self.recovering_since_ns
-                .saturating_add(self.budget.grace_ns),
-        )
+        self.grace.deadline_ns()
     }
 
     /// Advance the grace window on a pure time tick at monotonic `now_ns`,
@@ -756,8 +820,9 @@ impl BlkHealth {
     /// its grace timer fires without tracking whether a request already
     /// advanced the machine.
     pub fn poll(&mut self, now_ns: u64) -> BlkHealthState {
-        if matches!(self.state, BlkHealthState::Recovering) && self.grace_elapsed(now_ns) {
+        if matches!(self.state, BlkHealthState::Recovering) && self.grace.elapsed(now_ns) {
             self.state = BlkHealthState::Faulted;
+            self.grace.close();
         }
         self.state
     }
@@ -799,14 +864,17 @@ impl BlkHealth {
             // through the grace window (there is nothing to ride out).
             BlkStatus::Offline => {
                 self.state = BlkHealthState::Offline;
+                self.grace.close();
                 BlkStatus::Offline
             }
             BlkStatus::Removed => {
                 self.state = BlkHealthState::Removed;
+                self.grace.close();
                 BlkStatus::Removed
             }
             BlkStatus::Fatal => {
                 self.state = BlkHealthState::Failed;
+                self.grace.close();
                 BlkStatus::Fatal
             }
         }
@@ -825,14 +893,15 @@ impl BlkHealth {
             // First sign of trouble on a live device: open the grace window.
             BlkHealthState::Healthy | BlkHealthState::Degraded => {
                 self.state = BlkHealthState::Recovering;
-                self.recovering_since_ns = now_ns;
+                self.grace.open_at(now_ns);
                 BlkStatus::Reset
             }
             // Inside an open window: keep answering reissuably until the
             // window elapses, then fail closed.
             BlkHealthState::Recovering => {
-                if self.grace_elapsed(now_ns) {
+                if self.grace.elapsed(now_ns) {
                     self.state = BlkHealthState::Faulted;
+                    self.grace.close();
                     BlkStatus::Offline
                 } else {
                     BlkStatus::Reset
@@ -841,18 +910,186 @@ impl BlkHealth {
         }
     }
 
-    /// Whether an open recovery grace window has elapsed at monotonic
-    /// `now_ns`. Meaningful only while `Recovering`; `saturating_sub` keeps a
-    /// non-monotonic clock reading from wrapping the elapsed time, and a
-    /// `u64::MAX` grace window (ride out indefinitely) never reads as elapsed.
-    const fn grace_elapsed(&self, now_ns: u64) -> bool {
-        now_ns.saturating_sub(self.recovering_since_ns) >= self.budget.grace_ns
-    }
-
     /// Return the device to a live state, clearing any recovery episode.
     fn recover(&mut self, to: BlkHealthState) {
         self.state = to;
-        self.recovering_since_ns = 0;
+        self.grace.close();
+    }
+}
+
+/// The recovery state of one interior **fault domain** — the bus, hub, USB
+/// controller, SAS/JBOD expander, or PCIe root complex that owns a group of
+/// block devices beneath it.
+///
+/// A blip in an *owner* (a hub reset, a controller re-init) is one
+/// fault-domain event, not N independent disk failures: the whole subtree
+/// rides out a single shared grace window together. The three states mirror
+/// the device-level [`BlkHealthState`] machine, collapsed to what an interior
+/// node needs (an interior node has no "medium error" or "degraded-but-
+/// serving" of its own — those are per-device).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum FaultDomainState {
+    /// The owner is up; children answer on their own per-device health.
+    #[default]
+    Healthy,
+    /// The owner is resetting / mid-blip: every child is held reissuable under
+    /// one shared grace window while the owner is given a bounded chance to
+    /// come back.
+    Recovering,
+    /// The grace window elapsed without the owner returning: the whole subtree
+    /// is failed closed to consumers, but stays *recoverable* — a demonstrated
+    /// owner recovery returns it to [`FaultDomainState::Healthy`] with no
+    /// reboot.
+    Offline,
+}
+
+/// The recovery state machine of one interior fault-domain node (a bus, hub,
+/// controller, expander, or root complex) that owns a group of served block
+/// devices, read from the discovered hardware tree
+/// ([`crate::hwtree`]) — never hard-coded, so a USB hub, a SAS
+/// expander, and a PCIe root complex are all just interior nodes.
+///
+/// It turns an *owner-level* event — the owner began a reset/blip
+/// ([`quiesce`](Self::quiesce)), the owner demonstrably returned
+/// ([`resume`](Self::resume)), or the shared grace window elapsed
+/// ([`poll`](Self::poll)) — into the coherent [`BlkStatus`] every child in the
+/// subtree is told ([`child_status`](Self::child_status)). One hub reset is
+/// therefore one recovery episode across all its disks, not N spurious
+/// failures.
+///
+/// It reuses the same `GraceWindow` primitive as the per-device
+/// [`BlkHealth`], so an interior node and a leaf device time their recovery
+/// window identically. It holds no clock and no children: the caller supplies
+/// the monotonic reading and drives its children's own [`BlkHealth`], so the
+/// machine is pure, event-timed (never a busy-poll), and provable host-side.
+/// Which nodes are children is a property of the hardware tree the caller
+/// walks, not of this state machine — keeping it platform-neutral (it stores
+/// only the owner's opaque node id).
+///
+/// Sticky-but-recoverable: once `Offline`, only a demonstrated owner recovery
+/// ([`resume`](Self::resume)) clears it, so a flapping hub cannot masquerade
+/// as healthy, yet a genuine return always recovers the subtree.
+#[derive(Copy, Clone, Debug)]
+pub struct FaultDomain {
+    /// The owning bus/hub/controller node's hardware-tree id (opaque here; the
+    /// caller reads parenthood from [`crate::hwtree`]).
+    owner: u32,
+    state: FaultDomainState,
+    /// The shared recovery window for the whole subtree, open only while
+    /// `state == Recovering`.
+    grace: GraceWindow,
+}
+
+impl FaultDomain {
+    /// A freshly-`Healthy` fault domain owned by hardware-tree node `owner`,
+    /// whose recovery window lasts `grace_ns`.
+    ///
+    /// `grace_ns` is **policy**, derived by the caller from the owner's
+    /// discovered class (e.g. the widest [`IoBudget::grace_ns`] among the
+    /// children it fans out to, so a subtree of spinning disks rides out a
+    /// longer reset than one of removable units) — never a hand-picked global
+    /// constant, and never a security/validation bound.
+    #[must_use]
+    pub const fn new(owner: u32, grace_ns: u64) -> Self {
+        Self {
+            owner,
+            state: FaultDomainState::Healthy,
+            grace: GraceWindow::new(grace_ns),
+        }
+    }
+
+    /// The owning bus/hub/controller node's hardware-tree id.
+    #[must_use]
+    pub const fn owner(&self) -> u32 {
+        self.owner
+    }
+
+    /// The current fault-domain state.
+    #[must_use]
+    pub const fn state(&self) -> FaultDomainState {
+        self.state
+    }
+
+    /// Begin (or continue) an owner reset/blip at monotonic `now_ns`, opening
+    /// the shared grace window, and return the resulting state.
+    ///
+    /// A `Healthy` owner enters `Recovering` and arms the window; a continuing
+    /// blip keeps the *original* window start, so an owner that keeps resetting
+    /// cannot postpone its fail-closed indefinitely. An owner already `Offline`
+    /// stays `Offline` — a further reset is not a recovery (only
+    /// [`resume`](Self::resume) clears a failed subtree).
+    pub fn quiesce(&mut self, now_ns: u64) -> FaultDomainState {
+        match self.state {
+            FaultDomainState::Healthy | FaultDomainState::Recovering => {
+                self.state = FaultDomainState::Recovering;
+                self.grace.open_at(now_ns);
+            }
+            FaultDomainState::Offline => {}
+        }
+        self.state
+    }
+
+    /// Record that the owner has demonstrably returned: the whole subtree
+    /// recovers to `Healthy` and children resume on their own per-device
+    /// health, whatever state the domain was in.
+    ///
+    /// This is the only transition that clears an `Offline` subtree (no
+    /// reboot), so recovery is always a demonstrated event, never a guess.
+    pub fn resume(&mut self) -> FaultDomainState {
+        self.state = FaultDomainState::Healthy;
+        self.grace.close();
+        self.state
+    }
+
+    /// Advance the shared grace window on a pure time tick at monotonic
+    /// `now_ns`: a `Recovering` subtree whose owner has not returned by the
+    /// window's close fails closed to `Offline`.
+    ///
+    /// This is the time-driven counterpart to [`quiesce`](Self::quiesce),
+    /// driven by the one-shot timer [`grace_deadline_ns`](Self::grace_deadline_ns)
+    /// names rather than a busy-poll. Idempotent and side-effect-free off the
+    /// open-recovery path.
+    pub fn poll(&mut self, now_ns: u64) -> FaultDomainState {
+        if matches!(self.state, FaultDomainState::Recovering) && self.grace.elapsed(now_ns) {
+            self.state = FaultDomainState::Offline;
+            self.grace.close();
+        }
+        self.state
+    }
+
+    /// The absolute monotonic time the open recovery window closes at — the
+    /// deadline a driver arms a **one-shot** timer for to call
+    /// [`poll`](Self::poll). `None` when no window is open.
+    #[must_use]
+    pub const fn grace_deadline_ns(&self) -> Option<u64> {
+        self.grace.deadline_ns()
+    }
+
+    /// The [`BlkStatus`] a child device's in-flight request should be told
+    /// given the domain state at monotonic `now_ns`, or `None` when the domain
+    /// imposes nothing and the child answers on its own per-device
+    /// [`BlkHealth`].
+    ///
+    /// While `Recovering` a child's request is answered reissuably
+    /// ([`BlkStatus::Reset`]) so the blip is invisible to the workload if the
+    /// owner returns inside the window; once the window has elapsed (or the
+    /// domain is already `Offline`) the child is failed closed
+    /// ([`BlkStatus::Offline`]). This is a pure query — the fail-closed
+    /// *transition* happens in [`poll`](Self::poll) / [`quiesce`](Self::quiesce)
+    /// — so reading it never mutates the machine.
+    #[must_use]
+    pub const fn child_status(&self, now_ns: u64) -> Option<BlkStatus> {
+        match self.state {
+            FaultDomainState::Healthy => None,
+            FaultDomainState::Recovering => {
+                if self.grace.elapsed(now_ns) {
+                    Some(BlkStatus::Offline)
+                } else {
+                    Some(BlkStatus::Reset)
+                }
+            }
+            FaultDomainState::Offline => Some(BlkStatus::Offline),
+        }
     }
 }
 
@@ -1469,6 +1706,158 @@ mod tests {
         // ...and a genuine return recovers it without a reboot.
         assert_eq!(health.observe(BlkStatus::Ok, grace + 2), BlkStatus::Ok);
         assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    // ---- The interior fault-domain machine (`FaultDomain`) ----
+    //
+    // A hub/controller blip is *one* fault-domain event across its whole
+    // subtree, not N spurious disk failures. These prove that coherent
+    // quiesce/resume over the shared grace window, host-side.
+
+    /// A representative interior-node grace budget (an owning bus/hub's reset
+    /// envelope). A literal here stands in for the policy the caller derives
+    /// from the owner's discovered class at the wiring site.
+    const DOMAIN_GRACE_NS: u64 = 1_000;
+    /// A representative owner node id from the hardware tree.
+    const OWNER_ID: u32 = 7;
+
+    #[test]
+    fn a_healthy_domain_imposes_nothing_on_its_children() {
+        // A live owner does not override its children: each child answers on
+        // its own per-device health, so the domain returns `None`.
+        let domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(domain.state(), FaultDomainState::Healthy);
+        assert_eq!(domain.owner(), OWNER_ID);
+        assert_eq!(domain.child_status(0), None);
+        assert_eq!(domain.grace_deadline_ns(), None);
+    }
+
+    #[test]
+    fn an_owner_reset_holds_the_whole_subtree_reissuable_under_one_window() {
+        // One owner reset opens one shared window; every child in the subtree
+        // is told the same reissuable `Reset` while it is open.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(domain.quiesce(0), FaultDomainState::Recovering);
+        assert_eq!(domain.grace_deadline_ns(), Some(DOMAIN_GRACE_NS));
+        // Any child, at any point inside the window, reissues rather than fails.
+        assert_eq!(domain.child_status(0), Some(BlkStatus::Reset));
+        assert_eq!(
+            domain.child_status(DOMAIN_GRACE_NS - 1),
+            Some(BlkStatus::Reset)
+        );
+    }
+
+    #[test]
+    fn an_owner_that_returns_inside_the_window_recovers_the_whole_subtree() {
+        // The owner comes back before its window closes: the whole subtree
+        // resumes to `Healthy` and children go back to their own health,
+        // leaving no scar (the ride-out-the-blip behaviour).
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(10);
+        assert_eq!(domain.resume(), FaultDomainState::Healthy);
+        assert_eq!(domain.child_status(20), None);
+        assert_eq!(domain.grace_deadline_ns(), None);
+    }
+
+    #[test]
+    fn an_owner_that_outlasts_the_window_fails_the_subtree_closed() {
+        // The window elapses with no return: the subtree fails closed to
+        // `Offline` and every child is told `Offline`.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(0);
+        // A child observing at/after the deadline is failed closed even before
+        // a `poll` mutates the machine (the pure query agrees with the state).
+        assert_eq!(
+            domain.child_status(DOMAIN_GRACE_NS),
+            Some(BlkStatus::Offline)
+        );
+        assert_eq!(domain.poll(DOMAIN_GRACE_NS), FaultDomainState::Offline);
+        assert_eq!(
+            domain.child_status(DOMAIN_GRACE_NS),
+            Some(BlkStatus::Offline)
+        );
+        // Once failed closed the window is shut: no one-shot timer is re-armed.
+        assert_eq!(domain.grace_deadline_ns(), None);
+    }
+
+    #[test]
+    fn a_quiet_domain_expires_its_window_on_a_time_poll() {
+        // An owner that resets and then goes silent (no child request to fold)
+        // still fails closed on the one-shot grace timer, never sitting
+        // `Recovering` forever — and a poll before the deadline is a no-op.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(100);
+        assert_eq!(domain.grace_deadline_ns(), Some(100 + DOMAIN_GRACE_NS));
+        assert_eq!(
+            domain.poll(100 + DOMAIN_GRACE_NS - 1),
+            FaultDomainState::Recovering
+        );
+        assert_eq!(
+            domain.poll(100 + DOMAIN_GRACE_NS),
+            FaultDomainState::Offline
+        );
+    }
+
+    #[test]
+    fn an_offline_subtree_is_sticky_until_a_demonstrated_owner_return() {
+        // A failed-closed subtree cannot masquerade as healthy: a further reset
+        // leaves it `Offline`, and only a demonstrated owner recovery clears it
+        // — without a reboot.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(0);
+        domain.poll(DOMAIN_GRACE_NS);
+        assert_eq!(domain.state(), FaultDomainState::Offline);
+        // A fresh reset while already offline changes nothing.
+        assert_eq!(
+            domain.quiesce(DOMAIN_GRACE_NS + 5),
+            FaultDomainState::Offline
+        );
+        assert_eq!(domain.grace_deadline_ns(), None);
+        // A demonstrated return recovers the whole subtree.
+        assert_eq!(domain.resume(), FaultDomainState::Healthy);
+        assert_eq!(domain.child_status(DOMAIN_GRACE_NS + 10), None);
+    }
+
+    #[test]
+    fn a_continuing_reset_cannot_postpone_the_fail_closed() {
+        // A blip that keeps re-asserting must not extend its own window: the
+        // window is measured from the *first* quiesce, so a flapping owner
+        // still fails closed on schedule.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(0);
+        // Re-quiescing partway through keeps the original deadline.
+        domain.quiesce(DOMAIN_GRACE_NS / 2);
+        assert_eq!(domain.grace_deadline_ns(), Some(DOMAIN_GRACE_NS));
+        assert_eq!(domain.poll(DOMAIN_GRACE_NS), FaultDomainState::Offline);
+    }
+
+    #[test]
+    fn a_flapping_owner_reopens_a_fresh_window_each_episode() {
+        // A distinct new episode (after a genuine recovery) opens a fresh
+        // window from its own start, so an owner that recovers and blips again
+        // gets a full grace window for the new episode.
+        let mut domain = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        domain.quiesce(0);
+        domain.resume();
+        domain.quiesce(5_000);
+        assert_eq!(domain.grace_deadline_ns(), Some(5_000 + DOMAIN_GRACE_NS));
+        // The new episode rides out on its own clock.
+        assert_eq!(
+            domain.poll(5_000 + DOMAIN_GRACE_NS - 1),
+            FaultDomainState::Recovering
+        );
+    }
+
+    #[test]
+    fn a_ride_out_forever_domain_never_fails_closed() {
+        // A `u64::MAX` grace (ride out indefinitely) arms no one-shot timer and
+        // never elapses, so children stay reissuable until a demonstrated
+        // return — the honest "no deadline" convention.
+        let mut domain = FaultDomain::new(OWNER_ID, u64::MAX);
+        domain.quiesce(0);
+        assert_eq!(domain.grace_deadline_ns(), None);
+        assert_eq!(domain.poll(u64::MAX), FaultDomainState::Recovering);
+        assert_eq!(domain.child_status(u64::MAX), Some(BlkStatus::Reset));
     }
 
     // ---- The shared block-service request engine (`serve_request_recovering`)

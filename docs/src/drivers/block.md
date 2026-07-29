@@ -97,9 +97,49 @@ only the usb_msd-specific block-service endpoint-id derivation
 are currently consumed in-kernel (root-unlock) and expose only their `Block`
 implementation; when either is brought up as a user-space serving process it
 reuses the same engine rather than copying it. The volume-manager consumer
-marking the affected volume degraded, the fault-domain (hub/controller)
-quiesce/resume, and health observability through `lib/log`/`sysinfo` are the
-staged remainder (`plans/FIX-IO.md` IO3–IO6).
+marking the affected volume degraded and health observability through
+`lib/log`/`sysinfo` are the staged remainder (`plans/FIX-IO.md` IO3–IO6).
+
+## Fault domains — one hub/controller blip is one recovery episode
+
+A bus, hub, USB controller, SAS/JBOD expander, or PCIe root complex owns a
+group of block devices beneath it. When such an *owner* resets or blips, the
+symptom on every disk below it is the same stall — so treating it as N
+independent disk failures is wrong: it is **one** fault-domain event
+(`plans/FIX-IO.md` IO4). `blkio::FaultDomain` is the interior-node counterpart
+of the per-device `BlkHealth`, and both drive their recovery window through the
+one shared `GraceWindow` timer, so an interior node and a leaf device time
+their grace window identically and the arithmetic cannot diverge (`AGENTS.md`
+§2.2).
+
+- Which nodes are children is read from the discovered hardware tree
+  (`lib/abi::hwtree`), never hard-coded — a USB hub, a SAS expander, and a PCIe
+  root complex are all just interior nodes (`AGENTS.md` §18.1, §2.20). A
+  `FaultDomain` stores only the owner's opaque node id, so the type stays
+  platform-neutral.
+- `FaultDomain::quiesce(now_ns)` opens **one** shared grace window over the
+  whole subtree: every child's in-flight request is answered reissuably
+  (`FaultDomain::child_status` returns `BlkStatus::Reset`), so a hub reset that
+  resolves in milliseconds is invisible to the workload.
+- `FaultDomain::resume()` records a *demonstrated* owner return: the whole
+  subtree recovers to `Healthy` at once and children resume on their own
+  per-device health. This is the only transition that clears a failed subtree,
+  so a returning hub always recovers without a reboot (`AGENTS.md` §18.4).
+- `FaultDomain::poll(now_ns)` fails a `Recovering` subtree closed to `Offline`
+  when the window elapses, driven by the one-shot timer
+  `FaultDomain::grace_deadline_ns` names rather than a busy-poll (`AGENTS.md`
+  §2.23). A subtree that has failed closed is sticky until a demonstrated
+  return, so a flapping hub cannot masquerade as healthy.
+- The grace duration is **policy** the caller derives from the owner's
+  discovered class (e.g. the widest child `IoBudget::grace_ns`), never one
+  global `const` (`AGENTS.md` §24.1).
+
+The `FaultDomain` machine is pure and event-timed (the caller supplies the
+monotonic reading and drives the children's own `BlkHealth`), so the whole
+coherent quiesce/resume is proven host-side in `lib/abi`. Walking the hardware
+tree to drive a subtree's children through it — and the volume-manager degrade
+marking and health observability — are the staged remainder
+(`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 
