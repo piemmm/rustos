@@ -19,8 +19,8 @@
 //! rather than carrying authority the volume manager does not need.
 
 use tairix_abi::blkio::{
-    BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY,
-    BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkOp, BlkOutcome, BlkRequest, IoBudget,
+    BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::{DriverError, Errno};
@@ -59,6 +59,13 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     window: &'w mut [u8],
     geometry: BlockGeometry,
     read_only: bool,
+    /// The shared per-device I/O budget, whose retry count bounds how many
+    /// times a *reissuable* completion is reissued before failing closed —
+    /// the same policy the kernel filesystem client obeys, so the two
+    /// consumers cannot drift apart. The probe cannot yet discover the
+    /// device's class, so it uses the most generous class budget
+    /// ([`BlkDeviceClass::Rotational`]), exactly as the kernel client does.
+    budget: IoBudget,
 }
 
 impl<'w, C: BlkCall> RemoteBlock<'w, C> {
@@ -80,6 +87,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
                 block_count: 0,
             },
             read_only: false,
+            budget: BlkDeviceClass::Rotational.budget(),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -116,13 +124,37 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         self.read_only
     }
 
-    /// Issue one request and decode its completion fail-closed.
+    /// Issue one request, reissuing a *reissuable* completion up to the
+    /// device's [`IoBudget::max_retries`] before failing closed.
+    ///
+    /// This is the consumer half of the reply-reissuable recovery model
+    /// (`plans/FIX-IO.md` IO3), identical in policy to the kernel filesystem
+    /// client: when the serving driver rides out a device blip it answers
+    /// reissuably rather than with a hard fault, and this probe reissues
+    /// rather than failing an attach for a device that is merely recovering.
+    /// The reissue count is bounded, so a device that keeps answering
+    /// reissuably still fails closed deterministically. Each reissue is a
+    /// fresh request/reply exchange — event-driven, never a busy spin.
     fn transfer(&mut self, request: BlkRequest) -> Result<BlkCompletion, Errno> {
+        let mut attempts: u32 = 0;
+        loop {
+            let outcome = self.transfer_once(request)?;
+            if self.budget.should_reissue(outcome.status, attempts) {
+                attempts += 1;
+                continue;
+            }
+            return outcome.data();
+        }
+    }
+
+    /// Issue exactly one request and decode its completion fail-closed. The
+    /// reissue policy lives in [`transfer`](Self::transfer).
+    fn transfer_once(&mut self, request: BlkRequest) -> Result<BlkOutcome, Errno> {
         let mut frame = [0u8; BLK_REQUEST_LEN];
         let len = request.encode(&mut frame)?;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let got = self.call.call(&frame[..len], &mut reply, self.window)?;
-        tairix_abi::blkio::decode_completion(reply.get(..got).ok_or(Errno::BadMagic)?)
+        Ok(decode_outcome(reply.get(..got).ok_or(Errno::BadMagic)?))
     }
 
     /// Largest whole-block chunk a single transfer can move through the
@@ -524,5 +556,69 @@ mod tests {
             fill(&mut expected, lba * 512);
             assert_eq!(hbuf, expected, "the healthy sibling's data is intact");
         }
+    }
+
+    /// A device that answers geometry, then reports a reissuable `Reset` for
+    /// its first `faults` data requests before serving the real payload — a
+    /// stand-in for a disk that blips (a bus reset) and then recovers.
+    struct FlakyDevice {
+        inner: MemDevice,
+        faults: u32,
+    }
+    impl BlkCall for FlakyDevice {
+        fn call(
+            &mut self,
+            request: &[u8],
+            reply: &mut [u8],
+            window: &mut [u8],
+        ) -> Result<usize, Errno> {
+            let decoded = BlkRequest::decode(request)?;
+            if decoded.op != BlkOp::Geometry && self.faults > 0 {
+                self.faults -= 1;
+                return BlkCompletion::default()
+                    .encode_status(tairix_abi::blkio::BlkStatus::Reset, reply);
+            }
+            self.inner.call(request, reply, window)
+        }
+    }
+
+    #[test]
+    fn a_transient_fault_is_reissued_and_then_succeeds() {
+        // Two reissuable resets then a good read: within the rotational retry
+        // budget, so the probe rides out the blip and returns correct data
+        // rather than failing the attach for a device that was merely
+        // recovering.
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let mut client = RemoteBlock::connect(
+            FlakyDevice {
+                inner: device(512, 64, 0),
+                faults: 2,
+            },
+            &mut window,
+        )
+        .expect("connects");
+        let mut buf = [0u8; 512];
+        client.read_blocks(0, &mut buf).expect("read after reissue");
+        let mut expected = [0u8; 512];
+        fill(&mut expected, 0);
+        assert_eq!(buf, expected, "the recovered read returns the real payload");
+    }
+
+    #[test]
+    fn a_device_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
+        // A device that resets on every attempt (one initial plus the
+        // rotational budget of three reissues) fails closed as a reissuable
+        // `Busy` rather than retrying forever.
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let mut client = RemoteBlock::connect(
+            FlakyDevice {
+                inner: device(512, 64, 0),
+                faults: u32::MAX,
+            },
+            &mut window,
+        )
+        .expect("connects");
+        let mut buf = [0u8; 512];
+        assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
     }
 }

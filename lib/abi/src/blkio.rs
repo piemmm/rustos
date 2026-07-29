@@ -627,6 +627,25 @@ pub struct IoBudget {
     pub grace_ns: u64,
 }
 
+impl IoBudget {
+    /// Whether a block consumer should reissue a completion of `status` given
+    /// it has already made `attempts` attempts against this device.
+    ///
+    /// This is the single shared **bounded-reissue policy** every consumer of
+    /// a served block device obeys, so the kernel filesystem client and the
+    /// volume manager's probe can never drift apart in when they retry versus
+    /// fail closed. A completion is reissued only while it is *reissuable*
+    /// ([`BlkStatus::is_retryable`] — the serving driver's "I am recovering,
+    /// try again" answer under its own grace window) and only until this
+    /// device's [`max_retries`](Self::max_retries) is reached: a device that
+    /// keeps answering reissuably still fails closed deterministically rather
+    /// than retrying forever (`AGENTS.md`'s ban on retry-until-it-works).
+    #[must_use]
+    pub const fn should_reissue(self, status: BlkStatus, attempts: u32) -> bool {
+        status.is_retryable() && attempts < self.max_retries
+    }
+}
+
 /// The shared recovery **grace-window** timer: a bounded, event-timed window a
 /// stalling storage element — a single served device ([`BlkHealth`]) or a
 /// whole interior fault domain ([`FaultDomain`]) — is held open before it is
@@ -1461,6 +1480,39 @@ mod tests {
             BlkDeviceClass::SolidState.budget().queue_depth
                 > BlkDeviceClass::Rotational.budget().queue_depth
         );
+    }
+
+    #[test]
+    fn the_bounded_reissue_policy_retries_only_reissuable_statuses_within_budget() {
+        let budget = BlkDeviceClass::Rotational.budget();
+        assert!(budget.max_retries > 0);
+        // A reissuable status is reissued only up to the budget, then fails
+        // closed — never forever.
+        for status in [
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+        ] {
+            for attempts in 0..budget.max_retries {
+                assert!(budget.should_reissue(status, attempts), "{status:?}");
+            }
+            assert!(
+                !budget.should_reissue(status, budget.max_retries),
+                "{status:?} must stop at the budget"
+            );
+        }
+        // A valid completion or a definitive/gone verdict is never reissued,
+        // even on the very first attempt.
+        for status in [
+            BlkStatus::Ok,
+            BlkStatus::Degraded,
+            BlkStatus::MediumError,
+            BlkStatus::Offline,
+            BlkStatus::Removed,
+            BlkStatus::Fatal,
+        ] {
+            assert!(!budget.should_reissue(status, 0), "{status:?}");
+        }
     }
 
     #[test]
