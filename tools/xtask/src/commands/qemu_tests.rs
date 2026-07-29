@@ -7316,8 +7316,20 @@ fn attach_net_peer(
                 std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
             let qemu_sock = sock_base.with_extension("qemu.sock");
             let peer_sock = sock_base.with_extension("peer.sock");
-            let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock);
-            peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
+            let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock)
+                .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
+            // The two-process autoload verticals (V6LinkLocal) prove success
+            // through the peer's inbound echo campaign, whose confirming event —
+            // the peer receiving the guest's reply — is the *last* link in the
+            // causal chain. Their guest bins are built not to self-exit, so the
+            // run is ended by the peer's completion gate rather than by a guest
+            // debug-exit that would race, and lose to, the reply leaving the
+            // machine. Every other single-wire role keeps a guest-driven exit,
+            // so its gate stays unset here.
+            if t.netstack_peer == NetPeerMode::V6LinkLocal {
+                spec = spec.with_completion_gate(started.success_gate());
+            }
+            peer = Some(started);
             spec = spec.with_virtio_net_dgram_mac(
                 &qemu_sock,
                 &peer_sock,

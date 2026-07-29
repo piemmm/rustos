@@ -599,6 +599,23 @@ pub struct Spec {
     /// never printed the marker. `None` (the default) leaves the per-arch
     /// [`Arch::outcome_from_status`] convention untouched.
     pub reset_success_marker: Option<String>,
+    /// When `Some`, a **harness-driven** success signal: the run completes
+    /// as `Outcome::Pass` the moment this flag reads `true`, at which point
+    /// the runner kills QEMU. It exists for two-process verticals whose
+    /// success is proven by an out-of-guest observer (the harness-side
+    /// `netpeer` link peer) rather than by the guest itself: the guest must
+    /// *not* self-terminate on an intermediate witness, because the observer's
+    /// confirming event is the **last** link in the causal chain (e.g. the
+    /// peer receiving the guest's echo reply) and a guest self-exit races —
+    /// and loses to — that reply leaving the machine. With this gate the guest
+    /// stays alive and serving until the observer has its proof, so teardown
+    /// can never precede it. A guest that instead reaches its own debug-exit
+    /// (or falls silent for the inactivity budget) still ends the run through
+    /// the normal paths, so a genuine failure remains fail-loud; the
+    /// [`Spec::timeout`] additionally bounds the wait so a gate that never
+    /// trips cannot hang the run. `None` (the default) leaves the run driven
+    /// solely by the guest.
+    pub completion_gate: Option<Arc<AtomicBool>>,
 }
 
 /// How a QEMU session presents itself to a human.
@@ -639,6 +656,7 @@ impl Spec {
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
             reset_success_marker: None,
+            completion_gate: None,
         }
     }
 
@@ -670,6 +688,19 @@ impl Spec {
         self
     }
 
+    /// Complete the run as `Outcome::Pass` as soon as `gate` reads `true`,
+    /// killing QEMU at that instant. See [`Spec::completion_gate`]: this is
+    /// the harness-driven success signal for a two-process vertical whose
+    /// proof is held by the out-of-guest `netpeer` observer, so the guest
+    /// stays alive and serving until the observer's confirming (last-in-chain)
+    /// event has occurred rather than self-terminating on an earlier witness
+    /// and racing it.
+    #[must_use]
+    pub fn with_completion_gate(mut self, gate: Arc<AtomicBool>) -> Self {
+        self.completion_gate = Some(gate);
+        self
+    }
+
     /// Minimal riscv64 `virt`-board spec suitable for a QEMU integration
     /// test. Defaults: single CPU, 60 s inactivity budget. The default guest
     /// RAM and firmware come from the [`riscv64`] module.
@@ -693,6 +724,7 @@ impl Spec {
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
             reset_success_marker: None,
+            completion_gate: None,
         }
     }
 
@@ -719,6 +751,7 @@ impl Spec {
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
             reset_success_marker: None,
+            completion_gate: None,
         }
     }
 
@@ -1141,6 +1174,16 @@ fn supervise(
     // genuinely stalled guest still produces nothing for `spec.timeout` and is
     // killed, with no retry.
     let mut heartbeat = ProgressClock::new(Instant::now());
+    // Absolute run start, used only when a completion gate is configured: the
+    // gate's success (the out-of-guest observer's confirmation) is what ends
+    // such a run, and a gate that never trips must still fail loud rather than
+    // hang. The guest deliberately does not self-exit in that mode and keeps
+    // emitting campaign chatter, so the inactivity heartbeat alone cannot bound
+    // it; `spec.timeout` is applied as an absolute ceiling instead. It carries
+    // ample margin — a healthy run trips the gate within tens of seconds of
+    // boot, far inside the budget — so a slow-but-progressing guest is not
+    // killed prematurely.
+    let run_start = Instant::now();
 
     let SerialDrain {
         captured,
@@ -1187,6 +1230,17 @@ fn supervise(
     let mut serial_script = SerialScriptState::default();
     let mut serial_closed = false;
     let done = 'run: loop {
+        // Harness-driven success: the out-of-guest observer (the `netpeer` link
+        // peer) has confirmed the round-trip. End the run as `Pass` at once,
+        // before waiting on the guest — in this mode the guest never
+        // self-exits, so the gate is the sole success path.
+        if let Some(gate) = &spec.completion_gate {
+            if gate.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break 'run DoneReason::CompletedByGate;
+            }
+        }
         if let Some(status) = child.try_wait()? {
             break 'run exit_reason(spec, serial_script.step, &injections, status);
         }
@@ -1242,6 +1296,15 @@ fn supervise(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len();
         heartbeat.observe(serial_len, Instant::now());
+        // With a completion gate the guest keeps emitting campaign chatter
+        // while it waits to be confirmed, so the inactivity heartbeat would
+        // never fire; bound the wait with an absolute ceiling so a gate that
+        // never trips fails loud instead of hanging the run.
+        if spec.completion_gate.is_some() && run_start.elapsed() >= spec.timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 'run DoneReason::TimedOut;
+        }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
             // Strict, no-retry kill. `wait` afterwards is best
             // effort so we don't leave a zombie behind.
@@ -1345,6 +1408,7 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             }
             spec.arch.outcome_from_status(code, serial)
         }
+        DoneReason::CompletedByGate => Outcome::Pass,
         DoneReason::TimedOut => Outcome::Timeout {
             budget: spec.timeout,
             serial,
@@ -1477,6 +1541,10 @@ enum DoneReason {
     Exited(i32),
     /// The deadline elapsed; the child was killed.
     TimedOut,
+    /// The [`Spec::completion_gate`] tripped: the out-of-guest observer
+    /// (the `netpeer` link peer) confirmed success, so the child was
+    /// killed and the run scored `Pass`.
+    CompletedByGate,
     /// A requested key/serial injection could not be delivered; the
     /// child was killed. The message explains which injection and why.
     InjectionFailed(String),
@@ -2243,6 +2311,37 @@ mod tests {
     }
 
     #[test]
+    fn completion_gate_builder_records_the_flag() {
+        // By default there is no gate: the run is driven solely by the guest.
+        let plain = Spec::for_riscv64_kernel("/tmp/k");
+        assert!(plain.completion_gate.is_none());
+        // `with_completion_gate` records the shared flag the harness observer
+        // trips; the same `Arc` is what the runner reads each poll tick.
+        let gate = Arc::new(AtomicBool::new(false));
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_completion_gate(Arc::clone(&gate));
+        let recorded = spec.completion_gate.expect("gate recorded");
+        assert!(!recorded.load(Ordering::Acquire));
+        gate.store(true, Ordering::Release);
+        assert!(
+            recorded.load(Ordering::Acquire),
+            "the recorded gate is the same flag the harness trips"
+        );
+    }
+
+    #[test]
+    fn completed_by_gate_scores_pass_regardless_of_arch_convention() {
+        // The out-of-guest observer's confirmation is success on its own: the
+        // guest never wrote a debug-exit code (it did not self-exit), so the
+        // outcome must be Pass without consulting the per-arch status rule.
+        let spec = Spec::for_riscv64_kernel("/tmp/k")
+            .with_completion_gate(Arc::new(AtomicBool::new(true)));
+        assert!(matches!(
+            outcome_from_done(DoneReason::CompletedByGate, &spec, "campaign log".into()),
+            Outcome::Pass
+        ));
+    }
+
+    #[test]
     fn spec_for_x86_64_defaults_are_architecture_neutral() {
         // The generic Spec carries only architecture-neutral fields; the
         // x86_64-specific defaults (RAM size, OVMF flags) are owned by
@@ -2767,6 +2866,7 @@ mod tests {
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
             reset_success_marker: None,
+            completion_gate: None,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

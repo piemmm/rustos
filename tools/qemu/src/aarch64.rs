@@ -214,6 +214,7 @@ mod tests {
             monitor_commands: Vec::new(),
             session: SessionKind::HeadlessTest,
             reset_success_marker: None,
+            completion_gate: None,
         }
     }
 

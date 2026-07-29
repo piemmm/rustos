@@ -76,6 +76,14 @@ const IPV4_IDENT_SEED: u16 = 0x7EE7;
 /// A running host-side peer thread bound to one vertical's wire.
 pub struct NetPeer {
     stop: Arc<AtomicBool>,
+    /// Tripped by the peer thread the instant its campaign verdict is first
+    /// met (e.g. the guest's echo reply arrived). It is the harness-driven
+    /// completion signal: for a vertical whose success is proven by this
+    /// out-of-guest observer, the guest is built *not* to self-exit and the
+    /// QEMU runner ends the run when this flag reads `true`, so teardown can
+    /// never precede the observer's confirming (last-in-chain) event and race
+    /// it. `stop_and_join` still returns the authoritative verdict.
+    succeeded: Arc<AtomicBool>,
     handle: JoinHandle<Result<(), String>>,
 }
 
@@ -211,9 +219,17 @@ impl NetPeer {
         let primary = bind_wire(primary_qemu_sock, primary_peer_sock)?;
         let backup = bind_wire(backup_qemu_sock, backup_peer_sock)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let succeeded = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let handle = std::thread::spawn(move || run_bond_peer(&primary, &backup, &thread_stop));
-        Ok(Self { stop, handle })
+        let thread_succeeded = Arc::clone(&succeeded);
+        let handle = std::thread::spawn(move || {
+            run_bond_peer(&primary, &backup, &thread_stop, &thread_succeeded)
+        });
+        Ok(Self {
+            stop,
+            succeeded,
+            handle,
+        })
     }
 
     /// Shared socket bring-up + thread spawn for both peer roles: remove any
@@ -223,13 +239,37 @@ impl NetPeer {
     fn spawn_with(
         qemu_sock: &Path,
         peer_sock: &Path,
-        body: fn(&UnixDatagram, &PathBuf, &AtomicBool) -> Result<(), String>,
+        body: fn(&UnixDatagram, &PathBuf, &AtomicBool, &AtomicBool) -> Result<(), String>,
     ) -> Result<Self, String> {
         let wire = bind_wire(qemu_sock, peer_sock)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let succeeded = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let handle = std::thread::spawn(move || body(&wire.socket, &wire.qemu_sock, &thread_stop));
-        Ok(Self { stop, handle })
+        let thread_succeeded = Arc::clone(&succeeded);
+        let handle = std::thread::spawn(move || {
+            body(
+                &wire.socket,
+                &wire.qemu_sock,
+                &thread_stop,
+                &thread_succeeded,
+            )
+        });
+        Ok(Self {
+            stop,
+            succeeded,
+            handle,
+        })
+    }
+
+    /// The harness-driven completion gate: a clone of the flag the peer
+    /// thread trips the instant its campaign verdict is first met. The QEMU
+    /// runner is handed this flag ([`tairix_qemu::Spec::with_completion_gate`])
+    /// so it can end the run as soon as the observer confirms success, for a
+    /// vertical whose guest is built not to self-exit. Cloning shares the same
+    /// underlying flag with the running thread.
+    #[must_use]
+    pub fn success_gate(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.succeeded)
     }
 
     /// Signal the peer to stop and collect its verdict: `Ok` only if the
@@ -296,7 +336,12 @@ fn bind_wire(qemu_sock: &Path, peer_sock: &Path) -> Result<Wire, String> {
 /// knowing which is live. Its verdict is `Ok` once the guest's echo reply
 /// (to the bond's static address) arrives; the guest's own witnesses prove
 /// the failover was exercised.
-fn run_bond_peer(primary: &Wire, backup: &Wire, stop: &AtomicBool) -> Result<(), String> {
+fn run_bond_peer(
+    primary: &Wire,
+    backup: &Wire,
+    stop: &AtomicBool,
+    _succeeded: &AtomicBool,
+) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
         mtu: 1500,
@@ -404,9 +449,14 @@ fn send_frames_dual(primary: &Wire, backup: &Wire, frames: &[TxFrame]) {
 /// *device* MAC (`GUEST_MAC`, modified EUI-64): the peer pings only that
 /// link-local (from its own `PEER_IID` link-local — no extra static address)
 /// and requires only its reply.
-fn run_peer(socket: &UnixDatagram, qemu_sock: &PathBuf, stop: &AtomicBool) -> Result<(), String> {
+fn run_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    succeeded: &AtomicBool,
+) -> Result<(), String> {
     let guest_v6 = wire::link_local(eui64_interface_id(wire::GUEST_MAC));
-    run_v6_campaign(socket, qemu_sock, stop, None, guest_v6)
+    run_v6_campaign(socket, qemu_sock, stop, succeeded, None, guest_v6)
 }
 
 /// The peer's event loop for the **static-addressing** vertical
@@ -421,11 +471,13 @@ fn run_static_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    succeeded: &AtomicBool,
 ) -> Result<(), String> {
     run_v6_campaign(
         socket,
         qemu_sock,
         stop,
+        succeeded,
         Some((wire::PEER_STATIC_V6, wire::STATIC_PREFIX_LEN)),
         wire::GUEST_STATIC_V6,
     )
@@ -441,6 +493,7 @@ fn run_v6_campaign(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    succeeded: &AtomicBool,
     peer_static: Option<(core::net::Ipv6Addr, u8)>,
     guest_v6: core::net::Ipv6Addr,
 ) -> Result<(), String> {
@@ -512,6 +565,16 @@ fn run_v6_campaign(
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
         }
+
+        // Mirror the campaign verdict into the harness completion gate the
+        // instant the guest's reply first arrives, so the QEMU runner can end
+        // the run as soon as this out-of-guest observer has its proof — the
+        // guest for this vertical is built not to self-exit, precisely so its
+        // teardown cannot precede (and lose the race to) the reply leaving the
+        // machine. Idempotent: `reply_v6` only ever goes false -> true.
+        if reply_v6 {
+            succeeded.store(true, Ordering::Release);
+        }
     }
 
     if reply_v6 {
@@ -544,6 +607,7 @@ fn run_dhcp_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -980,6 +1044,7 @@ fn run_dhcp6_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -1592,6 +1657,7 @@ fn run_ping_responder(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -1793,6 +1859,7 @@ fn run_tcp_echo_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -1981,6 +2048,7 @@ fn run_tcp_echo_ecn_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -2126,6 +2194,7 @@ fn run_tcp_connect_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
+    _succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
