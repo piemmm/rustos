@@ -13,7 +13,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Rgba, Theme};
 
-use crate::paint::measured_thickness;
+use crate::paint::progress_thickness;
 use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
     RecoveryState,
@@ -116,10 +116,10 @@ fn bounds() -> Rect {
 }
 
 /// The trace's thin band within the test row as `(top, bottom)`: the theme's
-/// measured thickness, top-aligned when a caption fits beneath it and centred
+/// progress thickness, top-aligned when a caption fits beneath it and centred
 /// otherwise, mirroring the layout the trace itself resolves.
 fn band_rows(theme: &Theme) -> (u32, u32) {
-    let band = measured_thickness(theme, Scale::ONE);
+    let band = progress_thickness(theme, Scale::ONE);
     let spare = H - band;
     let top = if spare >= font().glyph_height() {
         0
@@ -453,7 +453,7 @@ fn denied_progress_shows_a_lock_bead() {
     let mut progress = Progress::new();
     progress.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let surface = progress_surface(&progress, &theme);
-    let band = measured_thickness(&theme, Scale::ONE);
+    let band = progress_thickness(&theme, Scale::ONE);
     assert!(region_has(
         &surface,
         (W - band, W),

@@ -43,14 +43,16 @@ bundles, under a stable `ThemeId`:
   `border_thickness`; the scrollbar's `scrollbar_breadth` and
   `min_thumb_length`; the control anatomy (`control_height`,
   `control_inset`, `control_gap`, `control_corner_radius`, `seam_thickness`,
-  `rail_thickness`, `bead_size`, `measured_thickness`, `selector_extent`,
-  `toggle_track_length`); and the window furniture (`title_bar_height`,
-  `frame_inset`, `window_control_extent`, `resize_grabber_extent`,
-  `hit_slop`).
-  - `measured_thickness` is the breadth of a *measured* track — a progress
-    bar's bar, a slider's groove. It is deliberately a thin instrument line
-    rather than a `control_height` plate, centred in the row the owner lays it
-    out in, which is how the boards draw them.
+  `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
+  `selector_extent`, `toggle_track_length`); and the window furniture
+  (`title_bar_height`, `frame_inset`, `window_control_extent`,
+  `resize_grabber_extent`, `hit_slop`).
+  - `measured_thickness` is the breadth of a slider's groove and
+    `progress_thickness` that of a progress trace's bar. Both are deliberately
+    thin instrument lines rather than `control_height` plates, centred in the
+    row the owner lays them out in, which is how the boards draw them. The
+    trace is the broader of the two: a slider's thumb marks its value, while a
+    read-only fill has to stay legible across a long run on its own.
   - `selector_extent` (a checkbox box, a radio circle, a toggle track's
     breadth) and `toggle_track_length` size a boolean selector's *mark*
     smaller than the row that carries it, so the glyph stays compact while the

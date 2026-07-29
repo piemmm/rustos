@@ -11,9 +11,11 @@
 //! so nothing here restates a recipe those families already own.
 //!
 //! A measured track is drawn as a thin instrument line — the theme's
-//! `measured_thickness`, centred in whatever row the owner lays the control out
-//! in — never a control-height plate, so a progress bar reads as an instrument
-//! and a slider as a groove rather than a block.
+//! `measured_thickness` for a slider's groove, the slightly broader
+//! `progress_thickness` for a trace the user only reads, centred in whatever row
+//! the owner lays the control out in — never a control-height plate, so a
+//! progress bar reads as an instrument and a slider as a groove rather than a
+//! block.
 
 use alloc::format;
 use alloc::string::String;
@@ -25,8 +27,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    inset, measured_thickness, paint_bead, paint_plate, plate_border, resolve_bead, resolve_frame,
-    resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
+    inset, measured_thickness, paint_bead, paint_plate, plate_border, progress_thickness,
+    resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -472,14 +474,15 @@ impl Progress {
             || self.state.recovery != RecoveryState::None
     }
 
-    /// The thin trace band within `bounds`: the theme's measured thickness,
+    /// The thin trace band within `bounds`: the theme's progress thickness,
     /// never taller than the bounds, centred when the caption cannot fit
     /// beside it and top-aligned when it can.
     ///
     /// The trace is an instrument line, not a filled block: its height comes
-    /// from the one measured-control thickness token every measured control
-    /// shares, so a caller that hands it a tall row gets a thin bar and a
-    /// captioned row rather than a slab.
+    /// from the theme's progress-trace thickness token — a touch broader than a
+    /// slider's groove, because a read-only fill has no thumb to mark it — so a
+    /// caller that hands it a tall row gets a thin bar and a captioned row
+    /// rather than a slab.
     fn band(
         rect: (u32, u32, u32, u32),
         scale: Scale,
@@ -487,7 +490,7 @@ impl Progress {
         font: BitmapFont,
     ) -> (u32, u32) {
         let (_, y, _, h) = rect;
-        let band = measured_thickness(theme, scale).min(h).max(1);
+        let band = progress_thickness(theme, scale).min(h).max(1);
         let spare = h - band;
         if spare >= font.glyph_height() {
             (y, band)

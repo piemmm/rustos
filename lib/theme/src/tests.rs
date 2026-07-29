@@ -174,6 +174,22 @@ fn builtins_share_metrics_fonts_and_cursors() {
 }
 
 #[test]
+fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
+    let dark = Theme::dark();
+    let m = dark.metrics();
+
+    // A slider's groove is the thinnest track: the thumb marks the value, so
+    // the line only has to be visible.
+    assert!(m.measured_thickness < m.progress_thickness);
+    // A progress bar has no thumb, so it reads a little broader — but it stays
+    // an instrument line, nowhere near a plate.
+    assert!(m.progress_thickness < m.selector_extent);
+    assert!(m.selector_extent < m.control_height);
+    // Every track survives the thinnest sensible rounding.
+    assert!(m.measured_thickness >= 1);
+}
+
+#[test]
 fn the_ladder_derives_every_role_from_one_base_size() {
     let fonts = Fonts::ladder("Board Sans", "Board Mono", 18);
 
@@ -412,6 +428,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             rail_thickness: 2,
             bead_size: 6,
             measured_thickness: 4,
+            progress_thickness: 6,
             selector_extent: 14,
             toggle_track_length: 24,
             title_bar_height: 24,

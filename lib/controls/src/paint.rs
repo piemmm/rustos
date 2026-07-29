@@ -72,16 +72,32 @@ pub(crate) fn plate_border(theme: &Theme, scale: Scale) -> u32 {
         .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
 }
 
-/// The physical breadth of a *measured* value track — a progress bar's bar, a
-/// slider's groove — from the theme metric, never thinner than a hairline.
+/// The physical breadth of the *measured* track a user drives — a slider's
+/// groove — from the theme metric, never thinner than a hairline.
 ///
-/// A measured track is an instrument line rather than a plate, so both the
-/// slider and the progress trace resolve it here instead of deriving a
-/// thickness from their row height.
+/// A measured track is an instrument line rather than a plate, so the slider
+/// resolves it here instead of deriving a thickness from its row height.
 #[must_use]
 pub(crate) fn measured_thickness(theme: &Theme, scale: Scale) -> u32 {
+    track_thickness(theme, scale, theme.metrics().measured_thickness)
+}
+
+/// The physical breadth of a progress trace's bar from the theme metric.
+///
+/// A progress bar is read rather than dragged, so the theme gives it a little
+/// more breadth than a slider's groove; it stays an instrument line resolved
+/// from theme data, never from the row it sits in.
+#[must_use]
+pub(crate) fn progress_thickness(theme: &Theme, scale: Scale) -> u32 {
+    track_thickness(theme, scale, theme.metrics().progress_thickness)
+}
+
+/// One logical track breadth in physical pixels: at least a hairline, and one
+/// pixel broader under heavy contrast so the line stays visible.
+#[must_use]
+fn track_thickness(theme: &Theme, scale: Scale, logical: u32) -> u32 {
     scale
-        .scale_length(theme.metrics().measured_thickness)
+        .scale_length(logical)
         .max(1)
         .saturating_add(u32::from(heavy_contrast(theme)))
 }

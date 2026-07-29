@@ -275,6 +275,7 @@ fn common_metrics() -> Metrics {
         rail_thickness: 3,
         bead_size: 8,
         measured_thickness: 4,
+        progress_thickness: 6,
         selector_extent: 16,
         toggle_track_length: 28,
         title_bar_height: 28,
