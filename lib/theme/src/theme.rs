@@ -149,6 +149,12 @@ impl Theme {
     }
 
     /// The built-in **dark** theme — TAIRiX's default.
+    ///
+    /// The tokens are the Reactive Alloy design boards (`plans/desktop1.png`,
+    /// `plans/desktop2a.png`) measured rather than invented: near-black cool
+    /// surfaces, one alloy-orange accent family (a burnt-orange plate fill
+    /// under a bright signal edge), and the semantic signal hues the boards'
+    /// own legend fixes.
     #[must_use]
     pub fn dark() -> Self {
         Self::new(
@@ -156,32 +162,32 @@ impl Theme {
             "TAIRiX Dark",
             Appearance::Dark,
             Palette {
-                desktop: Rgba::rgb(0x12, 0x14, 0x18),
-                surface: Rgba::rgb(0x1e, 0x22, 0x28),
-                surface_raised: Rgba::rgb(0x2a, 0x2f, 0x37),
-                on_surface: Rgba::rgb(0xe6, 0xe9, 0xef),
-                on_surface_muted: Rgba::rgb(0x9a, 0xa1, 0xad),
-                accent: Rgba::rgb(0x4c, 0x8d, 0xff),
-                on_accent: Rgba::rgb(0x0b, 0x0d, 0x10),
-                border: Rgba::rgb(0x3a, 0x40, 0x49),
-                surface_pressed: Rgba::rgb(0x16, 0x19, 0x1e),
-                rim: Rgba::rgb(0x44, 0x4b, 0x55),
-                rim_active: Rgba::rgb(0x6f, 0xa4, 0xff),
-                danger: Rgba::rgb(0xff, 0x5c, 0x5c),
-                cpu_pressure: Rgba::rgb(0xf0, 0xa0, 0x30),
-                memory_pressure: Rgba::rgb(0xb0, 0x6c, 0xf0),
-                disk_pressure: Rgba::rgb(0x30, 0xc0, 0xb0),
-                network_activity: Rgba::rgb(0x40, 0xb0, 0xff),
-                power_pressure: Rgba::rgb(0x8b, 0xd4, 0x50),
-                thermal_pressure: Rgba::rgb(0xff, 0x7a, 0x3c),
-                recovery: Rgba::rgb(0xff, 0x6a, 0xb0),
-                success: Rgba::rgb(0x4c, 0xd0, 0x7a),
-                warning: Rgba::rgb(0xf5, 0xc5, 0x42),
-                denied: Rgba::rgb(0xc8, 0x5a, 0x5a),
-                scroll_track: Rgba::rgb(0x23, 0x28, 0x30),
-                scroll_thumb: Rgba::rgb(0x4a, 0x51, 0x5c),
-                frame_active: Rgba::rgb(0x4c, 0x8d, 0xff),
-                frame_inactive: Rgba::rgb(0x3a, 0x40, 0x49),
+                desktop: Rgba::rgb(0x0b, 0x0e, 0x10),
+                surface: Rgba::rgb(0x0f, 0x13, 0x16),
+                surface_raised: Rgba::rgb(0x15, 0x1b, 0x1f),
+                on_surface: Rgba::rgb(0xe8, 0xeb, 0xed),
+                on_surface_muted: Rgba::rgb(0x8e, 0x97, 0x9c),
+                accent: Rgba::rgb(0xd1, 0x55, 0x0f),
+                on_accent: ON_ACCENT,
+                border: Rgba::rgb(0x1c, 0x23, 0x27),
+                surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
+                rim: Rgba::rgb(0x23, 0x2b, 0x30),
+                rim_active: Rgba::rgb(0xff, 0x60, 0x00),
+                danger: Rgba::rgb(0xe4, 0x1d, 0x21),
+                cpu_pressure: Rgba::rgb(0xf7, 0x62, 0x02),
+                memory_pressure: Rgba::rgb(0x8b, 0x43, 0xd6),
+                disk_pressure: Rgba::rgb(0xf8, 0xa3, 0x30),
+                network_activity: Rgba::rgb(0x0b, 0x88, 0xd9),
+                power_pressure: Rgba::rgb(0xa8, 0xd8, 0x4f),
+                thermal_pressure: Rgba::rgb(0xff, 0x8a, 0x5c),
+                recovery: Rgba::rgb(0xe8, 0x48, 0x4c),
+                success: Rgba::rgb(0x6f, 0xb2, 0x3a),
+                warning: Rgba::rgb(0xe8, 0xb1, 0x3a),
+                denied: Rgba::rgb(0xb0, 0x3a, 0x3d),
+                scroll_track: Rgba::rgb(0x13, 0x1a, 0x1d),
+                scroll_thumb: Rgba::rgb(0x2f, 0x3a, 0x3f),
+                frame_active: Rgba::rgb(0xd1, 0x55, 0x0f),
+                frame_inactive: Rgba::rgb(0x23, 0x2b, 0x30),
             },
             common_metrics(),
             common_fonts(),
@@ -193,6 +199,12 @@ impl Theme {
     }
 
     /// The built-in **light** theme.
+    ///
+    /// The light board (`plans/desktop1-light.png`) keeps the dark variant's
+    /// alloy-orange accent family and semantic vocabulary and re-tunes it for
+    /// warm off-white surfaces: every signal hue is darkened until it carries
+    /// on paper-white, and the accent deepens to the burnt end of the family
+    /// so orange-on-white text and rims stay legible.
     #[must_use]
     pub fn light() -> Self {
         Self::new(
@@ -200,32 +212,32 @@ impl Theme {
             "TAIRiX Light",
             Appearance::Light,
             Palette {
-                desktop: Rgba::rgb(0xd9, 0xdd, 0xe3),
-                surface: Rgba::rgb(0xf7, 0xf8, 0xfa),
-                surface_raised: Rgba::rgb(0xea, 0xec, 0xf0),
-                on_surface: Rgba::rgb(0x1a, 0x1d, 0x22),
-                on_surface_muted: Rgba::rgb(0x5b, 0x61, 0x6b),
-                accent: Rgba::rgb(0x1f, 0x6f, 0xeb),
-                on_accent: Rgba::rgb(0xff, 0xff, 0xff),
-                border: Rgba::rgb(0xc4, 0xc9, 0xd1),
-                surface_pressed: Rgba::rgb(0xdf, 0xe2, 0xe8),
-                rim: Rgba::rgb(0xb9, 0xbf, 0xc9),
-                rim_active: Rgba::rgb(0x1f, 0x6f, 0xeb),
-                danger: Rgba::rgb(0xd8, 0x35, 0x35),
-                cpu_pressure: Rgba::rgb(0xc0, 0x7a, 0x00),
-                memory_pressure: Rgba::rgb(0x8b, 0x3f, 0xd0),
-                disk_pressure: Rgba::rgb(0x0f, 0x8f, 0x80),
-                network_activity: Rgba::rgb(0x14, 0x78, 0xd0),
-                power_pressure: Rgba::rgb(0x4f, 0x9e, 0x20),
-                thermal_pressure: Rgba::rgb(0xd8, 0x5a, 0x1c),
-                recovery: Rgba::rgb(0xc8, 0x3a, 0x86),
-                success: Rgba::rgb(0x1f, 0x9e, 0x52),
-                warning: Rgba::rgb(0xb8, 0x86, 0x0b),
-                denied: Rgba::rgb(0xb0, 0x30, 0x30),
-                scroll_track: Rgba::rgb(0xe2, 0xe5, 0xea),
-                scroll_thumb: Rgba::rgb(0xb0, 0xb6, 0xc0),
-                frame_active: Rgba::rgb(0x1f, 0x6f, 0xeb),
-                frame_inactive: Rgba::rgb(0xc4, 0xc9, 0xd1),
+                desktop: Rgba::rgb(0xe8, 0xe3, 0xdd),
+                surface: Rgba::rgb(0xfd, 0xfc, 0xfa),
+                surface_raised: Rgba::rgb(0xf4, 0xf0, 0xec),
+                on_surface: Rgba::rgb(0x1b, 0x1d, 0x20),
+                on_surface_muted: Rgba::rgb(0x6a, 0x6f, 0x75),
+                accent: Rgba::rgb(0xc8, 0x50, 0x0c),
+                on_accent: ON_ACCENT,
+                border: Rgba::rgb(0xdd, 0xd6, 0xce),
+                surface_pressed: Rgba::rgb(0xe9, 0xe4, 0xde),
+                rim: Rgba::rgb(0xcf, 0xc7, 0xbf),
+                rim_active: Rgba::rgb(0xd2, 0x54, 0x0b),
+                danger: Rgba::rgb(0xc4, 0x16, 0x1a),
+                cpu_pressure: Rgba::rgb(0xd8, 0x54, 0x0a),
+                memory_pressure: Rgba::rgb(0x74, 0x33, 0xbd),
+                disk_pressure: Rgba::rgb(0xc4, 0x7a, 0x12),
+                network_activity: Rgba::rgb(0x0b, 0x6f, 0xb0),
+                power_pressure: Rgba::rgb(0x64, 0x8f, 0x1e),
+                thermal_pressure: Rgba::rgb(0xc2, 0x50, 0x1a),
+                recovery: Rgba::rgb(0xc9, 0x33, 0x37),
+                success: Rgba::rgb(0x4b, 0x7d, 0x22),
+                warning: Rgba::rgb(0xa9, 0x74, 0x1a),
+                denied: Rgba::rgb(0x8f, 0x25, 0x28),
+                scroll_track: Rgba::rgb(0xec, 0xe7, 0xe1),
+                scroll_thumb: Rgba::rgb(0xbd, 0xb5, 0xac),
+                frame_active: Rgba::rgb(0xc8, 0x50, 0x0c),
+                frame_inactive: Rgba::rgb(0xdd, 0xd6, 0xce),
             },
             common_metrics(),
             common_fonts(),
@@ -236,6 +248,13 @@ impl Theme {
         )
     }
 }
+
+/// The foreground both built-in themes draw on an accent fill.
+///
+/// A primary action is one treatment in the design boards — a warm white
+/// label on the alloy-orange plate — and it reads identically on either
+/// appearance, so the two variants share the token instead of restating it.
+const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and

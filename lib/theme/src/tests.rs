@@ -40,7 +40,6 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.on_surface, l.on_surface);
     assert_ne!(d.on_surface_muted, l.on_surface_muted);
     assert_ne!(d.accent, l.accent);
-    assert_ne!(d.on_accent, l.on_accent);
     assert_ne!(d.border, l.border);
     // The Reactive Alloy control roles and semantic signals also differ per
     // appearance, so a theme switch retunes them consistently.
@@ -70,6 +69,40 @@ fn dark_and_light_palettes_differ_on_every_role() {
             "signal role {role:?} differs"
         );
     }
+}
+
+#[test]
+fn accent_labels_stay_legible_on_the_accent_fill() {
+    // A primary action is one treatment on both appearances - a warm white
+    // label on the alloy-orange plate - so `on_accent` is deliberately shared
+    // and the invariant worth asserting is legibility, not difference.
+    assert_eq!(
+        Theme::dark().palette().on_accent,
+        Theme::light().palette().on_accent
+    );
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert!(
+            luma(p.on_accent).abs_diff(luma(p.accent)) >= 96,
+            "{}: accent label contrast too low",
+            theme.name()
+        );
+        assert!(
+            luma(p.on_surface).abs_diff(luma(p.surface)) >= 96,
+            "{}: body text contrast too low",
+            theme.name()
+        );
+        assert!(
+            luma(p.on_surface_muted).abs_diff(luma(p.surface)) >= 48,
+            "{}: muted text contrast too low",
+            theme.name()
+        );
+    }
+}
+
+/// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
+fn luma(c: Rgba) -> u32 {
+    (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
 }
 
 #[test]
