@@ -205,7 +205,8 @@ pub struct DiscoveredVideo {
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use metal::{
-    attach_console, configure_from_fdt, text_cell_count, text_grid, write_bytes, write_output_bytes,
+    active_framebuffer_extent, attach_console, configure_from_fdt, text_cell_count, text_grid,
+    write_bytes, write_output_bytes,
 };
 
 /// Host stand-in for the freestanding writer: rendering needs the
@@ -232,6 +233,14 @@ pub fn text_grid() -> Option<tairix_abi::TerminalSize> {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 #[must_use]
 pub fn text_cell_count() -> Option<usize> {
+    None
+}
+
+/// Host stand-in for the freestanding `active_framebuffer_extent`: no surface
+/// is discovered on the host, so there is no scan-out extent to report.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
+pub fn active_framebuffer_extent() -> Option<(u64, u64)> {
     None
 }
 
@@ -588,6 +597,29 @@ mod metal {
         // same CPU). A shared borrow suffices; geometry is read, not mutated.
         let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
         Some(state.geometry.cell_count())
+    }
+
+    /// The physical extent `(base, len_bytes)` of the active scan-out
+    /// surface, or `None` when no video console was discovered (UART-only).
+    ///
+    /// The boot path identity-maps the surface (`virtual == physical`), so
+    /// `fb_base` is already the physical base; the length is the whole
+    /// `stride × height` pixel span in bytes. The pre-boot Supervisor's
+    /// `memtest` takeover reads it to keep the live surface out of the
+    /// destructive whole-RAM sweep, so the progress display survives — the
+    /// Pi's mailbox framebuffer sits in ordinary usable DRAM the sweep would
+    /// otherwise overwrite.
+    ///
+    /// Post-MMU only (the render lock's atomic CAS requires it), which the
+    /// takeover always is.
+    pub fn active_framebuffer_extent() -> Option<(u64, u64)> {
+        let _guard = RENDER_LOCK.lock();
+        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
+        // the single-threaded boot CPU (visible in program order on the same
+        // CPU). A shared borrow suffices; the surface facts are read only.
+        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
+        let len = (state.pixel_count as u64).saturating_mul(4);
+        Some((state.fb_base as u64, len))
     }
 
     /// Attach the borrowed cell grids to the discovered surface and activate

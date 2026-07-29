@@ -28,7 +28,7 @@ use tairix_arch_api::{ContextSwitch, CoreClock, CpuFeatures, PlatformEntropy, Se
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use tairix_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
-use tairix_kernel_mem::BootMemoryMap;
+use tairix_kernel_mem::{BootMemoryMap, PhysAddr};
 use tairix_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
@@ -200,8 +200,10 @@ pub trait KernelArch: SchedulerArch {
     /// The port's **machine-takeover** handle, when it can hand the whole
     /// machine over to the pre-boot Supervisor's one-way destructive
     /// whole-RAM test (`plans/NEW-SUPERVISOR.md` §9): stop every other CPU,
-    /// mask interrupts, stop the lockup watchdog, and flatten paging so a
-    /// small self-contained test routine can address physical RAM.
+    /// mask interrupts, stop the lockup watchdog, and run the sweep over
+    /// physical RAM through the port's own direct/identity map (how a port
+    /// reaches RAM directly is per-silicon — it is not required to drop the
+    /// MMU).
     ///
     /// Because a takeover is irreversible (its only exits are reset /
     /// power-off), the Supervisor's `memtest` command reads this handle
@@ -234,6 +236,28 @@ pub trait KernelArch: SchedulerArch {
         &self,
         _grant: &crate::supervisor_system::TakeoverGrant,
     ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
+        None
+    }
+
+    /// The physical extent `(base, len_bytes)` of the **active console
+    /// framebuffer** scan-out surface, or [`None`] when this port has no
+    /// framebuffer console up (a serial-only boot, or a surface that is not
+    /// in swept RAM).
+    ///
+    /// The one-way `memtest` takeover (`plans/NEW-SUPERVISOR.md` §9) uses it
+    /// to keep the live scan-out surface **out** of the destructive whole-RAM
+    /// sweep, so the progress display survives the run: a firmware/mailbox
+    /// framebuffer sits in ordinary usable DRAM (the Raspberry Pi 4), and
+    /// sweeping it would scribble over the very pixels the test is drawing
+    /// through. A port whose framebuffer lives in reserved memory or MMIO
+    /// (a kernel-`.bss` ramfb surface, a VESA/GOP aperture) may return
+    /// [`None`]: excluding a range the sweep never reaches anyway is
+    /// harmless, so the accessor need only report a surface that *is* in
+    /// sweepable RAM.
+    ///
+    /// The default is [`None`] — a port with no framebuffer console, or none
+    /// in swept RAM, excludes nothing.
+    fn console_framebuffer(&self) -> Option<(PhysAddr, u64)> {
         None
     }
 

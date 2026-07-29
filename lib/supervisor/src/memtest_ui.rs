@@ -1,9 +1,9 @@
 //! The fullscreen, memtest86-style display for the Supervisor's one-way
 //! whole-RAM `memtest` takeover test (`plans/NEW-SUPERVISOR.md` §9, Stage D).
 //!
-//! Once the takeover has stopped every other CPU and flattened paging, the
-//! test owns the machine and the console outright, so this is the natural
-//! home for a full-screen progress display. It is built **entirely** on the
+//! Once the takeover has stopped every other CPU, the test owns the machine
+//! and the console outright, so this is the natural home for a full-screen
+//! progress display. It is built **entirely** on the
 //! shared [`Screen`] presenter (`lib/supervisor::screen`), which is itself a
 //! thin layer over the `lib/vt` `Op`/`emit` vocabulary — this module never
 //! hand-rolls a second copy of the terminal encoding (the charter forbids the
@@ -46,6 +46,10 @@ const MIB: u64 = 1024 * 1024;
 const TITLE_ROW: u16 = 1;
 /// Row of the one-line explanation of what the test is doing.
 const INTRO_ROW: u16 = 2;
+/// Row carrying the takeover diagnostics (reserved framebuffer extent and the
+/// number of memory regions the sweep walks) — shown so a metal run can see
+/// exactly what the sweep kept out and how the map was seen.
+const DIAG_ROW: u16 = 3;
 /// Row carrying the elapsed run time.
 const ELAPSED_ROW: u16 = 4;
 /// Row carrying the completed-test-loop count.
@@ -58,6 +62,8 @@ const PATTERN_ROW: u16 = 7;
 const TESTED_ROW: u16 = 8;
 /// Row carrying the progress bar and percentage.
 const BAR_ROW: u16 = 9;
+/// Row carrying the physical address of the frame currently under test.
+const CURRENT_ROW: u16 = 10;
 /// Row carrying the running error-count header.
 const ERRORS_ROW: u16 = 11;
 /// First row of the scrolling fault log, just beneath the error header.
@@ -191,33 +197,95 @@ impl<'a> MemtestUi<'a> {
     pub fn begin(&mut self) {
         if self.screen.is_plain() {
             self.screen
-                .write_str("memtest: testing all of RAM continuously; reset the machine to stop.");
+                .write_str("memtest: testing RAM continuously; reset the machine to stop.");
             self.screen.newline();
             return;
         }
         self.screen.enter_fullscreen();
         self.screen.move_to(TITLE_ROW, 1);
         self.screen.set_style(&TITLE_STYLE);
-        self.screen
-            .write_str(" TAIRiX memtest \u{2014} whole-RAM test ");
+        self.screen.write_str(" TAIRiX memtest \u{2014} RAM test ");
         self.screen.reset_style();
         self.screen.move_to(INTRO_ROW, LABEL_COL);
         self.screen
-            .write_str("Testing all of RAM continuously. Reset the machine to stop.");
+            .write_str("Testing RAM continuously. Reset the machine to stop.");
         self.label(ELAPSED_ROW, "elapsed:");
         self.label(LOOPS_ROW, "loops completed:");
-        self.label(TOTAL_ROW, "RAM under test:");
+        self.label(TOTAL_ROW, "free RAM under test:");
         self.label(PATTERN_ROW, "pattern:");
         self.label(TESTED_ROW, "tested:");
+        self.label(CURRENT_ROW, "current:");
         self.redraw_loops();
         self.redraw_errors();
+    }
+
+    /// Draw the takeover diagnostics: the reserved framebuffer extent the
+    /// sweep kept out of the destructive pass, the number of free-memory runs
+    /// it walks, and how many ranges it excluded from the sweep.
+    ///
+    /// `fb` is `(phys_base, len_bytes)` of the excluded scan-out surface, or
+    /// `None` when none was excluded (a serial-only boot, or a framebuffer
+    /// not in swept RAM). `regions` is the number of currently-free physical
+    /// runs the sweep tests. `excluded` is the number of ranges the sweep kept
+    /// out explicitly — the firmware framebuffer, the one in-use range the
+    /// allocator cannot know about; every other in-use frame (the kernel heap,
+    /// DMA buffers, driver and userland memory) is already absent from the
+    /// free set. Drawn once after [`set_total`](Self::set_total); in plain
+    /// mode it prints one concise line.
+    pub fn set_environment(&mut self, fb: Option<(u64, u64)>, regions: u64, excluded: u64) {
+        if self.screen.is_plain() {
+            self.screen.write_str("memtest: reserved fb ");
+            self.write_fb(fb);
+            self.screen.write_str(", ");
+            self.screen.write_u64(regions);
+            self.screen.write_str(" regions, ");
+            self.screen.write_u64(excluded);
+            self.screen.write_str(" excluded");
+            self.screen.newline();
+            return;
+        }
+        self.screen.move_to(DIAG_ROW, LABEL_COL);
+        self.screen.write_str("reserved fb ");
+        self.write_fb(fb);
+        self.screen.write_str("   regions: ");
+        self.screen.write_u64(regions);
+        self.screen.write_str("   excluded: ");
+        self.screen.write_u64(excluded);
+        self.screen.clear_line_tail();
+    }
+
+    /// Record the physical base of the frame now under test and redraw the
+    /// live "current address" line, so the value on screen names the frame
+    /// the sweep is on right now (the last one shown pins a stall). A no-op in
+    /// plain mode: the periodic plain progress ladder already paces the
+    /// output, and a line per window would flood a serial log.
+    pub fn set_current(&mut self, phys: u64) {
+        if self.screen.is_plain() {
+            return;
+        }
+        self.screen.move_to(CURRENT_ROW, VALUE_COL);
+        self.screen.write_hex(phys);
+        self.screen.clear_line_tail();
+    }
+
+    /// Write an excluded-framebuffer extent as `0x<base>+<n> MiB`, or `none`.
+    fn write_fb(&mut self, fb: Option<(u64, u64)>) {
+        match fb {
+            Some((base, len)) => {
+                self.screen.write_hex(base);
+                self.screen.write_str("+");
+                self.screen.write_u64(mib(len));
+                self.screen.write_str(" MiB");
+            }
+            None => self.screen.write_str("none"),
+        }
     }
 
     /// Record the total bytes under test and draw the total-RAM figure once.
     pub fn set_total(&mut self, total: u64) {
         self.total = total;
         if self.screen.is_plain() {
-            self.screen.write_str("memtest: RAM under test: ");
+            self.screen.write_str("memtest: free RAM under test: ");
             self.screen.write_u64(mib(total));
             self.screen.write_str(" MiB");
             self.screen.newline();
@@ -495,7 +563,7 @@ mod tests {
             ui.loop_complete(12);
         }
         assert!(!has_escape(out.bytes()));
-        assert!(out.contains("testing all of RAM continuously"));
+        assert!(out.contains("testing RAM continuously"));
         assert!(out.contains("50%"));
         assert!(out.contains("moving inversions"));
         assert!(out.contains("memtest: completed test loop 1"));
@@ -636,5 +704,46 @@ mod tests {
             ui.progress(100, 100, 0);
         }
         assert!(out.contains("100%"));
+    }
+
+    #[test]
+    fn rich_environment_shows_the_reserved_fb_extent_and_region_count() {
+        let mut out = VecReport::default();
+        {
+            let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
+            let mut ui = MemtestUi::new(screen);
+            ui.begin();
+            ui.set_environment(Some((0x3b40_0000, 8 * MIB)), 5, 3);
+            ui.set_current(0x1234_0000);
+        }
+        assert!(out.contains("reserved fb"));
+        assert!(out.contains("0x3b400000"));
+        assert!(out.contains("8 MiB"));
+        assert!(out.contains("regions: 5"));
+        // The framebuffer plus the grown kernel-heap regions kept out.
+        assert!(out.contains("excluded: 3"));
+        // The live current-address line shows the frame under test.
+        assert!(out.contains("current:"));
+        assert!(out.contains("0x12340000"));
+    }
+
+    #[test]
+    fn plain_environment_is_a_secret_free_line_and_set_current_is_silent() {
+        let mut out = VecReport::default();
+        {
+            let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
+            let mut ui = MemtestUi::new(screen);
+            ui.set_environment(None, 3, 2);
+            // No framebuffer was excluded; plain mode names it and stays
+            // escape-free, and `set_current` prints nothing (no per-window
+            // flood on a serial log).
+            ui.set_current(0xdead_0000);
+        }
+        assert!(!has_escape(out.bytes()));
+        assert!(out.contains("reserved fb none"));
+        assert!(out.contains("3 regions"));
+        assert!(out.contains("2 excluded"));
+        assert!(!out.contains("dead"));
+        assert_eq!(lines(out.bytes()), 1);
     }
 }

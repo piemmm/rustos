@@ -137,14 +137,18 @@ full-screen consumer — see *Machine takeover* below.
 
 Any RAM test that runs inside the live kernel can test only the RAM the kernel
 does not hold — it cannot exercise the memory the kernel image, heap, page
-tables, or stacks occupy without destroying the running system. So there is no
-"safe" partial test: the single `memtest` command tests *all* of RAM by a
+tables, or stacks occupy, nor any frame handed out to a driver or a device,
+without destroying the running system. So the single `memtest` command tests
+all **free** RAM (the frame allocator is the authority on what is free) by a
 one-way takeover — the machine is handed to the test and only a reset follows.
+Every in-use frame is excluded by construction; free RAM is the honest
+maximum-safe coverage, exactly as a running memtest86 cannot test its own
+resident working set.
 
 The arch-neutral core of that takeover is `tairix_kernel_mem::ramtest`'s
 `sweep_pattern`. Where the boot sanity check (`run`) samples one word per page
 and restores every cell it touches, `sweep_pattern` tests **every** word of
-every reachable usable region with one thorough pattern and, because the
+every reachable free run with one thorough pattern and, because the
 machine never resumes, does **not** restore them. A full test *loop* runs the
 whole `RamTestPattern` set — own-address, moving inversions (zeros/ones and the
 checkerboard), and walking ones/zeros — and the takeover repeats that loop
@@ -211,10 +215,11 @@ The response is to audit loudly and fail closed, never to weaken a defence:
 
 ## Machine takeover (continuous whole-RAM test)
 
-A memory test that runs inside the live kernel can only test RAM it explicitly
-owns; it can never test the frames the kernel image, heap, page tables, or
-stacks occupy. Testing *all* of RAM requires owning the whole machine —
-stopping every other CPU, masking interrupts, and stopping the lockup watchdog,
+A memory test that runs inside the live kernel can only safely test RAM that is
+not in use; it can never test the frames the kernel image, heap, page tables,
+stacks, drivers, or devices hold. Testing all **free** RAM still requires owning
+the whole machine — stopping every other CPU (so no peer allocates a frame the
+sweep decided was free), masking interrupts, and stopping the lockup watchdog,
 then sweeping physical RAM through the kernel's identity map — which is a
 one-way trip whose only exits are reset or power-off.
 
@@ -231,11 +236,29 @@ operation, `take_over(&self, sweep: &mut dyn FnMut())`, entered only once this
 CPU is the sole one running; it owns the rest of the irreversible sequence and
 never returns on success: mask interrupts, stop the watchdog,
 **switch onto a reserved stack the sweep cannot overwrite**, and run the
-caller's `sweep` (the arch-neutral test of every usable frame — every pattern
-over all of RAM, looping forever until the operator resets the board). The one
-region the sweep cannot test is the memory it runs from — the kernel image and
-that reserved stack — which a continuous run must keep intact to keep running,
-exactly as a running memtest86 cannot test its own resident code. The takeover
+caller's `sweep` (the arch-neutral test of every **free** frame — every pattern
+over all free RAM, looping forever until the operator resets the board). Before
+it hands off, the arch-neutral caller copies the frame allocator's
+currently-free runs (`FrameAllocator::for_each_free_region` via
+`ram_snapshot_free_regions`) into a **reserved-memory snapshot** on that stack,
+excluding the live console framebuffer (`KernelArch::console_framebuffer`). The
+frame allocator is the **single authority** on what is safe to overwrite: it
+already marks *every* in-use frame used, so testing only free RAM excludes the
+whole class of in-use memory by construction — the kernel image, reserved stack,
+and identity page tables (reserved); the kernel heap (the takeover's own console
+cell grids, audit ring, and everything allocated past the bootstrap arena); a
+DMA buffer a device may still map non-cacheably; and all driver and userland
+memory. Writing any such in-use frame races its owner and can wedge the machine
+— exactly what froze a real Raspberry Pi 4, where earlier designs snapshotted
+the boot map's "usable" regions and tried to exclude the tester's working set
+piece by piece (framebuffer, then grown heap) yet kept missing a live,
+non-cacheable DMA buffer at a fixed physical address (QEMU never exercises that
+live-DMA layout, so CI stayed green). The framebuffer is the one in-use range
+the allocator may not know about (firmware carves it from usable DRAM), so it is
+excluded explicitly to keep the progress display alive. Free RAM plus the memory
+the test runs from is exactly what a running memtest86 tests and cannot test —
+its own resident working set is the only RAM a continuous run leaves out.
+The takeover
 never resets the machine itself, so it needs **no** reset conduit and is
 available on every bare-metal port (a spin-table Pi 4 with no `/psci` node
 included). A two-step "prepare, then let the caller sweep on its own stack"
@@ -273,8 +296,8 @@ constructor is private to `supervisor_system`, the module that drives
 caller can mint the grant, so none can obtain the `MachineTakeover` handle or
 invoke its `unsafe` step: the accessor is the single gate and the grant is
 its only key. Once `take_over` succeeds, the arch-neutral `sweep_pattern`
-loop runs over the direct physical map — cycling every pattern over all of RAM,
-over and over — rendering to the memtest86-style full-screen UI, until the
+loop runs over the direct physical map — cycling every pattern over all free
+RAM, over and over — rendering to the memtest86-style full-screen UI, until the
 machine is reset; it never returns.
 
 ### The full-screen progress display
@@ -282,12 +305,18 @@ machine is reset; it never returns.
 Once the test owns the machine it owns the console outright, so the sweep is
 presented through `lib/supervisor::memtest_ui::MemtestUi`, built entirely on the
 `Screen` presenter above — there is no second escape-emitting path. It renders
-*only* from the values the engine hands it: a reverse-video title banner, the
-elapsed run time (`HH:MM:SS`), the count of completed test loops, the RAM under
-test, the current pattern, the tested-so-far figure, a green progress bar and a
-live percentage, and — beneath the bar — a scrolling log of any RAM faults with
-a running error count (each faulting physical address, expected and observed
-word; no secret was ever in this pre-unlock RAM). The rich figures are
+*only* from the values the engine hands it: a reverse-video title banner, a
+diagnostics line naming the reserved (excluded) framebuffer extent, the
+number of free-memory runs the sweep walks, and the number of ranges it excluded
+explicitly (the framebuffer — the one in-use range the allocator cannot know
+about), the elapsed run time (`HH:MM:SS`),
+the count of completed test loops, the free RAM under test, the current pattern, the
+tested-so-far figure, a green progress bar and a live percentage, the physical
+address of the frame currently under test (so the last value on screen pins
+where the sweep was if a bad cell or a wedged access ever stalls it), and —
+beneath the bar — a scrolling log of any RAM faults with a running error count
+(each faulting physical address, expected and observed word; no secret was ever
+in this pre-unlock RAM). The rich figures are
 absolute-positioned and redrawn in place as they advance. On a genuinely dumb
 serial line the same information
 degrades to concise, deduplicated plain-text lines (one injected `plain` flag,

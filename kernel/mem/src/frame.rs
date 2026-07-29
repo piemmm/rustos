@@ -988,6 +988,75 @@ impl FrameAllocator {
     pub fn reserve_frames(&self) -> FrameCount {
         self.inner.lock().reserve_frames
     }
+
+    /// Invoke `f(base, len)` once for every maximal run of currently-**free**
+    /// physical frames, in ascending address order — `base` is the run's
+    /// physical start address and `len` its byte length.
+    ///
+    /// This is the single authority on which physical RAM is safe to
+    /// overwrite. A frame is reported only when the allocator has neither
+    /// handed it out nor reserved it: every in-use frame (the kernel image
+    /// and page tables, the heap, DMA buffers, driver and userland memory),
+    /// every reserved region, and every physical-address hole is *excluded*,
+    /// because the bitmap marks all of them used.
+    ///
+    /// The one caller is the pre-boot Supervisor's whole-RAM `memtest`
+    /// takeover, which must test only free RAM: writing an in-use frame — a
+    /// DMA buffer a device still maps non-cacheably, say — races its owner
+    /// and can wedge the machine. Sweeping the free set is the honest
+    /// maximum-safe coverage, exactly as a running memtest86 cannot test its
+    /// own resident working set.
+    ///
+    /// `f` runs under the allocator lock, so it must not re-enter the
+    /// allocator; it is expected only to copy each `(base, len)` into a
+    /// caller-owned buffer.
+    pub fn for_each_free_region(&self, mut f: impl FnMut(PhysAddr, u64)) {
+        let state = self.inner.lock();
+        let base = state.base_frame;
+        let span = state.span;
+        // Absolute start frame of the free run currently being accumulated.
+        let mut run_start: Option<usize> = None;
+        let mut rel = 0usize;
+        while rel < span {
+            let word = state.bitmap[rel / 64];
+            let end_rel = (rel + 64).min(span);
+            if word == 0 {
+                // Whole word free: extend (or open) the current run and skip
+                // the rest of the word in one step.
+                if run_start.is_none() {
+                    run_start = Some(base + rel);
+                }
+            } else if word == u64::MAX {
+                // Whole word used: close any open run at the word boundary.
+                if let Some(s) = run_start.take() {
+                    emit_free_run(&mut f, s, base + rel);
+                }
+            } else {
+                // Mixed word: decide each frame individually.
+                for r in rel..end_rel {
+                    if (word >> (r % 64)) & 1 == 1 {
+                        if let Some(s) = run_start.take() {
+                            emit_free_run(&mut f, s, base + r);
+                        }
+                    } else if run_start.is_none() {
+                        run_start = Some(base + r);
+                    }
+                }
+            }
+            rel = end_rel;
+        }
+        if let Some(s) = run_start {
+            emit_free_run(&mut f, s, base + span);
+        }
+    }
+}
+
+/// Report the free frame run `[start_frame, end_frame)` to `f` as a physical
+/// `(base, byte_len)` pair.
+fn emit_free_run<F: FnMut(PhysAddr, u64)>(f: &mut F, start_frame: usize, end_frame: usize) {
+    let base = PhysAddr::new((start_frame as u64) << PAGE_SHIFT);
+    let len = ((end_frame - start_frame) as u64) << PAGE_SHIFT;
+    f(base, len);
 }
 
 // SAFETY: All shared mutable state lives behind the internal `SpinLock`,
@@ -1072,6 +1141,32 @@ mod tests {
         assert!(a.free_frames() < 8);
         a.free(f).unwrap();
         assert_eq!(a.free_frames(), 8);
+    }
+
+    #[test]
+    fn for_each_free_region_reports_only_currently_free_frames() {
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        let base = (16 * PAGE_SIZE) as u64;
+        let p = PAGE_SIZE as u64;
+
+        // Every frame free: one contiguous run over the whole region.
+        let mut runs = Vec::new();
+        a.for_each_free_region(|b, l| runs.push((b.as_u64(), l)));
+        assert_eq!(runs, std::vec![(base, 8 * p)]);
+
+        // Hand out every frame, then return two non-adjacent ones (by address)
+        // so the free set is two isolated single-frame runs and everything
+        // handed out is excluded.
+        let f: Vec<_> = (0..8).map(|_| a.alloc().unwrap()).collect();
+        for &k in &[1u64, 5] {
+            let target = base + k * p;
+            let fr = *f.iter().find(|fr| fr.start().as_u64() == target).unwrap();
+            a.free(fr).unwrap();
+        }
+        runs.clear();
+        a.for_each_free_region(|b, l| runs.push((b.as_u64(), l)));
+        assert_eq!(runs, std::vec![(base + p, p), (base + 5 * p, p)]);
     }
 
     #[test]

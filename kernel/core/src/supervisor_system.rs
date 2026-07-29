@@ -19,8 +19,8 @@
 use tairix_abi::ABI_VERSION_CURRENT;
 use tairix_arch_api::TakeoverError;
 use tairix_kernel_mem::{
-    ram_sweep_pattern, ram_takeover_test_bytes, BootMemoryMap, RamFault, RamTestPattern,
-    RegionKind, SweepObserver, PAGE_SIZE,
+    ram_snapshot_free_regions, ram_sweep_pattern, ram_takeover_test_bytes, BootMemoryMap,
+    MemoryRegion, PhysAddr, RamFault, RamTestPattern, RegionKind, SweepObserver, PAGE_SIZE,
 };
 use tairix_supervisor::{Geometry, MemtestUi, Report, Screen};
 use tairix_sync::once::OnceCell;
@@ -33,6 +33,19 @@ use crate::wallclock::WallClockSource;
 
 /// One binary mebibyte, the unit RAM figures are shown in.
 const MIB: u64 = 1024 * 1024;
+
+/// Capacity of the reserved-memory region snapshot the takeover sweep walks.
+///
+/// The sweep tests only the frame allocator's currently-free runs, copied into
+/// a fixed-size array on the reserved takeover stack first (see
+/// [`ram_snapshot_free_regions`]) so the sweep never reads a heap-backed
+/// structure it is about to overwrite. A freshly-booted machine's free memory
+/// is a handful of large runs and the framebuffer carve adds at most one
+/// split, so this is generously above any real count; a free set too
+/// fragmented to fit is refused fail-closed *before* the machine is quiesced.
+/// At 24 bytes per [`MemoryRegion`] the array is ~6 KiB — negligible on the
+/// reserved 64 KiB takeover stack.
+const MAX_TAKEOVER_REGIONS: usize = 256;
 
 /// A supervisor-only authorization witness for reading the machine-takeover
 /// handle ([`KernelArch::machine_takeover`]).
@@ -184,22 +197,31 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
     ///
     /// On a port that wired the takeover slice, once quiesce succeeds
     /// [`take_over`](tairix_arch_api::MachineTakeover::take_over) **never
-    /// returns**: it masks interrupts, stops the watchdog, flattens paging,
-    /// runs the `sweep` below on a reserved stack, then tests the
-    /// region the sweep ran from and resets. This method **returns** only when
-    /// the takeover did not proceed — no mechanism is wired, no physical map, a
-    /// peer CPU would not quiesce, or the preparation failed — having left the
+    /// returns**: it masks interrupts, stops the watchdog, switches onto a
+    /// reserved stack, and runs the `sweep` below (how it reaches physical RAM
+    /// directly is per-silicon — riscv64 bare mode, x86_64 a reserved
+    /// identity table, aarch64 its live identity map). This method **returns**
+    /// only when the takeover did not proceed — no mechanism is wired, no
+    /// physical map, a peer CPU would not quiesce, the free set is too
+    /// fragmented to snapshot, or the preparation failed — having left the
     /// machine unchanged, so the caller renders the reason and the REPL stays
     /// (fail closed, never a panic).
     ///
     /// The `sweep` renders the memtest86-style fullscreen display
-    /// ([`MemtestUi`]) and tests every usable frame through the safe,
-    /// range-checked [`ram_sweep_pattern`] engine over the [`BootMemoryMap`],
-    /// never raw pointer arithmetic. It **loops forever**, cycling every
-    /// [`RamTestPattern`] over all of RAM and updating the display's elapsed
-    /// timer, completed-loop count, and scrolling fault log until the machine
-    /// is reset; there is no abort seam, because the machine only leaves the
-    /// test by a reset.
+    /// ([`MemtestUi`]) and tests RAM through the safe, range-checked
+    /// [`ram_sweep_pattern`] engine, never raw pointer arithmetic. It first
+    /// copies the frame allocator's currently-**free** runs into a
+    /// **reserved-memory snapshot** on the takeover stack (carving out the live
+    /// console framebuffer), so it depends on none of the RAM it is about to
+    /// overwrite: every in-use frame — the heap the takeover renders through, a
+    /// DMA buffer a device may still map non-cacheably, all driver and userland
+    /// memory — is marked used by the allocator and never enters the snapshot,
+    /// and the scan-out surface it displays through is carved out. It then
+    /// **loops forever**, cycling every [`RamTestPattern`]
+    /// over that snapshot and updating the display's elapsed timer,
+    /// completed-loop count, current physical address, and scrolling fault log
+    /// until the machine is reset; there is no abort seam, because the machine
+    /// only leaves the test by a reset.
     fn drive_takeover(&self, out: &mut dyn Report) {
         // Minting the supervisor-only witness here is the sole authorization
         // for reading the takeover handle: the accessor cannot be called
@@ -214,6 +236,34 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
             out.line("memtest: no direct physical map; RAM cannot be addressed.");
             return;
         };
+        // The single authority on which RAM is safe to overwrite: the frame
+        // allocator's currently-free runs. Every in-use frame — the kernel
+        // image and page tables, the heap (this takeover's own console and
+        // audit ring included), DMA buffers a device may still map
+        // non-cacheably, and all driver and userland memory — is marked used
+        // and is never swept. Writing such an in-use frame races its owner and
+        // can wedge the machine; that is exactly what froze a real Raspberry
+        // Pi 4, where the old boot-map sweep reached a live DMA buffer.
+        let frames = self.state.frame_allocator;
+        // The active console framebuffer is the one exclusion the *allocator*
+        // may not know about: firmware carves it out of usable DRAM the
+        // allocator can still consider free, so keep it out explicitly to
+        // protect the live progress display. `None` on a serial-only boot.
+        let framebuffer = self.state.arch.console_framebuffer();
+        let exclude_count = usize::from(framebuffer.is_some());
+        // The sweep walks a reserved-memory copy of those free runs, not any
+        // heap-backed structure it is about to overwrite. Refuse fail-closed
+        // *before* quiescing if the free set is so fragmented that, even after
+        // the framebuffer carve splits at most one run, it could not fit the
+        // reserved snapshot — leaving the machine running rather than
+        // half-torn-down. (A fresh Supervisor has a handful of free runs, so
+        // this never trips in practice.)
+        let mut free_runs = 0usize;
+        frames.for_each_free_region(|_, _| free_runs += 1);
+        if free_runs.saturating_add(exclude_count) > MAX_TAKEOVER_REGIONS {
+            out.line("memtest: memory too fragmented to snapshot; the machine is unchanged.");
+            return;
+        }
         // Stop every other CPU *before* the irreversible tear-down. This is the
         // last step that may fail closed: if a peer will not halt within the
         // bounded handshake the machine is left running and recoverable and the
@@ -227,7 +277,6 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
             render_takeover_refusal(out, TakeoverError::CpuQuiesceTimeout { cpu });
             return;
         }
-        let memory_map = self.memory_map;
         // Scope the sweep closure so its unique borrow of `out` ends before the
         // refusal path below reuses `out`. On a supported port `take_over`
         // never returns, so the refusal path is only reached when nothing was
@@ -239,7 +288,38 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
                 // clamps every position to the assumed 80x24 geometry (the
                 // one-way console cannot be queried for size).
                 let screen = Screen::new(out, Geometry::DEFAULT, false);
-                let total = ram_takeover_test_bytes(memory_map);
+                // The one exclusion the free-run set cannot supply on its own:
+                // a firmware-carved framebuffer sitting in usable DRAM the
+                // allocator may still consider free. Keeping it out protects
+                // the live progress display. Everything else the sweep must
+                // avoid — every in-use frame — the allocator already excludes.
+                let mut excludes = [(PhysAddr::new(0), 0u64); 1];
+                let mut ex_n = 0usize;
+                if let Some((base, len)) = framebuffer {
+                    excludes[ex_n] = (base, len);
+                    ex_n += 1;
+                }
+                // Copy the allocator's currently-free runs into a snapshot on
+                // the reserved takeover stack, carving out the framebuffer,
+                // *before* any write. From here the sweep reads only this
+                // snapshot and never a heap-backed structure, an in-use frame,
+                // or the scan-out surface it is about to destroy — the
+                // dependencies that otherwise wedge the run the instant the
+                // sweep reaches the frames holding them. A too-fragmented set
+                // was refused before the quiesce; the snapshot only ever
+                // truncates surplus *free* runs, and a `None` (a programming
+                // error — more excludes than the cap) degrades to an empty
+                // sweep rather than panicking.
+                let mut snapshot = [MemoryRegion {
+                    start: PhysAddr::new(0),
+                    length: 0,
+                    kind: RegionKind::Usable,
+                }; MAX_TAKEOVER_REGIONS];
+                let region_count =
+                    ram_snapshot_free_regions(frames, &excludes[..ex_n], &mut snapshot)
+                        .unwrap_or(0);
+                let regions = &snapshot[..region_count];
+                let total = ram_takeover_test_bytes(regions);
                 let mut observer = TakeoverObserver {
                     ui: MemtestUi::new(screen),
                     arch,
@@ -248,16 +328,25 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
                 };
                 observer.ui.begin();
                 observer.ui.set_total(total);
-                // Test all of RAM continuously: cycle every pattern over every
-                // usable frame, over and over, until the operator resets the
-                // machine. Each completed cycle bumps the loop counter; a bad
-                // cell is logged and the sweep keeps going (it never stops on
-                // a fault). This never returns — the machine only leaves the
+                // Surface the reserved framebuffer extent, the number of free
+                // runs the sweep walks, and how many ranges were kept out (the
+                // framebuffer) as on-screen diagnostics, so a metal run shows
+                // exactly what the sweep excluded and how free RAM was seen.
+                observer.ui.set_environment(
+                    framebuffer.map(|(base, len)| (base.as_u64(), len)),
+                    region_count as u64,
+                    ex_n as u64,
+                );
+                // Test all free RAM continuously: cycle every pattern over
+                // every swept frame, over and over, until the operator resets
+                // the machine. Each completed cycle bumps the loop counter; a
+                // bad cell is logged and the sweep keeps going (it never stops
+                // on a fault). This never returns — the machine only leaves the
                 // test by a reset.
                 loop {
                     for &pattern in RamTestPattern::ALL {
                         observer.ui.set_pattern(pattern.name());
-                        ram_sweep_pattern(memory_map, physmap, pattern, total, &mut observer);
+                        ram_sweep_pattern(regions, physmap, pattern, total, &mut observer);
                     }
                     let elapsed = observer.elapsed_secs();
                     observer.ui.loop_complete(elapsed);
@@ -265,14 +354,18 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
             };
             // SAFETY: reached only from the confirmed, audited `memtest`
             // path holding the supervisor `TakeoverGrant`; the operator has
-            // decided to tear the machine down, so quiescing every CPU,
-            // flattening paging, and overwriting all of RAM are the intended,
-            // deliberate actions. On success `take_over` never returns — it
-            // runs `sweep` on a reserved stack after flattening paging. The
-            // `sweep` closure's code lives in the reserved kernel image and it
-            // reads/writes-through only `'static` reserved state (the boot
-            // memory map, the direct physical map, the console), satisfying the
-            // reserved-memory contract `take_over` requires.
+            // decided to tear the machine down, so quiescing every CPU and
+            // overwriting all of RAM are the intended, deliberate actions. On
+            // success `take_over` never returns — it runs `sweep` on a
+            // reserved stack. The `sweep` closure's code lives in the reserved
+            // kernel image, and it first copies the frame allocator's *free*
+            // runs into reserved-stack memory and excludes the live
+            // framebuffer, so it reads and writes-through only memory the sweep
+            // never destroys — that reserved snapshot, the direct physical map,
+            // the framebuffer it displays through, and every in-use frame the
+            // allocator kept out (the kernel heap it renders and keeps time
+            // through included) — satisfying the reserved-memory contract
+            // `take_over` requires.
             unsafe { handle.take_over(&mut sweep) }
         };
         // `take_over` returned, so the takeover did not proceed and the machine
@@ -286,11 +379,13 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
 /// It owns the [`MemtestUi`] and turns each engine callback into a display
 /// update: [`progress`](SweepObserver::progress) redraws the bar and the
 /// elapsed clock, [`fault`](SweepObserver::fault) appends to the scrolling
-/// error log. The elapsed time is read from the port's monotonic clock
+/// error log, and [`window`](SweepObserver::window) records the physical
+/// address of the frame currently under test (shown live, so a metal run
+/// pins where the sweep was if a bad cell or a wedged access ever stalls it).
+/// The elapsed time is read from the port's monotonic clock
 /// ([`KernelArch::monotonic_ns`]) — a bare counter read (`CNTPCT_EL0` /
-/// `RDTSC` / the `time` CSR) that stays valid after the takeover flattens
-/// paging, so the timer keeps advancing while the machine is owned by the
-/// test.
+/// `RDTSC` / the `time` CSR) that needs no memory, so the timer keeps
+/// advancing while the machine is owned by the test.
 ///
 /// Generic over the concrete arch (`KernelArch` carries an associated
 /// context-switch type, so it is not a `dyn` trait); the takeover only ever
@@ -319,6 +414,13 @@ impl<A: KernelArch> TakeoverObserver<'_, A> {
 }
 
 impl<A: KernelArch> SweepObserver for TakeoverObserver<'_, A> {
+    fn window(&mut self, phys: u64) {
+        // Drawn *before* the window is tested, so the address on screen names
+        // the frame the sweep is on right now — if a bad cell or a wedged
+        // access ever stalls the run, the last value shown pins it.
+        self.ui.set_current(phys);
+    }
+
     fn progress(&mut self, tested: u64, total: u64) {
         let elapsed = self.elapsed_secs();
         self.ui.progress(tested, total, elapsed);

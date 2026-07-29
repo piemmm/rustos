@@ -665,9 +665,36 @@ engine's `on_progress(tested, total)` callback and the final `SweepObserver`
 kernel type); its arithmetic is purely presentational and nothing panics on any
 input. The kernel-side `sweep` closure the port runs (built in
 `kernel/core::supervisor_system::drive_takeover`) builds the `Screen`/`MemtestUi`
-over the takeover console and feeds `ui.progress`/`ui.record_fault`/
-`ui.loop_complete` from the continuous sweep, which never returns (the operator
-resets the machine to end the run). Three both-mode `Screen`
+over the takeover console and, **before any write**, copies the frame
+allocator's currently-**free** runs
+(`tairix_kernel_mem::FrameAllocator::for_each_free_region` via
+`ram_snapshot_free_regions`) into a reserved-memory snapshot on the takeover
+stack — carving out the live console framebuffer
+(`KernelArch::console_framebuffer`) — so it depends on no RAM it is about to
+overwrite. This is the memtest86 model applied honestly, with the frame
+allocator as the **single authority** on what is safe to write: a tester cannot
+test its own resident working set, and here the allocator already marks *every*
+in-use frame used — the kernel image, takeover stack, and identity page tables
+(reserved), the kernel heap (the takeover's live console cell grids, audit ring,
+and everything allocated past the bootstrap arena), a DMA buffer a device may
+still map non-cacheably, and all driver and userland memory. Only free RAM is
+swept. This whack-a-mole-proof design is what finally fixed a real Raspberry
+Pi 4: earlier attempts snapshotted the boot map's "usable" regions and tried to
+enumerate and exclude the tester's working set piece by piece (framebuffer, then
+grown heap regions) and kept missing one — a live, non-cacheable DMA buffer at a
+fixed physical address the sweep then wrote, wedging the SoC (QEMU never exercises
+that exact live-DMA layout, so CI stayed green throughout). Testing only free
+frames excludes the *entire class* of in-use memory by construction. The
+framebuffer is the one in-use range the allocator may not know about (firmware
+carves it out of usable DRAM), so it is excluded explicitly to keep the progress
+display alive. A free set so fragmented it could not fit the reserved snapshot is
+refused fail-closed *before* the quiesce; a snapshot overflow post-quiesce only
+truncates surplus *free* runs (never sweeps an in-use frame). The closure then feeds
+`ui.progress`/`ui.record_fault`/`ui.loop_complete` and the per-window
+`ui.set_current` (the live physical address under test) from the continuous
+sweep, which never returns (the operator resets the machine to end the run);
+`ui.set_environment` shows the reserved framebuffer extent, the region count,
+and the number of excluded ranges as on-screen diagnostics. Three both-mode `Screen`
 helpers (`write_u64`/`write_hex`/`clear_line_tail`) were added for it. Full host
 tests over the `VecReport` mock: rich fullscreen emits escapes and the title,
 the bar/percentage/figures render, the fault table carries the values, plain

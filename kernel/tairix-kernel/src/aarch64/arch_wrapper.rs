@@ -345,6 +345,17 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn console_framebuffer(&self) -> Option<(tairix_kernel_mem::PhysAddr, u64)> {
+        // The active framebuffer console's scan-out surface, so the pre-boot
+        // Supervisor's `memtest` takeover can keep it out of the destructive
+        // whole-RAM sweep (the Pi's mailbox framebuffer sits in usable DRAM
+        // the sweep would otherwise overwrite, killing the progress display).
+        // The boot path identity-maps the surface, so the reported base is
+        // already physical. `None` on a UART-only boot or a host build.
+        let (base, len) = tairix_arch_aarch64::video::active_framebuffer_extent()?;
+        Some((tairix_kernel_mem::PhysAddr::new(base), len))
+    }
+
     fn install_irq_dispatch(&self, table: &'static IrqTable) {
         // Publish the freshly built `IrqTable` and register the production
         // device-IRQ dispatcher with the arch crate's EL1 IRQ-vector seam,

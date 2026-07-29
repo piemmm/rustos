@@ -66,8 +66,8 @@
 
 use core::ptr::NonNull;
 
-use crate::bootinfo::{BootMemoryMap, RegionKind};
-use crate::frame::{PhysAddr, PAGE_SIZE};
+use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::ptr::offset_within;
 
@@ -642,38 +642,212 @@ fn sweep_window(
     }
 }
 
-/// Sum the usable bytes of `map`, rounded inward to whole frames exactly as
-/// [`sweep_pattern`] walks them, so a progress callback can be given an
-/// honest denominator. A region the direct map cannot reach is still counted
-/// here (the driver discovers unreachability per window); an overflowing
-/// region is skipped, matching the driver.
-fn usable_frame_bytes(map: &BootMemoryMap) -> u64 {
+/// Sum the frame-aligned bytes of the pre-selected usable `regions`, rounded
+/// inward to whole frames exactly as [`sweep_pattern`] walks them, so a
+/// progress callback can be given an honest denominator. A region the direct
+/// map cannot reach is still counted here (the driver discovers
+/// unreachability per window); an overflowing region contributes nothing,
+/// matching the driver.
+fn regions_frame_bytes(regions: &[MemoryRegion]) -> u64 {
     let mut total: u64 = 0;
-    for region in map.regions() {
-        if region.kind != RegionKind::Usable {
-            continue;
-        }
+    for region in regions {
         let Some(region_end) = region.end() else {
             continue;
         };
         let start = align_up(region.start.as_u64(), PAGE_SIZE as u64);
         let end = align_down(region_end.as_u64(), PAGE_SIZE as u64);
         if end > start {
-            total += end - start;
+            total = total.saturating_add(end - start);
         }
     }
     total
 }
 
-/// The total number of reachable, frame-aligned usable bytes one pattern
-/// sweep of `map` walks — the honest denominator for a progress fraction.
+/// The total number of frame-aligned bytes one pattern sweep of `regions`
+/// walks — the honest denominator for a progress fraction.
 ///
-/// Computed once by the takeover driver before the loop begins and passed to
-/// [`sweep_pattern`] as `total`, so the UI's percentage is stable across the
-/// many patterns and loops rather than recomputed each time.
+/// `regions` is the reserved-memory snapshot [`snapshot_free_regions`]
+/// builds (currently-free RAM only, with any firmware-carved exclusion already
+/// carved out). Computed once by the takeover driver before the loop begins and
+/// passed to [`sweep_pattern`] as `total`, so the UI's percentage is stable
+/// across the many patterns and loops rather than recomputed each time.
 #[must_use]
-pub fn takeover_test_bytes(map: &BootMemoryMap) -> u64 {
-    usable_frame_bytes(map)
+pub fn takeover_test_bytes(regions: &[MemoryRegion]) -> u64 {
+    regions_frame_bytes(regions)
+}
+
+/// Append the usable frame span `[start, start + len)` to `out[*n]`, unless
+/// `len` is zero (nothing to add) or `out` is full (fail closed — the caller
+/// refuses the takeover rather than sweep a truncated map). A written entry
+/// is always [`RegionKind::Usable`]: the snapshot holds only sweepable RAM.
+fn push_region(out: &mut [MemoryRegion], n: &mut usize, start: u64, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if *n >= out.len() {
+        return false;
+    }
+    out[*n] = MemoryRegion {
+        start: PhysAddr::new(start),
+        length: len,
+        kind: RegionKind::Usable,
+    };
+    *n += 1;
+    true
+}
+
+/// The most exclusion ranges [`snapshot_free_regions`] will carve out of the
+/// sweep in one call.
+///
+/// The sweep already tests only *free* RAM (the frame allocator marks every
+/// in-use frame used), so the excludes cover only ranges the allocator does
+/// **not** know are in use: a firmware-carved framebuffer that sits in usable
+/// DRAM the allocator may still consider free. That is one range per active
+/// scan-out surface, so this cap is generously above any real count; more raw
+/// excludes than this is a programming error and is refused fail-closed.
+pub const MAX_SWEEP_EXCLUDES: usize = 8;
+
+/// Normalise `excludes` into `[start, end)` half-open intervals in `norm`,
+/// dropping zero-length entries, then sort and merge overlapping/adjacent
+/// ones so the subtraction below walks a clean, ascending, disjoint set.
+/// Returns the number of merged intervals, or [`None`] if there are more raw
+/// excludes than `norm` holds (fail closed — the caller refuses the takeover
+/// rather than sweep a region it should keep out).
+fn normalise_excludes(
+    excludes: &[(PhysAddr, u64)],
+    norm: &mut [(u64, u64); MAX_SWEEP_EXCLUDES],
+) -> Option<usize> {
+    let mut m = 0usize;
+    for &(base, len) in excludes {
+        if len == 0 {
+            continue;
+        }
+        if m >= norm.len() {
+            return None;
+        }
+        let s = base.as_u64();
+        norm[m] = (s, s.saturating_add(len));
+        m += 1;
+    }
+    // Insertion sort by start — `m` is small (a framebuffer or two), so an
+    // in-place O(m^2) sort with no allocation is right here.
+    for i in 1..m {
+        let cur = norm[i];
+        let mut j = i;
+        while j > 0 && norm[j - 1].0 > cur.0 {
+            norm[j] = norm[j - 1];
+            j -= 1;
+        }
+        norm[j] = cur;
+    }
+    // Merge overlapping or touching intervals in place.
+    let mut w = 0usize;
+    for r in 1..m {
+        let (rs, re) = norm[r];
+        if rs <= norm[w].1 {
+            if re > norm[w].1 {
+                norm[w].1 = re;
+            }
+        } else {
+            w += 1;
+            norm[w] = (rs, re);
+        }
+    }
+    Some(if m == 0 { 0 } else { w + 1 })
+}
+
+/// Emit the region `[start, end)` into `out`, minus every span in the
+/// pre-normalised (ascending, disjoint) `excl` set: walk it left to right,
+/// pushing each gap before the next overlapping exclude and skipping the
+/// excluded spans. Returns `false` if `out` filled mid-region (the caller
+/// decides whether that is fail-closed or a graceful truncation).
+fn emit_region_minus_excludes(
+    start: u64,
+    end: u64,
+    excl: &[(u64, u64)],
+    out: &mut [MemoryRegion],
+    n: &mut usize,
+) -> bool {
+    let mut cursor = start;
+    for &(es, ee) in excl {
+        if ee <= cursor || es >= end {
+            // This exclude is wholly before the cursor or wholly past the
+            // region; it carves nothing here.
+            continue;
+        }
+        if es > cursor && !push_region(out, n, cursor, es - cursor) {
+            return false;
+        }
+        // Advance past the excluded span (clamped to the region end).
+        cursor = cursor.max(ee.min(end));
+    }
+    if cursor < end && !push_region(out, n, cursor, end - cursor) {
+        return false;
+    }
+    true
+}
+
+/// Copy the frame allocator's currently-**free** physical runs into `out` — a
+/// **reserved-memory snapshot** the takeover sweep walks — carving out every
+/// `excludes` range.
+///
+/// This is the sweep target for the one-way whole-RAM `memtest`
+/// (`plans/NEW-SUPERVISOR.md` §9). The free-run set
+/// ([`FrameAllocator::for_each_free_region`]) is the single authority on which
+/// RAM is safe to overwrite: it already excludes **every** frame the running
+/// system holds — the kernel image and page tables, the heap (the takeover's
+/// own console cell grids and audit ring included), DMA buffers a device may
+/// still map non-cacheably, and all driver and userland memory — because the
+/// allocator marks them used. Writing such an in-use frame races its owner and
+/// can wedge the machine; that is exactly what froze a real Raspberry Pi 4
+/// (the sweep reached a live, non-cacheable DMA buffer the old boot-map
+/// snapshot still called "usable"). Testing only free RAM is the honest
+/// maximum-safe coverage, exactly as a running memtest86 cannot test its own
+/// resident working set.
+///
+/// `excludes` adds any range the *allocator* does not already know is in use —
+/// notably a firmware-carved framebuffer that sits in usable DRAM the
+/// allocator may still consider free — so the live scan-out surface survives
+/// the run. Overlapping or adjacent excludes are merged; a free run is split
+/// into the sub-ranges outside every exclude, and one wholly inside an exclude
+/// is dropped.
+///
+/// The snapshot is read once, before any write, into caller-owned reserved
+/// memory (the reserved takeover stack); the sweep thereafter reads only the
+/// snapshot and never the heap-backed structures it is about to overwrite.
+///
+/// Returns the number of regions written, or [`None`] only when there are more
+/// raw `excludes` than [`MAX_SWEEP_EXCLUDES`] (a programming error, fail
+/// closed). Because every free run is inherently safe to sweep, a set that
+/// would overflow `out` is **truncated** — the surplus free runs simply go
+/// untested this loop (the test loops forever) — never refused and never
+/// causing an in-use frame to be swept.
+pub fn snapshot_free_regions(
+    frames: &FrameAllocator,
+    excludes: &[(PhysAddr, u64)],
+    out: &mut [MemoryRegion],
+) -> Option<usize> {
+    let mut norm = [(0u64, 0u64); MAX_SWEEP_EXCLUDES];
+    let ex_count = normalise_excludes(excludes, &mut norm)?;
+    let excl = &norm[..ex_count];
+
+    let mut n = 0usize;
+    let mut full = false;
+    frames.for_each_free_region(|base, len| {
+        if full {
+            return;
+        }
+        let start = base.as_u64();
+        let Some(end) = start.checked_add(len) else {
+            return;
+        };
+        if !emit_region_minus_excludes(start, end, excl, out, &mut n) {
+            // `out` is full: stop appending. The runs already written are a
+            // safe (free-only) subset; the rest go untested this loop.
+            full = true;
+        }
+    });
+    Some(n)
 }
 
 /// The two things a [`sweep_pattern`] run reports as it goes: forward
@@ -686,6 +860,12 @@ pub fn takeover_test_bytes(map: &BootMemoryMap) -> u64 {
 /// sweep tests a window, then reports its progress), so an implementation may
 /// freely mutate shared state in both.
 pub trait SweepObserver {
+    /// Called with the physical base address of each window *before* it is
+    /// tested, so a UI can show exactly which physical page is under test —
+    /// the last value shown names the frame the sweep was on if a bad DRAM
+    /// cell (or a wedged access) ever stalls the run. The default is a no-op
+    /// for observers that do not surface it.
+    fn window(&mut self, _phys: u64) {}
     /// Called after each window with the cumulative bytes swept in *this*
     /// pattern and the precomputed `total` of all reachable frame-aligned
     /// usable bytes, so a UI can render a fraction.
@@ -695,28 +875,40 @@ pub trait SweepObserver {
     fn fault(&mut self, fault: RamFault);
 }
 
-/// Apply one [`RamTestPattern`] to **every** word of every reachable usable
-/// region of `map`, reporting progress and every fault through `observer`.
+/// Apply one [`RamTestPattern`] to **every** word of every reachable region
+/// in `regions`, reporting progress and every fault through `observer`.
 ///
-/// This is the engine behind the Supervisor's `memtest` takeover
-/// (`plans/NEW-SUPERVISOR.md` §9): once the machine has been quiesced and
-/// handed to the test it exercises all of RAM — including the frames the live
-/// kernel image, heap, page tables, and stacks occupied, which the read-only
-/// [`run`]/[`test_owned_window`] paths can never touch. It therefore
-/// **overwrites and does not restore** the memory it tests; the machine
-/// cannot resume and the only sequel is a reset. The safety argument that
-/// lets [`run`] run pre-allocator does not apply — the caller must have
-/// already taken the machine over (masked interrupts, stopped the watchdog,
-/// quiesced the other CPUs).
+/// `regions` is the reserved-memory snapshot [`snapshot_free_regions`]
+/// builds: currently-**free** RAM only, with any firmware-carved exclusion
+/// (the console framebuffer) already carved out. This is the engine behind the
+/// Supervisor's `memtest` takeover (`plans/NEW-SUPERVISOR.md` §9): once the
+/// machine has been quiesced and handed to the test it exercises all free
+/// RAM. Every in-use frame — a spawned process's memory, a DMA buffer a device
+/// still maps non-cacheably, the kernel heap the takeover itself renders
+/// through — is *not* in `regions`, because the frame allocator marks it used;
+/// writing one would race its owner and can wedge the machine. It therefore
+/// **overwrites and does not restore** the
+/// memory it tests; the machine cannot resume and the only sequel is a reset.
+/// The safety argument that lets [`run`] run pre-allocator does not apply —
+/// the caller must have already taken the machine over (masked interrupts,
+/// stopped the watchdog, quiesced the other CPUs) and must have kept out of
+/// `regions` every frame the still-running takeover itself depends on (the
+/// framebuffer it displays through, and — by building `regions` in reserved
+/// memory — the region list itself).
 ///
 /// The driver calls this once per pattern in [`RamTestPattern::ALL`] and
 /// repeats the whole cycle until the machine is reset, so this function tests
-/// one pattern over all of RAM and returns; it never loops or resets itself.
+/// one pattern over all of `regions` and returns; it never loops or resets
+/// itself.
 ///
-/// A region the direct map cannot reach is left untested and uncounted rather
-/// than faked as tested (fail closed), exactly as in [`run`].
+/// Each window's physical base is reported through [`SweepObserver::window`]
+/// before it is tested, so a UI can name the exact frame under test (the last
+/// one shown pins where the sweep was if a bad cell or a wedged access ever
+/// stalls it). A window the direct map cannot reach is left untested and
+/// uncounted rather than faked as tested (fail closed), exactly as in
+/// [`run`].
 pub fn sweep_pattern<M>(
-    map: &BootMemoryMap,
+    regions: &[MemoryRegion],
     physmap: &M,
     pattern: RamTestPattern,
     total: u64,
@@ -725,10 +917,7 @@ pub fn sweep_pattern<M>(
     M: PhysMap + ?Sized,
 {
     let mut tested: u64 = 0;
-    for region in map.regions() {
-        if region.kind != RegionKind::Usable {
-            continue;
-        }
+    for region in regions {
         let Some(region_end) = region.end() else {
             continue;
         };
@@ -741,6 +930,7 @@ pub fn sweep_pattern<M>(
             let Ok(chunk_len) = usize::try_from(chunk) else {
                 break;
             };
+            observer.window(addr);
             if let Some(window) = PhysWindow::new(physmap, PhysAddr::new(addr), chunk_len) {
                 sweep_window(&window, PhysAddr::new(addr), pattern, &mut |fault| {
                     observer.fault(fault);
@@ -756,12 +946,36 @@ pub fn sweep_pattern<M>(
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::bootinfo::MemoryRegion;
     use crate::phys::SimPhysMap;
 
     extern crate std;
     use core::cell::Cell;
     use std::vec::Vec;
+
+    /// The usable regions of `map` as a slice the slice-based
+    /// [`sweep_pattern`]/[`takeover_test_bytes`] take. The sweep rounds each
+    /// region inward to whole frames itself, so the raw usable regions are the
+    /// right input for a test that only wants "all of it".
+    fn usable_slice(map: &BootMemoryMap) -> Vec<MemoryRegion> {
+        map.regions()
+            .iter()
+            .filter(|r| r.kind == RegionKind::Usable)
+            .copied()
+            .collect()
+    }
+
+    /// A frame allocator over a single usable region of `frames` whole frames
+    /// starting at `base`, with every frame initially free — the starting
+    /// point for the free-run snapshot tests.
+    fn free_alloc(base: u64, frames: usize) -> FrameAllocator {
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(base),
+            length: frames as u64 * PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        FrameAllocator::new(&map).expect("valid usable map")
+    }
 
     /// How a [`FakeRam`] misbehaves, so the passes can be shown to catch each
     /// class of fault.
@@ -1065,16 +1279,23 @@ mod tests {
         faults
     }
 
-    /// A [`SweepObserver`] that records the last progress figures and every
-    /// fault, for driving [`sweep_pattern`] on the host.
+    /// A [`SweepObserver`] that records the last progress figures, the last
+    /// window base reported, and every fault, for driving [`sweep_pattern`] on
+    /// the host.
     #[derive(Default)]
     struct RecordingObserver {
         last_tested: u64,
         last_total: u64,
+        last_window: Option<u64>,
+        windows: u64,
         faults: Vec<RamFault>,
     }
 
     impl SweepObserver for RecordingObserver {
+        fn window(&mut self, phys: u64) {
+            self.last_window = Some(phys);
+            self.windows += 1;
+        }
         fn progress(&mut self, tested: u64, total: u64) {
             self.last_tested = tested;
             self.last_total = total;
@@ -1163,14 +1384,15 @@ mod tests {
             kind: RegionKind::Usable,
         });
 
-        let total = takeover_test_bytes(&map);
+        let regions = usable_slice(&map);
+        let total = takeover_test_bytes(&regions);
         assert_eq!(
             total, len as u64,
             "the honest denominator is all usable RAM"
         );
         let mut observer = RecordingObserver::default();
         sweep_pattern(
-            &map,
+            &regions,
             &sim,
             RamTestPattern::MovingInversionsCheckerboard,
             total,
@@ -1182,6 +1404,9 @@ mod tests {
         );
         assert_eq!(observer.last_tested, len as u64);
         assert_eq!(observer.last_total, len as u64);
+        // The first window's physical base is reported through `window`.
+        assert_eq!(observer.last_window, Some(base));
+        assert!(observer.windows >= 1, "each window is announced");
 
         // The takeover sweep never restores: the RAM is left holding the
         // final pattern, not zeroed (checked byte-wise, no aligned cast).
@@ -1216,10 +1441,11 @@ mod tests {
             length: PAGE_SIZE as u64,
             kind: RegionKind::Usable,
         });
-        let total = takeover_test_bytes(&map);
+        let regions = usable_slice(&map);
+        let total = takeover_test_bytes(&regions);
         let mut observer = RecordingObserver::default();
         sweep_pattern(
-            &map,
+            &regions,
             &sim,
             RamTestPattern::WalkingZeros,
             total,
@@ -1245,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn usable_frame_bytes_counts_only_frame_aligned_usable_span() {
+    fn takeover_test_bytes_counts_only_frame_aligned_usable_span() {
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             start: PhysAddr::new(0x1000),
@@ -1257,6 +1483,200 @@ mod tests {
             length: PAGE_SIZE as u64,
             kind: RegionKind::Reserved,
         });
-        assert_eq!(usable_frame_bytes(&map), 2 * PAGE_SIZE as u64);
+        // The snapshot keeps only the usable region; the reserved one is
+        // dropped, and the count is its whole frame-aligned span.
+        let regions = usable_slice(&map);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(takeover_test_bytes(&regions), 2 * PAGE_SIZE as u64);
+    }
+
+    #[test]
+    fn snapshot_excludes_frames_the_allocator_handed_out() {
+        // The core Raspberry Pi 4 regression: a frame the allocator has handed
+        // out (a live DMA buffer, say) must never appear in the sweep's
+        // free-run snapshot, even though the boot map still calls its whole
+        // region "usable". Overwriting such an in-use, possibly non-cacheably
+        // mapped frame is what wedged the board.
+        let base = 0x10_0000u64;
+        let p = PAGE_SIZE as u64;
+        let frames = free_alloc(base, 8);
+        // Hand out four frames, then return all but one so a single in-use
+        // frame sits amid otherwise-free RAM, exactly like a DMA buffer.
+        let f: Vec<_> = (0..4)
+            .map(|_| frames.alloc().expect("free frame"))
+            .collect();
+        frames.free(f[0]).expect("free");
+        frames.free(f[1]).expect("free");
+        frames.free(f[3]).expect("free");
+        let held = f[2].start().as_u64();
+
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 8];
+        let n = snapshot_free_regions(&frames, &[], &mut buf).expect("no excludes");
+        // The held frame is covered by none of the reported free runs.
+        for region in &buf[..n] {
+            let start = region.start.as_u64();
+            let end = start + region.length;
+            assert!(
+                held < start || held >= end,
+                "the in-use frame {held:#x} must be excluded from the sweep"
+            );
+        }
+        // Exactly the one held frame is kept out; every other usable frame is
+        // tested.
+        assert_eq!(takeover_test_bytes(&buf[..n]), 7 * p);
+    }
+
+    #[test]
+    fn snapshot_carves_an_interior_exclusion_into_two_regions() {
+        // A free run with the framebuffer sitting in its middle is split into
+        // the two sub-ranges either side of the excluded span, so the sweep
+        // never writes the live scan-out surface.
+        let base = 0x10_0000u64;
+        let len = 8 * PAGE_SIZE as u64;
+        let frames = free_alloc(base, 8);
+        // Exclude the middle two frames.
+        let fb_base = base + 3 * PAGE_SIZE as u64;
+        let fb_len = 2 * PAGE_SIZE as u64;
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 8];
+        let n = snapshot_free_regions(&frames, &[(PhysAddr::new(fb_base), fb_len)], &mut buf)
+            .expect("fits");
+        assert_eq!(n, 2, "a straddled run splits into two");
+        assert_eq!(buf[0].start, PhysAddr::new(base));
+        assert_eq!(buf[0].length, 3 * PAGE_SIZE as u64);
+        assert_eq!(buf[1].start, PhysAddr::new(fb_base + fb_len));
+        assert_eq!(buf[1].length, len - 5 * PAGE_SIZE as u64);
+        // The excluded span contributes no tested bytes.
+        assert_eq!(takeover_test_bytes(&buf[..n]), len - fb_len);
+    }
+
+    #[test]
+    fn snapshot_drops_a_run_wholly_inside_the_exclusion() {
+        // Two disjoint free runs (a non-usable gap between them is never free)
+        // with the exclusion covering the first: the covered run is dropped and
+        // the disjoint one passes through untouched.
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0x20_0000),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0x40_0000),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        let frames = FrameAllocator::new(&map).expect("valid map");
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 8];
+        let n = snapshot_free_regions(
+            &frames,
+            &[(PhysAddr::new(0x20_0000), PAGE_SIZE as u64)],
+            &mut buf,
+        )
+        .expect("fits");
+        assert_eq!(n, 1);
+        assert_eq!(buf[0].start, PhysAddr::new(0x40_0000));
+    }
+
+    #[test]
+    fn snapshot_carves_several_out_of_order_excludes_from_one_run() {
+        // A single free run with three firmware-carved excludes (given out of
+        // order and one touching another) is split into exactly the gaps
+        // between them, proving the sort/merge + multi-range subtraction.
+        let base = 0x10_0000u64;
+        let len = 16 * PAGE_SIZE as u64;
+        let frames = free_alloc(base, 16);
+        let p = PAGE_SIZE as u64;
+        // Frames [3,4) and [4,5) (adjacent → merge) and [10,12), given out of
+        // order to exercise the sort.
+        let excludes = [
+            (PhysAddr::new(base + 10 * p), 2 * p),
+            (PhysAddr::new(base + 3 * p), p),
+            (PhysAddr::new(base + 4 * p), p),
+        ];
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 8];
+        let n = snapshot_free_regions(&frames, &excludes, &mut buf).expect("fits");
+        assert_eq!(n, 3, "three gaps: [0,3), [5,10), [12,16)");
+        assert_eq!((buf[0].start, buf[0].length), (PhysAddr::new(base), 3 * p));
+        assert_eq!(
+            (buf[1].start, buf[1].length),
+            (PhysAddr::new(base + 5 * p), 5 * p)
+        );
+        assert_eq!(
+            (buf[2].start, buf[2].length),
+            (PhysAddr::new(base + 12 * p), 4 * p)
+        );
+        // Total tested = run minus the four excluded frames.
+        assert_eq!(takeover_test_bytes(&buf[..n]), len - 4 * p);
+    }
+
+    #[test]
+    fn snapshot_fails_closed_on_too_many_excludes() {
+        // More raw excludes than MAX_SWEEP_EXCLUDES is a programming error,
+        // refused fail-closed, so the takeover never sweeps a range it was
+        // asked to keep out.
+        let frames = free_alloc(0x10_0000, 0x1000);
+        let mut excludes = Vec::new();
+        for i in 0..=(MAX_SWEEP_EXCLUDES as u64) {
+            excludes.push((PhysAddr::new(0x10_0000 + i * 0x2000), PAGE_SIZE as u64));
+        }
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 32];
+        assert_eq!(snapshot_free_regions(&frames, &excludes, &mut buf), None);
+    }
+
+    #[test]
+    fn snapshot_truncates_when_the_buffer_is_too_small() {
+        // Every free run is inherently safe to sweep, so more free runs than
+        // the buffer holds are truncated — the surplus simply go untested this
+        // loop — rather than refused. Only an in-use frame must never be swept,
+        // and truncation only ever *omits* free RAM, never adds any.
+        let base = 0x10_0000u64;
+        let p = PAGE_SIZE as u64;
+        let frames = free_alloc(base, 8);
+        // Hand out every frame, then return the ones at base+{0,2,4,6} (chosen
+        // by address, not allocation order) so the free set is four isolated
+        // single-frame runs.
+        let f: Vec<_> = (0..8)
+            .map(|_| frames.alloc().expect("free frame"))
+            .collect();
+        for &k in &[0u64, 2, 4, 6] {
+            let target = base + k * p;
+            let fr = *f
+                .iter()
+                .find(|fr| fr.start().as_u64() == target)
+                .expect("frame handed out");
+            frames.free(fr).expect("free");
+        }
+        let mut buf = [MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0,
+            kind: RegionKind::Usable,
+        }; 2];
+        let n = snapshot_free_regions(&frames, &[], &mut buf).expect("truncates, not None");
+        assert_eq!(n, 2, "the two-slot buffer holds the first two free runs");
+        assert_eq!((buf[0].start, buf[0].length), (PhysAddr::new(base), p));
+        assert_eq!(
+            (buf[1].start, buf[1].length),
+            (PhysAddr::new(base + 2 * p), p)
+        );
     }
 }
