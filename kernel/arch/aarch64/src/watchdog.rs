@@ -105,9 +105,8 @@ pub const WATCHDOG_FIQ_PRIORITY: u8 = 0xC0;
         feature = "watchdog-diagnostics"
     )
 ))]
-const _: () = assert!(
-    WATCHDOG_FIQ_PRIORITY > crate::gic::MID_RANGE_PRIORITY && WATCHDOG_FIQ_PRIORITY < 0xFF
-);
+const _: () =
+    assert!(WATCHDOG_FIQ_PRIORITY > crate::gic::MID_RANGE_PRIORITY && WATCHDOG_FIQ_PRIORITY < 0xFF);
 
 /// `CNTV_CTL_EL0.ENABLE` (bit 0): start the virtual timer counting down.
 pub const CNTV_CTL_ENABLE: u64 = 1 << 0;
