@@ -10,6 +10,10 @@
 //! owning service applies the change and enforces authority. A denied selector
 //! keeps its value and shows an Authority Mark rather than silently looking
 //! disabled (spec §13).
+//!
+//! The glyph itself is compact — the theme's `selector_extent`, centred in the
+//! row the owner lays the control out in — so the row stays a comfortable hit
+//! target and a keyboard focus band while the mark stays small.
 
 use alloc::string::String;
 
@@ -41,10 +45,55 @@ pub enum SelectorAction {
     },
 }
 
-/// The square edge of the box (the checkbox/radio glyph, or the toggle track
-/// height): one row tall, floored so it stays a legible target.
-fn box_side(bounds: Rect) -> u32 {
-    bounds.height.max(1)
+/// The glyph rectangle of a boolean selector: `logical_w` x `logical_h`
+/// logical pixels resolved for density, clamped into `bounds`, and centred
+/// vertically within the row.
+///
+/// A selector's mark is a compact glyph beside its label, never a
+/// control-height plate: the row keeps a full-height hit target while the
+/// glyph keeps the proportions the theme fixes.
+fn glyph_rect(
+    bounds: Rect,
+    scale: Scale,
+    logical_w: u32,
+    logical_h: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let (x, y, w, h) = surface_rect(bounds)?;
+    let gw = scale.scale_length(logical_w).max(1).min(w);
+    let gh = scale.scale_length(logical_h).max(1).min(h);
+    if gw == 0 || gh == 0 {
+        return None;
+    }
+    Some((x, y + (h - gh) / 2, gw, gh))
+}
+
+/// The track rectangle of a toggle: the theme's toggle track length by the
+/// shared selector extent, clamped to the row and centred within it.
+pub(crate) fn toggle_track_rect(
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(u32, u32, u32, u32)> {
+    let metrics = theme.metrics();
+    glyph_rect(
+        bounds,
+        scale,
+        metrics.toggle_track_length,
+        metrics.selector_extent,
+    )
+}
+
+/// The square glyph rectangle of a checkbox box or radio circle: the theme's
+/// selector extent in both axes, clamped to the row and centred within it.
+pub(crate) fn square_glyph_rect(
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(u32, u32, u32, u32)> {
+    let extent = theme.metrics().selector_extent;
+    let (x, y, w, h) = glyph_rect(bounds, scale, extent, extent)?;
+    let side = w.min(h);
+    Some((x, y + (h - side) / 2, side, side))
 }
 
 /// Paint the label after the leading box, vertically centred, in `color`,
@@ -74,13 +123,13 @@ fn paint_label(
 
 /// Paint the overlay signals shared by every selector, drawn *after* the glyph
 /// so nothing hides them: the Pressure Rail (leading edge, full height), the
-/// pending Heat Seam (lower edge of the box while a check is pending, spec
-/// §11.4), and the Signal Bead (trailing-top corner). `box_w` is the width of
-/// the leading box the seam spans.
+/// pending Heat Seam (lower edge of the glyph while a check is pending, spec
+/// §11.4), and the Signal Bead (trailing-top corner). `glyph` is the leading
+/// glyph rectangle the seam spans.
 fn paint_selector_signals(
     surface: &mut Surface,
     bounds: Rect,
-    box_w: u32,
+    glyph: (u32, u32, u32, u32),
     scale: Scale,
     theme: &Theme,
     state: ControlState,
@@ -100,15 +149,16 @@ fn paint_selector_signals(
     }
 
     if state.disposition() == ControlDisposition::PendingCheck {
+        let (glyph_x, glyph_y, glyph_w, glyph_h) = glyph;
         let seam_h = scale
             .scale_length(metrics.seam_thickness)
             .max(1)
-            .min(h.saturating_sub(border.saturating_mul(2)));
-        let seam_w = box_w.saturating_sub(border.saturating_mul(2)).min(w);
+            .min(glyph_h.saturating_sub(border.saturating_mul(2)));
+        let seam_w = glyph_w.saturating_sub(border.saturating_mul(2));
         if seam_h > 0 && seam_w > 0 {
-            let seam_y = y + h - border - seam_h;
+            let seam_y = glyph_y + glyph_h - border - seam_h;
             surface.fill_rect(
-                x + border,
+                glyph_x + border,
                 seam_y,
                 seam_w,
                 seam_h,
@@ -131,6 +181,7 @@ fn paint_selector_signals(
 /// drawn within, or `None` when the box collapses. The pending Heat Seam is an
 /// overlay drawn later by `paint_selector_signals`, so a toggle's contact
 /// cannot hide it.
+#[allow(clippy::too_many_arguments)]
 fn paint_box(
     surface: &mut Surface,
     box_rect: (u32, u32, u32, u32),
@@ -140,7 +191,7 @@ fn paint_box(
     role: ControlRole,
     state: ControlState,
 ) -> Option<(u32, u32, u32, u32)> {
-    let (x, y, w, h) = box_rect;
+    let (_, _, w, h) = box_rect;
     if w == 0 || h == 0 {
         return None;
     }
@@ -160,12 +211,33 @@ fn paint_box(
         },
     );
 
+    inner_rect(box_rect, border)
+}
+
+/// The content rectangle inside a plate's rim border, or `None` when the plate
+/// collapses under its own border.
+fn inner_rect(box_rect: (u32, u32, u32, u32), border: u32) -> Option<(u32, u32, u32, u32)> {
+    let (x, y, w, h) = box_rect;
     let iw = w.checked_sub(border.saturating_mul(2))?;
     let ih = h.checked_sub(border.saturating_mul(2))?;
     if iw == 0 || ih == 0 {
         return None;
     }
     Some((x + border, y + border, iw, ih))
+}
+
+/// The rectangle a square selector's value mark fills for `bounds` under the
+/// active theme and density: the glyph, inside its rim border, inset by the
+/// mark margin. Composed from the same helpers `render` paints through, so a
+/// test probing the mark cannot drift from what is drawn.
+#[cfg(test)]
+pub(crate) fn selector_mark_rect(
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(u32, u32, u32, u32)> {
+    let glyph = square_glyph_rect(bounds, scale, theme)?;
+    mark_rect(inner_rect(glyph, plate_border(theme, scale))?)
 }
 
 /// Inset a plate rectangle by a small proportional margin so a glyph mark
@@ -300,21 +372,15 @@ impl Toggle {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        let side = box_side(bounds);
-        // A toggle track is wider than tall (a pill), bounded by the row width.
-        let track_w = side
-            .saturating_mul(9)
-            .saturating_div(5)
-            .max(side.saturating_add(1))
-            .min(bounds.width);
-        let Some((bx, by, _, _)) = surface_rect(bounds) else {
+        let metrics = theme.metrics();
+        let Some(track) = toggle_track_rect(bounds, scale, theme) else {
             return;
         };
-        let radius = side / 2;
+        let (_, _, track_w, track_h) = track;
         let inner = paint_box(
             surface,
-            (bx, by, track_w, side),
-            radius,
+            track,
+            track_h / 2,
             scale,
             theme,
             self.core.role,
@@ -359,7 +425,7 @@ impl Toggle {
         }
 
         let label_color = resolve_frame(theme, self.core.role, self.core.state).label;
-        let gap = scale.scale_length(theme.metrics().control_gap);
+        let gap = scale.scale_length(metrics.control_gap);
         paint_label(
             surface,
             bounds,
@@ -369,7 +435,7 @@ impl Toggle {
             &self.core.label,
             label_color,
         );
-        paint_selector_signals(surface, bounds, track_w, scale, theme, self.core.state);
+        paint_selector_signals(surface, bounds, track, scale, theme, self.core.state);
     }
 
     /// Feed a pointer event; a completed primary click over an actionable
@@ -470,16 +536,16 @@ impl Checkbox {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        let side = box_side(bounds);
-        let Some((bx, by, _, _)) = surface_rect(bounds) else {
+        let Some(glyph) = square_glyph_rect(bounds, scale, theme) else {
             return;
         };
+        let side = glyph.2;
         let radius = scale
             .scale_length(theme.metrics().control_corner_radius)
             .min(side / 2);
         let inner = paint_box(
             surface,
-            (bx, by, side, side),
+            glyph,
             radius,
             scale,
             theme,
@@ -513,7 +579,7 @@ impl Checkbox {
             &self.core.label,
             label_color,
         );
-        paint_selector_signals(surface, bounds, side, scale, theme, self.core.state);
+        paint_selector_signals(surface, bounds, glyph, scale, theme, self.core.state);
     }
 
     /// Feed a pointer event; a completed primary click requests the next value.
@@ -605,14 +671,14 @@ impl Radio {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        let side = box_side(bounds);
-        let Some((bx, by, _, _)) = surface_rect(bounds) else {
+        let Some(glyph) = square_glyph_rect(bounds, scale, theme) else {
             return;
         };
+        let side = glyph.2;
         // A radio box is a circle: radius half the side.
         let inner = paint_box(
             surface,
-            (bx, by, side, side),
+            glyph,
             side / 2,
             scale,
             theme,
@@ -647,7 +713,7 @@ impl Radio {
             &self.core.label,
             label_color,
         );
-        paint_selector_signals(surface, bounds, side, scale, theme, self.core.state);
+        paint_selector_signals(surface, bounds, glyph, scale, theme, self.core.state);
     }
 
     /// Feed a pointer event; a completed primary click requests selection.

@@ -74,9 +74,12 @@ pub struct Palette {
     pub scroll_track: Rgba,
     /// The scrollbar thumb.
     pub scroll_thumb: Rgba,
-    /// The Frame Rim of the active window.
+    /// The Frame Rim of the active (focused) window: a neutral tone, never
+    /// the accent, so the accent stays reserved for a chosen action while
+    /// focus reads as the brighter of two greys.
     pub frame_active: Rgba,
-    /// The Frame Rim of an inactive window (quieter, still legible).
+    /// The Frame Rim of an inactive window — the quieter of the two neutral
+    /// tones, still legible against the desktop behind it.
     pub frame_inactive: Rgba,
 }
 

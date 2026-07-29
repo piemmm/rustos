@@ -9,6 +9,11 @@
 //! colour/metric/radius from the active [`Theme`] and [`Scale`] and round their
 //! plates through the shared drawing core the button and selector families use,
 //! so nothing here restates a recipe those families already own.
+//!
+//! A measured track is drawn as a thin instrument line — the theme's
+//! `measured_thickness`, centred in whatever row the owner lays the control out
+//! in — never a control-height plate, so a progress bar reads as an instrument
+//! and a slider as a groove rather than a block.
 
 use alloc::format;
 use alloc::string::String;
@@ -20,8 +25,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    inset, paint_bead, paint_plate, plate_border, resolve_bead, resolve_frame, resolve_mark,
-    resolve_rail, surface_rect, to_i32, PlateStyle,
+    inset, measured_thickness, paint_bead, paint_plate, plate_border, resolve_bead, resolve_frame,
+    resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -66,10 +71,6 @@ struct SliderLayout {
     travel: u32,
     /// The thumb diameter (also its plate side), in pixels.
     thumb_d: u32,
-    /// The groove band's top y.
-    groove_y: u32,
-    /// The groove band's height.
-    groove_h: u32,
     /// The whole control's surface-x origin.
     x: u32,
     /// The whole control's surface-y origin.
@@ -86,6 +87,14 @@ impl SliderLayout {
         let v = u64::from(clamp_permille(permille));
         let along = u64::from(self.travel) * v / u64::from(FULL);
         self.track_x0 + u32::try_from(along).unwrap_or(self.travel)
+    }
+
+    /// The thin groove band — `(top y, height)` — for a measured track of
+    /// `thickness` physical pixels, centred in the control and never taller
+    /// than it.
+    fn groove(&self, thickness: u32) -> (u32, u32) {
+        let band = thickness.max(1).min(self.h);
+        (self.y + (self.h - band) / 2, band)
     }
 
     /// The permille value a pointer at surface-x `px` implies, clamped.
@@ -106,10 +115,10 @@ impl SliderLayout {
 
 /// Resolve a slider's horizontal geometry, or `None` if the control collapses.
 ///
-/// The thumb is one row tall (a grabbable knob); the track runs between the
-/// thumb's extreme centres so the thumb never overhangs the control edge, and
-/// the groove is a thin band centred vertically. Every extent is proportional
-/// to the bounds, so the slider scales with density with no hard-coded pixel.
+/// The thumb is one row tall (a grabbable knob) and the track runs between the
+/// thumb's extreme centres so the thumb never overhangs the control edge. Every
+/// extent is proportional to the bounds, so the slider scales with density with
+/// no hard-coded pixel.
 fn slider_layout(bounds: Rect) -> Option<SliderLayout> {
     let (x, y, w, h) = surface_rect(bounds)?;
     if w == 0 || h == 0 {
@@ -119,14 +128,10 @@ fn slider_layout(bounds: Rect) -> Option<SliderLayout> {
     let radius = thumb_d / 2;
     let travel = w.saturating_sub(thumb_d);
     let track_x0 = x + radius;
-    let groove_h = (h / 4).max(2).min(h);
-    let groove_y = y + (h.saturating_sub(groove_h)) / 2;
     Some(SliderLayout {
         track_x0,
         travel,
         thumb_d,
-        groove_y,
-        groove_h,
         x,
         y,
         w,
@@ -255,14 +260,15 @@ impl Slider {
         };
         let palette = theme.palette();
         let border = plate_border(theme, scale);
+        let (groove_y, groove_h) = layout.groove(measured_thickness(theme, scale));
 
         // The quiet groove the thumb runs along.
         surface.fill_round_rect(
             layout.track_x0,
-            layout.groove_y,
+            groove_y,
             layout.travel + layout.thumb_d,
-            layout.groove_h,
-            layout.groove_h / 2,
+            groove_h,
+            groove_h / 2,
             Color::from(palette.scroll_track),
         );
 
@@ -270,15 +276,8 @@ impl Slider {
         let centre = layout.centre_for(self.value);
         let active = resolve_rail(theme, self.state)
             .unwrap_or_else(|| resolve_mark(theme, self.role, self.state));
-        let active_w = centre.saturating_sub(layout.x).max(layout.groove_h);
-        surface.fill_round_rect(
-            layout.x,
-            layout.groove_y,
-            active_w,
-            layout.groove_h,
-            layout.groove_h / 2,
-            active,
-        );
+        let active_w = centre.saturating_sub(layout.x).max(groove_h);
+        surface.fill_round_rect(layout.x, groove_y, active_w, groove_h, groove_h / 2, active);
 
         // The bounded-cap marker at the constrained edge, if any.
         if let Some(cap) = self.cap {
@@ -473,6 +472,30 @@ impl Progress {
             || self.state.recovery != RecoveryState::None
     }
 
+    /// The thin trace band within `bounds`: the theme's measured thickness,
+    /// never taller than the bounds, centred when the caption cannot fit
+    /// beside it and top-aligned when it can.
+    ///
+    /// The trace is an instrument line, not a filled block: its height comes
+    /// from the one measured-control thickness token every measured control
+    /// shares, so a caller that hands it a tall row gets a thin bar and a
+    /// captioned row rather than a slab.
+    fn band(
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> (u32, u32) {
+        let (_, y, _, h) = rect;
+        let band = measured_thickness(theme, scale).min(h).max(1);
+        let spare = h - band;
+        if spare >= font.glyph_height() {
+            (y, band)
+        } else {
+            (y + spare / 2, band)
+        }
+    }
+
     /// Paint the trace into `surface` at `bounds` for the active theme.
     pub fn render(
         &self,
@@ -491,7 +514,10 @@ impl Progress {
         let palette = theme.palette();
         let metrics = theme.metrics();
         let border = plate_border(theme, scale);
-        let radius = scale.scale_length(metrics.control_corner_radius).min(h / 2);
+        let (band_y, band_h) = Self::band((x, y, w, h), scale, theme, font);
+        let radius = scale
+            .scale_length(metrics.control_corner_radius)
+            .min(band_h / 2);
         let failed = self.is_failed();
         let frame = resolve_frame(theme, self.role, self.state);
         let rim = if failed {
@@ -502,7 +528,7 @@ impl Progress {
 
         paint_plate(
             surface,
-            (x, y, w, h),
+            (x, band_y, w, band_h),
             &PlateStyle {
                 radius,
                 border,
@@ -514,23 +540,20 @@ impl Progress {
         );
 
         let inner_radius = radius.saturating_sub(border);
-        if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) {
+        if let Some((ix, iy, iw, ih)) = inset(x, band_y, w, band_h, border) {
             self.paint_fill(surface, (ix, iy, iw, ih), inner_radius, theme, failed);
         }
 
         if let Some((color, shape)) = resolve_bead(theme, self.state) {
-            let size = scale.scale_length(metrics.bead_size).max(3).min(w).min(h);
-            paint_bead(
-                surface,
-                x + w - border - size,
-                y + border,
-                size,
-                color,
-                shape,
-            );
+            let size = scale
+                .scale_length(metrics.bead_size)
+                .max(3)
+                .min(w)
+                .min(band_h);
+            paint_bead(surface, x + w - border - size, band_y, size, color, shape);
         }
 
-        self.paint_caption(surface, (x, y, w, h), scale, theme, font, failed);
+        self.paint_caption(surface, (x, y, w, h), (band_y, band_h), scale, theme, font);
     }
 
     /// Paint the value fill for the current activity within the inner area.
@@ -577,17 +600,23 @@ impl Progress {
     }
 
     /// Paint the caption: a percentage for known progress, else the reason /
-    /// note label, vertically and horizontally centred within the plate.
+    /// note label.
+    ///
+    /// It sits in the height left over below the thin trace band when there is
+    /// room for a full glyph, and is centred across the band otherwise, so a
+    /// caption never overprints the value fill it describes.
     fn paint_caption(
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
+        band: (u32, u32),
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        failed: bool,
     ) {
         let (x, y, w, h) = rect;
+        let (band_y, band_h) = band;
+        let failed = self.is_failed();
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset);
         let edge = border.saturating_add(pad);
@@ -614,7 +643,13 @@ impl Progress {
         let width = font.text_width(fitted);
         let glyph_h = font.glyph_height();
         let cx = to_i32(x) + to_i32(w) / 2;
-        let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
+        let below = band_y + band_h;
+        let spare = (y + h).saturating_sub(below);
+        let text_y = if spare >= glyph_h {
+            to_i32(below) + to_i32(spare - glyph_h) / 2
+        } else {
+            to_i32(band_y) + (to_i32(band_h) - to_i32(glyph_h)) / 2
+        };
         font.draw_text(surface, cx - to_i32(width) / 2, text_y, fitted, color);
     }
 }

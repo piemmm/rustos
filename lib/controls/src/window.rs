@@ -1230,9 +1230,12 @@ impl WindowFrame {
                 radius.saturating_sub(border),
                 Color::from(palette.surface),
             );
-            // The active frame adds a doubled inner rim line — a non-colour
-            // focus distinction that does not change frame measurements.
-            if active {
+            // In high contrast the active frame adds a doubled inner rim line,
+            // so focus reads as a shape difference and not only as the frame
+            // tone; it never changes frame measurements. Outside high contrast
+            // the frame stays a single flat line and the active/inactive tones
+            // carry the distinction.
+            if active && heavy_contrast(theme) {
                 draw_outline(
                     surface,
                     ix,
@@ -1240,7 +1243,7 @@ impl WindowFrame {
                     iw,
                     ih,
                     border,
-                    Color::from(palette.rim_active),
+                    Color::from(palette.frame_inactive),
                 );
             }
         }

@@ -13,6 +13,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Rgba, Theme};
 
+use crate::paint::measured_thickness;
 use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
     RecoveryState,
@@ -112,6 +113,20 @@ fn active_extent(surface: &Surface, accent: Pixel, y: u32) -> Option<u32> {
 
 fn bounds() -> Rect {
     Rect::new(0, 0, W, H)
+}
+
+/// The trace's thin band within the test row as `(top, bottom)`: the theme's
+/// measured thickness, top-aligned when a caption fits beneath it and centred
+/// otherwise, mirroring the layout the trace itself resolves.
+fn band_rows(theme: &Theme) -> (u32, u32) {
+    let band = measured_thickness(theme, Scale::ONE);
+    let spare = H - band;
+    let top = if spare >= font().glyph_height() {
+        0
+    } else {
+        spare / 2
+    };
+    (top, top + band)
 }
 
 // --- Slider measurement and value mapping (§11.6) ----------------------
@@ -438,12 +453,28 @@ fn denied_progress_shows_a_lock_bead() {
     let mut progress = Progress::new();
     progress.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let surface = progress_surface(&progress, &theme);
+    let band = measured_thickness(&theme, Scale::ONE);
     assert!(region_has(
         &surface,
-        (W - 10, W),
-        (0, 10),
+        (W - band, W),
+        band_rows(&theme),
         premul(theme.palette().denied)
     ));
+}
+
+#[test]
+fn progress_trace_is_a_thin_band_not_the_whole_row() {
+    let theme = Theme::dark();
+    let surface = progress_surface(
+        &progress_with(ActivityState::Progress(ProgressValue::new(1000))),
+        &theme,
+    );
+    let (top, bottom) = band_rows(&theme);
+    assert!(bottom - top < H, "the band must be thinner than its row");
+    let accent = premul(theme.palette().accent);
+    assert!(region_has(&surface, (0, W), (top, bottom), accent));
+    assert!(!region_has(&surface, (0, W), (0, top), accent));
+    assert!(!region_has(&surface, (0, W), (bottom, H), accent));
 }
 
 #[test]

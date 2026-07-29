@@ -13,7 +13,9 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Rgba, Theme};
 
-use crate::selector::{Checkbox, Radio, SelectorAction, Toggle};
+use crate::selector::{
+    selector_mark_rect, toggle_track_rect, Checkbox, Radio, SelectorAction, Toggle,
+};
 use crate::state::{
     AuthorityState, ControlState, PressureKind, PressureState, SelectionState, ValidationState,
 };
@@ -89,6 +91,18 @@ fn radio_surface(radio: &Radio, theme: &Theme) -> Surface {
     surface
 }
 
+/// The value-mark rectangle of a square selector (checkbox box, radio circle)
+/// for the test row, measured through the same helper `render` paints with, so
+/// a probe point can never drift from the drawn mark.
+fn mark(theme: &Theme) -> (u32, u32, u32, u32) {
+    selector_mark_rect(Rect::new(0, 0, W, H), Scale::ONE, theme).expect("mark rect")
+}
+
+/// The toggle track rectangle for the test row, measured the same way.
+fn track(theme: &Theme) -> (u32, u32, u32, u32) {
+    toggle_track_rect(Rect::new(0, 0, W, H), Scale::ONE, theme).expect("track rect")
+}
+
 /// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
 fn high_contrast() -> Theme {
     let base = Theme::dark();
@@ -158,8 +172,9 @@ fn checked_checkbox_fills_a_square_mark() {
     let checked = checkbox_surface(&Checkbox::new("A", SelectionState::Selected), &theme);
     let empty = checkbox_surface(&Checkbox::new("A", SelectionState::Unselected), &theme);
     let accent = premul(theme.palette().accent);
+    let (mx, my, mw, _) = mark(&theme);
     // The square fills the top of the mark region; an empty box has no mark.
-    assert_eq!(checked.get(13, 7), Some(accent));
+    assert_eq!(checked.get(mx + mw / 2, my), Some(accent));
     assert!(!has_pixel(&empty, accent));
 }
 
@@ -168,10 +183,11 @@ fn mixed_checkbox_draws_a_bar_not_a_full_square() {
     let theme = Theme::dark();
     let mixed = checkbox_surface(&Checkbox::new("A", SelectionState::Mixed), &theme);
     let accent = premul(theme.palette().accent);
+    let (mx, my, mw, mh) = mark(&theme);
     // The horizontal bar sits at the mark's centre, leaving the top clear —
     // so mixed is distinguishable from checked by shape, not just colour.
-    assert_eq!(mixed.get(13, 13), Some(accent));
-    assert_ne!(mixed.get(13, 7), Some(accent));
+    assert_eq!(mixed.get(mx + mw / 2, my + mh / 2), Some(accent));
+    assert_ne!(mixed.get(mx + mw / 2, my), Some(accent));
 }
 
 // --- Radio value: centre bead (§11.5) ----------------------------------
@@ -182,7 +198,8 @@ fn selected_radio_draws_a_centre_bead() {
     let selected = radio_surface(&Radio::new("One", true), &theme);
     let empty = radio_surface(&Radio::new("Two", false), &theme);
     let accent = premul(theme.palette().accent);
-    assert_eq!(selected.get(13, 13), Some(accent));
+    let (mx, my, mw, mh) = mark(&theme);
+    assert_eq!(selected.get(mx + mw / 2, my + mh / 2), Some(accent));
     assert!(!has_pixel(&empty, accent));
 }
 
@@ -246,7 +263,7 @@ fn pressure_paints_a_leading_rail() {
 fn pending_toggle_shows_a_heat_seam() {
     let theme = Theme::dark();
     // Off toggles, so the accent contact/thumb never covers the sampled track
-    // point (x = 40 is past the off thumb on the right of the track).
+    // point: it sits at the trailing end of the track, past the off thumb.
     let mut pending = Toggle::new("Wi-Fi", false);
     pending.set_state(ControlState::idle().with_validation(ValidationState::Pending));
     let idle = Toggle::new("Wi-Fi", false);
@@ -255,13 +272,15 @@ fn pending_toggle_shows_a_heat_seam() {
     // The seam paints the active rim along the lower edge of the track while a
     // check is pending; an unchanged toggle has no seam there, and its plate
     // centre stays the resting surface.
+    let (tx, ty, tw, th) = track(&theme);
+    let (sx, sy) = (tx + tw - 2, ty + th - 2);
     assert_eq!(
-        pending_s.get(40, 26),
+        pending_s.get(sx, sy),
         Some(premul(theme.palette().rim_active))
     );
-    assert_ne!(idle_s.get(40, 26), Some(premul(theme.palette().rim_active)));
+    assert_ne!(idle_s.get(sx, sy), Some(premul(theme.palette().rim_active)));
     assert_eq!(
-        idle_s.get(40, 14),
+        idle_s.get(sx, ty + th / 2),
         Some(premul(theme.palette().surface_raised))
     );
 }
