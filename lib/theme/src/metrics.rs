@@ -67,14 +67,23 @@ pub struct Metrics {
     /// The diameter of a Signal Bead (a compact count/alert lamp), in logical
     /// pixels.
     pub bead_size: u32,
-    /// The breadth (short dimension) of a *measured* value track — a progress
-    /// bar's bar and a slider's groove — in logical pixels.
+    /// The breadth (short dimension) of a *measured* value track the user
+    /// drives — a slider's groove — in logical pixels.
     ///
     /// A measured track is an instrument line, not a plate: it is deliberately
     /// much thinner than [`control_height`](Self::control_height) and is
-    /// centred within whatever row the owner lays it out in, so a progress
-    /// bar never reads as a button-sized block.
+    /// centred within whatever row the owner lays it out in, so a slider never
+    /// reads as a button-sized block.
     pub measured_thickness: u32,
+    /// The breadth (short dimension) of a progress trace's bar, in logical
+    /// pixels.
+    ///
+    /// A progress bar is read, never dragged, so it carries a little more
+    /// breadth than the [`measured_thickness`](Self::measured_thickness)
+    /// groove a slider's thumb rides in: the fill has to be legible at a
+    /// glance across a long run without a thumb to mark it. It stays an
+    /// instrument line well under [`control_height`](Self::control_height).
+    pub progress_thickness: u32,
     /// The square extent of a boolean selector's glyph — a checkbox box, a
     /// radio circle — and the breadth of a toggle's track, in logical pixels.
     ///
