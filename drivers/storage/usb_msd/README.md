@@ -46,7 +46,11 @@ binary works behind any host controller that speaks the URB transport
    drives).
 5. Parks on a kernel wait-set over the LUN endpoints and serves each
    `BlkRequest` (geometry / read / write / flush) through the shared SCSI
-   command layer (`src/scsi.rs`) on the device's wire transport:
+   command layer (`src/scsi.rs`) on the device's wire transport, each LUN
+   carrying a per-unit `blkio::BlkHealth` (the `Removable` device class) so a
+   transient stall or bus reset is ridden out through its recovery grace
+   window — answered reissuably while `Recovering`, failed closed only once
+   the window elapses without the unit returning (`plans/FIX-IO.md` IO3):
    - **BOT** (`src/bot.rs`): CBW/CSW framing with every device field
      validated, per-transfer stall recovery below (the HCD), CSW-stall
      retry, and Bulk-Only Mass Storage Reset on tag mismatch / corrupt CSW /

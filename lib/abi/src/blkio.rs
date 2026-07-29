@@ -18,7 +18,7 @@
 //! the per-device cost is fixed rather than a function of request size.
 
 use crate::le::{put_i32, put_u32, put_u64, read_i32, read_u32, read_u64};
-use crate::Errno;
+use crate::{DriverError, Errno};
 
 /// Length of the shared-memory data window a block-service endpoint
 /// serves transfers through, and therefore the largest single transfer
@@ -272,6 +272,32 @@ impl BlkStatus {
             Errno::MediumError => Self::MediumError,
             Errno::DeviceOffline => Self::Offline,
             _ => Self::Fatal,
+        }
+    }
+
+    /// The device-health status a [`Block`](crate::driver::block::Block)
+    /// result's [`DriverError`] carries, or [`None`] when the error is
+    /// *request-level* rather than a device-health signal.
+    ///
+    /// A serving driver's device call can fail for two very different
+    /// reasons, and only one of them is about the device's health. A bad
+    /// sector ([`DriverError::MediumError`]), a gone/unresponsive device
+    /// ([`DriverError::DeviceOffline`]), a busy device or a recovered stall
+    /// ([`DriverError::Busy`] / [`DriverError::EndpointStalled`]), and an
+    /// unrecoverable hardware fault ([`DriverError::DeviceFault`]) all speak
+    /// to the *device* and are folded into [`BlkHealth`]. A rejected request
+    /// — an out-of-range LBA, a write to a read-only unit, an unsupported op
+    /// — is about the *request*, not the device, and returns [`None`] so it
+    /// can never drive a healthy device toward [`BlkHealthState::Faulted`].
+    #[must_use]
+    pub const fn for_driver_health(err: DriverError) -> Option<Self> {
+        match err {
+            DriverError::MediumError => Some(Self::MediumError),
+            DriverError::DeviceOffline => Some(Self::Offline),
+            DriverError::Busy => Some(Self::TransientError),
+            DriverError::EndpointStalled => Some(Self::Reset),
+            DriverError::DeviceFault => Some(Self::Fatal),
+            _ => None,
         }
     }
 }
@@ -537,11 +563,14 @@ impl BlkDeviceClass {
     pub const fn budget(self) -> IoBudget {
         match self {
             // A spinning disk may legitimately take tens of seconds to spin
-            // up or complete an internal reset before it answers.
+            // up or complete an internal reset before it answers, and its
+            // grace window is wider still so a full spin-up plus reset is
+            // ridden out rather than punished.
             Self::Rotational => IoBudget {
                 deadline_ns: 30_000_000_000,
                 max_retries: 3,
                 queue_depth: 4,
+                grace_ns: 60_000_000_000,
             },
             // An SSD that has not answered in a few seconds is wedged, not
             // busy; a deep queue keeps it fed.
@@ -549,18 +578,22 @@ impl BlkDeviceClass {
                 deadline_ns: 5_000_000_000,
                 max_retries: 2,
                 queue_depth: 32,
+                grace_ns: 8_000_000_000,
             },
-            // A removable unit tolerates a bus glitch/reset but must fail
-            // closed promptly once genuinely gone.
+            // A removable unit tolerates a bus glitch/reset (which may
+            // re-enumerate the bus) but must fail closed promptly once
+            // genuinely gone.
             Self::Removable => IoBudget {
                 deadline_ns: 15_000_000_000,
                 max_retries: 3,
                 queue_depth: 2,
+                grace_ns: 20_000_000_000,
             },
             Self::Virtual => IoBudget {
                 deadline_ns: 10_000_000_000,
                 max_retries: 2,
                 queue_depth: 16,
+                grace_ns: 12_000_000_000,
             },
         }
     }
@@ -584,6 +617,242 @@ pub struct IoBudget {
     pub max_retries: u32,
     /// How many requests may be outstanding to the device at once.
     pub queue_depth: u32,
+    /// The recovery **grace window** in nanoseconds: how long a device that
+    /// has started stalling/resetting is held [`BlkHealthState::Recovering`]
+    /// (its requests answered reissuably) before it is failed closed, so a
+    /// transient blip is ridden out rather than punished. `u64::MAX` means
+    /// "ride out indefinitely" (never used by a real class). Sized wider than
+    /// `deadline_ns` so a single reset/spin-up cannot exhaust the window.
+    pub grace_ns: u64,
+}
+
+/// The health of one served block device: an explicit state distinguishing a
+/// device that is fine from one that is riding out a blip, from one that has
+/// been failed closed, from one that is gone.
+///
+/// A returning device is a normal transition (`Recovering`/`Faulted`/
+/// `Offline` back to `Healthy`), so a disk that flaps is never mistaken for a
+/// steadily-healthy one yet always recovers without a reboot. The values are
+/// ordered from healthiest to most-failed only for readability; nothing reads
+/// the discriminant.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum BlkHealthState {
+    /// The device is answering normally.
+    #[default]
+    Healthy,
+    /// The device is answering with valid data but reports itself unhealthy
+    /// (a recovered-error threshold, a pending reallocation): still usable.
+    Degraded,
+    /// The device has started stalling/resetting and is inside its grace
+    /// window: its requests are answered reissuably ([`BlkStatus::Reset`])
+    /// while it is given a bounded chance to come back.
+    Recovering,
+    /// The grace window elapsed without the device coming back: it is failed
+    /// closed to its consumers, but stays *recoverable* — a later successful
+    /// answer returns it to [`BlkHealthState::Healthy`].
+    Faulted,
+    /// The device is present but persistently unresponsive. Sticky until it
+    /// demonstrably answers again.
+    Offline,
+    /// The device has been surprise-removed. Sticky until it answers again
+    /// (a verified re-insert).
+    Removed,
+    /// An unclassified, unrecoverable failure was reported. Sticky; only a
+    /// demonstrated successful answer (e.g. after a driver restart) clears it.
+    Failed,
+}
+
+impl BlkHealthState {
+    /// Whether the device is currently answering with valid data (the only
+    /// states a consumer should treat as live for new work).
+    #[must_use]
+    pub const fn is_operational(self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded)
+    }
+}
+
+/// The per-device health state machine and recovery **grace window**, owned
+/// by the serving block-driver process (one per served logical unit).
+///
+/// It turns the raw per-request outcome the device produced into the health
+/// status the consumer is told, riding out a transient blip for a bounded,
+/// wall-clock-timed grace window ([`IoBudget::grace_ns`]) before failing
+/// closed. It is pure and event-timed: the caller supplies the monotonic
+/// `now_ns` (the kernel `clock_get` reading) on each observation, so there is
+/// no timer to spin on and the whole machine is provable host-side.
+///
+/// The recovery model is the reply-reissuable one: while `Recovering` the
+/// device's requests complete with a reissuable [`BlkStatus::Reset`] within
+/// their own per-request deadline, so the serve loop never parks on one
+/// device's blip and starve the others (head-of-line freedom). Only
+/// *device-level* outcomes are observed here; a request-level refusal (a
+/// write to a read-only unit, an out-of-range LBA) is health-neutral and is
+/// never fed in, so a hostile or malformed request can never drive a healthy
+/// device to `Faulted`.
+#[derive(Copy, Clone, Debug)]
+pub struct BlkHealth {
+    state: BlkHealthState,
+    budget: IoBudget,
+    /// The monotonic reading at which the current `Recovering` episode began;
+    /// meaningful only while `state == Recovering`.
+    recovering_since_ns: u64,
+}
+
+impl BlkHealth {
+    /// A freshly-`Healthy` device served with `class`'s I/O budget.
+    #[must_use]
+    pub const fn new(class: BlkDeviceClass) -> Self {
+        Self {
+            state: BlkHealthState::Healthy,
+            budget: class.budget(),
+            recovering_since_ns: 0,
+        }
+    }
+
+    /// The current health state.
+    #[must_use]
+    pub const fn state(&self) -> BlkHealthState {
+        self.state
+    }
+
+    /// The I/O budget (including the grace window) this device is served with.
+    #[must_use]
+    pub const fn budget(&self) -> IoBudget {
+        self.budget
+    }
+
+    /// The absolute monotonic time (the kernel `clock_get` reading) at which
+    /// this device's open recovery grace window expires, if one is open.
+    ///
+    /// While `Recovering`, a serving driver that has no further request to
+    /// fold through [`observe`](Self::observe) arms a **one-shot** timer for
+    /// this deadline and calls [`poll`](Self::poll) when it fires, so the
+    /// window still expires on an otherwise-quiet device without a busy-poll
+    /// (event-timed, never a spin). Returns `None` when no window is open (any
+    /// non-`Recovering` state) or when the class rides out indefinitely
+    /// (`grace_ns == u64::MAX`), so the caller arms no timer.
+    #[must_use]
+    pub const fn grace_deadline_ns(&self) -> Option<u64> {
+        if !matches!(self.state, BlkHealthState::Recovering) || self.budget.grace_ns == u64::MAX {
+            return None;
+        }
+        Some(
+            self.recovering_since_ns
+                .saturating_add(self.budget.grace_ns),
+        )
+    }
+
+    /// Advance the grace window on a pure time tick at monotonic `now_ns`,
+    /// returning the (possibly unchanged) state.
+    ///
+    /// This is the time-driven counterpart to [`observe`](Self::observe): it
+    /// folds *no* request outcome, only the passage of time. A device left
+    /// `Recovering` because it received no further request still fails closed
+    /// to [`BlkHealthState::Faulted`] once its grace window elapses, driven by
+    /// the one-shot timer [`grace_deadline_ns`](Self::grace_deadline_ns) names
+    /// rather than a busy-poll. It is idempotent and side-effect-free in every
+    /// state but an expired `Recovering` one, so a driver may call it whenever
+    /// its grace timer fires without tracking whether a request already
+    /// advanced the machine.
+    pub fn poll(&mut self, now_ns: u64) -> BlkHealthState {
+        if matches!(self.state, BlkHealthState::Recovering) && self.grace_elapsed(now_ns) {
+            self.state = BlkHealthState::Faulted;
+        }
+        self.state
+    }
+
+    /// Fold one device-level outcome into the health state at monotonic time
+    /// `now_ns`, returning the [`BlkStatus`] the consumer should be told.
+    ///
+    /// `raw` is what the device/transport produced for this request
+    /// ([`BlkStatus::Ok`] on success, else the classified error). The return
+    /// value may differ from `raw`: a transient error inside the grace window
+    /// is reported as a reissuable [`BlkStatus::Reset`], while the same error
+    /// after the window has elapsed is reported as [`BlkStatus::Offline`]
+    /// (failed closed). A valid answer always recovers the device.
+    pub fn observe(&mut self, raw: BlkStatus, now_ns: u64) -> BlkStatus {
+        match raw {
+            // Any valid answer from the device demonstrates it is alive and
+            // clears a fault/recovery episode (sticky-but-recoverable).
+            BlkStatus::Ok => {
+                self.recover(BlkHealthState::Healthy);
+                BlkStatus::Ok
+            }
+            BlkStatus::Degraded => {
+                self.recover(BlkHealthState::Degraded);
+                BlkStatus::Degraded
+            }
+            // A definitive per-sector verdict is still an answer: the device
+            // is reachable (only its media is bad), so recover the device
+            // while surfacing the medium error for this one request.
+            BlkStatus::MediumError => {
+                if !self.state.is_operational() {
+                    self.recover(BlkHealthState::Healthy);
+                }
+                BlkStatus::MediumError
+            }
+            BlkStatus::TransientError | BlkStatus::Timeout | BlkStatus::Reset => {
+                self.on_transient(now_ns)
+            }
+            // A gone device is sticky until it answers again; it does not pass
+            // through the grace window (there is nothing to ride out).
+            BlkStatus::Offline => {
+                self.state = BlkHealthState::Offline;
+                BlkStatus::Offline
+            }
+            BlkStatus::Removed => {
+                self.state = BlkHealthState::Removed;
+                BlkStatus::Removed
+            }
+            BlkStatus::Fatal => {
+                self.state = BlkHealthState::Failed;
+                BlkStatus::Fatal
+            }
+        }
+    }
+
+    /// Drive the grace window for a retryable (transient/timeout/reset)
+    /// outcome.
+    fn on_transient(&mut self, now_ns: u64) -> BlkStatus {
+        match self.state {
+            // Already known gone/dead: a further non-answer changes nothing,
+            // and the device stays failed closed until it demonstrably
+            // answers (handled by the valid-answer arms of `observe`).
+            BlkHealthState::Offline | BlkHealthState::Faulted => BlkStatus::Offline,
+            BlkHealthState::Removed => BlkStatus::Removed,
+            BlkHealthState::Failed => BlkStatus::Fatal,
+            // First sign of trouble on a live device: open the grace window.
+            BlkHealthState::Healthy | BlkHealthState::Degraded => {
+                self.state = BlkHealthState::Recovering;
+                self.recovering_since_ns = now_ns;
+                BlkStatus::Reset
+            }
+            // Inside an open window: keep answering reissuably until the
+            // window elapses, then fail closed.
+            BlkHealthState::Recovering => {
+                if self.grace_elapsed(now_ns) {
+                    self.state = BlkHealthState::Faulted;
+                    BlkStatus::Offline
+                } else {
+                    BlkStatus::Reset
+                }
+            }
+        }
+    }
+
+    /// Whether an open recovery grace window has elapsed at monotonic
+    /// `now_ns`. Meaningful only while `Recovering`; `saturating_sub` keeps a
+    /// non-monotonic clock reading from wrapping the elapsed time, and a
+    /// `u64::MAX` grace window (ride out indefinitely) never reads as elapsed.
+    const fn grace_elapsed(&self, now_ns: u64) -> bool {
+        now_ns.saturating_sub(self.recovering_since_ns) >= self.budget.grace_ns
+    }
+
+    /// Return the device to a live state, clearing any recovery episode.
+    fn recover(&mut self, to: BlkHealthState) {
+        self.state = to;
+        self.recovering_since_ns = 0;
+    }
 }
 
 #[cfg(test)]
@@ -783,6 +1052,12 @@ mod tests {
             assert_eq!(BlkDeviceClass::from_u32(class.as_u32()), Ok(class));
             let b = class.budget();
             assert!(b.deadline_ns > 0 && b.queue_depth > 0);
+            // The grace window rides out at least one full deadline's worth of
+            // stall/reset, so a single reset cannot exhaust it.
+            assert!(
+                b.grace_ns > b.deadline_ns,
+                "{class:?} grace must exceed its per-request deadline"
+            );
         }
         assert_eq!(BlkDeviceClass::from_u32(4), Err(Errno::OutOfRange));
         // A rotational disk is given a longer spin-up/reset budget than an SSD,
@@ -802,5 +1077,243 @@ mod tests {
         for block_size in [512usize, 4096] {
             assert_eq!(BLK_DATA_LEN % block_size, 0);
         }
+    }
+
+    #[test]
+    fn only_device_level_errors_classify_as_health_signals() {
+        // Device-health errors fold into the state machine...
+        for (err, status) in [
+            (DriverError::MediumError, BlkStatus::MediumError),
+            (DriverError::DeviceOffline, BlkStatus::Offline),
+            (DriverError::Busy, BlkStatus::TransientError),
+            (DriverError::EndpointStalled, BlkStatus::Reset),
+            (DriverError::DeviceFault, BlkStatus::Fatal),
+        ] {
+            assert_eq!(BlkStatus::for_driver_health(err), Some(status), "{err:?}");
+        }
+        // ...while request-level rejections are health-neutral (a hostile or
+        // malformed request must never be able to fault a healthy device).
+        for err in [
+            DriverError::OutOfRange,
+            DriverError::LengthOutOfRange,
+            DriverError::PermissionDenied,
+            DriverError::Unsupported,
+            DriverError::NotImplemented,
+            DriverError::BadMagic,
+            DriverError::NotFound,
+            DriverError::NoSpace,
+        ] {
+            assert_eq!(BlkStatus::for_driver_health(err), None, "{err:?}");
+        }
+    }
+
+    #[test]
+    fn a_healthy_device_reports_its_answers_verbatim() {
+        let mut health = BlkHealth::new(BlkDeviceClass::SolidState);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+        assert_eq!(health.observe(BlkStatus::Ok, 0), BlkStatus::Ok);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+        // A self-reported unhealthy device stays usable and its data valid.
+        assert_eq!(health.observe(BlkStatus::Degraded, 1), BlkStatus::Degraded);
+        assert_eq!(health.state(), BlkHealthState::Degraded);
+        assert!(health.state().is_operational());
+        // A live device recovers straight back to healthy on its next good read.
+        assert_eq!(health.observe(BlkStatus::Ok, 2), BlkStatus::Ok);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_medium_error_is_a_live_answer_not_a_device_fault() {
+        let mut health = BlkHealth::new(BlkDeviceClass::Rotational);
+        // A bad sector surfaces to the request but never faults the device.
+        assert_eq!(
+            health.observe(BlkStatus::MediumError, 0),
+            BlkStatus::MediumError
+        );
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_blip_that_returns_inside_the_grace_window_is_ridden_out() {
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        let grace = health.budget().grace_ns;
+        // First stall opens the window; the request is answered reissuably,
+        // never hard-failed.
+        assert_eq!(health.observe(BlkStatus::Reset, 1_000), BlkStatus::Reset);
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+        // A reissue still inside the window is still reissuable.
+        assert_eq!(
+            health.observe(BlkStatus::TransientError, 1_000 + grace / 2),
+            BlkStatus::Reset
+        );
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+        // The device comes back before the window elapses: fully recovered,
+        // no reboot, the episode invisible to the workload's data.
+        assert_eq!(
+            health.observe(BlkStatus::Ok, 1_000 + grace - 1),
+            BlkStatus::Ok
+        );
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_blip_that_outlasts_the_grace_window_fails_closed() {
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let grace = health.budget().grace_ns;
+        assert_eq!(health.observe(BlkStatus::Timeout, 100), BlkStatus::Reset);
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+        // Exactly at the window boundary the device is failed closed: the
+        // consumer is told the device is offline, not reissuable.
+        assert_eq!(
+            health.observe(BlkStatus::Timeout, 100 + grace),
+            BlkStatus::Offline
+        );
+        assert_eq!(health.state(), BlkHealthState::Faulted);
+        // Faulted is sticky: further non-answers keep failing closed...
+        assert_eq!(
+            health.observe(BlkStatus::Reset, 100 + grace + 1),
+            BlkStatus::Offline
+        );
+        assert_eq!(health.state(), BlkHealthState::Faulted);
+        // ...but a genuine return still recovers it without a reboot.
+        assert_eq!(
+            health.observe(BlkStatus::Ok, 100 + grace + 2),
+            BlkStatus::Ok
+        );
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_gone_device_is_sticky_until_it_demonstrably_returns() {
+        for gone in [BlkStatus::Offline, BlkStatus::Removed] {
+            let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+            assert_eq!(health.observe(gone, 0), gone);
+            let expected = if gone == BlkStatus::Removed {
+                BlkHealthState::Removed
+            } else {
+                BlkHealthState::Offline
+            };
+            assert_eq!(health.state(), expected);
+            assert!(!health.state().is_operational());
+            // A gone device does not enter the grace window: a further stall
+            // keeps it gone (there is nothing present to ride out).
+            assert!(!health.observe(BlkStatus::Reset, 10).data_valid());
+            assert_eq!(health.state(), expected);
+            // Only a real answer (a verified re-insert) clears it.
+            assert_eq!(health.observe(BlkStatus::Ok, 20), BlkStatus::Ok);
+            assert_eq!(health.state(), BlkHealthState::Healthy);
+        }
+    }
+
+    #[test]
+    fn a_fatal_outcome_is_sticky_but_still_recoverable() {
+        let mut health = BlkHealth::new(BlkDeviceClass::SolidState);
+        assert_eq!(health.observe(BlkStatus::Fatal, 0), BlkStatus::Fatal);
+        assert_eq!(health.state(), BlkHealthState::Failed);
+        // A transient after a fatal keeps failing closed, never re-opening a
+        // grace window on a device declared dead.
+        assert_eq!(health.observe(BlkStatus::Reset, 1), BlkStatus::Fatal);
+        assert_eq!(health.state(), BlkHealthState::Failed);
+        // A demonstrated good answer (e.g. after a driver restart) recovers it.
+        assert_eq!(health.observe(BlkStatus::Ok, 2), BlkStatus::Ok);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_flapping_device_re_opens_a_fresh_grace_window_each_episode() {
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        let grace = health.budget().grace_ns;
+        // Episode one: stall, recover.
+        assert_eq!(health.observe(BlkStatus::Reset, 0), BlkStatus::Reset);
+        assert_eq!(health.observe(BlkStatus::Ok, 10), BlkStatus::Ok);
+        // Episode two starts a *new* window measured from its own start, so
+        // the earlier episode's elapsed time cannot prematurely fault it.
+        let base = 1_000_000;
+        assert_eq!(health.observe(BlkStatus::Reset, base), BlkStatus::Reset);
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+        assert_eq!(
+            health.observe(BlkStatus::Reset, base + grace - 1),
+            BlkStatus::Reset,
+            "the new window is measured from this episode's own start"
+        );
+        assert_eq!(
+            health.observe(BlkStatus::Reset, base + grace),
+            BlkStatus::Offline
+        );
+    }
+
+    #[test]
+    fn an_idle_recovering_device_expires_its_window_on_a_time_poll() {
+        // A device that stalls once and then goes *quiet* (no further request
+        // to fold through `observe`) must still fail closed when its grace
+        // window elapses, driven by the one-shot timer `grace_deadline_ns`
+        // names rather than a busy-poll.
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let grace = health.budget().grace_ns;
+        assert_eq!(health.observe(BlkStatus::Timeout, 100), BlkStatus::Reset);
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+        // The driver arms its one-shot for exactly this deadline.
+        assert_eq!(health.grace_deadline_ns(), Some(100 + grace));
+
+        // A poll before the deadline leaves the window open (the timer would
+        // not have fired yet); it is idempotent.
+        assert_eq!(health.poll(100 + grace - 1), BlkHealthState::Recovering);
+        assert_eq!(health.poll(100 + grace - 1), BlkHealthState::Recovering);
+        assert_eq!(health.state(), BlkHealthState::Recovering);
+
+        // At the deadline the poll fails the device closed, with no request
+        // ever observed in the interim.
+        assert_eq!(health.poll(100 + grace), BlkHealthState::Faulted);
+        assert_eq!(health.state(), BlkHealthState::Faulted);
+        // Faulted has no open window, so no further timer is armed...
+        assert_eq!(health.grace_deadline_ns(), None);
+        // ...and a repeat poll is a sticky no-op (never re-faults or resets).
+        assert_eq!(health.poll(u64::MAX), BlkHealthState::Faulted);
+    }
+
+    #[test]
+    fn a_time_poll_is_a_no_op_off_the_open_recovery_path() {
+        // A healthy device is never faulted by the passage of time alone.
+        let mut healthy = BlkHealth::new(BlkDeviceClass::SolidState);
+        assert_eq!(healthy.grace_deadline_ns(), None);
+        assert_eq!(healthy.poll(u64::MAX), BlkHealthState::Healthy);
+        assert_eq!(healthy.state(), BlkHealthState::Healthy);
+
+        // A device reported degraded (usable) is likewise time-poll-inert.
+        let mut degraded = BlkHealth::new(BlkDeviceClass::SolidState);
+        assert_eq!(
+            degraded.observe(BlkStatus::Degraded, 0),
+            BlkStatus::Degraded
+        );
+        assert_eq!(degraded.grace_deadline_ns(), None);
+        assert_eq!(degraded.poll(u64::MAX), BlkHealthState::Degraded);
+
+        // A device already known gone stays gone: a time poll never rewrites a
+        // sticky terminal state into `Faulted`.
+        let mut gone = BlkHealth::new(BlkDeviceClass::Removable);
+        assert_eq!(gone.observe(BlkStatus::Removed, 0), BlkStatus::Removed);
+        assert_eq!(gone.grace_deadline_ns(), None);
+        assert_eq!(gone.poll(u64::MAX), BlkHealthState::Removed);
+    }
+
+    #[test]
+    fn a_time_poll_expiry_matches_an_observed_expiry() {
+        // The time-driven and request-driven paths agree: a device failed
+        // closed by `poll` behaves exactly as one failed closed by a stall
+        // that outlasted the window — sticky-offline, yet still recoverable.
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        let grace = health.budget().grace_ns;
+        assert_eq!(health.observe(BlkStatus::Reset, 0), BlkStatus::Reset);
+        assert_eq!(health.poll(grace), BlkHealthState::Faulted);
+        // A subsequent stall is failed closed (sticky), as on the observed
+        // path...
+        assert_eq!(
+            health.observe(BlkStatus::Reset, grace + 1),
+            BlkStatus::Offline
+        );
+        assert_eq!(health.state(), BlkHealthState::Faulted);
+        // ...and a genuine return recovers it without a reboot.
+        assert_eq!(health.observe(BlkStatus::Ok, grace + 2), BlkStatus::Ok);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
     }
 }

@@ -429,6 +429,42 @@ impl DriverError {
             Self::Unsupported | Self::NotImplemented => Errno::NotImplemented,
         }
     }
+
+    /// Classify a transport or block-service [`Errno`] as the
+    /// [`DriverError`] the [`block::Block`] contract exposes, health-aware.
+    ///
+    /// This is the one place the block layer's error classification lives,
+    /// so every consumer of a served block device — the kernel-side client and
+    /// the volume manager's probe alike — turns a completion's [`Errno`] into
+    /// the same [`DriverError`] rather than each re-deriving it. The health
+    /// axis is preserved end to end: a permanent bad sector
+    /// ([`Errno::MediumError`]) and a gone-or-unresponsive device
+    /// ([`Errno::DeviceOffline`]) each keep their distinct class so the
+    /// filesystem layer can tell them apart and fail *this* device's callers
+    /// closed while every other device keeps running; a transient stall or a
+    /// device/hub reset ([`Errno::WouldBlock`] / [`Errno::EndpointStalled`])
+    /// is a [`Busy`](Self::Busy) the caller may reissue.
+    ///
+    /// Fails closed: an errno with no more specific block meaning — a deadline
+    /// that elapsed ([`Errno::TimedOut`]), a torn-down or vanished endpoint
+    /// ([`Errno::NotFound`] — the serving driver exited on unplug), a
+    /// cancelled call, or anything unrecognised — is a
+    /// [`DeviceFault`](Self::DeviceFault): the device is gone or misbehaving,
+    /// not the request.
+    #[must_use]
+    pub const fn from_errno(err: Errno) -> Self {
+        match err {
+            Errno::BufferTooSmall => Self::BufferTooSmall,
+            Errno::LengthOutOfRange => Self::LengthOutOfRange,
+            Errno::OutOfRange => Self::OutOfRange,
+            Errno::PermissionDenied => Self::PermissionDenied,
+            Errno::NoSpace => Self::NoSpace,
+            Errno::MediumError => Self::MediumError,
+            Errno::DeviceOffline => Self::DeviceOffline,
+            Errno::WouldBlock | Errno::EndpointStalled => Self::Busy,
+            _ => Self::DeviceFault,
+        }
+    }
 }
 
 /// Fixed-size prefix of a signed driver manifest.
@@ -1168,6 +1204,58 @@ mod tests {
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(18), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
+    }
+
+    #[test]
+    fn driver_error_from_errno_is_health_aware_and_fails_closed() {
+        // The health axis is preserved: a permanent medium error and a gone
+        // device keep their distinct class, so the filesystem layer can tell
+        // a bad sector from a missing disk.
+        assert_eq!(
+            DriverError::from_errno(Errno::MediumError),
+            DriverError::MediumError
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::DeviceOffline),
+            DriverError::DeviceOffline
+        );
+        // The retryable classes (a transient stall, a device/hub reset) read
+        // as a reissuable `Busy`.
+        assert_eq!(
+            DriverError::from_errno(Errno::WouldBlock),
+            DriverError::Busy
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::EndpointStalled),
+            DriverError::Busy
+        );
+        // The request-shape errnos keep their own class.
+        assert_eq!(
+            DriverError::from_errno(Errno::BufferTooSmall),
+            DriverError::BufferTooSmall
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::LengthOutOfRange),
+            DriverError::LengthOutOfRange
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::OutOfRange),
+            DriverError::OutOfRange
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::PermissionDenied),
+            DriverError::PermissionDenied
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::NoSpace),
+            DriverError::NoSpace
+        );
+        // Fails closed: a timed-out or vanished endpoint, a cancelled call,
+        // and anything unrecognised are a device fault, never mistaken for a
+        // request-level error.
+        for gone in [Errno::TimedOut, Errno::NotFound, Errno::DeviceFault] {
+            assert_eq!(DriverError::from_errno(gone), DriverError::DeviceFault);
+        }
     }
 
     #[test]

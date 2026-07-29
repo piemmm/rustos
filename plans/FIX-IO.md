@@ -234,33 +234,96 @@ tests that a `CallReply` member wakes on a ready reply and on a deadline; the
 every new `BlkStatus`; fuzz the completion/status decode and the reap/deadline
 path (§19.6).
 
-### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **planned**
+### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **in progress**
 
 Stop the "entire strata locks up": no shared blocking thread across devices.
 
-Deliverables:
-- Each volume/filesystem attachment drives its device through the IO1 seam and
-  multiplexes completions/timeouts on a **wait-set** (§2.23). One device's
-  stall parks only the tasks waiting on *that* device; unrelated volumes keep
-  running. Any single serialised worker fanning out to all disks is removed.
-- `RemoteBlock`/`Block` become fault-aware: a timeout/offline on a non-root
-  (even empty) disk surfaces to *its* callers only; the root and every other
-  mount are unaffected.
-- The mount stays up; the op fails. A wedged device yields `-TimedOut`/`Offline`
-  to its callers, and the volume is marked degraded (Stage IO3 state), not torn
-  out.
+The structural isolation is already in place from the IO1 consumer rewrites and
+is *not* re-architected here: there is no single serialised worker fanning out
+to all disks. Each mount has its own served block device, its own transport
+(the kernel `BlkClient` over a per-LUN `CallEndpoint`; volmgr's `RtBlkCall` over
+a per-device `CallReply` wait-set), and the mounted filesystem service takes a
+**per-driver** `SleepLock` (never a global one), so a per-request deadline park
+on a wedged device parks only that mount's callers — unrelated volumes run on.
 
-Tests (§7): a host harness with two devices where one stalls forever and the
-other keeps serving, asserting the live device's completions are unaffected
-(head-of-line isolation); a QEMU vertical with a wedged/removed virtio-blk or
-USB MSD device beside a live volume.
+Landed:
+- **Consumer fault-awareness via one shared mapping.** Every consumer of a
+  served block device classifies a completion's health through the single
+  `DriverError::from_errno` (`lib/abi`), never a per-consumer copy (§2.2). A bad
+  sector (`MediumError`), a gone/unresponsive/removed device (`DeviceOffline`),
+  a transient stall or reset (reissuable `Busy`), and a timed-out/vanished
+  endpoint (fail-closed `DeviceFault`) each keep their distinct class, so a
+  fault on one device surfaces only to *its* callers. volmgr's `RemoteBlock` no
+  longer collapses the health axis to `DeviceFault`.
+- Object-level isolation regression test (volmgr host doubles): a faulted
+  device (offline) beside a healthy one — the faulted client fails every read
+  closed with the typed health error while the healthy sibling keeps serving
+  correct data, interleaved.
 
-### Stage IO3 — Per-device health state machine + the recovery grace window. **planned**
+Remaining:
+- Mark the affected volume degraded (Stage IO3 state) rather than only
+  surfacing the typed error to its callers.
+- A QEMU vertical with a wedged/removed virtio-blk or USB MSD device beside a
+  live volume, asserting the live device's throughput is unaffected while the
+  wedged one fails closed at its deadline (true concurrent head-of-line
+  freedom, which the host doubles cannot express without the kernel deadline
+  machinery).
+
+### Stage IO3 — Per-device health state machine + the recovery grace window. **in progress**
 
 This is the core of the issue: a bounded grace window to ride out a blip
 before failing closed.
 
-Deliverables:
+**Landed (the shared primitive + first serving consumer):** the per-device
+health state machine and grace window live in one place both a serving driver
+and a consumer read — `blkio::BlkHealth` / `BlkHealthState` in `lib/abi`
+(§2.2), consuming the per-class `IoBudget::grace_ns` policy (`BlkDeviceClass::
+budget`). `BlkHealth::observe(raw, now_ns)` folds each *device-level* outcome
+into `Healthy → Degraded → Recovering → { Healthy | Faulted } → Offline/
+Removed → Failed` and returns the `BlkStatus` the consumer is told; it is pure
+and event-timed (the caller supplies the monotonic `clock_get` reading, no
+timer to spin on, §2.23), so the whole machine is proven host-side. A
+transient stall/reset inside the window is reported reissuably (`Reset`) and
+held `Recovering`; the same stall once the window elapses is `Faulted` and
+fails closed (`Offline`); any valid answer recovers the device
+(sticky-but-recoverable, no reboot). Only device-level outcomes drive health —
+`BlkStatus::for_driver_health` returns `None` for request-level rejections, so
+a hostile/malformed request can never fault a healthy device. The **reply-
+reissuable** recovery model (not inline parking) is the one this stage adopts,
+so one unit's blip never stalls the serve loop's other units (head-of-line
+freedom, §26.1) — exactly the "reply within the per-request deadline while the
+device works its grace window behind the scenes" option the design below
+allows. The first serving consumer is `usb_msd`: `serve_request_recovering`
+(a `Served{Device,Refused}` split so a request refusal is never fed to health)
+wraps each per-LUN request with a `BlkHealth` (the `Removable` class) driven by
+`clock_get`, host-tested over a fault-injecting `Block` double. The state
+machine is also complete for the *quiet-device* case (§27): `BlkHealth::
+grace_deadline_ns` gives the absolute one-shot deadline a driver arms its idle
+timer to while `Recovering`, and `BlkHealth::poll(now_ns)` is the pure,
+event-timed transition that fails a still-`Recovering` device closed to
+`Faulted` when that window elapses with no further request to fold through
+`observe` — the shared `grace_elapsed` check keeps `observe` and `poll` from
+diverging (§2.2). Wiring a driver's one-shot timer to call `poll` is the
+remaining IO4 idle-timer work below.
+
+Remaining:
+- Adopt the same `serve_request_recovering` shape in the `virtio_blk` and
+  `emmc2` serve paths (they have their own serve loops; the shared `BlkHealth`
+  keeps them from diverging, §2.2).
+- The bounded recovery *escalation* (retry-with-backoff → LUN/device/port
+  reset) as an explicit driver action behind the reply-reissuable reporting.
+  The background grace-window expiry for a `Recovering` device that receives no
+  further request now has its primitive (`BlkHealth::poll` /
+  `grace_deadline_ns`, above); only wiring a driver's own one-shot idle timer
+  to call it remains (belongs with the driver's idle timers, Stage IO4).
+- The volume-manager consumer marking the affected volume degraded (below) and
+  the health observability (Stage IO5).
+- A QEMU vertical driving a device through fault → grace(recovering) →
+  return-inside-window → Healthy and fault → grace-expiry → Faulted →
+  fail-closed, which the host doubles cannot express without the live kernel
+  deadline machinery.
+
+Deliverables (design):
 - **A per-device health state machine, owned by the block driver process:**
   `Healthy → Degraded → Recovering(grace) → { Healthy | Faulted } → Offline/
   Removed → Failed`. Transitions are logged (Stage IO5).

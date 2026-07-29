@@ -86,30 +86,6 @@ pub struct BlkClient {
     deadline_ns: u64,
 }
 
-/// Map a transport or service refusal onto the [`Block`] contract's error
-/// space.
-fn errno_to_driver(err: Errno) -> DriverError {
-    match err {
-        Errno::BufferTooSmall => DriverError::BufferTooSmall,
-        Errno::LengthOutOfRange => DriverError::LengthOutOfRange,
-        Errno::OutOfRange => DriverError::OutOfRange,
-        Errno::PermissionDenied => DriverError::PermissionDenied,
-        Errno::NoSpace => DriverError::NoSpace,
-        // The block health axis (`plans/FIX-IO.md` IO1): a permanent medium
-        // error and a gone device each keep their distinct class so the
-        // filesystem layer can tell a bad sector from a missing disk; a
-        // transient/reset/timeout is a device fault the caller may reissue.
-        Errno::MediumError => DriverError::MediumError,
-        Errno::DeviceOffline => DriverError::DeviceOffline,
-        Errno::WouldBlock | Errno::EndpointStalled => DriverError::Busy,
-        // A vanished endpoint (`NotFound` — the driver exited on unplug),
-        // a deadline that elapsed (`TimedOut` — the device never answered),
-        // a cancelled call, and every other transport failure is a device
-        // fault: the device is gone or misbehaving, not the request.
-        _ => DriverError::DeviceFault,
-    }
-}
-
 impl BlkClient {
     /// Connect to the block service on `endpoint`, moving data through
     /// `window`, and validate the device geometry.
@@ -208,7 +184,7 @@ impl BlkClient {
             blocks: 0,
         })
         .map(|_| ())
-        .map_err(errno_to_driver)
+        .map_err(DriverError::from_errno)
     }
 
     /// Issue one request and block until its completion, mirroring the
@@ -359,7 +335,7 @@ impl Block for BlkClient {
                 lba,
                 blocks,
             })
-            .map_err(errno_to_driver)?;
+            .map_err(DriverError::from_errno)?;
             self.window_read(&mut buf[off..off + chunk]);
             off += chunk;
             lba += u64::from(blocks);
@@ -386,7 +362,7 @@ impl Block for BlkClient {
                 lba,
                 blocks,
             })
-            .map_err(errno_to_driver)?;
+            .map_err(DriverError::from_errno)?;
             off += chunk;
             lba += u64::from(blocks);
         }
