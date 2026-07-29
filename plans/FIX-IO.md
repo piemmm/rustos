@@ -117,38 +117,102 @@ model. IO6 depends on RustFS existing and is gated on it.
 Give the block seam a deadline so a consumer is *never* parked forever on a
 wedged device. The ABI is unfrozen (§9), so change it in place (§2.13).
 
+**Chosen transport shape (the reviewer decision this stage reserved): the
+async submit/complete seam.** The deadlined-synchronous alternative is
+rejected: it is still one-in-flight-per-caller (effectively a blocking
+thread per device), which cannot satisfy IO2 head-of-line freedom (§26.1) or
+IO3's "hold in-flight requests through a grace window" without being reworked,
+so building it first would be the deferred-correctness §2.19 forbids. The
+async shape is the complete abstraction (§27) and reuses the existing
+ticketed call machinery and wait-set event loop (`kernel/ipc/src/call.rs`,
+`lib/abi/src/waitset.rs`, `plans/USB.md`) rather than inventing a parallel one
+(§2.2).
+
 Deliverables:
-- **A per-request deadline on the block call.** Two shapes; the reviewer picks
-  one and this plan is updated to the chosen one before IO2 starts:
-  - *(Preferred)* an **async submit/complete** seam: `blk_submit(request,
-    deadline)` returns a ticket, completions arrive on a **wait-set** the
-    consumer already owns, and `blk_cancel(ticket)` withdraws an outstanding
-    request. This is the scalable, head-of-line-free shape (§26.1, §27
-    "implement the abstraction, not the caller's slice") and mirrors the
-    existing async HCD event loop (`plans/USB.md`, `lib/abi/src/waitset.rs`).
-  - *(Minimum)* extend the synchronous call with a `deadline_ns` so the block
-    endpoint returns `-TimedOut` instead of parking forever, reusing the
-    `waitset_wait`/`irq_wait` convention.
+
+- **A general-purpose *asynchronous call* on the existing `CallEndpoint`.**
+  The client half of `ipc_call` today bundles post + park + reap with no
+  deadline. Split those into three non-blocking syscalls over the *same*
+  endpoint object every service already binds (`call_create`/`call_recv`/
+  `call_reply`), so this is one IPC primitive completed (§27), not a
+  block-only bolt-on:
+  - `call_post(endpoint, request_ptr, request_len, ticket_out_ptr,
+    deadline_ns)` — posts without blocking (`CallEndpoint::post`), writes the
+    minted `CallTicket` to `ticket_out`, wakes the bound server, and arms a
+    per-ticket one-shot deadline. `deadline_ns == u64::MAX` means "no
+    deadline" (the `waitset_wait`/`irq_wait` convention). Same capability +
+    grant + size checks as `ipc_call` (no new authority; the endpoint's
+    send-cap and any per-endpoint grant are re-checked kernel-side, §5.4).
+  - `call_reap(endpoint, ticket, reply_ptr, reply_cap)` — non-blocking
+    `take_reply`: copies the reply out and returns its length on
+    `Ready`; `-WouldBlock` on `Pending`; `-TimedOut` if the ticket's deadline
+    has passed (the kernel retires the ticket and, best-effort, cancels the
+    in-flight request); `-NotFound` on `Cancelled`/`Unknown` (endpoint torn
+    down, or not this caller's ticket — no existence oracle, §5.4).
+  - `call_cancel(endpoint, ticket)` — withdraw one outstanding request
+    (a per-ticket form of the existing `cancel_posted_by`), so a consumer
+    abandoning a wedged transfer frees the endpoint slot deterministically.
+  - **Wait-set completion source: `WaitSourceKind::CallReply`** (`id` = the
+    endpoint id). Added to a wait-set the consumer owns; owner-checked at
+    add time by the caller's send authority to that endpoint (the `ipc_call`
+    grant check), never the endpoint *owner* check (the caller is the client,
+    not the server). Readiness is the existing non-consuming peek:
+    `CallEndpoint::has_ready_reply_for(claimant)` — a reply the caller posted
+    is `completed` and unclaimed, **or** its deadline has elapsed (so a
+    timeout wakes the waiter exactly like a real completion). The woken
+    consumer drains with `call_reap`, never the wait.
+  - New `CallEndpoint` methods (host-unit-tested in `kernel/ipc`):
+    `has_ready_reply_for(claimant)`, `cancel_one(claimant, ticket)`, and a
+    per-ticket `deadline` recorded in `PendingCall`/`in_service` so
+    `take_reply`/reap can surface `-TimedOut`. The deadline is armed through
+    the same timed wait-queue the kernel already uses (`waitq`), so it is
+    event-timed, never a spin (§2.23).
 - **`BlkCompletion` gains an explicit outcome/health axis** in
   `lib/abi/src/blkio.rs`, replacing the bare success-or-`-errno` frame with a
-  status enum: `Ok`, `TransientError` (retryable — recovered ECC, comms
-  glitch), `Timeout`, `Reset` (aborted by a device/hub reset; safe to
-  reissue), `Degraded` (served, but the device reports itself unhealthy),
-  `MediumError` (permanent bad-sector), `Offline`/`Removed` (surprise removal,
-  already precedented in `sysinfo.rs`), `Fatal`. The consumer isolates on the
-  class rather than guessing from an `Errno`.
-- **`errno_to_driver` / `DriverError` grow the matching typed classes** so the
-  filesystem layer can act (transient/reset → reissue; medium/offline →
-  surface as I/O error).
+  leading `BlkStatus` word: `Ok`, `TransientError` (retryable — recovered
+  ECC, comms glitch), `Timeout`, `Reset` (aborted by a device/hub reset; safe
+  to reissue), `Degraded` (served, but the device reports itself unhealthy),
+  `MediumError` (permanent bad-sector), `Offline`/`Removed` (surprise
+  removal, already precedented in `sysinfo.rs`), `Fatal`. `Timeout` is
+  synthesised kernel-side by the `call_reap` deadline path (the serving
+  driver need not answer to produce it); the others the serving driver emits
+  from what it already knows (SCSI sense → `MediumError`, surprise-removal →
+  `Offline`/`Removed`, recovered error → `TransientError`, device health →
+  `Degraded`). Decoded fail-closed: an unknown status word is `Fatal`, never
+  silently `Ok`.
+- **`errno_to_driver` / `DriverError` grow the matching typed classes**
+  (`DriverError` is the `#[repr(i32)] #[non_exhaustive]` enum in
+  `lib/abi/src/driver/mod.rs`): add `MediumError`, `DeviceOffline` (device
+  present but unresponsive/removed), and reuse `Busy`/`DeviceFault`/
+  `EndpointStalled` for the transient/reset classes, each with a distinct
+  `Errno` so the filesystem layer can act (transient/reset → reissue;
+  medium/offline → surface as I/O error). No status collapses to a generic
+  `DeviceFault` (root cause #3).
 - **Per-device bounds are policy, not a global `const`** (§24.1 vs §24.4): the
   deadline, retry count, and queue depth are derived from the device's
   discovered class (a rotational SATA disk ≠ an NVMe namespace) and fail closed
-  under pressure (§26.1).
+  under pressure (§26.1). The class → budget mapping lives in one place both
+  the serving driver and the consumer read, never a copied literal (§2.2).
 
-Tests (§7): extend the `blk.rs` host doubles — a `BlkCall` that stalls past the
-deadline returns `-TimedOut`/`Timeout` and the consumer unblocks; round-trip and
-fail-closed decode of every new status class; fuzz the completion/status decode
-and the deadline path (§19.6).
+Consumers rewritten in place (no shim, §2.13): the kernel-side block client
+(`kernel/core/src/fs/blkclient.rs`), the volume manager's `RemoteBlock`
+(`drivers/storage/volmgr/src/blk.rs` — its `BlkCall` seam becomes
+submit/reap-on-a-wait-set while the synchronous `Block` trait it exposes to
+filesystems is preserved, so the filesystems are unchanged), and the serving
+side (`drivers/storage/usb_msd/src/serve.rs`, plus the `virtio_blk`/`emmc2`
+serve paths) to emit `BlkStatus`. The `lib/rt`/`lib/drvrt` wrappers, the
+syscall table (`lib/abi/src/syscalls.rs` → `kernel/syscall/src/table.rs`),
+the generated C header, and the fuzz/proptest syscall models gain the three
+new calls; `cargo xtask abi-check`/`c-header` enforce the drift guards.
+
+Tests (§7): `kernel/ipc` unit tests for `call_post`/`call_reap`/`call_cancel`
++ deadline + `has_ready_reply_for` (round-trip, `-WouldBlock`, `-TimedOut`,
+per-ticket cancel, claimant mismatch fails closed); `kernel/core` wait-set
+tests that a `CallReply` member wakes on a ready reply and on a deadline; the
+`blk.rs` host doubles — a serving double that stalls past the deadline yields
+`Timeout` and the consumer unblocks; round-trip and fail-closed decode of
+every new `BlkStatus`; fuzz the completion/status decode and the reap/deadline
+path (§19.6).
 
 ### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **planned**
 
@@ -305,12 +369,12 @@ callers only if it does not), and the whole system responsive throughout.
 ## 4. Scope / escalation (§15.7)
 
 This spans `lib/abi` (block seam + status/health enum + fault-domain), the
-kernel IPC/timer path (deadlined/async call + cancel), every block driver
-(`usb_msd`, `virtio_blk`, `emmc2`), `volmgr`, the filesystem drivers,
-`sysinfo`, and `lib/log`. It is larger than one change, hence the staging above:
-each stage lands complete and green on its own. The exact IO1 transport shape
-(async submit/complete vs deadlined synchronous call) is the one open decision
-that touches everything downstream — if it turns out to conflict with the
-in-flight HCD async event loop (`plans/USB.md`), that is a stop-and-ask point,
-not a place to pick a "for now" compromise (§2.19). IO6 is gated on RustFS
-existing; IO1–IO5 do not depend on it and land first.
+kernel IPC/timer path (async call post/reap/cancel + per-request deadline +
+the `CallReply` wait-set source), every block driver (`usb_msd`, `virtio_blk`,
+`emmc2`), `volmgr`, the filesystem drivers, `sysinfo`, and `lib/log`. It is
+larger than one change, hence the staging above: each stage lands complete and
+green on its own. The IO1 transport shape is decided — the async
+submit/complete seam (Stage IO1) — so the downstream stages build on the
+ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
+HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6 is
+gated on RustFS existing; IO1–IO5 do not depend on it and land first.
