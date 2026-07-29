@@ -1,6 +1,5 @@
-//! Build script for the aarch64 pre-boot-Supervisor destructive
-//! `memtest` takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9
-//! Stage E).
+//! Build script for the aarch64 pre-boot-Supervisor `memtest` takeover
+//! QEMU vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target, identical
 //! to the ESC boot-screen vertical this mirrors:
@@ -10,10 +9,9 @@
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it,
 //!    because QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer
 //!    (`x0 = 0`); the boot pipeline is handed a pointer to this embedded
-//!    blob so it discovers the console, GIC, `/memory` window, timer rate,
-//!    and — crucially for the takeover — the `/psci` reset conduit exactly
-//!    as on real firmware. The dump helper lives in the shared harness so no
-//!    aarch64 build script re-rolls it.
+//!    blob so it discovers the console, GIC, `/memory` window, and timer rate
+//!    exactly as on real firmware. The dump helper lives in the shared harness
+//!    so no aarch64 build script re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
 //! deterministic.
@@ -38,8 +36,13 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        // One CPU: the takeover is driven from the boot CPU and the port is
-        // single-core (its quiesce step verifies no secondary was started).
+        // One CPU: this vertical exercises the aarch64 takeover's no-peers
+        // quiesce path (like the single-hart riscv64 sibling); the genuine
+        // multi-core quiesce is proven by the x86_64 sibling (`-smp 4`, its
+        // CPUs discovered from ACPI rather than an embedded DTB). Keeping this
+        // guest single-core also keeps it a light citizen in the parallel QEMU
+        // matrix — a continuous memtest pins every core it is given until the
+        // harness resets it.
         tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.

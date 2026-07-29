@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-supervisor-memtest-takeover-qemu-aarch64"
-description = "plans/NEW-SUPERVISOR.md §9 Stage E QEMU vertical: boot the aarch64 virt pipeline and drive the pre-boot Supervisor's one-way destructive memtest-full takeover, asserting the guest ends in a machine reset (QEMU -no-reboot exits 0)."
+description = "plans/NEW-SUPERVISOR.md §9 Stage E QEMU vertical: boot the aarch64 virt pipeline and drive the pre-boot Supervisor's one-way whole-RAM memtest takeover, asserting the guest tests all of RAM continuously and the harness resets it after a completed loop (QEMU -no-reboot exits 0)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,11 +18,14 @@ workspace = true
 # (`AuditEvent::BootCompleted`, the point where the Supervisor system is
 # published and the kernel state is fully built), drives
 # `supervisor_system().memtest_takeover(...)`. On the wired aarch64 port that
-# never returns: it quiesces, masks interrupts, flattens paging, destructively
-# tests all of RAM, and PSCI-resets — so QEMU (`-no-reboot`) exits with status
-# 0 and the runner registers `Outcome::Pass`. If the takeover ever *returns*
-# (refused/unsupported) the sink writes a fail finisher, so a regression that
-# stops resetting fails loud. Keeping the observer behaviour in a separate bin
+# never returns: it quiesces every other core, masks interrupts, flattens
+# paging, and tests all of RAM continuously on a reserved stack. The takeover
+# never resets the board itself; once the guest completes one test loop the
+# harness issues a QEMU-monitor `system_reset`, so QEMU (`-no-reboot`) exits
+# with status 0 and the runner registers `Outcome::Pass`. If the takeover ever
+# *returns* (refused/unsupported) the sink writes a fail finisher, so a
+# regression that stops the test running fails loud. Keeping the observer
+# behaviour in a separate bin
 # (not a Cargo feature on a production crate) prevents feature unification from
 # leaking the takeover trigger into any production build (fail closed).
 

@@ -614,15 +614,14 @@ impl KernelArch for BinArch {
         &self,
         _grant: &tairix_kernel_core::supervisor_system::TakeoverGrant,
     ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
-        // The x86_64 destructive whole-RAM takeover the Supervisor's confirmed
-        // `memtest` drives (`plans/NEW-SUPERVISOR.md` §9). The handle is
-        // minted only through the arch port's gated accessor, and this override
-        // is itself reachable only with the supervisor-only `TakeoverGrant`, so
-        // the mechanism stays confined to that one path. Unlike aarch64 there
-        // is no discovered reset conduit to thread: the relocated stub resets
-        // through the legacy 8042 / `0xCF9` reset hardware every PC-class board
-        // decodes (the same channels `reset::reboot` uses), so the handle is
-        // stateless.
+        // The x86_64 whole-RAM takeover the Supervisor's confirmed `memtest`
+        // drives (`plans/NEW-SUPERVISOR.md` §9). The handle is minted only
+        // through the arch port's gated accessor, and this override is itself
+        // reachable only with the supervisor-only `TakeoverGrant`, so the
+        // mechanism stays confined to that one path. The takeover never resets
+        // the machine itself — the `memtest` sweep tests RAM continuously until
+        // the operator resets the machine — so the handle is stateless and
+        // needs no reset hardware.
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
             Some(tairix_arch_x86_64::takeover::machine_takeover_handle())

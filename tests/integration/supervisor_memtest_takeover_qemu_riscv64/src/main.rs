@@ -19,23 +19,26 @@
 //! driven directly here because the riscv64 SBI console offers no interactive
 //! input to key the REPL and the takeover run cannot return anyway).
 //!
-//! The guest boots with four harts, so this genuinely exercises the cross-CPU
-//! quiesce: `drive_takeover` stops the three secondary harts through the
-//! bounded IPI-halt handshake before the tear-down begins.
+//! The production riscv64 port is single-hart, so this boots single-hart and
+//! the cross-CPU quiesce runs its "no online peers, succeed immediately" path
+//! — the same handshake code the other two Tier-1 ports prove with real
+//! secondaries, with nothing to stop here.
 //!
 //! On the wired riscv64 port `memtest_takeover` **never returns**: the caller
-//! quiesces every other hart, then the `MachineTakeover` body masks
-//! S-mode interrupts, flattens paging to bare mode, tests every
-//! usable frame on a reserved stack (rendering the memtest86-style display to
-//! this serial console), tests the kernel-image region with the relocated
-//! stub, and issues an SBI System-Reset. QEMU runs the riscv64 board with
-//! `-no-reboot`, so that reset exits the host process with status 0 and the
-//! runner registers `Outcome::Pass`.
+//! quiesces every other hart (none here), then the `MachineTakeover` body masks
+//! S-mode interrupts, flattens paging to bare mode, and tests every usable
+//! frame on a reserved stack — cycling every pattern over all of RAM, over and
+//! over, rendering the memtest86-style display (elapsed timer, completed-loop
+//! count, error log) to this serial console. The takeover never resets the
+//! board itself; once the guest prints the completed-test-loop marker the
+//! harness issues a QEMU-monitor `system_reset`, and under `-no-reboot` that
+//! reset exits the host process with status 0 so the runner registers
+//! `Outcome::Pass`.
 //!
-//! A normal boot that reached idle without resetting would time out
-//! (`Outcome::Timeout`), and a takeover that *returned* (refused/unsupported)
-//! makes the sink write a fail finisher — so a regression that stops the port
-//! resetting fails loud rather than passing by accident.
+//! A boot that never reached a completed test loop would fall silent and time
+//! out (`Outcome::Timeout`), and a takeover that *returned* (refused/
+//! unsupported) makes the sink write a fail finisher — so a regression that
+//! stops the test running fails loud rather than passing by accident.
 //!
 //! ## How it differs from a production kernel
 //!

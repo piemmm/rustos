@@ -54,19 +54,25 @@
 //!    identity page table rooted in a reserved arena), and perform the cache
 //!    maintenance the whole-RAM writes require.
 //! 4. **Switch onto a reserved stack the sweep will never overwrite** and run
-//!    the caller-supplied `sweep` — the architecture-neutral phase that
-//!    tests every *usable* frame and renders progress. The port
-//!    guarantees the sweep executes only from memory the sweep does not
-//!    destroy (its code lives in the reserved kernel image; its stack and all
-//!    state it reads are in reserved memory — see the `sweep` safety
-//!    contract on [`MachineTakeover::take_over`]).
-//! 5. **Test the region the sweep executed from** — the kernel image and the
-//!    stack it ran on, which `sweep` necessarily could not touch — with a
-//!    small self-contained, relocated per-port stub that never touches the
-//!    firmware region (overwriting it would break the reset path), then
-//!    **reset** the machine. This is the memtest86-complete "all of RAM"
-//!    coverage: only the tiny relocated stub arena and the firmware are
-//!    excluded, and both are unavoidable.
+//!    the caller-supplied `sweep` — the architecture-neutral phase that tests
+//!    every *usable* frame and renders progress. The port guarantees the
+//!    sweep executes only from memory the sweep does not destroy (its code
+//!    lives in the reserved kernel image; its stack and all state it reads are
+//!    in reserved memory — see the `sweep` safety contract on
+//!    [`MachineTakeover::take_over`]). The Supervisor's `memtest` sweep tests
+//!    all of RAM **continuously** and never returns — the operator ends the
+//!    run by resetting the machine — so on a supported port `take_over` runs
+//!    the sweep and never hands control back. The one region the sweep cannot
+//!    test is the memory it executes from (the kernel image and its reserved
+//!    stack); a continuous run leaves that resident image intact by necessity,
+//!    exactly as a running memtest86 cannot test its own resident code. Should
+//!    a future `sweep` ever return, the port parks the sole CPU in a masked
+//!    halt rather than resume kernel code — the machine has been torn down.
+//!
+//! Because the takeover needs no software reset (the operator power-cycles or
+//! resets the board), a port requires **no** reset conduit to be available:
+//! every Tier-1 bare-metal port supports the takeover regardless of the
+//! firmware's reset facilities.
 //!
 //! On any pre-teardown refusal — no takeover mechanism wired, a quiesce
 //! timeout, or a preparation the port could not complete — `take_over`
@@ -90,7 +96,8 @@
 //! the sweep* — exactly the behaviour `wasm32` and the not-yet-wired ports
 //! exhibit. The real per-port takeover is proven end-to-end by the
 //! memtest-takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E),
-//! whose guest ends in a reset rather than resuming boot.
+//! whose guest is externally reset once it reports a completed test loop
+//! rather than resuming boot.
 
 use crate::CpuId;
 
@@ -159,19 +166,20 @@ impl TakeoverError {
 ///   succeeds only once every other CPU is halted (or there are none), and
 ///   otherwise times out fail-closed within a bounded budget.
 pub trait MachineTakeover {
-    /// Take the whole machine over and run the one-way whole-RAM
-    /// test to completion, then reset. **Never returns on success.**
+    /// Take the whole machine over and run the one-way whole-RAM test.
+    /// **Never returns on success.**
     ///
     /// The port drives, in order and without handing control back to normal
     /// kernel code: quiesce every other CPU (bounded, fail-closed), mask
     /// interrupts, stop the lockup watchdog, flatten paging so physical RAM
     /// is addressed directly, switch onto a reserved stack the sweep cannot
-    /// overwrite, call `sweep` (the architecture-neutral phase that
-    /// tests every *usable* frame and renders progress), then
-    /// test the region the sweep executed from — the kernel image and the
-    /// stack it ran on — with a small relocated per-port stub that never
-    /// touches the firmware, and finally reset. See the module docs for the
-    /// full contract.
+    /// overwrite, and call `sweep` (the architecture-neutral phase that tests
+    /// every *usable* frame and renders progress). The Supervisor's `memtest`
+    /// sweep tests all of RAM continuously and never returns — the operator
+    /// ends the run by resetting the machine — so on a supported port this
+    /// call runs the sweep and never comes back. Should a `sweep` ever return,
+    /// the port parks the sole CPU in a masked halt rather than resume kernel
+    /// code. See the module docs for the full contract.
     ///
     /// # Returns / errors
     ///
@@ -180,13 +188,14 @@ pub trait MachineTakeover {
     /// [`TakeoverError::CpuQuiesceTimeout`] (a secondary would not halt), or
     /// [`TakeoverError::PrepareFailed`] (the port could not complete the
     /// pre-sweep preparation). On every such return the machine is unchanged
-    /// and `sweep` was not called. On success it never returns (the machine
-    /// resets).
+    /// and `sweep` was not called. On success it never returns (it runs the
+    /// caller's whole-RAM sweep, which for `memtest` loops until the operator
+    /// resets the machine).
     ///
     /// # Safety
     ///
-    /// The caller must guarantee this is the confirmed, audited `memtest
-    /// full` path — the operator has decided to tear the machine down, so
+    /// The caller must guarantee this is the confirmed, audited `memtest`
+    /// path — the operator has decided to tear the machine down, so
     /// stopping every other CPU, flattening paging, and overwriting all of
     /// RAM are the intended, deliberate actions.
     ///

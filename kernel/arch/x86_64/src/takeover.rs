@@ -40,38 +40,22 @@
 //!    the *usable* RAM it is about to destroy.
 //! 4. **Run the sweep** (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console) on the reserved stack.
-//! 5. **Test the region the sweep could not** — the kernel image and the
-//!    stack it ran on, the physical range `[__boot_phys_start,
-//!    __kernel_phys_end)` — with the relocatable, register-only
-//!    `_takeover_stub` copied into a just-swept usable page above the kernel
-//!    image (the "arena"). Because long mode requires paging and the boot
-//!    page tables sit inside the region under test, the takeover first builds
-//!    a minimal identity page table in that same arena and hands the stub its
-//!    `%cr3`; the stub installs it, tests the region, and resets the platform
-//!    through the legacy 8042 / `0xCF9` reset hardware. The arena (the stub
-//!    and its page tables) and the low firmware/ACPI reserved RAM are the only
-//!    RAM excluded, both unavoidable.
+//!    The Supervisor's `memtest` sweep tests all of RAM continuously and
+//!    never returns; the operator ends the run by resetting the machine.
+//!    Should a `sweep` ever return, the CPU parks in a masked `hlt` loop
+//!    rather than resume kernel code — the machine has been torn down.
 //!
-//! This body owns no pre-teardown refusal of its own (the reset hardware is
-//! always present on this port); the quiesce refusal is the caller's and is
-//! fail-closed there.
+//! The one region the sweep cannot test is the memory it executes from — the
+//! kernel image and its reserved stack — because a continuous run must keep
+//! that resident image intact to go on running, exactly as a running memtest86
+//! cannot test its own resident code.
+//!
+//! This body owns no pre-teardown refusal of its own; the quiesce refusal is
+//! the caller's and is fail-closed there.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
-use crate::paging::{flags, KERNEL_VMA_BASE, PAGE_SIZE};
-
 extern "C" {
-    /// First byte of the kernel image, at its 1:1 low *physical* load address
-    /// (`linker.ld`: `. = 1M; __boot_phys_start = .`). The inclusive lower
-    /// bound of the region the relocated stub self-tests; everything below it
-    /// is low firmware / BIOS / ACPI reserved RAM the stub must never touch.
-    static __boot_phys_start: u8;
-    /// One-past-the-end *physical* address of the whole kernel image (boot
-    /// trampoline through the end of `.bss`, including the bump heap;
-    /// `linker.ld`: `__kernel_phys_end = . - KERNEL_VMA_BASE`). The exclusive
-    /// upper bound of the stub's self-test region; 4 KiB-aligned by the
-    /// linker.
-    static __kernel_phys_end: u8;
     /// The boot PML4 (`boot.s`, `.boot.bss`), linked 1:1 in low memory so its
     /// symbol address **is** its physical address — the reserved `%cr3` the
     /// sweep runs under.
@@ -81,8 +65,7 @@ extern "C" {
 /// Size of the reserved takeover stack, in bytes (64 KiB — matching the
 /// riscv64/aarch64 ports and the boot stack's headroom). It lives in the
 /// kernel image's `.bss` (reserved), so the sweep (which tests only *usable*
-/// frames) never overwrites it; the relocated stub tests it as part of the
-/// kernel-image region *after* the sweep has finished using it.
+/// frames) never overwrites it.
 const TAKEOVER_STACK_BYTES: usize = 64 * 1024;
 
 /// The reserved takeover stack the sweep runs on.
@@ -90,8 +73,7 @@ const TAKEOVER_STACK_BYTES: usize = 64 * 1024;
 /// `UnsafeCell` because the CPU writes through it via `%rsp` while the Rust
 /// aliasing model would otherwise treat a plain `static` as immutable; it is
 /// never read as a Rust value, only used as raw stack backing. A takeover
-/// happens at most once per boot (the machine resets), so there is no
-/// concurrent access.
+/// happens at most once per boot, so there is no concurrent access.
 #[repr(C, align(16))]
 struct TakeoverStack {
     bytes: core::cell::UnsafeCell<[u8; TAKEOVER_STACK_BYTES]>,
@@ -108,22 +90,12 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
     bytes: core::cell::UnsafeCell::new([0u8; TAKEOVER_STACK_BYTES]),
 };
 
-/// Round `addr` up to the next multiple of `align` (a power of two).
-///
-/// Operates in `u64` because x86_64 physical addresses are 64-bit (the arena
-/// sits just above the kernel image, potentially anywhere in the low physical
-/// window), so there is no lossy narrowing on the whole-RAM path.
-const fn align_up(addr: u64, align: u64) -> u64 {
-    (addr + align - 1) & !(align - 1)
-}
-
 /// The x86_64 machine-takeover handle (`plans/NEW-SUPERVISOR.md` §9).
 ///
 /// A zero-sized unit: the takeover needs no per-instance state (the reserved
-/// stack, the kernel-image bounds, the boot page tables, and the relocatable
-/// stub are all `static`/linker-provided). Held by the downstream
-/// `KernelArch` wrapper behind the supervisor-gated accessor and never
-/// constructed elsewhere.
+/// stack and the boot page tables are all `static`/linker-provided). Held by
+/// the downstream `KernelArch` wrapper behind the supervisor-gated accessor
+/// and never constructed elsewhere.
 pub struct X86MachineTakeover;
 
 /// The single `'static` takeover handle. Private to the crate: the only way
@@ -143,12 +115,6 @@ pub fn machine_takeover_handle() -> &'static (dyn MachineTakeover + Sync) {
 }
 
 extern "C" {
-    /// The relocatable, register-only kernel-image self-test + reset stub
-    /// (`takeover.s`). Its address and [`_takeover_stub_end`] bound the bytes
-    /// copied into the arena.
-    fn _takeover_stub();
-    /// One past the last byte of [`_takeover_stub`].
-    fn _takeover_stub_end();
     /// Install the reserved stack and tail-call
     /// [`tairix_arch_x86_64_takeover_continue`] (`takeover.s`). Never returns.
     fn _takeover_switch_stack(thin: usize, stack_top: usize) -> !;
@@ -169,14 +135,13 @@ impl MachineTakeover for X86MachineTakeover {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
 
-        // 2. Switch onto the reserved stack and run the sweep, then test the
-        //    kernel-image region and reset — none of which returns. The sweep
-        //    handle is reached through a thin pointer to the caller's `&mut
-        //    dyn FnMut()`, read once at entry (on the still-live caller stack)
-        //    before the switch. The reserved stack is `.bss`, mapped in the
-        //    higher half under whatever `%cr3` is active, so the switch is
-        //    valid before the boot page tables are installed (step 4, in the
-        //    continuation).
+        // 2. Switch onto the reserved stack and run the sweep, which never
+        //    returns. The sweep handle is reached through a thin pointer to
+        //    the caller's `&mut dyn FnMut()`, read once at entry (on the
+        //    still-live caller stack) before the switch. The reserved stack is
+        //    `.bss`, mapped in the higher half under whatever `%cr3` is active,
+        //    so the switch is valid before the boot page tables are installed
+        //    (step 3, in the continuation).
         let mut sweep_ref: &mut dyn FnMut() = sweep;
         let thin = core::ptr::addr_of_mut!(sweep_ref) as usize;
         let stack_top = core::ptr::addr_of!(TAKEOVER_STACK) as usize + TAKEOVER_STACK_BYTES;
@@ -188,10 +153,9 @@ impl MachineTakeover for X86MachineTakeover {
     }
 }
 
-/// Install the reserved boot page tables, run the whole-RAM sweep on the
-/// reserved stack, then test the region it executed from and reset. Entered
-/// from `_takeover_switch_stack` with `%rsp` already on the reserved takeover
-/// stack; never returns.
+/// Install the reserved boot page tables and run the whole-RAM sweep on the
+/// reserved stack; never returns. Entered from `_takeover_switch_stack` with
+/// `%rsp` already on the reserved takeover stack.
 ///
 /// # Safety
 ///
@@ -203,10 +167,9 @@ impl MachineTakeover for X86MachineTakeover {
 unsafe extern "C" fn tairix_arch_x86_64_takeover_continue(thin: usize) -> ! {
     // 3. Install the reserved boot page tables (`%cr3 = boot_pml4`). They live
     //    in `.boot.bss` (reserved) and map both the higher-half kernel window
-    //    the sweep writes physical RAM through and the low identity window the
-    //    relocated stub later executes from, so nothing the sweep destroys is
-    //    depended upon. `boot_pml4`'s symbol address is its physical address
-    //    (linked 1:1 in low memory).
+    //    the sweep writes physical RAM through and the low identity window, so
+    //    nothing the sweep destroys is depended upon. `boot_pml4`'s symbol
+    //    address is its physical address (linked 1:1 in low memory).
     let boot_cr3 = core::ptr::addr_of!(boot_pml4) as u64;
     // SAFETY: `boot_pml4` is the boot page-table root the kernel itself booted
     // on; loading it re-establishes the reserved mapping. Its higher-half
@@ -225,93 +188,15 @@ unsafe extern "C" fn tairix_arch_x86_64_takeover_continue(thin: usize) -> ! {
     let sweep = unsafe { &mut *(thin as *mut &mut dyn FnMut()) };
     sweep();
 
-    // 5. The sweep tested every *usable* frame. The one region it could not
-    //    touch is the memory it ran from — the kernel image and this stack.
-    // SAFETY: the sweep has completed; relocating the register-only stub into
-    // a swept usable arena and jumping to it tests that region and resets,
-    // never returning.
-    unsafe { relocate_stub_and_reset() }
-}
-
-/// Build a minimal identity page table plus a copy of the relocatable stub in
-/// a swept usable arena above the kernel image, then jump to the stub to test
-/// `[__boot_phys_start, __kernel_phys_end)` and reset. Never returns.
-///
-/// # Safety
-///
-/// Called only from [`tairix_arch_x86_64_takeover_continue`] after the
-/// usable-RAM sweep, with interrupts masked and the boot page tables active.
-/// The arena is swept usable RAM above the kernel image; it is overwritten
-/// wholesale, so it must not hold anything still needed.
-unsafe fn relocate_stub_and_reset() -> ! {
-    let start = core::ptr::addr_of!(__boot_phys_start) as u64;
-    let end = core::ptr::addr_of!(__kernel_phys_end) as u64;
-
-    // The arena: four contiguous 4 KiB pages of swept usable RAM immediately
-    // above the kernel image — a PML4, a PDPT, one PD (identity-mapping the
-    // low 1 GiB with 2 MiB huge pages, enough to cover the kernel image and
-    // the stub's own execution page), and the stub's code page. Their
-    // physical addresses are all below the 1 GiB higher-half window, so the
-    // boot page tables let this code write them through
-    // `KERNEL_VMA_BASE + phys`.
-    let page = PAGE_SIZE as u64;
-    let arena = align_up(end, page);
-    let pml4_phys = arena;
-    let pdpt_phys = arena + page;
-    let pd_phys = arena + 2 * page;
-    let stub_phys = arena + 3 * page;
-
-    // A power-of-two "present + writable" leaf/table flag set and the 2 MiB
-    // huge-page identity mapping, reusing the port's own PTE flag definitions
-    // rather than re-spelling raw bits.
-    let table_flags = flags::PRESENT | flags::WRITABLE;
-    // SAFETY: each arena page is plain RAM below the 1 GiB higher-half window,
-    // reachable at `KERNEL_VMA_BASE + phys` under the boot page tables just
-    // installed, and outside the `[start, end)` region the stub will test, so
-    // writing the page tables and stub bytes here corrupts nothing the stub
-    // depends on. The pages were swept, so their prior contents are dead.
-    unsafe {
-        let pml4 = (KERNEL_VMA_BASE + pml4_phys) as *mut u64;
-        let pdpt = (KERNEL_VMA_BASE + pdpt_phys) as *mut u64;
-        let pd = (KERNEL_VMA_BASE + pd_phys) as *mut u64;
-        // Zero the three table pages, then chain PML4[0] -> PDPT[0] -> PD.
-        for i in 0..512 {
-            pml4.add(i).write_volatile(0);
-            pdpt.add(i).write_volatile(0);
+    // The Supervisor's `memtest` sweep loops until the operator resets the
+    // machine, so control never reaches here. If a future finite sweep ever
+    // returned, the machine has been torn down (usable RAM overwritten) and
+    // must not resume kernel code, so park the sole CPU.
+    loop {
+        // SAFETY: interrupts are masked; `hlt` merely idles the parked CPU
+        // until the operator resets the machine.
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
         }
-        pml4.write_volatile(pdpt_phys | table_flags);
-        pdpt.write_volatile(pd_phys | table_flags);
-        // Identity-map [0, 1 GiB) with 512 * 2 MiB huge pages (P|RW|PS).
-        const HUGE_2MIB: u64 = 2 * 1024 * 1024;
-        for k in 0..512u64 {
-            pd.add(k as usize)
-                .write_volatile(k * HUGE_2MIB | table_flags | flags::HUGE);
-        }
-
-        // Copy the relocatable stub into its arena page (via the higher-half
-        // window). It will execute at its identity address `stub_phys`.
-        let stub_src = _takeover_stub as *const () as *const u8;
-        let stub_end = _takeover_stub_end as *const () as usize;
-        let stub_len = stub_end - (_takeover_stub as *const () as usize);
-        let stub_dst = (KERNEL_VMA_BASE + stub_phys) as *mut u8;
-        core::ptr::copy_nonoverlapping(stub_src, stub_dst, stub_len);
-    }
-
-    // Jump to the stub at its low identity address (mapped executable by the
-    // boot page tables' 0..4 GiB identity window). The stub installs the arena
-    // `%cr3`, tests `[start, end)`, and resets — it never returns.
-    // SAFETY: `stub_phys` holds the freshly-copied register-only stub, mapped
-    // identity and executable under the active boot page tables; the arguments
-    // are passed in the System V registers the stub's entry contract names,
-    // and `dst` is a distinct scratch register so it cannot alias them.
-    unsafe {
-        core::arch::asm!(
-            "jmp {dst}",
-            in("rdi") start,
-            in("rsi") end,
-            in("rdx") pml4_phys,
-            dst = in(reg) stub_phys,
-            options(noreturn, nostack),
-        );
     }
 }
