@@ -196,8 +196,8 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "memtest",
         aliases: &[],
-        summary: "thorough RAM test (memtest [passes] | memtest full); ESC aborts",
-        help: "memtest [passes | full]\n\n  With a pass count (default 1), run the thorough, non-destructive\n  multi-pattern RAM test (walking ones/zeros, address-in-address, moving\n  inversions) over free memory the Supervisor owns. Progress is shown;\n  press ESC to abort. A fault is reported loudly.\n\n  `memtest full` (alias `memtest --takeover`) is the DESTRUCTIVE, one-way\n  whole-RAM test: it takes the whole machine over, overwrites ALL of RAM\n  (including the running kernel), and can only end in a reset. It demands\n  an explicit typed confirmation and never returns on a platform that\n  supports it.",
+        summary: "whole-RAM test: takes the machine over and tests RAM until reset",
+        help: "memtest\n\n  The one-way whole-RAM test. It takes the whole machine over - stopping\n  every other CPU - and tests ALL of RAM continuously, cycling thorough\n  memtest86-style patterns (own-address, moving inversions, walking\n  ones/zeros) over every frame and looping until the machine is reset. The\n  display shows an elapsed timer, the count of completed test loops, the\n  current pattern, a progress bar, and a log of any errors found. It\n  overwrites the running kernel as it goes, so it can only end in a reset:\n  there is no confirmation prompt - running `memtest` IS the decision to\n  tear the machine down. On a platform that supports it this never returns;\n  otherwise the reason is reported and the Supervisor stays.",
         handler: commands::diag::cmd_memtest,
     },
     Command {

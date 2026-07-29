@@ -592,7 +592,7 @@ pub struct Spec {
     /// architecture-specific debug-exit success — is the intended success
     /// signal, accepted **only** when the captured serial also contains
     /// `marker`. This is how the pre-boot Supervisor's one-way destructive
-    /// `memtest full` takeover vertical passes on x86_64, where success is
+    /// `memtest` takeover vertical passes on x86_64, where success is
     /// normally the `isa-debug-exit` `0x21` status (a takeover cannot write
     /// it — it resets the real hardware). The marker gate keeps a crash that
     /// merely triple-faults into a reset (also status `0`) failing loud: it
@@ -662,7 +662,7 @@ impl Spec {
     /// contains `marker`. See [`Spec::reset_success_marker`]: this is the
     /// success signal for a run whose guest deliberately resets the machine
     /// rather than writing an architecture-specific debug-exit code (the
-    /// pre-boot Supervisor's one-way destructive `memtest full` takeover on
+    /// pre-boot Supervisor's one-way destructive `memtest` takeover on
     /// x86_64), with the marker gate keeping a crash-into-reset failing loud.
     #[must_use]
     pub fn with_reset_success_marker(mut self, marker: impl Into<String>) -> Self {
@@ -2192,9 +2192,8 @@ mod tests {
     fn reset_success_marker_accepts_a_marked_reset_exit() {
         // A guest that resets (status 0 under -no-reboot) having printed the
         // required marker is the takeover vertical's success: Pass.
-        let spec =
-            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
-        let serial = String::from("... memtest full: PASSED \u{2014} 181 MiB tested. Resetting.");
+        let spec = Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest: PASSED");
+        let serial = String::from("... memtest: PASSED \u{2014} 181 MiB tested. Resetting.");
         assert!(matches!(
             outcome_from_done(DoneReason::Exited(0), &spec, serial),
             Outcome::Pass
@@ -2205,8 +2204,7 @@ mod tests {
     fn reset_success_marker_rejects_an_unmarked_reset_exit() {
         // A crash that merely triple-faults into a reset (status 0) without
         // ever printing the marker must still fail loud, not pass by accident.
-        let spec =
-            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
+        let spec = Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest: PASSED");
         match outcome_from_done(DoneReason::Exited(0), &spec, "partial boot".into()) {
             Outcome::Fail { status, serial } => {
                 assert_eq!(status, 0);
@@ -2220,9 +2218,8 @@ mod tests {
     fn reset_success_marker_rejects_a_nonzero_exit_even_with_the_marker() {
         // Only a clean reset (status 0) is the success signal; a non-zero exit
         // is a failure regardless of what the guest printed.
-        let spec =
-            Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest full: PASSED");
-        match outcome_from_done(DoneReason::Exited(1), &spec, "memtest full: PASSED".into()) {
+        let spec = Spec::for_x86_64_kernel("/tmp/k").with_reset_success_marker("memtest: PASSED");
+        match outcome_from_done(DoneReason::Exited(1), &spec, "memtest: PASSED".into()) {
             Outcome::Fail { status, .. } => assert_eq!(status, 1),
             other => panic!("expected Fail, got {other:?}"),
         }

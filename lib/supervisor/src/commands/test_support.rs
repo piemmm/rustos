@@ -77,11 +77,9 @@ pub struct MockHost {
     pub rebooted: bool,
     /// Whether `poweroff` was called.
     pub powered_off: bool,
-    /// Whether the destructive `memtest full` takeover seam was invoked.
+    /// Whether the `memtest` takeover seam was invoked.
     pub takeover_requested: bool,
     mount_result: Option<MountOutcome>,
-    memtest_result: Option<TestOutcome>,
-    last_memtest_passes: Option<u32>,
     scan_result: Option<TestOutcome>,
     last_scan_device: Option<String>,
 }
@@ -92,20 +90,9 @@ impl MockHost {
         self.mount_result = Some(result);
     }
 
-    /// Set the result the next `memtest` returns.
-    pub fn set_memtest_result(&mut self, result: TestOutcome) {
-        self.memtest_result = Some(result);
-    }
-
     /// Set the result the next `test disk` returns.
     pub fn set_scan_result(&mut self, result: TestOutcome) {
         self.scan_result = Some(result);
-    }
-
-    /// The pass count the most recent `memtest` was asked for.
-    #[must_use]
-    pub fn last_memtest_passes(&self) -> Option<u32> {
-        self.last_memtest_passes
     }
 
     /// The device the most recent `test disk` scanned.
@@ -177,19 +164,6 @@ impl SupervisorHost for MockHost {
         out.line("date: 1970-01-01 00:00:12 UTC");
     }
 
-    fn memtest(
-        &mut self,
-        passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome {
-        self.last_memtest_passes = Some(passes);
-        // Exercise the abort predicate exactly as the real host would.
-        let _ = abort();
-        out.line("memtest: running...");
-        self.memtest_result.unwrap_or(TestOutcome::Passed)
-    }
-
     fn scan_disk(
         &mut self,
         device: &str,
@@ -219,7 +193,7 @@ impl SupervisorHost for MockHost {
         // return so the caller exercises the fail-closed "did not proceed"
         // path exactly as an unsupported real platform would.
         self.takeover_requested = true;
-        out.line("memtest full: takeover not supported on the test host.");
+        out.line("memtest: takeover not supported on the test host.");
     }
 
     fn audit(&mut self, event: SupervisorEvent) {
@@ -291,7 +265,7 @@ impl MockSession {
         self.host.powered_off
     }
 
-    /// Whether the destructive `memtest full` takeover seam was invoked.
+    /// Whether the `memtest` takeover seam was invoked.
     #[must_use]
     pub fn takeover_requested(&self) -> bool {
         self.host.takeover_requested
@@ -302,20 +276,9 @@ impl MockSession {
         self.host.set_mount_result(result);
     }
 
-    /// Set the next `memtest` result.
-    pub fn set_memtest_result(&mut self, result: TestOutcome) {
-        self.host.set_memtest_result(result);
-    }
-
     /// Set the next `test disk` result.
     pub fn set_scan_result(&mut self, result: TestOutcome) {
         self.host.set_scan_result(result);
-    }
-
-    /// The pass count the last `memtest` ran.
-    #[must_use]
-    pub fn last_memtest_passes(&self) -> Option<u32> {
-        self.host.last_memtest_passes()
     }
 
     /// The device the last `test disk` scanned.

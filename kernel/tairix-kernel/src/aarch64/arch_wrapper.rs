@@ -439,7 +439,7 @@ impl KernelArch for Aarch64BinArch {
         _grant: &tairix_kernel_core::supervisor_system::TakeoverGrant,
     ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
         // The aarch64 destructive whole-RAM takeover the Supervisor's
-        // confirmed `memtest full` drives (`plans/NEW-SUPERVISOR.md` §9). The
+        // confirmed `memtest` drives (`plans/NEW-SUPERVISOR.md` §9). The
         // handle is minted only through the arch port's gated accessor, and
         // this override is itself reachable only with the supervisor-only
         // `TakeoverGrant`, so the mechanism stays confined to that one path.

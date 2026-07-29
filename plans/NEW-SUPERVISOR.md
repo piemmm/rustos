@@ -230,14 +230,14 @@ spirit (§16.7) where a command has a coreutils analogue (`ls`, `echo`).
   band (reuse memstats / `KernelIntrospectSource`).
 - `mem map` — print the `BootMemoryMap` regions (usable/reserved) — pairs
   with `memtest`.
-- `memtest [passes]` — the "heavy" test. Reuse `tairix_kernel_mem::ramtest`
-  via `kernel/core::memtest`; add a **thorough** multi-pattern mode
-  (walking-ones/zeros, address-in-address, moving-inversions) with a
-  progress counter and **ESC-to-abort**. Strictly bounded, interruptible,
-  fail-loud on a fault. No raw pointer arithmetic — only the safe
-  `ramtest::run` over the `BootMemoryMap`. This stays the safe,
-  non-destructive test; the destructive whole-RAM `memtest full` takeover
-  mode is a distinct command specified in §9.
+- `memtest` — the **only** memory test, and it is the one-way
+  whole-RAM takeover specified in §9. It takes no arguments and asks for no
+  confirmation: running `memtest` *is* the decision to tear the machine down
+  (stop every other CPU, overwrite all of RAM, reset). There is no separate
+  bounded / multi-pass mode — an in-kernel RAM test can only ever
+  cover the frames it owns, so a partial "safe" test was misleading and has
+  been removed. The early-boot banner self-test (`kernel/core::memtest` over
+  `ramtest`) is a separate boot-time thing, not this command.
 - `ls [path]` — the "crude" listing. Pre-mount, the only readable volume is
   the always-readable `/System` (the driver store lives there); scope `ls`
   to `/System` and say so clearly when the root is not yet mounted. After a
@@ -284,11 +284,13 @@ kernel or arch types:
   `mount_root_disk_and_load_users` (the kernel wires the disk `Block`,
   install cells, and audit behind this closure so `lib/supervisor` never
   names them).
-- `introspect`/`hw`/`partitions`/`arxfs`/`ls`/`memtest`/`log` — each a
-  narrow read-only seam trait implemented in the kernel over the existing
-  sources (`KernelIntrospectSource`, the hardware tree, `lib/partition`,
-  the ARXFS descriptor read, the `/System` `FilesystemRead`, `memtest`, the
-  `lib/log` ring). `lib/supervisor` depends on **no** `kernel/*` crate
+- `introspect`/`hw`/`partitions`/`arxfs`/`ls`/`memtest_takeover`/`log` — each
+  a narrow seam trait implemented in the kernel over the existing sources
+  (`KernelIntrospectSource`, the hardware tree, `lib/partition`, the ARXFS
+  descriptor read, the `/System` `FilesystemRead`, the one-way takeover
+  drive, the `lib/log` ring). All are read-only except `memtest_takeover`,
+  which is the one-way whole-RAM test. `lib/supervisor` depends on **no**
+  `kernel/*` crate
   (§17.4): the seams are defined in `lib/supervisor` (or `lib/abi` where a
   type already exists) and implemented kernel-side.
 
@@ -313,8 +315,11 @@ today (`unlock_orchestrate.rs` / arch crates).
 - **Read-only by construction.** `ls`, `hw`, `disk`, `partitions`, `arxfs`,
   `log`, `mem`, `cpu`, `version`, `test disk` never write to disk and never
   expose an arbitrary physical-address read/poke that could break isolation.
-  `memtest` uses the safe `ramtest` engine over the `BootMemoryMap`, not raw
-  pointer arithmetic.
+  `memtest` is the sole exception and is deliberately one-way (§9); even
+  so it destroys RAM only through the safe, range-checked
+  `ramtest::sweep_pattern` engine over the `BootMemoryMap`, never raw
+  pointer arithmetic, and only after the operator invokes it and every other
+  CPU has been quiesced.
 - **Threat model stated, not glossed.** Pre-auth at the physical console =
   the §19.9 physical-attacker class (already out of scope). The response is
   loud auditing + fail-closed, never a weakened defence.
@@ -332,7 +337,8 @@ Land in the **same change**:
   seams; the full ESC/timeout/disambiguation state machine (lone ESC, ESC
   then `[`, ESC then printable, ESC at EOF, window-timeout fall-through,
   stray-byte discard); the dispatcher (exact match, unknown command,
-  tokeniser, `help`/`help <cmd>`); `memtest` abort path; fail-closed
+  tokeniser, `help`/`help <cmd>`); the prompt-free `memtest` drives the
+  audited takeover seam; fail-closed
   outcomes.
 - **`lib/vt` tests**: the `LoneEscape` / `LineFeed::Escape` resolution and
   that arrow/Delete CSI editing still works unchanged.
@@ -434,31 +440,30 @@ its own and is verified independently).
 
 ---
 
-## 9. `memtest full` — the destructive, one-way takeover RAM test
+## 9. `memtest` — the one-way takeover RAM test
 
-This section is **immediate work for an AI**, staged in well-defined full
-stages A–E; each stage is independently reviewable and must land complete
-(§27) with its tests and docs (§7, §13). It is **additive**: the existing
-non-destructive, bounded, ESC-abortable in-system `memtest` (§4.2) stays
-exactly as it is. The takeover mode is a distinct, explicitly-confirmed
-command.
+This section is staged in full stages A–E; each stage is independently
+reviewable and must land complete (§27) with its tests and docs (§7, §13).
+**`memtest` is the *only* memory test.** There is no separate safe
+command: an earlier bounded, in-kernel `memtest [passes]` existed but could
+only ever cover the frames it owned (never the live kernel), which was
+misleading, so it has been removed. `memtest` now *is* the takeover, and it
+runs with **no confirmation prompt** — invoking it is the decision.
 
-### 9.0 Why a takeover mode, and why it is the *only* way to test all of RAM
+### 9.0 Why `memtest` must take the machine over to test all of RAM
 
-The in-system `memtest` (`supervisor_system.rs`) runs **inside the live
-kernel**: it `alloc()`s free frames, tests each with `ram_test_owned_window`,
-frees them, and is deliberately capped (`MEMTEST_MAX_BYTES`, and never more
-than half of free RAM) precisely because "a RAM test must confine itself to
-memory it explicitly owns … never the live map (that would corrupt the
-running kernel)". It therefore can **never** test the RAM the kernel image,
-heap, page tables, or stacks occupy — the same wall memtest86 avoids by
-owning the whole machine.
+Any RAM test that runs **inside the live kernel** can only test frames it
+explicitly owns — never the RAM the kernel image, heap, page tables, or
+stacks occupy, because corrupting the live map destroys the running kernel.
+That is the same wall memtest86 avoids by owning the whole machine, and it is
+why the old capped in-kernel test could never be honest about "all of RAM".
 
-A takeover mode is the correct — and only — way to test *all* of RAM. It is a
-**one-way trip**, exactly like `reboot`/`poweroff`: there is no "drop back
-into the system", the only exits are reset/power-off. That irreversibility is
-what makes the confirmation (Stage C) and the pre-jump audit (Stage C)
-mandatory, not optional.
+So `memtest` takes the machine over: it is a **one-way trip**, exactly like
+`reboot`/`poweroff` — there is no "drop back into the system", the only exits
+are reset/power-off. That irreversibility is why the decision is audited
+before the attempt (Stage C); it is **not** gated behind a typed
+confirmation, because a bounded, safe alternative no longer exists
+to "fall back" to — running the one memory test there is *is* the intent.
 
 ### 9.1 Binding decisions (whole feature)
 
@@ -469,21 +474,27 @@ mandatory, not optional.
 - **Split arch-neutral vs arch-specific honestly (§2.20 / §2.21 / §17.2).**
   The *pattern algorithm* (walking-ones/zeros, address-in-address,
   moving-inversions) is arch-neutral and already lives in
-  `tairix_kernel_mem::ramtest` — extend it with a destructive full-range
-  variant shared by all four targets. The *takeover mechanism* (quiesce
-  secondaries, mask interrupts + watchdog, relocate/flatten paging so the
-  test can address physical RAM, cache maintenance) is irreducibly
-  target-divergent and lives behind a **new Arch HAL slice**, implemented
-  per `kernel/arch/<target>/`. Do **not** `cfg(target_arch)` this into shared
+  `tairix_kernel_mem::ramtest` — extend it with a whole-RAM full-range
+  variant shared by all four targets. **Stopping the other CPUs is itself
+  architecture-neutral** and lives in one place, `kernel/arch/api::quiesce`
+  (the `quiesce_others` stop-request + boot-published liveness/ack tables +
+  bounded wait), driven by `kernel/core`'s `drive_takeover` over the neutral
+  `SchedulerArch::send_ipi`; only *parking* a stopped CPU is per-silicon
+  (each port's IPI-receive path calls `quiesce::stop_requested` →
+  `acknowledge` → its masked halt). The remaining *takeover mechanism* (mask
+  interrupts + watchdog, relocate/flatten paging so the test can address
+  physical RAM, cache maintenance, reset) is irreducibly target-divergent and
+  lives behind the **Arch HAL `MachineTakeover` slice**, implemented per
+  `kernel/arch/<target>/`. Do **not** `cfg(target_arch)` this into shared
   code (`cargo xtask cfg-check` forbids it).
 - **No raw pointer arithmetic without bounds-checked wrappers (§4).** The
-  destructive writes go through the safe, range-checked `ramtest` window over
+  the whole-RAM writes go through the safe, range-checked `ramtest` window over
   the `BootMemoryMap` (the `WordWindow` / `PhysWindow` abstraction already
   there), never ad-hoc pointers.
 - **Same threat model as the rest of the Supervisor (§0, §19.9).** It runs at
   the physical console *before the root is unlocked*, so **no key material or
   user secret is in RAM yet** — the destruction exposes nothing. That is a
-  reason to audit loudly and confirm explicitly, never to relax anything.
+  reason to audit loudly, never to relax anything.
 - **No panic on any path (§2.9).** A platform that cannot take over (no
   quiesce/relocate primitive) reports "not supported" fail-safe and stays in
   the REPL — exactly like `poweroff` on a port without a power-off primitive
@@ -491,20 +502,21 @@ mandatory, not optional.
   the machine and wedges.
 - **No busy-waiting as steady state (§2.23).** Quiescing the other CPUs is a
   legitimate *bounded handshake* (a documented §2.23 exception — the machine
-  is being deliberately torn down, so the secondaries spin-halt under a
-  bounded budget and it is documented as such), not a perpetual poll. If a
-  secondary does not acknowledge within the budget the takeover **fails
-  closed** (report "could not quiesce CPU N", stay in the REPL), it does not
-  spin forever.
+  is being deliberately torn down, so the boot CPU spin-polls the ack table
+  under a bounded budget while each stopped CPU parks on its masked halt),
+  not a perpetual poll. If a peer does not acknowledge within the budget the
+  takeover **fails closed** (`quiesce_others` returns `Err(cpu)`, the
+  Supervisor reports `takeover_cpu_quiesce_timeout` and stays in the REPL),
+  it does not spin forever.
 
-### Stage A — the arch-neutral destructive full-range pattern engine
+### Stage A — the arch-neutral whole-RAM full-range pattern engine
 
-- Extend `kernel/mem/src/ramtest.rs` with a **destructive** whole-region
+- Extend `kernel/mem/src/ramtest.rs` with a **whole-RAM** whole-region
   variant: given the `BootMemoryMap` and a physical-address window
   abstraction, run the full multi-pattern sweep (moving-inversions +
   address-in-address, reusing the existing `address_pass` / `test_window`
   primitives) across a physical range **without** the "leave it zeroed /
-  restore" contract the non-destructive `run` keeps — because the machine
+  restore" contract the safe `run` keeps — because the machine
   never resumes. Report progress through an injected `on_progress(tested,
   total)` callback and honour an injected `abort() -> bool` between chunks.
 - It stays pure `lib/*` logic over the `WordWindow` trait, so it is fully
@@ -512,7 +524,7 @@ mandatory, not optional.
 - **Host tests**: healthy region passes; each seeded `Fault`
   (`StuckLow`/`StuckHigh`/`Alias`) is caught with the correct reported
   physical offset; abort stops early; the engine touches every word in the
-  range (the point of "destructive full-range").
+  range (the point of "whole-RAM full-range").
 
 ### Stage B — the Arch HAL takeover slice
 
@@ -520,15 +532,20 @@ mandatory, not optional.
 `kernel/arch/api/src/takeover.rs` follows the `smp.rs`/`watchdog.rs` pattern.
 The object-safe `MachineTakeover` trait is **one** operation,
 `unsafe fn take_over(&self, sweep: &mut dyn FnMut()) -> TakeoverError`, that
-owns the *entire* irreversible sequence and never returns on success: quiesce
-secondaries (bounded, fail-closed) → mask interrupts → stop the watchdog →
-flatten paging → **switch onto a reserved stack the sweep cannot overwrite** →
-run the caller's `sweep` (the arch-neutral phase that destructively tests all
+owns the *entire* irreversible sequence and never returns on success: mask
+interrupts → stop the watchdog → flatten paging → **switch onto a reserved
+stack the sweep cannot overwrite** →
+run the caller's `sweep` (the arch-neutral phase that tests all
 *usable* RAM) → test the region the sweep executed from (kernel image + its
 stack, never the firmware) with a relocated per-port stub → reset. `take_over`
-**returns** only on a pre-destructive refusal (`TakeoverError`: `NotSupported`,
+**returns** only on a pre-teardown refusal (`TakeoverError`: `NotSupported`,
 `CpuQuiesceTimeout { cpu }`, `PrepareFailed(i64)`, stable `as_str()`), leaving
-the machine unchanged and `sweep` un-run. The host `takeover::conformance`
+the machine unchanged and `sweep` un-run. **Stopping the other CPUs happens
+before this, in the arch-neutral caller** (`kernel/core::drive_takeover` →
+`quiesce_others`), so `take_over` is only ever entered once this CPU is the
+sole one running; the `CpuQuiesceTimeout { cpu }` variant stays part of the
+neutral `TakeoverError` vocabulary but is produced by that upstream coordinator,
+not by `take_over` itself. The host `takeover::conformance`
 vertical (`run_unsupported`) proves the fail-closed vocabulary via an
 unsupported double *and asserts the sweep is never invoked* (a genuine takeover
 has no harmless input, so — unlike `smp` — a supported port is only proven by
@@ -540,7 +557,7 @@ the Stage E QEMU vertical). `KernelArch::machine_takeover`
 primitive).
 
 > **Why one operation, not the earlier `quiesce`+`prepare` pair.** The
-> Supervisor REPL (hence `memtest full`) runs on a kernel-service **kthread
+> Supervisor REPL (hence `memtest`) runs on a kernel-service **kthread
 > stack allocated from usable RAM**. A driver that quiesced/prepared, then swept
 > RAM and called `reboot()` on that *same* stack would overwrite its own live
 > stack and return path mid-sweep and crash instead of resetting — the two-step
@@ -551,15 +568,15 @@ primitive).
 > (memory map, physmap, console) to live in reserved memory, never a
 > frame-allocator frame.
 
-**Per-target bodies + conformance — the destructive mechanism.** The real
+**Per-target bodies + conformance — the takeover mechanism.** The real
 `MachineTakeover` bodies under `kernel/arch/<target>/`, each wiring
-`machine_takeover()` to return its handle and adding its destructive QEMU
+`machine_takeover()` to return its handle and adding its memtest-takeover QEMU
 vertical (Stage E). Precise per-port design:
 - **riscv64 (done — the cleanest first port).** `kernel/arch/riscv64/src/takeover.rs`
-  + `takeover.s`: quiesce verifies the single-hart image installed no secondary
-  entry (`smp::secondary_entry_addr() == 0`; a non-zero entry means SMP was
-  wired without teaching the takeover to cooperatively stop the secondaries, so
-  it refuses fail-closed `CpuQuiesceTimeout`); mask `sstatus.SIE`+`sie`; the
+  + `takeover.s`: every other hart is already parked by the arch-neutral
+  quiesce (the caller's `quiesce_others`; each hart halts in
+  `preempt::on_software_interrupt`), so the body starts by masking
+  `sstatus.SIE`+`sie`; the
   watchdog is unwired (no-op); flatten paging with `satp = 0` (bare mode — the
   identity map still resolves `virt==phys` with no page-table walk, and
   `BOOT_PAGE_TABLES`/`.bss` are Reserved so nothing to corrupt); switch `sp` to
@@ -571,10 +588,11 @@ vertical (Stage E). Precise per-port design:
   SBI reset ecall) — then SBI System-Reset (cold reboot). Proven by
   `tests/integration/supervisor_memtest_takeover_qemu_riscv64` (guest ends in a
   reset → QEMU `-no-reboot` exit 0).
-- **aarch64 (done).** `kernel/arch/aarch64/src/takeover.rs` + `takeover.s`: quiesce
-  verifies the single-core image installed no secondary entry
-  (`smp::secondary_entry_addr() == 0`, else fail-closed `CpuQuiesceTimeout`); mask
-  `DAIF` (all of debug/SError/IRQ/FIQ) and stop the watchdog cadence (`CNTV_CTL_EL0
+- **aarch64 (done).** `kernel/arch/aarch64/src/takeover.rs` + `takeover.s`: every
+  other core is already parked by the arch-neutral quiesce (the caller's
+  `quiesce_others`; each core halts in `preempt::on_ipi_interrupt`), so the body
+  starts by resolving the reset conduit, then masks
+  `DAIF` (all of debug/SError/IRQ/FIQ) and stops the watchdog cadence (`CNTV_CTL_EL0
   = 0`); clean+invalidate the kernel-image cache lines to PoC (reusing
   `paging::clean_invalidate_range_to_poc`), then flatten by writing the known
   MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, M/C/I clear — the kernel is
@@ -591,9 +609,10 @@ vertical (Stage E). Precise per-port design:
   Proven by `tests/integration/supervisor_memtest_takeover_qemu_aarch64` (guest
   ends in a reset → QEMU `-no-reboot` exit 0).
 - **x86_64 (done).** `kernel/arch/x86_64/src/takeover.rs` + `takeover.s`:
-  quiesce verifies no AP was started (`smp::secondary_entry_addr() == 0`, else
-  fail-closed `CpuQuiesceTimeout`); mask `RFLAGS.IF` (`cli`; no lockup watchdog
-  wired). Long mode cannot drop paging, so instead of flattening the MMU the
+  every AP is already parked by the arch-neutral quiesce (the caller's
+  `quiesce_others` delivers the stop IPI on `TIMER_VECTOR`; each AP halts in
+  `preempt`'s timer dispatch), so the body starts by masking `RFLAGS.IF`
+  (`cli`; no lockup watchdog wired). Long mode cannot drop paging, so instead of flattening the MMU the
   port switches `%cr3` to the **reserved** boot page tables (`boot_pml4`, all in
   `.boot.bss`, mapping both the higher-half physmap the sweep writes RAM through
   and the low identity window) so the sweep depends on no page-table frame in
@@ -602,7 +621,7 @@ vertical (Stage E). Precise per-port design:
   arch-neutral `sweep` over usable RAM; then build a minimal identity page table
   and copy the register-only PIC `_takeover_stub` into a swept arena above
   `__kernel_phys_end`, jump to it, load the arena `%cr3` (its tables outside the
-  region under test), destructively test the kernel-image region
+  region under test), test the kernel-image region
   `[__boot_phys_start, __kernel_phys_end)` — never the arena or low
   firmware/ACPI reserved RAM — and reset via the legacy 8042 / `0xCF9` hardware
   (the same channels `reset::reboot` drives). Wired into
@@ -610,19 +629,20 @@ vertical (Stage E). Precise per-port design:
   by `tests/integration/supervisor_memtest_takeover_qemu_x86_64`.
 - **wasm32** stays `NotSupported` (a sandbox owns no physical RAM to take over).
 
-### Stage C — the confirmation, the pre-jump synchronous audit, and the seam
+### Stage C — the pre-jump synchronous audit and the seam
 
 - Extend the `SupervisorSystem` seam (`kernel/core/src/supervisor_system.rs`)
   with a `memtest_takeover(...) -> !`-shaped control method (mirroring how
-  `reboot`/`poweroff` are the state-changing methods), driven by a **distinct
-  command** in `lib/supervisor` — `memtest full` (alias `memtest
-  --takeover`). The default `memtest` stays the safe, bounded, ESC-abortable
-  in-system test.
-- **Explicit typed confirmation.** Because it is irreversible and destroys the
-  boot, the command requires an explicit, clearly-worded confirmation before
-  it does anything (a typed confirmation phrase read through the existing REPL
-  line reader — no new input path). A mistyped/blank/aborted confirmation
-  returns to the `*` prompt fail-closed and changes nothing.
+  `reboot`/`poweroff` are the state-changing methods). It is driven by the
+  **one** `memtest` command in `lib/supervisor`: there is no separate
+  safe test and **no confirmation prompt**. `drive_takeover` first
+  stops every other CPU (`quiesce_others`, fail-closed
+  `takeover_cpu_quiesce_timeout`), then drives the takeover.
+- **No typed confirmation.** The earlier design gated the whole-RAM test
+  behind a typed phrase because a bounded, safe `memtest` existed to
+  fall back to. That safe test has been removed, so there is nothing to
+  disambiguate from: the command *is* the whole-RAM test, and prompting for
+  a second confirmation of an already-explicit command would be noise.
 - **Audit *before* the jump, synchronously.** The in-memory `BOOT_AUDIT_RING`
   is destroyed by the takeover, so a new stable id (extend the Supervisor
   `41xx` range, e.g. `4157 SUPERVISOR_MEMTEST_TAKEOVER`) is flushed to the
@@ -643,7 +663,7 @@ percentage, and a coloured pass line / red fault table), with the §8 plain-text
 fallback (one injected `plain` flag, no probe) that degrades to concise,
 deduplicated lines for a dumb serial line. It reuses the §8 `screen` module —
 no second escape-emitting path (§2.2) — and renders **only** from the Stage-A
-engine's `on_progress(tested, total)` callback and the final `DestructiveOutcome`
+engine's `on_progress(tested, total)` callback and the final `SweepObserver`
 (mapped in from the kernel as plain integers, so `lib/supervisor` names no
 kernel type); its arithmetic is purely presentational and nothing panics on any
 input. The kernel-side `sweep` closure the port runs (built in
@@ -660,25 +680,25 @@ zero total and a narrow geometry never panic.
 
 ### Stage E — tests, docs, and the gate
 
-- **Host tests**: the Stage A engine (above); the confirmation/decision logic
-  over mock seams (confirm → takeover requested; decline/blank/abort → no
-  takeover, return to prompt, nothing changed); the pre-jump audit id is
-  emitted exactly once before the control jump; the fullscreen UI byte output
-  over a mock `Report` (and that `plain` mode emits no escapes); the Arch HAL
-  `takeover` conformance double.
-- **QEMU integration vertical**: because a true full-RAM destructive run
-  cannot "return", drive the confirmation, assert the pre-jump audit line and
-  the fullscreen output bytes on the serial console, and assert the guest
-  **ends in a reset** rather than resuming boot. (A tiny/emulated memory
-  window keeps the run bounded in CI.)
+- **Host tests**: the Stage A engine (above); the prompt-free `memtest`
+  command over mock seams (invoking `memtest` audits the decision and drives
+  the takeover seam once, with no confirmation and regardless of trailing
+  args); the quiesce coordinator (`kernel/arch/api::quiesce` — peer selection,
+  the all-acknowledged path, and the fail-closed bounded-timeout path over
+  plain slices); the fullscreen UI byte output over a mock `Report` (and that
+  `plain` mode emits no escapes); the Arch HAL `takeover` conformance double.
+- **QEMU integration vertical**: because a true full-RAM takeover run
+  cannot "return", boot **multi-core** (so the takeover really quiesces its
+  peers), assert the fullscreen output bytes on the serial console, and assert
+  the guest **ends in a reset** rather than resuming boot.
 - **Docs**: `docs/src/architecture/supervisor.md` gains the takeover section
-  (the one-way contract, the confirmation wording, the audit id, the Arch HAL
+  (the one-way contract, the cross-CPU quiesce, the audit id, the Arch HAL
   slice), rustdoc on every public item, and the `plans/WIRING.md` /
   `plans/WATCHDOG.md` / `PLAN.md` cross-references.
 - **Gate**: the same whole-workspace gate as §7 (`cargo fmt --all`,
   `cargo xtask ci` once, `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both
   --secs 20`), green, before the work is done. The REPL fuzz harness (§7)
-  covers the new `memtest full` / confirmation parsing.
+  covers the prompt-free `memtest` dispatch.
 
 ---
 
@@ -740,7 +760,7 @@ zero total and a narrow geometry never panic.
 - `kernel/core::boot_audit_ring::BootAuditRing<N, I>` — a bounded, SMP-/ISR-safe
   `tairix_log::Sink` that keeps the most recent `N` boot events (level, id,
   monotonic time via an injected `MonotonicClock`, message) readable
-  **non-destructively**. `kernel/core::audit` is only the id catalogue and
+  **safely**. `kernel/core::audit` is only the id catalogue and
   `lib/log::BootRing` is a drain-once FIFO, so neither serves the
   Supervisor's `log`: this ring is that missing store.
   - **Home is `kernel/core`, not `lib/log` (deliberate).** The ring needs the
@@ -846,11 +866,11 @@ zero total and a narrow geometry never panic.
   every public item; `docs/src/architecture/supervisor.md` "Rich screens"
   section. This is §9's Stage-D dependency and now stands complete on its own.
 
-**Done (§9 Stage A — the arch-neutral destructive full-range engine):**
+**Done (§9 Stage A — the arch-neutral whole-RAM full-range engine):**
 
-- `kernel/mem::ramtest::run_destructive` (+ `DestructiveOutcome`,
-  `destructive_window`, `usable_frame_bytes`) — the whole-RAM, full-coverage
-  destructive test the takeover mode drives. It reuses the existing
+- `kernel/mem::ramtest::sweep_pattern` (+ `RamTestPattern`, `SweepObserver`,
+  `sweep_window`, `usable_frame_bytes`) — the whole-RAM, full-coverage
+  whole-RAM test the takeover mode drives. It reuses the existing
   `WordWindow`/`PhysWindow`/`check`/`address_marker` primitives (§2.2): a
   full address-in-address pass over **every** word plus a moving-inversions
   pass (fill `PATTERN`, ascending verify→write `ANTIPATTERN`, descending
@@ -867,41 +887,42 @@ zero total and a narrow geometry never panic.
   early, and the progress denominator is honest. No arch, no board, no
   `cfg(target_arch)`; Stages B–E build on it.
 
-**Done (§9 Stage C — the `memtest full` command + the supervisor-only takeover gate):**
+**Done (§9 Stage C — the `memtest` command + the supervisor-only takeover gate):**
 
-- **`memtest full` (alias `memtest --takeover`)** — a distinct `lib/supervisor`
-  command (`commands/diag.rs`), separate from the safe `memtest`, that demands
-  an explicit typed `DESTROY` confirmation (a mistyped/blank/over-long entry
-  cancels fail-closed and changes nothing), audits the confirmed decision
-  through the new `SupervisorEvent::MemtestTakeover`, then drives the
-  `SupervisorHost::takeover_memtest` seam. Host-tested: confirm → audited +
-  seam driven; decline/blank → no audit, no drive; the alias; and that plain
-  `memtest` never triggers it. The REPL fuzz harness covers the parsing.
+- **`memtest`** — the single `lib/supervisor` command (`commands/diag.rs`).
+  There is **no** separate safe test and **no confirmation prompt**:
+  invoking `memtest` audits the decision through
+  `SupervisorEvent::MemtestTakeover` and immediately drives the
+  `SupervisorHost::takeover_memtest` seam. Host-tested: `memtest` audits + drives
+  the seam once, ignores trailing arguments, and stays fail-closed in the REPL
+  when the seam returns. The REPL fuzz harness covers the dispatch.
 - **Supervisor-only gate on the takeover handle.** `KernelArch::machine_takeover`
-  now requires a `kernel/core::supervisor_system::TakeoverGrant` — a witness
-  with a private field whose only constructor (`TakeoverGrant::mint`) is
-  module-private to `supervisor_system`, the module that drives the confirmed
-  `memtest full`. Holding a `&dyn KernelArch` is therefore no longer enough to
-  obtain the `MachineTakeover` handle: no other kernel subsystem, driver, or
-  userland caller can mint the grant, so the destructive mechanism is
-  reachable **only** from the Supervisor. Ports keep their takeover `static`
-  private and hand it back only through this gated accessor.
-- **The kernel seam** `SupervisorSystem::memtest_takeover`
-  (`kernel/core::supervisor_system`) calls `drive_takeover`, which mints the
-  grant, reads the gated handle and the direct physical map, builds the `sweep`
-  closure (the Stage-A `run_destructive` sweep + the Stage-D `MemtestUi`
-  rendering, whose captured state is all `'static`/reserved per the `take_over`
-  contract), and drives the **single** `MachineTakeover::take_over(&mut sweep)`
-  operation. On a supported port that never returns (the port quiesces, masks,
-  flattens paging, sweeps on a reserved stack, tests the kernel-image region,
-  and resets); on any refusal (unsupported / quiesce timeout / prepare failed)
-  it returns and the host-tested `render_takeover_refusal` renders the stable
-  cause fail-closed (never a payload value) so the REPL stays.
+  requires a `kernel/core::supervisor_system::TakeoverGrant` — a witness with a
+  private field whose only constructor (`TakeoverGrant::mint`) is module-private
+  to `supervisor_system`, the module that drives `memtest`. Holding a
+  `&dyn KernelArch` is therefore not enough to obtain the `MachineTakeover`
+  handle: no other kernel subsystem, driver, or userland caller can mint the
+  grant, so the takeover mechanism is reachable **only** from the
+  Supervisor. Ports keep their takeover `static` private and hand it back only
+  through this gated accessor.
+- **The cross-CPU quiesce is here, in the neutral caller.** `drive_takeover`
+  mints the grant, reads the gated handle and the direct physical map, then
+  **stops every other CPU** — `tairix_arch_api::quiesce_others(current,
+  |peer| SchedulerArch::send_ipi(arch, peer))` over the boot-published
+  liveness/ack tables — as the *last fallible step* before the irreversible
+  tear-down. On a bounded-timeout miss it renders `CpuQuiesceTimeout`
+  fail-closed (stable cause `takeover_cpu_quiesce_timeout`, no payload value)
+  and stays in the REPL, having changed nothing. Only once every peer is parked
+  does it build the `sweep` closure (the Stage-A `sweep_pattern` sweep + the
+  Stage-D `MemtestUi`, all `'static`/reserved per the `take_over` contract) and
+  drive the **single** `MachineTakeover::take_over(&mut sweep)` operation, which
+  on a supported port never returns (mask, flatten paging, sweep on a reserved
+  stack, test the kernel-image region, reset).
   `KernelSupervisorHost::takeover_memtest` wires it in and audits id
-  `4157 SUPERVISOR_MEMTEST_TAKEOVER` (`Warn`) synchronously before the
-  attempt. Because every current port's `machine_takeover` is `None`, the
-  command reports "not supported" fail-closed on all Tier-1 targets today; the
-  supported path is proven end-to-end by the per-port QEMU vertical (Stage E).
+  `4157 SUPERVISOR_MEMTEST_TAKEOVER` (`Warn`) synchronously before the attempt.
+  The wired riscv64/aarch64/x86_64 ports return `Some` from `machine_takeover`
+  and are proven end-to-end by the per-port **multi-core** QEMU verticals
+  (Stage E); `wasm32` stays `NotSupported`.
 
 **Done (the REPL fuzz harness — the item-2 prerequisite):**
 
@@ -925,7 +946,7 @@ zero total and a narrow geometry never panic.
   line-oriented fallback (one injected `plain` flag, no probe) that
   deduplicates into 10% buckets on a dumb serial line. It renders **only** from
   the Stage-A engine's `on_progress(tested, total)` and the final
-  `DestructiveOutcome` (mapped in as plain integers, so the crate names no
+  `SweepObserver` faults (mapped in as plain integers, so the crate names no
   kernel type); the arithmetic is purely presentational and nothing panics on
   any input. The kernel-side `sweep` closure built in
   `kernel/core::supervisor_system::drive_takeover` drives it over the takeover
@@ -1014,7 +1035,7 @@ zero total and a narrow geometry never panic.
   trivial: register two entries against the existing
   `tairix-test-supervisor-esc-qemu-x86-64` bin with the same shared scripts.
 
-**Done (§9 Stage B/E — the riscv64 destructive takeover body + QEMU vertical):**
+**Done (§9 Stage B/E — the riscv64 takeover body + QEMU vertical):**
 
 - `kernel/arch/riscv64/src/takeover.rs` + `takeover.s` — the real riscv64
   `MachineTakeover::take_over` body (the "cleanest first port"). In order and
@@ -1026,10 +1047,10 @@ zero total and a narrow geometry never panic.
   bare mode (`satp = 0`, `sfence.vma` — the kernel is identity-mapped so nothing
   moves); **switch** onto a reserved 64 KiB `.bss` stack (via the
   `_takeover_switch_stack` trampoline) the sweep cannot overwrite; run the
-  caller's arch-neutral **sweep** (Stage-A `run_destructive` + Stage-D
+  caller's arch-neutral **sweep** (Stage-A `sweep_pattern` + Stage-D
   `MemtestUi`); then copy the register-only, position-independent
   `_takeover_stub` into the first swept usable page (`align_up(__kernel_end)`)
-  and jump to it to destructively test the kernel-image region
+  and jump to it to test the kernel-image region
   `[__kernel_image_start, __kernel_end)` — never the OpenSBI firmware below it —
   and **SBI System-Reset** (cold reboot). The handle is a private `static`
   reached only through `machine_takeover_handle()`, wired into
@@ -1037,18 +1058,18 @@ zero total and a narrow geometry never panic.
   Added the `__kernel_image_start` linker symbol and the SBI HSM
   `hart_get_status`/`SBI_HART_STATE_STOPPED` constants.
 - `tests/integration/supervisor_memtest_takeover_qemu_riscv64` — the Stage E
-  destructive QEMU vertical. It reuses the production riscv64 boot pipeline and,
+  memtest-takeover QEMU vertical. It reuses the production riscv64 boot pipeline and,
   on `AuditEvent::BootCompleted` (Supervisor system published, kernel state
   built), drives the real `supervisor_system().memtest_takeover(...)` seam from
   the reserved boot stack (the riscv64 SBI console has no interactive input, so
   the REPL cannot be keyed — the confirmation/command parsing is host-tested in
   `lib/supervisor` instead). On the wired port this never returns: the guest
-  renders the memtest86 UI to 100%, prints "PASSED — … Resetting.", and
+  renders the memtest86 UI to 100%, prints "memtest: completed test loop", and
   SBI-resets, so QEMU (`-no-reboot`) exits status 0 = PASS. A takeover that
   *returned* writes a fail finisher, so a regression that stops resetting fails
   loud. Registered in `tools/xtask` and the workspace.
 
-**Done (§9 Stage B/E — the aarch64 destructive takeover body + QEMU vertical):**
+**Done (§9 Stage B/E — the aarch64 takeover body + QEMU vertical):**
 
 - `kernel/arch/aarch64/src/takeover.rs` + `takeover.s` — the real aarch64
   `MachineTakeover::take_over` body. In order and never returning on success:
@@ -1064,9 +1085,9 @@ zero total and a narrow geometry never panic.
   kernel is identity-mapped so `virt==phys` survives) with `tlbi vmalle1`/`ic
   iallu`; **switch** onto a reserved 64 KiB `.bss` stack
   (`_takeover_switch_stack`) the sweep cannot overwrite; run the caller's
-  arch-neutral **sweep** (Stage-A `run_destructive` + Stage-D `MemtestUi`); then
+  arch-neutral **sweep** (Stage-A `sweep_pattern` + Stage-D `MemtestUi`); then
   copy the register-only PIC `_takeover_stub` into the first swept usable page
-  (`align_up(__kernel_end)`) and jump to it to destructively test the
+  (`align_up(__kernel_end)`) and jump to it to test the
   kernel-image region `[__kernel_start, __kernel_end)` — never the firmware/DTB
   reserved region below it — and issue **PSCI `SYSTEM_RESET`** through the
   conduit (in the stub's `x2`). The handle is a private `static` reached only
@@ -1074,18 +1095,18 @@ zero total and a narrow geometry never panic.
   conduit), wired into `Aarch64BinArch::machine_takeover` behind the
   supervisor-only `TakeoverGrant`.
 - `tests/integration/supervisor_memtest_takeover_qemu_aarch64` — the Stage E
-  destructive QEMU vertical, the aarch64 sibling of the riscv64 one. It reuses
+  memtest-takeover QEMU vertical, the aarch64 sibling of the riscv64 one. It reuses
   the production aarch64 `boot_aarch64::boot` pipeline (embedded `virt` DTB) and,
   on `AuditEvent::BootCompleted`, drives the real
-  `supervisor_system().memtest_takeover(...)` seam directly (a destructive run
-  cannot return to key the REPL; the confirmation/command parsing is host-tested
+  `supervisor_system().memtest_takeover(...)` seam directly (a takeover run
+  cannot return to key the REPL; the command dispatch is host-tested
   in `lib/supervisor`). On the wired port this never returns: the guest sweeps
   all of RAM on the reserved stack, tests the kernel-image region with the
   relocated stub, and PSCI-resets, so QEMU (`-no-reboot`) exits status 0 = PASS;
   a takeover that *returned* writes a fail finisher. Registered in `tools/xtask`
   and the workspace.
 
-**Done (§9 Stage B/E — the x86_64 destructive takeover body + QEMU vertical):**
+**Done (§9 Stage B/E — the x86_64 takeover body + QEMU vertical):**
 
 - `kernel/arch/x86_64/src/takeover.rs` + `takeover.s` — the real x86_64
   `MachineTakeover::take_over` body, wired into `X86_64` `BinArch::machine_takeover`
@@ -1102,12 +1123,12 @@ zero total and a narrow geometry never panic.
   installed); **install the reserved boot page tables** (`%cr3 = boot_pml4` —
   they live in `.boot.bss` and map both the higher-half physmap the sweep
   writes RAM through and the low identity window, so nothing the sweep destroys
-  is depended on); run the arch-neutral **sweep** (Stage-A `run_destructive` +
+  is depended on); run the arch-neutral **sweep** (Stage-A `sweep_pattern` +
   Stage-D `MemtestUi`) over usable RAM; then build a minimal identity page
   table plus a copy of the register-only `_takeover_stub` in a swept **arena**
   above `__kernel_phys_end`, and jump to the stub at its identity address. The
   stub loads the arena `%cr3` (so the tables it walks are outside the region
-  under test), destructively tests the kernel-image region
+  under test), tests the kernel-image region
   `[__boot_phys_start, __kernel_phys_end)` — **never** the arena or the low
   firmware/ACPI reserved RAM below the image — and **resets** through the
   legacy 8042 / `0xCF9` hardware (the same channels `reset::reboot` drives).
@@ -1116,31 +1137,31 @@ zero total and a narrow geometry never panic.
   "all of RAM" coverage the module contract describes. The handle is a private
   `static` reached only through `machine_takeover_handle()`.
 - `tests/integration/supervisor_memtest_takeover_qemu_x86_64` — the Stage E
-  destructive QEMU vertical, the x86_64 sibling of the riscv64/aarch64 ones. It
+  memtest-takeover QEMU vertical, the x86_64 sibling of the riscv64/aarch64 ones. It
   reuses the production x86_64 `boot_x86_64::boot` pipeline and, on
   `AuditEvent::BootCompleted`, drives the real
-  `supervisor_system().memtest_takeover(...)` seam directly (a destructive run
-  cannot return to key the REPL; the confirmation/command parsing is host-tested
+  `supervisor_system().memtest_takeover(...)` seam directly (a takeover run
+  cannot return to key the REPL; the command dispatch is host-tested
   in `lib/supervisor`). On the wired port this never returns: the guest sweeps
   all of RAM on the reserved stack (rendering the memtest86 UI to COM1 up to
-  100% and printing `memtest full: PASSED`), tests the kernel-image region with
+  100% and printing `memtest: completed test loop`), tests the kernel-image region with
   the relocated stub, and resets. Because x86_64 scores success through the
   `isa-debug-exit` `0x21` status — which a genuine reset cannot write — the
   vertical opts into a new, marker-gated reset-is-success rule in the shared
   runner: `tairix_qemu::Spec::with_reset_success_marker` accepts a status-`0`
   reset (under `-no-reboot`) as a pass **only** when the captured serial also
-  contains the `MemtestUi` `PASSED` line, so a crash that merely triple-faults
+  contains the `MemtestUi` completed-test-loop marker line, so a crash that merely triple-faults
   into a reset still fails loud. Registered in `tools/xtask` and the workspace.
 
 The arch-neutral engine, the machine-control seam, the boot audit-log
 composition, the `SupervisorHost`, the ESC boot-screen (both entry points),
 the §8 rich-screen presenter, the REPL fuzz harness, the §9 Stage-A
-destructive full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
+whole-RAM full-range RAM engine, the §9 Stage-B `MachineTakeover` Arch HAL
 slice (arch-neutral surface + conformance + supervisor-gated `KernelArch`
-seam), the §9 Stage-C `memtest full` command, the §9 Stage-D fullscreen
+seam), the §9 Stage-C `memtest` command, the §9 Stage-D fullscreen
 memtest86-style UI, the aarch64 + x86_64 ESC boot-screen QEMU verticals and
 the two further aarch64 trigger-point verticals, and the **§9 riscv64,
-aarch64, and x86_64 destructive takeover bodies + their Stage E QEMU
+aarch64, and x86_64 takeover bodies + their Stage E QEMU
 verticals** are complete and compiling on every Tier-1 target. `wasm32` stays
 `NotSupported` (a sandbox owns no physical RAM to take over). **§9 is
 complete on all four Tier-1 targets.**

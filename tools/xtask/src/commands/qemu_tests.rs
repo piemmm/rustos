@@ -1550,18 +1550,26 @@ static TESTS: &[QemuTest] = &[
     // production riscv64 `virt` pipeline and, on `AuditEvent::BootCompleted`
     // (the point where the Supervisor system is published and the kernel
     // state is fully built), drives the pre-boot Supervisor's one-way
-    // destructive `memtest full` takeover through the real published
-    // `SupervisorSystem::memtest_takeover` seam. On the wired riscv64 port
-    // the `MachineTakeover` body quiesces (single-hart), masks interrupts,
-    // flattens paging to bare mode, destructively tests all of RAM on a
-    // reserved stack, tests the kernel-image region with the relocated stub,
-    // and issues an SBI System-Reset — so QEMU (`-no-reboot`) exits status 0
-    // and the runner registers `Outcome::Pass`. A normal boot that idled
-    // would time out; a takeover that *returned* (refused/unsupported) writes
-    // a fail finisher — so a regression that stops the port resetting fails
-    // loud. Single CPU (the port is single-hart) and a 60-second budget match
-    // the other riscv64 boot-then-do-fixed-work verticals; the destructive
-    // sweep over the `virt` board's 256 MiB is comfortably bounded within it.
+    // `memtest` takeover through the real published
+    // `SupervisorSystem::memtest_takeover` seam. On the wired riscv64 port the
+    // caller first quiesces every other hart (the bounded cross-CPU IPI-halt
+    // handshake), then the `MachineTakeover` body masks interrupts, flattens
+    // paging to bare mode, and tests all of RAM continuously on a reserved
+    // stack (every pattern over all of RAM, looping until reset). Once the
+    // guest completes one full test loop the harness issues a QEMU-monitor
+    // `system_reset`; QEMU (`-no-reboot`) then exits status 0 and the runner
+    // registers `Outcome::Pass`. A boot that never completes a loop falls
+    // silent and times out; a takeover that *returned* (refused/unsupported)
+    // writes a fail finisher — so a regression that stops the test running
+    // fails loud. The production riscv64 port is single-hart
+    // (`BootInfo::new(BOOT_CPU, ...)`, `RiscvArchStorage<1>`; it brings up no
+    // secondaries), so this boots single-hart and the quiesce runs its "no
+    // online peers, succeed immediately" path — the same handshake code, with
+    // nothing to stop. (Booting `-smp 4` would only expose OpenSBI handing the
+    // kernel a non-zero boot hart it does not support; the genuine multi-core
+    // quiesce is proven by the aarch64 and x86_64 siblings, which do bring up
+    // secondaries.) The 60-second budget is the inactivity window between
+    // progress updates, not a total-runtime cap.
     QemuTest {
         package: "tairix-test-supervisor-memtest-takeover-qemu-riscv64",
         binary: "tairix-test-supervisor-memtest-takeover-qemu-riscv64",
@@ -1583,24 +1591,26 @@ static TESTS: &[QemuTest] = &[
     // boots the production aarch64 `virt` pipeline and, on
     // `AuditEvent::BootCompleted` (the point where the Supervisor system is
     // published and the kernel state is fully built), drives the pre-boot
-    // Supervisor's one-way destructive `memtest full` takeover through the real
+    // Supervisor's one-way `memtest` takeover through the real
     // published `SupervisorSystem::memtest_takeover` seam. On the wired aarch64
-    // port the `MachineTakeover` body quiesces (single-core), masks interrupts
-    // and stops the watchdog cadence, flattens paging (MMU off), destructively
-    // tests all of RAM on a reserved stack, tests the kernel-image region with
-    // the relocated stub, and issues PSCI `SYSTEM_RESET` through the discovered
-    // conduit — so QEMU (`-no-reboot`) exits status 0 and the runner registers
-    // `Outcome::Pass`. A normal boot that idled would time out; a takeover that
+    // port the caller first quiesces every other CPU (the bounded cross-CPU
+    // IPI-halt handshake), then the `MachineTakeover` body masks interrupts and
+    // stops the watchdog cadence, flattens paging (MMU off), and tests all of
+    // RAM continuously on a reserved stack (every pattern over all of RAM,
+    // looping until reset). Once the guest completes one full test loop the
+    // harness issues a QEMU-monitor `system_reset`; QEMU (`-no-reboot`) then
+    // exits status 0 and the runner registers `Outcome::Pass`. A boot that
+    // never completes a loop falls silent and times out; a takeover that
     // *returned* (refused/unsupported) writes a fail finisher — so a regression
-    // that stops the port resetting fails loud. Single CPU (the port is
-    // single-core) and a 60-second budget match the riscv64 sibling; the
-    // destructive sweep over the `virt` board's 256 MiB is comfortably bounded
-    // within it.
+    // that stops the test running fails loud. Four CPUs so the takeover
+    // genuinely stops its three secondary cores before tearing the machine down
+    // (proving the quiesce); the 60-second budget is the inactivity window
+    // between progress updates, not a total-runtime cap.
     QemuTest {
         package: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
         binary: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
         target: "aarch64-unknown-none",
-        cpus: 1,
+        cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -1617,24 +1627,27 @@ static TESTS: &[QemuTest] = &[
     // boots the production x86_64 `tairix-kernel` pipeline and, on
     // `AuditEvent::BootCompleted` (the point where the Supervisor system is
     // published and the kernel state is fully built), drives the pre-boot
-    // Supervisor's one-way destructive `memtest full` takeover through the real
+    // Supervisor's one-way `memtest` takeover through the real
     // published `SupervisorSystem::memtest_takeover` seam. On the wired x86_64
-    // port the `MachineTakeover` body verifies no AP was started, masks
-    // interrupts, switches onto a reserved `.bss` stack, installs the reserved
-    // boot page tables, destructively tests all of RAM on that stack, tests the
-    // kernel-image region with the relocated stub under a minimal identity page
-    // table, and resets through the legacy 8042 / `0xCF9` hardware — so QEMU
-    // (`-no-reboot`) exits and the runner registers `Outcome::Pass`. A normal
-    // boot that idled would time out; a takeover that *returned*
+    // port the caller first quiesces every other CPU (the bounded cross-CPU
+    // IPI-halt handshake), then the `MachineTakeover` body masks interrupts,
+    // switches onto a reserved `.bss` stack, installs the reserved boot page
+    // tables, and tests all of RAM continuously on that stack (every pattern
+    // over all of RAM, looping until reset). Once the guest completes one full
+    // test loop the harness issues a QEMU-monitor `system_reset`, which resets
+    // through the legacy 8042 / `0xCF9` hardware path — so QEMU (`-no-reboot`)
+    // exits and the runner registers `Outcome::Pass`. A boot that never
+    // completes a loop falls silent and times out; a takeover that *returned*
     // (refused/unsupported) writes a fail finisher — so a regression that stops
-    // the port resetting fails loud. Single CPU (the port starts no AP) and a
-    // 60-second budget match the riscv64/aarch64 siblings; the destructive
-    // sweep over the 256 MiB guest is comfortably bounded within it.
+    // the test running fails loud. Four CPUs so the takeover genuinely stops
+    // its three application processors before tearing the machine down (proving
+    // the quiesce); the 60-second budget is the inactivity window between
+    // progress updates, not a total-runtime cap.
     QemuTest {
         package: "tairix-test-supervisor-memtest-takeover-qemu-x86-64",
         binary: "tairix-test-supervisor-memtest-takeover-qemu-x86-64",
         target: "x86_64-unknown-none",
-        cpus: 1,
+        cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -7211,16 +7224,25 @@ fn spawn_net_peer(
 /// gating monitor injections on an audit message substring.
 const BOND_FAILOVER_TRIGGER_MARKER: &str = "netstack: inbound echo request served (reply queued)";
 
-/// The x86_64 destructive `memtest full` takeover vertical's binary
-/// (`plans/NEW-SUPERVISOR.md` §9 Stage E). Named so [`finish_run`] can opt it
-/// into the reset-is-success scoring the takeover needs.
-const MEMTEST_TAKEOVER_X86_64_BINARY: &str = "tairix-test-supervisor-memtest-takeover-qemu-x86-64";
+/// The `memtest` takeover verticals' binaries (`plans/NEW-SUPERVISOR.md` §9
+/// Stage E), one per Tier-1 bare-metal target. [`finish_run`] recognises them
+/// to end the intentionally-endless test with a monitor `system_reset` after
+/// a proven loop and score that reset as success.
+const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
+    "tairix-test-supervisor-memtest-takeover-qemu-x86-64",
+    "tairix-test-supervisor-memtest-takeover-qemu-riscv64",
+    "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
+];
 
-/// Serial marker gating the takeover vertical's reset-is-success pass: the
-/// `MemtestUi` prints this line the instant the whole-RAM sweep passes, just
-/// before the port resets. A crash that reset before finishing never prints
-/// it, so the run fails loud (`tairix_qemu::Spec::reset_success_marker`).
-const MEMTEST_TAKEOVER_PASS_MARKER: &str = "memtest full: PASSED";
+/// Serial marker the continuous `memtest` prints when it finishes one full
+/// test loop (every pattern over all of RAM). Its first appearance proves the
+/// takeover quiesced the peers, flattened paging, swept every pattern over all
+/// of RAM, and rendered the display. The runner keys on it twice: it issues a
+/// QEMU-monitor `system_reset` to end the endless test deterministically, and
+/// it gates the reset-is-success scoring on it, so a crash that reset before a
+/// completed loop never printed it and fails loud
+/// (`tairix_qemu::Spec::reset_success_marker`).
+const MEMTEST_TAKEOVER_LOOP_MARKER: &str = "memtest: completed test loop";
 
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
 /// `netpeer` link peer, returning the updated spec and the running peer (if
@@ -7311,17 +7333,18 @@ fn attach_net_peer(
 fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     let (mut spec, peer) = attach_net_peer(t, kernel, spec)?;
 
-    // The destructive `memtest full` takeover vertical's guest signals success
-    // by *resetting the machine* — it takes the machine over and never returns
-    // to write a debug-exit code (`plans/NEW-SUPERVISOR.md` §9 Stage E). On
-    // x86_64, where a normal pass is the `isa-debug-exit` `0x21` status, a
-    // reset instead exits QEMU with status `0` under `-no-reboot`; accept that
-    // as a pass only when the memtest UI's `PASSED` line was printed first, so
-    // a regression that crash-resets before finishing still fails loud. The
-    // riscv64/aarch64 siblings already map a reset to a status-`0` pass, so the
-    // opt-in is x86-only.
-    if t.binary == MEMTEST_TAKEOVER_X86_64_BINARY {
-        spec = spec.with_reset_success_marker(MEMTEST_TAKEOVER_PASS_MARKER);
+    // The `memtest` takeover verticals test all of RAM *continuously* and
+    // never stop on their own (`plans/NEW-SUPERVISOR.md` §9 Stage E): the
+    // machine only leaves the test by a reset. Once the guest completes a full
+    // test loop — printing MEMTEST_TAKEOVER_LOOP_MARKER — issue a QEMU-monitor
+    // `system_reset` to end the endless test deterministically. Under
+    // `-no-reboot` that reset exits QEMU with status 0; accept it as a pass
+    // only when the marker was printed first, so a crash that reset before a
+    // completed loop still fails loud. The gate is identical on all three
+    // bare-metal targets.
+    if MEMTEST_TAKEOVER_BINARIES.contains(&t.binary) {
+        spec = spec.with_reset_success_marker(MEMTEST_TAKEOVER_LOOP_MARKER);
+        spec = spec.with_monitor_command(MEMTEST_TAKEOVER_LOOP_MARKER, 1, "system_reset");
     }
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
@@ -7455,20 +7478,20 @@ mod tests {
     };
     use std::time::Duration;
 
-    /// The x86_64 destructive-takeover vertical is enrolled under exactly the
-    /// binary name `finish_run` opts into reset-is-success scoring for, and
-    /// its pass marker is the `MemtestUi` PASSED-line prefix — so the scoring
-    /// hook and the guest's success signal cannot silently drift apart.
+    /// Every `memtest` takeover binary `finish_run` scores by reset is
+    /// actually enrolled, and the per-loop marker the runner keys on matches
+    /// the exact line the `MemtestUi` prints — so the scoring hook and the
+    /// guest's success signal cannot silently drift apart.
     #[test]
-    fn memtest_takeover_x86_64_binary_is_enrolled_and_marker_is_stable() {
-        use super::{MEMTEST_TAKEOVER_PASS_MARKER, MEMTEST_TAKEOVER_X86_64_BINARY};
-        assert!(
-            TESTS
-                .iter()
-                .any(|t| t.binary == MEMTEST_TAKEOVER_X86_64_BINARY),
-            "the x86_64 takeover binary finish_run scores by reset must be enrolled",
-        );
-        assert_eq!(MEMTEST_TAKEOVER_PASS_MARKER, "memtest full: PASSED");
+    fn memtest_takeover_binaries_are_enrolled_and_marker_is_stable() {
+        use super::{MEMTEST_TAKEOVER_BINARIES, MEMTEST_TAKEOVER_LOOP_MARKER};
+        for binary in MEMTEST_TAKEOVER_BINARIES {
+            assert!(
+                TESTS.iter().any(|t| t.binary == binary),
+                "takeover binary {binary} finish_run scores by reset must be enrolled",
+            );
+        }
+        assert_eq!(MEMTEST_TAKEOVER_LOOP_MARKER, "memtest: completed test loop");
     }
 
     /// The memory-stability vertical's serial-script marker is the leading

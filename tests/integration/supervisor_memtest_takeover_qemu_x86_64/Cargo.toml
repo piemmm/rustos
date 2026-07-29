@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 # Freestanding "boot the production x86_64 kernel pipeline, then drive the
-# confirmed `memtest full` machine-takeover seam" integration test. It links
+# confirmed `memtest` machine-takeover seam" integration test. It links
 # the production x86_64 boot pipeline (`boot_x86_64::boot` via `tairix-kernel`)
 # and only supplies its own audit Sink — one that, on observing `EventId(4004)`
 # (`AuditEvent::BootCompleted`, the point where the Supervisor system is

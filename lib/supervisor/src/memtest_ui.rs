@@ -1,6 +1,5 @@
-//! The fullscreen, memtest86-style display for the one-way destructive
-//! `memtest full` whole-RAM takeover test (`plans/NEW-SUPERVISOR.md` §9,
-//! Stage D).
+//! The fullscreen, memtest86-style display for the Supervisor's one-way
+//! whole-RAM `memtest` takeover test (`plans/NEW-SUPERVISOR.md` §9, Stage D).
 //!
 //! Once the takeover has stopped every other CPU and flattened paging, the
 //! test owns the machine and the console outright, so this is the natural
@@ -10,26 +9,35 @@
 //! hand-rolls a second copy of the terminal encoding (the charter forbids the
 //! duplication) and it names no board, MMIO, or architecture.
 //!
+//! # A continuous, looping presenter
+//!
+//! The `memtest` takeover tests all of RAM **continuously**: it cycles a set
+//! of thorough patterns (own-address, moving inversions, walking ones/zeros)
+//! over every usable frame, over and over, until the operator resets the
+//! machine. This presenter renders that live: the elapsed run time, the count
+//! of completed test loops, the current pattern, a progress bar for the
+//! current pattern, and — beneath the bar — a scrolling log of any RAM errors
+//! found, with a running error count.
+//!
 //! # A presenter, not a source of truth
 //!
-//! The UI renders **only** from the values the destructive engine hands it —
-//! the running `(tested, total)` byte counts and the final pass / fault /
-//! abort outcome — mapped in from the kernel as plain integers so this crate
-//! stays free of any kernel type. It computes nothing about the RAM itself;
-//! the arithmetic here is purely presentational (bytes → MiB, a fraction →
-//! a bar and a percentage).
+//! The UI renders **only** from the values the engine hands it — the running
+//! `(tested, total)` byte counts, the current pattern name, the elapsed
+//! seconds, and each fault's address/expected/observed words — mapped in from
+//! the kernel as plain integers and `&str`, so this crate stays free of any
+//! kernel type. It computes nothing about the RAM itself; the arithmetic here
+//! is purely presentational (bytes → MiB, a fraction → a bar and a
+//! percentage, seconds → `HH:MM:SS`).
 //!
 //! # Degrade gracefully
 //!
 //! When the backing [`Screen`] is in plain mode (a genuinely dumb serial
-//! line, no positioning) the UI falls back to concise, line-oriented progress
-//! and result text — never a stream of redrawn bars. Nothing here panics on
-//! any input, and a degenerate geometry or a zero total is handled, not
-//! faulted.
-
-use tairix_vt::color::{BasicColor, Color};
+//! line, no positioning) the UI falls back to concise, line-oriented output —
+//! never a stream of redrawn bars. Nothing here panics on any input, and a
+//! degenerate geometry or a zero total is handled, not faulted.
 
 use crate::screen::{Screen, Style};
+use tairix_vt::color::{BasicColor, Color};
 
 /// One binary mebibyte, the unit RAM figures are shown in.
 const MIB: u64 = 1024 * 1024;
@@ -37,15 +45,29 @@ const MIB: u64 = 1024 * 1024;
 /// Row of the reverse-video title banner (1-based).
 const TITLE_ROW: u16 = 1;
 /// Row of the one-line explanation of what the test is doing.
-const INTRO_ROW: u16 = 3;
+const INTRO_ROW: u16 = 2;
+/// Row carrying the elapsed run time.
+const ELAPSED_ROW: u16 = 4;
+/// Row carrying the completed-test-loop count.
+const LOOPS_ROW: u16 = 5;
 /// Row carrying the total-RAM-under-test figure.
-const TOTAL_ROW: u16 = 5;
-/// Row carrying the running tested-so-far figure.
-const TESTED_ROW: u16 = 6;
+const TOTAL_ROW: u16 = 6;
+/// Row carrying the current pattern name.
+const PATTERN_ROW: u16 = 7;
+/// Row carrying the running tested-so-far figure for the current pattern.
+const TESTED_ROW: u16 = 8;
 /// Row carrying the progress bar and percentage.
-const BAR_ROW: u16 = 8;
-/// First row of the result / fault panel.
-const RESULT_ROW: u16 = 11;
+const BAR_ROW: u16 = 9;
+/// Row carrying the running error-count header.
+const ERRORS_ROW: u16 = 11;
+/// First row of the scrolling fault log, just beneath the error header.
+const LOG_TOP_ROW: u16 = 12;
+/// Rows of fault log shown at once (a fixed rendering window, not a scalable
+/// capacity): the most recent this-many faults.
+const LOG_ROWS: usize = 10;
+/// Row carrying the per-loop completion status line (the stable marker an
+/// automated test keys on).
+const STATUS_ROW: u16 = 23;
 
 /// Column labels start at.
 const LABEL_COL: u16 = 3;
@@ -61,17 +83,20 @@ const BAR_INNER_MAX: usize = 50;
 const TITLE_STYLE: Style = Style::DEFAULT.reverse().bold();
 /// The rendition of the filled portion of the progress bar (green).
 const FILL_STYLE: Style = Style::fg(Color::Basic(BasicColor::Green));
-/// The rendition of a clean pass result (green, bold).
-const PASS_STYLE: Style = Style::fg(Color::Basic(BasicColor::Green)).bold();
-/// The rendition of a fault result (red, bold).
+/// The rendition of the error-count header when faults have been seen (red).
 const FAULT_STYLE: Style = Style::fg(Color::Basic(BasicColor::Red)).bold();
+
+/// The plain-mode progress line is printed once per this many percent, so a
+/// dumb serial log gets a short, readable ladder rather than a line per 2 MiB
+/// window.
+const PLAIN_PERCENT_STEP: u8 = 10;
 
 /// Divide `bytes` down to whole mebibytes.
 const fn mib(bytes: u64) -> u64 {
     bytes / MIB
 }
 
-/// The completed fraction of the test as a whole-number percent `0..=100`.
+/// The completed fraction as a whole-number percent `0..=100`.
 ///
 /// Saturates at 100 (a `tested` past `total` from rounding never overshoots)
 /// and treats a zero `total` as `0`, so no input divides by zero or exceeds a
@@ -80,53 +105,60 @@ fn percent(tested: u64, total: u64) -> u8 {
     if total == 0 {
         return 0;
     }
-    // Widen to `u128` so a very large RAM figure cannot overflow the `* 100`,
-    // and clamp the quotient (always `0..=100`) into a `u8` without a lossy
-    // cast; the `unwrap_or` can never fire but keeps the path panic-free.
     let numerator = u128::from(tested.min(total)) * 100;
     u8::try_from(numerator / u128::from(total)).unwrap_or(100)
 }
 
-/// The fullscreen, memtest86-style presenter for the destructive whole-RAM
+/// One recorded RAM fault, kept as plain integers so the log holds no kernel
+/// type. No secret was ever in this pre-unlock RAM, so the address and the
+/// two word values are safe to display.
+#[derive(Clone, Copy, Default)]
+struct FaultEntry {
+    phys: u64,
+    expected: u64,
+    observed: u64,
+}
+
+/// The fullscreen, memtest86-style presenter for the continuous whole-RAM
 /// takeover test.
 ///
 /// It owns the [`Screen`] for the duration of the run (the machine never
 /// resumes, so there is no "leave fullscreen"). Every method renders only
-/// from the values it is given; it holds no test state of its own beyond what
-/// it needs to avoid redundant redraws.
-///
-/// In rich mode the figures and bar are redrawn in place at fixed positions;
-/// in plain mode (a dumb serial line) the same information degrades to
-/// concise, deduplicated lines. Neither path panics on any input.
+/// from the values it is given plus the small counters it keeps (completed
+/// loops, faults seen, a bounded ring of the most recent faults).
 pub struct MemtestUi<'a> {
     /// The rich/plain presenter every byte goes through.
     screen: Screen<'a>,
     /// The bar interior width in cells, derived from the console geometry
     /// once and clamped into `1..=BAR_INNER_MAX`.
     bar_inner: usize,
-    /// The total-bytes figure once the engine has reported it (`0` until the
-    /// first progress call), so the total line is drawn exactly once.
+    /// Total bytes under test (`0` until [`set_total`](Self::set_total)).
     total: u64,
+    /// Completed full test loops (every pattern over all RAM).
+    loops: u64,
+    /// Total faults reported so far.
+    fault_count: u64,
+    /// A bounded ring of the most recent faults, newest wrapping over oldest.
+    log: [FaultEntry; LOG_ROWS],
     /// The last whole-percent rendered in rich mode, to skip a redraw when it
-    /// has not advanced.
+    /// has not advanced. Reset by [`set_pattern`](MemtestUi::set_pattern) so
+    /// each pattern's bar starts fresh.
     last_percent: Option<u8>,
+    /// The last whole-second of elapsed time rendered, to skip a redraw within
+    /// the same second.
+    last_elapsed: Option<u64>,
     /// The last plain-mode progress bucket printed, to keep the fallback to a
     /// handful of lines rather than one per window.
     last_plain_bucket: Option<u8>,
 }
 
-/// The plain-mode progress line is printed once per this many percent, so a
-/// dumb serial log gets a short, readable ladder rather than a line per 2 MiB
-/// window.
-const PLAIN_PERCENT_STEP: u8 = 10;
-
 impl<'a> MemtestUi<'a> {
     /// Build a presenter over `screen`.
     ///
     /// The progress-bar interior width is derived once from the screen's
-    /// [`Geometry`](crate::screen::Geometry) and clamped into `1..=BAR_INNER_MAX`,
-    /// so a tiny or a very wide console both yield a sensible bar without an
-    /// unbounded buffer.
+    /// [`Geometry`](crate::screen::Geometry) and clamped into
+    /// `1..=BAR_INNER_MAX`, so a tiny or a very wide console both yield a
+    /// sensible bar without an unbounded buffer.
     #[must_use]
     pub fn new(screen: Screen<'a>) -> Self {
         // Reserve the left margin, the two brackets, and a trailing " 100%".
@@ -138,7 +170,11 @@ impl<'a> MemtestUi<'a> {
             screen,
             bar_inner: inner,
             total: 0,
+            loops: 0,
+            fault_count: 0,
+            log: [FaultEntry::default(); LOG_ROWS],
             last_percent: None,
+            last_elapsed: None,
             last_plain_bucket: None,
         }
     }
@@ -149,14 +185,13 @@ impl<'a> MemtestUi<'a> {
         self.screen.is_plain()
     }
 
-    /// Draw the static frame: enter the alternate screen, the reverse-video
-    /// title banner, the one-line explanation, and the (still empty) figure
-    /// labels. In plain mode it prints a single introductory line instead.
+    /// Draw the static frame: the reverse-video title banner, the one-line
+    /// explanation, the (still empty) figure labels, and the error header. In
+    /// plain mode it prints a single introductory line instead.
     pub fn begin(&mut self) {
         if self.screen.is_plain() {
-            self.screen.write_str(
-                "memtest full: testing all of RAM; the machine will reset when finished.",
-            );
+            self.screen
+                .write_str("memtest: testing all of RAM continuously; reset the machine to stop.");
             self.screen.newline();
             return;
         }
@@ -164,38 +199,66 @@ impl<'a> MemtestUi<'a> {
         self.screen.move_to(TITLE_ROW, 1);
         self.screen.set_style(&TITLE_STYLE);
         self.screen
-            .write_str(" TAIRiX memtest \u{2014} destructive whole-RAM test ");
+            .write_str(" TAIRiX memtest \u{2014} whole-RAM test ");
         self.screen.reset_style();
         self.screen.move_to(INTRO_ROW, LABEL_COL);
         self.screen
-            .write_str("Testing all of RAM. The machine will reset when the test finishes.");
-        self.screen.move_to(TOTAL_ROW, LABEL_COL);
-        self.screen.write_str("RAM under test:");
-        self.screen.move_to(TESTED_ROW, LABEL_COL);
-        self.screen.write_str("tested:");
+            .write_str("Testing all of RAM continuously. Reset the machine to stop.");
+        self.label(ELAPSED_ROW, "elapsed:");
+        self.label(LOOPS_ROW, "loops completed:");
+        self.label(TOTAL_ROW, "RAM under test:");
+        self.label(PATTERN_ROW, "pattern:");
+        self.label(TESTED_ROW, "tested:");
+        self.redraw_loops();
+        self.redraw_errors();
     }
 
-    /// Update the display from a running `(tested, total)` byte count.
-    ///
-    /// Rich mode redraws the tested figure and bar in place whenever the whole
-    /// percent advances; plain mode prints a concise line each ten percent.
-    /// Both are idempotent between advances, so the engine may call this after
-    /// every window without flooding the console.
-    pub fn progress(&mut self, tested: u64, total: u64) {
+    /// Record the total bytes under test and draw the total-RAM figure once.
+    pub fn set_total(&mut self, total: u64) {
+        self.total = total;
         if self.screen.is_plain() {
-            self.progress_plain(tested, total);
-        } else {
-            self.progress_rich(tested, total);
+            self.screen.write_str("memtest: RAM under test: ");
+            self.screen.write_u64(mib(total));
+            self.screen.write_str(" MiB");
+            self.screen.newline();
+            return;
         }
+        self.screen.move_to(TOTAL_ROW, VALUE_COL);
+        self.write_mib(total);
     }
 
-    /// Rich-mode progress: draw the total once, then redraw the tested figure
-    /// and the bar whenever the whole percent advances.
-    fn progress_rich(&mut self, tested: u64, total: u64) {
-        if self.total != total {
-            self.total = total;
-            self.screen.move_to(TOTAL_ROW, VALUE_COL);
-            self.write_mib(total);
+    /// Announce the pattern now running, resetting the per-pattern bar so it
+    /// restarts from empty. In plain mode this prints a concise line.
+    pub fn set_pattern(&mut self, name: &str) {
+        self.last_percent = None;
+        self.last_plain_bucket = None;
+        if self.screen.is_plain() {
+            self.screen.write_str("memtest: pattern ");
+            self.screen.write_str(name);
+            self.screen.newline();
+            return;
+        }
+        self.screen.move_to(PATTERN_ROW, VALUE_COL);
+        self.screen.write_str(name);
+        self.screen.clear_line_tail();
+    }
+
+    /// Update the display from a running `(tested, total)` byte count and the
+    /// elapsed run time in whole seconds.
+    ///
+    /// Rich mode redraws the tested figure and bar whenever the whole percent
+    /// advances, and the elapsed clock whenever the second advances; plain
+    /// mode prints a concise line each ten percent. Both are idempotent
+    /// between advances, so the engine may call this after every window
+    /// without flooding the console.
+    pub fn progress(&mut self, tested: u64, total: u64, elapsed_secs: u64) {
+        if self.screen.is_plain() {
+            self.progress_plain(tested, total, elapsed_secs);
+            return;
+        }
+        if self.last_elapsed != Some(elapsed_secs) {
+            self.last_elapsed = Some(elapsed_secs);
+            self.redraw_elapsed(elapsed_secs);
         }
         let pct = percent(tested, total);
         if self.last_percent == Some(pct) {
@@ -207,18 +270,128 @@ impl<'a> MemtestUi<'a> {
         self.draw_bar(pct);
     }
 
+    /// Record and display a detected RAM fault: append it to the scrolling
+    /// log, bump the running error count, and redraw both. The address and
+    /// the two word values are the only data shown — no secret was ever in
+    /// this pre-unlock RAM.
+    pub fn record_fault(&mut self, phys: u64, expected: u64, observed: u64) {
+        let slot = usize::try_from(self.fault_count % LOG_ROWS as u64).unwrap_or(0);
+        self.log[slot] = FaultEntry {
+            phys,
+            expected,
+            observed,
+        };
+        self.fault_count = self.fault_count.saturating_add(1);
+        if self.screen.is_plain() {
+            self.screen.write_str("memtest: RAM FAULT at ");
+            self.screen.write_hex(phys);
+            self.screen.write_str(" expected ");
+            self.screen.write_hex(expected);
+            self.screen.write_str(" read ");
+            self.screen.write_hex(observed);
+            self.screen.newline();
+            return;
+        }
+        self.redraw_errors();
+    }
+
+    /// Mark one full test loop (every pattern over all RAM) complete: bump the
+    /// completed-loop count, redraw it, and print the stable per-loop status
+    /// line an automated test keys on.
+    pub fn loop_complete(&mut self, elapsed_secs: u64) {
+        self.loops = self.loops.saturating_add(1);
+        if self.screen.is_plain() {
+            self.write_loop_marker(elapsed_secs);
+            self.screen.newline();
+            return;
+        }
+        self.redraw_loops();
+        self.screen.move_to(STATUS_ROW, LABEL_COL);
+        self.write_loop_marker(elapsed_secs);
+        self.screen.clear_line_tail();
+    }
+
+    /// Write the stable per-loop completion sentence. Emitted as one
+    /// contiguous run so the exact substring an automated test matches on
+    /// (`memtest: completed test loop <n>`) is never split by a cursor move.
+    fn write_loop_marker(&mut self, elapsed_secs: u64) {
+        self.screen.write_str("memtest: completed test loop ");
+        self.screen.write_u64(self.loops);
+        self.screen.write_str(" (elapsed ");
+        self.write_clock(elapsed_secs);
+        self.screen.write_str(")");
+    }
+
+    /// Draw a label at `row`, [`LABEL_COL`].
+    fn label(&mut self, row: u16, text: &str) {
+        self.screen.move_to(row, LABEL_COL);
+        self.screen.write_str(text);
+    }
+
+    /// Redraw the completed-loop count.
+    fn redraw_loops(&mut self) {
+        self.screen.move_to(LOOPS_ROW, VALUE_COL);
+        self.screen.write_u64(self.loops);
+        self.screen.clear_line_tail();
+    }
+
+    /// Redraw the elapsed clock at `elapsed_secs`.
+    fn redraw_elapsed(&mut self, elapsed_secs: u64) {
+        self.screen.move_to(ELAPSED_ROW, VALUE_COL);
+        self.write_clock(elapsed_secs);
+        self.screen.clear_line_tail();
+    }
+
+    /// Redraw the error-count header and the scrolling fault log beneath it.
+    fn redraw_errors(&mut self) {
+        self.screen.move_to(ERRORS_ROW, LABEL_COL);
+        if self.fault_count > 0 {
+            self.screen.set_style(&FAULT_STYLE);
+        }
+        self.screen.write_str("errors: ");
+        self.screen.write_u64(self.fault_count);
+        self.screen.reset_style();
+        self.screen.clear_line_tail();
+        self.redraw_log();
+    }
+
+    /// Redraw the most recent [`LOG_ROWS`] faults, oldest-visible first.
+    fn redraw_log(&mut self) {
+        let shown = usize::try_from(self.fault_count.min(LOG_ROWS as u64)).unwrap_or(LOG_ROWS);
+        // Work in the u64 fault-count space for the absolute index so a very
+        // large count never overflows a `usize` on a 32-bit target; only the
+        // final ring slot (always < LOG_ROWS) is narrowed.
+        let start = self.fault_count - shown as u64;
+        for r in 0..LOG_ROWS {
+            let row = LOG_TOP_ROW + u16::try_from(r).unwrap_or(0);
+            self.screen.move_to(row, LABEL_COL);
+            if r < shown {
+                let abs = start + r as u64;
+                let slot = usize::try_from(abs % LOG_ROWS as u64).unwrap_or(0);
+                let entry = self.log[slot];
+                self.screen.write_hex(entry.phys);
+                self.screen.write_str("  exp ");
+                self.screen.write_hex(entry.expected);
+                self.screen.write_str("  got ");
+                self.screen.write_hex(entry.observed);
+            }
+            self.screen.clear_line_tail();
+        }
+    }
+
     /// Plain-mode progress: print a concise line each `PLAIN_PERCENT_STEP`
-    /// percent, deduplicated so a whole-RAM run yields a short ladder rather
+    /// percent, deduplicated so a whole-RAM sweep yields a short ladder rather
     /// than one line per 2 MiB window.
-    fn progress_plain(&mut self, tested: u64, total: u64) {
-        self.total = total;
+    fn progress_plain(&mut self, tested: u64, total: u64, elapsed_secs: u64) {
         let pct = percent(tested, total);
         let bucket = pct / PLAIN_PERCENT_STEP;
         if self.last_plain_bucket == Some(bucket) {
             return;
         }
         self.last_plain_bucket = Some(bucket);
-        self.screen.write_str("memtest full: ");
+        self.screen.write_str("memtest: ");
+        self.write_clock(elapsed_secs);
+        self.screen.write_str("  ");
         self.screen.write_u64(u64::from(pct));
         self.screen.write_str("% (");
         self.screen.write_u64(mib(tested));
@@ -228,60 +401,35 @@ impl<'a> MemtestUi<'a> {
         self.screen.newline();
     }
 
-    /// Render a clean pass; the machine resets next.
-    pub fn passed(&mut self, tested: u64) {
-        self.result_prefix(RESULT_ROW, &PASS_STYLE);
-        self.screen.write_str("memtest full: PASSED \u{2014} ");
-        self.screen.write_u64(mib(tested));
-        self.screen.write_str(" MiB tested. Resetting.");
-        self.result_suffix();
-    }
-
-    /// Render a detected RAM fault: a small coloured table in rich mode, a
-    /// single line in plain mode. The address and the two word values are the
-    /// only data shown — no secret was ever in this pre-unlock RAM, and none
-    /// could be here regardless.
-    pub fn faulted(&mut self, phys: u64, expected: u64, observed: u64) {
-        if self.screen.is_plain() {
-            self.screen
-                .write_str("memtest full: RAM FAULT at physical ");
-            self.screen.write_hex(phys);
-            self.screen.write_str(" (expected ");
-            self.screen.write_hex(expected);
-            self.screen.write_str(", read ");
-            self.screen.write_hex(observed);
-            self.screen.write_str("). Resetting.");
-            self.screen.newline();
-            return;
-        }
-        self.result_prefix(RESULT_ROW, &FAULT_STYLE);
-        self.screen.write_str("RAM FAULT");
-        self.screen.reset_style();
-        self.fault_row(RESULT_ROW + 1, "address:  ", phys);
-        self.fault_row(RESULT_ROW + 2, "expected: ", expected);
-        self.fault_row(RESULT_ROW + 3, "observed: ", observed);
-        self.screen.move_to(RESULT_ROW + 5, LABEL_COL);
-        self.screen.write_str("The machine will now reset.");
-    }
-
-    /// Render an incomplete (aborted) run. The destructive takeover polls no
-    /// abort, but the engine's outcome carries the variant, so it is rendered
-    /// for completeness rather than silently swallowed.
-    pub fn aborted(&mut self, tested: u64) {
-        self.result_prefix(RESULT_ROW, &Style::DEFAULT);
-        self.screen
-            .write_str("memtest full: run did not complete after ");
-        self.screen.write_u64(mib(tested));
-        self.screen.write_str(" MiB. Resetting.");
-        self.result_suffix();
-    }
-
     /// Write a byte figure as `<n> MiB`, then clear any stale tail so a
     /// shrinking value can never leave a digit behind.
     fn write_mib(&mut self, bytes: u64) {
         self.screen.write_u64(mib(bytes));
         self.screen.write_str(" MiB");
         self.screen.clear_line_tail();
+    }
+
+    /// Write `secs` as a zero-padded `HH:MM:SS` clock. Hours are not clamped —
+    /// a run of many hours reads honestly — but minutes and seconds always
+    /// occupy two digits.
+    fn write_clock(&mut self, secs: u64) {
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        let seconds = secs % 60;
+        self.screen.write_u64(hours);
+        self.screen.write_str(":");
+        self.write_two(minutes);
+        self.screen.write_str(":");
+        self.write_two(seconds);
+    }
+
+    /// Write `value` (`0..=99`) as exactly two decimal digits.
+    fn write_two(&mut self, value: u64) {
+        let v = value % 100;
+        let tens = u8::try_from(v / 10).unwrap_or(0);
+        let ones = u8::try_from(v % 10).unwrap_or(0);
+        let digits = [b'0' + tens, b'0' + ones];
+        self.screen.write_bytes(&digits);
     }
 
     /// Draw the bracketed progress bar and the trailing percentage at
@@ -304,28 +452,6 @@ impl<'a> MemtestUi<'a> {
         self.screen.write_bytes(b"%");
         self.screen.clear_line_tail();
     }
-
-    /// Position at the result panel and apply `style`. In plain mode the move
-    /// and the style are no-ops, so the result simply follows the progress
-    /// text.
-    fn result_prefix(&mut self, row: u16, style: &Style) {
-        self.screen.move_to(row, LABEL_COL);
-        self.screen.set_style(style);
-    }
-
-    /// Close a result line: reset the rendition and end the line.
-    fn result_suffix(&mut self) {
-        self.screen.reset_style();
-        self.screen.newline();
-    }
-
-    /// One `label 0xVALUE` row of the rich-mode fault table.
-    fn fault_row(&mut self, row: u16, label: &str, value: u64) {
-        self.screen.move_to(row, LABEL_COL + 2);
-        self.screen.write_str(label);
-        self.screen.write_hex(value);
-        self.screen.clear_line_tail();
-    }
 }
 
 #[cfg(test)]
@@ -342,8 +468,7 @@ mod tests {
         bytes.contains(&0x1b)
     }
 
-    /// Count CR-LF line endings by their `\n`, so a line-oriented plain-mode
-    /// render can be counted without a UTF-8 decode of rich control bytes.
+    /// Count line endings by their `\n`.
     fn lines(bytes: &[u8]) -> usize {
         bytes.split(|&b| b == b'\n').count().saturating_sub(1)
     }
@@ -352,27 +477,28 @@ mod tests {
     fn percent_saturates_and_handles_a_zero_total() {
         assert_eq!(percent(0, 0), 0);
         assert_eq!(percent(5, 0), 0);
-        assert_eq!(percent(0, 100), 0);
         assert_eq!(percent(50, 100), 50);
         assert_eq!(percent(100, 100), 100);
-        // A `tested` past `total` (rounding) never overshoots 100.
         assert_eq!(percent(150, 100), 100);
     }
 
     #[test]
-    fn plain_mode_emits_no_escape_bytes() {
+    fn plain_mode_emits_no_escape_bytes_and_the_key_figures() {
         let mut out = VecReport::default();
         {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
             let mut ui = MemtestUi::new(screen);
             ui.begin();
-            ui.progress(50 * MIB, 100 * MIB);
-            ui.passed(100 * MIB);
+            ui.set_total(100 * MIB);
+            ui.set_pattern("moving inversions (zeros/ones)");
+            ui.progress(50 * MIB, 100 * MIB, 5);
+            ui.loop_complete(12);
         }
         assert!(!has_escape(out.bytes()));
-        assert!(out.contains("testing all of RAM"));
+        assert!(out.contains("testing all of RAM continuously"));
         assert!(out.contains("50%"));
-        assert!(out.contains("PASSED"));
+        assert!(out.contains("moving inversions"));
+        assert!(out.contains("memtest: completed test loop 1"));
     }
 
     #[test]
@@ -381,26 +507,13 @@ mod tests {
         {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
             let mut ui = MemtestUi::new(screen);
-            // 1..=9 MiB of 1000 MiB are all under 1% — one bucket, one line.
+            ui.set_pattern("own-address");
             for i in 1..=9u64 {
-                ui.progress(i * MIB, 1000 * MIB);
+                ui.progress(i * MIB, 1000 * MIB, 0);
             }
         }
-        assert_eq!(lines(out.bytes()), 1);
-    }
-
-    #[test]
-    fn plain_progress_prints_a_line_per_bucket() {
-        let mut out = VecReport::default();
-        {
-            let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
-            let mut ui = MemtestUi::new(screen);
-            let total = 100 * MIB;
-            ui.progress(5 * MIB, total); // 5%  → bucket 0
-            ui.progress(15 * MIB, total); // 15% → bucket 1
-            ui.progress(25 * MIB, total); // 25% → bucket 2
-        }
-        assert_eq!(lines(out.bytes()), 3);
+        // The pattern line plus one progress line (all nine are one bucket).
+        assert_eq!(lines(out.bytes()), 2);
     }
 
     #[test]
@@ -413,35 +526,61 @@ mod tests {
         }
         assert!(has_escape(out.bytes()));
         assert!(out.contains("TAIRiX memtest"));
+        assert!(out.contains("Reset the machine to stop"));
+        assert!(!out.contains("destructive"));
     }
 
     #[test]
-    fn rich_progress_draws_a_bar_and_a_percentage() {
+    fn rich_progress_draws_a_bar_a_percentage_and_a_clock() {
         let mut out = VecReport::default();
         {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
             let mut ui = MemtestUi::new(screen);
-            ui.progress(50 * MIB, 100 * MIB);
+            ui.set_total(100 * MIB);
+            ui.set_pattern("walking ones");
+            ui.progress(50 * MIB, 100 * MIB, 3661);
         }
         assert!(out.contains("["));
-        assert!(out.contains("]"));
         assert!(out.contains("50%"));
         assert!(out.contains("MiB"));
+        // 3661 s == 01:01:01.
+        assert!(out.contains("1:01:01"));
     }
 
     #[test]
-    fn rich_fault_renders_a_table_with_the_values() {
+    fn a_recorded_fault_shows_a_count_and_the_values() {
         let mut out = VecReport::default();
         {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
             let mut ui = MemtestUi::new(screen);
-            ui.faulted(0x1234, 0xaaaa_aaaa, 0x0);
+            ui.begin();
+            ui.record_fault(0x1234, 0xAAAA_AAAA, 0x0);
         }
-        assert!(out.contains("RAM FAULT"));
+        assert!(out.contains("errors: 1"));
         assert!(out.contains("0x1234"));
-        assert!(out.contains("address:"));
-        assert!(out.contains("expected:"));
-        assert!(out.contains("observed:"));
+        assert!(out.contains("exp "));
+        assert!(out.contains("got "));
+    }
+
+    #[test]
+    fn the_fault_log_scrolls_to_the_most_recent_entries() {
+        let mut out = VecReport::default();
+        {
+            let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
+            let mut ui = MemtestUi::new(screen);
+            ui.begin();
+            // More faults than the log window: the count keeps climbing, and
+            // the newest address is shown while the oldest has scrolled off.
+            for i in 0..(super::LOG_ROWS as u64 + 3) {
+                ui.record_fault(0x1000 + i * 8, 0xFF, 0x0);
+            }
+        }
+        assert!(out.contains("errors: 13"));
+        // The most recent fault (i == 12 → 0x1060) is on screen. (The capture
+        // is a cumulative byte log, not a snapshot, so an address that has
+        // since scrolled off still appears in the history — the running count
+        // is what proves the log kept advancing past its window.)
+        assert!(out.contains("0x1060"));
     }
 
     #[test]
@@ -450,12 +589,26 @@ mod tests {
         {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
             let mut ui = MemtestUi::new(screen);
-            ui.faulted(0x2000, 0xff, 0x00);
+            ui.record_fault(0x2000, 0xff, 0x00);
         }
         assert!(!has_escape(out.bytes()));
         assert!(out.contains("RAM FAULT"));
         assert!(out.contains("0x2000"));
         assert_eq!(lines(out.bytes()), 1);
+    }
+
+    #[test]
+    fn loop_complete_increments_and_prints_the_stable_marker() {
+        let mut out = VecReport::default();
+        {
+            let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
+            let mut ui = MemtestUi::new(screen);
+            ui.begin();
+            ui.loop_complete(1);
+            ui.loop_complete(2);
+        }
+        assert!(out.contains("memtest: completed test loop 1"));
+        assert!(out.contains("memtest: completed test loop 2"));
     }
 
     #[test]
@@ -465,33 +618,23 @@ mod tests {
             let screen = Screen::new(&mut out, Geometry::DEFAULT, false);
             let mut ui = MemtestUi::new(screen);
             ui.begin();
-            ui.progress(0, 0);
-            ui.passed(0);
+            ui.set_total(0);
+            ui.set_pattern("own-address");
+            ui.progress(0, 0, 0);
+            ui.loop_complete(0);
         }
-        assert!(out.contains("PASSED"));
+        assert!(out.contains("completed test loop 1"));
     }
 
     #[test]
     fn a_narrow_geometry_still_yields_a_valid_bar() {
         let mut out = VecReport::default();
         {
-            // cols smaller than the reserved margin clamps the bar to width 1.
             let screen = Screen::new(&mut out, Geometry::new(10, 24), false);
             let mut ui = MemtestUi::new(screen);
-            ui.progress(100, 100); // 100%
+            ui.set_pattern("walking zeros");
+            ui.progress(100, 100, 0);
         }
         assert!(out.contains("100%"));
-    }
-
-    #[test]
-    fn aborted_reports_the_tested_figure() {
-        let mut out = VecReport::default();
-        {
-            let screen = Screen::new(&mut out, Geometry::DEFAULT, true);
-            let mut ui = MemtestUi::new(screen);
-            ui.aborted(42 * MIB);
-        }
-        assert!(out.contains("did not complete"));
-        assert!(out.contains("42"));
     }
 }

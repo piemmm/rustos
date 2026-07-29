@@ -72,7 +72,7 @@ const SUPERVISOR_MOUNT_OK: EventId = EventId(4155);
 /// structural fault). Never an oracle: a wrong passphrase logs exactly this.
 const SUPERVISOR_MOUNT_FAILED: EventId = EventId(4156);
 
-/// Audit event: the operator confirmed the destructive, one-way `memtest
+/// Audit event: the operator confirmed the one-way `memtest
 /// full` whole-RAM takeover test. Recorded loudly *before* the takeover is
 /// attempted, because a successful takeover destroys the in-memory audit ring
 /// and never returns — this synchronous record is the last one the ring can
@@ -392,19 +392,6 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         }
     }
 
-    fn memtest(
-        &mut self,
-        passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome {
-        let Some(sys) = supervisor_system() else {
-            out.line("memtest: system state provider not installed");
-            return TestOutcome::Aborted;
-        };
-        sys.memtest(passes, out, abort)
-    }
-
     fn scan_disk(
         &mut self,
         _device: &str,
@@ -501,7 +488,7 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
 
     fn takeover_memtest(&mut self, out: &mut dyn Report) {
         let Some(sys) = supervisor_system() else {
-            out.line("memtest full: system state provider not installed");
+            out.line("memtest: system state provider not installed");
             return;
         };
         // On a platform that wired the takeover slice this never returns; on
@@ -550,7 +537,7 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
             SupervisorEvent::MemtestTakeover => (
                 SUPERVISOR_MEMTEST_TAKEOVER,
                 Level::Warn,
-                "supervisor: destructive memtest-full machine takeover confirmed",
+                "supervisor: memtest whole-RAM machine takeover confirmed",
             ),
         };
         self.record(id, level, message);

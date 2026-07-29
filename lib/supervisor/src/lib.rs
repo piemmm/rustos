@@ -139,7 +139,7 @@ pub enum SupervisorEvent {
     MountOk,
     /// An in-Supervisor `mount` failed (wrong passphrase or structural).
     MountFailed,
-    /// The operator confirmed the one-way, destructive `memtest full`
+    /// The operator confirmed the one-way `memtest`
     /// whole-RAM takeover test. Recorded immediately before the takeover is
     /// attempted, because a successful takeover destroys the in-memory audit
     /// ring and never returns — this is the last record the ring can hold.
@@ -221,10 +221,9 @@ pub trait SupInput {
     fn read_byte(&mut self) -> Option<u8>;
 
     /// Return an already-available byte without blocking, or [`None`] if
-    /// none is buffered. Used to poll for an `ESC` abort during `memtest` /
-    /// `test disk`. The default never yields a byte, so a backing that
-    /// cannot poll simply makes those commands non-abortable rather than
-    /// spinning.
+    /// none is buffered. Used to poll for an `ESC` abort during `test disk`.
+    /// The default never yields a byte, so a backing that cannot poll simply
+    /// makes that command non-abortable rather than spinning.
     fn poll_byte(&mut self) -> Option<u8> {
         None
     }
@@ -233,10 +232,10 @@ pub trait SupInput {
 /// The data and control seam the Supervisor presents and drives.
 ///
 /// Every method is implemented by the kernel over an existing subsystem
-/// (introspection, the memory-map RAM test, the partition reader, the
-/// hardware tree, the audit-log ring, the real unlock path, the port reset
-/// primitive). The engine calls them; it never reaches past this seam, so it
-/// depends on no `kernel/*` crate and names no device (`AGENTS.md` §17.4).
+/// (introspection, the one-way whole-RAM takeover, the partition reader,
+/// the hardware tree, the audit-log ring, the real unlock path, the port
+/// reset primitive). The engine calls them; it never reaches past this seam,
+/// so it depends on no `kernel/*` crate and names no device.
 ///
 /// All rendering methods take a [`Report`] and are **read-only**: they never
 /// write to storage and never expose an arbitrary physical-address read.
@@ -286,21 +285,10 @@ pub trait SupervisorHost {
     /// Render the wall-clock date/time.
     fn date(&mut self, out: &mut dyn Report);
 
-    /// Run the thorough RAM test for `passes` passes, rendering progress and
-    /// any fault to `out`. `abort` is polled between units; when it returns
-    /// `true` the test stops early and reports [`TestOutcome::Aborted`]. The
-    /// test uses the safe memory-map RAM engine, never raw pointer
-    /// arithmetic.
-    fn memtest(
-        &mut self,
-        passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome;
-
     /// Run a bounded, read-only surface scan of `device`, reporting read
-    /// errors/timeouts. Never writes. `abort` is polled as for
-    /// [`memtest`](SupervisorHost::memtest).
+    /// errors/timeouts. Never writes. `abort` is polled between work units;
+    /// when it returns `true` the scan stops early and reports
+    /// [`TestOutcome::Aborted`].
     fn scan_disk(
         &mut self,
         device: &str,
@@ -322,9 +310,10 @@ pub trait SupervisorHost {
     /// returns, the platform has no power-off and the engine reports it.
     fn poweroff(&mut self);
 
-    /// Attempt the one-way, destructive `memtest full` whole-RAM takeover
-    /// test. The engine calls this **only** after an explicit typed
-    /// confirmation and after auditing [`SupervisorEvent::MemtestTakeover`].
+    /// Attempt the one-way `memtest` whole-RAM takeover test.
+    /// The engine calls this after auditing
+    /// [`SupervisorEvent::MemtestTakeover`]; there is no separate
+    /// confirmation, because running `memtest` at all is the decision.
     ///
     /// On a platform that can take the machine over this never returns: it
     /// stops every CPU, tests all of RAM (overwriting it), and resets. If it

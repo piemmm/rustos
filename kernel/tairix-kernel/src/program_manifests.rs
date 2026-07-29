@@ -382,11 +382,15 @@ pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
 
 /// PID 1 `init`'s manifest: `CAP_CONSOLE_WRITE` for its startup banner
 /// (`stream_write`), `CAP_PROC_SPAWN` to launch the boot services and
-/// the per-console login supervisors, and `CAP_SPAWN_AS_USER` because
+/// the per-console login supervisors, `CAP_SPAWN_AS_USER` because
 /// every service and session it launches is switched onto its own
 /// compiled-in service account (`plans/USERS.md` — the startup config
 /// names the account, the kernel resolves the credential from the
-/// boot-installed identity table). As a system program its manifest is
+/// boot-installed identity table), and `CAP_LOG_EMIT` so its service
+/// manager can record structured service-lifecycle events (skip, spawn,
+/// ready) through the diagnostic sink — the same authority the boot
+/// services it launches (`login`, `devmgr`, `sysinfod`) already carry.
+/// As a system program its manifest is
 /// also its ceiling (there is no account row for the system principal),
 /// and each child it spawns is bounded by that child's *own* registered
 /// manifest intersected with its service account's ceiling, never by
@@ -395,6 +399,7 @@ pub const INIT_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::PROC_SPAWN,
     CapabilityId::SPAWN_AS_USER,
+    CapabilityId::LOG_EMIT,
 ];
 
 #[cfg(test)]
@@ -665,6 +670,7 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::SPAWN_AS_USER,
+                CapabilityId::LOG_EMIT,
             ])
         );
     }

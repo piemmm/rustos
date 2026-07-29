@@ -3,42 +3,49 @@
 //!
 //! The Arch HAL [`MachineTakeover`] body for the QEMU `virt` / SiFive
 //! `virt`-class port: the irreversible, one-way sequence the pre-boot
-//! Supervisor's `memtest full` drives to test **all** of RAM. It is
+//! Supervisor's `memtest` drives to test **all** of RAM. It is
 //! deliberately the *only* public surface of this module — the takeover
 //! `static` is private and reachable solely through the supervisor-gated
 //! `KernelArch::machine_takeover` accessor the downstream boot wrapper
 //! implements.
 //!
+//! # Where the cross-CPU quiesce lives
+//!
+//! Stopping every *other* hart is **not** done here: it is architecture-neutral
+//! (a stop request, the directed SBI IPI, the boot-published liveness/ack
+//! tables) and is driven by the caller before this body runs — the
+//! Supervisor's `drive_takeover` calls `tairix_arch_api::quiesce_others`,
+//! which returns [`TakeoverError::CpuQuiesceTimeout`] fail-closed if a hart
+//! will not halt, so this body is only ever reached once this hart is the sole
+//! one running. The one per-silicon half of quiesce — *parking* a stopped
+//! hart — lives in the IPI receive path
+//! (`crate::preempt::on_software_interrupt`), not here.
+//!
 //! # The riscv64 sequence
 //!
 //! [`RiscvMachineTakeover::take_over`] performs, in order and without ever
-//! returning on success:
+//! returning on success (every other hart already quiesced):
 //!
-//! 1. **Confirm this is the only running hart.** The production `virt`
-//!    image is single-hart and starts no secondary, so there is nothing to
-//!    quiesce; the step still *verifies* it — every other hart the port
-//!    could address must report the SBI HSM `STOPPED` state — and fails
-//!    closed ([`TakeoverError::CpuQuiesceTimeout`]) rather than assuming it.
-//! 2. **Mask S-mode interrupts** (`sstatus.SIE = 0`, `sie = 0`) so nothing
+//! 1. **Mask S-mode interrupts** (`sstatus.SIE = 0`, `sie = 0`) so nothing
 //!    preempts the solitary hart. There is no lockup watchdog wired on this
 //!    port, so there is none to stop.
-//! 3. **Flatten paging** to bare mode (`satp = 0`). The kernel runs under an
+//! 2. **Flatten paging** to bare mode (`satp = 0`). The kernel runs under an
 //!    Sv39 *identity* map (`virtual == physical`), so dropping to bare mode
 //!    leaves every address — the running `pc`, the boot page tables, the
 //!    console MMIO — resolving to the same physical byte; nothing moves.
-//! 4. **Switch onto a reserved stack** the sweep will not overwrite and run
-//!    the caller's `sweep` (the arch-neutral destructive test of every
+//! 3. **Switch onto a reserved stack** the sweep will not overwrite and run
+//!    the caller's `sweep` (the arch-neutral whole-RAM test of every
 //!    *usable* frame, which renders progress to the console).
-//! 5. **Test the region the sweep could not** — the kernel image and the
+//! 4. **Test the region the sweep could not** — the kernel image and the
 //!    stack the sweep ran on, `[__kernel_image_start, __kernel_end)` — with
 //!    the relocatable, register-only `_takeover_stub` copied into a
 //!    just-swept usable page, then **SBI System-Reset**. The stub never
 //!    touches the OpenSBI firmware below the kernel image, so the reset
 //!    ecall still works.
 //!
-//! On any pre-destructive refusal `take_over` returns the [`TakeoverError`]
-//! with the machine untouched and `sweep` un-run (fail closed, never a
-//! panic).
+//! This body owns no pre-teardown refusal of its own (SBI System-Reset is
+//! always available on this port); the quiesce refusal is the caller's and is
+//! fail-closed there.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
@@ -88,7 +95,7 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
 ///
 /// Operates in `usize` because its only caller works in native addresses
 /// (the kernel-image bounds and the scratch page), so there is no lossy
-/// `u64`↔`usize` cast on the destructive path.
+/// `u64`↔`usize` cast on the whole-RAM path.
 const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
@@ -111,8 +118,8 @@ static RISCV_TAKEOVER: RiscvMachineTakeover = RiscvMachineTakeover;
 ///
 /// The downstream boot wrapper's `KernelArch::machine_takeover` — itself
 /// gated on the supervisor-only `TakeoverGrant` — is the only caller, so
-/// the destructive mechanism stays reachable exclusively from the confirmed
-/// `memtest full` path.
+/// the takeover mechanism stays reachable exclusively from the confirmed
+/// `memtest` path.
 #[must_use]
 pub fn machine_takeover_handle() -> &'static (dyn MachineTakeover + Sync) {
     &RISCV_TAKEOVER
@@ -133,24 +140,17 @@ extern "C" {
 
 impl MachineTakeover for RiscvMachineTakeover {
     unsafe fn take_over(&self, sweep: &mut dyn FnMut()) -> TakeoverError {
-        // 1. Confirm this is the only running hart. The production `virt`
-        //    image is single-hart and installs no secondary entry, so
-        //    `secondary_entry_addr()` is 0 and there is nothing to quiesce.
-        //    A non-zero entry means SMP bring-up was wired without teaching
-        //    this takeover to cooperatively stop the secondaries, so it
-        //    refuses fail-closed rather than destroy RAM another hart is
-        //    still using. (Logical CPU 1 is the first secondary; the exact
-        //    id is cosmetic on a path that cannot occur in the shipped
-        //    single-hart image.)
-        if crate::smp::secondary_entry_addr() != 0 {
-            return TakeoverError::CpuQuiesceTimeout { cpu: 1 };
-        }
+        // Every other hart has already been quiesced by the
+        // architecture-neutral caller (the Supervisor's `drive_takeover` runs
+        // the cross-CPU stop handshake before this is ever reached), so this
+        // hart is the only one running. This body owns only the single-hart
+        // tear-down that follows.
 
-        // 2. Mask S-mode interrupts so nothing preempts the solitary hart:
+        // 1. Mask S-mode interrupts so nothing preempts the solitary hart:
         //    clear `sstatus.SIE`, then disable every S-mode interrupt
         //    source (`sie = 0`). There is no lockup watchdog wired on this
         //    port, so there is none to stop.
-        // 3. Flatten paging to bare mode (`satp = 0`) and flush the TLB.
+        // 2. Flatten paging to bare mode (`satp = 0`) and flush the TLB.
         //    The kernel runs identity-mapped (virtual == physical), so
         //    every address keeps resolving to the same physical byte.
         // SAFETY: all four are well-defined S-mode CSR operations. Masking
@@ -169,7 +169,7 @@ impl MachineTakeover for RiscvMachineTakeover {
             );
         }
 
-        // 4. Switch onto the reserved stack and run the sweep, then test the
+        // 3. Switch onto the reserved stack and run the sweep, then test the
         //    kernel-image region and reset — none of which returns. The
         //    sweep handle is reached through a thin pointer to the caller's
         //    `&mut dyn FnMut()`, which lives on the caller's (reserved)
@@ -185,7 +185,7 @@ impl MachineTakeover for RiscvMachineTakeover {
     }
 }
 
-/// Run the destructive sweep on the reserved stack, then test the region it
+/// Run the whole-RAM sweep on the reserved stack, then test the region it
 /// executed from and reset. Entered from `_takeover_switch_stack` with `sp`
 /// already installed on the reserved takeover stack; never returns.
 ///
@@ -199,7 +199,7 @@ impl MachineTakeover for RiscvMachineTakeover {
 unsafe extern "C" fn tairix_arch_riscv64_takeover_continue(thin: usize) -> ! {
     // SAFETY: `thin` points at the live `&mut dyn FnMut()` the caller
     // placed on its reserved stack; reconstructing and calling it runs the
-    // architecture-neutral destructive sweep over every usable frame.
+    // architecture-neutral whole-RAM sweep over every usable frame.
     let sweep = unsafe { &mut *(thin as *mut &mut dyn FnMut()) };
     sweep();
     // The sweep tested every *usable* frame. The one region it could not

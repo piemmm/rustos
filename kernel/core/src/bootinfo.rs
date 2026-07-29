@@ -204,7 +204,7 @@ pub trait KernelArch: SchedulerArch {
     /// small self-contained test routine can address physical RAM.
     ///
     /// Because a takeover is irreversible (its only exits are reset /
-    /// power-off), the Supervisor's `memtest full` command reads this handle
+    /// power-off), the Supervisor's `memtest` command reads this handle
     /// only *after* an explicit typed confirmation and a synchronous
     /// pre-jump audit. Like [`Self::watchdog_recovery`] the reference is
     /// `'static` and shared, so it is `Sync`.
@@ -216,7 +216,7 @@ pub trait KernelArch: SchedulerArch {
     /// a `&dyn KernelArch`: it demands a
     /// [`TakeoverGrant`](crate::supervisor_system::TakeoverGrant), a witness
     /// that can be minted only inside `crate::supervisor_system` — the
-    /// confirmed, audited `memtest full` path. No other kernel subsystem,
+    /// confirmed, audited `memtest` path. No other kernel subsystem,
     /// driver, or userland caller can construct the grant, so none can obtain
     /// the [`MachineTakeover`](tairix_arch_api::MachineTakeover) handle or
     /// invoke its `unsafe` steps. A port implements this by handing back its

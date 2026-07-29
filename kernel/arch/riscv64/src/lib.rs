@@ -108,7 +108,7 @@ core::arch::global_asm!(include_str!("smp.s"));
 // kernel-image self-test + reset stub (`plans/NEW-SUPERVISOR.md` §9) are
 // meaningful only on the bare-metal target; the whole `takeover` module is
 // freestanding-only (it is all CSR/assembly and destroys the machine, so it
-// is proven by the destructive QEMU vertical, never a host test).
+// is proven by the memtest-takeover QEMU vertical, never a host test).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 core::arch::global_asm!(include_str!("takeover.s"));
 
@@ -193,9 +193,9 @@ pub mod panic;
 pub mod serial;
 /// riscv64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the
 /// Arch HAL [`tairix_arch_api::MachineTakeover`] body driving the pre-boot
-/// Supervisor's one-way destructive whole-RAM `memtest full`. Freestanding
+/// Supervisor's one-way whole-RAM `memtest`. Freestanding
 /// only — it is all CSR/assembly and destroys the machine, so it is proven
-/// by the destructive QEMU vertical, never a host test.
+/// by the memtest-takeover QEMU vertical, never a host test.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod takeover;
 

@@ -735,6 +735,17 @@ pub unsafe fn enable_ipi() {
 /// `on_software_interrupt`.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_ipi_interrupt(cpu: CpuId) {
+    // A cross-CPU quiesce turns this delivered IPI into a one-way stop: the
+    // pre-boot Supervisor's whole-RAM takeover needs every other
+    // core halted before it flattens paging and overwrites RAM. Acknowledge so
+    // the boot CPU's bounded handshake sees this core is down, then park masked
+    // and memory-free forever (never returning to run kernel code again, and
+    // never EOI-ing — the machine is about to be reset). The reschedule
+    // callback below is skipped: a quiescing core must not touch the scheduler.
+    if tairix_arch_api::quiesce_stop_requested() {
+        tairix_arch_api::quiesce_acknowledge(cpu);
+        crate::kernel_arch::halt_current_cpu();
+    }
     let raw = IPI_CALLBACK_FN.load(Ordering::Relaxed);
     if raw != 0 {
         // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid

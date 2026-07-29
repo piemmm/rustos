@@ -108,21 +108,22 @@ the burn-down is complete.
 
 `MachineTakeover` (`kernel/arch/api/src/takeover.rs`) is **not** a §17.2
 mandatory primitive — the §17.2 burn-down above stays complete. It is the
-optional machine-takeover slice the pre-boot Supervisor's one-way destructive
-`memtest full` drives (`plans/NEW-SUPERVISOR.md` §9): the arch-neutral trait,
+optional machine-takeover slice the pre-boot Supervisor's one-way
+`memtest` drives (`plans/NEW-SUPERVISOR.md` §9): the arch-neutral trait,
 `TakeoverError`, and its host `takeover::conformance` vertical have landed, and
 `KernelArch::machine_takeover` defaults to `None` (fail closed), so a port that
 has not wired the quiesce/relocate mechanism honestly reports "not supported".
 The accessor is **supervisor-gated**: it requires a
 `kernel/core::supervisor_system::TakeoverGrant` witness that only the confirmed
-`memtest full` path can mint, so a port hands its takeover `static` back only
+`memtest` path can mint, so a port hands its takeover `static` back only
 through this one accessor and no other caller can reach the handle.
 **riscv64**, **aarch64**, and **x86_64** have all landed the real mechanism
-(`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce (single-CPU
-verified via `smp::secondary_entry_addr() == 0`, else fail-closed
-`CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`; `DAIF` +
-`CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the arch-neutral
-destructive sweep, then relocate a register-only stub into a swept usable page
+(`kernel/arch/<t>/src/takeover.rs` + `takeover.s`): quiesce every other CPU
+through the bounded cross-CPU IPI-halt handshake (`tairix_arch_api::quiesce`,
+else fail-closed `CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`;
+`DAIF` + `CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the
+arch-neutral whole-RAM sweep continuously (cycling every pattern over all of
+RAM until reset), then relocate a register-only stub into a swept usable page
 to test the kernel-image region and reset. riscv64/aarch64 **flatten paging**
 (bare mode `satp = 0`; MMU-off `SCTLR_EL1` after a cache clean+invalidate —
 both ports are identity-mapped so `virt==phys` survives); x86_64 cannot drop
@@ -133,7 +134,7 @@ builds a minimal identity page table in the swept arena for the stub, testing
 `0xCF9` hardware. Each is proven end-to-end by
 `tests/integration/supervisor_memtest_takeover_qemu_<t>` (the guest ends in a
 reset). `wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
-impls are staged with the Supervisor `memtest full` command, not part of the
+impls are staged with the Supervisor `memtest` command, not part of the
 §17.2 parity guarantee.
 
 **QEMU vertical parity** (`tests/integration/*`):
@@ -151,7 +152,7 @@ impls are staged with the Supervisor `memtest full` command, not part of the
 | display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    | ✓(browser) |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 | **`cross_cpu_tlb_shootdown`** | ✓ | ✓ | ✓ | n/a |
-| **`memtest_takeover`** (destructive) | ✓ | ✓ | ✓ | n/a |
+| **`memtest_takeover`** (continuous) | ✓ | ✓ | ✓ | n/a |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the

@@ -1,27 +1,31 @@
 //! `plans/NEW-SUPERVISOR.md` §9 Stage E QEMU integration test: boot the
 //! production riscv64 `virt` pipeline and drive the pre-boot Supervisor's
-//! one-way **destructive `memtest full` takeover**, proving the riscv64
+//! one-way **`memtest` takeover**, proving the riscv64
 //! `MachineTakeover` mechanism takes the whole machine over, tests all of
 //! RAM, and ends in a **machine reset**.
 //!
 //! ## What this vertical asserts
 //!
 //! It exercises the riscv64 machine-takeover mechanism end to end — the one
-//! part of `memtest full` that can only be proven on real silicon/QEMU (the
+//! part of `memtest` that can only be proven on real silicon/QEMU (the
 //! confirmation, command parsing, and the arch-neutral sweep are host-tested
 //! in `lib/supervisor` and `kernel/mem`). On `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) — the point at which the Supervisor system is published
 //! and the kernel state (frame allocator, boot memory map, direct physical
 //! map) is fully built — the audit sink drives the real published
-//! `SupervisorSystem::memtest_takeover` seam, exactly as the confirmed
-//! `memtest full` command does after its typed `DESTROY` confirmation (which
-//! is itself host-tested in `lib/supervisor`; the riscv64 SBI console offers
-//! no interactive input, so the REPL cannot be driven by keystrokes on this
-//! port — the seam is driven directly instead).
+//! `SupervisorSystem::memtest_takeover` seam, exactly as the `memtest` command
+//! does (there is only the one whole-RAM test and no confirmation prompt;
+//! the command dispatch is host-tested in `lib/supervisor`, and the seam is
+//! driven directly here because the riscv64 SBI console offers no interactive
+//! input to key the REPL and the takeover run cannot return anyway).
 //!
-//! On the wired riscv64 port `memtest_takeover` **never returns**: the
-//! `MachineTakeover` body quiesces (single-hart, nothing to stop), masks
-//! S-mode interrupts, flattens paging to bare mode, destructively tests every
+//! The guest boots with four harts, so this genuinely exercises the cross-CPU
+//! quiesce: `drive_takeover` stops the three secondary harts through the
+//! bounded IPI-halt handshake before the tear-down begins.
+//!
+//! On the wired riscv64 port `memtest_takeover` **never returns**: the caller
+//! quiesces every other hart, then the `MachineTakeover` body masks
+//! S-mode interrupts, flattens paging to bare mode, tests every
 //! usable frame on a reserved stack (rendering the memtest86-style display to
 //! this serial console), tests the kernel-image region with the relocated
 //! stub, and issues an SBI System-Reset. QEMU runs the riscv64 board with
@@ -61,7 +65,7 @@ mod kernel {
 
     /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
     /// section (excluded from the usable physical-memory map, so the
-    /// destructive sweep never overwrites it). `static mut` because the
+    /// whole-RAM sweep never overwrites it). `static mut` because the
     /// bump allocator hands out disjoint slices via an atomic cursor.
     #[link_section = ".heap"]
     static mut HEAP: Heap = Heap::ZERO;
@@ -91,7 +95,7 @@ mod kernel {
     }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and, on
-    /// [`BOOT_COMPLETED_EVENT_ID`], drives the destructive `memtest full`
+    /// [`BOOT_COMPLETED_EVENT_ID`], drives the `memtest`
     /// takeover through the published `SupervisorSystem` seam.
     struct MemtestTakeoverSink;
 
@@ -104,8 +108,9 @@ mod kernel {
                 return;
             }
             // Drive the real published takeover seam. On the wired riscv64
-            // port this never returns (the machine resets → QEMU `-no-reboot`
-            // exits 0 = PASS).
+            // port this never returns: it tests RAM continuously until the
+            // harness issues a monitor `system_reset` after a completed loop
+            // (QEMU `-no-reboot` exits 0 = PASS).
             let mut report = SerialReport;
             if let Some(system) = tairix_kernel_core::supervisor_system() {
                 system.memtest_takeover(&mut report);

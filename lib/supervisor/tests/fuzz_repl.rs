@@ -143,16 +143,6 @@ impl SupervisorHost for FuzzHost {
     fn date(&mut self, out: &mut dyn Report) {
         out.line("date");
     }
-    fn memtest(
-        &mut self,
-        _passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome {
-        let _ = abort();
-        out.line("memtest");
-        TestOutcome::Passed
-    }
     fn scan_disk(
         &mut self,
         _device: &str,

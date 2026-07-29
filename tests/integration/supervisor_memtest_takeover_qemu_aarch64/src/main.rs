@@ -1,37 +1,43 @@
 //! `plans/NEW-SUPERVISOR.md` §9 Stage E QEMU integration test: boot the
 //! production aarch64 `virt` pipeline and drive the pre-boot Supervisor's
-//! one-way **destructive `memtest full` takeover**, proving the aarch64
-//! `MachineTakeover` mechanism takes the whole machine over, tests all of
-//! RAM, and ends in a **machine reset**.
+//! one-way **`memtest` takeover**, proving the aarch64 `MachineTakeover`
+//! mechanism takes the whole machine over and tests all of RAM continuously.
+//! The test never stops on its own — the machine only leaves it by a reset —
+//! so the harness resets the VM once the guest has completed one full test
+//! loop, which registers as a **machine reset**.
 //!
 //! ## What this vertical asserts
 //!
 //! It exercises the aarch64 machine-takeover mechanism end to end — the one
-//! part of `memtest full` that can only be proven on real silicon/QEMU (the
+//! part of `memtest` that can only be proven on real silicon/QEMU (the
 //! confirmation, command parsing, and the arch-neutral sweep are host-tested
 //! in `lib/supervisor` and `kernel/mem`). On `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) — the point at which the Supervisor system is published
 //! and the kernel state (frame allocator, boot memory map, direct physical
 //! map) is fully built — the audit sink drives the real published
-//! `SupervisorSystem::memtest_takeover` seam, exactly as the confirmed
-//! `memtest full` command does after its typed `DESTROY` confirmation (which
-//! is itself host-tested in `lib/supervisor`; the takeover is driven directly
-//! here because the destructive run cannot return to key the REPL).
+//! `SupervisorSystem::memtest_takeover` seam, exactly as the `memtest` command
+//! does (there is only the one whole-RAM test and no confirmation prompt; the
+//! command dispatch is host-tested in `lib/supervisor`, and the takeover is
+//! driven directly here because it never returns to key the REPL).
 //!
-//! On the wired aarch64 port `memtest_takeover` **never returns**: the
-//! `MachineTakeover` body quiesces (single-core, nothing to stop), masks
-//! interrupts and stops the watchdog cadence, flattens paging (MMU off),
-//! destructively tests every usable frame on a reserved stack (rendering the
-//! memtest86-style display to this serial console), tests the kernel-image
-//! region with the relocated stub, and issues PSCI `SYSTEM_RESET` through the
-//! discovered conduit. QEMU runs the aarch64 `virt` board with `-no-reboot`,
-//! so that reset exits the host process with status 0 and the runner
-//! registers `Outcome::Pass`.
+//! The guest boots with four CPUs, so this genuinely exercises the cross-CPU
+//! quiesce: `drive_takeover` stops the three secondary cores through the
+//! bounded IPI-halt handshake before the tear-down begins.
 //!
-//! A normal boot that reached idle without resetting would time out
-//! (`Outcome::Timeout`), and a takeover that *returned* (refused/unsupported)
-//! makes the sink write a fail finisher — so a regression that stops the port
-//! resetting fails loud rather than passing by accident.
+//! On the wired aarch64 port `memtest_takeover` **never returns**: the caller
+//! quiesces every other core, then the `MachineTakeover` body masks
+//! interrupts and stops the watchdog cadence, flattens paging (MMU off), and
+//! tests every usable frame on a reserved stack — cycling every pattern over
+//! all of RAM, over and over, rendering the memtest86-style display (elapsed
+//! timer, completed-loop count, and error log) to this serial console. Once
+//! the guest prints the completed-test-loop marker the harness issues a QEMU
+//! monitor `system_reset`; under `-no-reboot` that reset exits the host
+//! process with status 0 and the runner registers `Outcome::Pass`.
+//!
+//! A boot that never reached a completed test loop would fall silent and time
+//! out (`Outcome::Timeout`), and a takeover that *returned* (refused/
+//! unsupported) makes the sink write a fail finisher — so a regression that
+//! stops the test running fails loud rather than passing by accident.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -74,9 +80,8 @@ mod kernel {
 
     /// Static boot heap, mirroring the production aarch64 kernel binary's
     /// `.bss`-resident heap (zeroed by the boot trampoline). It lives inside
-    /// the kernel image, which the boot memory map reserves, so the
-    /// destructive sweep (which tests only *usable* frames) never overwrites
-    /// it.
+    /// the kernel image, which the boot memory map reserves, so the whole-RAM
+    /// sweep (which tests only *usable* frames) never overwrites it.
     ///
     /// `static mut` because the bump allocator hands out disjoint slices via
     /// an atomic cursor; the storage is otherwise never aliased.
@@ -111,8 +116,8 @@ mod kernel {
     }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and, on
-    /// [`BOOT_COMPLETED_EVENT_ID`], drives the destructive `memtest full`
-    /// takeover through the published `SupervisorSystem` seam.
+    /// [`BOOT_COMPLETED_EVENT_ID`], drives the `memtest` takeover through the
+    /// published `SupervisorSystem` seam.
     struct MemtestTakeoverSink;
 
     impl Sink for MemtestTakeoverSink {
@@ -124,8 +129,9 @@ mod kernel {
                 return;
             }
             // Drive the real published takeover seam. On the wired aarch64
-            // port this never returns (the machine resets → QEMU `-no-reboot`
-            // exits 0 = PASS).
+            // port this never returns: it tests RAM continuously until the
+            // harness issues a monitor `system_reset` after a completed loop
+            // (QEMU `-no-reboot` exits 0 = PASS).
             let mut report = SerialReport;
             if let Some(system) = tairix_kernel_core::supervisor_system() {
                 system.memtest_takeover(&mut report);

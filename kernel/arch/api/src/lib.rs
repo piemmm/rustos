@@ -76,7 +76,7 @@
 //! **machine-takeover** slice (`plans/NEW-SUPERVISOR.md` §9): the
 //! [`MachineTakeover`] trait whose single [`MachineTakeover::take_over`]
 //! operation hands the whole machine over to the pre-boot Supervisor's
-//! one-way destructive whole-RAM test — quiesce the other CPUs, mask
+//! one-way whole-RAM test — quiesce the other CPUs, mask
 //! interrupts, stop the watchdog, flatten paging, run the sweep on a reserved
 //! stack, then reset (it never returns on success) — plus its
 //! [`takeover::conformance`] vertical. It also hosts
@@ -131,6 +131,7 @@ pub mod memtag;
 pub mod mmu;
 pub mod percpu;
 pub mod platform;
+pub mod quiesce;
 pub mod sidechannel;
 pub mod smp;
 pub mod takeover;
@@ -208,6 +209,11 @@ pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
 pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
 
 pub use takeover::{conformance as takeover_conformance, MachineTakeover, TakeoverError};
+
+pub use quiesce::{
+    acknowledge as quiesce_acknowledge, publish_tables as quiesce_publish_tables, quiesce_others,
+    stop_requested as quiesce_stop_requested, PublishError as QuiescePublishError,
+};
 
 pub use watchdog::{
     conformance as watchdog_conformance, RecoveryOutcome, RemotePcSample, StuckInterrupt,

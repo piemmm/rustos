@@ -473,101 +473,177 @@ where
     }
 }
 
-/// The result of a destructive, whole-range RAM test ([`run_destructive`]).
+/// One whole-RAM test pattern the machine-takeover memtest applies to every
+/// word of every usable frame.
 ///
-/// Unlike the boot sanity check ([`run`]) and the owned-window test
-/// ([`test_owned_window`]), the destructive test is a **one-way** operation:
-/// it overwrites every word of every tested region and never restores it, so
-/// the machine it ran on cannot resume — the only sequel is a reset. It is
-/// therefore reported as a distinct outcome rather than folded into
-/// `Result<u64, RamFault>`, so a caller cannot accidentally treat an early
-/// operator abort as a clean pass.
+/// A single *test loop* runs [`ALL`](RamTestPattern::ALL) in order over all
+/// of RAM; the Supervisor's `memtest` repeats that loop until the machine is
+/// reset. Each pattern targets a different fault class (after Michael Barr,
+/// *"Software-Based Memory Testing"*, 2000, and the classic memtest86 suite),
+/// so the whole loop is thorough rather than fast:
+///
+/// * [`OwnAddress`](RamTestPattern::OwnAddress) — an *address-in-address*
+///   pass: every word is stamped with a value derived from its own offset and
+///   read back, so a stuck or shorted address line that makes two cells alias
+///   is caught by a marker read from the wrong place.
+/// * [`MovingInversionsZeros`](RamTestPattern::MovingInversionsZeros) and
+///   [`MovingInversionsCheckerboard`](RamTestPattern::MovingInversionsCheckerboard)
+///   — *moving-inversions* passes with all-zeros/all-ones and the
+///   `0xAA`/`0x55` checkerboard: the window is filled, then walked ascending
+///   (verify, write complement) and descending (verify, write back), so every
+///   bit of every cell holds both polarities and an inter-cell coupling fault
+///   is exercised in both address directions.
+/// * [`WalkingOnes`](RamTestPattern::WalkingOnes) and
+///   [`WalkingZeros`](RamTestPattern::WalkingZeros) — a walking single-bit
+///   pattern whose set (or clear) bit advances with the word index, catching
+///   data-bus and adjacent-bit coupling faults a uniform fill cannot.
+///
+/// Every pattern touches **every** word of the window and does not restore
+/// it: the caller owns the whole machine and it never resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestructiveOutcome {
-    /// Every word of every reachable usable region was written and read back
-    /// correctly. `tested` is the number of bytes proven.
-    Passed {
-        /// Bytes written and verified across every reachable usable region.
-        tested: u64,
-    },
-    /// The operator aborted (the injected `abort` returned `true`) after
-    /// `tested` bytes. The RAM already written is destroyed regardless; the
-    /// abort only stops before touching the rest.
-    Aborted {
-        /// Bytes written and verified before the abort was observed.
-        tested: u64,
-    },
-    /// The first cell that failed to read back the value written to it.
-    Faulted(RamFault),
+pub enum RamTestPattern {
+    /// Stamp each word with its own address and read it back.
+    OwnAddress,
+    /// Moving inversions between all-zeros and all-ones.
+    MovingInversionsZeros,
+    /// Moving inversions between the `0xAA…`/`0x55…` checkerboard halves.
+    MovingInversionsCheckerboard,
+    /// A walking one-hot bit that advances with the word index.
+    WalkingOnes,
+    /// A walking single-zero bit that advances with the word index.
+    WalkingZeros,
 }
 
-/// Drive word `i` of `w` to `value`, flush it to DRAM, and fail closed with
-/// its physical address if it does not read back — the destructive
-/// counterpart of [`check`] that owns the write as well as the verify.
-fn write_verify<W: WordWindow>(
-    w: &W,
+impl RamTestPattern {
+    /// The patterns one complete test loop applies, in order.
+    pub const ALL: &'static [RamTestPattern] = &[
+        RamTestPattern::OwnAddress,
+        RamTestPattern::MovingInversionsZeros,
+        RamTestPattern::MovingInversionsCheckerboard,
+        RamTestPattern::WalkingOnes,
+        RamTestPattern::WalkingZeros,
+    ];
+
+    /// A short, stable display name for the progress UI.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            RamTestPattern::OwnAddress => "own-address",
+            RamTestPattern::MovingInversionsZeros => "moving inversions (zeros/ones)",
+            RamTestPattern::MovingInversionsCheckerboard => "moving inversions (checkerboard)",
+            RamTestPattern::WalkingOnes => "walking ones",
+            RamTestPattern::WalkingZeros => "walking zeros",
+        }
+    }
+}
+
+/// The walking-bit value for word `i`: a lone set bit (or, when `zeros`, a
+/// lone clear bit) whose position advances with the word index, so a run of
+/// cells exercises every data-bus line in turn.
+fn walking_value(i: usize, zeros: bool) -> Word {
+    let bit = 1u64 << ((i as u64) & (u64::from(Word::BITS) - 1));
+    if zeros {
+        !bit
+    } else {
+        bit
+    }
+}
+
+/// Read word `i` back and, if it does not equal `expected`, report the fault
+/// through `on_fault` and keep going.
+///
+/// Unlike [`check`], this never returns early: the takeover memtest logs each
+/// bad cell and continues testing the rest of RAM (and keeps looping), so a
+/// single faulty cell does not hide every other one behind it.
+fn verify_word(
+    w: &dyn WordWindow,
     base: PhysAddr,
     i: usize,
-    value: Word,
-) -> Result<(), RamFault> {
-    w.write(i, value);
-    w.flush_word(i);
-    check(w, base, i, value)
+    expected: Word,
+    on_fault: &mut dyn FnMut(RamFault),
+) {
+    let observed = w.read(i);
+    if observed != expected {
+        let phys = PhysAddr::new(base.as_u64() + (i as u64) * WORD_BYTES as u64);
+        on_fault(RamFault {
+            phys,
+            expected,
+            observed,
+        });
+    }
 }
 
-/// The destructive whole-window test: prove **every** word of `w`, not a
-/// sample.
-///
-/// Where [`test_window`] samples one word per page for speed (a boot sanity
-/// check), this exercises every cell in the window, because the machine is
-/// being handed over to the test and never resumes — full coverage is the
-/// whole point of a takeover run. Two textbook passes are applied, both
-/// touching every word:
-///
-/// * an **address-in-address** pass: every word is stamped with a value
-///   derived from its own offset ([`address_marker`]) and read back, so a
-///   stuck or shorted address line that makes two cells alias is caught by a
-///   marker read from the wrong place — over the whole range, not just the
-///   power-of-two offsets the sampling [`address_pass`] walks;
-/// * a **moving-inversions** pass with [`PATTERN`]: the window is filled with
-///   the pattern, then walked ascending (verify pattern, write complement)
-///   and descending (verify complement, write pattern), so every bit of every
-///   cell is proven to hold both polarities and an inter-cell coupling fault
-///   is exercised in both address directions (after Michael Barr,
-///   *"Software-Based Memory Testing"*, 2000).
-///
-/// The cells are **not** restored — the caller owns the whole machine and it
-/// will not resume. Fails closed at the first cell that does not read back.
-fn destructive_window<W: WordWindow>(w: &W, base: PhysAddr) -> Result<(), RamFault> {
+/// A moving-inversions pass over the whole window with `value` and its
+/// complement, reporting every mismatch through `on_fault` without stopping.
+fn moving_inversions(
+    w: &dyn WordWindow,
+    base: PhysAddr,
+    value: Word,
+    on_fault: &mut dyn FnMut(RamFault),
+) {
     let n = w.words();
-    // Address-in-address: stamp then verify every offset.
+    let complement = !value;
     for i in 0..n {
-        w.write(i, address_marker(i));
+        w.write(i, value);
         w.flush_word(i);
     }
+    // Ascending: expect the value, drive the complement in its place.
     for i in 0..n {
-        check(w, base, i, address_marker(i))?;
-    }
-    // Moving inversions: fill with the pattern.
-    for i in 0..n {
-        w.write(i, PATTERN);
+        verify_word(w, base, i, value, on_fault);
+        w.write(i, complement);
         w.flush_word(i);
     }
-    // Ascending: expect the pattern, drive the complement.
-    for i in 0..n {
-        check(w, base, i, PATTERN)?;
-        write_verify(w, base, i, ANTIPATTERN)?;
-    }
-    // Descending: expect the complement, drive the pattern back.
+    // Descending: expect the complement, drive the value back.
     for i in (0..n).rev() {
-        check(w, base, i, ANTIPATTERN)?;
-        write_verify(w, base, i, PATTERN)?;
+        verify_word(w, base, i, complement, on_fault);
+        w.write(i, value);
+        w.flush_word(i);
     }
-    Ok(())
+}
+
+/// Apply one [`RamTestPattern`] to every word of window `w`, reporting each
+/// mismatch through `on_fault` and continuing.
+///
+/// Every pattern writes the whole window and reads it back through a per-word
+/// flush (so the read observes DRAM, not the cache) and leaves the window
+/// holding its final pattern — the caller owns the machine and it never
+/// resumes, so nothing is restored.
+fn sweep_window(
+    w: &dyn WordWindow,
+    base: PhysAddr,
+    pattern: RamTestPattern,
+    on_fault: &mut dyn FnMut(RamFault),
+) {
+    let n = w.words();
+    match pattern {
+        RamTestPattern::OwnAddress => {
+            for i in 0..n {
+                w.write(i, address_marker(i));
+                w.flush_word(i);
+            }
+            for i in 0..n {
+                verify_word(w, base, i, address_marker(i), on_fault);
+            }
+        }
+        RamTestPattern::MovingInversionsZeros => moving_inversions(w, base, 0, on_fault),
+        RamTestPattern::MovingInversionsCheckerboard => {
+            moving_inversions(w, base, PATTERN, on_fault);
+        }
+        RamTestPattern::WalkingOnes | RamTestPattern::WalkingZeros => {
+            let zeros = matches!(pattern, RamTestPattern::WalkingZeros);
+            for i in 0..n {
+                w.write(i, walking_value(i, zeros));
+                w.flush_word(i);
+            }
+            for i in 0..n {
+                verify_word(w, base, i, walking_value(i, zeros), on_fault);
+            }
+        }
+    }
 }
 
 /// Sum the usable bytes of `map`, rounded inward to whole frames exactly as
-/// [`run_destructive`] walks them, so a progress callback can be given an
+/// [`sweep_pattern`] walks them, so a progress callback can be given an
 /// honest denominator. A region the direct map cannot reach is still counted
 /// here (the driver discovers unreachability per window); an overflowing
 /// region is skipped, matching the driver.
@@ -589,42 +665,65 @@ fn usable_frame_bytes(map: &BootMemoryMap) -> u64 {
     total
 }
 
-/// Destructively test **every** word of every reachable usable region of
-/// `map`, reporting progress and honouring an operator abort.
+/// The total number of reachable, frame-aligned usable bytes one pattern
+/// sweep of `map` walks — the honest denominator for a progress fraction.
 ///
-/// This is the engine behind the Supervisor's one-way `memtest full` takeover
+/// Computed once by the takeover driver before the loop begins and passed to
+/// [`sweep_pattern`] as `total`, so the UI's percentage is stable across the
+/// many patterns and loops rather than recomputed each time.
+#[must_use]
+pub fn takeover_test_bytes(map: &BootMemoryMap) -> u64 {
+    usable_frame_bytes(map)
+}
+
+/// The two things a [`sweep_pattern`] run reports as it goes: forward
+/// progress and each detected fault.
+///
+/// A single observer is threaded through the whole sweep, so the driver's
+/// live display (progress bar + scrolling fault log) is updated through one
+/// borrow — the progress and fault paths share the UI without a second
+/// mutable alias. The two methods are never called at the same instant (the
+/// sweep tests a window, then reports its progress), so an implementation may
+/// freely mutate shared state in both.
+pub trait SweepObserver {
+    /// Called after each window with the cumulative bytes swept in *this*
+    /// pattern and the precomputed `total` of all reachable frame-aligned
+    /// usable bytes, so a UI can render a fraction.
+    fn progress(&mut self, tested: u64, total: u64);
+    /// Called for **every** cell that fails to read back; the sweep never
+    /// stops early, so one bad cell does not mask the rest.
+    fn fault(&mut self, fault: RamFault);
+}
+
+/// Apply one [`RamTestPattern`] to **every** word of every reachable usable
+/// region of `map`, reporting progress and every fault through `observer`.
+///
+/// This is the engine behind the Supervisor's `memtest` takeover
 /// (`plans/NEW-SUPERVISOR.md` §9): once the machine has been quiesced and
 /// handed to the test it exercises all of RAM — including the frames the live
-/// kernel image, heap, page tables, and stacks occupied, which the
-/// non-destructive [`run`]/[`test_owned_window`] paths can never touch. It
-/// therefore **overwrites and does not restore** the memory it tests; the
-/// machine cannot resume and the only sequel is a reset. The safety argument
-/// that lets [`run`] run pre-allocator does not apply — the caller must have
+/// kernel image, heap, page tables, and stacks occupied, which the read-only
+/// [`run`]/[`test_owned_window`] paths can never touch. It therefore
+/// **overwrites and does not restore** the memory it tests; the machine
+/// cannot resume and the only sequel is a reset. The safety argument that
+/// lets [`run`] run pre-allocator does not apply — the caller must have
 /// already taken the machine over (masked interrupts, stopped the watchdog,
 /// quiesced the other CPUs).
 ///
-/// * `on_progress(tested, total)` is called after each window with the
-///   cumulative bytes proven and the precomputed total of all reachable
-///   frame-aligned usable bytes, so a UI can render a fraction.
-/// * `abort()` is polled between windows; returning `true` stops the sweep and
-///   yields [`DestructiveOutcome::Aborted`] (the RAM already written stays
-///   destroyed). It is never polled *within* a window, so a window is always
-///   completed atomically.
+/// The driver calls this once per pattern in [`RamTestPattern::ALL`] and
+/// repeats the whole cycle until the machine is reset, so this function tests
+/// one pattern over all of RAM and returns; it never loops or resets itself.
 ///
 /// A region the direct map cannot reach is left untested and uncounted rather
-/// than faked as a pass (fail closed), exactly as in [`run`].
-pub fn run_destructive<M, F, A>(
+/// than faked as tested (fail closed), exactly as in [`run`].
+pub fn sweep_pattern<M>(
     map: &BootMemoryMap,
     physmap: &M,
-    mut on_progress: F,
-    mut abort: A,
-) -> DestructiveOutcome
-where
+    pattern: RamTestPattern,
+    total: u64,
+    observer: &mut dyn SweepObserver,
+) where
     M: PhysMap + ?Sized,
-    F: FnMut(u64, u64),
-    A: FnMut() -> bool,
 {
-    let total = usable_frame_bytes(map);
     let mut tested: u64 = 0;
     for region in map.regions() {
         if region.kind != RegionKind::Usable {
@@ -637,25 +736,21 @@ where
         let end = align_down(region_end.as_u64(), PAGE_SIZE as u64);
         let mut addr = start;
         while addr < end {
-            if abort() {
-                return DestructiveOutcome::Aborted { tested };
-            }
             let remaining = end - addr;
             let chunk = remaining.min(PROGRESS_STEP_BYTES as u64);
             let Ok(chunk_len) = usize::try_from(chunk) else {
                 break;
             };
             if let Some(window) = PhysWindow::new(physmap, PhysAddr::new(addr), chunk_len) {
-                if let Err(fault) = destructive_window(&window, PhysAddr::new(addr)) {
-                    return DestructiveOutcome::Faulted(fault);
-                }
+                sweep_window(&window, PhysAddr::new(addr), pattern, &mut |fault| {
+                    observer.fault(fault);
+                });
                 tested += chunk;
-                on_progress(tested, total);
+                observer.progress(tested, total);
             }
             addr += chunk;
         }
     }
-    DestructiveOutcome::Passed { tested }
 }
 
 #[cfg(all(test, not(loom)))]
@@ -963,16 +1058,43 @@ mod tests {
         assert_eq!(tested, PAGE_SIZE as u64);
     }
 
+    /// Collect every fault a sweep of `ram` with `pattern` reports.
+    fn faults_of(ram: &FakeRam, base: u64, pattern: RamTestPattern) -> Vec<RamFault> {
+        let mut faults = Vec::new();
+        sweep_window(ram, PhysAddr::new(base), pattern, &mut |f| faults.push(f));
+        faults
+    }
+
+    /// A [`SweepObserver`] that records the last progress figures and every
+    /// fault, for driving [`sweep_pattern`] on the host.
+    #[derive(Default)]
+    struct RecordingObserver {
+        last_tested: u64,
+        last_total: u64,
+        faults: Vec<RamFault>,
+    }
+
+    impl SweepObserver for RecordingObserver {
+        fn progress(&mut self, tested: u64, total: u64) {
+            self.last_tested = tested;
+            self.last_total = total;
+        }
+        fn fault(&mut self, fault: RamFault) {
+            self.faults.push(fault);
+        }
+    }
+
     #[test]
-    fn destructive_window_touches_every_word_and_leaves_the_pattern_behind() {
-        // The destructive test is full-coverage and one-way: unlike
-        // `test_window`, it writes *every* cell and never restores it. Prove
-        // both: a healthy window passes, and every cell ends holding the
-        // final pattern (so every word was written, and nothing was zeroed
-        // back).
+    fn checkerboard_sweep_touches_every_word_and_leaves_the_pattern_behind() {
+        // The takeover sweep is full-coverage and one-way: unlike
+        // `test_window`, it writes *every* cell and never restores it. A
+        // healthy window reports no fault, and the checkerboard
+        // moving-inversions pattern ends with every word holding `PATTERN`
+        // (its descending pass writes the value back), so every word was
+        // written and nothing was zeroed.
         let words = 3 * STRIDE + 7;
         let ram = FakeRam::new(words, Fault::None);
-        assert_eq!(destructive_window(&ram, PhysAddr::new(0x4000)), Ok(()));
+        assert!(faults_of(&ram, 0x4000, RamTestPattern::MovingInversionsCheckerboard).is_empty());
         assert!(
             ram.cells.iter().all(|c| c.get() == PATTERN),
             "every word is left holding the final moving-inversions pattern"
@@ -980,35 +1102,57 @@ mod tests {
     }
 
     #[test]
-    fn destructive_window_catches_a_stuck_bit_between_the_sampling_gaps() {
+    fn own_address_sweep_catches_a_stuck_bit_between_the_sampling_gaps() {
         // Word 5 is neither a power-of-two offset nor a stride multiple, so
         // the *sampling* `test_window` deliberately misses a lone fault there
-        // — the destructive full-range test must not: it tests every word.
+        // — the full-coverage own-address sweep must not: it tests every word.
         let ram = FakeRam::new(STRIDE, Fault::StuckLow { word: 5, bit: 0 });
-        let fault = destructive_window(&ram, PhysAddr::new(0x1_0000)).unwrap_err();
-        assert_eq!(fault.phys, PhysAddr::new(0x1_0000 + 5 * WORD_BYTES as u64));
+        let faults = faults_of(&ram, 0x1_0000, RamTestPattern::OwnAddress);
+        assert!(faults
+            .iter()
+            .any(|f| f.phys == PhysAddr::new(0x1_0000 + 5 * WORD_BYTES as u64)));
     }
 
     #[test]
-    fn destructive_window_catches_a_stuck_high_bit_naming_the_cell() {
+    fn moving_inversions_catches_a_stuck_high_bit_naming_the_cell() {
         let ram = FakeRam::new(16, Fault::StuckHigh { word: 9, bit: 12 });
-        let fault = destructive_window(&ram, PhysAddr::new(0x2000)).unwrap_err();
-        assert_eq!(fault.phys, PhysAddr::new(0x2000 + 9 * WORD_BYTES as u64));
+        let faults = faults_of(&ram, 0x2000, RamTestPattern::MovingInversionsZeros);
+        let fault = faults
+            .iter()
+            .find(|f| f.phys == PhysAddr::new(0x2000 + 9 * WORD_BYTES as u64))
+            .expect("the stuck-high cell is reported");
         assert_ne!(fault.expected & (1 << 12), fault.observed & (1 << 12));
     }
 
     #[test]
-    fn destructive_window_catches_a_shorted_address_line() {
+    fn own_address_sweep_catches_a_shorted_address_line() {
         // Writes to word 2 land on word 5; reading word 2 back observes word
-        // 5's marker, so the address-in-address pass fails closed naming
-        // word 2 (the offset it was reading).
+        // 5's marker, so the address-in-address pass reports word 2 (the
+        // offset it was reading).
         let ram = FakeRam::new(8, Fault::Alias { from: 2, to: 5 });
-        let fault = destructive_window(&ram, PhysAddr::new(0x8000)).unwrap_err();
-        assert_eq!(fault.phys, PhysAddr::new(0x8000 + 2 * WORD_BYTES as u64));
+        let faults = faults_of(&ram, 0x8000, RamTestPattern::OwnAddress);
+        assert!(faults
+            .iter()
+            .any(|f| f.phys == PhysAddr::new(0x8000 + 2 * WORD_BYTES as u64)));
     }
 
     #[test]
-    fn run_destructive_passes_a_healthy_map_and_does_not_restore_it() {
+    fn a_sweep_reports_the_bad_cell_without_stopping_the_rest() {
+        // A stuck bit is reported through the callback while the sweep keeps
+        // going: the moving-inversions pass over word 7 (which the all-ones
+        // half drives high) sees bit 3 stuck low and reports it, and the
+        // ascending + descending passes both still run to completion over the
+        // whole window (proved by the fault appearing in the report at all —
+        // the callback path never returns early).
+        let ram = FakeRam::new(4 * STRIDE, Fault::StuckLow { word: 7, bit: 3 });
+        let faults = faults_of(&ram, 0, RamTestPattern::MovingInversionsZeros);
+        assert!(faults
+            .iter()
+            .any(|f| f.phys == PhysAddr::new(7 * WORD_BYTES as u64)));
+    }
+
+    #[test]
+    fn sweep_pattern_covers_a_healthy_map_and_does_not_restore_it() {
         let base = 0x10_0000u64;
         let len = 2 * PAGE_SIZE;
         let sim = SimPhysMap::new(PhysAddr::new(base), len);
@@ -1019,25 +1163,27 @@ mod tests {
             kind: RegionKind::Usable,
         });
 
-        let mut last_tested = 0u64;
-        let mut last_total = 0u64;
-        let outcome = run_destructive(
+        let total = takeover_test_bytes(&map);
+        assert_eq!(
+            total, len as u64,
+            "the honest denominator is all usable RAM"
+        );
+        let mut observer = RecordingObserver::default();
+        sweep_pattern(
             &map,
             &sim,
-            |tested, total| {
-                last_tested = tested;
-                last_total = total;
-            },
-            || false,
+            RamTestPattern::MovingInversionsCheckerboard,
+            total,
+            &mut observer,
         );
-        assert_eq!(outcome, DestructiveOutcome::Passed { tested: len as u64 });
-        assert_eq!(last_tested, len as u64);
-        assert_eq!(
-            last_total, len as u64,
-            "the progress total is the honest denominator"
+        assert!(
+            observer.faults.is_empty(),
+            "healthy simulated RAM reports no fault"
         );
+        assert_eq!(observer.last_tested, len as u64);
+        assert_eq!(observer.last_total, len as u64);
 
-        // The destructive test never restores: the RAM is left holding the
+        // The takeover sweep never restores: the RAM is left holding the
         // final pattern, not zeroed (checked byte-wise, no aligned cast).
         let ptr = sim
             .translate(PhysAddr::new(base), len)
@@ -1053,12 +1199,12 @@ mod tests {
     }
 
     #[test]
-    fn run_destructive_stops_early_when_the_operator_aborts() {
-        // Two contiguous single-page usable regions over one simulated span.
-        // `abort` is polled before each window: it lets the first through and
-        // stops the second, so exactly one page is reported tested.
-        let base = 0x20_0000u64;
-        let sim = SimPhysMap::new(PhysAddr::new(base), 2 * PAGE_SIZE);
+    fn sweep_pattern_skips_an_unmappable_region_rather_than_faking_it() {
+        // The simulator covers one region; a second usable region lies far
+        // outside it. The reachable region is swept (its bytes counted); the
+        // unreachable one is skipped, never faked as tested.
+        let base = 0x30_0000u64;
+        let sim = SimPhysMap::new(PhysAddr::new(base), PAGE_SIZE);
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             start: PhysAddr::new(base),
@@ -1066,38 +1212,36 @@ mod tests {
             kind: RegionKind::Usable,
         });
         map.push(MemoryRegion {
-            start: PhysAddr::new(base + PAGE_SIZE as u64),
+            start: PhysAddr::new(base + 0x100_0000),
             length: PAGE_SIZE as u64,
             kind: RegionKind::Usable,
         });
-
-        let calls = Cell::new(0usize);
-        let outcome = run_destructive(
+        let total = takeover_test_bytes(&map);
+        let mut observer = RecordingObserver::default();
+        sweep_pattern(
             &map,
             &sim,
-            |_, _| {},
-            || {
-                let n = calls.get();
-                calls.set(n + 1);
-                n >= 1
-            },
+            RamTestPattern::WalkingZeros,
+            total,
+            &mut observer,
         );
+        assert!(observer.faults.is_empty(), "healthy RAM reports no fault");
         assert_eq!(
-            outcome,
-            DestructiveOutcome::Aborted {
-                tested: PAGE_SIZE as u64
-            }
+            observer.last_tested, PAGE_SIZE as u64,
+            "only the reachable region"
         );
     }
 
     #[test]
-    fn run_destructive_reports_a_fault_and_never_a_pass() {
-        // A window whose sim map cannot be reached is skipped, but a mappable
-        // one with a fault is reported as `Faulted`, never `Passed`. Here the
-        // simulator is healthy, so drive the fault through the window engine
-        // directly and confirm the outcome type is distinct from a pass.
-        let ram = FakeRam::new(8, Fault::StuckLow { word: 0, bit: 1 });
-        assert!(destructive_window(&ram, PhysAddr::new(0)).is_err());
+    fn every_pattern_has_a_distinct_display_name() {
+        let mut names = Vec::new();
+        for p in RamTestPattern::ALL {
+            let name = p.name();
+            assert!(!name.is_empty());
+            assert!(!names.contains(&name), "names are distinct");
+            names.push(name);
+        }
+        assert_eq!(names.len(), RamTestPattern::ALL.len());
     }
 
     #[test]

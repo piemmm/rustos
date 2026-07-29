@@ -1,7 +1,7 @@
 //! Machine-takeover surface of the Arch HAL — the irreducibly
 //! per-architecture mechanism that hands the *whole* machine over to a
-//! one-way, destructive whole-RAM test (the pre-boot Supervisor's
-//! `memtest full`, `plans/NEW-SUPERVISOR.md` §9).
+//! one-way whole-RAM test (the pre-boot Supervisor's
+//! `memtest`, `plans/NEW-SUPERVISOR.md` §9).
 //!
 //! # Why this is a HAL slice
 //!
@@ -21,16 +21,16 @@
 //!
 //! The *pattern algorithm* the test runs (moving-inversions,
 //! address-in-address) is **not** here: it is arch-neutral and already
-//! lives in `tairix_kernel_mem::ramtest::run_destructive`. This slice is
+//! lives in `tairix_kernel_mem::ramtest::sweep_pattern`. This slice is
 //! only the takeover *mechanism*.
 //!
 //! # The contract (one irreversible operation that never returns)
 //!
 //! A machine takeover cannot be expressed as a "prepare, then let the caller
-//! sweep on its own stack" pair: the destructive sweep overwrites **all** of
+//! sweep on its own stack" pair: the whole-RAM sweep overwrites **all** of
 //! RAM, including whatever stack the caller was running on, so the moment the
 //! sweep touches that stack the caller's return address and locals are gone.
-//! The Supervisor REPL (and therefore `memtest full`) runs on a kernel-service
+//! The Supervisor REPL (and therefore `memtest`) runs on a kernel-service
 //! kthread stack allocated from *usable* RAM, so a driver that swept RAM and
 //! then called `reboot()` on that same stack would corrupt its own execution
 //! mid-sweep and crash rather than reset. The takeover is therefore a
@@ -52,10 +52,10 @@
 //!    page-table walk depends on RAM the sweep is about to destroy (riscv64
 //!    `satp = 0` bare mode; aarch64 `SCTLR_EL1.M = 0`; x86_64 an
 //!    identity page table rooted in a reserved arena), and perform the cache
-//!    maintenance destructive writes require.
+//!    maintenance the whole-RAM writes require.
 //! 4. **Switch onto a reserved stack the sweep will never overwrite** and run
 //!    the caller-supplied `sweep` — the architecture-neutral phase that
-//!    destructively tests every *usable* frame and renders progress. The port
+//!    tests every *usable* frame and renders progress. The port
 //!    guarantees the sweep executes only from memory the sweep does not
 //!    destroy (its code lives in the reserved kernel image; its stack and all
 //!    state it reads are in reserved memory — see the `sweep` safety
@@ -68,7 +68,7 @@
 //!    coverage: only the tiny relocated stub arena and the firmware are
 //!    excluded, and both are unavoidable.
 //!
-//! On any pre-destructive refusal — no takeover mechanism wired, a quiesce
+//! On any pre-teardown refusal — no takeover mechanism wired, a quiesce
 //! timeout, or a preparation the port could not complete — `take_over`
 //! **returns** the [`TakeoverError`] with the machine left running and
 //! recoverable, so the caller reports it and stays in the REPL. It never
@@ -89,7 +89,7 @@
 //! **fails closed** with [`TakeoverError::NotSupported`] *without ever running
 //! the sweep* — exactly the behaviour `wasm32` and the not-yet-wired ports
 //! exhibit. The real per-port takeover is proven end-to-end by the
-//! destructive-memtest QEMU vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E),
+//! memtest-takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E),
 //! whose guest ends in a reset rather than resuming boot.
 
 use crate::CpuId;
@@ -105,7 +105,7 @@ use crate::CpuId;
 pub enum TakeoverError {
     /// A secondary CPU did not acknowledge the quiesce request within the
     /// bounded handshake budget. The takeover is abandoned before any
-    /// destructive step, so the machine is left running and the operator is
+    /// irreversible step, so the machine is left running and the operator is
     /// told which core could not be stopped (fail closed).
     CpuQuiesceTimeout {
         /// The logical CPU that failed to halt within the budget.
@@ -137,7 +137,7 @@ impl TakeoverError {
     }
 }
 
-/// Hand the whole machine over to a one-way destructive whole-RAM test.
+/// Hand the whole machine over to a one-way whole-RAM test.
 ///
 /// Implemented once per port (the SMP quiesce channel, the interrupt
 /// controller, the MMU/cache regime, and the relocation/reset path are all
@@ -152,14 +152,14 @@ impl TakeoverError {
 ///   times out returns [`TakeoverError::CpuQuiesceTimeout`]; a preparation
 ///   that cannot complete returns [`TakeoverError::PrepareFailed`].
 /// * On any refusal the machine must be left **running and recoverable** — no
-///   destructive step taken, no half-torn-down state that wedges the caller,
+///   irreversible step taken, no half-torn-down state that wedges the caller,
 ///   and `sweep` must **not** have been called. A port must not begin
 ///   flattening paging until it can complete the whole sequence.
 /// * The quiesce is a *bounded* handshake, never an unbounded spin: it
 ///   succeeds only once every other CPU is halted (or there are none), and
 ///   otherwise times out fail-closed within a bounded budget.
 pub trait MachineTakeover {
-    /// Take the whole machine over and run the one-way destructive whole-RAM
+    /// Take the whole machine over and run the one-way whole-RAM
     /// test to completion, then reset. **Never returns on success.**
     ///
     /// The port drives, in order and without handing control back to normal
@@ -167,7 +167,7 @@ pub trait MachineTakeover {
     /// interrupts, stop the lockup watchdog, flatten paging so physical RAM
     /// is addressed directly, switch onto a reserved stack the sweep cannot
     /// overwrite, call `sweep` (the architecture-neutral phase that
-    /// destructively tests every *usable* frame and renders progress), then
+    /// tests every *usable* frame and renders progress), then
     /// test the region the sweep executed from — the kernel image and the
     /// stack it ran on — with a small relocated per-port stub that never
     /// touches the firmware, and finally reset. See the module docs for the
@@ -211,7 +211,7 @@ pub trait MachineTakeover {
 /// [`MachineTakeover::take_over`] must be object-safe, total (never panic),
 /// and **fail closed** with [`TakeoverError::NotSupported`] *without ever
 /// running the sweep* — the behaviour every not-yet-wired port exhibits. The
-/// real per-port takeover is proven by the destructive-memtest QEMU vertical
+/// real per-port takeover is proven by the memtest-takeover QEMU vertical
 /// (`plans/NEW-SUPERVISOR.md` §9 Stage E).
 pub mod conformance {
     use super::{MachineTakeover, TakeoverError};
@@ -224,7 +224,7 @@ pub mod conformance {
     /// invoking the sweep** — both directly and behind the object-safe
     /// erasure the kernel holds the handle through. A sweep that ran on an
     /// unsupported port would mean the machine was torn down without the
-    /// destructive mechanism actually being ready, so the double asserts the
+    /// takeover mechanism actually being ready, so the double asserts the
     /// sweep is never called.
     ///
     /// It must only be given a handle whose takeover is *not* wired (the
@@ -249,7 +249,7 @@ pub mod conformance {
         );
         assert!(
             !swept,
-            "an unsupported port must not run the destructive sweep",
+            "an unsupported port must not run the whole-RAM sweep",
         );
     }
 

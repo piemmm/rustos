@@ -19,39 +19,27 @@
 use tairix_abi::ABI_VERSION_CURRENT;
 use tairix_arch_api::TakeoverError;
 use tairix_kernel_mem::{
-    ram_test_owned_window, run_destructive, BootMemoryMap, DestructiveOutcome, Frame, RegionKind,
-    PAGE_SIZE,
+    ram_sweep_pattern, ram_takeover_test_bytes, BootMemoryMap, RamFault, RamTestPattern,
+    RegionKind, SweepObserver, PAGE_SIZE,
 };
-use tairix_supervisor::{Geometry, MemtestUi, Report, Screen, TestOutcome};
+use tairix_supervisor::{Geometry, MemtestUi, Report, Screen};
 use tairix_sync::once::OnceCell;
 
 use crate::boot_audit_ring::{BootAuditRing, TailRecord};
 use crate::bootinfo::KernelArch;
 use crate::init::KernelState;
+use crate::sched::CpuId;
 use crate::wallclock::WallClockSource;
 
 /// One binary mebibyte, the unit RAM figures are shown in.
 const MIB: u64 = 1024 * 1024;
 
-/// Upper bound on the free RAM one `memtest` pass will claim and test, in
-/// bytes.
-///
-/// The Supervisor runs *after* the frame allocator is live, so a RAM test
-/// must confine itself to memory it explicitly owns — free frames it
-/// allocates and frees — never the live map (that would corrupt the running
-/// kernel). This caps how much free RAM a single pass borrows so the test
-/// never starves the rest of the system of memory (`AGENTS.md` §26.3); the
-/// pass additionally never takes more than half of what is free, and stops
-/// early if the allocator runs out. It is a safety bound on a borrowed
-/// resource, not a scalable capacity.
-const MEMTEST_MAX_BYTES: u64 = 64 * MIB;
-
 /// A supervisor-only authorization witness for reading the machine-takeover
 /// handle ([`KernelArch::machine_takeover`]).
 ///
-/// The destructive whole-RAM takeover mechanism is irreversible: it stops
+/// The one-way whole-RAM takeover mechanism is irreversible: it stops
 /// every CPU, overwrites all of RAM, and can only end in a reset. It must be
-/// reachable **only** from the confirmed, audited `memtest full` path in this
+/// reachable **only** from the audited `memtest` path in this
 /// module and nowhere else. Holding a `&dyn KernelArch` is deliberately *not*
 /// enough to obtain the [`MachineTakeover`](tairix_arch_api::MachineTakeover)
 /// handle: the accessor demands a
@@ -102,17 +90,6 @@ pub trait SupervisorSystem: Sync {
     /// Render the wall-clock date/time (or that it is not yet set).
     fn date(&self, out: &mut dyn Report);
 
-    /// Run the thorough, non-destructive RAM test over free frames the
-    /// Supervisor owns, for `passes` passes, rendering progress and any fault
-    /// to `out`. `abort` is polled between frames; when it returns `true` the
-    /// test stops early and reports [`TestOutcome::Aborted`].
-    fn memtest(
-        &self,
-        passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome;
-
     /// Reset the machine. Returns only if the platform cannot reboot, so the
     /// caller can report the failure rather than pretend it worked.
     fn reboot(&self);
@@ -121,12 +98,13 @@ pub trait SupervisorSystem: Sync {
     /// power-off primitive.
     fn poweroff(&self);
 
-    /// Attempt the one-way, destructive `memtest full` whole-RAM takeover
-    /// test.
+    /// Attempt the one-way `memtest` whole-RAM takeover test.
     ///
-    /// Called only from the confirmed, audited engine path. On a platform
+    /// Called only from the audited engine path. On a platform
     /// that wired the machine-takeover slice this never returns: it stops
-    /// every CPU, tests all of RAM (overwriting it), and resets. It **returns**
+    /// every CPU and then tests all of RAM continuously (overwriting it),
+    /// pattern after pattern, loop after loop, until the machine is reset. It
+    /// **returns**
     /// only when the takeover did not proceed — the platform has no takeover
     /// mechanism, or the quiesce/prepare handshake failed closed — having
     /// rendered the reason to `out` and left the machine unchanged, so the
@@ -188,38 +166,67 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
         out.write_str(" MiB");
     }
 
-    /// Mint the supervisor-only grant, read the port's machine-takeover
-    /// handle, and drive the one-way destructive whole-RAM `memtest full`.
+    /// Mint the supervisor-only grant, stop every other CPU, read the port's
+    /// machine-takeover handle, and drive the one-way whole-RAM `memtest`.
     ///
-    /// On a port that wired the takeover slice this **never returns**:
-    /// [`take_over`](tairix_arch_api::MachineTakeover::take_over) quiesces every other CPU, masks
-    /// interrupts, stops the watchdog, flattens paging, runs the destructive
-    /// `sweep` below on a reserved stack, then tests the region the sweep ran
-    /// from and resets. It **returns** only when the takeover did not proceed
-    /// — no mechanism is wired, a secondary would not quiesce, or the
-    /// preparation failed — having left the machine unchanged, so the caller
-    /// renders the reason and the REPL stays (fail closed, never a panic).
+    /// The **quiesce is architecture-neutral and happens here**, not inside the
+    /// per-port takeover: it uses the neutral directed IPI
+    /// ([`crate::sched::SchedulerArch::send_ipi`]) and the boot-published
+    /// liveness/ack tables
+    /// through [`tairix_arch_api::quiesce_others`], so the shared handshake is
+    /// written once rather than duplicated into every port. Only *parking* a
+    /// stopped core is per-silicon (each port's interrupt path). The quiesce is
+    /// the **last fallible step before the irreversible tear-down**: it runs
+    /// only after the takeover mechanism and the physical map are confirmed
+    /// available, so a machine whose peers were stopped is always one that will
+    /// go on to reset — never left with its cores parked and no takeover to
+    /// follow.
+    ///
+    /// On a port that wired the takeover slice, once quiesce succeeds
+    /// [`take_over`](tairix_arch_api::MachineTakeover::take_over) **never
+    /// returns**: it masks interrupts, stops the watchdog, flattens paging,
+    /// runs the `sweep` below on a reserved stack, then tests the
+    /// region the sweep ran from and resets. This method **returns** only when
+    /// the takeover did not proceed — no mechanism is wired, no physical map, a
+    /// peer CPU would not quiesce, or the preparation failed — having left the
+    /// machine unchanged, so the caller renders the reason and the REPL stays
+    /// (fail closed, never a panic).
     ///
     /// The `sweep` renders the memtest86-style fullscreen display
-    /// ([`MemtestUi`]) and destroys every usable frame through the safe,
-    /// range-checked [`run_destructive`] engine over the [`BootMemoryMap`],
-    /// never raw pointer arithmetic. There is no abort seam: once the port has
-    /// taken the machine over it is already being destroyed, so the sweep's
-    /// abort callback is a constant `false`.
+    /// ([`MemtestUi`]) and tests every usable frame through the safe,
+    /// range-checked [`ram_sweep_pattern`] engine over the [`BootMemoryMap`],
+    /// never raw pointer arithmetic. It **loops forever**, cycling every
+    /// [`RamTestPattern`] over all of RAM and updating the display's elapsed
+    /// timer, completed-loop count, and scrolling fault log until the machine
+    /// is reset; there is no abort seam, because the machine only leaves the
+    /// test by a reset.
     fn drive_takeover(&self, out: &mut dyn Report) {
         // Minting the supervisor-only witness here is the sole authorization
         // for reading the takeover handle: the accessor cannot be called
         // without a `&TakeoverGrant`, and nothing outside this module can mint
-        // one, so the destructive mechanism is reachable only from here.
+        // one, so the takeover mechanism is reachable only from here.
         let grant = TakeoverGrant::mint();
         let Some(handle) = self.state.arch.machine_takeover(&grant) else {
-            out.line("memtest full: machine takeover is not supported on this platform.");
+            out.line("memtest: machine takeover is not supported on this platform.");
             return;
         };
         let Some(physmap) = self.state.arch.direct_phys_map() else {
-            out.line("memtest full: no direct physical map; RAM cannot be addressed.");
+            out.line("memtest: no direct physical map; RAM cannot be addressed.");
             return;
         };
+        // Stop every other CPU *before* the irreversible tear-down. This is the
+        // last step that may fail closed: if a peer will not halt within the
+        // bounded handshake the machine is left running and recoverable and the
+        // REPL stays. A single-CPU (or not-yet-SMP) boot has no peers and this
+        // succeeds immediately.
+        let arch = self.state.arch.as_ref();
+        let current = crate::sched::SchedulerArch::current_cpu(arch);
+        if let Err(cpu) = tairix_arch_api::quiesce_others(current, |peer| {
+            crate::sched::SchedulerArch::send_ipi(arch, peer);
+        }) {
+            render_takeover_refusal(out, TakeoverError::CpuQuiesceTimeout { cpu });
+            return;
+        }
         let memory_map = self.memory_map;
         // Scope the sweep closure so its unique borrow of `out` ends before the
         // refusal path below reuses `out`. On a supported port `take_over`
@@ -232,23 +239,31 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
                 // clamps every position to the assumed 80x24 geometry (the
                 // one-way console cannot be queried for size).
                 let screen = Screen::new(out, Geometry::DEFAULT, false);
-                let mut ui = MemtestUi::new(screen);
-                ui.begin();
-                let outcome = run_destructive(
-                    memory_map,
-                    physmap,
-                    |tested, total| ui.progress(tested, total),
-                    || false,
-                );
-                match outcome {
-                    DestructiveOutcome::Passed { tested } => ui.passed(tested),
-                    DestructiveOutcome::Faulted(fault) => {
-                        ui.faulted(fault.phys.as_u64(), fault.expected, fault.observed);
+                let total = ram_takeover_test_bytes(memory_map);
+                let mut observer = TakeoverObserver {
+                    ui: MemtestUi::new(screen),
+                    arch,
+                    cpu: current,
+                    start_ns: arch.monotonic_ns(current),
+                };
+                observer.ui.begin();
+                observer.ui.set_total(total);
+                // Test all of RAM continuously: cycle every pattern over every
+                // usable frame, over and over, until the operator resets the
+                // machine. Each completed cycle bumps the loop counter; a bad
+                // cell is logged and the sweep keeps going (it never stops on
+                // a fault). This never returns — the machine only leaves the
+                // test by a reset.
+                loop {
+                    for &pattern in RamTestPattern::ALL {
+                        observer.ui.set_pattern(pattern.name());
+                        ram_sweep_pattern(memory_map, physmap, pattern, total, &mut observer);
                     }
-                    DestructiveOutcome::Aborted { tested } => ui.aborted(tested),
+                    let elapsed = observer.elapsed_secs();
+                    observer.ui.loop_complete(elapsed);
                 }
             };
-            // SAFETY: reached only from the confirmed, audited `memtest full`
+            // SAFETY: reached only from the confirmed, audited `memtest`
             // path holding the supervisor `TakeoverGrant`; the operator has
             // decided to tear the machine down, so quiescing every CPU,
             // flattening paging, and overwriting all of RAM are the intended,
@@ -266,7 +281,56 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
     }
 }
 
-/// Render the fail-closed `memtest full` refusal line for `err`.
+/// The live-display adapter the continuous `memtest` sweep reports through.
+///
+/// It owns the [`MemtestUi`] and turns each engine callback into a display
+/// update: [`progress`](SweepObserver::progress) redraws the bar and the
+/// elapsed clock, [`fault`](SweepObserver::fault) appends to the scrolling
+/// error log. The elapsed time is read from the port's monotonic clock
+/// ([`KernelArch::monotonic_ns`]) — a bare counter read (`CNTPCT_EL0` /
+/// `RDTSC` / the `time` CSR) that stays valid after the takeover flattens
+/// paging, so the timer keeps advancing while the machine is owned by the
+/// test.
+///
+/// Generic over the concrete arch (`KernelArch` carries an associated
+/// context-switch type, so it is not a `dyn` trait); the takeover only ever
+/// constructs one, for the running port.
+struct TakeoverObserver<'a, A: KernelArch> {
+    /// The fullscreen presenter, borrowing the takeover console.
+    ui: MemtestUi<'a>,
+    /// The port's monotonic clock, read for the elapsed timer.
+    arch: &'a A,
+    /// The CPU the clock is read on (the sole surviving core post-quiesce).
+    cpu: CpuId,
+    /// The clock reading captured when the sweep began, so elapsed time is a
+    /// difference rather than an absolute counter value.
+    start_ns: u64,
+}
+
+impl<A: KernelArch> TakeoverObserver<'_, A> {
+    /// Whole seconds elapsed since the sweep began, saturating so a counter
+    /// that appears to go backwards never underflows.
+    fn elapsed_secs(&self) -> u64 {
+        self.arch
+            .monotonic_ns(self.cpu)
+            .saturating_sub(self.start_ns)
+            / 1_000_000_000
+    }
+}
+
+impl<A: KernelArch> SweepObserver for TakeoverObserver<'_, A> {
+    fn progress(&mut self, tested: u64, total: u64) {
+        let elapsed = self.elapsed_secs();
+        self.ui.progress(tested, total, elapsed);
+    }
+
+    fn fault(&mut self, fault: RamFault) {
+        self.ui
+            .record_fault(fault.phys.as_u64(), fault.expected, fault.observed);
+    }
+}
+
+/// Render the fail-closed `memtest` refusal line for `err`.
 ///
 /// Reached only when
 /// [`take_over`](tairix_arch_api::MachineTakeover::take_over) returned rather than
@@ -275,7 +339,7 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
 /// [`TakeoverError::as_str`]; no payload value (a CPU id, a raw port status)
 /// is rendered to the operator.
 fn render_takeover_refusal(out: &mut dyn Report, err: TakeoverError) {
-    out.write_str("memtest full: takeover could not proceed (");
+    out.write_str("memtest: takeover could not proceed (");
     out.write_str(err.as_str());
     out.line("); the machine is unchanged.");
 }
@@ -381,92 +445,6 @@ impl<A: KernelArch + 'static> SupervisorSystem for KernelSupervisorSystem<A> {
         } else {
             out.line("wall clock: not set (no time source before the root is mounted)");
         }
-    }
-
-    fn memtest(
-        &self,
-        passes: u32,
-        out: &mut dyn Report,
-        abort: &mut dyn FnMut() -> bool,
-    ) -> TestOutcome {
-        let Some(physmap) = self.state.arch.direct_phys_map() else {
-            out.line("memtest: no direct physical map on this platform; RAM cannot be tested.");
-            return TestOutcome::Aborted;
-        };
-        let page = PAGE_SIZE as u64;
-        for pass in 1..=passes {
-            out.write_str("memtest: pass ");
-            out.write_u64(u64::from(pass));
-            out.write_str(" of ");
-            out.write_u64(u64::from(passes));
-            out.newline();
-            // Borrow at most half of the currently-free RAM, capped, so the
-            // test never starves the rest of the system.
-            let free_bytes = self.state.frame_allocator.free_frames() as u64 * page;
-            let budget = (free_bytes / 2).min(MEMTEST_MAX_BYTES);
-            let frame_budget = (budget / page) as usize;
-            let mut held: alloc::vec::Vec<Frame> = alloc::vec::Vec::new();
-            let mut tested_bytes = 0u64;
-            let mut fault = None;
-            let mut aborted = false;
-            while held.len() < frame_budget {
-                if abort() {
-                    aborted = true;
-                    break;
-                }
-                // Take one more free frame to test; running out is the
-                // natural bound, not an error.
-                let Ok(frame) = self.state.frame_allocator.alloc() else {
-                    break;
-                };
-                match ram_test_owned_window(physmap, frame.start(), PAGE_SIZE) {
-                    Ok(true) => {
-                        tested_bytes += page;
-                        if tested_bytes % (8 * MIB) == 0 {
-                            out.write_bytes(b"\r  tested ");
-                            out.write_u64(tested_bytes / MIB);
-                            out.write_str(" MiB");
-                        }
-                    }
-                    // Unmappable frame: leave it untested rather than trust it.
-                    Ok(false) => {}
-                    Err(f) => {
-                        fault = Some(f);
-                    }
-                }
-                held.push(frame);
-                if fault.is_some() {
-                    break;
-                }
-            }
-            // Return every borrowed frame before rendering the result: the
-            // test owns them only for its duration and must leave the machine
-            // exactly as it found it.
-            for frame in held {
-                let _ = self.state.frame_allocator.free(frame);
-            }
-            out.write_bytes(b"\r");
-            if let Some(f) = fault {
-                out.write_str("  RAM FAULT at physical 0x");
-                out.write_hex(f.phys.as_u64());
-                out.write_str(" (expected 0x");
-                out.write_hex(f.expected);
-                out.write_str(", read 0x");
-                out.write_hex(f.observed);
-                out.line(")");
-                return TestOutcome::Failed;
-            }
-            if aborted {
-                out.write_str("  aborted after ");
-                out.write_u64(tested_bytes / MIB);
-                out.line(" MiB");
-                return TestOutcome::Aborted;
-            }
-            out.write_str("  ");
-            out.write_u64(tested_bytes / MIB);
-            out.line(" MiB of free RAM verified");
-        }
-        TestOutcome::Passed
     }
 
     fn reboot(&self) {

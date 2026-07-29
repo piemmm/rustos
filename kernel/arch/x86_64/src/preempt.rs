@@ -384,6 +384,32 @@ pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
 unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     let cpu_id = current_cpu_id_from_lapic();
 
+    // A cross-CPU quiesce turns this delivered reschedule IPI (which
+    // `X86_64Arch::send_ipi` delivers on `TIMER_VECTOR`, landing here) into a
+    // one-way stop: the pre-boot Supervisor's whole-RAM takeover
+    // needs every other core halted before it flattens paging and overwrites
+    // RAM. Release the LAPIC in-service bit (EOI) so the local APIC is left
+    // clean, acknowledge so the boot CPU's bounded handshake sees this core is
+    // down, then park masked (`cli;hlt`) and memory-free forever — never
+    // returning to run the scheduler again. The machine resets shortly after.
+    //
+    // Gated on `sched-arch`: the quiesce coordinator lives in `tairix-arch-api`
+    // (pulled in only by that feature, which also brings `kernel_arch` and the
+    // `send_ipi` that triggers a quiesce), so a freestanding consumer without
+    // the scheduler has no secondaries, no takeover, and nothing to stop.
+    #[cfg(feature = "sched-arch")]
+    if tairix_arch_api::quiesce_stop_requested() {
+        // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI register
+        // (Intel SDM Vol 3A §11.8.5); writing `0` is the documented
+        // end-of-interrupt sequence, and the MMIO is identity-mapped.
+        unsafe {
+            let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
+            core::ptr::write_volatile(eoi, 0);
+        }
+        tairix_arch_api::quiesce_acknowledge(cpu_id);
+        crate::kernel_arch::halt();
+    }
+
     // The LAPIC one-shot fired, so the quantum (if one was armed) is
     // consumed: clear its recorded deadline before the tick callback runs,
     // so the per-tick timed-wake sweep does not re-arm the one-shot against

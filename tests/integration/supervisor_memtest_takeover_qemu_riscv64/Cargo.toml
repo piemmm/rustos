@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 # Freestanding "boot the riscv64 kernel pipeline, then drive the confirmed
-# `memtest full` machine-takeover seam" integration test. It links the
+# `memtest` machine-takeover seam" integration test. It links the
 # production riscv64 boot pipeline and only supplies its own audit Sink —
 # one that, on observing `EventId(4004)` (`AuditEvent::BootCompleted`, the
 # point where the Supervisor system is published and the kernel state is

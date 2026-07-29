@@ -1,5 +1,5 @@
 //! Build script for the aarch64 pre-boot-Supervisor destructive
-//! `memtest full` takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9
+//! `memtest` takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9
 //! Stage E).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target, identical

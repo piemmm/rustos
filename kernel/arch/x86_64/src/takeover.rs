@@ -1,40 +1,46 @@
 //! x86_64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9 Stage B).
 //!
 //! The Arch HAL [`MachineTakeover`] body for the x86_64 PC-class port: the
-//! irreversible, one-way sequence the pre-boot Supervisor's `memtest full`
+//! irreversible, one-way sequence the pre-boot Supervisor's `memtest`
 //! drives to test **all** of RAM. It is deliberately the only public surface
 //! of this module — the takeover `static` is private and reachable solely
 //! through the supervisor-gated [`machine_takeover_handle`], which the
 //! downstream boot wrapper calls from its `KernelArch::machine_takeover`
 //! accessor.
 //!
+//! # Where the cross-CPU quiesce lives
+//!
+//! Stopping every *other* CPU is **not** done here: it is architecture-neutral
+//! (a stop request, the directed IPI on `TIMER_VECTOR`, the boot-published
+//! liveness/ack tables) and is driven by the caller before this body runs —
+//! the Supervisor's `drive_takeover` calls `tairix_arch_api::quiesce_others`,
+//! which returns [`TakeoverError::CpuQuiesceTimeout`] fail-closed if a peer
+//! will not halt, so this body is only ever reached once this CPU is the sole
+//! one running. The one per-silicon half of quiesce — *parking* a stopped
+//! CPU — lives in the reschedule-IPI receive path
+//! (`crate::preempt`'s timer dispatch), not here.
+//!
 //! # The x86_64 sequence
 //!
 //! [`X86MachineTakeover::take_over`] performs, in order and without ever
-//! returning on success:
+//! returning on success (every other CPU already quiesced):
 //!
-//! 1. **Confirm this is the only running CPU.** The production x86_64 image
-//!    starts no application processors, so there is nothing to quiesce; the
-//!    step still *verifies* it and fails closed
-//!    ([`TakeoverError::CpuQuiesceTimeout`]) rather than assuming it — a
-//!    non-zero [`crate::smp::secondary_entry_addr`] means AP bring-up was
-//!    wired without teaching this takeover to cooperatively stop the APs.
-//! 2. **Mask interrupts** (`cli`) so nothing preempts the solitary CPU. The
+//! 1. **Mask interrupts** (`cli`) so nothing preempts the solitary CPU. The
 //!    x86_64 port wires no lockup watchdog, so there is none to stop.
-//! 3. **Switch onto a reserved stack** the sweep will not overwrite. It lives
+//! 2. **Switch onto a reserved stack** the sweep will not overwrite. It lives
 //!    in the kernel image's `.bss` (reserved), which every address space maps
 //!    in the higher half, so the switch is safe under whatever `%cr3` was
 //!    active when the Supervisor was entered.
-//! 4. **Install the reserved boot page tables** (`%cr3 = boot_pml4`). Unlike
+//! 3. **Install the reserved boot page tables** (`%cr3 = boot_pml4`). Unlike
 //!    riscv64/aarch64, long mode cannot drop paging, so instead of flattening
 //!    the MMU the takeover switches to the boot page tables — which live
 //!    entirely in `.boot.bss` (reserved) and map both the higher-half kernel
 //!    window (through which the sweep reaches physical RAM) and the low
 //!    identity window — so the sweep never depends on a page-table frame in
 //!    the *usable* RAM it is about to destroy.
-//! 5. **Run the sweep** (the arch-neutral destructive test of every *usable*
+//! 4. **Run the sweep** (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console) on the reserved stack.
-//! 6. **Test the region the sweep could not** — the kernel image and the
+//! 5. **Test the region the sweep could not** — the kernel image and the
 //!    stack it ran on, the physical range `[__boot_phys_start,
 //!    __kernel_phys_end)` — with the relocatable, register-only
 //!    `_takeover_stub` copied into a just-swept usable page above the kernel
@@ -46,8 +52,9 @@
 //!    and its page tables) and the low firmware/ACPI reserved RAM are the only
 //!    RAM excluded, both unavoidable.
 //!
-//! On any pre-destructive refusal `take_over` returns the [`TakeoverError`]
-//! with the machine untouched and `sweep` un-run (fail closed, never a panic).
+//! This body owns no pre-teardown refusal of its own (the reset hardware is
+//! always present on this port); the quiesce refusal is the caller's and is
+//! fail-closed there.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
@@ -105,7 +112,7 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
 ///
 /// Operates in `u64` because x86_64 physical addresses are 64-bit (the arena
 /// sits just above the kernel image, potentially anywhere in the low physical
-/// window), so there is no lossy narrowing on the destructive path.
+/// window), so there is no lossy narrowing on the whole-RAM path.
 const fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
 }
@@ -128,8 +135,8 @@ static X86_TAKEOVER: X86MachineTakeover = X86MachineTakeover;
 ///
 /// The downstream boot wrapper's `KernelArch::machine_takeover` — itself gated
 /// on the supervisor-only `TakeoverGrant` — is the only caller, so the
-/// destructive mechanism stays reachable exclusively from the confirmed
-/// `memtest full` path.
+/// takeover mechanism stays reachable exclusively from the confirmed
+/// `memtest` path.
 #[must_use]
 pub fn machine_takeover_handle() -> &'static (dyn MachineTakeover + Sync) {
     &X86_TAKEOVER
@@ -149,18 +156,12 @@ extern "C" {
 
 impl MachineTakeover for X86MachineTakeover {
     unsafe fn take_over(&self, sweep: &mut dyn FnMut()) -> TakeoverError {
-        // 1. Confirm this is the only running CPU. The production x86_64
-        //    image starts no APs, so `secondary_entry_addr()` is 0 and there
-        //    is nothing to quiesce. A non-zero entry means AP bring-up was
-        //    wired without teaching this takeover to cooperatively stop the
-        //    APs, so it refuses fail-closed rather than destroy RAM another
-        //    CPU is still using. (Logical CPU 1 is the first AP; the exact id
-        //    is cosmetic on a path that cannot occur in the shipped image.)
-        if crate::smp::secondary_entry_addr() != 0 {
-            return TakeoverError::CpuQuiesceTimeout { cpu: 1 };
-        }
+        // Every other CPU has already been quiesced by the architecture-neutral
+        // caller (the Supervisor's `drive_takeover` runs the cross-CPU stop
+        // handshake before this is ever reached), so this CPU is the only one
+        // running. This body owns only the single-CPU tear-down that follows.
 
-        // 2. Mask interrupts so nothing preempts the solitary CPU. There is
+        // 1. Mask interrupts so nothing preempts the solitary CPU. There is
         //    no lockup watchdog wired on this port, so there is none to stop.
         // SAFETY: `cli` clears only `RFLAGS.IF`; this is the deliberate,
         // confirmed tear-down the caller's `TakeoverGrant` authorises.
@@ -168,7 +169,7 @@ impl MachineTakeover for X86MachineTakeover {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
 
-        // 3. Switch onto the reserved stack and run the sweep, then test the
+        // 2. Switch onto the reserved stack and run the sweep, then test the
         //    kernel-image region and reset — none of which returns. The sweep
         //    handle is reached through a thin pointer to the caller's `&mut
         //    dyn FnMut()`, read once at entry (on the still-live caller stack)
@@ -187,7 +188,7 @@ impl MachineTakeover for X86MachineTakeover {
     }
 }
 
-/// Install the reserved boot page tables, run the destructive sweep on the
+/// Install the reserved boot page tables, run the whole-RAM sweep on the
 /// reserved stack, then test the region it executed from and reset. Entered
 /// from `_takeover_switch_stack` with `%rsp` already on the reserved takeover
 /// stack; never returns.
@@ -200,7 +201,7 @@ impl MachineTakeover for X86MachineTakeover {
 /// destroy.
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_x86_64_takeover_continue(thin: usize) -> ! {
-    // 4. Install the reserved boot page tables (`%cr3 = boot_pml4`). They live
+    // 3. Install the reserved boot page tables (`%cr3 = boot_pml4`). They live
     //    in `.boot.bss` (reserved) and map both the higher-half kernel window
     //    the sweep writes physical RAM through and the low identity window the
     //    relocated stub later executes from, so nothing the sweep destroys is
@@ -216,15 +217,15 @@ unsafe extern "C" fn tairix_arch_x86_64_takeover_continue(thin: usize) -> ! {
         core::arch::asm!("mov cr3, {}", in(reg) boot_cr3, options(nostack, preserves_flags));
     }
 
-    // 5. Run the destructive sweep over every usable frame.
+    // 4. Run the whole-RAM sweep over every usable frame.
     // SAFETY: `thin` points at the live `&mut dyn FnMut()` the caller placed
     // on its stack; reconstructing and calling it runs the architecture-neutral
-    // destructive sweep, which reads/writes only reserved state and the
+    // whole-RAM sweep, which reads/writes only reserved state and the
     // physical RAM it is meant to destroy.
     let sweep = unsafe { &mut *(thin as *mut &mut dyn FnMut()) };
     sweep();
 
-    // 6. The sweep tested every *usable* frame. The one region it could not
+    // 5. The sweep tested every *usable* frame. The one region it could not
     //    touch is the memory it ran from — the kernel image and this stack.
     // SAFETY: the sweep has completed; relocating the register-only stub into
     // a swept usable arena and jumping to it tests that region and resets,

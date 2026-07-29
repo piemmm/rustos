@@ -1,6 +1,6 @@
 //! `plans/NEW-SUPERVISOR.md` §9 Stage E QEMU integration test: boot the
 //! production x86_64 `tairix-kernel` pipeline and drive the pre-boot
-//! Supervisor's one-way **destructive `memtest full` takeover**, proving the
+//! Supervisor's one-way **`memtest` takeover**, proving the
 //! x86_64 `MachineTakeover` mechanism takes the whole machine over, tests all
 //! of RAM, and ends in a **machine reset**. The x86_64 sibling of the
 //! aarch64/riscv64 takeover verticals.
@@ -8,21 +8,26 @@
 //! ## What this vertical asserts
 //!
 //! It exercises the x86_64 machine-takeover mechanism end to end — the one
-//! part of `memtest full` that can only be proven on QEMU (the confirmation,
+//! part of `memtest` that can only be proven on QEMU (the confirmation,
 //! command parsing, and the arch-neutral sweep are host-tested in
 //! `lib/supervisor` and `kernel/mem`). On `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) — the point at which the Supervisor system is published
 //! and the kernel state (frame allocator, boot memory map, direct physical
 //! map) is fully built — the audit sink drives the real published
-//! `SupervisorSystem::memtest_takeover` seam, exactly as the confirmed
-//! `memtest full` command does after its typed `DESTROY` confirmation (which
-//! is itself host-tested in `lib/supervisor`; the takeover is driven directly
-//! here because the destructive run cannot return to key the REPL).
+//! `SupervisorSystem::memtest_takeover` seam, exactly as the `memtest` command
+//! does (there is only the one whole-RAM test and no confirmation prompt;
+//! the command dispatch is host-tested in `lib/supervisor`, and the takeover
+//! is driven directly here because the takeover run cannot return to key
+//! the REPL).
 //!
-//! On the wired x86_64 port `memtest_takeover` **never returns**: the
-//! `MachineTakeover` body verifies no AP was started (single-CPU), masks
+//! The guest boots with four CPUs, so this genuinely exercises the cross-CPU
+//! quiesce: `drive_takeover` stops the three application processors through
+//! the bounded IPI-halt handshake before the tear-down begins.
+//!
+//! On the wired x86_64 port `memtest_takeover` **never returns**: the caller
+//! quiesces every other CPU, then the `MachineTakeover` body masks
 //! interrupts (`cli`), switches onto a reserved `.bss` stack, installs the
-//! reserved boot page tables, destructively tests every usable frame
+//! reserved boot page tables, tests every usable frame
 //! (rendering the memtest86-style display to COM1), then relocates the
 //! register-only stub into a swept arena above the kernel image, tests the
 //! kernel-image region under a minimal identity page table, and resets the
@@ -66,7 +71,7 @@ mod kernel {
     /// declaration; `#[global_allocator]` is per-binary).
     ///
     /// It lives inside the kernel image (`.bss`), which the boot memory map
-    /// reserves, so the destructive sweep (which tests only *usable* frames)
+    /// reserves, so the whole-RAM sweep (which tests only *usable* frames)
     /// never overwrites it.
     ///
     /// `static mut` because the bump allocator hands out disjoint slices via
@@ -105,7 +110,7 @@ mod kernel {
     }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and, on
-    /// [`BOOT_COMPLETED_EVENT_ID`], drives the destructive `memtest full`
+    /// [`BOOT_COMPLETED_EVENT_ID`], drives the `memtest`
     /// takeover through the published `SupervisorSystem` seam.
     struct MemtestTakeoverSink;
 
@@ -118,8 +123,9 @@ mod kernel {
                 return;
             }
             // Drive the real published takeover seam. On the wired x86_64
-            // port this never returns (the machine resets → QEMU `-no-reboot`
-            // exits = PASS).
+            // port this never returns: it tests RAM continuously until the
+            // harness issues a monitor `system_reset` after a completed loop
+            // (QEMU `-no-reboot` exits = PASS).
             let mut report = SerialReport;
             if let Some(system) = tairix_kernel_core::supervisor_system() {
                 system.memtest_takeover(&mut report);

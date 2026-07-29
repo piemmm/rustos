@@ -595,6 +595,44 @@ impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryD
     }
 }
 
+/// Allocate the per-CPU liveness + quiesce-ack tables for `cpu_count` CPUs,
+/// publish them to the cross-CPU quiesce coordinator, and return the leaked
+/// liveness table.
+///
+/// Both tables carry one `AtomicBool` per dense CPU id, sized to the
+/// discovered core count (never a fixed ceiling) and leaked `&'static` for the
+/// kernel's lifetime. The liveness table is the one a started secondary marks
+/// as it comes online and the bring-up barrier reads; the ack table backs the
+/// destructive-takeover stop handshake, published alongside liveness so that
+/// handshake reads real per-CPU state.
+///
+/// # Errors
+///
+/// Returns a stable cause string if the coordinator refuses the publish (the
+/// tables are set-once per boot), so the caller fails closed rather than
+/// running a later takeover against stale liveness.
+fn init_liveness_and_quiesce_tables(cpu_count: u32) -> Result<&'static [AtomicBool], &'static str> {
+    let table = || -> &'static [AtomicBool] {
+        Box::leak(
+            (0..cpu_count)
+                .map(|_| AtomicBool::new(false))
+                .collect::<alloc::vec::Vec<_>>()
+                .into_boxed_slice(),
+        )
+    };
+    let online = table();
+    let quiesce_ack = table();
+    match tairix_arch_api::quiesce_publish_tables(online, quiesce_ack) {
+        Ok(()) => Ok(online),
+        Err(tairix_arch_api::QuiescePublishError::AlreadyPublished) => {
+            Err("quiesce_tables_already_published")
+        }
+        Err(tairix_arch_api::QuiescePublishError::LengthMismatch) => {
+            Err("quiesce_tables_length_mismatch")
+        }
+    }
+}
+
 /// Bring every discovered secondary CPU online: publish the dispatch
 /// hand-off, then ask the arch port to start each dense id in
 /// `0..cpu_count` other than the boot CPU, auditing every acceptance
@@ -630,17 +668,27 @@ fn start_secondaries<A: KernelArch + 'static>(
         );
         return;
     };
-    // One arrival-acknowledgement flag per dense CPU id, leaked for the
-    // kernel's lifetime. A growable `Vec` sized to the discovered core
-    // count (never a fixed ceiling): a started secondary sets its own
-    // slot before joining the dispatch loop, and the barrier below reads
-    // it.
-    let online: &'static [AtomicBool] = Box::leak(
-        (0..cpu_count)
-            .map(|_| AtomicBool::new(false))
-            .collect::<alloc::vec::Vec<_>>()
-            .into_boxed_slice(),
-    );
+    // Allocate the per-CPU liveness table (which the dispatch handle and the
+    // bring-up barrier read) and the companion quiesce-ack table, and publish
+    // both to the cross-CPU quiesce coordinator. Both are sized to the
+    // discovered core count (never a fixed ceiling). A publish failure is
+    // set-once/wiring corruption: fail closed, loud, rather than run a
+    // destructive takeover against stale liveness later.
+    let online = match init_liveness_and_quiesce_tables(cpu_count) {
+        Ok(online) => online,
+        Err(cause) => {
+            emit(
+                audit_sink,
+                Level::Error,
+                AuditEvent::SecondaryCpuStartFailed,
+                &[Field {
+                    key: "cause",
+                    value: tairix_log::FieldValue::Str(cause),
+                }],
+            );
+            return;
+        }
+    };
     let handle: &'static KernelSecondaryDispatch<A> =
         Box::leak(Box::new(KernelSecondaryDispatch {
             state,
@@ -673,6 +721,33 @@ fn start_secondaries<A: KernelArch + 'static>(
     // that core can fault mid-bring-up on real hardware — a cache/
     // coherency hazard a cacheless emulator never exhibits, observed as
     // the last dense id deterministically never coming online.
+    // SAFETY: the `KernelArch::secondary_bringup` contract obliges a port
+    // returning `Some` to have installed its secondary entry and stack pool
+    // before handing over a multi-CPU `BootInfo`.
+    unsafe { start_each_secondary(state, bringup, handle, boot_cpu, cpu_count) };
+}
+
+/// Start each secondary dense id in `0..cpu_count` (skipping the boot CPU)
+/// one at a time, waiting bounded for each to come online, auditing every
+/// start, missed online-ack, and refusal.
+///
+/// Degraded-but-correct: a refusal or a missed acknowledgement is loud on the
+/// audit log and the boot proceeds on the cores that did come up.
+///
+/// # Safety
+///
+/// The caller must have confirmed `bringup` is the port's real secondary
+/// bring-up surface (its entry and stack pool installed) and published the
+/// dispatch `handle`; each `cpu` started is a dense id in `0..cpu_count`
+/// other than `boot_cpu`.
+unsafe fn start_each_secondary<A: KernelArch + 'static>(
+    state: &'static KernelState<A>,
+    bringup: &dyn tairix_arch_api::SecondaryBringup,
+    handle: &'static KernelSecondaryDispatch<A>,
+    boot_cpu: CpuId,
+    cpu_count: u32,
+) {
+    let audit_sink = state.audit_sink;
     let arch = state.arch.as_ref();
     for cpu in 0..cpu_count {
         if cpu == boot_cpu {
@@ -680,11 +755,9 @@ fn start_secondaries<A: KernelArch + 'static>(
         }
         let mut cpu_buf = [0u8; 12];
         let cpu_str = tairix_util::fmt::format_usize(cpu as usize, &mut cpu_buf);
-        // SAFETY: the `KernelArch::secondary_bringup` contract obliges a
-        // port returning `Some` to have installed its secondary entry
-        // and stack pool before handing over a multi-CPU `BootInfo`;
-        // `cpu` is a dense id inside the validated `0..cpu_count` range
-        // and is not the (already running) boot CPU.
+        // SAFETY: forwarded from this function's contract — `cpu` is a dense
+        // id in `0..cpu_count` and is not the (already running) boot CPU, and
+        // `bringup` is the port's installed secondary surface.
         match unsafe { bringup.start_secondary(cpu) } {
             Ok(()) => {
                 emit(

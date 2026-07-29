@@ -3,51 +3,56 @@
 //!
 //! The Arch HAL [`MachineTakeover`] body for the ARMv8-A `virt` / Raspberry
 //! Pi 4 port: the irreversible, one-way sequence the pre-boot Supervisor's
-//! `memtest full` drives to test **all** of RAM. It is deliberately the only
+//! `memtest` drives to test **all** of RAM. It is deliberately the only
 //! public surface of this module — the takeover `static` is private and
 //! reachable solely through the supervisor-gated
 //! [`machine_takeover_handle`], which the downstream boot wrapper calls from
 //! its `KernelArch::machine_takeover` accessor.
 //!
+//! # Where the cross-CPU quiesce lives
+//!
+//! Stopping every *other* CPU is **not** done here: it is architecture-neutral
+//! (a stop request, the directed IPI, the boot-published liveness/ack tables)
+//! and is driven by the caller before this body runs — the Supervisor's
+//! `drive_takeover` calls `tairix_arch_api::quiesce_others`, which returns
+//! [`TakeoverError::CpuQuiesceTimeout`] fail-closed if a peer will not halt, so
+//! this body is only ever reached once this core is the sole one running. The
+//! one per-silicon half of quiesce — *parking* a stopped core — lives in the
+//! IPI receive path (`crate::preempt::on_ipi_interrupt`), not here.
+//!
 //! # The aarch64 sequence
 //!
 //! [`Aarch64MachineTakeover::take_over`] performs, in order and without ever
-//! returning on success:
+//! returning on success (every other CPU already quiesced):
 //!
-//! 1. **Confirm this is the only running core.** The production images boot
-//!    a single core and install no secondary entry, so there is nothing to
-//!    quiesce; the step still *verifies* it and fails closed
-//!    ([`TakeoverError::CpuQuiesceTimeout`]) rather than assuming it — a
-//!    non-zero [`crate::smp::secondary_entry_addr`] means SMP was wired
-//!    without teaching this takeover to cooperatively stop the secondaries.
-//! 2. **Resolve the reset conduit.** The reset instruction (`hvc`/`smc`) is
+//! 1. **Resolve the reset conduit.** The reset instruction (`hvc`/`smc`) is
 //!    the discovered PSCI conduit, published by [`machine_takeover_handle`].
 //!    With none known there is no way to reset, so the takeover refuses
 //!    fail-closed ([`TakeoverError::NotSupported`]) before touching anything.
-//! 3. **Mask interrupts** (`DAIFSet` — all of debug/SError/IRQ/FIQ) so
+//! 2. **Mask interrupts** (`DAIFSet` — all of debug/SError/IRQ/FIQ) so
 //!    nothing preempts the solitary core, and **stop the lockup watchdog**
 //!    by disabling its `CNTV` virtual-timer cadence (`CNTV_CTL_EL0 = 0`).
-//! 4. **Clean+invalidate** the kernel-image region's cache lines to the
+//! 3. **Clean+invalidate** the kernel-image region's cache lines to the
 //!    point of coherency so RAM holds the current bytes, then **flatten
 //!    paging** by writing the known MMU-off `SCTLR_EL1`
 //!    ([`crate::paging::SCTLR_MMU_OFF`], clearing `M`/`C`/`I`). The kernel
 //!    runs under an *identity* map (`virtual == physical`), so dropping the
 //!    MMU leaves every address resolving to the same physical byte; every
-//!    access is then Normal Non-cacheable, so the destructive sweep reaches
+//!    access is then Normal Non-cacheable, so the whole-RAM sweep reaches
 //!    RAM directly.
-//! 5. **Switch onto a reserved stack** the sweep will not overwrite and run
-//!    the caller's `sweep` (the arch-neutral destructive test of every
+//! 4. **Switch onto a reserved stack** the sweep will not overwrite and run
+//!    the caller's `sweep` (the arch-neutral whole-RAM test of every
 //!    *usable* frame, which renders progress to the console).
-//! 6. **Test the region the sweep could not** — the kernel image and the
+//! 5. **Test the region the sweep could not** — the kernel image and the
 //!    stack it ran on, `[__kernel_start, __kernel_end)` — with the
 //!    relocatable, register-only `_takeover_stub` copied into a just-swept
 //!    usable page, then reset via the resolved PSCI conduit. The stub never
 //!    touches the firmware/DTB reserved region below the kernel image, so
 //!    the reset call still works.
 //!
-//! On any pre-destructive refusal `take_over` returns the [`TakeoverError`]
-//! with the machine untouched and `sweep` un-run (fail closed, never a
-//! panic).
+//! On the one pre-teardown refusal it still owns (no reset conduit)
+//! `take_over` returns [`TakeoverError::NotSupported`] with the machine
+//! untouched and `sweep` un-run (fail closed, never a panic).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -113,7 +118,7 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
 ///
 /// Operates in `usize` because its only caller works in native addresses
 /// (the kernel-image bounds and the scratch page), so there is no lossy
-/// `u64`↔`usize` cast on the destructive path.
+/// `u64`↔`usize` cast on the whole-RAM path.
 const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
@@ -135,8 +140,8 @@ static AARCH64_TAKEOVER: Aarch64MachineTakeover = Aarch64MachineTakeover;
 ///
 /// The downstream boot wrapper's `KernelArch::machine_takeover` — itself
 /// gated on the supervisor-only `TakeoverGrant` — is the only caller, so
-/// the destructive mechanism stays reachable exclusively from the confirmed
-/// `memtest full` path. It threads the conduit the boot path discovered from
+/// the takeover mechanism stays reachable exclusively from the confirmed
+/// `memtest` path. It threads the conduit the boot path discovered from
 /// the `/psci` node so the relocated stub can reset through it (there is no
 /// fixed reset instruction on aarch64 the way riscv64 has the SBI ecall).
 #[must_use]
@@ -164,20 +169,12 @@ extern "C" {
 
 impl MachineTakeover for Aarch64MachineTakeover {
     unsafe fn take_over(&self, sweep: &mut dyn FnMut()) -> TakeoverError {
-        // 1. Confirm this is the only running core. The production images
-        //    are single-core and install no secondary entry, so
-        //    `secondary_entry_addr()` is 0 and there is nothing to quiesce.
-        //    A non-zero entry means SMP bring-up was wired without teaching
-        //    this takeover to cooperatively stop the secondaries, so it
-        //    refuses fail-closed rather than destroy RAM another core is
-        //    still using. (Logical CPU 1 is the first secondary; the exact
-        //    id is cosmetic on a path that cannot occur in a single-core
-        //    image.)
-        if crate::smp::secondary_entry_addr() != 0 {
-            return TakeoverError::CpuQuiesceTimeout { cpu: 1 };
-        }
+        // Every other CPU has already been quiesced by the architecture-neutral
+        // caller (the Supervisor's `drive_takeover` runs the cross-CPU stop
+        // handshake before this is ever reached), so this core is the only one
+        // running. This body owns only the single-CPU tear-down that follows.
 
-        // 2. Resolve the reset conduit the boot path discovered. Without one
+        // 1. Resolve the reset conduit the boot path discovered. Without one
         //    there is no way to reset the board, so refuse fail-closed
         //    before masking interrupts or touching paging.
         let conduit = TAKEOVER_CONDUIT.load(Ordering::Acquire);
@@ -185,7 +182,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
             return TakeoverError::NotSupported;
         }
 
-        // 3. Mask every interrupt (DAIF: debug, SError, IRQ, FIQ) so nothing
+        // 2. Mask every interrupt (DAIF: debug, SError, IRQ, FIQ) so nothing
         //    preempts the solitary core, and stop the lockup watchdog by
         //    disabling its virtual-timer cadence — masking `DAIF.F` already
         //    prevents its (Group-0/FIQ) sample from being taken, and
@@ -201,7 +198,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
             );
         }
 
-        // 4. Clean+invalidate the kernel-image region's cache lines to the
+        // 3. Clean+invalidate the kernel-image region's cache lines to the
         //    point of coherency so RAM holds the current bytes before the
         //    MMU (and the data cache with it) goes away — after flattening,
         //    every access is Normal Non-cacheable and would miss a dirty
@@ -233,7 +230,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
             );
         }
 
-        // 5. Switch onto the reserved stack and run the sweep, then test the
+        // 4. Switch onto the reserved stack and run the sweep, then test the
         //    kernel-image region and reset — none of which returns. The
         //    sweep handle is reached through a thin pointer to the caller's
         //    `&mut dyn FnMut()`, which lives on the caller's stack and is
@@ -249,7 +246,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
     }
 }
 
-/// Run the destructive sweep on the reserved stack, then test the region it
+/// Run the whole-RAM sweep on the reserved stack, then test the region it
 /// executed from and reset. Entered from `_takeover_switch_stack` with `sp`
 /// already installed on the reserved takeover stack; never returns.
 ///
@@ -263,7 +260,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
 unsafe extern "C" fn tairix_arch_aarch64_takeover_continue(thin: usize) -> ! {
     // SAFETY: `thin` points at the live `&mut dyn FnMut()` the caller placed
     // on its stack; reconstructing and calling it runs the
-    // architecture-neutral destructive sweep over every usable frame.
+    // architecture-neutral whole-RAM sweep over every usable frame.
     let sweep = unsafe { &mut *(thin as *mut &mut dyn FnMut()) };
     sweep();
     // The sweep tested every *usable* frame. The one region it could not
