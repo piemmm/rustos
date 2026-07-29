@@ -102,7 +102,7 @@ fn fetch_snapshot(transport: &dyn Transport) -> Result<Option<Vec<HwNode>>, Call
         }
         let total = usize::try_from(header.node_count())
             .map_err(|_| CallError::Service(Errno::LengthOutOfRange))?;
-        for chunk in body.chunks_exact(HwNode::WIRE_LEN) {
+        for chunk in body.as_chunks::<{ HwNode::WIRE_LEN }>().0 {
             nodes.push(HwNode::from_bytes(chunk).map_err(CallError::Service)?);
         }
         if nodes.len() > total {

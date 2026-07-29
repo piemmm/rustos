@@ -313,7 +313,7 @@ impl<'a, M: PhysMap + ?Sized> PhysWindow<'a, M> {
     /// `len` must be a non-zero multiple of [`WORD_BYTES`]; the caller only
     /// ever passes frame-aligned spans, which satisfy both.
     fn new(physmap: &'a M, base: PhysAddr, len: usize) -> Option<Self> {
-        if len == 0 || len % WORD_BYTES != 0 {
+        if len == 0 || !len.is_multiple_of(WORD_BYTES) {
             return None;
         }
         let ptr = physmap.translate(base, len)?;

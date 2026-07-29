@@ -789,7 +789,8 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             write = true;
         } else {
             return Err(format!(
-                "c-header: unexpected argument {arg:?}; usage: cargo xtask c-header [--write]"
+                "c-header: unexpected argument {}; usage: cargo xtask c-header [--write]",
+                arg.display()
             ));
         }
     }
@@ -820,7 +821,8 @@ fn run_font_atlas(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             write = true;
         } else {
             return Err(format!(
-                "font-atlas: unexpected argument {arg:?}; usage: cargo xtask font-atlas [--write]"
+                "font-atlas: unexpected argument {}; usage: cargo xtask font-atlas [--write]",
+                arg.display()
             ));
         }
     }
@@ -883,7 +885,8 @@ fn run_sbom(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             output = Some(std::path::PathBuf::from(path));
         } else {
             return Err(format!(
-                "sbom: unexpected argument {arg:?}; usage: cargo xtask sbom [--output PATH]"
+                "sbom: unexpected argument {}; usage: cargo xtask sbom [--output PATH]",
+                arg.display()
             ));
         }
     }
@@ -901,8 +904,9 @@ fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             write_pins = true;
         } else {
             return Err(format!(
-                "supply-chain: unexpected argument {arg:?}; usage: \
-                 cargo xtask supply-chain [--write-pins]"
+                "supply-chain: unexpected argument {}; usage: \
+                 cargo xtask supply-chain [--write-pins]",
+                arg.display()
             ));
         }
     }
@@ -1107,7 +1111,8 @@ fn static_gate(
 fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     if let Some(bad) = args.iter().find(|a| *a != "--dry-run") {
         return Err(format!(
-            "ci-long: unexpected argument {bad:?}; usage: cargo xtask ci-long [--dry-run]"
+            "ci-long: unexpected argument {}; usage: cargo xtask ci-long [--dry-run]",
+            bad.display()
         ));
     }
     if args.iter().any(|a| a == "--dry-run") {

@@ -99,7 +99,7 @@ impl Block for MemBlock {
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let bs = self.block_size as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = as_usize(lba) * bs;
@@ -113,7 +113,7 @@ impl Block for MemBlock {
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         let bs = self.block_size as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = as_usize(lba) * bs;
@@ -218,7 +218,7 @@ impl Block for SparseBlock {
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let bs = self.block_size as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let count = (buf.len() / bs) as u64;
@@ -236,7 +236,7 @@ impl Block for SparseBlock {
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         let bs = self.block_size as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let count = (buf.len() / bs) as u64;

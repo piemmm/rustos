@@ -456,13 +456,13 @@ fn push_integer(out: &mut Vec<u8>, d: &Directive, value: Int) {
     if d.left {
         out.extend_from_slice(sign);
         out.extend_from_slice(&body);
-        out.extend(core::iter::repeat(b' ').take(padding));
+        out.extend(core::iter::repeat_n(b' ', padding));
     } else if d.zero && d.precision.is_none() {
         out.extend_from_slice(sign);
-        out.extend(core::iter::repeat(b'0').take(padding));
+        out.extend(core::iter::repeat_n(b'0', padding));
         out.extend_from_slice(&body);
     } else {
-        out.extend(core::iter::repeat(b' ').take(padding));
+        out.extend(core::iter::repeat_n(b' ', padding));
         out.extend_from_slice(sign);
         out.extend_from_slice(&body);
     }
@@ -474,9 +474,9 @@ fn push_padded(out: &mut Vec<u8>, content: &[u8], d: &Directive) {
     let padding = width.saturating_sub(content.len());
     if d.left {
         out.extend_from_slice(content);
-        out.extend(core::iter::repeat(b' ').take(padding));
+        out.extend(core::iter::repeat_n(b' ', padding));
     } else {
-        out.extend(core::iter::repeat(b' ').take(padding));
+        out.extend(core::iter::repeat_n(b' ', padding));
         out.extend_from_slice(content);
     }
 }

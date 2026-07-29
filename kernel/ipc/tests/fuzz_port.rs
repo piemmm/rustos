@@ -205,7 +205,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             assert!(port.len() <= MAILBOX_CAPACITY);
 
             // Drain occasionally, asserting FIFO byte-for-byte fidelity.
-            if rng.next_u64() % 3 == 0 {
+            if rng.next_u64().is_multiple_of(3) {
                 match port.recv() {
                     Some(msg) => {
                         let want = expected.pop_front().expect("model had a queued message");

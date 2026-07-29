@@ -538,7 +538,7 @@ impl PerCpuGdt {
         // Copy the packed array to a local before indexing (E0793).
         let privilege_stack = self.tss.privilege_stack;
         let rsp0 = privilege_stack[0];
-        if rsp0 == 0 || rsp0 % IST_STACK_ALIGN != 0 {
+        if rsp0 == 0 || !rsp0.is_multiple_of(IST_STACK_ALIGN) {
             return Err(GdtError::PrivilegeStackInvalid);
         }
 
@@ -676,7 +676,7 @@ fn validate_stack_top(stack_top: u64) -> Result<(), IstError> {
     if stack_top == 0 {
         return Err(IstError::NullPointer);
     }
-    if stack_top % IST_STACK_ALIGN != 0 {
+    if !stack_top.is_multiple_of(IST_STACK_ALIGN) {
         return Err(IstError::Misaligned);
     }
     Ok(())

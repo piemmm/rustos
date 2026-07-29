@@ -158,7 +158,7 @@ impl ApBootSlot {
     ///
     /// [`SlotError::StackMisaligned`] if `stack_top % 16 != 0`.
     pub fn new(cr3: u64, stack_top: u64, entry: u64, cpu_id: u32) -> Result<Self, SlotError> {
-        if stack_top % 16 != 0 {
+        if !stack_top.is_multiple_of(16) {
             return Err(SlotError::StackMisaligned);
         }
         Ok(Self {
@@ -902,7 +902,7 @@ mod tests {
         // Four IPIs * 2 writes each = 8 LAPIC writes.
         assert_eq!(writes.len(), 8);
         // Every IPI writes ICR_HIGH (0x310) then ICR_LOW (0x300).
-        for chunk in writes.chunks_exact(2) {
+        for chunk in writes.as_chunks::<2>().0 {
             assert_eq!(chunk[0].0, 0x310);
             assert_eq!(chunk[1].0, 0x300);
             // ICR_HIGH destination field is bits 24..31.

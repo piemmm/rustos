@@ -866,7 +866,7 @@ mod tests {
         let mut editor = Editor::new();
         // 60 characters into a 40-column terminal: the tail stays visible,
         // the head scrolls out.
-        let text: String = core::iter::repeat('x').take(59).chain(['Z']).collect();
+        let text: String = core::iter::repeat_n('x', 59).chain(['Z']).collect();
         let (_, out) = drive(&mut editor, chars(&text), &FixedCompleter::none());
         assert!(out.contains('Z'), "the cursor end stays visible");
         let last_paint = out.rsplit('\r').find(|s| !s.is_empty()).unwrap_or("");

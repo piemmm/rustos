@@ -242,7 +242,9 @@ impl<'a> GrantList<'a> {
     /// refuse; `filter_map` expresses that without a panic path.
     pub fn iter(&self) -> impl Iterator<Item = CapabilityId> + 'a {
         self.raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .filter_map(|b| CapabilityId::from_raw(u16::from_le_bytes([b[0], b[1]])).ok())
     }
 
@@ -254,7 +256,7 @@ impl<'a> GrantList<'a> {
             return Err(Errno::LengthOutOfRange);
         }
         let raw = cur.take(count * 2)?;
-        for b in raw.chunks_exact(2) {
+        for b in raw.as_chunks::<2>().0 {
             CapabilityId::from_raw(u16::from_le_bytes([b[0], b[1]]))?;
         }
         Ok(Self { raw })
@@ -284,7 +286,9 @@ impl<'a> GidList<'a> {
     /// Iterate the gids.
     pub fn iter(&self) -> impl Iterator<Item = u32> + 'a {
         self.raw
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
@@ -570,7 +574,7 @@ pub fn grant_list_into<'a>(
     if ids.len() > USERS_ADMIN_MAX_GRANTS || backing.len() < ids.len() * 2 {
         return Err(Errno::LengthOutOfRange);
     }
-    for (slot, id) in backing.chunks_exact_mut(2).zip(ids.iter()) {
+    for (slot, id) in backing.as_chunks_mut::<2>().0.iter_mut().zip(ids.iter()) {
         slot.copy_from_slice(&id.as_u16().to_le_bytes());
     }
     Ok(GrantList {
@@ -589,7 +593,7 @@ pub fn gid_list_into<'a>(gids: &[u32], backing: &'a mut [u8]) -> Result<GidList<
     if gids.len() > USERS_ADMIN_MAX_GIDS || backing.len() < gids.len() * 4 {
         return Err(Errno::LengthOutOfRange);
     }
-    for (slot, gid) in backing.chunks_exact_mut(4).zip(gids.iter()) {
+    for (slot, gid) in backing.as_chunks_mut::<4>().0.iter_mut().zip(gids.iter()) {
         slot.copy_from_slice(&gid.to_le_bytes());
     }
     Ok(GidList {

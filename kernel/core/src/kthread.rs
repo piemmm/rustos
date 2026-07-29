@@ -221,7 +221,7 @@ const STACK_ALIGN: usize = 16;
 /// `plans/PI.md`) lands on a clean page boundary.
 const _STACK_LAYOUT_OK: () = {
     assert!(STACK_GUARD_CANARY_BYTES <= STACK_GUARD_BYTES);
-    assert!(STACK_GUARD_BYTES % 4096 == 0);
+    assert!(STACK_GUARD_BYTES.is_multiple_of(4096));
 };
 
 impl BoxStack {
@@ -1339,7 +1339,7 @@ where
         (*ctl)
             .live
             .as_deref_mut()
-            .map(|space| space as *mut (dyn LiveUserSpace + Send))
+            .map(core::ptr::from_mut::<dyn LiveUserSpace + Send>)
     };
     if let Some(ptr) = ptr {
         if let Some(state) = cpu_state::get(cpu) {
@@ -1416,7 +1416,9 @@ pub(crate) fn publish_live_space_for_test(
     space: &'static mut (dyn LiveUserSpace + Send),
 ) -> LiveSpacePublishGuard {
     if let Some(state) = cpu_state::get(cpu) {
-        *state.live_space.lock() = Some(LiveSpacePtr(space as *mut (dyn LiveUserSpace + Send)));
+        *state.live_space.lock() = Some(LiveSpacePtr(core::ptr::from_mut::<
+            dyn LiveUserSpace + Send,
+        >(space)));
     }
     LiveSpacePublishGuard { cpu }
 }
@@ -1478,7 +1480,7 @@ mod tests {
             if stack_top == 0 {
                 return Err(PrepareError::NullStack);
             }
-            if stack_top % 16 != 0 {
+            if !stack_top.is_multiple_of(16) {
                 return Err(PrepareError::Misaligned);
             }
             if stack_top < DOUBLE_FRAME {

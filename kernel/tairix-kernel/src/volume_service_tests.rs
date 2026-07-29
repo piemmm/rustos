@@ -150,7 +150,9 @@ impl Block for RamBlock {
         let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
         let end = start
             .checked_add(buf.len())
-            .filter(|&end| end <= self.data.len() && !buf.is_empty() && buf.len() % BLOCK_SIZE == 0)
+            .filter(|&end| {
+                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
+            })
             .ok_or(DriverError::LengthOutOfRange)?;
         buf.copy_from_slice(&self.data[start..end]);
         Ok(())
@@ -160,7 +162,9 @@ impl Block for RamBlock {
         let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
         let end = start
             .checked_add(buf.len())
-            .filter(|&end| end <= self.data.len() && !buf.is_empty() && buf.len() % BLOCK_SIZE == 0)
+            .filter(|&end| {
+                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
+            })
             .ok_or(DriverError::LengthOutOfRange)?;
         self.data[start..end].copy_from_slice(buf);
         Ok(())

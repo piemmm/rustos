@@ -86,7 +86,7 @@ impl Geometry {
     /// bounds (fail closed: the geometry is firmware input).
     #[must_use]
     pub fn for_display(width_px: u32, height_px: u32, pitch_bytes: u32) -> Option<Self> {
-        if pitch_bytes % 4 != 0 {
+        if !pitch_bytes.is_multiple_of(4) {
             return None;
         }
         let stride_px = pitch_bytes / 4;

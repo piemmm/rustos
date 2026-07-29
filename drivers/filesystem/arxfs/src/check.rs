@@ -504,7 +504,7 @@ impl<B: Block> ARXFS<B> {
             }
             if let Some(root) = TxnRoot::decode_any(&buf[..bs], self.fs_uuid, phys, &self.mac_key) {
                 report.roots_found += 1;
-                if best.map_or(true, |b| root.generation > b.generation) {
+                if best.is_none_or(|b| root.generation > b.generation) {
                     best = Some(root);
                 }
             }

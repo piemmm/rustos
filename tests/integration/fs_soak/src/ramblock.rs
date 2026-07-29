@@ -36,7 +36,7 @@ impl RamBlock {
     /// or an error if the access is unaligned or out of range.
     fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
         let sector = SECTOR_BYTES as usize;
-        if len == 0 || len % sector != 0 {
+        if len == 0 || !len.is_multiple_of(sector) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)

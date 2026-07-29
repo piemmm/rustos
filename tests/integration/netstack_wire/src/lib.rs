@@ -643,19 +643,11 @@ wan.ipv6.method dhcp
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
 pub const fn link_local(iid: [u8; 8]) -> Ipv6Addr {
-    // `fe80::/64` in the high half, the interface identifier in the low
-    // half. Built from `u16` segments so construction stays `const` on
-    // the pinned MSRV (`Ipv6Addr::from_octets` is a newer const API).
-    Ipv6Addr::new(
-        0xFE80,
-        0,
-        0,
-        0,
-        ((iid[0] as u16) << 8) | iid[1] as u16,
-        ((iid[2] as u16) << 8) | iid[3] as u16,
-        ((iid[4] as u16) << 8) | iid[5] as u16,
-        ((iid[6] as u16) << 8) | iid[7] as u16,
-    )
+    // `fe80::/64` in the high half, the interface identifier in the low half.
+    Ipv6Addr::from_octets([
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, iid[0], iid[1], iid[2], iid[3], iid[4], iid[5], iid[6],
+        iid[7],
+    ])
 }
 
 #[cfg(test)]

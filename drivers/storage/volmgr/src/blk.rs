@@ -140,7 +140,7 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let block_size = self.geometry.block_size as usize;
-        if buf.is_empty() || buf.len() % block_size != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(block_size) {
             return Err(DriverError::OutOfRange);
         }
         let blocks = buf.len() / block_size;

@@ -852,7 +852,7 @@ where
         if page_count == 0 {
             return Err(LiveSpaceError::Anon(AnonError::ZeroLength));
         }
-        if base_va % crate::frame::PAGE_SIZE as u64 != 0 {
+        if !base_va.is_multiple_of(crate::frame::PAGE_SIZE as u64) {
             return Err(LiveSpaceError::Anon(AnonError::Unaligned));
         }
         // No-overcommit admission (see `reserve_anonymous`): reserve physical

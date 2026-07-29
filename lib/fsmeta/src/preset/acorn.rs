@@ -174,7 +174,7 @@ pub fn centiseconds_to_time64(centiseconds: u64) -> Result<Time64, MetadataError
 /// beyond the 40-bit centisecond range, or carries sub-centisecond precision
 /// (which RISC OS cannot represent and this never silently drops).
 pub fn time64_to_centiseconds(time: Time64) -> Result<u64, MetadataError> {
-    if time.subsec_nanos() % NANOS_PER_CENTI != 0 {
+    if !time.subsec_nanos().is_multiple_of(NANOS_PER_CENTI) {
         return Err(MetadataError::TimestampOutOfRange);
     }
     let since_1900 = time

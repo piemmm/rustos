@@ -110,7 +110,7 @@ fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSum
     let mut summary = RunSummary::default();
     let mut rtt = RttStats::default();
     let mut seq: u16 = 0;
-    while config.count.map_or(true, |c| u32::from(seq) < c) {
+    while config.count.is_none_or(|c| u32::from(seq) < c) {
         if let Some(deadline) = overall_deadline {
             if io.now() >= deadline {
                 break;

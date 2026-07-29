@@ -446,14 +446,14 @@ fn parse_options(bytes: &[u8]) -> Option<TcpOptions> {
                 opts.sack_permitted = true;
             }
             OPT_SACK => {
-                if body.is_empty() || body.len() % 8 != 0 {
+                if body.is_empty() || !body.len().is_multiple_of(8) {
                     return None;
                 }
                 let count = body.len() / 8;
                 if count > MAX_SACK_BLOCKS {
                     return None;
                 }
-                for (slot, chunk) in opts.sack_blocks.iter_mut().zip(body.chunks_exact(8)) {
+                for (slot, chunk) in opts.sack_blocks.iter_mut().zip(body.as_chunks::<8>().0) {
                     let left = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     let right = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
                     *slot = SackBlock {
@@ -661,7 +661,7 @@ fn encode_options(options: &TcpOptions, out: &mut [u8; MAX_OPTIONS_LEN]) -> Opti
         }
     }
     // Pad with end-of-option-list bytes to a 4-byte boundary.
-    while n % 4 != 0 {
+    while !n.is_multiple_of(4) {
         put(out, &mut n, &[OPT_END])?;
     }
     Some(n)

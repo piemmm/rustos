@@ -66,7 +66,7 @@ impl Image {
     #[must_use]
     pub fn dominant_color(&self) -> ((u8, u8, u8), f64) {
         let mut counts: HashMap<(u8, u8, u8), u64> = HashMap::new();
-        for rgb in self.pixels.chunks_exact(3) {
+        for rgb in self.pixels.as_chunks::<3>().0 {
             *counts.entry((rgb[0], rgb[1], rgb[2])).or_insert(0) += 1;
         }
         let total = (self.pixels.len() / 3) as u64;

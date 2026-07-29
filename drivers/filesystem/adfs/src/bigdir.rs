@@ -146,7 +146,7 @@ impl BigDir {
         };
         if header.size > object_limit
             || header.size < BIG_DIR_GRAIN
-            || header.size % BIG_DIR_GRAIN != 0
+            || !header.size.is_multiple_of(BIG_DIR_GRAIN)
         {
             return Err(DriverError::BadMagic);
         }
@@ -216,7 +216,7 @@ impl BigDir {
             || name_len as usize > MAX_NAME_LEN
             || name_ptr
                 .checked_add(name_len)
-                .map_or(true, |end| end > self.header.names_size)
+                .is_none_or(|end| end > self.header.names_size)
         {
             return Err(DriverError::BadMagic);
         }
@@ -412,7 +412,7 @@ impl BigDir {
     ///   larger multiple of [`BIG_DIR_GRAIN`].
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     pub fn grow<S: DirStore>(&mut self, store: &mut S, new_size: u32) -> Result<(), DriverError> {
-        if new_size <= self.header.size || new_size % BIG_DIR_GRAIN != 0 {
+        if new_size <= self.header.size || !new_size.is_multiple_of(BIG_DIR_GRAIN) {
             return Err(DriverError::LengthOutOfRange);
         }
         let old_tail = self.header.tail_offset();
@@ -468,7 +468,7 @@ impl BigDir {
             parent,
         };
         if size < BIG_DIR_GRAIN
-            || size % BIG_DIR_GRAIN != 0
+            || !size.is_multiple_of(BIG_DIR_GRAIN)
             || header.used_end() > header.tail_offset()
         {
             return Err(DriverError::LengthOutOfRange);

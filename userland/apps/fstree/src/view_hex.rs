@@ -54,7 +54,7 @@ impl HexPattern {
             }
             let mut bytes = Vec::with_capacity(digits.len() / 2);
             let raw = digits.as_bytes();
-            for pair in raw.chunks_exact(2) {
+            for pair in raw.as_chunks::<2>().0 {
                 let high = hex_value(pair[0])?;
                 let low = hex_value(pair[1])?;
                 bytes.push(high << 4 | low);

@@ -223,7 +223,7 @@ impl DmaProgram {
         ];
         let mut i = 0;
         while i < addrs.len() {
-            if addrs[i] == 0 || addrs[i] % 64 != 0 {
+            if addrs[i] == 0 || !addrs[i].is_multiple_of(64) {
                 ok = false;
             }
             i += 1;

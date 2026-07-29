@@ -283,7 +283,7 @@ impl Segment {
             return Err(RxeError::ReservedNonZero);
         }
         let permission = RxePermission::from_segment_flags(flags)?;
-        if vaddr % RXE_PAGE_SIZE != 0 {
+        if !vaddr.is_multiple_of(RXE_PAGE_SIZE) {
             return Err(RxeError::MisalignedSegment);
         }
         if mem_size == 0 || file_size > mem_size {

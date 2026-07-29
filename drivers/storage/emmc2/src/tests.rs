@@ -312,7 +312,7 @@ impl MockSdhci {
             self.store[off + 3],
         ]);
         self.read_cursor += 4;
-        if (self.read_cursor - self.read_start) % BLOCK_SIZE as usize == 0 {
+        if (self.read_cursor - self.read_start).is_multiple_of(BLOCK_SIZE as usize) {
             if self.read_cursor < self.read_end {
                 self.raise(regs::INT_READ_RDY);
             } else {
@@ -334,7 +334,7 @@ impl MockSdhci {
         let off = self.write_cursor;
         self.store[off..off + 4].copy_from_slice(&value.to_le_bytes());
         self.write_cursor += 4;
-        if (self.write_cursor - self.write_start) % BLOCK_SIZE as usize == 0 {
+        if (self.write_cursor - self.write_start).is_multiple_of(BLOCK_SIZE as usize) {
             if self.write_cursor < self.write_end {
                 self.raise(regs::INT_WRITE_RDY);
             } else {

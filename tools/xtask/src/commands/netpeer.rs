@@ -1900,8 +1900,9 @@ fn run_tcp_echo_peer(
             Ok(len) => {
                 // Inject bounded loss once established: drop this inbound
                 // frame rather than deliver it, forcing a retransmission.
-                let drop =
-                    tcb.is_established() && loss_budget > 0 && inbound_seen % LOSS_EVERY == 0;
+                let drop = tcb.is_established()
+                    && loss_budget > 0
+                    && inbound_seen.is_multiple_of(LOSS_EVERY);
                 inbound_seen += 1;
                 if drop {
                     loss_budget -= 1;
@@ -2269,8 +2270,9 @@ fn run_tcp_connect_peer(
             Ok(len) => {
                 // Inject bounded loss once established: drop this inbound
                 // frame rather than deliver it, forcing a retransmission.
-                let drop =
-                    tcb.is_established() && loss_budget > 0 && inbound_seen % LOSS_EVERY == 0;
+                let drop = tcb.is_established()
+                    && loss_budget > 0
+                    && inbound_seen.is_multiple_of(LOSS_EVERY);
                 inbound_seen += 1;
                 if drop {
                     loss_budget -= 1;

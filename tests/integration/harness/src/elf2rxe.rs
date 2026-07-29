@@ -329,7 +329,7 @@ fn apply_relocations(
         // No RELA table: a static PIE with no relocations is acceptable.
         return Ok(());
     };
-    if rela_ent != RELA_LEN as u64 || rela_size % rela_ent != 0 {
+    if rela_ent != RELA_LEN as u64 || !rela_size.is_multiple_of(rela_ent) {
         return Err(Elf2RxeError::UnsupportedRelocation);
     }
     let rela_off = vaddr_to_elf_offset(loads, rela_vaddr, rela_size)?;

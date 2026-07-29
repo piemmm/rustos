@@ -46,23 +46,21 @@ pub fn crc32c_sse42(data: &[u8]) -> u32 {
 #[target_feature(enable = "sse4.2")]
 unsafe fn crc32c_sse42_unchecked(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu64;
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<8>();
+    for chunk in chunks {
         // The bytes are folded low-address-first to match the reflected
         // CRC-32C the portable reference computes; `from_le_bytes` fixes the
         // order independently of the host's endianness (both x86_64 and the
         // reference agree). A decode mistake here is caught by the mandatory
         // self-verify before this candidate can be selected.
-        let word = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+        let word = u64::from_le_bytes(*chunk);
         // The intrinsic is safe to call here: this fn carries the matching
         // `#[target_feature(enable = "sse4.2")]`, so the compiler proves the
         // instruction is legal in this body.
         crc = _mm_crc32_u64(crc, word);
     }
     let mut crc = crc as u32;
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         crc = _mm_crc32_u8(crc, byte);
     }
     !crc

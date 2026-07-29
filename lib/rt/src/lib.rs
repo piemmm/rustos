@@ -1725,7 +1725,7 @@ pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 dma_alloc-result encoding (base ≥ 0, else -errno).
 pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
-    let ptr = (device_out as *mut u64) as usize as u64;
+    let ptr = core::ptr::from_mut::<u64>(device_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap. `device_out`
     // is a live exclusive `&mut u64` for the duration of the call, so the
@@ -2643,7 +2643,7 @@ fn call_recv_with_flags(
     flags: tairix_abi::CallRecvFlags,
 ) -> Result<usize, i64> {
     let buf_ptr = buf.as_mut_ptr() as usize as u64;
-    let ticket_ptr = (ticket_out as *mut u64) as usize as u64;
+    let ticket_ptr = core::ptr::from_mut::<u64>(ticket_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // both pointers against the caller's address space before touching them. `buf` is a live exclusive `&mut [u8]` and
     // `ticket_out` a live `&mut u64` for the duration of the call.
@@ -3021,7 +3021,7 @@ pub fn terminal_size(fd: u32) -> Result<TerminalSize, i64> {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_create-result encoding (base ≥ 0, else -errno).
 pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
-    let id_ptr = (id_out as *mut u64) as usize as u64;
+    let id_ptr = core::ptr::from_mut::<u64>(id_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap. `id_out` is a live exclusive
     // `&mut u64` for the duration of the call, so the pointer denotes writable
@@ -3054,7 +3054,7 @@ pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_map-result encoding (base ≥ 0, else -errno).
 pub fn shm_map(handle: u64, len_out: &mut u64) -> i64 {
-    let len_ptr = (len_out as *mut u64) as usize as u64;
+    let len_ptr = core::ptr::from_mut::<u64>(len_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap. `len_out` is a live exclusive
     // `&mut u64` for the duration of the call, so the pointer denotes
@@ -3269,7 +3269,7 @@ pub fn waitset_ctl(set: u64, op: WaitSetOp, kind: WaitSourceKind, id: u64, token
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
-    let token_ptr = (token_out as *mut u64) as usize as u64;
+    let token_ptr = core::ptr::from_mut::<u64>(token_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; `token_out` is a live
     // exclusive `&mut u64` for the duration of the call, so the pointer denotes
     // writable memory the kernel may fill with the ready member's token; the

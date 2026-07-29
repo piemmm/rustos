@@ -1996,7 +1996,7 @@ use tairix_controls::{FurniturePart, ResizeEdge};
 fn title_y(c: &Compositor, id: WindowId) -> i32 {
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
-    (bounds.top() + client.top()) / 2
+    i32::midpoint(bounds.top(), client.top())
 }
 
 /// The first screen point on the title band (scanning left→right at

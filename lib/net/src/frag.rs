@@ -212,7 +212,7 @@ impl Reassembler {
         let Some(end) = offset.checked_add(data.len()) else {
             return PushOutcome::Rejected(RejectReason::Malformed);
         };
-        if data.is_empty() || end > MAX_DATAGRAM || (more && data.len() % 8 != 0) {
+        if data.is_empty() || end > MAX_DATAGRAM || (more && !data.len().is_multiple_of(8)) {
             return PushOutcome::Rejected(RejectReason::Malformed);
         }
         let index = if let Some(index) = self.find(key) {
@@ -379,7 +379,7 @@ impl Reassembler {
             .datagrams
             .iter()
             .enumerate()
-            .filter(|(_, d)| protected != Some(d.key) && source.map_or(true, |s| d.key.source == s))
+            .filter(|(_, d)| protected != Some(d.key) && source.is_none_or(|s| d.key.source == s))
             .min_by_key(|(_, d)| d.created)
             .map(|(i, _)| i)?;
         self.datagrams.swap_remove(victim);

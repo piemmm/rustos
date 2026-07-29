@@ -64,7 +64,7 @@ fn isqrt(n: i32) -> i32 {
     let mut prev = 0;
     while x != prev {
         prev = x;
-        x = (x + n / x) / 2;
+        x = i32::midpoint(x, n / x);
     }
     x
 }

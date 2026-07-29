@@ -53,7 +53,7 @@ static GLOBAL_HEAP: AtomicPtr<FreeListAllocator> = AtomicPtr::new(core::ptr::nul
 /// slot.
 pub fn register_global_heap(heap: &'static FreeListAllocator) {
     GLOBAL_HEAP.store(
-        (heap as *const FreeListAllocator).cast_mut(),
+        core::ptr::from_ref::<FreeListAllocator>(heap).cast_mut(),
         Ordering::Release,
     );
 }
@@ -204,7 +204,7 @@ mod tests {
         // exposed through no other allocator; a zero length means it is
         // never read or written. Host test.
         let heap: &'static FreeListAllocator = Box::leak(Box::new(unsafe {
-            FreeListAllocator::new((boot as *mut u64).cast::<u8>(), 0)
+            FreeListAllocator::new(core::ptr::from_mut::<u64>(boot).cast::<u8>(), 0)
         }));
         let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
             frames,
@@ -273,7 +273,7 @@ mod tests {
         // SAFETY: unique `'static` 8-byte-aligned pointer, zero length so it
         // is never dereferenced; the heap owns its grown regions. Host test.
         let heap: &'static FreeListAllocator = Box::leak(Box::new(unsafe {
-            FreeListAllocator::new((boot as *mut u64).cast::<u8>(), 0)
+            FreeListAllocator::new(core::ptr::from_mut::<u64>(boot).cast::<u8>(), 0)
         }));
         let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
             frames,

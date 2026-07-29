@@ -1820,9 +1820,9 @@ mod tests {
     /// cursor back over it, blank every column, and step back again.
     fn marker_rubout(width: usize) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec::Vec::new();
-        bytes.extend(core::iter::repeat(0x08u8).take(width));
-        bytes.extend(core::iter::repeat(b' ').take(width));
-        bytes.extend(core::iter::repeat(0x08u8).take(width));
+        bytes.extend(core::iter::repeat_n(0x08u8, width));
+        bytes.extend(core::iter::repeat_n(b' ', width));
+        bytes.extend(core::iter::repeat_n(0x08u8, width));
         bytes
     }
 

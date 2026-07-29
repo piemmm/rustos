@@ -256,10 +256,8 @@ impl Ipv6List {
     /// Append every 16-octet address in `data`, stopping at the fixed
     /// capacity or the last whole address (a trailing partial is ignored).
     fn extend_from_bytes(&mut self, data: &[u8]) {
-        for chunk in data.chunks_exact(16) {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(chunk);
-            self.push(Ipv6Addr::from(octets));
+        for chunk in data.as_chunks::<16>().0 {
+            self.push(Ipv6Addr::from(*chunk));
         }
     }
 }

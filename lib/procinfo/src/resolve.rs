@@ -884,7 +884,7 @@ fn query_cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, Resol
             return Err(ResolveInfoError::Malformed);
         }
         let count = reply.len() / CpuInfoRecord::WIRE_LEN;
-        for chunk in reply.chunks_exact(CpuInfoRecord::WIRE_LEN) {
+        for chunk in reply.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
             records
                 .push(CpuInfoRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?);
         }

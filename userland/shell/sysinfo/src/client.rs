@@ -260,7 +260,7 @@ fn run_seats(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoE
         return Err(SysinfoError::Service(Errno::BufferTooSmall));
     }
     emit(out, "seat  owner       generation  foreground")?;
-    for chunk in reply.chunks_exact(SeatRecord::WIRE_LEN) {
+    for chunk in reply.as_chunks::<{ SeatRecord::WIRE_LEN }>().0 {
         let record = SeatRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
         let owner = match record.owner() {
             Some(task) => format!("task {task}"),
@@ -337,7 +337,7 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
         out,
         "class                  payload    metadata  entries      hits    misses  hit%  refusals  shrinks  failures",
     )?;
-    for chunk in reply.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
+    for chunk in reply.as_chunks::<{ ReclaimClassRecord::WIRE_LEN }>().0 {
         let record = ReclaimClassRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
         let name = RECLAIM_CLASS_NAMES[usize::from(record.class)];
         emit(
@@ -444,7 +444,7 @@ fn run_cpu_load(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
             return Err(SysinfoError::Service(Errno::BufferTooSmall));
         }
         let records = reply.len() / CpuLoadRecord::WIRE_LEN;
-        for chunk in reply.chunks_exact(CpuLoadRecord::WIRE_LEN) {
+        for chunk in reply.as_chunks::<{ CpuLoadRecord::WIRE_LEN }>().0 {
             let record = CpuLoadRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
             emit(
                 out,
@@ -555,7 +555,7 @@ fn run_cpu_info(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
             return Err(SysinfoError::Service(Errno::BufferTooSmall));
         }
         let records = reply.len() / CpuInfoRecord::WIRE_LEN;
-        for chunk in reply.chunks_exact(CpuInfoRecord::WIRE_LEN) {
+        for chunk in reply.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
             let record = CpuInfoRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
             if !first {
                 emit(out, "")?;

@@ -1389,7 +1389,7 @@ impl Stage1TranslationEnabled {
         let Stage1TranslationEnabled = self;
         let _ = park_root.compare_exchange(0, root_phys, Ordering::AcqRel, Ordering::Relaxed);
         clean_invalidate_range_to_poc(
-            park_root as *const AtomicU64 as u64,
+            core::ptr::from_ref::<AtomicU64>(park_root) as u64,
             core::mem::size_of::<AtomicU64>() as u64,
         );
     }

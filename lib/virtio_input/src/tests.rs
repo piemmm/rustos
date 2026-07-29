@@ -102,7 +102,7 @@ fn auto_host() -> &'static AutoDrainHost {
 fn open_input(t: MockTransport) -> Box<VirtioInput<'static, MockTransport>> {
     let host = auto_host();
     let mut dev = Box::new(VirtioInput::open(t, host).expect("open"));
-    host.install_transport(dev.transport_mut() as *mut MockTransport);
+    host.install_transport(core::ptr::from_mut::<MockTransport>(dev.transport_mut()));
     dev
 }
 

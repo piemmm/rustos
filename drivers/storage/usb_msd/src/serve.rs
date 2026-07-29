@@ -216,7 +216,7 @@ mod tests {
             let end = start
                 .checked_add(buf.len())
                 .ok_or(DriverError::LengthOutOfRange)?;
-            if buf.len() % BLOCK_SIZE != 0 || end > self.data.len() {
+            if !buf.len().is_multiple_of(BLOCK_SIZE) || end > self.data.len() {
                 return Err(DriverError::LengthOutOfRange);
             }
             buf.copy_from_slice(&self.data[start..end]);
@@ -229,7 +229,7 @@ mod tests {
             let end = start
                 .checked_add(buf.len())
                 .ok_or(DriverError::LengthOutOfRange)?;
-            if buf.len() % BLOCK_SIZE != 0 || end > self.data.len() {
+            if !buf.len().is_multiple_of(BLOCK_SIZE) || end > self.data.len() {
                 return Err(DriverError::LengthOutOfRange);
             }
             self.data[start..end].copy_from_slice(buf);

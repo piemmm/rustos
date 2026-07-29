@@ -132,7 +132,7 @@ pub fn dispatch_ecall(frame: &mut TrapFrame) -> bool {
         return false;
     };
     let args = pack_raw_args(frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5);
-    let ret = cb(frame.a7, &args);
+    let ret = cb(frame.a7, &raw const args);
     frame.a0 = ret;
     true
 }

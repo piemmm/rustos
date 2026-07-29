@@ -132,7 +132,7 @@ impl RegisterWindow {
     /// Validate `offset` for an access of `width` bytes, returning the
     /// in-bounds, correctly-aligned byte pointer.
     fn checked_ptr(&self, offset: usize, width: usize) -> Result<*mut u8, WindowError> {
-        if offset % width != 0 {
+        if !offset.is_multiple_of(width) {
             return Err(WindowError::Misaligned);
         }
         let end = offset.checked_add(width).ok_or(WindowError::OutOfBounds)?;

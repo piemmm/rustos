@@ -115,12 +115,12 @@ fn random_inputs_never_panic() {
                 4 => nd::TYPE_REDIRECT,
                 _ => (rng.next_u64() & 0xFF) as u8,
             };
-            let code = if rng.next_u64() % 4 == 0 {
+            let code = if rng.next_u64().is_multiple_of(4) {
                 (rng.next_u64() & 0xFF) as u8
             } else {
                 0
             };
-            let hop_limit = if rng.next_u64() % 4 == 0 {
+            let hop_limit = if rng.next_u64().is_multiple_of(4) {
                 (rng.next_u64() & 0xFF) as u8
             } else {
                 nd::ND_HOP_LIMIT
@@ -130,7 +130,7 @@ fn random_inputs_never_panic() {
                 message_type,
                 code,
                 hop_limit,
-                rng.next_u64() % 2 == 0,
+                rng.next_u64().is_multiple_of(2),
                 &buf[..size],
                 &mut table,
                 now,

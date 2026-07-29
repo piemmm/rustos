@@ -284,7 +284,7 @@ impl Model {
                 // space so a long interval can never overflow.
                 let pct = u128::from(delta) * 1000 / u128::from(interval_ns);
                 let pct = u32::try_from(pct).unwrap_or(u32::MAX);
-                (pct, (entry.wcpu_tenths + pct) / 2)
+                (pct, u32::midpoint(entry.wcpu_tenths, pct))
             }
             // A process first seen this refresh (or an unmeasurable
             // interval) has no observed share yet; zero is the truthful

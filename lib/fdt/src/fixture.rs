@@ -45,7 +45,7 @@ impl DtbBuilder {
     }
 
     fn pad4(&mut self) {
-        while self.structure.len() % 4 != 0 {
+        while !self.structure.len().is_multiple_of(4) {
             self.structure.push(0);
         }
     }

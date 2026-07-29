@@ -85,11 +85,11 @@ impl Checksum {
             self.sum += u32::from(u16::from_be_bytes([high, low]));
             bytes = rest;
         }
-        let mut words = bytes.chunks_exact(2);
-        for word in words.by_ref() {
+        let (words, remainder) = bytes.as_chunks::<2>();
+        for word in words {
             self.sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
         }
-        if let [odd] = words.remainder() {
+        if let [odd] = remainder {
             self.pending = Some(*odd);
         }
     }

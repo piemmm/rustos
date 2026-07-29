@@ -801,7 +801,7 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
         let empty = self.streams[i]
             .writer
             .as_ref()
-            .map_or(true, |w| w.record_count() == 0);
+            .is_none_or(|w| w.record_count() == 0);
         if empty {
             self.streams[i].dict = DictionaryBuilder::new();
             Ok(())

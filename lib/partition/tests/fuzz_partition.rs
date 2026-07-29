@@ -44,7 +44,7 @@ impl VecBlock {
 
     fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
         let bs = self.block_size as usize;
-        if bs == 0 || len == 0 || len % bs != 0 {
+        if bs == 0 || len == 0 || !len.is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)

@@ -153,7 +153,7 @@ pub fn dispatch_svc(frame: &mut SyscallFrame) -> bool {
         return false;
     };
     let args = frame.args;
-    let ret = cb(frame.number, &args);
+    let ret = cb(frame.number, &raw const args);
     frame.args[0] = ret;
     true
 }

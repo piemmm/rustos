@@ -680,8 +680,8 @@ impl SecondaryBringup for Aarch64Arch {
                 if release_addrs
                     .get(cpu as usize)
                     .copied()
-                    .filter(|&addr| addr != 0)
-                    .is_none()
+                    .as_ref()
+                    .is_none_or(|&addr| addr == 0)
                 {
                     return Err(SmpError::InvalidCpu);
                 }

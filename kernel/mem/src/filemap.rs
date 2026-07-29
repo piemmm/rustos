@@ -128,7 +128,7 @@ where
     if page_count == 0 {
         return Err(AnonError::ZeroLength);
     }
-    if base_va % PAGE_SIZE as u64 != 0 {
+    if !base_va.is_multiple_of(PAGE_SIZE as u64) {
         return Err(AnonError::Unaligned);
     }
 

@@ -140,7 +140,7 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
         return None;
     }
     let entry = ((child_address + parent_address + child_size) * 4) as usize;
-    if ranges.len() % entry != 0 {
+    if !ranges.len().is_multiple_of(entry) {
         return None;
     }
     let mut off = 0;
@@ -226,7 +226,7 @@ pub fn dma_ranges_aperture(
             child_size,
         )?;
         let top = parent_base.checked_add(size)?;
-        if min_base.map_or(true, |b| parent_base < b) {
+        if min_base.is_none_or(|b| parent_base < b) {
             bus_base_at_min = if child_address == 3 {
                 read_cells(value, off + 4, 2)?
             } else {

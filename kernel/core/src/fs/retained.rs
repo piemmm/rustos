@@ -176,7 +176,8 @@ impl RetainedWrites {
     /// the retention budget, so it is not charged against it.
     pub fn set_evidence(&mut self, first_lba: u64, bytes: &[u8]) {
         self.invalidate_evidence();
-        if bytes.is_empty() || self.block_size == 0 || bytes.len() % self.block_size != 0 {
+        if bytes.is_empty() || self.block_size == 0 || !bytes.len().is_multiple_of(self.block_size)
+        {
             return;
         }
         let mut committed = Vec::new();

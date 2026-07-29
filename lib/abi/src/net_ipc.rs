@@ -2641,7 +2641,7 @@ mod tests {
         let (count, body) =
             decode_page_reply(&out[..written], NetResolverServer::WIRE_LEN).expect("decode");
         assert_eq!(count, 2);
-        let mut chunks = body.chunks_exact(NetResolverServer::WIRE_LEN);
+        let mut chunks = body.as_chunks::<{ NetResolverServer::WIRE_LEN }>().0.iter();
         assert_eq!(
             NetResolverServer::from_bytes(chunks.next().expect("first")),
             Ok(NetResolverServer {
@@ -3693,7 +3693,7 @@ mod tests {
             decode_page_reply(&out[..len], NetInterfaceFactsRecord::WIRE_LEN).expect("decode");
         assert_eq!(count, 2);
         assert_eq!(body.len(), 2 * NetInterfaceFactsRecord::WIRE_LEN);
-        for chunk in body.chunks_exact(NetInterfaceFactsRecord::WIRE_LEN) {
+        for chunk in body.as_chunks::<{ NetInterfaceFactsRecord::WIRE_LEN }>().0 {
             assert_eq!(
                 NetInterfaceFactsRecord::from_bytes(chunk),
                 Ok(sample_facts())

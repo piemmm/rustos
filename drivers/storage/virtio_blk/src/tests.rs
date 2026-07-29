@@ -204,7 +204,7 @@ fn open_with_autodrain_host(
     // can record once and reuse for every `notify_wait`).
     let host = auto_host();
     let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
-    host.install_transport(blk.transport_mut() as *mut MockTransport);
+    host.install_transport(core::ptr::from_mut::<MockTransport>(blk.transport_mut()));
     (blk, host)
 }
 
@@ -214,7 +214,7 @@ fn open_with_autodrain_host(
 fn open_with_spurious(t: MockTransport, n: u32) -> Box<VirtioBlk<'static, MockTransport>> {
     let host: &'static AutoDrainHost = Box::leak(Box::new(AutoDrainHost::with_spurious_wakes(n)));
     let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
-    host.install_transport(blk.transport_mut() as *mut MockTransport);
+    host.install_transport(core::ptr::from_mut::<MockTransport>(blk.transport_mut()));
     blk
 }
 

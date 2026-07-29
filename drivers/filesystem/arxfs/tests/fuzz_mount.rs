@@ -134,7 +134,7 @@ impl Block for MemBlock {
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let bs = BLOCK_SIZE as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)
@@ -153,7 +153,7 @@ impl Block for MemBlock {
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         let bs = BLOCK_SIZE as usize;
-        if buf.is_empty() || buf.len() % bs != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)

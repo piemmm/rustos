@@ -26,7 +26,7 @@ use tairix_net::{Ipv4Addr, Ipv6Addr};
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 fn pseudo(rng: &mut Lcg) -> Pseudo {
-    if rng.next_u64() % 2 == 0 {
+    if rng.next_u64().is_multiple_of(2) {
         Pseudo::V4 {
             source: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
             destination: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
@@ -391,18 +391,18 @@ fn drive_once(rng: &mut Lcg) {
 
         // Deliver legitimate traffic in both directions, dropping ~1/4.
         for f in driver_drain(&mut client, now) {
-            if rng.next_u64() % 4 != 0 {
+            if !rng.next_u64().is_multiple_of(4) {
                 driver_feed(&mut server, &f, now);
             }
         }
         for f in driver_drain(&mut server, now) {
-            if rng.next_u64() % 4 != 0 {
+            if !rng.next_u64().is_multiple_of(4) {
                 driver_feed(&mut client, &f, now);
             }
         }
 
         // Injected hostile segments at the server.
-        if rng.next_u64() % 3 == 0 {
+        if rng.next_u64().is_multiple_of(3) {
             let f = injected(rng, injection_base);
             if !f.is_empty() {
                 driver_feed(&mut server, &f, now);
@@ -410,7 +410,7 @@ fn drive_once(rng: &mut Lcg) {
         }
 
         // Injected hostile SACK-bearing ACKs at the client sender.
-        if rng.next_u64() % 3 == 0 {
+        if rng.next_u64().is_multiple_of(3) {
             let f = injected_sack_ack(rng, client_isn, server_isn);
             if !f.is_empty() {
                 driver_feed(&mut client, &f, now);
@@ -586,7 +586,7 @@ fn listener_drive_once(rng: &mut Lcg) {
             );
         }
         // Occasionally complete an honest cookie handshake and accept it.
-        if rng.next_u64() % 5 == 0 {
+        if rng.next_u64().is_multiple_of(5) {
             honest.port = honest.port.wrapping_add(1) | 1;
             let ps = listen_pseudo(honest);
             let mut client = Tcb::connect(driver_config(), honest.port, LISTEN_PORT, 0x1234, now);

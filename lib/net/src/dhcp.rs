@@ -231,7 +231,7 @@ impl AddressList {
     /// Append every four-octet address in `data`, up to capacity. A
     /// trailing partial group (not a multiple of four) is ignored.
     fn extend_from_bytes(&mut self, data: &[u8]) {
-        for group in data.chunks_exact(4) {
+        for group in data.as_chunks::<4>().0 {
             self.push(Ipv4Addr::new(group[0], group[1], group[2], group[3]));
         }
     }

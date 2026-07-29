@@ -583,8 +583,12 @@ pub fn quote_object(
     }
     // Pair quotes left to right; pick the first pair that ends at or after
     // the cursor.
-    let mut it = positions.chunks_exact(2);
-    let (open, close) = it.find(|pair| pair[1] >= pos.col).map(|p| (p[0], p[1]))?;
+    let (open, close) = positions
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|pair| pair[1] >= pos.col)
+        .map(|p| (p[0], p[1]))?;
     if around {
         return Some(ObjectSpan {
             start: Position::new(pos.line, open),

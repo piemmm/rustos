@@ -271,7 +271,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         self.live.lock().insert(slot, buf);
         let phys = buf.phys().as_u64();
         let len = buf.len();
-        let pool_ptr: *const () = (self as *const Self).cast::<()>();
+        let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
         // SAFETY: as discussed in the module-level comment —
         // (i) `base` is non-null and covers `len` disjoint bytes
         //     (witnessed by the pool's slot bitmap);

@@ -103,10 +103,8 @@ impl FastRng {
 /// Read 32 bytes as four little-endian `u64` state words.
 fn state_from_bytes(bytes: &[u8; 32]) -> [u64; 4] {
     let mut state = [0u64; 4];
-    for (word, chunk) in state.iter_mut().zip(bytes.chunks_exact(8)) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        *word = u64::from_le_bytes(buf);
+    for (word, chunk) in state.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
     }
     state
 }

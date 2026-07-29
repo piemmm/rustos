@@ -523,7 +523,7 @@ impl<B: Block> BlockCache<B> {
     /// and takes the device's own error surface.
     fn cacheable_span(&self, lba: u64, len: usize) -> Option<u64> {
         let bs = self.block_size();
-        if self.poisoned || len == 0 || bs == 0 || len % bs != 0 {
+        if self.poisoned || len == 0 || bs == 0 || !len.is_multiple_of(bs) {
             return None;
         }
         let blocks = (len / bs) as u64;
@@ -664,7 +664,7 @@ impl<B: Block> BlockCache<B> {
             // A bypassed write still mutates the device: nothing it
             // covers may be served stale.
             let bs = self.block_size();
-            if bs != 0 && buf.len() % bs == 0 {
+            if bs != 0 && buf.len().is_multiple_of(bs) {
                 self.invalidate_range(lba, (buf.len() / bs) as u64);
             } else {
                 // An unaligned mutation's extent is unknowable in
@@ -697,7 +697,7 @@ impl<B: Block> BlockCache<B> {
             return;
         }
         let bs = self.block_size();
-        if bs != 0 && len % bs == 0 {
+        if bs != 0 && len.is_multiple_of(bs) {
             self.invalidate_range(lba, (len / bs) as u64);
         } else {
             self.drop_all();

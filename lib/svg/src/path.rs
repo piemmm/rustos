@@ -38,7 +38,12 @@ pub fn parse_points(points: &str) -> Result<Vec<(i32, i32)>, SvgError> {
     if coords.len() % 2 != 0 {
         return Err(SvgError::InvalidNumber);
     }
-    Ok(coords.chunks_exact(2).map(|p| (p[0], p[1])).collect())
+    Ok(coords
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0], p[1]))
+        .collect())
 }
 
 /// Build the four corners of an axis-aligned `<rect>`.

@@ -181,7 +181,7 @@ fn open_net_with_host(
 ) {
     let host = auto_host();
     let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
-    host.install_transport(net.transport_mut() as *mut MockTransport);
+    host.install_transport(core::ptr::from_mut::<MockTransport>(net.transport_mut()));
     (net, host)
 }
 

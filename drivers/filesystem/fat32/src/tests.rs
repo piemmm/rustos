@@ -275,7 +275,7 @@ struct MockBlock {
 
 impl MockBlock {
     fn span(lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
-        if len == 0 || len % SECTOR_SIZE != 0 {
+        if len == 0 || !len.is_multiple_of(SECTOR_SIZE) {
             return Err(DriverError::BufferTooSmall);
         }
         let start = usize::try_from(lba)
@@ -913,7 +913,7 @@ mod format {
         }
 
         fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
-            if len == 0 || len % SECTOR_SIZE != 0 {
+            if len == 0 || !len.is_multiple_of(SECTOR_SIZE) {
                 return Err(DriverError::BufferTooSmall);
             }
             let start = usize::try_from(lba)

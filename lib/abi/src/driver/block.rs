@@ -450,7 +450,7 @@ mod tests {
 
         fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
             let bs = self.geo.block_size as usize;
-            if buf.is_empty() || buf.len() % bs != 0 {
+            if buf.is_empty() || !buf.len().is_multiple_of(bs) {
                 return Err(DriverError::BufferTooSmall);
             }
             let blocks = buf.len() / bs;
@@ -468,7 +468,7 @@ mod tests {
 
         fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
             let bs = self.geo.block_size as usize;
-            if buf.is_empty() || buf.len() % bs != 0 {
+            if buf.is_empty() || !buf.len().is_multiple_of(bs) {
                 return Err(DriverError::BufferTooSmall);
             }
             let blocks = buf.len() / bs;
@@ -571,7 +571,7 @@ mod tests {
         }
         fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
             let bs = self.geo.block_size as usize;
-            if buf.is_empty() || buf.len() % bs != 0 {
+            if buf.is_empty() || !buf.len().is_multiple_of(bs) {
                 return Err(DriverError::BufferTooSmall);
             }
             let blocks = buf.len() / bs;
@@ -591,7 +591,7 @@ mod tests {
         }
         fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
             let bs = self.geo.block_size as usize;
-            if buf.is_empty() || buf.len() % bs != 0 {
+            if buf.is_empty() || !buf.len().is_multiple_of(bs) {
                 return Err(DriverError::BufferTooSmall);
             }
             let blocks = buf.len() / bs;
