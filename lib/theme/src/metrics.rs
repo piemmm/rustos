@@ -67,6 +67,26 @@ pub struct Metrics {
     /// The diameter of a Signal Bead (a compact count/alert lamp), in logical
     /// pixels.
     pub bead_size: u32,
+    /// The breadth (short dimension) of a *measured* value track — a progress
+    /// bar's bar and a slider's groove — in logical pixels.
+    ///
+    /// A measured track is an instrument line, not a plate: it is deliberately
+    /// much thinner than [`control_height`](Self::control_height) and is
+    /// centred within whatever row the owner lays it out in, so a progress
+    /// bar never reads as a button-sized block.
+    pub measured_thickness: u32,
+    /// The square extent of a boolean selector's glyph — a checkbox box, a
+    /// radio circle — and the breadth of a toggle's track, in logical pixels.
+    ///
+    /// Smaller than [`control_height`](Self::control_height): the glyph is a
+    /// compact mark centred in the control's row beside its label, so the row
+    /// keeps a full-height hit target while the mark stays small.
+    pub selector_extent: u32,
+    /// The length (long dimension) of a toggle's track, in logical pixels.
+    /// Together with [`selector_extent`](Self::selector_extent) this fixes the
+    /// pill's proportions from theme data rather than a ratio buried in the
+    /// renderer.
+    pub toggle_track_length: u32,
 
     // --- Window-furniture metrics ---------------------------------------
     /// The height of a window title bar, in logical pixels.

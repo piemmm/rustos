@@ -19,15 +19,42 @@ same reasoning that puts the System Information client helpers in
 The crate owns no rendering arithmetic; it is a table of values. A `Theme`
 bundles, under a stable `ThemeId`:
 
-- `Palette` — semantic `Rgba` colour roles: `desktop`, `surface`,
-  `surface_raised`, `on_surface`, `on_surface_muted`, `accent`, `on_accent`,
-  and `border`. The roles are named fields, not a free-form map, so a theme
-  can never omit a role and a consumer can never request one that does not
-  exist (`AGENTS.md` §2.11). The window manager, the taskbar, and the apps
-  all read these same roles, which is what makes a theme switch apply
+- `Palette` — semantic `Rgba` colour roles: the surface/foreground base
+  (`desktop`, `surface`, `surface_raised`, `on_surface`, `on_surface_muted`,
+  `accent`, `on_accent`, `border`), the Reactive Alloy control roles
+  (`surface_pressed`, `rim`, `rim_active`, `danger`), the signal roles the
+  boards' legend fixes (the `*_pressure` set, `network_activity`, `recovery`,
+  `success`, `warning`, `denied`), and the scroll and window-frame roles
+  (`scroll_track`, `scroll_thumb`, `frame_active`, `frame_inactive`). The
+  roles are named fields, not a free-form map, so a theme can never omit a
+  role and a consumer can never request one that does not exist
+  (`AGENTS.md` §2.11). `Palette::signal(SignalRole)` is the one place a
+  signal becomes a colour. The window manager, the taskbar, and the apps all
+  read these same roles, which is what makes a theme switch apply
   consistently everywhere.
-- `Metrics` — `window_corner_radius`, `taskbar_corner_radius`,
-  `popup_corner_radius`, and `border_thickness`.
+  - The two frame roles are *neutral* tones, not the accent: a focused window
+    takes the brighter grey and an unfocused one the dimmer, so the accent
+    stays reserved for a chosen action and focus is read from the frame's tone
+    (the boards' behaviour). Only the high-contrast shape fallback
+    (`plans/GUI-CONTROLS-DESIGN.md` §15) adds a second inner rim on top of
+    that tone difference.
+- `Metrics` — every logical length the desktop is laid out from, so no
+  renderer carries a private constant: the corner radii and
+  `border_thickness`; the scrollbar's `scrollbar_breadth` and
+  `min_thumb_length`; the control anatomy (`control_height`,
+  `control_inset`, `control_gap`, `control_corner_radius`, `seam_thickness`,
+  `rail_thickness`, `bead_size`, `measured_thickness`, `selector_extent`,
+  `toggle_track_length`); and the window furniture (`title_bar_height`,
+  `frame_inset`, `window_control_extent`, `resize_grabber_extent`,
+  `hit_slop`).
+  - `measured_thickness` is the breadth of a *measured* track — a progress
+    bar's bar, a slider's groove. It is deliberately a thin instrument line
+    rather than a `control_height` plate, centred in the row the owner lays it
+    out in, which is how the boards draw them.
+  - `selector_extent` (a checkbox box, a radio circle, a toggle track's
+    breadth) and `toggle_track_length` size a boolean selector's *mark*
+    smaller than the row that carries it, so the glyph stays compact while the
+    full row remains the hit target.
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, derived from
   a single authored base size through the boards' shared ladder (see
   [Typography](#typography)), referencing faces under `/System/Fonts`.

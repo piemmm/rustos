@@ -12,7 +12,7 @@
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, SignalRole, Theme};
+use tairix_theme::{Contrast, Palette, Rgba, SignalRole, Theme};
 
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, PressureKind,
@@ -70,6 +70,20 @@ pub(crate) fn plate_border(theme: &Theme, scale: Scale) -> u32 {
         .scale_length(theme.metrics().border_thickness)
         .max(1)
         .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+}
+
+/// The physical breadth of a *measured* value track — a progress bar's bar, a
+/// slider's groove — from the theme metric, never thinner than a hairline.
+///
+/// A measured track is an instrument line rather than a plate, so both the
+/// slider and the progress trace resolve it here instead of deriving a
+/// thickness from their row height.
+#[must_use]
+pub(crate) fn measured_thickness(theme: &Theme, scale: Scale) -> u32 {
+    scale
+        .scale_length(theme.metrics().measured_thickness)
+        .max(1)
+        .saturating_add(u32::from(heavy_contrast(theme)))
 }
 
 /// A `u32` extent as an `i32` coordinate, saturating rather than wrapping.
@@ -166,47 +180,118 @@ pub(crate) struct FrameColors {
     pub focused: bool,
 }
 
+/// How strongly a control's role is stated on its surface.
+///
+/// The design boards give a control exactly three treatments, and the
+/// difference between them is *where* the role colour lands: nowhere, on the
+/// edge and the label, or across the whole plate. Naming the three makes the
+/// recipe one decision instead of a per-family colour choice.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Emphasis {
+    /// No role colour: a neutral plate with a quiet rim and a plain label.
+    Quiet,
+    /// The role colour on the rim and the label, over the resting plate.
+    Outlined(Rgba),
+    /// The role colour across the plate, with the rim the same colour and a
+    /// contrasting label.
+    Filled(Rgba),
+}
+
+/// The emphasis a role carries on an interactive control.
+///
+/// The main action of a surface is filled, the action the model recommends and
+/// a destructive action are outlined in their own colour (so a hard-to-undo
+/// action reads as coloured intent without shouting like the primary), and
+/// everything else stays quiet.
+#[must_use]
+fn role_emphasis(palette: &Palette, role: ControlRole) -> Emphasis {
+    match role {
+        ControlRole::Primary => Emphasis::Filled(palette.accent),
+        ControlRole::Recovery => Emphasis::Filled(palette.recovery),
+        ControlRole::Recommended => Emphasis::Outlined(palette.accent),
+        ControlRole::Destructive => Emphasis::Outlined(palette.danger),
+        ControlRole::Neutral | ControlRole::Navigation | ControlRole::System => Emphasis::Quiet,
+    }
+}
+
+/// How far a filled plate is darkened while pressed, in permille.
+const PRESS_DARKEN: u16 = 220;
+/// How far a filled plate is lightened while hovered, in permille.
+const HOVER_LIGHTEN: u16 = 90;
+
+/// Black and white, the two ends a filled role colour is mixed toward to
+/// derive its pressed and hovered neighbours.
+const BLACK: Rgba = Rgba::rgb(0, 0, 0);
+const WHITE: Rgba = Rgba::rgb(255, 255, 255);
+
+/// A filled role colour under one pointer state: darker while pressed,
+/// brighter while hovered, the plain role colour at rest.
+#[must_use]
+fn filled_plate(color: Rgba, pointer: PointerState) -> Rgba {
+    match pointer {
+        PointerState::Pressed => color.mix(BLACK, PRESS_DARKEN),
+        PointerState::Hover => color.mix(WHITE, HOVER_LIGHTEN),
+        PointerState::None | PointerState::DragSource | PointerState::DragTarget => color,
+    }
+}
+
 /// Resolve the shared plate/rim/label colours for one theme, role, and state.
 ///
 /// The rim carries the spec §13 disposition: a disabled control shows a quiet
 /// border, a denial the denied role, a failed-closed attempt the recovery
 /// role, a pending check the active rim; only an interactive control takes its
-/// role's emphasis (destructive danger, recovery, primary accent) or lifts to
-/// the active rim on hover/press/focus.
+/// role's emphasis.
+///
+/// Two invariants come from the design boards and hold for every family. A
+/// coloured plate always has its rim in the *same* colour, so a filled control
+/// never shows a foreign edge; and a control states its role on the edge and
+/// the label before it states it on the plate — pressing a quiet or outlined
+/// control colours it rather than merely darkening it, which is what makes a
+/// click visible without motion.
 #[must_use]
 pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlState) -> FrameColors {
     let palette = theme.palette();
     let disposition = state.disposition();
+    let pointer = state.pointer;
 
-    let plate = match disposition {
-        ControlDisposition::DisabledByState => palette.surface,
-        _ if state.pointer == PointerState::Pressed => palette.surface_pressed,
-        _ => palette.surface_raised,
+    let emphasis = match disposition {
+        ControlDisposition::DisabledByState => Emphasis::Quiet,
+        ControlDisposition::DeniedByAuthority => Emphasis::Outlined(palette.denied),
+        ControlDisposition::FailedClosed => Emphasis::Outlined(palette.recovery),
+        ControlDisposition::PendingCheck => Emphasis::Outlined(palette.rim_active),
+        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => {
+            role_emphasis(palette, role)
+        }
     };
 
-    let rim = match disposition {
-        ControlDisposition::DisabledByState => palette.border,
-        ControlDisposition::DeniedByAuthority => palette.denied,
-        ControlDisposition::FailedClosed => palette.recovery,
-        ControlDisposition::PendingCheck => palette.rim_active,
-        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => match role {
-            ControlRole::Destructive => palette.danger,
-            ControlRole::Recovery => palette.recovery,
-            ControlRole::Primary | ControlRole::Recommended => palette.accent,
-            _ if state.pointer == PointerState::Hover
-                || state.pointer == PointerState::Pressed
-                || state.focus.focused =>
-            {
-                palette.rim_active
-            }
-            _ => palette.rim,
-        },
-    };
-
-    let label = if disposition == ControlDisposition::DisabledByState {
-        palette.on_surface_muted
-    } else {
-        palette.on_surface
+    let (plate, rim, label) = match emphasis {
+        Emphasis::Filled(color) => {
+            let fill = filled_plate(color, pointer);
+            (fill, fill, palette.on_accent)
+        }
+        // A press promotes an outlined control to a filled one: the colour it
+        // was stating on its edge takes the plate, edge included.
+        Emphasis::Outlined(color) if pointer == PointerState::Pressed => {
+            let fill = filled_plate(color, pointer);
+            (fill, fill, palette.on_accent)
+        }
+        Emphasis::Outlined(color) => (palette.surface_raised, color, color),
+        Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => {
+            (palette.surface, palette.border, palette.on_surface_muted)
+        }
+        // A quiet control has no colour of its own, so a press borrows the
+        // active rim for both its edge and its label.
+        Emphasis::Quiet if pointer == PointerState::Pressed => (
+            palette.surface_pressed,
+            palette.rim_active,
+            palette.rim_active,
+        ),
+        Emphasis::Quiet if pointer == PointerState::Hover || state.focus.focused => (
+            palette.surface_raised,
+            palette.rim_active,
+            palette.on_surface,
+        ),
+        Emphasis::Quiet => (palette.surface_raised, palette.rim, palette.on_surface),
     };
 
     FrameColors {
