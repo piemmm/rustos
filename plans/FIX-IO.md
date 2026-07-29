@@ -255,10 +255,27 @@ Landed:
   endpoint (fail-closed `DeviceFault`) each keep their distinct class, so a
   fault on one device surfaces only to *its* callers. volmgr's `RemoteBlock` no
   longer collapses the health axis to `DeviceFault`.
+- **Consumer-side bounded reissue** — the consumer half of the reply-reissuable
+  model (IO3). Both consumers (the kernel `BlkClient`, volmgr's `RemoteBlock`)
+  reissue a driver-framed reissuable completion (`is_retryable`:
+  `TransientError`/`Reset`/`Timeout`) a bounded number of times before failing
+  closed, so a device that is merely recovering is not punished with a spurious
+  I/O error. The cap is the shared per-class policy `IoBudget::max_retries`,
+  read through one definition `IoBudget::should_reissue(status, attempts)` both
+  consumers call (§2.2), so they cannot drift apart; a device that keeps
+  answering reissuably still fails closed deterministically at the budget (no
+  retry-until-it-works, §2.1). Each reissue is a fresh post → park-on-reply
+  exchange (event-driven, never a spin, §2.23); the serving driver owns the
+  grace window and its timers. A hard per-request deadline miss and a torn-down
+  endpoint fail closed with no reissue; a non-retryable verdict (`MediumError`/
+  `Offline`/`Removed`) surfaces on the first attempt.
 - Object-level isolation regression test (volmgr host doubles): a faulted
   device (offline) beside a healthy one — the faulted client fails every read
   closed with the typed health error while the healthy sibling keeps serving
-  correct data, interleaved.
+  correct data, interleaved. Reissue regression tests on both consumers: a
+  transient blip that resolves inside the retry budget is ridden out (correct
+  data returned), and a device that resets on every attempt fails closed as
+  `Busy` at the budget.
 
 Remaining:
 - Mark the affected volume degraded (Stage IO3 state) rather than only

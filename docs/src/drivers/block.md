@@ -100,6 +100,33 @@ reuses the same engine rather than copying it. The volume-manager consumer
 marking the affected volume degraded and health observability through
 `lib/log`/`sysinfo` are the staged remainder (`plans/FIX-IO.md` IO3–IO6).
 
+## Consumer-side bounded reissue
+
+The grace window is the *serving* half of the reply-reissuable model; the
+*consumer* half is a bounded reissue. When a serving driver rides a blip out it
+answers within the request's own deadline with a reissuable status
+(`BlkStatus::TransientError` / `Reset` / `Timeout`) rather than a hard fault, so
+a consumer that simply surfaced the first such reply as an I/O error would
+punish a device that was merely recovering. Instead every consumer of a served
+block device — the kernel-side `BlkClient` (`kernel/core`) and the volume
+manager's probe (`RemoteBlock`) — reissues a reissuable completion a bounded
+number of times before failing closed:
+
+- The retry count is the shared per-class policy `IoBudget::max_retries`, read
+  through the one definition `IoBudget::should_reissue(status, attempts)` both
+  consumers call, so they can never drift apart in when they retry versus fail
+  closed (`AGENTS.md` §2.2). A device that keeps answering reissuably still
+  fails closed deterministically at the budget rather than retrying forever
+  (`AGENTS.md`'s ban on retry-until-it-works).
+- Each reissue is a fresh post → park-on-reply exchange — it is event-driven,
+  never a busy spin (`AGENTS.md` §2.23). The serving driver owns the recovery
+  grace window and its timers; the consumer only honours the reissuable reply.
+- A hard per-request deadline timeout (synthesised kernel-side when the driver
+  never answers) and a torn-down endpoint fail closed with **no** reissue: a
+  device that consumed its whole deadline without answering is treated as
+  wedged, not retried. A non-retryable verdict — a `MediumError` bad sector, a
+  gone `Offline`/`Removed` device — is surfaced on the first attempt.
+
 ## Fault domains — one hub/controller blip is one recovery episode
 
 A bus, hub, USB controller, SAS/JBOD expander, or PCIe root complex owns a

@@ -22,8 +22,8 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{
-    decode_completion, BlkCompletion, BlkDeviceClass, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
-    BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkOp, BlkOutcome, BlkRequest, IoBudget,
+    BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -74,16 +74,20 @@ pub struct BlkClient {
     geometry: BlockGeometry,
     /// Whether the device reported itself write-protected.
     read_only: bool,
-    /// Per-request deadline (ns) after which a transfer fails closed rather
-    /// than parking the kernel filesystem path forever on a wedged device
-    /// (Invariant 1: every I/O is time-bounded). The kernel-side client
+    /// The per-device I/O budget this client serves the device with: the
+    /// per-request deadline (Invariant 1: every I/O is time-bounded, so a
+    /// wedged device fails closed rather than parking the filesystem path
+    /// forever) and the number of times a driver-framed *reissuable* failure
+    /// may be reissued before it fails closed. It is the single shared policy
+    /// both the serving driver and this consumer read, so the deadline and
+    /// retry count can never diverge between them. The kernel-side client
     /// cannot yet discover the device's class, so it uses the most generous
     /// class budget ([`BlkDeviceClass::Rotational`] — a spinning disk's
     /// spin-up/reset envelope), which never prematurely fails a slow but
     /// healthy device while still bounding a genuinely dead one; a
     /// class-specific budget threads through with the health state machine
     /// (`plans/FIX-IO.md` IO3).
-    deadline_ns: u64,
+    budget: IoBudget,
 }
 
 impl BlkClient {
@@ -139,7 +143,7 @@ impl BlkClient {
                 block_count: 0,
             },
             read_only: false,
-            deadline_ns: BlkDeviceClass::Rotational.budget().deadline_ns,
+            budget: BlkDeviceClass::Rotational.budget(),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -187,10 +191,46 @@ impl BlkClient {
         .map_err(DriverError::from_errno)
     }
 
+    /// Issue one request, blocking until the device answers or the
+    /// per-request deadline fails it closed, reissuing a *reissuable*
+    /// completion up to the device's [`IoBudget::max_retries`].
+    ///
+    /// This is the consumer half of the reply-reissuable recovery model
+    /// (`plans/FIX-IO.md` IO3): when the serving driver rides out a device
+    /// blip it answers within the request's deadline with a reissuable status
+    /// (`BlkStatus::TransientError` / `BlkStatus::Reset` /
+    /// `BlkStatus::Timeout`) rather than a hard fault, and this client
+    /// reissues rather than surfacing a spurious I/O error for a device that
+    /// is merely recovering. The reissue count is bounded by the shared
+    /// per-class budget, so a device that keeps answering reissuably still
+    /// fails closed deterministically rather than retrying forever
+    /// (`AGENTS.md`'s ban on retry-until-it-works). Each reissue re-posts and
+    /// re-parks on the reply — it is event-driven, never a busy spin: the
+    /// serving driver owns the recovery grace window and its timers; this
+    /// consumer only honours the reissuable reply. A hard deadline timeout or
+    /// a torn-down endpoint fails closed with no reissue — a device that
+    /// consumed its whole deadline without answering is treated as wedged, not
+    /// retried.
+    fn transfer(&self, request: BlkRequest) -> Result<BlkCompletion, Errno> {
+        let mut attempts: u32 = 0;
+        loop {
+            let outcome = self.transfer_once(request)?;
+            if self.budget.should_reissue(outcome.status, attempts) {
+                attempts += 1;
+                continue;
+            }
+            return outcome.data();
+        }
+    }
+
     /// Issue one request and block until its completion, mirroring the
     /// `ipc_call` handler's post → wake-server → park → take-reply
-    /// discipline.
-    fn transfer(&self, request: BlkRequest) -> Result<BlkCompletion, Errno> {
+    /// discipline. Returns the fully-decoded [`BlkOutcome`] (health status
+    /// plus payload/error), or fails closed with [`Errno::TimedOut`] on a
+    /// deadline miss and [`Errno::NotFound`] on a torn-down endpoint. The
+    /// reissue policy lives in [`transfer`](Self::transfer); this issues
+    /// exactly one attempt.
+    fn transfer_once(&self, request: BlkRequest) -> Result<BlkOutcome, Errno> {
         let mut frame = [0u8; BLK_REQUEST_LEN];
         let len = request.encode(&mut frame)?;
 
@@ -212,7 +252,7 @@ impl BlkClient {
         // is no deadline and the cooperative fallback below stands in.
         let poster = sched.map_or(0, |(_, task)| task);
         let deadline_abs = wait_arch().map_or(NO_DEADLINE, |hook| {
-            hook.now_ns().saturating_add(self.deadline_ns)
+            hook.now_ns().saturating_add(self.budget.deadline_ns)
         });
         let ticket =
             self.endpoint
@@ -265,7 +305,7 @@ impl BlkClient {
                 hook.set_wakeup(nearest_timed_deadline());
             }
         }
-        decode_completion(&outcome?)
+        Ok(decode_outcome(&outcome?))
     }
 
     /// Copy `data` into the shared window (a write's payload).
@@ -750,5 +790,125 @@ mod tests {
             client.read_blocks(0, &mut buf),
             Err(DriverError::DeviceFault)
         );
+    }
+
+    /// Serve `count` requests, answering the geometry probe normally and
+    /// each subsequent data request from `script` (front to back): `None`
+    /// serves it successfully, `Some(err)` frames an error completion. This
+    /// injects a driver's reissuable statuses (a `Reset` from
+    /// `EndpointStalled`, a transient from `WouldBlock`) and its hard ones
+    /// (a `MediumError`, a `DeviceOffline`) to exercise the client's
+    /// bounded-reissue policy.
+    fn serve_scripted(
+        endpoint: Arc<CallEndpoint>,
+        script: StdArc<Mutex<Vec<Option<Errno>>>>,
+        count: usize,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut served = 0;
+            while served < count {
+                let call = match endpoint.recv_call(BLK_REQUEST_LEN) {
+                    RecvCall::Received(call) => call,
+                    RecvCall::Empty => {
+                        thread::yield_now();
+                        continue;
+                    }
+                    RecvCall::TooLarge { .. } => panic!("oversize request"),
+                };
+                let mut reply = [0u8; BLK_COMPLETION_LEN];
+                let len = match BlkRequest::decode(&call.request) {
+                    Err(err) => encode_error_completion(&mut reply, err).unwrap(),
+                    Ok(request) => match request.op {
+                        BlkOp::Geometry => BlkCompletion {
+                            block_size: BLOCK_SIZE_U32,
+                            block_count: 8,
+                            flags: 0,
+                        }
+                        .encode(&mut reply)
+                        .unwrap(),
+                        // A scripted data request: the next verdict, or a
+                        // (window-unchanged) success when the script says so.
+                        _ => match script.lock().unwrap().remove(0) {
+                            Some(err) => encode_error_completion(&mut reply, err).unwrap(),
+                            None => BlkCompletion::default().encode(&mut reply).unwrap(),
+                        },
+                    },
+                };
+                endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                served += 1;
+            }
+        })
+    }
+
+    /// Connect a client to a scripted server (see [`serve_scripted`]).
+    fn connect_scripted(
+        script: Vec<Option<Errno>>,
+        count: usize,
+    ) -> (BlkClient, thread::JoinHandle<()>) {
+        let id = fresh_endpoint_id();
+        let endpoint = register_endpoint(id);
+        let window = leak_window();
+        let script = StdArc::new(Mutex::new(script));
+        let server = serve_scripted(endpoint, script, count);
+        let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+        let client = BlkClient::connect(id, hold, &SINK).expect("connect");
+        (client, server)
+    }
+
+    #[test]
+    fn a_transient_fault_is_reissued_and_then_succeeds() {
+        // Geometry, then two reissuable resets, then a good read: within the
+        // rotational class's retry budget, so the read succeeds rather than
+        // surfacing a spurious I/O error for a device that was merely
+        // recovering.
+        let (mut client, server) = connect_scripted(
+            vec![
+                Some(Errno::EndpointStalled),
+                Some(Errno::EndpointStalled),
+                None,
+            ],
+            4,
+        );
+        let mut buf = [0u8; BLOCK_SIZE];
+        client.read_blocks(0, &mut buf).expect("read after reissue");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_device_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
+        // One initial attempt plus the rotational budget of three reissues,
+        // all reissuable resets: the client stops and fails closed rather
+        // than retrying forever.
+        let (mut client, server) = connect_scripted(vec![Some(Errno::EndpointStalled); 4], 5);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_permanent_medium_error_is_never_reissued() {
+        // A bad sector is a definitive per-request answer, not a transient
+        // blip: it surfaces on the first attempt with no reissue (geometry
+        // plus exactly one data request reach the server).
+        let (mut client, server) = connect_scripted(vec![Some(Errno::MediumError)], 2);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(
+            client.read_blocks(0, &mut buf),
+            Err(DriverError::MediumError)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_gone_device_is_never_reissued() {
+        // An offline device is not retryable: reissuing a gone device only
+        // wastes its budget, so it fails closed immediately.
+        let (mut client, server) = connect_scripted(vec![Some(Errno::DeviceOffline)], 2);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(
+            client.read_blocks(0, &mut buf),
+            Err(DriverError::DeviceOffline)
+        );
+        server.join().unwrap();
     }
 }
