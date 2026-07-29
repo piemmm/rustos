@@ -1602,15 +1602,18 @@ static TESTS: &[QemuTest] = &[
     // exits status 0 and the runner registers `Outcome::Pass`. A boot that
     // never completes a loop falls silent and times out; a takeover that
     // *returned* (refused/unsupported) writes a fail finisher — so a regression
-    // that stops the test running fails loud. Four CPUs so the takeover
-    // genuinely stops its three secondary cores before tearing the machine down
-    // (proving the quiesce); the 60-second budget is the inactivity window
+    // that stops the test running fails loud. Single-core (embedded 1-CPU DTB),
+    // so the quiesce runs its no-peers path here (like the riscv64 sibling); the
+    // genuine multi-core quiesce is proven by the x86_64 sibling below, whose
+    // CPUs come from ACPI rather than an embedded DTB. Keeping this
+    // continuous-memtest guest single-core also keeps it a light citizen in the
+    // parallel QEMU matrix. The 60-second budget is the inactivity window
     // between progress updates, not a total-runtime cap.
     QemuTest {
         package: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
         binary: "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
         target: "aarch64-unknown-none",
-        cpus: 4,
+        cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -1633,9 +1636,9 @@ static TESTS: &[QemuTest] = &[
     // IPI-halt handshake), then the `MachineTakeover` body masks interrupts,
     // switches onto a reserved `.bss` stack, installs the reserved boot page
     // tables, and tests all of RAM continuously on that stack (every pattern
-    // over all of RAM, looping until reset). Once the guest completes one full
-    // test loop the harness issues a QEMU-monitor `system_reset`, which resets
-    // through the legacy 8042 / `0xCF9` hardware path — so QEMU (`-no-reboot`)
+    // over all of RAM, looping until reset). The takeover never resets the
+    // board itself; once the guest completes one full test loop the harness
+    // issues a QEMU-monitor `system_reset` — so QEMU (`-no-reboot`)
     // exits and the runner registers `Outcome::Pass`. A boot that never
     // completes a loop falls silent and times out; a takeover that *returned*
     // (refused/unsupported) writes a fail finisher — so a regression that stops

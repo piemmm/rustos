@@ -1,9 +1,9 @@
 //! `plans/NEW-SUPERVISOR.md` §9 Stage E QEMU integration test: boot the
 //! production x86_64 `tairix-kernel` pipeline and drive the pre-boot
 //! Supervisor's one-way **`memtest` takeover**, proving the
-//! x86_64 `MachineTakeover` mechanism takes the whole machine over, tests all
-//! of RAM, and ends in a **machine reset**. The x86_64 sibling of the
-//! aarch64/riscv64 takeover verticals.
+//! x86_64 `MachineTakeover` mechanism takes the whole machine over and tests
+//! all of RAM continuously. The x86_64 sibling of the aarch64/riscv64 takeover
+//! verticals.
 //!
 //! ## What this vertical asserts
 //!
@@ -25,20 +25,20 @@
 //! the bounded IPI-halt handshake before the tear-down begins.
 //!
 //! On the wired x86_64 port `memtest_takeover` **never returns**: the caller
-//! quiesces every other CPU, then the `MachineTakeover` body masks
-//! interrupts (`cli`), switches onto a reserved `.bss` stack, installs the
-//! reserved boot page tables, tests every usable frame
-//! (rendering the memtest86-style display to COM1), then relocates the
-//! register-only stub into a swept arena above the kernel image, tests the
-//! kernel-image region under a minimal identity page table, and resets the
-//! platform through the legacy 8042 / `0xCF9` reset hardware. QEMU runs with
-//! `-no-reboot`, so that reset exits the host process and the runner
+//! quiesces every other CPU, then the `MachineTakeover` body masks interrupts
+//! (`cli`), switches onto a reserved `.bss` stack, installs the reserved boot
+//! page tables, and tests every usable frame on that stack — cycling every
+//! pattern over all of RAM, over and over, rendering the memtest86-style
+//! display (elapsed timer, completed-loop count, error log) to COM1. The
+//! takeover never resets the board itself; once the guest prints the
+//! completed-test-loop marker the harness issues a QEMU-monitor `system_reset`,
+//! and under `-no-reboot` that reset exits the host process so the runner
 //! registers `Outcome::Pass`.
 //!
-//! A normal boot that reached idle without resetting would time out
-//! (`Outcome::Timeout`), and a takeover that *returned* (refused/unsupported)
-//! makes the sink write a fail finisher — so a regression that stops the port
-//! resetting fails loud rather than passing by accident.
+//! A boot that never reached a completed test loop would fall silent and time
+//! out (`Outcome::Timeout`), and a takeover that *returned* (refused/
+//! unsupported) makes the sink write a fail finisher — so a regression that
+//! stops the test running fails loud rather than passing by accident.
 //!
 //! ## How it differs from a production kernel
 //!

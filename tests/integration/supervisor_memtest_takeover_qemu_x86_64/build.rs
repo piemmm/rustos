@@ -1,5 +1,5 @@
-//! Build script for the x86_64 pre-boot-Supervisor destructive `memtest
-//! full` takeover QEMU vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E).
+//! Build script for the x86_64 pre-boot-Supervisor `memtest` takeover QEMU
+//! vertical (`plans/NEW-SUPERVISOR.md` §9 Stage E).
 //!
 //! One job on the freestanding `x86_64-unknown-none` target, identical to the
 //! x86_64 ESC boot-screen vertical this mirrors: hand the production x86_64

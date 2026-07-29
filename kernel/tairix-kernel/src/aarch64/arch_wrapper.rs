@@ -438,20 +438,18 @@ impl KernelArch for Aarch64BinArch {
         &self,
         _grant: &tairix_kernel_core::supervisor_system::TakeoverGrant,
     ) -> Option<&'static (dyn tairix_arch_api::MachineTakeover + Sync)> {
-        // The aarch64 destructive whole-RAM takeover the Supervisor's
-        // confirmed `memtest` drives (`plans/NEW-SUPERVISOR.md` §9). The
-        // handle is minted only through the arch port's gated accessor, and
-        // this override is itself reachable only with the supervisor-only
-        // `TakeoverGrant`, so the mechanism stays confined to that one path.
-        // The relocated reset stub has no fixed reset instruction the way
-        // riscv64 has the SBI ecall, so the discovered PSCI conduit is
-        // threaded into the handle; a board that declared no `/psci` node has
-        // no way to reset and is left unsupported (fail closed) rather than
-        // guessing a conduit.
+        // The aarch64 whole-RAM takeover the Supervisor's confirmed `memtest`
+        // drives (`plans/NEW-SUPERVISOR.md` §9). The handle is minted only
+        // through the arch port's gated accessor, and this override is itself
+        // reachable only with the supervisor-only `TakeoverGrant`, so the
+        // mechanism stays confined to that one path. The takeover never resets
+        // the board itself — the `memtest` sweep tests RAM continuously until
+        // the operator resets the machine — so it needs no PSCI reset conduit
+        // and is available on every aarch64 board, including a spin-table Pi 4
+        // whose firmware tree declares no `/psci` node.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
-            self.psci
-                .map(tairix_arch_aarch64::takeover::machine_takeover_handle)
+            Some(tairix_arch_aarch64::takeover::machine_takeover_handle())
         }
         #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
         {

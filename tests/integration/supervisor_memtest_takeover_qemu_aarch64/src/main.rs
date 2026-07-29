@@ -20,12 +20,14 @@
 //! command dispatch is host-tested in `lib/supervisor`, and the takeover is
 //! driven directly here because it never returns to key the REPL).
 //!
-//! The guest boots with four CPUs, so this genuinely exercises the cross-CPU
-//! quiesce: `drive_takeover` stops the three secondary cores through the
-//! bounded IPI-halt handshake before the tear-down begins.
+//! The guest boots single-core (embedded 1-CPU DTB), so the cross-CPU quiesce
+//! runs its "no online peers, succeed immediately" path here — the same
+//! handshake code the x86_64 sibling proves with real secondaries. Keeping
+//! this continuous-memtest guest single-core also keeps it a light citizen in
+//! the parallel QEMU matrix.
 //!
 //! On the wired aarch64 port `memtest_takeover` **never returns**: the caller
-//! quiesces every other core, then the `MachineTakeover` body masks
+//! quiesces every other core (none here), then the `MachineTakeover` body masks
 //! interrupts and stops the watchdog cadence, flattens paging (MMU off), and
 //! tests every usable frame on a reserved stack — cycling every pattern over
 //! all of RAM, over and over, rendering the memtest86-style display (elapsed
@@ -43,9 +45,11 @@
 //!
 //! QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer (`x0 = 0`), so
 //! the canonical `virt` device tree is dumped and embedded at build time
-//! (`build.rs`) and its address handed to the boot pipeline, exactly as the
-//! ESC boot-screen vertical does. The tree's `/psci` node gives the boot path
-//! the `hvc` reset conduit the takeover threads into its reset stub.
+//! (`build.rs`, a single CPU node) and its address handed to the boot
+//! pipeline, exactly as the ESC boot-screen vertical does. The takeover never
+//! resets the board itself (the harness does), so it needs no reset conduit —
+//! and it is available on a real spin-table Pi 4 whose tree has no `/psci`
+//! node at all.
 //!
 //! ## How it differs from a production kernel
 //!
