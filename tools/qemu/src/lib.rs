@@ -63,7 +63,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1215,11 +1215,6 @@ fn supervise(
     };
     let mut err_reader = Some(err_reader);
 
-    // Poll for completion in short ticks so the deadline is precise to
-    // the millisecond. We deliberately do *not* sleep until the deadline
-    // and then check once: that pattern adds up to `timeout` of latency
-    // for fast-failing tests, which would slow `cargo xtask ci`.
-    let tick = Duration::from_millis(25);
     let mut injections = InjectionState::new(spec);
     // Serial-input script cursor: the next step to send, and the byte
     // offset in the captured serial log just past the previous step's
@@ -1228,96 +1223,26 @@ fn supervise(
     // after a refused login) anchors its own step rather than re-firing
     // on the first occurrence.
     let mut serial_script = SerialScriptState::default();
-    let mut serial_closed = false;
-    let done = 'run: loop {
-        // Harness-driven success: the out-of-guest observer (the `netpeer` link
-        // peer) has confirmed the round-trip. End the run as `Pass` at once,
-        // before waiting on the guest — in this mode the guest never
-        // self-exits, so the gate is the sole success path.
-        if let Some(gate) = &spec.completion_gate {
-            if gate.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
-                break 'run DoneReason::CompletedByGate;
-            }
-        }
-        if let Some(status) = child.try_wait()? {
-            break 'run exit_reason(spec, serial_script.step, &injections, status);
-        }
-        if let Some(result) = completed_drain_result(&mut reader, "serial output") {
-            serial_closed = result.is_ok();
-            if let Err(reason) = result {
-                let _ = child.kill();
-                let _ = child.wait();
-                break 'run DoneReason::DrainFailed(reason);
-            }
-        }
-        if let Some(Err(reason)) = completed_drain_result(&mut err_reader, "qemu stderr") {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 'run DoneReason::DrainFailed(reason);
-        }
-        if let Err(e) = injections.drive(
-            spec,
-            monitor,
-            &InjectionMarkers {
-                key: &marker_seen,
-                typing: &typing_markers_seen,
-                pointer: &pointer_markers_seen,
-                screendump: &screendump_markers_seen,
-                monitor: &monitor_markers_seen,
-            },
-        ) {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 'run DoneReason::InjectionFailed(e);
-        }
-        let advanced = advance_serial_script(
-            &spec.serial_input,
-            &captured,
-            &mut serial_stdin,
-            &mut serial_script,
-            Instant::now(),
-        );
-        if let Err(e) = advanced {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 'run DoneReason::InjectionFailed(format!(
-                "serial input injection failed at step {}: {e}",
-                serial_script.step
-            ));
-        }
-        // Any new serial output is forward progress: reset the heartbeat so a
-        // guest that is alive but slow is never mistaken for a hung one. The
-        // captured log only ever grows, so its length is a cheap, monotonic
-        // progress signal.
-        let serial_len = captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
-        heartbeat.observe(serial_len, Instant::now());
-        // With a completion gate the guest keeps emitting campaign chatter
-        // while it waits to be confirmed, so the inactivity heartbeat would
-        // never fire; bound the wait with an absolute ceiling so a gate that
-        // never trips fails loud instead of hanging the run.
-        if spec.completion_gate.is_some() && run_start.elapsed() >= spec.timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 'run DoneReason::TimedOut;
-        }
-        if heartbeat.idle_for(Instant::now()) >= spec.timeout {
-            // Strict, no-retry kill. `wait` afterwards is best
-            // effort so we don't leave a zombie behind.
-            let _ = child.kill();
-            let _ = child.wait();
-            break 'run if serial_closed {
-                DoneReason::DrainFailed(String::from("serial output closed before QEMU exited"))
-            } else {
-                DoneReason::TimedOut
-            };
-        }
-        std::thread::sleep(tick);
-    };
+    let done = run_wait_loop(WaitLoop {
+        child: &mut child,
+        spec,
+        monitor,
+        reader: &mut reader,
+        err_reader: &mut err_reader,
+        serial_stdin: &mut serial_stdin,
+        captured: &captured,
+        markers: InjectionMarkers {
+            key: &marker_seen,
+            typing: &typing_markers_seen,
+            pointer: &pointer_markers_seen,
+            screendump: &screendump_markers_seen,
+            monitor: &monitor_markers_seen,
+        },
+        injections: &mut injections,
+        serial_script: &mut serial_script,
+        heartbeat: &mut heartbeat,
+        run_start,
+    })?;
 
     // The child has exited (or been killed); the reader thread sees
     // EOF on the closed pipe and finishes. Drop the monitor connections
@@ -1337,6 +1262,146 @@ fn supervise(
         .clone();
     append_stderr(&mut serial, &captured_err);
     Ok(outcome_from_done(done, spec, serial))
+}
+
+/// The running state the QEMU supervision wait-loop drives while a guest is
+/// alive. Bundled into one borrow so [`run_wait_loop`] takes a single argument
+/// rather than a dozen; every field is borrowed from [`supervise`], which
+/// keeps ownership for the post-loop drain and outcome assembly.
+struct WaitLoop<'a> {
+    /// The spawned QEMU child being supervised.
+    child: &'a mut Child,
+    /// The test spec: deadline, injections, and optional completion gate.
+    spec: &'a Spec,
+    /// The QMP monitor connection, when the spec drives one.
+    monitor: Option<&'a MonitorSocket>,
+    /// The serial-drain thread handle, polled for an early drain failure.
+    reader: &'a mut Option<std::thread::JoinHandle<io::Result<()>>>,
+    /// The stderr-drain thread handle, polled for an early drain failure.
+    err_reader: &'a mut Option<std::thread::JoinHandle<io::Result<()>>>,
+    /// The guest's serial input pipe the serial-input script writes through.
+    serial_stdin: &'a mut Option<ChildStdin>,
+    /// Everything the guest has printed on serial so far.
+    captured: &'a Arc<Mutex<String>>,
+    /// The per-injection readiness flags the injector consults each tick.
+    markers: InjectionMarkers<'a>,
+    /// The ordered key/pointer/dump/monitor injection cursor.
+    injections: &'a mut InjectionState,
+    /// The serial-input script cursor.
+    serial_script: &'a mut SerialScriptState,
+    /// The inactivity heartbeat.
+    heartbeat: &'a mut ProgressClock,
+    /// Absolute run start, used only for the completion-gate absolute ceiling.
+    run_start: Instant,
+}
+
+/// Poll a running QEMU guest to completion and report why it finished.
+///
+/// Split out of [`supervise`] so the spawn/validate path and the wait loop
+/// each stay within one screen. The deadline model is documented on
+/// [`supervise`] and [`ProgressClock`]: an inactivity heartbeat for a
+/// self-exiting guest, plus an absolute ceiling when a completion gate drives
+/// the run instead.
+fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
+    let WaitLoop {
+        child,
+        spec,
+        monitor,
+        reader,
+        err_reader,
+        serial_stdin,
+        captured,
+        markers,
+        injections,
+        serial_script,
+        heartbeat,
+        run_start,
+    } = cx;
+    // Poll for completion in short ticks so the deadline is precise to
+    // the millisecond. We deliberately do *not* sleep until the deadline
+    // and then check once: that pattern adds up to `timeout` of latency
+    // for fast-failing tests, which would slow `cargo xtask ci`.
+    let tick = Duration::from_millis(25);
+    let mut serial_closed = false;
+    loop {
+        // Harness-driven success: the out-of-guest observer (the `netpeer` link
+        // peer) has confirmed the round-trip. End the run as `Pass` at once,
+        // before waiting on the guest — in this mode the guest never
+        // self-exits, so the gate is the sole success path.
+        if let Some(gate) = &spec.completion_gate {
+            if gate.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(DoneReason::CompletedByGate);
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(exit_reason(spec, serial_script.step, &*injections, status));
+        }
+        if let Some(result) = completed_drain_result(reader, "serial output") {
+            serial_closed = result.is_ok();
+            if let Err(reason) = result {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(DoneReason::DrainFailed(reason));
+            }
+        }
+        if let Some(Err(reason)) = completed_drain_result(err_reader, "qemu stderr") {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DoneReason::DrainFailed(reason));
+        }
+        if let Err(e) = injections.drive(spec, monitor, &markers) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DoneReason::InjectionFailed(e));
+        }
+        let advanced = advance_serial_script(
+            &spec.serial_input,
+            captured,
+            serial_stdin,
+            serial_script,
+            Instant::now(),
+        );
+        if let Err(e) = advanced {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DoneReason::InjectionFailed(format!(
+                "serial input injection failed at step {}: {e}",
+                serial_script.step
+            )));
+        }
+        // Any new serial output is forward progress: reset the heartbeat so a
+        // guest that is alive but slow is never mistaken for a hung one. The
+        // captured log only ever grows, so its length is a cheap, monotonic
+        // progress signal.
+        let serial_len = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        heartbeat.observe(serial_len, Instant::now());
+        // With a completion gate the guest keeps emitting campaign chatter
+        // while it waits to be confirmed, so the inactivity heartbeat would
+        // never fire; bound the wait with an absolute ceiling so a gate that
+        // never trips fails loud instead of hanging the run.
+        if spec.completion_gate.is_some() && run_start.elapsed() >= spec.timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DoneReason::TimedOut);
+        }
+        if heartbeat.idle_for(Instant::now()) >= spec.timeout {
+            // Strict, no-retry kill. `wait` afterwards is best
+            // effort so we don't leave a zombie behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(if serial_closed {
+                DoneReason::DrainFailed(String::from("serial output closed before QEMU exited"))
+            } else {
+                DoneReason::TimedOut
+            });
+        }
+        std::thread::sleep(tick);
+    }
 }
 
 /// Inactivity heartbeat for the supervision loop.
