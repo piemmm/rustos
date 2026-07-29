@@ -2,7 +2,10 @@
 //! URB-backed transport, LUN bring-up, per-LUN block-service publication,
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
-use tairix_abi::blkio::{BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN};
+use tairix_abi::blkio::{
+    serve_request_recovering, BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN, BLK_DATA_LEN,
+    BLK_REQUEST_LEN,
+};
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
@@ -16,7 +19,7 @@ use tairix_drv_storage_usb_msd::desc::{
 use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
-use tairix_drv_storage_usb_msd::serve::{blk_block_for, serve_request};
+use tairix_drv_storage_usb_msd::serve::blk_block_for;
 use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -300,12 +303,16 @@ fn get_configuration_setup(length: u16) -> [u8; 8] {
 }
 
 /// One published logical unit: its serve endpoint, shared data window,
-/// emitted node, and brought-up state.
+/// emitted node, brought-up state, and health/recovery state machine.
 struct LunServe {
     endpoint: u64,
     node_id: u32,
     state: LunState,
     window: &'static mut [u8],
+    /// The per-LUN health state machine and recovery grace window. A USB
+    /// mass-storage unit is a removable device (bus resets, surprise
+    /// removal), so it is served with that class's budget.
+    health: BlkHealth,
 }
 
 /// Create the block-service endpoint `id`. Binding it grant-restricted
@@ -628,6 +635,7 @@ where
             node_id,
             state,
             window,
+            health: BlkHealth::new(BlkDeviceClass::Removable),
         });
         published += 1;
     }
@@ -702,14 +710,19 @@ where
         let lun = index as u8;
         let read_only = serve.state.write_protected;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
+        // The monotonic reading that times this LUN's recovery grace window;
+        // `clock_get` is unprivileged and never blocks.
+        let now_ns = tairix_rt::clock_get();
         let len = {
             let mut block = LunBlock::new(&mut scsi, lun, serve.state);
-            serve_request(
+            serve_request_recovering(
                 &mut block,
                 read_only,
                 &request[..n],
                 serve.window,
                 &mut reply,
+                &mut serve.health,
+                now_ns,
             )
         };
         let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);

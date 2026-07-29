@@ -161,7 +161,7 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
                 lba: lba + done as u64,
                 blocks: u32::try_from(chunk_blocks).map_err(|_| DriverError::OutOfRange)?,
             };
-            self.transfer(request).map_err(errno_to_driver)?;
+            self.transfer(request).map_err(DriverError::from_errno)?;
             let chunk_bytes = chunk_blocks * block_size;
             let offset = done * block_size;
             buf[offset..offset + chunk_bytes].copy_from_slice(&self.window[..chunk_bytes]);
@@ -183,17 +183,6 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
         // attach-time write client (which does write) owns the durability
         // flush; here it is a truthful no-op, not a swallowed forward.
         Ok(())
-    }
-}
-
-/// Map a transport/completion [`Errno`] onto the block-driver error the
-/// `Block` consumer expects. Unknown codes fail closed as a device fault.
-fn errno_to_driver(err: Errno) -> DriverError {
-    match err {
-        Errno::PermissionDenied => DriverError::PermissionDenied,
-        Errno::OutOfRange | Errno::LengthOutOfRange => DriverError::OutOfRange,
-        Errno::NotFound => DriverError::NotFound,
-        _ => DriverError::DeviceFault,
     }
 }
 
@@ -447,5 +436,93 @@ mod tests {
             client.read_blocks(0, &mut buf),
             Err(DriverError::DeviceFault)
         );
+    }
+
+    /// A device that answers geometry, then reports a fixed health
+    /// [`BlkStatus`] for every data request — a stand-in for a disk that has
+    /// gone medium-error, offline/removed, or is mid-reset.
+    struct FaultingDevice {
+        status: tairix_abi::blkio::BlkStatus,
+    }
+    impl BlkCall for FaultingDevice {
+        fn call(
+            &mut self,
+            request: &[u8],
+            reply: &mut [u8],
+            _window: &mut [u8],
+        ) -> Result<usize, Errno> {
+            if BlkRequest::decode(request)?.op == BlkOp::Geometry {
+                BlkCompletion {
+                    block_size: 512,
+                    block_count: 64,
+                    flags: 0,
+                }
+                .encode(reply)
+            } else {
+                BlkCompletion::default().encode_status(self.status, reply)
+            }
+        }
+    }
+
+    #[test]
+    fn the_health_axis_surfaces_as_the_matching_typed_driver_error() {
+        use tairix_abi::blkio::BlkStatus;
+        // Each health outcome keeps its class through to the `Block`
+        // consumer: a bad sector and a gone device are distinct hard errors,
+        // the transient/reset classes are reissuable `Busy`, and a timeout or
+        // an unclassified fatal fails closed as a device fault.
+        for (status, expected) in [
+            (BlkStatus::MediumError, DriverError::MediumError),
+            (BlkStatus::Offline, DriverError::DeviceOffline),
+            (BlkStatus::Removed, DriverError::DeviceOffline),
+            (BlkStatus::TransientError, DriverError::Busy),
+            (BlkStatus::Reset, DriverError::Busy),
+            (BlkStatus::Timeout, DriverError::DeviceFault),
+            (BlkStatus::Fatal, DriverError::DeviceFault),
+        ] {
+            let mut window = vec![0u8; BLK_DATA_LEN];
+            let mut client =
+                RemoteBlock::connect(FaultingDevice { status }, &mut window).expect("connects");
+            let mut buf = [0u8; 512];
+            assert_eq!(client.read_blocks(0, &mut buf), Err(expected), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_faulted_device_does_not_disturb_a_healthy_sibling() {
+        use tairix_abi::blkio::BlkStatus;
+        // Two independent served devices: one has gone offline, the other is
+        // healthy. Each client owns its own transport and window, so a fault
+        // on one is contained to its own caller — the head-of-line isolation
+        // the strata depends on (one stalling disk never wedges another).
+        let mut faulted_window = vec![0u8; BLK_DATA_LEN];
+        let mut faulted = RemoteBlock::connect(
+            FaultingDevice {
+                status: BlkStatus::Offline,
+            },
+            &mut faulted_window,
+        )
+        .expect("connects");
+
+        let mut healthy_window = vec![0u8; BLK_DATA_LEN];
+        let mut healthy =
+            RemoteBlock::connect(device(512, 64, 0), &mut healthy_window).expect("connects");
+
+        let mut fbuf = [0u8; 512];
+        let mut hbuf = [0u8; 512];
+        for lba in 0..4u64 {
+            // The faulted sibling fails every read closed...
+            assert_eq!(
+                faulted.read_blocks(lba, &mut fbuf),
+                Err(DriverError::DeviceOffline)
+            );
+            // ...while the healthy one keeps serving correct data throughout.
+            healthy
+                .read_blocks(lba, &mut hbuf)
+                .expect("healthy device unaffected by the faulted sibling");
+            let mut expected = [0u8; 512];
+            fill(&mut expected, lba * 512);
+            assert_eq!(hbuf, expected, "the healthy sibling's data is intact");
+        }
     }
 }

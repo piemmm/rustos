@@ -234,33 +234,108 @@ tests that a `CallReply` member wakes on a ready reply and on a deadline; the
 every new `BlkStatus`; fuzz the completion/status decode and the reap/deadline
 path (§19.6).
 
-### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **planned**
+### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **in progress**
 
 Stop the "entire strata locks up": no shared blocking thread across devices.
 
-Deliverables:
-- Each volume/filesystem attachment drives its device through the IO1 seam and
-  multiplexes completions/timeouts on a **wait-set** (§2.23). One device's
-  stall parks only the tasks waiting on *that* device; unrelated volumes keep
-  running. Any single serialised worker fanning out to all disks is removed.
-- `RemoteBlock`/`Block` become fault-aware: a timeout/offline on a non-root
-  (even empty) disk surfaces to *its* callers only; the root and every other
-  mount are unaffected.
-- The mount stays up; the op fails. A wedged device yields `-TimedOut`/`Offline`
-  to its callers, and the volume is marked degraded (Stage IO3 state), not torn
-  out.
+The structural isolation is already in place from the IO1 consumer rewrites and
+is *not* re-architected here: there is no single serialised worker fanning out
+to all disks. Each mount has its own served block device, its own transport
+(the kernel `BlkClient` over a per-LUN `CallEndpoint`; volmgr's `RtBlkCall` over
+a per-device `CallReply` wait-set), and the mounted filesystem service takes a
+**per-driver** `SleepLock` (never a global one), so a per-request deadline park
+on a wedged device parks only that mount's callers — unrelated volumes run on.
 
-Tests (§7): a host harness with two devices where one stalls forever and the
-other keeps serving, asserting the live device's completions are unaffected
-(head-of-line isolation); a QEMU vertical with a wedged/removed virtio-blk or
-USB MSD device beside a live volume.
+Landed:
+- **Consumer fault-awareness via one shared mapping.** Every consumer of a
+  served block device classifies a completion's health through the single
+  `DriverError::from_errno` (`lib/abi`), never a per-consumer copy (§2.2). A bad
+  sector (`MediumError`), a gone/unresponsive/removed device (`DeviceOffline`),
+  a transient stall or reset (reissuable `Busy`), and a timed-out/vanished
+  endpoint (fail-closed `DeviceFault`) each keep their distinct class, so a
+  fault on one device surfaces only to *its* callers. volmgr's `RemoteBlock` no
+  longer collapses the health axis to `DeviceFault`.
+- Object-level isolation regression test (volmgr host doubles): a faulted
+  device (offline) beside a healthy one — the faulted client fails every read
+  closed with the typed health error while the healthy sibling keeps serving
+  correct data, interleaved.
 
-### Stage IO3 — Per-device health state machine + the recovery grace window. **planned**
+Remaining:
+- Mark the affected volume degraded (Stage IO3 state) rather than only
+  surfacing the typed error to its callers.
+- A QEMU vertical with a wedged/removed virtio-blk or USB MSD device beside a
+  live volume, asserting the live device's throughput is unaffected while the
+  wedged one fails closed at its deadline (true concurrent head-of-line
+  freedom, which the host doubles cannot express without the kernel deadline
+  machinery).
+
+### Stage IO3 — Per-device health state machine + the recovery grace window. **in progress**
 
 This is the core of the issue: a bounded grace window to ride out a blip
 before failing closed.
 
-Deliverables:
+**Landed (the shared primitive + first serving consumer):** the per-device
+health state machine and grace window live in one place both a serving driver
+and a consumer read — `blkio::BlkHealth` / `BlkHealthState` in `lib/abi`
+(§2.2), consuming the per-class `IoBudget::grace_ns` policy (`BlkDeviceClass::
+budget`). `BlkHealth::observe(raw, now_ns)` folds each *device-level* outcome
+into `Healthy → Degraded → Recovering → { Healthy | Faulted } → Offline/
+Removed → Failed` and returns the `BlkStatus` the consumer is told; it is pure
+and event-timed (the caller supplies the monotonic `clock_get` reading, no
+timer to spin on, §2.23), so the whole machine is proven host-side. A
+transient stall/reset inside the window is reported reissuably (`Reset`) and
+held `Recovering`; the same stall once the window elapses is `Faulted` and
+fails closed (`Offline`); any valid answer recovers the device
+(sticky-but-recoverable, no reboot). Only device-level outcomes drive health —
+`BlkStatus::for_driver_health` returns `None` for request-level rejections, so
+a hostile/malformed request can never fault a healthy device. The **reply-
+reissuable** recovery model (not inline parking) is the one this stage adopts,
+so one unit's blip never stalls the serve loop's other units (head-of-line
+freedom, §26.1) — exactly the "reply within the per-request deadline while the
+device works its grace window behind the scenes" option the design below
+allows. The whole request engine is one shared definition every block driver
+reuses — `blkio::serve_request_recovering` in `lib/abi` (§2.2, §27): it decodes
+and validates a request, drives the device through the `Block` trait, folds the
+outcome into a `BlkHealth`, and frames the completion, with a
+`Served{Device,Refused}` split so a request refusal is never fed to health.
+Validation, the fail-closed refusals, the success paths, and the grace window
+thus cannot diverge between drivers, and the engine is pure/alloc-free and
+proven host-side over fault-injecting `Block` doubles in `lib/abi`. The first
+consumer is `usb_msd`: its wait-set serve loop hands each per-LUN request to the
+engine with that LUN's `BlkHealth` (the `Removable` class) driven by
+`clock_get`; only the usb_msd-specific block-service endpoint-id derivation
+(`serve::blk_block_for`) lives in the driver crate. The state
+machine is also complete for the *quiet-device* case (§27): `BlkHealth::
+grace_deadline_ns` gives the absolute one-shot deadline a driver arms its idle
+timer to while `Recovering`, and `BlkHealth::poll(now_ns)` is the pure,
+event-timed transition that fails a still-`Recovering` device closed to
+`Faulted` when that window elapses with no further request to fold through
+`observe` — the shared `grace_elapsed` check keeps `observe` and `poll` from
+diverging (§2.2). Wiring a driver's one-shot timer to call `poll` is the
+remaining IO4 idle-timer work below.
+
+Remaining:
+- `virtio_blk` and `emmc2` are currently consumed **in-kernel** (root-unlock)
+  and expose only their `Block` implementation — they are not yet brought up as
+  user-space serving processes with their own serve loops. When either is, it
+  reuses the shared `blkio::serve_request_recovering` engine (above) rather than
+  copying it, so there is nothing to "adopt" separately; the shared engine is
+  the single definition (§2.2). Bringing those serve processes up is tracked
+  with their user-space driver-process work, not this stage.
+- The bounded recovery *escalation* (retry-with-backoff → LUN/device/port
+  reset) as an explicit driver action behind the reply-reissuable reporting.
+  The background grace-window expiry for a `Recovering` device that receives no
+  further request now has its primitive (`BlkHealth::poll` /
+  `grace_deadline_ns`, above); only wiring a driver's own one-shot idle timer
+  to call it remains (belongs with the driver's idle timers, Stage IO4).
+- The volume-manager consumer marking the affected volume degraded (below) and
+  the health observability (Stage IO5).
+- A QEMU vertical driving a device through fault → grace(recovering) →
+  return-inside-window → Healthy and fault → grace-expiry → Faulted →
+  fail-closed, which the host doubles cannot express without the live kernel
+  deadline machinery.
+
+Deliverables (design):
 - **A per-device health state machine, owned by the block driver process:**
   `Healthy → Degraded → Recovering(grace) → { Healthy | Faulted } → Offline/
   Removed → Failed`. Transitions are logged (Stage IO5).
@@ -296,8 +371,9 @@ Deliverables:
 - The driver owns its own timers/IRQ waits and never blocks the consumer: it
   either completes, or replies with a `Timeout`/`Reset`/`Degraded` completion
   within the per-request deadline while the device works through its grace
-  window behind the scenes. The pure per-request logic in `usb_msd/src/serve.rs`
-  stays host-testable; the serve path grows a recovery arm around it.
+  window behind the scenes. The pure per-request logic is the shared
+  `blkio::serve_request_recovering` engine in `lib/abi`, host-tested; each
+  driver's serve loop wraps a recovery arm around it.
 
 Tests (§7): drive the state machine over a fault-injecting `Block` double
 through fault → degrade → grace(recovering) → **return-inside-window →
@@ -306,29 +382,51 @@ fail-closed → D4 retention; assert the grace timer is event-timed (no busy
 spin) and that requests inside the window are held/reissued, not hard-failed;
 assert a flapping device stays sticky-degraded until a real recovery.
 
-### Stage IO4 — Fault-domain tree (hub/controller quiesce/resume). **planned**
+### Stage IO4 — Fault-domain tree (hub/controller quiesce/resume). **in progress**
 
 A hub or controller blip is *one* fault-domain event, not N spurious disk
 failures.
 
-Deliverables:
-- A **fault-domain** object mirroring the hardware tree (`hwtree.rs`): a device
-  node's parent bus/hub/controller node is its fault-domain owner, discovered,
-  not hard-coded (§18.1, §2.20). USB hub, JBOD/SAS expander, and PCIe root
-  complex are all interior nodes.
-- **Coherent quiesce/resume.** When an owner must reset, it transitions all
-  children to `Recovering(grace)` under one shared grace window (Stage IO3): in-
-  flight requests complete with `Reset` (reissuable), new requests park on the
-  event-timed budget, and on success the children resume — so one hub reset is
-  one recovery episode, not N failures. If the owner cannot recover within its
-  grace budget, its subtree goes `Offline` and consumers are told, fail-closed.
+**Landed (the shared primitive):** the interior-node fault-domain state machine
+lives beside the per-device one in `lib/abi` — `blkio::FaultDomain` /
+`FaultDomainState` (`Healthy → Recovering(grace) → Offline`, sticky-but-
+recoverable). It is the interior-node counterpart of `BlkHealth` and reuses the
+**same** grace-window timer: the recovery-window arm/elapsed/one-shot-deadline
+arithmetic was extracted into one private `blkio::GraceWindow` that both
+`BlkHealth` and `FaultDomain` drive, so a leaf device and an interior node time
+their grace window identically and cannot diverge (§2.2). `FaultDomain::quiesce`
+opens one shared window over the whole subtree (children answered reissuably via
+`child_status → Reset`); `resume` records a demonstrated owner return and
+recovers the subtree to `Healthy` at once (no reboot, §18.4); `poll` fails a
+`Recovering` subtree closed to `Offline` when the window elapses, driven by the
+one-shot deadline `grace_deadline_ns` names (event-timed, never a spin, §2.23);
+the failed subtree is sticky until a demonstrated return so a flapping hub never
+masquerades as healthy. The domain stores only the owner's opaque hardware-tree
+node id, so the type is platform-neutral (§2.20) and children are read from the
+discovered tree (`hwtree.rs`), never hard-coded (§18.1). The whole machine is
+pure and event-timed (the caller supplies the monotonic reading and drives the
+children's own `BlkHealth`), so the coherent quiesce/resume is proven host-side.
+
+Remaining:
+- **Wiring the tree.** Walk the hardware tree (`hwtree.rs`) to associate each
+  block device with its parent bus/hub/controller `FaultDomain`, so a serving
+  driver folds `child_status` into each child's completion and a serving/bus
+  driver calls `quiesce`/`resume`/`poll` around its own reset. This belongs
+  with the user-space bus/serving driver work (it needs the live serve loops and
+  timers the host doubles cannot express), like the per-device idle-timer wiring
+  in IO3.
 - Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
   `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
   *degrade/reset/restore* health transitions alongside add/remove.
 
-Tests (§7): a modelled hub with several children where the hub resets — assert
-one fault-domain recovery episode, children reissue and resume within the grace
-window, and only a genuine expiry takes the subtree `Offline`.
+Tests (§7): the pure `FaultDomain` machine is proven host-side in `lib/abi` —
+one owner reset holds the whole subtree reissuable under one window; an owner
+returning inside the window recovers the subtree leaving no scar; an owner that
+outlasts it fails the subtree closed; a quiet domain expires on the one-shot
+time poll; a continuing reset cannot postpone the fail-closed; a failed subtree
+is sticky until a demonstrated return. A QEMU vertical of a modelled hub with
+several children resetting (asserting one recovery episode across the subtree)
+lands with the tree wiring above.
 
 ### Stage IO5 — Health observability (audit log + `sysinfo`). **planned**
 

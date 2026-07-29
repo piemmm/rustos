@@ -18,9 +18,128 @@ loaded as user-space drivers unless their manifest declares
 
 All methods return `Result<_, DriverError>`. Per `AGENTS.md` §2.9 the
 class trait never panics — buffer length errors map to
-`DriverError::BufferTooSmall`, out-of-range LBAs map to
-`DriverError::LengthOutOfRange`, and device-reported failures map to
-`DriverError::DeviceFault`.
+`DriverError::BufferTooSmall` and out-of-range LBAs map to
+`DriverError::LengthOutOfRange`.
+
+Device-reported outcomes carry a **health axis** rather than collapsing to a
+single fault. A block-service completion leads with a `blkio::BlkStatus`
+word, and every consumer of a served device — the kernel-side `BlkClient`
+and the volume manager's probe alike — classifies it through the one shared
+`DriverError::from_errno` mapping (`lib/abi`), never a per-consumer copy
+(`AGENTS.md` §2.2). The health classes stay distinct so the filesystem layer
+can act on them: a permanent bad sector is `DriverError::MediumError`, a
+present-but-unresponsive or surprise-removed device is
+`DriverError::DeviceOffline`, a transient stall or a device/hub reset is a
+reissuable `DriverError::Busy`, and a timed-out or vanished endpoint (and any
+unclassified failure) fails closed as `DriverError::DeviceFault`. Because the
+mapping is per-consumer-agnostic, a fault on one device surfaces only to that
+device's callers while every other mount keeps running (`plans/FIX-IO.md`
+IO1/IO2).
+
+## Health state machine and the recovery grace window
+
+A device that stalls, resets, or has its bus glitch is far more often only
+*briefly* unwell than terminally dead, so a serving driver rides such a blip
+out for a bounded **grace window** before failing it closed rather than
+punishing the first missed beat (`plans/FIX-IO.md` IO3, `AGENTS.md` §26.5).
+The policy and mechanism live in one shared place both a serving driver and a
+consumer read (`blkio::BlkHealth`), never a per-driver copy (`AGENTS.md`
+§2.2):
+
+- `BlkHealth::observe(raw, now_ns)` folds each device-level outcome into an
+  explicit `BlkHealthState` (`Healthy` → `Degraded` → `Recovering` →
+  `{ Healthy | Faulted }` → `Offline`/`Removed` → `Failed`) and returns the
+  `BlkStatus` the consumer is told. It is pure and event-timed: the caller
+  supplies the monotonic `clock_get` reading, so there is no timer to spin on
+  (`AGENTS.md` §2.23) and the whole machine is proven host-side.
+- **Inside the window** a transient stall/reset is answered with a reissuable
+  `BlkStatus::Reset` and the device is held `Recovering`, so a blip that
+  resolves in milliseconds is invisible to the workload. The reply is
+  reissuable *within its own per-request deadline* rather than parked, so one
+  device's blip never stalls the serve loop's other units (head-of-line
+  freedom, §26.1).
+- **When the window elapses** without the device coming back the device goes
+  `Faulted` and only *then* fails closed (`BlkStatus::Offline`). A device that
+  has faulted stays quarantined until it *demonstrably* answers again, so a
+  flapping disk cannot masquerade as healthy — yet a genuine return always
+  recovers it to `Healthy` with no reboot (`AGENTS.md` §18.4).
+- **A quiet device still expires its window.** `observe` advances the window
+  when a request outcome arrives, but a device that stalls and then goes silent
+  would otherwise sit `Recovering` forever. `BlkHealth::grace_deadline_ns`
+  returns the absolute monotonic time the window closes (a driver arms a
+  **one-shot** timer for it, never a busy-poll — `AGENTS.md` §2.23), and
+  `BlkHealth::poll(now_ns)` is the pure, event-timed transition that fails a
+  still-`Recovering` device closed to `Faulted` when that deadline passes with
+  no further request. `observe` and `poll` share one `grace_elapsed` check so
+  the request-driven and time-driven paths cannot diverge (`AGENTS.md` §2.2).
+- Only a *device-level* outcome drives health. A request-level rejection (a
+  write to a read-only unit, an out-of-range LBA, a malformed frame) is
+  classified `BlkStatus::for_driver_health(err) == None` and framed verbatim,
+  so a hostile or malformed request can never drive a healthy device toward
+  `Faulted`.
+- The grace duration is **per-device-class policy** (`IoBudget::grace_ns` from
+  `BlkDeviceClass::budget`), sized wider than the per-request deadline so a
+  single reset/spin-up cannot exhaust it — a rotational disk's spin-up budget
+  is not an SSD's. It is scaling policy, never one global `const` (`AGENTS.md`
+  §24.1) and never a security/validation bound (§24.4).
+
+The request engine is **one shared definition** every block driver reuses:
+`tairix_abi::blkio::serve_request_recovering` decodes and validates a request,
+drives the device through the `Block` trait, folds the outcome into a
+`BlkHealth`, and frames the completion — so the validation, the fail-closed
+refusals, the success paths, and the recovery grace window cannot diverge
+between drivers (`AGENTS.md` §2.2, §27). It is pure and alloc-free, proven
+host-side over in-memory `Block` doubles in `lib/abi`. `usb_msd` is the first
+consumer: its wait-set serve loop hands each per-LUN request to the engine with
+that LUN's `BlkHealth` (the `Removable` class) driven by the monotonic clock;
+only the usb_msd-specific block-service endpoint-id derivation
+(`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and `emmc2`
+are currently consumed in-kernel (root-unlock) and expose only their `Block`
+implementation; when either is brought up as a user-space serving process it
+reuses the same engine rather than copying it. The volume-manager consumer
+marking the affected volume degraded and health observability through
+`lib/log`/`sysinfo` are the staged remainder (`plans/FIX-IO.md` IO3–IO6).
+
+## Fault domains — one hub/controller blip is one recovery episode
+
+A bus, hub, USB controller, SAS/JBOD expander, or PCIe root complex owns a
+group of block devices beneath it. When such an *owner* resets or blips, the
+symptom on every disk below it is the same stall — so treating it as N
+independent disk failures is wrong: it is **one** fault-domain event
+(`plans/FIX-IO.md` IO4). `blkio::FaultDomain` is the interior-node counterpart
+of the per-device `BlkHealth`, and both drive their recovery window through the
+one shared `GraceWindow` timer, so an interior node and a leaf device time
+their grace window identically and the arithmetic cannot diverge (`AGENTS.md`
+§2.2).
+
+- Which nodes are children is read from the discovered hardware tree
+  (`lib/abi::hwtree`), never hard-coded — a USB hub, a SAS expander, and a PCIe
+  root complex are all just interior nodes (`AGENTS.md` §18.1, §2.20). A
+  `FaultDomain` stores only the owner's opaque node id, so the type stays
+  platform-neutral.
+- `FaultDomain::quiesce(now_ns)` opens **one** shared grace window over the
+  whole subtree: every child's in-flight request is answered reissuably
+  (`FaultDomain::child_status` returns `BlkStatus::Reset`), so a hub reset that
+  resolves in milliseconds is invisible to the workload.
+- `FaultDomain::resume()` records a *demonstrated* owner return: the whole
+  subtree recovers to `Healthy` at once and children resume on their own
+  per-device health. This is the only transition that clears a failed subtree,
+  so a returning hub always recovers without a reboot (`AGENTS.md` §18.4).
+- `FaultDomain::poll(now_ns)` fails a `Recovering` subtree closed to `Offline`
+  when the window elapses, driven by the one-shot timer
+  `FaultDomain::grace_deadline_ns` names rather than a busy-poll (`AGENTS.md`
+  §2.23). A subtree that has failed closed is sticky until a demonstrated
+  return, so a flapping hub cannot masquerade as healthy.
+- The grace duration is **policy** the caller derives from the owner's
+  discovered class (e.g. the widest child `IoBudget::grace_ns`), never one
+  global `const` (`AGENTS.md` §24.1).
+
+The `FaultDomain` machine is pure and event-timed (the caller supplies the
+monotonic reading and drives the children's own `BlkHealth`), so the whole
+coherent quiesce/resume is proven host-side in `lib/abi`. Walking the hardware
+tree to drive a subtree's children through it — and the volume-manager degrade
+marking and health observability — are the staged remainder
+(`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 
@@ -317,10 +436,15 @@ call endpoint and a 32 KiB shared data window. Consumers drive the unit
 with the fixed-frame `tairix_abi::blkio` protocol (`BlkRequest`:
 geometry / read / write / flush; completions carry the geometry and the
 read-only flag) — the same request-reply IPC shape as the URB transport,
-served by the driver's wait-set loop (never a busy-poll). A hot-unplug
-surfaces as the URB endpoint vanishing: the driver retracts its LUN nodes
-and exits cleanly so a re-plug re-enumerates and reloads it. The engine,
-descriptor reader, and block service are host-proven over scripted
+served by the driver's wait-set loop (never a busy-poll). Each LUN carries a
+per-unit `blkio::BlkHealth` (the `Removable` device class), so a transient
+device stall or bus reset is ridden out through its recovery grace window —
+answered reissuably while the unit is `Recovering` — and only a unit that
+stays unwell past the window is failed closed to its consumers, while the
+other LUNs and every other mount keep running (`plans/FIX-IO.md` IO3). A
+hot-unplug surfaces as the URB endpoint vanishing: the driver retracts its
+LUN nodes and exits cleanly so a re-plug re-enumerates and reloads it. The
+engine, descriptor reader, and block service are host-proven over scripted
 doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).
 
 ### Volume manager (automount policy) — `drivers/storage/volmgr`
