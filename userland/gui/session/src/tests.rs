@@ -1991,7 +1991,7 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     // The picker resolves its font from the active theme's UI size; the
     // click row must be computed from the same font so it lands on row 0.
     let theme = shell.session().active_theme();
-    let font = tairix_font::BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+    let font = crate::picker::picker_font(theme);
     // The first entry row sits directly below the chrome (the command toolbar
     // strip over the breadcrumb path bar), so compute it from the shared
     // `chrome_height` the renderer reserves.

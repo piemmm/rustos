@@ -82,17 +82,49 @@ the same ABI discipline as the syscall table (§9): versioned, hashed, and
 frozen on the first release (mutable now — `abi-v1` is not frozen). It is not
 part of the curated C-ABI surface, so the generated C headers are unchanged.
 
-- A fixed 16-byte `FontRequest` in: `Glyph { scalar, cell_height }` or
+- A fixed 20-byte `FontRequest` in: `Glyph { scalar, cell_height, weight }` or
   `Metrics { cell_height }`. The scalar is carried as a `char`, so a surrogate
   or out-of-range code point is unrepresentable in an accepted request; the
   cell height is bounded by `FONT_MIN_CELL_HEIGHT`/`FONT_MAX_CELL_HEIGHT`
-  (8..=512) — a validation bound, not a capacity.
+  (8..=512) — a validation bound, not a capacity. The `weight` is a closed
+  `FontWeight` (`Regular`, `Medium`, `Bold`) decoded from its wire value, so an
+  unknown weight is refused rather than coerced. The reserved tail of every
+  frame must be zero, so a smuggled field is a decode failure, never silently
+  ignored.
 - A status-framed reply out: a glyph reply is `width`, `height`, `advance`, and
   the `width * height` 8-bit coverage samples (bounded by
   `FONT_MAX_GLYPH_REPLY`); a metrics reply is the monospace `FontMetrics`
   (`cell_width`, `cell_height`, `baseline`) for a client that holds no geometry
   of its own. One shared `glyph_coverage_len` bounds check governs both encode
   and decode, so producer and consumer cannot diverge.
+
+## Weights are synthesised, and never change layout
+
+A theme names a weight per text role (see [Desktop theming](../desktop/theming.md)),
+but the four committed `/System/Fonts` faces ship one weight each. A heavier run
+is therefore rasterised from the *same* outline and thickened inside the
+service: `Medium` adds a stroke of em/48 and `Bold` em/24 — the strength a
+stroke-widening rasteriser applies for a synthetic bold — carried in 1/256 px
+fixed point so the thickening is a smooth function of the rendered size rather
+than a whole-pixel jump.
+
+Two properties make this safe to put on the text path:
+
+- **The stroke is horizontal only.** A vertical smear would push an ascender or
+  descender out of the cell the client laid out, contradicting the geometry
+  `FontMetrics` promised. A horizontal one stays inside the (up to two-cell)
+  bitmap and leaves the baseline, cell height, and pen advance untouched, so a
+  bold run occupies exactly the cells its regular twin would and every layout
+  is weight-independent.
+- **It transforms coverage, not outlines.** Thickening the 8-bit alpha samples
+  keeps the whole operation inside the sandbox that already owns the raster,
+  needs no second rasterisation pass, and cannot move a control point. A
+  `Regular` request adds a stroke of zero and is byte-identical to the
+  pre-weight output.
+
+The weight is part of the service's cache key alongside the face, glyph, and
+cell height, so each (glyph, size, weight) is emboldened once and the hot path
+is a cache read.
 
 ## Startup and discovery
 

@@ -14,7 +14,10 @@
 //! so anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
 
+use tairix_abi::font_ipc::FontWeight;
+use tairix_geometry::Scale;
 use tairix_raster::{Color, Pixel, Surface};
+use tairix_theme::{Fonts, TextRole};
 use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
@@ -45,6 +48,10 @@ pub struct BitmapFont {
     /// The cell height this font renders at, in physical pixels, always in
     /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
     cell_height: u32,
+    /// The weight glyphs are requested in. A heavier weight thickens the
+    /// coverage the service returns and leaves every metric alone, so it is
+    /// not part of any layout arithmetic below.
+    weight: FontWeight,
 }
 
 impl Default for BitmapFont {
@@ -76,6 +83,7 @@ impl BitmapFont {
     pub const fn inconsolata() -> Self {
         Self {
             cell_height: atlas::CELL_HEIGHT,
+            weight: FontWeight::Regular,
         }
     }
 
@@ -97,7 +105,42 @@ impl BitmapFont {
         } else {
             pixels
         };
-        Self { cell_height }
+        Self {
+            cell_height,
+            weight: FontWeight::Regular,
+        }
+    }
+
+    /// The font a theme's `role` resolves to at `scale`: the role's authored
+    /// logical size converted to a physical cell height through the one shared
+    /// DPI scale, set in the weight the theme names.
+    ///
+    /// This is the only place a themed text role becomes a drawable font, so
+    /// every surface — window furniture, the taskbar, a control label, an app's
+    /// own text — sizes and weights a role identically and none of them repeats
+    /// the logical-to-physical conversion.
+    #[must_use]
+    pub fn for_role(fonts: &Fonts, role: TextRole, scale: Scale) -> Self {
+        let spec = fonts.spec(role);
+        Self::with_pixel_height(scale.scale_length(u32::from(spec.size_px)))
+            .with_weight(spec.weight)
+    }
+
+    /// The same font set in `weight`.
+    ///
+    /// The desktop draws a text role in the weight its theme names
+    /// (`tairix_theme::FontSpec::weight`); a heavier weight is a different
+    /// raster of the same outline at the same advance, so switching weight
+    /// never moves a glyph or reflows a label.
+    #[must_use]
+    pub const fn with_weight(self, weight: FontWeight) -> Self {
+        Self { weight, ..self }
+    }
+
+    /// The weight glyphs are requested in.
+    #[must_use]
+    pub const fn weight(self) -> FontWeight {
+        self.weight
     }
 
     /// The glyph cell width in pixels: the native cell width scaled to this
@@ -187,7 +230,7 @@ impl BitmapFont {
             let step_advance = advance.saturating_mul(cells);
             // A glyph may span two cells; the service returns a bitmap two
             // cells wide, so a narrow glyph is clipped to its own advance.
-            client::with_glyph(ch, self.cell_height, |glyph| {
+            client::with_glyph(ch, self.cell_height, self.weight, |glyph| {
                 let visible = step_advance.min(glyph.width);
                 draw_coverage_glyph(surface, pen, y, glyph, visible, &sources);
             });

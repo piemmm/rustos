@@ -27,6 +27,8 @@
 //! # Module map
 //!
 //! * [`events`] — stable [`tairix_log::EventId`] constants (`17000` range).
+//! * `embolden` — the synthetic-weight coverage transform the Regular-only
+//!   faces are thickened with when a client asks for a heavier weight.
 //! * [`service`] — the [`FontService`] rasteriser, its bounded cache, and the
 //!   [`FontService::handle`] request pipeline.
 //!
@@ -45,6 +47,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod embolden;
 pub mod events;
 pub mod service;
 

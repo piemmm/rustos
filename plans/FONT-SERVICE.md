@@ -121,7 +121,7 @@ follows (`cargo xtask c-header`).
 
 - Reserved id `FONT_ENDPOINT` (ASCII-hex-spelled, per the existing
   convention; register with `crate::ipc::is_reserved_endpoint`).
-- Requests: `Glyph { scalar: u32, cell_height: u32 }` and a one-shot
+- Requests: `Glyph { scalar: u32, cell_height: u32, weight }` and a one-shot
   `Metrics { cell_height }` returning the monospace cell geometry the client
   needs to lay text out. Fixed max request length; reject anything else,
   fail closed (§5.4).
@@ -138,8 +138,8 @@ follows (`cargo xtask c-header`).
 
 - The `render`/`cache` path no longer embeds TTFs or runs `lib/fontface`
   in-process. It sends a `FONT_ENDPOINT` request and blits the returned
-  coverage, caching replies locally per `(face, glyph, height)` (the same
-  bounded FIFO, now client-side, so steady-state redraws issue no IPC).
+  coverage, caching replies locally per `(face, glyph, height, weight)` (the
+  same bounded FIFO, now client-side, so steady-state redraws issue no IPC).
 - The `include_bytes!` of the four faces (`cache.rs`) and the full atlas
   (`atlas.rs` / `atlas_coverage.bin`) are **deleted** from the crate (§2.14).
 - Protocol request/reply encoders live in `lib/abi::font_ipc` and are shared
@@ -196,9 +196,10 @@ process draws through the thin `lib/font` client over `FONT_ENDPOINT`.
 Load-bearing facts a future reader needs:
 
 - **Protocol** (`lib/abi/src/font_ipc.rs`, `FONT_ENDPOINT = 0x464E_5400`,
-  registered in `is_reserved_endpoint` as a privileged bind). A fixed 16-byte
-  `FontRequest` — `Glyph { scalar: char, cell_height }` / `Metrics {
-  cell_height }`, the scalar a `char` so a surrogate is unrepresentable — and a
+  registered in `is_reserved_endpoint` as a privileged bind). A fixed 20-byte
+  `FontRequest` — `Glyph { scalar: char, cell_height, weight }` / `Metrics {
+  cell_height }`, the scalar a `char` so a surrogate is unrepresentable and the
+  weight a closed `FontWeight` decoded from its wire value — and a
   status-framed reply: a glyph reply (`width`, `height`, `advance`, then
   `width*height` 8-bit samples, bounded by `FONT_MAX_GLYPH_REPLY`) or the
   `FontMetrics { cell_width, cell_height, baseline }`. One shared
@@ -217,15 +218,26 @@ Load-bearing facts a future reader needs:
 - **Service** (`userland/system/fontd`, `/System/Services/fontd.app`). A dual
   library + `Run`-binary crate modelled on `sysinfod`. The host-testable
   `FontService` dispatcher owns the parsed faces and a bounded `(face, glyph,
-  cell height)` FIFO cache, resolves a scalar to its covering face, rasterises
-  through the shared `lib/fontface` engine (4-bit `×17` → the protocol's 8-bit
-  samples, byte-identical to the old blitter), and always emits a reply
-  (status-word error frame on failure, fail closed). Its manifest requests
+  cell height, weight)` FIFO cache, resolves a scalar to its covering face,
+  rasterises through the shared `lib/fontface` engine (4-bit `×17` → the
+  protocol's 8-bit samples; a `Regular` request is byte-identical to the old
+  blitter), thickens the coverage to the requested weight, and always emits a
+  reply (status-word error frame on failure, fail closed). Its manifest requests
   `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the one-shot startup read of the
   faces through the secured VFS — `fs_open` is capability-gated regardless of
   the file's mode; `/System` is read-only so no write reach), and
   `CAP_LOG_EMIT`, and the `fontd` service account (uid 15, `FONTD_CEILING`)
   grants exactly those three.
+- **Synthesised weights** (`userland/system/fontd/src/embolden.rs`). The four
+  committed faces ship one weight each, so a theme's `Medium`/`Bold` role is
+  rasterised from the same outline and thickened in the service: a stroke of
+  em/48 (Medium) or em/24 (Bold) — the strength a stroke-widening rasteriser
+  applies for a synthetic bold, as FreeType's `FT_GlyphSlot_Embolden` does —
+  carried in 1/256 px fixed point and applied to the 8-bit coverage, never the
+  outline. The stroke is **horizontal only**, so the baseline, cell height, and
+  pen advance are unchanged and layout is weight-independent; `Regular` adds a
+  zero stroke. A weighted face added to `/System/Fonts` later would replace the
+  synthesis without changing the protocol or the theme ladder.
 - **Client** (`lib/font`, `render` feature). `BitmapFont` is a thin cached
   `FONT_ENDPOINT` client with the same public API; the four TTF embeds
   (`cache.rs`) and the full atlas are deleted. The transport is a

@@ -31,6 +31,13 @@ tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
 # and the atlas-only console view never pull the runtime in; a program links
 # it by enabling `tairix-font/rt`.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# The authored design tokens a text role resolves to (size in logical pixels
+# and weight) and the one logical->physical scale that converts that size to a
+# cell height. Resolving a themed role to a drawable font lives here, once, so
+# no screen repeats the conversion (§2.2). Only the `render` blitter needs
+# them; the atlas-only console view links neither.
+tairix-theme = { path = "../theme", version = "=0.0.0", optional = true }
+tairix-geometry = { path = "../geometry", version = "=0.0.0", optional = true }
 
 [features]
 default = ["render"]
@@ -41,6 +48,8 @@ render = [
     "dep:tairix-vt",
     "dep:tairix-sync",
     "dep:tairix-abi",
+    "dep:tairix-theme",
+    "dep:tairix-geometry",
 ]
 # The production, `ipc_call`-backed font-service transport. A program that
 # runs on the TAIRiX runtime enables this so `draw_text` reaches `fontd`

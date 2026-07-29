@@ -22,7 +22,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconSet};
 use tairix_raster::{Color, RasterCache, Surface};
-use tairix_theme::{Palette, Theme};
+use tairix_theme::{Palette, TextRole, Theme};
 
 use crate::layout::{BarLayout, MenuLayout};
 use crate::menu::StartMenu;
@@ -125,7 +125,7 @@ impl TaskbarRenderer {
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
-            ui_font(theme, scale),
+            PanelFonts::resolve(theme, scale),
             &mut icons,
         )
     }
@@ -149,19 +149,35 @@ impl TaskbarRenderer {
             &layout,
             taskbar.start_menu(),
             theme.palette(),
-            ui_font(theme, scale),
+            PanelFonts::resolve(theme, scale).text,
         )
     }
 }
 
-/// The desktop UI font resolved from the active theme and DPI scale.
+/// The two fonts the panel draws with, each resolved from the text role whose
+/// job it does.
 ///
-/// The theme authors its font size in *logical* pixels; the scale converts it
-/// to the panel's physical pixels, exactly as it does every other desktop
-/// length. This is where the taskbar's text picks up its comfortable
-/// size.
-fn ui_font(theme: &Theme, scale: Scale) -> BitmapFont {
-    BitmapFont::with_pixel_height(scale.scale_length(u32::from(theme.fonts().ui.size_px)))
+/// A task title and a menu row are ordinary interface text; the clock is a
+/// de-emphasised annotation, set a step smaller like every other caption on
+/// the desktop. Resolving both from the theme's roles keeps their relative
+/// size and weight the theme's decision rather than this screen's.
+#[derive(Copy, Clone)]
+struct PanelFonts {
+    /// Task titles and start-menu rows.
+    text: BitmapFont,
+    /// The clock readout.
+    clock: BitmapFont,
+}
+
+impl PanelFonts {
+    /// The panel's fonts under `theme` at `scale`.
+    fn resolve(theme: &Theme, scale: Scale) -> Self {
+        let fonts = theme.fonts();
+        Self {
+            text: BitmapFont::for_role(fonts, TextRole::Body, scale),
+            clock: BitmapFont::for_role(fonts, TextRole::Caption, scale),
+        }
+    }
 }
 
 /// Fill every region, then draw the clock and task titles into a fresh
@@ -173,7 +189,7 @@ fn paint(
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
-    font: BitmapFont,
+    fonts: PanelFonts,
     icons: &mut IconContext<'_>,
 ) -> Option<Surface> {
     let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
@@ -201,7 +217,7 @@ fn paint(
             *slot,
             &entry.title,
             task_text(palette, focused, entry.minimised),
-            font,
+            fonts.text,
             Align::Leading,
         );
     }
@@ -223,7 +239,7 @@ fn paint(
         layout.clock,
         clock_label,
         palette.on_surface.into(),
-        font,
+        fonts.clock,
         Align::Centre,
     );
 

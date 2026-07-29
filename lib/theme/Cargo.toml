@@ -11,8 +11,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# No dependencies on purpose: this crate is pure theme *data*. The
-# compositing colour algebra lives in `lib/raster`; this crate owns the
-# authored design tokens it (and the taskbar and default apps) read, so it
-# stays at the bottom of the §17.4 layering and is depended on, never
-# depends.
+[dependencies]
+# The one definition of a font weight, which is the ABI type the font service
+# rasterises at (`tairix_abi::font_ipc::FontWeight`). A theme names the weight
+# a text role is set in, and that name must be *the same* value the glyph
+# request carries, so the enum is imported rather than restated here.
+# This is the crate's only dependency: everything else here is pure theme
+# *data*, the compositing colour algebra lives in `lib/raster`, and the crate
+# stays at the bottom of the layering — depended on, never depending on a
+# kernel, driver, or userland crate.
+tairix-abi = { path = "../abi", version = "=0.0.0" }

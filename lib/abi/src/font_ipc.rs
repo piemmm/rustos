@@ -67,6 +67,53 @@ pub const FONT_MAX_GLYPH_WIDTH: u32 = 2 * FONT_MAX_CELL_HEIGHT;
 pub const FONT_MAX_COVERAGE_LEN: usize =
     (FONT_MAX_GLYPH_WIDTH as usize) * (FONT_MAX_CELL_HEIGHT as usize);
 
+/// The weight a glyph is rasterised at.
+///
+/// The committed faces are Regular-only, so the heavier weights are
+/// *synthetic*: the service thickens the rasterised coverage of the same
+/// outline by a sub-pixel stroke proportional to the rendered size. The pen
+/// advance is deliberately unchanged, so a heavier run occupies exactly the
+/// same monospace cells as its regular twin and no layout depends on the
+/// weight.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum FontWeight {
+    /// Normal weight: body text, secondary detail, terminal text.
+    #[default]
+    Regular,
+    /// A medium weight for titling text — an item's primary line, a window
+    /// title, a panel heading.
+    Medium,
+    /// Bold weight: column headers and metric readouts.
+    Bold,
+}
+
+impl FontWeight {
+    /// This weight's wire discriminant.
+    #[must_use]
+    pub const fn to_wire(self) -> u16 {
+        match self {
+            Self::Regular => 1,
+            Self::Medium => 2,
+            Self::Bold => 3,
+        }
+    }
+
+    /// The weight `wire` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a discriminant outside the closed set, so an
+    /// unknown weight is refused rather than silently rendered as Regular.
+    pub const fn from_wire(wire: u16) -> Result<Self, Errno> {
+        match wire {
+            1 => Ok(Self::Regular),
+            2 => Ok(Self::Medium),
+            3 => Ok(Self::Bold),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// One font-service operation (`plans/FONT-SERVICE.md` FS-1).
 ///
 /// A [`FontRequest::Glyph`] asks for the coverage bitmap of one Unicode
@@ -88,6 +135,8 @@ pub enum FontRequest {
         /// The monospace cell height in physical pixels
         /// ([`FONT_MIN_CELL_HEIGHT`]..=[`FONT_MAX_CELL_HEIGHT`]).
         cell_height: u32,
+        /// The weight to rasterise at. The advance does not depend on it.
+        weight: FontWeight,
     },
     /// Report the monospace cell geometry (cell width, cell height,
     /// baseline) at a cell `cell_height` pixels tall, so the client can lay
@@ -105,9 +154,9 @@ const OP_GLYPH: u16 = 1;
 const OP_METRICS: u16 = 2;
 
 impl FontRequest {
-    /// Encoded size on the wire: magic (4), version (2), op (2), and an
-    /// 8-byte operation block whose unused tail must be zero.
-    pub const WIRE_LEN: usize = 16;
+    /// Encoded size on the wire: magic (4), version (2), op (2), and a
+    /// 12-byte operation block whose unused tail must be zero.
+    pub const WIRE_LEN: usize = 20;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -120,10 +169,12 @@ impl FontRequest {
             Self::Glyph {
                 scalar,
                 cell_height,
+                weight,
             } => {
                 out[6..8].copy_from_slice(&OP_GLYPH.to_le_bytes());
                 put_u32(&mut out, 8, scalar as u32);
                 put_u32(&mut out, 12, cell_height);
+                out[16..18].copy_from_slice(&weight.to_wire().to_le_bytes());
             }
             Self::Metrics { cell_height } => {
                 out[6..8].copy_from_slice(&OP_METRICS.to_le_bytes());
@@ -146,7 +197,7 @@ impl FontRequest {
     /// * [`Errno::AbiVersionUnsupported`] — not `font-v1`.
     /// * [`Errno::OutOfRange`] — an operation outside the closed set, or a
     ///   `scalar` that is not a Unicode scalar value (a surrogate or a value
-    ///   past `U+10FFFF`).
+    ///   past `U+10FFFF`), or a weight outside [`FontWeight`]'s closed set.
     /// * [`Errno::LengthOutOfRange`] — a cell height outside
     ///   [`FONT_MIN_CELL_HEIGHT`]..=[`FONT_MAX_CELL_HEIGHT`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -162,11 +213,14 @@ impl FontRequest {
         let op = u16::from_le_bytes([bytes[6], bytes[7]]);
         match op {
             OP_GLYPH => {
+                reserved_zero(bytes, 18)?;
                 let scalar = char::from_u32(read_u32(bytes, 8)).ok_or(Errno::OutOfRange)?;
                 let cell_height = validate_cell_height(read_u32(bytes, 12))?;
+                let weight = FontWeight::from_wire(u16::from_le_bytes([bytes[16], bytes[17]]))?;
                 Ok(Self::Glyph {
                     scalar,
                     cell_height,
+                    weight,
                 })
             }
             OP_METRICS => {
@@ -412,9 +466,9 @@ mod tests {
     extern crate alloc;
     use super::{
         decode_glyph_reply, decode_metrics_reply, encode_glyph_error_reply, encode_glyph_reply,
-        encode_metrics_reply, FontMetrics, FontRequest, FONT_ENDPOINT, FONT_GLYPH_REPLY_HEADER_LEN,
-        FONT_MAX_CELL_HEIGHT, FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_WIDTH, FONT_METRICS_REPLY_LEN,
-        FONT_MIN_CELL_HEIGHT, FONT_REQUEST_MAGIC,
+        encode_metrics_reply, FontMetrics, FontRequest, FontWeight, FONT_ENDPOINT,
+        FONT_GLYPH_REPLY_HEADER_LEN, FONT_MAX_CELL_HEIGHT, FONT_MAX_GLYPH_REPLY,
+        FONT_MAX_GLYPH_WIDTH, FONT_METRICS_REPLY_LEN, FONT_MIN_CELL_HEIGHT, FONT_REQUEST_MAGIC,
     };
     use crate::Errno;
     use alloc::vec;
@@ -433,14 +487,17 @@ mod tests {
             FontRequest::Glyph {
                 scalar: 'A',
                 cell_height: 28,
+                weight: FontWeight::Regular,
             },
             FontRequest::Glyph {
                 scalar: '\u{FFFD}',
                 cell_height: FONT_MIN_CELL_HEIGHT,
+                weight: FontWeight::Medium,
             },
             FontRequest::Glyph {
                 scalar: '\u{10FFFF}',
                 cell_height: FONT_MAX_CELL_HEIGHT,
+                weight: FontWeight::Bold,
             },
             FontRequest::Metrics { cell_height: 16 },
         ] {
@@ -454,6 +511,7 @@ mod tests {
         let good = FontRequest::Glyph {
             scalar: 'x',
             cell_height: 20,
+            weight: FontWeight::Regular,
         }
         .to_le_bytes();
 
@@ -473,6 +531,25 @@ mod tests {
         let mut bad_op = good;
         bad_op[6] = 9;
         assert_eq!(FontRequest::from_bytes(&bad_op), Err(Errno::OutOfRange));
+        // An unknown weight is refused rather than rendered as Regular.
+        let mut bad_weight = good;
+        bad_weight[16] = 9;
+        assert_eq!(FontRequest::from_bytes(&bad_weight), Err(Errno::OutOfRange));
+        // A smuggled field in the glyph frame's reserved tail is wire corruption.
+        let mut dirty_tail = good;
+        dirty_tail[18] = 1;
+        assert_eq!(FontRequest::from_bytes(&dirty_tail), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn weight_wire_discriminants_are_a_closed_set() {
+        for weight in [FontWeight::Regular, FontWeight::Medium, FontWeight::Bold] {
+            assert_eq!(FontWeight::from_wire(weight.to_wire()), Ok(weight));
+        }
+        assert_eq!(FontWeight::default(), FontWeight::Regular);
+        for wire in [0u16, 4, u16::MAX] {
+            assert_eq!(FontWeight::from_wire(wire), Err(Errno::OutOfRange));
+        }
     }
 
     #[test]
@@ -481,6 +558,7 @@ mod tests {
         let mut surrogate = FontRequest::Glyph {
             scalar: 'A',
             cell_height: 20,
+            weight: FontWeight::Regular,
         }
         .to_le_bytes();
         surrogate[8..12].copy_from_slice(&0xD800u32.to_le_bytes());
@@ -496,10 +574,12 @@ mod tests {
             FontRequest::Glyph {
                 scalar: 'A',
                 cell_height: FONT_MIN_CELL_HEIGHT - 1,
+                weight: FontWeight::Regular,
             },
             FontRequest::Glyph {
                 scalar: 'A',
                 cell_height: FONT_MAX_CELL_HEIGHT + 1,
+                weight: FontWeight::Bold,
             },
             FontRequest::Metrics { cell_height: 0 },
             FontRequest::Metrics {

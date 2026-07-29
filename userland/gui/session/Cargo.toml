@@ -24,6 +24,10 @@ tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
 # the window manager's single anti-aliased rounded-corner path (§2.2).
 # Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
 tairix-wm = { path = "../wm", version = "=0.0.0" }
+# The one logical->physical UI scale (§10): the picker resolves the theme's
+# authored text sizes to physical cell heights through `Scale`, the same shared
+# conversion the window manager and taskbar use.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The cursor and icon set builders (§10): the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic

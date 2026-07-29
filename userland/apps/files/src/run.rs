@@ -95,7 +95,7 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
     /// Exit code when the initial directory listing was refused (no
@@ -754,6 +754,16 @@ mod program {
         double_click: DoubleClickTracker,
     }
 
+    /// The font every part of the browser window draws its text in: the
+    /// theme's body role, resolved through the one shared role-to-font path.
+    ///
+    /// The window is authored in unscaled pixels, so the logical size is the
+    /// physical size; resolving it here once keeps the listing, the overlays,
+    /// and the hit-testing that measures them on the same font.
+    fn ui_font(theme: &Theme) -> BitmapFont {
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+    }
+
     /// Render the browser into `frame` (the shared window surface) and
     /// present the whole window.
     ///
@@ -782,10 +792,7 @@ mod program {
         let owner = overlays.owner.as_ref();
         let can_chown = overlays.can_chown;
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        // Render the listing at the theme's logical UI font size (the browser
-        // window is not DPI-scaled today, so the logical size is the physical
-        // size), rather than a size hard-coded here.
-        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let font = ui_font(theme);
         let mut surface = render(
             browser,
             theme,
@@ -873,7 +880,7 @@ mod program {
         mode: &DisplayMode,
         event: &WindowEvent,
     ) -> (bool, bool) {
-        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let font = ui_font(theme);
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
 
         // A close request ends the app whatever mode it is in; an open rename
@@ -1598,7 +1605,7 @@ mod program {
         theme: &Theme,
         mode: &DisplayMode,
     ) -> OperationControl {
-        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let font = ui_font(theme);
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         match event {
             WindowEvent::CloseRequested { .. } => OperationControl::Close,

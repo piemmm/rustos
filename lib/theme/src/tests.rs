@@ -4,8 +4,8 @@ use alloc::string::String;
 
 use crate::motion::MotionInteraction;
 use crate::{
-    Appearance, Contrast, CursorKind, CursorSet, Density, FontSpec, FontWeight, Fonts, Metrics,
-    MotionTheme, Palette, Rgba, SignalRole, Theme, ThemeError, ThemeId, ThemeRegistry,
+    Appearance, Contrast, CursorKind, CursorSet, Density, FontWeight, Fonts, Metrics, MotionTheme,
+    Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
 };
 
 #[test]
@@ -171,6 +171,63 @@ fn builtins_share_metrics_fonts_and_cursors() {
     assert_eq!(Theme::dark().metrics(), Theme::light().metrics());
     assert_eq!(Theme::dark().fonts(), Theme::light().fonts());
     assert_eq!(Theme::dark().cursors(), Theme::light().cursors());
+}
+
+#[test]
+fn the_ladder_derives_every_role_from_one_base_size() {
+    let fonts = Fonts::ladder("Board Sans", "Board Mono", 18);
+
+    assert_eq!(fonts.base_size_px(), 18);
+    // Body is the base by definition, so a theme authors one number.
+    assert_eq!(fonts.spec(TextRole::Body).size_px, 18);
+    // The boards' ladder is tight but strictly ordered around the base.
+    assert!(fonts.spec(TextRole::Heading).size_px > fonts.spec(TextRole::ItemTitle).size_px);
+    assert!(fonts.spec(TextRole::ItemTitle).size_px > fonts.spec(TextRole::Body).size_px);
+    assert!(fonts.spec(TextRole::Body).size_px > fonts.spec(TextRole::Caption).size_px);
+    assert!(fonts.spec(TextRole::Caption).size_px > fonts.spec(TextRole::SectionHeader).size_px);
+    // Every rung is legible: no role rounds away to nothing.
+    for role in TextRole::ALL {
+        assert!(fonts.spec(role).size_px >= 1, "{role:?} rounded to zero");
+    }
+}
+
+#[test]
+fn the_ladder_carries_the_boards_weights_and_families() {
+    let fonts = Fonts::ladder("Board Sans", "Board Mono", 18);
+
+    // On the boards the hierarchy is carried mostly by weight: titling text
+    // is medium, column headers and metric readouts are bold, and running
+    // text stays regular.
+    assert_eq!(fonts.spec(TextRole::Heading).weight, FontWeight::Medium);
+    assert_eq!(fonts.spec(TextRole::ItemTitle).weight, FontWeight::Medium);
+    assert_eq!(fonts.spec(TextRole::WindowTitle).weight, FontWeight::Medium);
+    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::Bold);
+    assert_eq!(fonts.spec(TextRole::Metric).weight, FontWeight::Bold);
+    assert_eq!(fonts.spec(TextRole::Body).weight, FontWeight::Regular);
+    assert_eq!(fonts.spec(TextRole::Caption).weight, FontWeight::Regular);
+    assert_eq!(fonts.spec(TextRole::Monospace).weight, FontWeight::Regular);
+
+    // Only the fixed-width role leaves the UI family.
+    assert_eq!(fonts.ui_family(), "Board Sans");
+    assert_eq!(fonts.monospace_family(), "Board Mono");
+    assert_eq!(fonts.spec(TextRole::Monospace).family, "Board Mono");
+    for role in TextRole::ALL {
+        if role != TextRole::Monospace {
+            assert_eq!(fonts.spec(role).family, "Board Sans", "{role:?}");
+        }
+    }
+}
+
+#[test]
+fn an_out_of_range_base_size_is_clamped_rather_than_accepted() {
+    assert_eq!(
+        Fonts::ladder("S", "M", 0).base_size_px(),
+        Fonts::MIN_BASE_SIZE_PX
+    );
+    assert_eq!(
+        Fonts::ladder("S", "M", u16::MAX).base_size_px(),
+        Fonts::MAX_BASE_SIZE_PX
+    );
 }
 
 #[test]
@@ -360,10 +417,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             resize_grabber_extent: 14,
             hit_slop: 3,
         },
-        Fonts {
-            ui: FontSpec::new("Test Sans", 12, FontWeight::Regular),
-            monospace: FontSpec::new("Test Mono", 12, FontWeight::Bold),
-        },
+        Fonts::ladder("Test Sans", "Test Mono", 15),
         CursorSet {
             arrow: String::from("c.arrow"),
             text: String::from("c.text"),

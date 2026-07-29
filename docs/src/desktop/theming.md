@@ -28,8 +28,9 @@ bundles, under a stable `ThemeId`:
   consistently everywhere.
 - `Metrics` — `window_corner_radius`, `taskbar_corner_radius`,
   `popup_corner_radius`, and `border_thickness`.
-- `Fonts` — a `ui` and a `monospace` `FontSpec` (family, size, weight),
-  referencing faces under `/System/Fonts`.
+- `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, derived from
+  a single authored base size through the boards' shared ladder (see
+  [Typography](#typography)), referencing faces under `/System/Fonts`.
 - `CursorSet` — one asset id per `CursorKind`, referencing assets under
   `/System/Graphics`.
 
@@ -45,6 +46,46 @@ action is one treatment in the boards (a warm white label on the alloy-orange
 plate), so the token is shared rather than restated (`AGENTS.md` §2.2). The
 invariant that matters for it is therefore legibility, not difference, and the
 tests assert a minimum luma separation from the accent fill.
+
+## Typography
+
+A theme sizes text by the **job** it does, never by the widget that draws it.
+`TextRole` is a closed set — `Heading`, `ItemTitle`, `WindowTitle`, `Body`,
+`Metric`, `Caption`, `SectionHeader`, `Monospace` — and `Fonts::spec(role)` is
+a constant-time array read, so a text draw can neither miss a lookup nor
+invent a size literal at the call site.
+
+Every role's size is a percentage of one authored base (body) size, measured
+from the design boards, so a theme states *one* number and the whole desktop's
+type scales together (`AGENTS.md` §2.2):
+
+| Role | Size | Weight |
+| --- | --- | --- |
+| `Heading` | 133% | Medium |
+| `ItemTitle` | 113% | Medium |
+| `WindowTitle` | 100% | Medium |
+| `Body` | 100% | Regular |
+| `Metric` | 100% | Bold |
+| `Caption` | 87% | Regular |
+| `SectionHeader` | 80% | Bold |
+| `Monospace` | 100% | Regular |
+
+The boards carry their hierarchy with a deliberately *tight* size ladder and a
+rising weight — a detail line sits within a point of the title above it, and a
+column header is smaller but bold — so weight, not size, does most of the work.
+The built-ins author the base at 18 logical pixels; `Fonts::ladder` clamps an
+authored base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so a theme can
+neither author text below the rasteriser's legibility floor nor above its
+cell-height ceiling (`AGENTS.md` §5.4).
+
+Sizes are *logical* pixels at `tairix_geometry::REFERENCE_DPI`;
+`tairix_font::BitmapFont::for_role(fonts, role, scale)` is the one place a role
+and the active `Scale` become a rasterised face, so the logical→physical
+arithmetic is never duplicated (`AGENTS.md` §10, §2.2). The weight a role names
+is the font service's own `FontWeight`, re-exported rather than restated: the
+shipped faces are Regular-only, so `fontd` synthesises the heavier weights as a
+bounded thickening of the same outline coverage, leaving the advance — and
+therefore every layout — unchanged.
 
 ## No duplicated colour algebra
 
@@ -93,9 +134,12 @@ surfaced to the apps as `SessionEvent::AppearanceChanged`. See
 `cargo test -p tairix-theme` covers the built-in palettes (every
 appearance-dependent role differs between dark and light, `on_accent` is shared
 and stays legible on the accent fill, body and muted text clear their own
-minimum contrast, surfaces are opaque and distinct), the shared
-metrics/fonts/cursors, cursor lookup for every kind, and the registry: the
-dark default, runtime dark↔light switching, custom-theme registration and
+minimum contrast, surfaces are opaque and distinct), the type ladder (every
+role's size and weight, the descending order, the base-size clamp at both
+ends, and the monospace role being the only one on the fixed-width family),
+the shared metrics/fonts/cursors, cursor lookup for every kind, and the
+registry: the dark default, runtime dark↔light switching, custom-theme
+registration and
 activation, and the fail-closed `UnknownTheme`/`DuplicateId` paths. The
 window manager's `cargo test -p tairix-wm` adds the integration tests that
 source the compositor background and a window's corner radius from the active
