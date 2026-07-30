@@ -8,11 +8,12 @@
 //! the precedence rules exist exactly once and every surface that presents
 //! the library agrees on what it holds.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::category::LibraryCategory;
+use tairix_abi::LibraryCategory;
+
 use crate::entry::{DisplayName, EntryId, IconAsset, LibraryEntry};
 
 /// Maximum number of records one catalog document may hold.
@@ -41,13 +42,13 @@ impl fmt::Display for CatalogFull {
 
 /// A user's adjustment to an entry their own document does not declare.
 ///
-/// The machine-wide catalog is written under the machine settings-write
-/// capability; an unprivileged account may not edit it. A patch is how such
-/// an account personalises what it sees — rename an application, re-file it
-/// into another folder, give it a different icon, or hide it — without
-/// holding any authority over the machine store, and without copying the
-/// entry, which would leave a stale duplicate behind when the bundle is
-/// upgraded or removed.
+/// The machine-wide catalog is a system-owned file an unprivileged
+/// account may read but not rewrite (its per-inode owner/mode/ACL record
+/// refuses the write). A patch is how such an account personalises what
+/// it sees — rename an application, re-file it into another folder, give
+/// it a different icon, or hide it — without holding any authority over
+/// the machine store, and without copying the entry, which would leave a
+/// stale duplicate behind when the bundle is upgraded or removed.
 ///
 /// A patch carries only the fields it changes, and every field it does
 /// carry is already validated, so applying one cannot fail.
@@ -120,10 +121,9 @@ impl EntryPatch {
         self.hidden = Some(hidden);
     }
 
-    /// Apply this patch's field changes to `entry`.
-    ///
-    /// Visibility is not an entry field: it is resolved by [`merge`], which
-    /// drops a hidden entry from the catalog it returns.
+    /// Apply this patch's field changes to `entry`, its visibility verdict
+    /// included: patches are applied machine-first, so the last verdict
+    /// written — the user's own — is the one [`merge`] resolves.
     fn apply_to(&self, entry: &mut LibraryEntry) {
         if let Some(name) = &self.name {
             entry.set_name(name.clone());
@@ -133,6 +133,9 @@ impl EntryPatch {
         }
         if let Some(icon) = &self.icon {
             entry.set_icon(icon.clone());
+        }
+        if let Some(hidden) = self.hidden {
+            entry.set_hidden(hidden);
         }
     }
 }
@@ -309,6 +312,42 @@ impl Catalog {
             .filter(|&category| self.entries().any(|entry| entry.category() == category))
             .collect()
     }
+
+    /// Fold newly `discovered` applications into the catalog: declare every
+    /// entry whose identifier no existing record claims, and leave every
+    /// existing record — a curated entry or a patch — exactly as it stands,
+    /// so a rescan can register what an installer missed without disturbing
+    /// an administrator's curation. Within `discovered`, the first entry
+    /// under an identifier wins; a later duplicate is skipped, so a caller's
+    /// deterministic discovery order decides.
+    ///
+    /// Returns how many entries were declared; `0` means the catalog is
+    /// unchanged and a caller need not rewrite its store.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogFull`] when declaring the new entries would exceed
+    /// [`MAX_ENTRIES`]; the catalog is left **unchanged** — the fold is
+    /// refused whole rather than half-applied.
+    pub fn reconcile(&mut self, discovered: &[LibraryEntry]) -> Result<usize, CatalogFull> {
+        let mut new_ids: BTreeSet<&EntryId> = BTreeSet::new();
+        for entry in discovered {
+            if !self.records.contains_key(entry.id()) {
+                new_ids.insert(entry.id());
+            }
+        }
+        let added = new_ids.len();
+        if self.records.len() + added > MAX_ENTRIES {
+            return Err(CatalogFull);
+        }
+        for entry in discovered {
+            if new_ids.remove(entry.id()) {
+                self.records
+                    .insert(entry.id().clone(), Record::Entry(entry.clone()));
+            }
+        }
+        Ok(added)
+    }
 }
 
 /// Fold a machine-wide catalog and a user's overlay into the resolved
@@ -321,12 +360,17 @@ impl Catalog {
 ///    same identifier outright: a user's own bundle wins over a
 ///    machine-wide one it shadows.
 /// 3. The machine catalog's patches, then the overlay's, applied to
-///    whatever entry stands under each identifier — so a user's rename wins
-///    over a machine-wide one.
-/// 4. An entry any patch hides is dropped. A hide is final: whichever
-///    document asked for it, no other document can re-show the entry, so a
-///    machine-wide policy that hides an application cannot be undone by an
-///    unprivileged account's own overlay.
+///    whatever entry stands under each identifier — so a user's adjustment
+///    wins field by field over a machine-wide one, the visibility verdict
+///    included: a user's own overlay re-shows an application the machine
+///    store declared hidden, and hides one it shows. Hiding is
+///    presentation, never authority (launching stays behind the loader's
+///    signature and capability gate), so the account that owns the view
+///    has the last word on it.
+/// 4. An entry whose resolved verdict is hidden is dropped from the
+///    result. Its record stays in the document that declared it, so its
+///    identifier remains claimed and a discovery rescan cannot resurrect
+///    what a curator suppressed.
 ///
 /// A patch whose identifier names no entry is discarded: its bundle has
 /// been removed or was never installed, which is an ordinary state of the
@@ -334,11 +378,11 @@ impl Catalog {
 /// own document, re-installing the application restores the
 /// personalisation.
 ///
-/// The result declares entries only; every patch has been resolved into the
-/// entry it adjusted or discarded. Applying a patch cannot fail, so neither
-/// can this. The result can never exceed [`MAX_ENTRIES`] records either,
-/// since it holds at most one entry per identifier the two bounded inputs
-/// declare between them.
+/// The result declares visible entries only; every patch has been resolved
+/// into the entry it adjusted or discarded. Applying a patch cannot fail,
+/// so neither can this. The result can never exceed [`MAX_ENTRIES`]
+/// records either, since it holds at most one entry per identifier the two
+/// bounded inputs declare between them.
 #[must_use]
 pub fn merge(machine: &Catalog, overlay: &Catalog) -> Catalog {
     let mut entries: BTreeMap<EntryId, LibraryEntry> = BTreeMap::new();
@@ -347,9 +391,7 @@ pub fn merge(machine: &Catalog, overlay: &Catalog) -> Catalog {
     }
 
     for (id, patch) in machine.patches().chain(overlay.patches()) {
-        if patch.hidden() == Some(true) {
-            entries.remove(id);
-        } else if let Some(entry) = entries.get_mut(id) {
+        if let Some(entry) = entries.get_mut(id) {
             patch.apply_to(entry);
         }
     }
@@ -357,7 +399,12 @@ pub fn merge(machine: &Catalog, overlay: &Catalog) -> Catalog {
     Catalog {
         records: entries
             .into_iter()
+            .filter(|(_, entry)| !entry.hidden())
             .map(|(id, entry)| (id, Record::Entry(entry)))
             .collect(),
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod tests;

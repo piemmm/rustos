@@ -17,10 +17,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::fmt;
 
+use tairix_abi::LibraryCategory;
 use tairix_util::conf::strip_comment;
 
 use crate::catalog::{Catalog, EntryPatch, Record, MAX_ENTRIES};
-use crate::category::LibraryCategory;
 use crate::entry::{
     DisplayName, EntryError, EntryId, IconAsset, LibraryEntry, MAX_BUNDLE_PATH_LEN,
     MAX_DISPLAY_NAME_LEN, MAX_ENTRY_ID_LEN, MAX_ICON_ASSET_LEN,
@@ -66,9 +66,12 @@ pub enum EntryKey {
     Category,
     /// The icon asset inside the bundle's own `Resources/`.
     Icon,
-    /// Whether the entry is hidden from the library. Only a patch may set
-    /// it: a document that declares an entry states it by declaring it, and
-    /// hiding what you yourself declare is a contradiction, not a setting.
+    /// Whether the entry is hidden from the resolved library. On a
+    /// declared entry it is the curator's own suppression — the record
+    /// stays, claiming its identifier against a discovery rescan, but no
+    /// launcher lists it. In a patch it is the overlay's verdict on an
+    /// entry declared elsewhere: `true` hides it, `false` re-shows what
+    /// the layer below hid.
     Hidden,
 }
 
@@ -135,8 +138,6 @@ pub enum ParseError {
     /// A record named a bundle but no display name, so it declares neither
     /// a complete entry nor a patch.
     IncompleteEntry,
-    /// A record declared an entry *and* set `hidden`.
-    HiddenOnDeclaredEntry,
     /// The document held more than [`MAX_ENTRIES`] records.
     TooManyEntries,
 }
@@ -154,7 +155,6 @@ impl fmt::Display for ParseError {
             Self::MalformedFlag => f.write_str("flag is neither true nor false"),
             Self::Field(error) => write!(f, "{error}"),
             Self::IncompleteEntry => f.write_str("entry names a bundle but no display name"),
-            Self::HiddenOnDeclaredEntry => f.write_str("a declared entry cannot also be hidden"),
             Self::TooManyEntries => f.write_str("catalog holds too many records"),
         }
     }
@@ -241,16 +241,15 @@ impl Draft {
     fn into_record(self, id: EntryId) -> Result<Record, ParseError> {
         if let Some(bundle) = self.bundle {
             let name = self.name.ok_or(ParseError::IncompleteEntry)?;
-            if self.hidden.is_some() {
-                return Err(ParseError::HiddenOnDeclaredEntry);
-            }
-            return Ok(Record::Entry(LibraryEntry::new(
+            let mut entry = LibraryEntry::new(
                 id,
                 name,
                 bundle,
                 self.category.unwrap_or_default(),
                 self.icon,
-            )));
+            );
+            entry.set_hidden(self.hidden.unwrap_or(false));
+            return Ok(Record::Entry(entry));
         }
 
         let mut patch = EntryPatch::new();
@@ -393,6 +392,11 @@ pub fn render(catalog: &Catalog) -> String {
                 if let Some(icon) = entry.icon() {
                     line(EntryKey::Icon, icon.as_str());
                 }
+                // Visible is the default, so only a suppression is worth a
+                // line; an explicit `hidden false` re-renders to nothing.
+                if entry.hidden() {
+                    line(EntryKey::Hidden, render_flag(true));
+                }
             }
             Record::Patch(patch) => {
                 if let Some(name) = patch.name() {
@@ -412,3 +416,7 @@ pub fn render(catalog: &Catalog) -> String {
     }
     text
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

@@ -974,6 +974,7 @@ mod tests {
         // deliberately absent: it is the boot floor the boot path enters
         // directly, never a store bundle.
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
+            ("applib", AppKind::Command, PURE_TOOL_REQUEST),
             ("basename", AppKind::Command, PURE_TOOL_REQUEST),
             ("cat", AppKind::Command, CAT_MANIFEST),
             ("chmod", AppKind::Command, PURE_TOOL_REQUEST),

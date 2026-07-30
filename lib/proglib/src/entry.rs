@@ -12,9 +12,9 @@
 use alloc::string::{String, ToString};
 use core::fmt;
 
-use tairix_abi::{BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX};
-
-use crate::category::LibraryCategory;
+use tairix_abi::{
+    LibraryCategory, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, LIBRARY_ICON_MAX,
+};
 
 /// Maximum length, in bytes, of an entry identifier: the bundle identifier
 /// bound the signed manifest already fixes, so a catalog key and the
@@ -31,8 +31,10 @@ pub const MAX_DISPLAY_NAME_LEN: usize = BUNDLE_NAME_MAX;
 pub const MAX_BUNDLE_PATH_LEN: usize = 512;
 
 /// Maximum length, in bytes, of an entry's icon asset name — a plain file
-/// name inside the bundle's own `Resources/` directory.
-pub const MAX_ICON_ASSET_LEN: usize = 128;
+/// name inside the bundle's own `Resources/` directory: the icon bound the
+/// signed manifest already fixes, so a catalog icon and the `AppInfo` icon
+/// it is derived from can never disagree on width.
+pub const MAX_ICON_ASSET_LEN: usize = LIBRARY_ICON_MAX;
 
 /// The `/`-view component naming the machine-wide application store,
 /// derived from the one store-path definition
@@ -48,6 +50,12 @@ const USER_APP_STORE_LEAF: &str = "Apps";
 /// (`tairix_users::policy::default_home`), the single definition of that
 /// spelling.
 const USERS_VIEW_LEAF: &str = "Users";
+
+/// The `/`-view component naming the read-only `/System` subtree, under
+/// which the system app store lives (`/System/Apps`). Pinned by a unit
+/// test to the one store-path definition
+/// ([`tairix_abi::SYSTEM_APP_STORE`]).
+const SYSTEM_VIEW_LEAF: &str = "System";
 
 /// Why a program-library entry field was refused.
 ///
@@ -219,15 +227,23 @@ impl fmt::Display for DisplayName {
 /// as the leading `/`-view components of a bundle path.
 ///
 /// The machine-wide store is `/Apps`; a user's own store is
-/// `/Users/<name>/Apps`. The system command-app store (`/System/Apps`) and
-/// the service store are deliberately absent: those bundles are commands
-/// and daemons, not the user-facing applications a launcher offers.
+/// `/Users/<name>/Apps`; and the read-only system app store
+/// (`/System/Apps`) holds the OS-shipped programs, among them the
+/// graphical applications a fresh install's library lists (the file
+/// manager, the terminal). The service store is deliberately absent:
+/// daemons are not the user-facing applications a launcher offers, and a
+/// catalog claiming one is malformed.
 ///
-/// Both stores permit plain nesting (`/Apps/games/chess.app`), so only the
-/// prefix is fixed here; the depth beneath it is not.
+/// Every store permits plain nesting (`/Apps/games/chess.app`), so only
+/// the prefix is fixed here; the depth beneath it is not.
 fn store_body(components: &[String]) -> Option<&[String]> {
     match components {
         [store, rest @ ..] if store == USER_APP_STORE_LEAF => Some(rest),
+        [system, store, rest @ ..]
+            if system == SYSTEM_VIEW_LEAF && store == USER_APP_STORE_LEAF =>
+        {
+            Some(rest)
+        }
         [users, _account, store, rest @ ..]
             if users == USERS_VIEW_LEAF && store == USER_APP_STORE_LEAF =>
         {
@@ -348,6 +364,14 @@ impl fmt::Display for IconAsset {
 /// construction: consumers read the accessors without re-checking, the
 /// renderer emits it knowing it round-trips, and the merge path applies a
 /// user's rename or re-file without a fallible re-validation.
+///
+/// An entry may be declared **hidden**: it keeps its record — and so keeps
+/// its identifier claimed against a discovery rescan that would otherwise
+/// re-register the bundle — but the resolved catalog a launcher draws
+/// drops it. Hiding is how a curated store suppresses an installed
+/// application without deleting the fact of its installation; it is
+/// presentation, not authority — launching the bundle stays governed by
+/// the loader's signature and capability gate either way.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryEntry {
     id: EntryId,
@@ -355,10 +379,12 @@ pub struct LibraryEntry {
     bundle: BundlePath,
     category: LibraryCategory,
     icon: Option<IconAsset>,
+    hidden: bool,
 }
 
 impl LibraryEntry {
-    /// Build an entry from already-validated fields.
+    /// Build an entry from already-validated fields. It is visible until
+    /// [`set_hidden`](Self::set_hidden) says otherwise.
     #[must_use]
     pub fn new(
         id: EntryId,
@@ -373,6 +399,7 @@ impl LibraryEntry {
             bundle,
             category,
             icon,
+            hidden: false,
         }
     }
 
@@ -420,6 +447,17 @@ impl LibraryEntry {
     /// Replace the icon asset the entry draws with.
     pub fn set_icon(&mut self, icon: IconAsset) {
         self.icon = Some(icon);
+    }
+
+    /// Whether the entry is hidden from the resolved library.
+    #[must_use]
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Hide the entry from the resolved library, or show it again.
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
     }
 }
 

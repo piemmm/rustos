@@ -5,8 +5,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::LibraryCategory;
+
 use super::{merge, Catalog, CatalogFull, EntryPatch, Record, MAX_ENTRIES};
-use crate::category::LibraryCategory;
 use crate::entry::{BundlePath, DisplayName, EntryId, IconAsset, LibraryEntry};
 
 /// An entry filed under `category`, keyed and named after `leaf`.
@@ -56,6 +57,86 @@ fn patching(leaf: &str, patch: EntryPatch) -> Catalog {
     let mut catalog = Catalog::new();
     catalog.patch(id(leaf), patch).expect("patch recorded");
     catalog
+}
+
+#[test]
+fn reconcile_declares_only_identifiers_no_record_claims() {
+    // A curated entry (re-filed by an administrator) and a patch both
+    // stand; only the genuinely new bundle is declared.
+    let mut catalog = declaring(&[("Editor", LibraryCategory::Office)]);
+    let mut hide = EntryPatch::new();
+    hide.set_hidden(true);
+    catalog.patch(id("Legacy"), hide.clone()).expect("patch");
+
+    let discovered = [
+        entry("Editor", LibraryCategory::Utilities),
+        entry("Legacy", LibraryCategory::Utilities),
+        entry("Terminal", LibraryCategory::Programming),
+    ];
+    let added = catalog.reconcile(&discovered).expect("within bound");
+    assert_eq!(added, 1, "only the unclaimed identifier is declared");
+    assert_eq!(
+        catalog.entry(&id("Editor")).map(LibraryEntry::category),
+        Some(LibraryCategory::Office),
+        "the curated entry is untouched"
+    );
+    assert_eq!(
+        catalog.entry_patch(&id("Legacy")),
+        Some(&hide),
+        "the standing patch is untouched"
+    );
+    assert_eq!(
+        catalog.entry(&id("Terminal")),
+        Some(&entry("Terminal", LibraryCategory::Programming))
+    );
+
+    // A second identical fold changes nothing: rescan is idempotent.
+    assert_eq!(catalog.reconcile(&discovered), Ok(0));
+}
+
+#[test]
+fn reconcile_keeps_the_first_of_duplicate_discovered_identifiers() {
+    let mut catalog = Catalog::new();
+    let added = catalog
+        .reconcile(&[
+            entry("Editor", LibraryCategory::Office),
+            entry("Editor", LibraryCategory::Games),
+        ])
+        .expect("within bound");
+    assert_eq!(added, 1);
+    assert_eq!(
+        catalog.entry(&id("Editor")).map(LibraryEntry::category),
+        Some(LibraryCategory::Office),
+        "the first discovered entry wins"
+    );
+}
+
+#[test]
+fn reconcile_refuses_the_whole_fold_at_the_record_bound() {
+    let mut catalog = Catalog::new();
+    for index in 0..MAX_ENTRIES - 1 {
+        catalog
+            .insert(entry(&format!("app{index}"), LibraryCategory::Other))
+            .expect("within bound");
+    }
+    let discovered = [
+        entry("one-more", LibraryCategory::Other),
+        entry("one-too-many", LibraryCategory::Other),
+    ];
+    assert_eq!(catalog.reconcile(&discovered), Err(CatalogFull));
+    assert_eq!(
+        catalog.len(),
+        MAX_ENTRIES - 1,
+        "a refused fold leaves the catalog unchanged"
+    );
+    assert_eq!(catalog.entry(&id("one-more")), None, "never half-applied");
+
+    // Exactly filling the bound is fine.
+    assert_eq!(
+        catalog.reconcile(&discovered[..1]),
+        Ok(1),
+        "the bound itself is reachable"
+    );
 }
 
 #[test]
@@ -112,7 +193,10 @@ fn a_patch_and_an_entry_displace_one_another_under_one_identifier() {
     hide.set_hidden(true);
     assert_eq!(
         catalog.patch(id("Editor"), hide.clone()),
-        Ok(Some(Record::Entry(entry("Editor", LibraryCategory::Office))))
+        Ok(Some(Record::Entry(entry(
+            "Editor",
+            LibraryCategory::Office
+        ))))
     );
     assert_eq!(catalog.entry(&id("Editor")), None);
     assert_eq!(catalog.entry_patch(&id("Editor")), Some(&hide));
@@ -135,7 +219,10 @@ fn recording_a_patch_that_changes_nothing_clears_the_personalisation() {
         Ok(Some(Record::Patch(renamed))),
         "an empty patch clears what the identifier held"
     );
-    assert!(catalog.is_empty(), "and leaves no unrenderable record behind");
+    assert!(
+        catalog.is_empty(),
+        "and leaves no unrenderable record behind"
+    );
     assert_eq!(
         catalog.patch(id("Editor"), EntryPatch::new()),
         Ok(None),
@@ -204,14 +291,19 @@ fn the_record_bound_fails_closed_and_still_admits_a_replacement() {
         catalog.insert(entry("OneTooMany", LibraryCategory::Other)),
         Err(CatalogFull)
     );
-    assert_eq!(catalog.patch(id("OneTooMany"), hide.clone()), Err(CatalogFull));
+    assert_eq!(
+        catalog.patch(id("OneTooMany"), hide.clone()),
+        Err(CatalogFull)
+    );
     assert_eq!(catalog.len(), MAX_ENTRIES, "a refused record does not land");
 
     assert!(
         catalog.patch(id("App0"), hide).is_ok(),
         "an identifier already held is replaceable at the bound"
     );
-    assert!(catalog.insert(entry("App1", LibraryCategory::Games)).is_ok());
+    assert!(catalog
+        .insert(entry("App1", LibraryCategory::Games))
+        .is_ok());
     assert_eq!(catalog.len(), MAX_ENTRIES);
 }
 
@@ -265,7 +357,10 @@ fn a_folder_lists_its_own_entries_by_name() {
         listed_names(&catalog.folder(LibraryCategory::Games)),
         ["Backgammon", "Chess"]
     );
-    assert_eq!(listed_names(&catalog.folder(LibraryCategory::Office)), ["Editor"]);
+    assert_eq!(
+        listed_names(&catalog.folder(LibraryCategory::Office)),
+        ["Editor"]
+    );
     assert!(catalog.folder(LibraryCategory::Internet).is_empty());
 }
 
@@ -353,7 +448,11 @@ fn the_users_own_patch_wins_field_by_field_over_the_machine_wide_one() {
     let resolved = merge(&adjusted, &patching("Editor", mine));
 
     let editor = resolved.entry(&id("Editor")).expect("entry survives");
-    assert_eq!(editor.name().as_str(), "My Editor", "the user's rename wins");
+    assert_eq!(
+        editor.name().as_str(),
+        "My Editor",
+        "the user's rename wins"
+    );
     assert_eq!(
         editor.category(),
         LibraryCategory::Utilities,
@@ -377,19 +476,37 @@ fn an_entry_a_patch_hides_is_dropped_from_the_resolved_catalog() {
 }
 
 #[test]
-fn an_overlay_re_shows_what_the_machine_store_hid() {
-    let mut machine = declaring(&[("Editor", LibraryCategory::Office)]);
-    let mut hide = EntryPatch::new();
-    hide.set_hidden(true);
-    machine
-        .patch(id("Editor"), hide)
-        .expect("machine-wide patch recorded");
+fn an_overlay_re_shows_what_the_machine_store_declared_hidden() {
+    let mut machine = Catalog::new();
+    let mut suppressed = entry("Editor", LibraryCategory::Office);
+    suppressed.set_hidden(true);
+    machine.insert(suppressed).expect("declared");
     assert!(merge(&machine, &Catalog::new()).is_empty());
 
     let mut show = EntryPatch::new();
     show.set_hidden(false);
     let resolved = merge(&machine, &patching("Editor", show));
-    assert!(resolved.entry(&id("Editor")).is_some());
+    let editor = resolved
+        .entry(&id("Editor"))
+        .expect("the user's re-show wins");
+    assert!(!editor.hidden());
+}
+
+#[test]
+fn a_hidden_declaration_keeps_its_identifier_claimed_against_reconcile() {
+    let mut catalog = Catalog::new();
+    let mut suppressed = entry("Editor", LibraryCategory::Office);
+    suppressed.set_hidden(true);
+    catalog.insert(suppressed.clone()).expect("declared");
+
+    // A rescan re-discovering the same bundle must not resurrect what the
+    // curator suppressed: the hidden record already claims the identifier.
+    let added = catalog
+        .reconcile(&[entry("Editor", LibraryCategory::Office)])
+        .expect("within bounds");
+    assert_eq!(added, 0);
+    assert_eq!(catalog.entry(&id("Editor")), Some(&suppressed));
+    assert!(merge(&catalog, &Catalog::new()).is_empty());
 }
 
 #[test]

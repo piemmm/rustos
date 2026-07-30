@@ -22,6 +22,14 @@ fn the_app_store_leaf_matches_the_one_store_path_definition() {
 }
 
 #[test]
+fn the_system_store_leaves_match_the_one_store_path_definition() {
+    assert_eq!(
+        tairix_abi::SYSTEM_APP_STORE,
+        alloc::format!("/{SYSTEM_VIEW_LEAF}/{USER_APP_STORE_LEAF}")
+    );
+}
+
+#[test]
 fn the_users_view_leaf_matches_the_account_home_layout() {
     let home = tairix_users::default_home("ada");
     assert_eq!(home, alloc::format!("/{USERS_VIEW_LEAF}/ada"));
@@ -116,13 +124,15 @@ fn a_display_name_that_would_forge_a_line_is_refused() {
 }
 
 #[test]
-fn a_bundle_path_admits_both_application_stores_and_plain_nesting() {
+fn a_bundle_path_admits_every_application_store_and_plain_nesting() {
     for path in [
         "/Apps/Editor.app",
         "/Apps/games/chess.app",
         "/Apps/games/board/chess.app",
         "/Users/ada/Apps/Editor.app",
         "/Users/ada/Apps/games/chess.app",
+        "/System/Apps/files.app",
+        "/System/Apps/extras/files.app",
     ] {
         let bundle = BundlePath::new(path).expect("permitted bundle path");
         assert_eq!(bundle.as_str(), path);
@@ -133,13 +143,14 @@ fn a_bundle_path_admits_both_application_stores_and_plain_nesting() {
 #[test]
 fn a_bundle_path_outside_an_application_store_is_refused() {
     for hostile in [
-        "/System/Apps/ls.app",
         "/System/Services/devmgr.app",
+        "/System/Drivers/storage/emmc2.app",
         "/Storage/usb0/Editor.app",
         "/Users/ada/Documents/Editor.app",
         "/Users/ada/Editor.app",
         "/Editor.app",
         "/Apps",
+        "/System/Apps",
         "",
     ] {
         assert_eq!(
@@ -310,6 +321,18 @@ fn an_entry_reads_back_the_fields_it_was_built_from() {
     assert_eq!(entry.bundle().as_str(), "/Apps/Editor.app");
     assert_eq!(entry.category(), LibraryCategory::Accessories);
     assert!(entry.icon().is_none());
+    assert!(!entry.hidden(), "an entry is visible until suppressed");
+}
+
+#[test]
+fn a_suppression_flips_only_the_visibility_flag() {
+    let mut entry = entry();
+    entry.set_hidden(true);
+    assert!(entry.hidden());
+    assert_eq!(entry.name().as_str(), "Editor");
+
+    entry.set_hidden(false);
+    assert!(!entry.hidden());
 }
 
 #[test]

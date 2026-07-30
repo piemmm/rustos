@@ -122,6 +122,7 @@
 - [elsh (Element Shell)](./userland/shell.md)
 - [Text login](./userland/login.md)
 - [Application bundle loader](./userland/appmgr.md)
+- [Program-library admin (`applib`)](./userland/applib.md)
 - [Core CLI utilities](./userland/utilities.md)
 - [System-log tool (`log`)](./userland/log.md)
 - [Building a curses TUI (`top`)](./userland/curses-porting.md)

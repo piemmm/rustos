@@ -23,3 +23,6 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # document hand-off, plans/NEW-FILEMANAGER.md FM6b). A display hint only — the
 # signed load gate still verifies and capability-checks the launch.
 associations = ["text/plain", "text/markdown", "text/csv", "application/json", "application/yaml", "application/xml"]
+# A windowed, user-facing application: list it in the desktop's program
+# library beside the other text tools (plans/NEW-TASKBAR.md T3).
+library = "Accessories"

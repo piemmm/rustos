@@ -37,14 +37,14 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1 done**; T2 is next. `lib/proglib` is landed: the closed
-folder taxonomy, the validated entry model, the `<id>.<field>` store grammar
-with its closed key registry, the bounded fail-closed parser, the canonical
-render, the `Catalog` operations, and the one machine ∪ user-overlay `merge`,
-with the path spellings defined once and the parser fuzzed
-(`tests/fuzz_proglib.rs`, registered with `cargo xtask fuzz`). Everything
-else below is unstarted. The rest of the starting point is Stage 7 as it
-stands:
+`in progress` — **T1–T3 done**; T4 is next. The library **data** layer is
+landed end to end: `lib/proglib` (T1 — taxonomy, entry model, store grammar,
+fail-closed parse, canonical render, `merge`, `reconcile`, fuzzed by
+`tests/fuzz_proglib.rs`), the `applib` admin command (T2 —
+`userland/apps/applib`), the manifest `library` listing + `applib rescan`
+discovery, and the image-build catalog seeding (T3 — `tools/mkimage`).
+Everything else below (T4 onward — the UI) is unstarted. The rest of the
+starting point is Stage 7 as it stands:
 `tairix-taskbar` models the start button / task list / notification area /
 clock and emits typed `TaskbarResponse`s; `tairix-session` presents the bar
 through the compositor, owns the theme, and resolves those responses
@@ -161,8 +161,8 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   render, and the add/remove/reorder operations. Kept separate from
   `lib/proglib` because a pin references a library entry / bundle but is
   per-user ordering state, a distinct concern with a distinct store. (T6)
-- `lib/abi` — extend `AppInfo` with an optional `library` descriptor
-  (category, `show_in_library`, icon asset) so the library is *discovered*
+- `lib/abi` — extend `AppInfo` with the optional `library` listing (the
+  opt-in folder byte + `library-icon` asset) so the library is *discovered*
   from bundles (T3); add the taskbar↔Switchboard **tray-signal summary**
   record and the **library-edit** / **pin** / **Switchboard-control** IPC
   vocabularies under the usual ABI discipline (versioned, hashed, fuzzed).
@@ -211,8 +211,9 @@ reviewed one-line data change, never free-form text:
   a library folder. A bundle whose category resolves to a settings surface is
   refused from the library catalog.
 - Command apps (`/System/Apps`, `plans/APPS.md` §8), background services
-  (`/System/Services`), and any bundle with `show_in_library = false` never
-  appear in the library — only user-facing graphical applications do.
+  (`/System/Services`), and any bundle whose manifest declares no `library`
+  folder never appear in the library — listing is an explicit manifest
+  opt-in, so only user-facing graphical applications do.
 - Folder display order is the enum order above; entries within a folder sort
   by display name (locale-aware, deterministic). An empty folder is hidden.
 
@@ -223,12 +224,14 @@ and enforces it; none is defined speculatively (§2.4, §5.2). Before adding
 any, the implementer checks whether an existing capability already expresses
 the authority at the right granularity and, if so, uses it.
 
-- `CAP_SETTINGS_WRITE` — write the **machine-wide** library catalog under
-  `/System/Settings/ProgramLibrary/`. Held by the installer and the `applib`
-  command; enforced at the catalog write path (T2). (Per §16.2 this is the
-  standing machine-wide settings-write capability; if it already exists when
-  T2 lands, reuse it — do not mint a second.) The **per-user** overlay and
-  the per-user pin store need no new capability: they are ordinary §5.3
+- The **machine-wide** catalog write under `/System/Settings/ProgramLibrary/`
+  mints **no capability** (resolved in T2): no `CAP_SETTINGS_WRITE` exists in
+  the tree, and §5.2/§16.2 forbid defining one ahead of the settings service
+  that would hold and enforce it. The enforcement point is the §5.3 per-inode
+  policy the kernel VFS already applies under the caller's attested identity
+  — the store is a system-owned file an ordinary account reads but cannot
+  rewrite, and the kernel logs the denial. The **per-user** overlay and the
+  per-user pin store likewise need no new capability: they are ordinary §5.3
   file-permission writes under the user's own `/Users/<u>/Settings/` identity.
 - `CAP_SYSINFO_GLOBAL` / `CAP_SYSINFO_KERNEL` / `CAP_SYSINFO_HW` — **existing**
   (§16.6); the Switchboard component requests them to read the live overview.
@@ -250,7 +253,8 @@ the authority at the right granularity and, if so, uses it.
   line per entry, grammar owned by `lib/proglib`, structurally like
   `lib/sysconfig`: `#` comments, blank lines ignored, each entry a
   fail-closed record of `bundle-path`, `category`, `display-name`, optional
-  `icon` asset id, and a stable `id`. Written only under `CAP_SETTINGS_WRITE`.
+  `icon` asset id, and a stable `id`. Written only by principals the
+  `/System/Settings` per-inode policy admits (the system identity).
 - **Per-user overlay:** `/Users/<u>/Settings/ProgramLibrary/library.conf` —
   same grammar; lets a user hide, re-file, or rename an entry, and add
   entries for their own `/Users/<u>/Apps` bundles, without touching the
@@ -291,80 +295,116 @@ engine every later stage builds on. What it now guarantees:
   entry is unrepresentable.
 - **The store** — the `<id>.<field>` line grammar (keys split at the *last*
   `.`, so a reverse-DNS id is valid) over the closed `EntryKey` registry
-  (`name`, `bundle`, `category`, `icon`, and the patch-only `hidden`); a
-  bounded, fail-closed `parse` that refuses the **whole** document
-  (`CatalogError` with the offending line) and a canonical `render` that
-  round-trips exactly.
+  (`name`, `bundle`, `category`, `icon`, `hidden`); a bounded, fail-closed
+  `parse` that refuses the **whole** document (`CatalogError` with the
+  offending line) and a canonical `render` that round-trips exactly. A
+  declaration may carry its own `hidden true` suppression — the record
+  keeps its identifier claimed, so a rescan cannot resurrect it — and a
+  patch carries the overlay's visibility verdict (`false` re-shows).
 - **`Catalog`** — `insert`/`patch`/`remove`/`get`/`entry`/`entry_patch`,
   `records`/`entries`/`patches`, and the `folder`/`folders` views, failing
   closed with `CatalogFull` at `MAX_ENTRIES`. A record is a declared
   `Record::Entry` or an overlay `Record::Patch`.
 - **`merge(machine, overlay)`** — the one pure overlay resolution: overlay
-  entries replace machine entries of the same id, overlay patches win over
-  machine patches, a hide by *either* document is final, and a patch naming
-  no entry is discarded (so re-installing restores the personalisation).
+  entries replace machine entries of the same id, patches apply machine-first
+  so the user's verdict — visibility included — wins field by field (hiding
+  is presentation, never authority), an entry whose resolved verdict is
+  hidden is dropped, and a patch naming no entry is discarded (so
+  re-installing restores the personalisation).
+- **`Catalog::reconcile(discovered)`** — the self-healing discovery fold
+  (T3): declares every discovered entry whose identifier no existing record
+  claims and never disturbs curation, refusing the whole fold at
+  `MAX_ENTRIES`.
 - **The path spellings defined once** — `LIBRARY_DIR`, `LIBRARY_FILE`,
-  `MACHINE_LIBRARY_PATH`, and `user_library_path` (over
-  `tairix_users::default_home`). No I/O, no authority.
+  `LIBRARY_SETTINGS_SUBDIR`, `MACHINE_LIBRARY_PATH`, and `user_library_path`
+  (over the caller's inherited home, the runtime truth even for a moved
+  home). No I/O, no authority.
 
 Docs: `lib/proglib/README.md`, `docs/src/lib/proglib.md`, `AGENTS.md` §3,
 `PLAN.md`. Tested host-side beside the code (round-trip, every fail-closed
 rejection, ordering determinism, merge precedence, empty-store default) and
 fuzzed by `tests/fuzz_proglib.rs`, registered with `cargo xtask fuzz`.
 
-## T2 — Programmatic add/remove: `applib` + the installer hook
+## T2 — Programmatic add/remove: the `applib` command app — **done**
 
 The first-class "installer adds a shortcut" path (issue requirement).
+`userland/apps/applib` (a command app lives under `userland/apps/`, §3; GNU
+conventions per §16.7) now guarantees:
 
-**Deliverables**
-- `userland/system/applib` command app (bundle per §16.5; GNU-style options
-  per §16.7): `applib add <bundle> --category <cat> [--name <n>] [--icon <a>]`,
-  `applib remove <id|bundle>`, `applib list [--category <cat>]`,
-  `applib rescan` (T3). It reads/writes the catalog **through `lib/proglib`**
-  over the secured VFS under its own identity; the machine store write is
-  gated by `CAP_SETTINGS_WRITE` and fails closed + audit-logs (§19.4). The
-  per-user store is an ordinary user-identity write.
-- Installer integration: `userland/system/installer` (and the app-install
-  path generally) registers a library entry when it installs a graphical
-  bundle and removes it on uninstall — the same `lib/proglib` write path,
-  no second implementation.
-- `stdinfo` advisory records (§20.1) for `add`/`remove` outcomes; `stderr`
-  diagnosis on a refused write (fail loud, §2.24).
+- **The grammar** — `applib [list [--category <folder>]]`,
+  `applib add <bundle> [--category <f>] [--name <n>] [--icon <a>] [--user]`,
+  `applib remove <id|bundle> [--user]`, `applib hide|show <id> [--user]`,
+  `applib rescan [--user]`; `--opt value` and `--opt=value`, `--`
+  end-of-options, and the reserved `-h`/`-?` short-help switches. `add`
+  derives id/name/folder/icon from the bundle's own signed `AppInfo`
+  (overridable); an unlisted manifest without `--category` is refused, never
+  guessed.
+- **One engine, no authority** — every document is read/written whole
+  through `lib/proglib` over the secured VFS under the caller's attested
+  identity. The machine store write is gated by its §5.3 per-inode system
+  ownership (no new capability — §4 above; the kernel logs the denial);
+  `--user` targets the caller's own overlay (`user_library_path` over the
+  inherited `HOME`), and `hide`/`show` record the visibility verdict on the
+  target store's own entry or as an overlay patch.
+- **Fail loud, fail closed** — refusals name their store side and reason on
+  `stderr` (§2.24) with GNU-style exit codes (0/1/2); a malformed store
+  refuses the whole operation; nothing partial is ever written.
+- **`stdinfo` records (§20.1)** — one `summary` record per completed change
+  on fd 3 (`apps.library_entry_added`/`_removed`/`_hidden`/`_shown`,
+  `apps.library_rescan`), JSON-escaped, best-effort, never load-bearing.
+- **Seeding without an installer** — a fresh image's machine catalog is
+  derived at build time from the very bundles the image plants
+  (`tools/mkimage::library`, T3), so "installer adds a shortcut" holds today
+  via the image build + `applib`; when the Stage-8 installer gains a real
+  app-install path it calls this same `lib/proglib` write path — no second
+  implementation.
 
-**Tests**: `applib` add/remove/list against a fake VFS + `lib/proglib`;
-capability-denied write fails closed and audits; installer registers/removes
-on install/uninstall. Help-lint passes (`en-US` + required locales, §8.1).
+Tested host-side in `userland/apps/applib/src/tests.rs` (grammar, every
+operation over in-memory seams, every refusal including the denied machine
+write, walk bounds, record emission, per-locale Help tokens); help-lint
+passes for `en-US` + all required locales. Docs:
+`userland/apps/applib/README.md`, `docs/src/userland/applib.md`.
 
-**Done when**: an app can be added to / removed from the library purely by
-running `applib` (or installing/uninstalling), with no code change and no
-compiled-in list; gate green.
+## T3 — Discovery & reconciliation (never a compiled-in list) — **done**
 
-## T3 — Discovery & reconciliation (never a compiled-in list, §16.5/§18.5)
+What now guarantees §16.5/§18.5's "no compiled-in app list":
 
-**Deliverables**
-- Extend `lib/abi` `AppInfo` with an optional `library` descriptor:
-  `category: LibraryCategory`, `show_in_library: bool` (default: true for a
-  graphical app class, false for command/service/settings classes), optional
-  `icon` asset id. Regenerate the C header (`cargo xtask c-header --write`).
-  Update `lib/appload` to expose it from a verified bundle.
-- `lib/proglib::reconcile(catalog, discovered) -> Catalog` + the `applib
-  rescan` command: scan `/Apps`, `/System/Apps`, and `/Users/<u>/Apps` (the
-  recursive bundle walk `plans/APPS.md`/`§16.3` already defines), read each
-  verified `AppInfo`, and add any graphical, `show_in_library` bundle not yet
-  catalogued to its declared category — self-healing without ever hard-coding
-  which apps exist. Bundles that are command apps, services, settings, or
-  `show_in_library = false` are skipped.
-- Default seeding: the image builder / installer runs `rescan` at first boot
-  so a fresh install's library reflects the shipped graphical apps, all
-  discovered from their bundles.
+- **The manifest listing (`lib/abi`)** — `AppInfoHeader` carries the
+  program-library listing as an explicit **opt-in**: a `library` wire byte
+  (`0` = never listed — the default for every command app and service — else
+  the `LibraryCategory` folder) plus an optional `library_icon` asset name
+  (legal only on a listed bundle; icon-without-listing, an unknown folder
+  byte, or a dirty reserved field refuse the whole manifest). There is no
+  `show_in_library` boolean and no app-class heuristic: a bundle asks to be
+  listed by declaring its folder, in its own signed manifest. The manifest
+  TOML source grows the matching optional `library` / `library-icon` keys
+  (composer-validated: unknown folder, case drift, an icon without a
+  listing, or a `library` on a `service` fail the build). The C header is
+  regenerated (`cargo xtask c-header --write`); `lib/appload` consumers read
+  the listing off the verified header's own accessors.
+- **The fold (`lib/proglib::Catalog::reconcile`)** + **`applib rescan`** —
+  the walk covers `/System/Apps` then `/Apps` (machine) or the caller's
+  `<home>/Apps` (`--user`), breadth-first in sorted order (deterministic
+  duplicate resolution), descending nested plain subdirectories but never
+  into a sealed `.app`, bounded by `MAX_WALK_DEPTH`/`MAX_WALK_ENTRIES`
+  (fail-closed on a tree it cannot believe). Every listed bundle not yet
+  catalogued is declared under its manifest folder; unlisted bundles are
+  simply not library applications; a malformed/oversized/unreadable
+  manifest is skipped and counted, never a scan abort; curation — renames,
+  re-files, and hidden suppressions (whose records keep their identifiers
+  claimed) — is never disturbed; an unchanged catalog is not rewritten.
+- **Default seeding at image build** — `tools/mkimage::library` derives
+  `/System/Settings/ProgramLibrary/library.conf` from the planted bundles'
+  own manifests and the root-volume author ships it pre-seeded (in the
+  writable `/System/Settings` subtree, §16.2), so a fresh install's library
+  reflects the shipped graphical apps with **no first-boot rescan** and no
+  hand list anywhere (a garbage planted manifest or a duplicate library id
+  fails the image build closed).
 
-**Tests**: reconcile adds only eligible bundles; excludes command/service/
-settings/hidden; category comes from the manifest; a manifest with no
-`library` descriptor lands in `Other`; a malformed/oversized manifest is
-skipped fail-closed, never aborts the scan.
-
-**Done when**: the library is fully populated by discovery + catalog, with
-zero compiled-in app lists anywhere; gate green.
+Tested in `lib/proglib` (reconcile semantics), `userland/apps/applib`
+(walk/rescan behaviour and bounds), `tools/mkimage` (derivation, refusals,
+and the shipped-store read-back off a built image), and the composer
+(manifest acceptance/refusal, wire round-trip, signing).
 
 ## T4 — Taskbar permanent leading icons: Library + File Manager
 
@@ -544,8 +584,8 @@ The dedicated, capability-sized process behind the Switchboard (§0).
   requesting exactly `CAP_SYSINFO_GLOBAL`/`CAP_SYSINFO_KERNEL`/`CAP_SYSINFO_HW`
   (read) + the process-control authority (§4 capabilities) + the D7 window
   class (`CAP_DISPLAY`-adjacent app-window channel). It is a long-running
-  component started with the desktop session (registered in the library as
-  `show_in_library = false`).
+  component started with the desktop session; its manifest declares no
+  `library` folder, so the program library never lists it.
 - A **sampler** that reads the live system through `lib/procinfo` / `sysinfo`
   on a **tickless one-shot timer** and on demand (never a busy-poll, §2.23):
   process/task list, CPU/mem/disk/net stats, per-CPU times, pressure signals,
@@ -689,8 +729,6 @@ green.
 - **Process-control capability**: does an adequate signal/priority/kill
   capability already exist (`plans/SPAWN.md` / the signal work)? If yes, reuse
   it; only mint `CAP_PROC_CONTROL` in T10 if none fits (§5.2).
-- **`CAP_SETTINGS_WRITE`**: confirm whether the machine-wide settings-write
-  capability already exists before T2 introduces it (§16.2).
 - **Switchboard lifecycle**: started by the session at desktop bring-up vs. a
   `/System/Services` autostart — decide in T10 against `plans/DISPLAY.md` and
   the CU6 sizing rule; the taskbar icon must degrade calmly when it is absent.

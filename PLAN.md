@@ -3109,12 +3109,17 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1 done) —
-`plans/NEW-TASKBAR.md`: a first-class, folder-organised program library
-(`lib/proglib` — the catalog store engine, **landed**: closed folder taxonomy,
+Full **icon-bar** build-out (staged, `in progress` — T1–T3 done, the library
+data layer) — `plans/NEW-TASKBAR.md`: a first-class, folder-organised program
+library, **landed end to end as data**: `lib/proglib` (closed folder taxonomy,
 validated entry model, `<id>.<field>` grammar, bounded fail-closed parser,
-canonical render, and the one machine ∪ user-overlay merge; programmatically
-add/removable via the `applib` command + the installer, next), a permanent
+canonical render, the machine ∪ user-overlay merge with the overlay's
+visibility verdict last, and the `reconcile` discovery fold), the
+`userland/apps/applib` admin command (list/add/remove/hide/show/rescan, GNU
+conventions, fd-3 records), the signed `AppInfo` `library` listing (opt-in
+folder + icon; C header regenerated), and the image-build seeding
+(`tools/mkimage` derives `/System/Settings/ProgramLibrary/library.conf` from
+the planted bundles' own manifests). Next (T4+, the UI): a permanent
 file-manager icon, user-pinned shortcuts (`lib/taskpins`, pin-to-taskbar +
 drag), the notification area, and the always-rightmost Switchboard
 system-overview surface (`userland/gui/switchboard` hosting the existing

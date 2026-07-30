@@ -33,8 +33,10 @@
 #define TAIRIX_MIME_TYPE_MAX 64u
 /* Encoded length of one MIME-type body entry (length byte + buffer). */
 #define TAIRIX_MIME_ENTRY_LEN 65u
+/* Maximum length, in bytes, of a bundle's library icon asset name. */
+#define TAIRIX_LIBRARY_ICON_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 340u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 408u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"
@@ -52,6 +54,20 @@
 #define TAIRIX_LIBRARY_SCOPE_BUNDLE ((uint8_t)0u)
 #define TAIRIX_LIBRARY_SCOPE_SYSTEM ((uint8_t)1u)
 
+/* Program-library listing wire byte (`library` field): not listed, or the
+ * folder the bundle files itself under (uint8_t). */
+#define TAIRIX_APPINFO_LIBRARY_NONE ((uint8_t)0u)
+#define TAIRIX_APPINFO_LIBRARY_ACCESSORIES ((uint8_t)1u)
+#define TAIRIX_APPINFO_LIBRARY_GRAPHICS ((uint8_t)2u)
+#define TAIRIX_APPINFO_LIBRARY_INTERNET ((uint8_t)3u)
+#define TAIRIX_APPINFO_LIBRARY_MULTIMEDIA ((uint8_t)4u)
+#define TAIRIX_APPINFO_LIBRARY_OFFICE ((uint8_t)5u)
+#define TAIRIX_APPINFO_LIBRARY_PROGRAMMING ((uint8_t)6u)
+#define TAIRIX_APPINFO_LIBRARY_GAMES ((uint8_t)7u)
+#define TAIRIX_APPINFO_LIBRARY_SYSTEMTOOLS ((uint8_t)8u)
+#define TAIRIX_APPINFO_LIBRARY_UTILITIES ((uint8_t)9u)
+#define TAIRIX_APPINFO_LIBRARY_OTHER ((uint8_t)10u)
+
 /* Signed AppInfo manifest prefix; encoded little-endian on the wire. */
 typedef struct tairix_appinfo_header {
     uint32_t magic;
@@ -62,10 +78,13 @@ typedef struct tairix_appinfo_header {
     uint8_t id_len;
     uint8_t name_len;
     uint8_t version_len;
-    uint8_t reserved0;
+    uint8_t library_icon_len;
+    uint8_t library;
+    uint8_t reserved0[3];
     uint8_t id[TAIRIX_BUNDLE_ID_MAX];
     uint8_t name[TAIRIX_BUNDLE_NAME_MAX];
     uint8_t version[TAIRIX_BUNDLE_VERSION_MAX];
+    uint8_t library_icon[TAIRIX_LIBRARY_ICON_MAX];
     uint8_t syscall_table_hash[32];
     uint8_t content_hash[32];
     uint8_t signer_pubkey[32];

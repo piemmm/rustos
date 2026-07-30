@@ -49,12 +49,12 @@ use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
     DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadAverage, LoadHeader, ManifestHeader,
-    MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
-    OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
-    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
-    RxePermission, Segment, Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot,
-    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
+    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LoadAverage, LoadHeader,
+    ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode,
+    NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
+    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit,
+    ResourceLimitRecord, RxePermission, Segment, Severity, Signal, SignalIntakeOp, StdInfoKind,
+    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
     UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
@@ -65,19 +65,19 @@ use tairix_abi::{
     HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
     HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
     KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED,
-    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
-    LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN,
-    LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
-    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
-    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
-    SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
-    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
+    LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS,
+    LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
+    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
+    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN,
+    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
+    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1049,6 +1049,8 @@ fn generate_appinfo() -> String {
     let _ = writeln!(out, "#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u");
     out.push_str("/* Encoded length of one MIME-type body entry (length byte + buffer). */\n");
     let _ = writeln!(out, "#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u");
+    out.push_str("/* Maximum length, in bytes, of a bundle's library icon asset name. */\n");
+    let _ = writeln!(out, "#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u");
     out.push_str("/* Packed little-endian wire size of an AppInfo header, in bytes. */\n");
     let _ = writeln!(
         out,
@@ -1092,6 +1094,8 @@ fn generate_appinfo() -> String {
     );
     out.push('\n');
 
+    emit_library_listing_bytes(&mut out);
+
     let _ = writeln!(
         out,
         "/* Signed AppInfo manifest prefix; encoded little-endian on the wire. */\n\
@@ -1104,10 +1108,13 @@ fn generate_appinfo() -> String {
          \x20   uint8_t id_len;\n\
          \x20   uint8_t name_len;\n\
          \x20   uint8_t version_len;\n\
-         \x20   uint8_t reserved0;\n\
+         \x20   uint8_t library_icon_len;\n\
+         \x20   uint8_t library;\n\
+         \x20   uint8_t reserved0[3];\n\
          \x20   uint8_t id[TAIRIX_BUNDLE_ID_MAX];\n\
          \x20   uint8_t name[TAIRIX_BUNDLE_NAME_MAX];\n\
          \x20   uint8_t version[TAIRIX_BUNDLE_VERSION_MAX];\n\
+         \x20   uint8_t library_icon[TAIRIX_LIBRARY_ICON_MAX];\n\
          \x20   uint8_t syscall_table_hash[{SYSCALL_TABLE_HASH_LEN}];\n\
          \x20   uint8_t content_hash[32];\n\
          \x20   uint8_t signer_pubkey[32];\n\
@@ -1117,6 +1124,30 @@ fn generate_appinfo() -> String {
 
     out.push_str("#endif /* TAIRIX_APPINFO_H */\n");
     out
+}
+
+/// Emit the program-library listing wire bytes (the `AppInfoHeader::library`
+/// field's vocabulary): `TAIRIX_APPINFO_LIBRARY_NONE` for a bundle the
+/// desktop's launcher never lists, plus one constant per closed
+/// [`LibraryCategory`] folder — every value read from `lib/abi`'s own wire
+/// encoding, never re-typed.
+fn emit_library_listing_bytes(out: &mut String) {
+    use std::fmt::Write as _;
+
+    out.push_str(
+        "/* Program-library listing wire byte (`library` field): not listed, or the\n\
+         \x20* folder the bundle files itself under (uint8_t). */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_APPINFO_LIBRARY_NONE ((uint8_t)0u)");
+    for category in LibraryCategory::ALL {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_APPINFO_LIBRARY_{} ((uint8_t){}u)",
+            category.as_str().to_ascii_uppercase(),
+            LibraryCategory::to_wire(Some(category))
+        );
+    }
+    out.push('\n');
 }
 
 /// `tairix_rxe.h` — the `rxe` load-image table and load-time hardening
@@ -3384,9 +3415,10 @@ mod tests {
     #[test]
     fn appinfo_header_pins_layout_constants_and_names() {
         use tairix_abi::{
-            AppInfoHeader, BundleEntry, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
-            APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, MIME_ENTRY_LEN,
-            MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
+            AppInfoHeader, BundleEntry, LibraryCategory, LibraryScope, APPINFO_MAGIC,
+            APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+            BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+            SYSTEM_LIBRARIES_DIR,
         };
         let h = body("tairix_appinfo.h");
         assert!(h.contains("#ifndef TAIRIX_APPINFO_H"), "guard present");
@@ -3405,6 +3437,7 @@ mod tests {
             format!("#define TAIRIX_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u"),
             format!("#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u"),
             format!("#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u"),
+            format!("#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u"),
             format!(
                 "#define TAIRIX_APPINFO_HEADER_WIRE_LEN {}u",
                 AppInfoHeader::WIRE_LEN
@@ -3431,6 +3464,36 @@ mod tests {
             );
             assert!(h.contains(&line), "missing `{line}` in:\n{h}");
         }
+        // Every program-library folder wire byte is exported, read from
+        // lib/abi, alongside the "not listed" zero and the struct fields
+        // that carry the listing.
+        assert!(
+            h.contains("#define TAIRIX_APPINFO_LIBRARY_NONE ((uint8_t)0u)"),
+            "missing the not-listed wire byte in:\n{h}"
+        );
+        for category in LibraryCategory::ALL {
+            let line = format!(
+                "#define TAIRIX_APPINFO_LIBRARY_{} ((uint8_t){}u)",
+                category.as_str().to_ascii_uppercase(),
+                LibraryCategory::to_wire(Some(category))
+            );
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+        assert!(
+            h.contains("uint8_t library_icon[TAIRIX_LIBRARY_ICON_MAX];"),
+            "missing the library-icon field in:\n{h}"
+        );
+        // The listing wire encoding is frozen at its lib/abi values.
+        assert_eq!(
+            LibraryCategory::to_wire(Some(LibraryCategory::Accessories)),
+            1,
+            "Accessories wire byte frozen"
+        );
+        assert_eq!(
+            LibraryCategory::to_wire(Some(LibraryCategory::Other)),
+            10,
+            "Other wire byte frozen"
+        );
         // The C struct mirrors the #[repr(C)] Rust layout (no trailing pad).
         assert_eq!(
             core::mem::size_of::<AppInfoHeader>(),
@@ -4000,7 +4063,7 @@ mod tests {
             ("tairix_ipc.h", "} tairix_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
             ("tairix_ipc.h", "} tairix_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
-            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 340, align_of::<AppInfoHeader>(), 4),
+            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 408, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),

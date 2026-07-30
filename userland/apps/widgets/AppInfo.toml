@@ -17,3 +17,7 @@ name = "widgets"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+# The Reactive Alloy control gallery is a windowed development aid: list
+# it in the desktop's program library under the development folder
+# (plans/NEW-TASKBAR.md T3).
+library = "Programming"

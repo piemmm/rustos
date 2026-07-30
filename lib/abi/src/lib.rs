@@ -64,10 +64,10 @@ pub mod window_ipc;
 pub use appinfo::{
     body_len as appinfo_body_len, digest_bundle_contents, mime_type_at, resolve_library,
     validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError,
-    LibraryError, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APP_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
-    USER_APP_STORE,
+    LibraryCategory, LibraryError, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX,
+    BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APP_STORE,
+    SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE, USER_APP_STORE,
 };
 pub use boot::{
     Arch, BootFacts, BootId, CpuName, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN,

@@ -16,20 +16,26 @@
 //! bundle verifier reconstructs.
 //!
 //! The manifest-source grammar is a deliberately tiny, line-based TOML
-//! subset, parsed fail-closed: `#` comments, and exactly the keys `id`,
+//! subset, parsed fail-closed: `#` comments; the required keys `id`,
 //! `name`, `version`, `kind`, and `capabilities` (a single-line array of
-//! canonical `CAP_*` names), each exactly once. Anything else — an unknown
-//! key, a duplicate, a multi-line value, an unknown capability name — is a
-//! packaging defect that fails the build, never a guessed default.
+//! canonical `CAP_*` names); and the optional keys `associations` (the
+//! declared file-type hints), `library` (the program-library folder a
+//! graphical application lists itself under — absence means the library
+//! never shows the bundle), and `library-icon` (an icon asset inside the
+//! bundle's `Resources/`, legal only beside `library`). Each key appears
+//! at most once. Anything else — an unknown key, a duplicate, a multi-line
+//! value, an unknown capability or folder name — is a packaging defect
+//! that fails the build, never a guessed default.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
-    digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, ABI_VERSION_CURRENT,
-    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
+    ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -102,6 +108,17 @@ pub struct AppManifestSource {
     /// gate still verifies and capability-checks whichever bundle is
     /// launched (`plans/NEW-FILEMANAGER.md` `FM6b`).
     pub associations: Vec<String>,
+    /// The program-library folder the bundle lists itself under, or `None`
+    /// for a bundle the desktop's Program Library never shows. Listing is
+    /// an explicit opt-in — exactly as a desktop entry is elsewhere — so a
+    /// plain command tool stays out of the launcher without a marker, and
+    /// a graphical application declares its folder in its own manifest
+    /// (`plans/NEW-TASKBAR.md` T3).
+    pub library: Option<LibraryCategory>,
+    /// The library icon asset — a plain file name inside the bundle's own
+    /// `Resources/` — legal only on a listed bundle. `None` means a
+    /// launcher draws its class fallback icon.
+    pub library_icon: Option<String>,
 }
 
 impl AppManifestSource {
@@ -113,7 +130,9 @@ impl AppManifestSource {
     /// duplicate key, a missing key, a malformed string or array value, an
     /// over-long or empty identity field, a name that is not a plain
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
-    /// name, or a capability list exceeding the manifest bound.
+    /// name, a capability list exceeding the manifest bound, an unknown
+    /// library folder, a `library-icon` without `library`, or a `library`
+    /// on a `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -122,6 +141,8 @@ impl AppManifestSource {
         let mut kind = None;
         let mut capabilities = None;
         let mut associations = None;
+        let mut library = None;
+        let mut library_icon = None;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -143,6 +164,10 @@ impl AppManifestSource {
                 "associations" => {
                     set(&at, key, &mut associations, parse_associations(&at, value)?)?;
                 }
+                "library" => set(&at, key, &mut library, parse_library(&at, value)?)?,
+                "library-icon" => {
+                    set(&at, key, &mut library_icon, parse_string(&at, value)?)?;
+                }
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -155,8 +180,11 @@ impl AppManifestSource {
             kind: require(kind, "kind")?,
             capabilities: require(capabilities, "capabilities")?,
             // `associations` is optional: a bundle that opens no operand
-            // file declares none.
+            // file declares none. `library`/`library-icon` are optional
+            // too: absence means the library never lists the bundle.
             associations: associations.unwrap_or_default(),
+            library,
+            library_icon,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -192,6 +220,23 @@ impl AppManifestSource {
         }
         for mime in &self.associations {
             check_len(ctx, "association", mime, MIME_TYPE_MAX)?;
+        }
+        if let Some(icon) = &self.library_icon {
+            if self.library.is_none() {
+                // An icon on a bundle the library never lists is incoherent;
+                // refuse the manifest whole rather than half-honour it.
+                return Err(AppImageError::new(ctx, "`library-icon` without `library`"));
+            }
+            check_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?;
+        }
+        if self.library.is_some() && self.kind == AppKind::Service {
+            // A service is a daemon, not a user-facing application; listing
+            // one in the launcher would offer a user a bundle that opens no
+            // surface.
+            return Err(AppImageError::new(
+                ctx,
+                "a `service` cannot declare `library`",
+            ));
         }
         Ok(())
     }
@@ -241,6 +286,14 @@ fn parse_kind(at: &str, value: &str) -> Result<AppKind, AppImageError> {
         "service" => Ok(AppKind::Service),
         other => Err(AppImageError::new(at, format!("unknown kind `{other}`"))),
     }
+}
+
+/// Parse the closed program-library folder vocabulary
+/// ([`LibraryCategory`]): the canonical, case-exact folder identifiers.
+fn parse_library(at: &str, value: &str) -> Result<LibraryCategory, AppImageError> {
+    let name = parse_string(at, value)?;
+    LibraryCategory::from_id(&name)
+        .ok_or_else(|| AppImageError::new(at, format!("unknown library folder `{name}`")))
 }
 
 /// Parse a single-line array of canonical `CAP_*` capability names.
@@ -467,10 +520,16 @@ pub fn compose_signed_appinfo(
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
         version_len: inline_len(ctx, "version", &manifest.version, BUNDLE_VERSION_MAX)?,
-        reserved0: 0,
+        library_icon_len: match &manifest.library_icon {
+            Some(icon) => inline_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?,
+            None => 0,
+        },
+        library: LibraryCategory::to_wire(manifest.library),
+        reserved0: [0; 3],
         id: inline_buf(&manifest.id),
         name: inline_buf(&manifest.name),
         version: inline_buf(&manifest.version),
+        library_icon: inline_buf(manifest.library_icon.as_deref().unwrap_or("")),
         syscall_table_hash,
         content_hash,
         signer_pubkey,
@@ -538,6 +597,12 @@ mod tests {
         kind = \"command\"\n\
         capabilities = [\"CAP_CONSOLE_WRITE\", \"CAP_FS_ACCESS\"]\n";
 
+    /// A listed graphical application's manifest: the [`GOOD`] base plus
+    /// the explicit library opt-in and its icon.
+    fn listed() -> String {
+        format!("{GOOD}library = \"Office\"\nlibrary-icon = \"example.svg\"\n")
+    }
+
     #[test]
     fn parses_a_valid_manifest() {
         let manifest = AppManifestSource::parse(GOOD).expect("valid");
@@ -550,6 +615,21 @@ mod tests {
             [CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS]
         );
         assert_eq!(manifest.bundle_dir(), "example.app");
+        assert_eq!(manifest.library, None, "listing is an explicit opt-in");
+        assert_eq!(manifest.library_icon, None);
+    }
+
+    #[test]
+    fn a_listed_application_declares_its_folder_and_icon() {
+        let manifest = AppManifestSource::parse(&listed()).expect("valid");
+        assert_eq!(manifest.library, Some(LibraryCategory::Office));
+        assert_eq!(manifest.library_icon.as_deref(), Some("example.svg"));
+
+        // The icon is optional on a listed bundle; the folder alone lists it.
+        let folder_only = format!("{GOOD}library = \"Games\"\n");
+        let manifest = AppManifestSource::parse(&folder_only).expect("valid");
+        assert_eq!(manifest.library, Some(LibraryCategory::Games));
+        assert_eq!(manifest.library_icon, None);
     }
 
     #[test]
@@ -597,6 +677,30 @@ mod tests {
                 GOOD.replace("version = \"1.2.3\"\n", "version\n"),
                 "no equals",
             ),
+            (
+                format!("{GOOD}library = \"Settings\"\n"),
+                "unknown library folder",
+            ),
+            (
+                format!("{GOOD}library = \"office\"\n"),
+                "folder identifiers are case-exact",
+            ),
+            (
+                format!("{GOOD}library-icon = \"example.svg\"\n"),
+                "library-icon without library",
+            ),
+            (
+                listed().replace("\"command\"", "\"service\""),
+                "a service cannot declare library",
+            ),
+            (
+                listed().replace("example.svg", &"x".repeat(LIBRARY_ICON_MAX + 1)),
+                "over-long library icon",
+            ),
+            (
+                format!("{GOOD}library = \"Office\"\nlibrary = \"Games\"\n"),
+                "duplicate library key",
+            ),
         ] {
             assert!(
                 AppManifestSource::parse(&broken).is_err(),
@@ -616,6 +720,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "applib",
                 "basename",
                 "cat",
                 "chmod",
@@ -728,6 +833,8 @@ mod tests {
         assert_eq!(header.bundle_id(), "os.tairix.example");
         assert_eq!(header.bundle_name(), "example");
         assert_eq!(header.bundle_version(), "1.2.3");
+        assert_eq!(header.library_category(), None);
+        assert_eq!(header.library_icon(), None);
         assert_eq!(header.syscall_table_hash, syscall_hash);
         assert_eq!(header.signer_pubkey, composed.signer_pubkey);
 
@@ -769,6 +876,24 @@ mod tests {
         })
         .expect("frames");
         assert_ne!(header.content_hash, sha256(&other_framing));
+    }
+
+    #[test]
+    fn a_listed_applications_folder_and_icon_survive_composition() {
+        let manifest = AppManifestSource::parse(&listed()).expect("valid");
+        let composed = compose_signed_appinfo(
+            &[3u8; 32],
+            &manifest,
+            [0xCD; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program bytes",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(header.library_category(), Some(LibraryCategory::Office));
+        assert_eq!(header.library_icon(), Some("example.svg"));
     }
 
     #[test]
