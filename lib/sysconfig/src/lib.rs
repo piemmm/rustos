@@ -85,6 +85,8 @@ extern crate alloc;
 use alloc::string::String;
 use core::fmt;
 
+use tairix_util::conf::strip_comment;
+
 /// The directory that holds the boot-time configuration store, inside the
 /// writable `/System/Settings` subtree of the encrypted root volume.
 pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
@@ -705,16 +707,6 @@ impl SystemConfig {
             out.push('\n');
         }
         out
-    }
-}
-
-/// Return the portion of `line` before its first `#`, dropping an inline or
-/// whole-line comment. No registry key or value contains `#`, so cutting at
-/// the first one is unambiguous.
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(index) => &line[..index],
-        None => line,
     }
 }
 

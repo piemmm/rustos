@@ -80,6 +80,7 @@ members = [
     "lib/path",
     "lib/pci",
     "lib/procinfo",
+    "lib/proglib",
     "lib/raster",
     "lib/resolver",
     "lib/resref",

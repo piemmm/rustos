@@ -11,6 +11,11 @@ code.
 
 ## Members
 
+* `conf` — the `#`-comment line grammar every line-oriented
+  configuration store shares (`strip_comment`: a `#` opens a comment
+  that runs to the end of the line). Consumers: `lib/sysconfig`,
+  `lib/netconfig`, and `userland/system/init`'s service registry and
+  startup list.
 * `cfloat` — C-locale `printf(3)` floating-point rendering
   (`FloatDirective`: flags, width, precision, `efga`/`EFGA`
   conversions, rendered exactly as C prints a `double`). Consumers: the
@@ -25,5 +30,12 @@ code.
   parsing (`SizeScale`), ceiling block scaling (`blocks_ceil`), and the
   `human_ceiling` renderings (`format_human`, powers of 1024 or 1000).
   Consumers: the `du` and `df` command apps (`plans/APPS.md`).
+* `count` — the GNU count grammar for `-c`/`-n` values
+  (`parse_decimal`, and `parse_suffixed` for the multiplier alphabet).
+  Consumers: the `head` and `tail` command apps (`plans/APPS.md`).
+* `tailwindow` — the bounded rolling "keep the last N bytes/lines"
+  windows (`ByteWindow`, `LineWindow`), so a last-N view costs memory in
+  N rather than in the input. Consumers: the `head` and `tail` command
+  apps.
 
 Long-form documentation: `docs/src/lib/util.md`.

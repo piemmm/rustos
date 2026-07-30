@@ -1,0 +1,36 @@
+[package]
+name = "tairix-proglib"
+description = "TAIRiX program-library catalog engine: the one definition of the `/System/Settings/ProgramLibrary/library.conf` document — its closed folder taxonomy, `<id>.<key>` grammar, validated entry model, bounded fail-closed parser, canonical render, and the machine-catalog/user-overlay merge every producer and consumer shares (§3 `lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The bundle-store layout, the `.app` suffix, and the identifier/name
+# bounds an `AppInfo` manifest already fixes: a catalog entry names a
+# bundle, so it keys its own bounds to those rather than mint a second set
+# that could drift.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one path-spelling parser: a catalog entry's bundle path is validated
+# and canonicalised through it, so the store can never hold a spelling the
+# rest of the system would resolve differently.
+tairix-path = { path = "../path", version = "=0.0.0" }
+# The one definition of the `/Users/<name>` home layout the per-user
+# overlay path is built from (`tairix_users::policy::default_home`).
+tairix-users = { path = "../users", version = "=0.0.0" }
+# The one `#`-comment line grammar every line-oriented configuration store
+# in the tree shares, so a comment is recognised in a catalog exactly as it
+# is in the boot-time and network stores.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

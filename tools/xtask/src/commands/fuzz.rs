@@ -149,6 +149,12 @@ pub const TARGETS: &[Target] = &[
         description: "network.conf store engine (per-interface parse, bounds, render round-trip)",
     },
     Target {
+        package: "tairix-proglib",
+        test: "fuzz_proglib",
+        description:
+            "program-library catalog store (entry grammar, patch merge, render round-trip, bounds)",
+    },
+    Target {
         package: "tairix-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
@@ -873,6 +879,65 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-kernel-ipc");
+    }
+
+    #[test]
+    fn program_library_store_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_proglib"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-proglib");
+    }
+
+    /// Collects the harness names (`fuzz_<name>` integration-test files) a
+    /// crate publishes under its own `tests/` directory.
+    fn harnesses_below(dir: &std::path::Path, found: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let in_tests_dir = dir.file_name().is_some_and(|name| name == "tests");
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            if path.is_dir() {
+                if name != "target" {
+                    harnesses_below(&path, found);
+                }
+            } else if in_tests_dir {
+                if let Some(stem) = name.strip_suffix(".rs") {
+                    if stem.starts_with("fuzz_") {
+                        found.push(stem.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A harness that exists on disk but is absent from the registry is never
+    /// run by the gate, so its subject is unfuzzed however green CI looks.
+    #[test]
+    fn every_harness_in_the_tree_is_registered() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("xtask sits two levels below the workspace root");
+        let mut found = Vec::new();
+        for area in ["kernel", "drivers", "lib", "userland", "tools", "tests"] {
+            harnesses_below(&root.join(area), &mut found);
+        }
+        assert!(
+            !found.is_empty(),
+            "walked {} but found no harnesses at all",
+            root.display()
+        );
+        let unregistered: Vec<&String> = found
+            .iter()
+            .filter(|name| !TARGETS.iter().any(|t| t.test == name.as_str()))
+            .collect();
+        assert!(
+            unregistered.is_empty(),
+            "fuzz harnesses missing from the registry: {unregistered:?}"
+        );
     }
 
     #[test]

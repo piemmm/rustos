@@ -35,6 +35,10 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # its uid through `tairix_users::system_account_uid` at parse time, so
 # every boot service is spawned as its own service account.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The one `#`-comment line grammar every line-oriented configuration store
+# in the tree shares: the service registry and the startup list tokenise
+# their documents exactly as `lib/sysconfig` and `lib/netconfig` do.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.

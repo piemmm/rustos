@@ -129,10 +129,15 @@ Do **not** begin a stage before all its listed dependencies are complete.
   with longest-prefix `endptr` semantics and exact hex-float rounding;
   the same two apps), `count` (the GNU `-c`/`-n` count-with-multiplier
   grammar; the `head` + `tail` command apps, hoisted out of `head` when
-  `tail` became the second consumer), and `tailwindow` (the bounded
+  `tail` became the second consumer), `tailwindow` (the bounded
   rolling "keep the last N bytes/lines" windows; the `head` + `tail`
   command apps — `head`'s `-c -N`/`-n -N` elide modes and `tail`'s
-  `-c N`/`-n N` last-N modes are the two policies over one mechanism).
+  `-c N`/`-n N` last-N modes are the two policies over one mechanism),
+  and `conf` (the `#`-comment line grammar every line-oriented
+  configuration store shares; `lib/sysconfig` + `lib/netconfig` +
+  `userland/system/init`'s service registry and startup list, hoisted out
+  of the four private copies so a comment is recognised identically in
+  all of them).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 
@@ -3104,9 +3109,12 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `planned`) — `plans/NEW-TASKBAR.md`: a
-first-class, folder-organised program library (`lib/proglib`, programmatically
-add/removable via the `applib` command + the installer), a permanent
+Full **icon-bar** build-out (staged, `in progress` — T1 done) —
+`plans/NEW-TASKBAR.md`: a first-class, folder-organised program library
+(`lib/proglib` — the catalog store engine, **landed**: closed folder taxonomy,
+validated entry model, `<id>.<field>` grammar, bounded fail-closed parser,
+canonical render, and the one machine ∪ user-overlay merge; programmatically
+add/removable via the `applib` command + the installer, next), a permanent
 file-manager icon, user-pinned shortcuts (`lib/taskpins`, pin-to-taskbar +
 drag), the notification area, and the always-rightmost Switchboard
 system-overview surface (`userland/gui/switchboard` hosting the existing

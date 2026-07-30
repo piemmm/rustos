@@ -37,7 +37,14 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`planned` — no stage started. The starting point is Stage 7 as it stands:
+`in progress` — **T1 done**; T2 is next. `lib/proglib` is landed: the closed
+folder taxonomy, the validated entry model, the `<id>.<field>` store grammar
+with its closed key registry, the bounded fail-closed parser, the canonical
+render, the `Catalog` operations, and the one machine ∪ user-overlay `merge`,
+with the path spellings defined once and the parser fuzzed
+(`tests/fuzz_proglib.rs`, registered with `cargo xtask fuzz`). Everything
+else below is unstarted. The rest of the starting point is Stage 7 as it
+stands:
 `tairix-taskbar` models the start button / task list / notification area /
 clock and emits typed `TaskbarResponse`s; `tairix-session` presents the bar
 through the compositor, owns the theme, and resolves those responses
@@ -271,32 +278,39 @@ T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate) — but T8 (notificatio
 area) and the file-manager button in T4 have no dependency on the library
 data and may proceed in parallel.
 
-## T1 — `lib/proglib`: the program-library catalog engine
+## T1 — `lib/proglib`: the program-library catalog engine — **done**
 
-**Deliverables**
-- New `no_std` crate `lib/proglib` (stability `experimental` in its README,
-  §6), added to §3 of `AGENTS.md` and to `PLAN.md`.
-- `LibraryCategory` (the closed taxonomy of §3) with a total, deterministic
-  ordering and locale-neutral folder ids.
-- `LibraryEntry { id, bundle_path, category, display_name, icon }` — a typed,
-  validated record (bundle path parsed through the shared `lib/path` parser;
-  display name/icon length-bounded).
-- The store grammar: `parse(&str) -> Result<Catalog, LibraryError>` (bounded,
-  alloc-disciplined, fail closed) and `render(&Catalog) -> String` (canonical,
-  round-trips), mirroring `lib/sysconfig`.
-- `Catalog` operations: `insert`/`remove`/`get` by id, `entries_in(category)`
-  sorted, `folders()` (non-empty folders in taxonomy order).
-- `merge(machine, user) -> Catalog` — the one pure overlay-merge function.
-- The path/suffix constants (`LIBRARY_DIR`, `LIBRARY_FILE`) defined **once**
-  here (or in `lib/abi` if a kernel consumer needs them), never duplicated.
+`lib/proglib` (`no_std` + `alloc`, stability `experimental`) is the catalog
+engine every later stage builds on. What it now guarantees:
 
-**Tests (host)**: parse/render round-trip; every fail-closed rejection
-(unknown category, duplicate id, oversize, malformed line); ordering
-determinism; merge precedence (user hide/rename/re-file/append); empty-store
-default. Fuzz the parser (§19.6) — it is untrusted input.
+- **The taxonomy** — `LibraryCategory`, the closed folder set with
+  locale-neutral ids and a total, deterministic presentation order.
+- **The entry model** — `LibraryEntry` over the validated newtypes `EntryId`
+  / `DisplayName` / `BundlePath` (confined to an application bundle inside an
+  application store, parsed through `lib/path`) / `IconAsset`, so an invalid
+  entry is unrepresentable.
+- **The store** — the `<id>.<field>` line grammar (keys split at the *last*
+  `.`, so a reverse-DNS id is valid) over the closed `EntryKey` registry
+  (`name`, `bundle`, `category`, `icon`, and the patch-only `hidden`); a
+  bounded, fail-closed `parse` that refuses the **whole** document
+  (`CatalogError` with the offending line) and a canonical `render` that
+  round-trips exactly.
+- **`Catalog`** — `insert`/`patch`/`remove`/`get`/`entry`/`entry_patch`,
+  `records`/`entries`/`patches`, and the `folder`/`folders` views, failing
+  closed with `CatalogFull` at `MAX_ENTRIES`. A record is a declared
+  `Record::Entry` or an overlay `Record::Patch`.
+- **`merge(machine, overlay)`** — the one pure overlay resolution: overlay
+  entries replace machine entries of the same id, overlay patches win over
+  machine patches, a hide by *either* document is final, and a patch naming
+  no entry is discarded (so re-installing restores the personalisation).
+- **The path spellings defined once** — `LIBRARY_DIR`, `LIBRARY_FILE`,
+  `MACHINE_LIBRARY_PATH`, and `user_library_path` (over
+  `tairix_users::default_home`). No I/O, no authority.
 
-**Done when**: `lib/proglib` parses, renders, and merges catalogs with full
-coverage, no I/O, no authority, and the whole-project gate is green.
+Docs: `lib/proglib/README.md`, `docs/src/lib/proglib.md`, `AGENTS.md` §3,
+`PLAN.md`. Tested host-side beside the code (round-trip, every fail-closed
+rejection, ordering determinism, merge precedence, empty-store default) and
+fuzzed by `tests/fuzz_proglib.rs`, registered with `cargo xtask fuzz`.
 
 ## T2 — Programmatic add/remove: `applib` + the installer hook
 

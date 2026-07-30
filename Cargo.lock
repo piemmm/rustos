@@ -1428,6 +1428,7 @@ dependencies = [
  "tairix-log",
  "tairix-rt",
  "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1844,6 +1845,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1918,6 +1920,17 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-resref",
  "tairix-rt",
+]
+
+[[package]]
+name = "tairix-proglib"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-path",
+ "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2109,6 +2122,9 @@ dependencies = [
 [[package]]
 name = "tairix-sysconfig"
 version = "0.0.0"
+dependencies = [
+ "tairix-util",
+]
 
 [[package]]
 name = "tairix-syshelp"

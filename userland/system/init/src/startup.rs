@@ -47,6 +47,8 @@
 
 use core::fmt;
 
+use tairix_util::conf::strip_comment;
+
 /// Maximum length, in bytes, of a startup config text [`StartupConfig::parse`]
 /// will consider. A larger input is refused outright ([`ConfigError::TooLong`])
 /// rather than scanned — the config `init` carries is tiny, and an
@@ -394,16 +396,6 @@ fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
     }
     let uid = tairix_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
     Ok(Launch { path, uid: uid.0 })
-}
-
-/// Return the portion of `line` before its first `#`, dropping an inline or
-/// whole-line comment. A `session` path never contains `#`, so cutting at the
-/// first one is unambiguous.
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(index) => &line[..index],
-        None => line,
-    }
 }
 
 /// Count the `service` directives a startup config `text` declares.

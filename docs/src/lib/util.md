@@ -8,6 +8,17 @@ and panic-free throughout.
 
 ## Members
 
+* `conf` — the `#`-comment line grammar every line-oriented
+  configuration store in the tree shares: `strip_comment` returns the
+  portion of a line before its first `#`, leaving the surrounding
+  whitespace for the caller to trim, so a blank result is a line
+  carrying no setting. The boot-time system configuration
+  (`lib/sysconfig`), the network configuration (`lib/netconfig`), and
+  `userland/system/init`'s service registry and startup list all read
+  that one definition, so a change to how a comment is recognised can
+  never apply to some stores and not others. No store's keys or values
+  may contain `#` — each store's own validators enforce that, which is
+  what makes cutting at the first `#` unambiguous.
 * `cfloat` — C-locale `printf(3)` floating-point rendering shared by the
   `seq` and `printf` command apps (`plans/APPS.md`): one `FloatDirective`
   (the five printf flags, width, precision, `efga`/`EFGA` conversions)
@@ -38,6 +49,21 @@ and panic-free throughout.
   units, an integer otherwise, re-tiering a rounded-up amount, in
   powers of 1024 or 1000). Values are `u128` internally so a 100 TB+
   volume's byte totals can never overflow (`AGENTS.md` §26.6).
+* `count` — the GNU count grammar for the `-c`/`-n` values shared by the
+  `head` and `tail` command apps (`plans/APPS.md`): `parse_decimal`
+  reads a plain digit run and `parse_suffixed` a digit run with the GNU
+  multiplier alphabet (`b` = 512; `k`/`K`/`M`/`G`/… as powers of 1024, or
+  of 1000 with a trailing `B`). A malformed spelling or unknown suffix is
+  rejected as `None`; an in-grammar count beyond any possible input
+  saturates at `u64::MAX` rather than wrapping, since a count larger than
+  the input is served exactly by "all of it". The tool-specific sign
+  handling (`head`'s leading `-`, `tail`'s `+`) stays in each tool.
+* `tailwindow` — the bounded rolling "keep the last N bytes/lines"
+  windows shared by the same two apps: `ByteWindow` and `LineWindow`
+  retain only the trailing N units of a stream, so `head`'s `-c -N` /
+  `-n -N` elide modes and `tail`'s `-c N` / `-n N` last-N modes are two
+  policies over one mechanism whose memory cost is N, never the input
+  size — a 100 TB+ file is a constant-memory read.
 
 ## How to grow the crate
 

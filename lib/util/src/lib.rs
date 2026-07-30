@@ -8,6 +8,10 @@
 //!
 //! Members:
 //!
+//! * [`conf`] — the `#`-comment line grammar every line-oriented
+//!   configuration store shares, consumed by `lib/sysconfig`,
+//!   `lib/netconfig`, and `userland/system/init`'s service registry and
+//!   startup list, so a comment is recognised the same way in all of them.
 //! * [`cfloat`] — C-locale `printf(3)` floating-point rendering, consumed
 //!   by the `seq` and `printf` command apps (`plans/APPS.md`), so C's
 //!   rounding, flag, and padding rules exist in exactly one place.
@@ -46,6 +50,7 @@ extern crate alloc;
 
 pub mod cfloat;
 pub mod cnum;
+pub mod conf;
 pub mod count;
 pub mod fmt;
 pub mod size;

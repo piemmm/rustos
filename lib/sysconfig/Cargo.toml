@@ -12,3 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The one `#`-comment line grammar every line-oriented configuration store
+# in the tree shares, so a comment is recognised identically here, in
+# `lib/netconfig`, and in init's service registry and startup list.
+tairix-util = { path = "../util", version = "=0.0.0" }

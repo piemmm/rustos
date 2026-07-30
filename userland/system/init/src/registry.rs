@@ -61,6 +61,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_caps::CapabilitySet;
+use tairix_util::conf::strip_comment;
 
 use crate::service::decode_manifest_capabilities;
 
@@ -312,15 +313,6 @@ pub fn unenrol(current: &Enrolment, name: &str) -> Result<Enrolment, EnrolError>
         .cloned()
         .collect();
     Ok(Enrolment { names })
-}
-
-/// Strip a `#`-to-end-of-line comment from a line, returning the part before
-/// the first `#`.
-fn strip_comment(line: &str) -> &str {
-    match line.find('#') {
-        Some(idx) => &line[..idx],
-        None => line,
-    }
 }
 
 #[cfg(test)]

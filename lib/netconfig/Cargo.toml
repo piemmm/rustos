@@ -16,6 +16,10 @@ workspace = true
 # `netstack-v1` wire message; this grammar keys its own limit to it so the
 # store, the engine, and the wire can never disagree (§2.2).
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one `#`-comment line grammar every line-oriented configuration store
+# in the tree shares, so a comment is recognised identically here, in
+# `lib/sysconfig`, and in init's service registry and startup list.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

@@ -563,11 +563,13 @@ tairix/
 │   ├── log/             # Structured logging.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
 │   ├── net/             # Network protocol engine (wire protocols).
+│   ├── netconfig/       # network.conf per-interface configuration store engine.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
+│   ├── proglib/         # Program-library catalog store engine (folders/entries).
 │   ├── raster/          # Shared software rasterisation.
 │   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
 │   ├── resref/          # Shared resource-reference parser.
