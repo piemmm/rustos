@@ -351,6 +351,29 @@ later genuine return recovers it — a health fault is not a surprise-removal).
 The timeout arithmetic is that one shared helper, so `virtio_blk`/`emmc2`
 reuse it unchanged when brought up (§2.2), never a per-driver copy.
 
+The bounded recovery **escalation** — what the *driver* does to the hardware
+between reissued attempts — is landed as its own shared primitive
+`blkio::RecoveryLadder` (§2.2, §27), the driver-action counterpart of
+`BlkHealth`. `RecoveryLadder::next_action(state)` maps a device's current
+`BlkHealthState` to the next `RecoveryAction`: an operational device re-arms the
+ladder (`None`); a `Recovering` device escalates — a gentle `Retry` first (a
+one-off glitch often clears itself), then a data-path `Reset` on each subsequent
+attempt — up to the class's `IoBudget::max_retries` (the **same** cap the
+consumer's `should_reissue` reads, so escalation and reissue derive from one
+policy and cannot drift), after which it is `GiveUp` and the grace window is left
+to fail the device closed; a device already failed closed is `GiveUp` until a
+demonstrated return re-arms it. The ladder holds no clock and never spins or
+parks: it advances one rung per reissued attempt, which are already spaced by the
+consumer's reissue cadence and per-request deadline — stronger than a driver-side
+backoff timer for head-of-line freedom (§26.1), and provable host-side. `usb_msd`
+is the first consumer: after each reply its serve loop consults the LUN's ladder
+from the just-folded `BlkHealth` state and, on `Reset`, clears the unit's bulk
+pipes (`ScsiDevice::scrub_window`, its one data-path reset) and logs an
+`MSD_RECOVERY_RESET` audit event; the reset is only issued for a unit already
+answered reissuably, so it never stalls an unrelated LUN. `virtio_blk`/`emmc2`
+inherit the same primitive when brought up as user-space serve processes,
+mapping `Reset` to their own queue/controller re-init.
+
 Remaining:
 - `virtio_blk` and `emmc2` are currently consumed **in-kernel** (root-unlock)
   and expose only their `Block` implementation — they are not yet brought up as
@@ -359,13 +382,6 @@ Remaining:
   copying it, so there is nothing to "adopt" separately; the shared engine is
   the single definition (§2.2). Bringing those serve processes up is tracked
   with their user-space driver-process work, not this stage.
-- The bounded recovery *escalation* (retry-with-backoff → LUN/device/port
-  reset) as an explicit driver action behind the reply-reissuable reporting.
-  The background grace-window expiry for a `Recovering` device that receives no
-  further request is landed both as its primitive (`BlkHealth::poll` /
-  `grace_deadline_ns` / `recovery_wait_timeout`) and as the live `usb_msd`
-  serve-loop wiring (above); `virtio_blk`/`emmc2` inherit the same helper when
-  brought up as user-space serve processes.
 - The consumer marking the affected volume degraded landed in IO2 above (the
   kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
   Recovering}`); the remaining observability is the audit-log health trail
@@ -387,10 +403,15 @@ Deliverables (design):
   - New requests are briefly parked on the same event-timed budget rather than
     failed immediately, so a blip that resolves in milliseconds is invisible to
     the workload.
-  - The driver runs its bounded recovery escalation, each step time-boxed and
-    event-driven: retry-with-backoff → LUN reset → device/port reset → (escalate
-    to the fault-domain owner for, Stage IO4) hub reset → controller reset. No
-    unbounded retries (§2.1); backoff parks on a one-shot timer (§2.23).
+  - The driver runs its bounded recovery escalation through the shared
+    `blkio::RecoveryLadder`: a gentle retry, then a bounded, escalating
+    data-path reset (a driver maps `RecoveryAction::Reset` to its mechanism —
+    `usb_msd` clears its bulk pipes; the fault-domain owner's hub/controller
+    reset is Stage IO4). It is bounded by the class's `IoBudget::max_retries`
+    (no unbounded retries, §2.1) and, in the reply-reissuable model, advances
+    one rung per reissued attempt — spaced by the consumer's reissue cadence,
+    so the driver neither spins nor parks a backoff timer of its own (§2.23,
+    §26.1 head-of-line freedom).
   - **If the device returns inside the window** → `Recovering → Healthy`, held
     requests complete normally, and a recovery event is logged (§26.5 "disks can
     come back to life; note it in the health log"). This is the explicit

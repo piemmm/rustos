@@ -3,8 +3,8 @@
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
 use tairix_abi::blkio::{
-    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN,
-    BLK_DATA_LEN, BLK_REQUEST_LEN,
+    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, RecoveryAction,
+    RecoveryLadder, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -69,6 +69,11 @@ const MSD_DETACHED: EventId = EventId(4165);
 /// and its endpoint keeps serving fail-closed answers — a later genuine
 /// return still recovers it (sticky-but-recoverable, no reboot).
 const MSD_GRACE_EXPIRED: EventId = EventId(4166);
+
+/// Diagnostic event id: the recovery ladder escalated to a data-path reset
+/// for a stalling LUN — the bounded step taken to try to bring a recovering
+/// unit back before its grace window is left to fail it closed.
+const MSD_RECOVERY_RESET: EventId = EventId(4167);
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -319,6 +324,11 @@ struct LunServe {
     /// mass-storage unit is a removable device (bus resets, surprise
     /// removal), so it is served with that class's budget.
     health: BlkHealth,
+    /// The per-LUN recovery-escalation ladder: what this driver *does* to the
+    /// hardware between reissued attempts while the unit is recovering (a
+    /// gentle retry first, then an escalating data-path reset), bounded by the
+    /// same removable-class budget the health window uses.
+    ladder: RecoveryLadder,
 }
 
 /// Create the block-service endpoint `id`. Binding it grant-restricted
@@ -671,6 +681,7 @@ where
             state,
             window,
             health: BlkHealth::new(BlkDeviceClass::Removable),
+            ladder: RecoveryLadder::new(BlkDeviceClass::Removable),
         });
         published += 1;
     }
@@ -781,6 +792,25 @@ where
             )
         };
         let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
+        // Drive the bounded recovery-escalation ladder from the unit's health.
+        // A unit that just answered normally re-arms the ladder; a `Recovering`
+        // unit escalates — a first gentle retry, then a data-path reset (this
+        // driver's one recovery mechanism: clear the bulk pipes) — to try to
+        // bring it back before its grace window is left to fail it closed. The
+        // ladder bounds how often the reset is taken, so a wedged unit is never
+        // reset forever, and the reset is only ever issued for a unit already
+        // being answered reissuably, so head-of-line freedom holds.
+        let health_state = serve.health.state();
+        if serve.ladder.next_action(health_state) == RecoveryAction::Reset {
+            scsi.scrub_window();
+            log_hex_event(
+                MSD_RECOVERY_RESET,
+                Level::Warn,
+                "usb-msd: escalating a data-path reset to recover a stalling LUN",
+                "lun_hex",
+                u64::from(lun),
+            );
+        }
         // A vanished URB endpoint means the HCD retracted the interface:
         // the device is gone. Retract the LUN nodes and exit cleanly so a
         // re-plug re-enumerates and reloads this driver.

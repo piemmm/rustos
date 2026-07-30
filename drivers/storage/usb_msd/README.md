@@ -50,7 +50,13 @@ binary works behind any host controller that speaks the URB transport
    carrying a per-unit `blkio::BlkHealth` (the `Removable` device class) so a
    transient stall or bus reset is ridden out through its recovery grace
    window — answered reissuably while `Recovering`, failed closed only once
-   the window elapses without the unit returning (`plans/FIX-IO.md` IO3):
+   the window elapses without the unit returning (`plans/FIX-IO.md` IO3). A
+   recovering unit also drives a per-LUN `blkio::RecoveryLadder`: after each
+   reply the serve loop escalates the shared ladder from the unit's health —
+   a gentle retry first, then a bulk-pipe reset (`ScsiDevice::scrub_window`)
+   on the next attempt, bounded by the same removable-class
+   `IoBudget::max_retries` so a wedged unit is never reset forever — nudging a
+   stalling unit back before the grace window is left to fail it closed:
    - **BOT** (`src/bot.rs`): CBW/CSW framing with every device field
      validated, per-transfer stall recovery below (the HCD), CSW-stall
      retry, and Bulk-Only Mass Storage Reset on tag mismatch / corrupt CSW /

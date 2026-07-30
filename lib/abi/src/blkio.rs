@@ -972,6 +972,128 @@ where
         .map(|deadline| deadline.saturating_sub(now_ns))
 }
 
+/// The recovery action a serving block driver takes for one device before its
+/// next attempt, decided by the bounded escalation ladder [`RecoveryLadder`].
+///
+/// The ladder escalates from the least disruptive action to the most, so a
+/// one-off comms glitch is not punished with a needless bus reset while a
+/// genuinely stuck data path is still cleared before the workload gives up.
+/// A driver maps each action to the concrete mechanism it has (a USB
+/// mass-storage driver clears its bulk pipes; a virtio/NVMe driver resets its
+/// queue/controller); an action a driver's hardware cannot express is a no-op
+/// that still advances the ladder, so the escalation is honest on every
+/// transport.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryAction {
+    /// The device is operational: there is nothing to recover and the ladder
+    /// is back at the bottom. Emitted for a `Healthy`/`Degraded` device.
+    None,
+    /// Reissue the transfer without disturbing the device — the first response
+    /// to a transient blip, since a one-off glitch (a recovered ECC error, a
+    /// single dropped packet) often clears itself and a reset would only add
+    /// latency.
+    Retry,
+    /// Reset the device's data path (clear stalled endpoints / re-init the
+    /// queue) before the next attempt — the escalation once a blip has
+    /// recurred rather than cleared on its own.
+    Reset,
+    /// The bounded ladder is exhausted (the device's per-class retry budget is
+    /// spent, or it has already been failed closed): stop escalating and let
+    /// the grace window ([`BlkHealth`]) fail the device closed on time. Never
+    /// an unbounded retry.
+    GiveUp,
+}
+
+/// The bounded recovery-**escalation** ladder a serving block driver climbs
+/// while one of its devices is riding out a blip, owned per served logical
+/// unit alongside that unit's [`BlkHealth`].
+///
+/// It is the driver-action counterpart of [`BlkHealth`]: where `BlkHealth`
+/// decides *what the consumer is told* (reissuable while `Recovering`, failed
+/// closed once the grace window elapses), the ladder decides *what the driver
+/// does to the hardware* between reissued attempts — reissue as-is, reset the
+/// data path, or give up escalating — bounded by the same per-class
+/// [`IoBudget::max_retries`] both this and the consumer's
+/// [`IoBudget::should_reissue`] read, so the driver's escalation and the
+/// consumer's reissue budget derive from one policy and cannot drift apart
+/// (§2.2). A device that keeps stalling therefore climbs a *finite* ladder and
+/// is never reset forever (the charter's ban on retry-until-it-works).
+///
+/// It is pure and holds no clock or timer: the escalation advances one rung
+/// per reissued attempt, and reissued attempts are already spaced by the
+/// consumer's own reissue cadence and per-request deadline, so the driver
+/// neither spins nor parks a backoff timer of its own — which is *stronger*
+/// than a driver-side backoff for head-of-line freedom, since the serve loop
+/// never sleeps on one recovering device while its siblings wait. The whole
+/// ladder is therefore provable host-side.
+#[derive(Copy, Clone, Debug)]
+pub struct RecoveryLadder {
+    budget: IoBudget,
+    /// How many recovery attempts have been taken in the current episode; zero
+    /// whenever the device is operational.
+    attempts: u32,
+}
+
+impl RecoveryLadder {
+    /// A ladder at the bottom rung for a device of `class`, reading the same
+    /// per-class budget its [`BlkHealth`] does.
+    #[must_use]
+    pub const fn new(class: BlkDeviceClass) -> Self {
+        Self {
+            budget: class.budget(),
+            attempts: 0,
+        }
+    }
+
+    /// How many recovery attempts have been taken in the current episode.
+    #[must_use]
+    pub const fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    /// The next recovery action for a device now in health `state`, advancing
+    /// the ladder.
+    ///
+    /// The single entry point, so the escalation policy lives in one place and
+    /// a driver cannot re-derive it differently:
+    /// - An operational device (`Healthy`/`Degraded`) resets the ladder and
+    ///   yields [`RecoveryAction::None`] — the prior episode, if any, is over.
+    /// - A `Recovering` device escalates: the first attempt is a plain
+    ///   [`RecoveryAction::Retry`]; every subsequent attempt is a
+    ///   [`RecoveryAction::Reset`], up to the class's
+    ///   [`IoBudget::max_retries`], after which it is [`RecoveryAction::GiveUp`]
+    ///   and the grace window is left to fail the device closed on time.
+    /// - A device already failed closed (`Faulted`/`Offline`/`Removed`/
+    ///   `Failed`) yields [`RecoveryAction::GiveUp`]: the episode ended, so the
+    ///   driver stops escalating resets; a later genuine answer returns the
+    ///   device to `Healthy` and re-arms the ladder.
+    pub fn next_action(&mut self, state: BlkHealthState) -> RecoveryAction {
+        match state {
+            BlkHealthState::Healthy | BlkHealthState::Degraded => {
+                self.attempts = 0;
+                RecoveryAction::None
+            }
+            BlkHealthState::Recovering => {
+                let taken = self.attempts;
+                if taken >= self.budget.max_retries {
+                    RecoveryAction::GiveUp
+                } else {
+                    self.attempts = taken + 1;
+                    if taken == 0 {
+                        RecoveryAction::Retry
+                    } else {
+                        RecoveryAction::Reset
+                    }
+                }
+            }
+            BlkHealthState::Faulted
+            | BlkHealthState::Offline
+            | BlkHealthState::Removed
+            | BlkHealthState::Failed => RecoveryAction::GiveUp,
+        }
+    }
+}
+
 /// The recovery state of one interior **fault domain** — the bus, hub, USB
 /// controller, SAS/JBOD expander, or PCIe root complex that owns a group of
 /// block devices beneath it.
@@ -1848,6 +1970,139 @@ mod tests {
         let deadline = health.grace_deadline_ns().expect("recovering");
         assert_eq!(recovery_wait_timeout([&health], deadline), Some(0));
         assert_eq!(recovery_wait_timeout([&health], deadline + 1_000), Some(0));
+    }
+
+    // ---- The driver-side recovery escalation ladder (`RecoveryLadder`) ----
+    //
+    // The ladder decides what the *driver* does to the hardware between
+    // reissued attempts while a device is `Recovering`. These prove the
+    // escalation is bounded, escalates least-disruptive-first, and derives its
+    // cap from the same per-class budget the consumer reissues against.
+
+    #[test]
+    fn an_operational_device_needs_no_recovery_action() {
+        // A healthy or degraded (working-but-unwell) device is not recovering:
+        // the ladder yields `None` and stays at the bottom rung.
+        let mut ladder = RecoveryLadder::new(BlkDeviceClass::Removable);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Healthy),
+            RecoveryAction::None
+        );
+        assert_eq!(ladder.attempts(), 0);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Degraded),
+            RecoveryAction::None
+        );
+        assert_eq!(ladder.attempts(), 0);
+    }
+
+    #[test]
+    fn a_recovering_device_escalates_retry_then_reset_then_gives_up_at_budget() {
+        // The first recovering attempt is a plain reissue (a one-off glitch may
+        // clear itself); each subsequent attempt escalates to a data-path
+        // reset; once the class's retry budget is spent the ladder gives up and
+        // leaves the grace window to fail the device closed.
+        let budget = BlkDeviceClass::Rotational.budget();
+        assert_eq!(budget.max_retries, 3);
+        let mut ladder = RecoveryLadder::new(BlkDeviceClass::Rotational);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Retry
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Reset
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Reset
+        );
+        // The budget (3) is now spent: no more escalation, deterministically.
+        assert_eq!(ladder.attempts(), 3);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::GiveUp
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::GiveUp,
+            "give-up is sticky while recovering: never an unbounded reset loop"
+        );
+        assert_eq!(ladder.attempts(), 3);
+    }
+
+    #[test]
+    fn the_ladders_cap_scales_with_the_device_class_budget() {
+        // A shallower-budget class (an SSD: max_retries 2) exhausts its ladder
+        // in fewer rungs than a deeper one, straight from the shared per-class
+        // budget — never a hand-picked constant in the ladder.
+        assert_eq!(BlkDeviceClass::SolidState.budget().max_retries, 2);
+        let mut ladder = RecoveryLadder::new(BlkDeviceClass::SolidState);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Retry
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Reset
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn a_device_that_recovers_mid_ladder_re_arms_from_the_bottom() {
+        // A blip that clears returns the device to `Healthy`; the ladder resets
+        // so the next, unrelated episode starts from a gentle retry rather than
+        // an immediate reset (no scar from the prior episode).
+        let mut ladder = RecoveryLadder::new(BlkDeviceClass::Removable);
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Retry
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Reset
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Healthy),
+            RecoveryAction::None
+        );
+        assert_eq!(ladder.attempts(), 0);
+        // A fresh episode starts from the gentle rung again.
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Retry
+        );
+    }
+
+    #[test]
+    fn a_device_already_failed_closed_stops_escalating() {
+        // Once the device has been failed closed (grace window elapsed, gone,
+        // or unclassified-fatal), the recovering episode is over: the driver
+        // stops resetting and waits for a demonstrated return, which re-arms the
+        // ladder from the bottom.
+        let mut ladder = RecoveryLadder::new(BlkDeviceClass::Virtual);
+        for state in [
+            BlkHealthState::Faulted,
+            BlkHealthState::Offline,
+            BlkHealthState::Removed,
+            BlkHealthState::Failed,
+        ] {
+            assert_eq!(ladder.next_action(state), RecoveryAction::GiveUp);
+            assert_eq!(ladder.attempts(), 0, "a failed-closed device takes no rung");
+        }
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Healthy),
+            RecoveryAction::None
+        );
+        assert_eq!(
+            ladder.next_action(BlkHealthState::Recovering),
+            RecoveryAction::Retry,
+            "a demonstrated return re-arms the ladder"
+        );
     }
 
     // ---- The interior fault-domain machine (`FaultDomain`) ----

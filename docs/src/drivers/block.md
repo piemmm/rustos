@@ -108,9 +108,52 @@ derivation (`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and
 `emmc2` are currently consumed in-kernel (root-unlock) and expose only their
 `Block` implementation; when either is brought up as a user-space serving
 process it reuses the same engine and the same idle-timer helper rather than
-copying them. The bounded recovery *escalation* (retry-with-backoff → LUN/port
-reset) and device-level health observability through `lib/log`/`sysinfo` are
-the staged remainder (`plans/FIX-IO.md` IO3–IO6).
+copying them. Device-level health observability through `lib/log`/`sysinfo`
+beyond the per-volume mount overlay is the staged remainder
+(`plans/FIX-IO.md` IO3–IO6).
+
+## The recovery-escalation ladder — what the *driver* does behind a blip
+
+The grace window decides *what a consumer is told* while a device rides out a
+blip; the **recovery ladder** decides *what the driver does to the hardware*
+between the reissued attempts, so a stalling device is actively nudged back
+rather than merely waited on. It is a second shared primitive,
+`tairix_abi::blkio::RecoveryLadder`, owned per served logical unit alongside
+that unit's `BlkHealth`:
+
+- `RecoveryLadder::next_action(state)` is the single entry point mapping the
+  unit's current `BlkHealthState` to the next `RecoveryAction`. An operational
+  device (`Healthy`/`Degraded`) yields `None` and re-arms the ladder; a
+  `Recovering` device **escalates** — the first attempt is a gentle `Retry`
+  (a one-off comms glitch often clears itself, and a reset would only add
+  latency), and each subsequent attempt is a data-path `Reset`; once the
+  class's `IoBudget::max_retries` is spent it is `GiveUp` and the grace window
+  is left to fail the device closed on time. A device already failed closed
+  (`Faulted`/`Offline`/`Removed`/`Failed`) is `GiveUp`, so the driver stops
+  escalating; a later genuine answer returns it to `Healthy` and re-arms the
+  ladder.
+- The ladder's cap is the **same** per-class `IoBudget::max_retries` the
+  consumer's `IoBudget::should_reissue` reads, so the driver's escalation and
+  the consumer's reissue budget derive from one policy and cannot drift apart
+  (`AGENTS.md` §2.2). A device that keeps stalling therefore climbs a *finite*
+  ladder and is never reset forever (`AGENTS.md`'s ban on
+  retry-until-it-works).
+- The ladder holds no clock or timer and never spins or parks: it advances one
+  rung per reissued attempt, and reissued attempts are already spaced by the
+  consumer's own reissue cadence and per-request deadline. That is *stronger*
+  than a driver-side backoff timer for head-of-line freedom (`AGENTS.md` §26.1),
+  since the serve loop never sleeps on one recovering device while its siblings
+  wait, and it keeps the whole ladder provable host-side.
+
+`usb_msd` is the first consumer: after replying to each request its serve loop
+consults the LUN's ladder from the just-folded `BlkHealth` state and, on a
+`Reset`, clears the unit's bulk pipes (`ScsiDevice::scrub_window` — this
+driver's one data-path reset mechanism) and logs an `MSD_RECOVERY_RESET` audit
+event. The reset is only ever issued for a unit already being answered
+reissuably, so it cannot stall an unrelated LUN. Which concrete mechanism a
+`Reset` maps to is per-driver (a virtio/NVMe driver re-inits its queue); an
+action a driver's hardware cannot express is a no-op that still advances the
+ladder, so the escalation is honest on every transport.
 
 ## Consumer-side bounded reissue
 
