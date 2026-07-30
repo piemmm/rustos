@@ -475,12 +475,22 @@ the discovered hardware tree upward and returns the nearest strict ancestor that
 owns a group of devices — a bus/hub/controller/expander/PCIe-root-complex
 (`HwDeviceClass::Bus`) or the synthetic `Root` as the domain of last resort —
 skipping non-owning ancestors. It is platform-neutral (reads the tree, hard-codes
-no board, §2.20), usable recursively so the full chain of nested fault domains up
-to the root is obtained by re-applying it, and fails closed (`None`) on an absent
+no board, §2.20) and fails closed (`None`) on an absent
 node, a rootless node, or a broken/cyclic chain (the walk is bounded by the node
 count, never an unbounded spin, §2.9/§5.4). Proven host-side over a USB-shaped
 tree (nearest bus, root fallback, nesting, non-owning-ancestor skip, and the
-absent/broken/cyclic fail-closed cases).
+absent/broken/cyclic fail-closed cases). The **full ordered chain** of nested
+fault-domain owners a device blips with (leaf → hub → controller → root, nearest
+first) is the shared lazy iterator `hwtree::fault_domain_chain(nodes, node_id)`
+built by re-applying `fault_domain_owner` to each owner in turn, so a serving
+driver builds one `FaultDomain` per interior node without re-deriving the walk
+itself (§2.2). It is allocation-free (holds only a borrow of the tree, so no
+fixed-depth ceiling, §24.1), inherits `fault_domain_owner`'s fail-closed
+behaviour at every level, and is cycle-safe — bounded to at most one step per
+node, so even a bus pair that parents each other terminates rather than spins
+(§2.9). Proven host-side (the nested chain nearest-first, the interior-node and
+root-fallback starts, the empty chain of the root itself, the non-owning-ancestor
+skip, the absent/broken fail-closed cases, and the bounded cyclic-bus walk).
 
 **Landed (the composition primitives — the shared fold + timing the live
 wiring consumes):** two pure helpers in `lib/abi` let a serve loop use its
@@ -512,12 +522,12 @@ laws; the child-status fold with precedence and nesting; the interior-node
 timeout mirroring the per-device one).
 
 Remaining:
-- **Wiring the tree into the live serve loops.** With the association resolved
-  by `hwtree::fault_domain_owner` and the fold/timing now the shared
+- **Wiring the tree into the live serve loops.** With the nested-owner chain
+  resolved by `hwtree::fault_domain_chain`, and the fold/timing now the shared
   `effective_child_status` / `fault_domain_wait_timeout` above, the remaining
-  work is the *live* wiring: a serving driver builds each child device's
-  `FaultDomain` from its resolved owner, folds `effective_child_status` into
-  each completion, arms its wait from `fault_domain_wait_timeout`, and a
+  work is the *live* wiring: a serving driver builds one `FaultDomain` per
+  interior node in a device's `fault_domain_chain`, folds `effective_child_status`
+  into each completion, arms its wait from `fault_domain_wait_timeout`, and a
   serving/bus driver calls `quiesce`/`resume`/`poll` around its own reset. This
   belongs with the user-space bus/serving driver work (it needs the live serve
   loops and timers the host doubles cannot express), like the per-device

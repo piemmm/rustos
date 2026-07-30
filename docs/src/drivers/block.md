@@ -225,13 +225,24 @@ Which interior node a device blips *with* is resolved by the shared
 hardware tree upward and returns the nearest strict ancestor that owns a group
 of devices — a bus/hub/controller/expander/PCIe-root-complex
 (`HwDeviceClass::Bus`), or the synthetic `Root` as the domain of last resort for
-a device attached directly to it. It skips non-owning ancestors, is usable
-recursively (the owner of an interior node is its own nearest such ancestor, so
-the full chain of nested fault domains is obtained by re-applying it), and fails
+a device attached directly to it. It skips non-owning ancestors and fails
 closed on an absent node, a rootless node, or a broken/cyclic chain (the walk is
 bounded by the node count, never an unbounded spin, `AGENTS.md` §2.9). It reads
 the tree and hard-codes no board (`AGENTS.md` §18.1, §2.20), so it is the one
 definition every serving/bus driver uses to build a child's `FaultDomain`.
+
+A device usually blips with more than one interior node — a disk on a hub on a
+controller shares a fault domain with the hub *and* the controller *and* the
+root. The **full ordered chain** of those nested owners, nearest first, is the
+shared lazy iterator `hwtree::fault_domain_chain(nodes, node_id)`, built by
+re-applying `fault_domain_owner` to each owner in turn — so a serving driver
+builds one `FaultDomain` per interior node in the chain without re-deriving the
+walk itself (`AGENTS.md` §2.2). It is allocation-free (it holds only a borrow of
+the tree, so no fixed-depth ceiling, `AGENTS.md` §24.1), inherits
+`fault_domain_owner`'s fail-closed behaviour at every level, and is cycle-safe:
+bounded to at most one step per node, so even a malformed tree terminates rather
+than spins. The chain is exactly the `domains` argument the two composition
+helpers below consume.
 
 Two pure composition helpers let a serve loop use those fault domains exactly
 as it already uses the per-device machinery, without re-deriving the rules

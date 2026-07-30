@@ -1509,6 +1509,72 @@ pub fn fault_domain_owner(nodes: &[HwNode], node_id: u32) -> Option<u32> {
     None
 }
 
+/// The ordered chain of nested fault-domain owners of hardware-tree node
+/// `node_id`, **nearest first**, up to and including the synthetic root — the
+/// full set of interior nodes a block device blips *together with*.
+///
+/// Where [`fault_domain_owner`] resolves only the *nearest* owner, a serving
+/// driver needs the whole nested chain (leaf → hub → controller → root) to
+/// build one [`FaultDomain`](crate::blkio::FaultDomain) per interior node and
+/// fold them with the leaf's own outcome through
+/// [`effective_child_status`](crate::blkio::effective_child_status). This is
+/// that chain, computed by re-applying `fault_domain_owner` to each owner in
+/// turn — the single definition of the recursion, so a driver never re-derives
+/// the walk itself.
+///
+/// It is lazy and allocation-free: it yields owner ids one at a time and holds
+/// only a borrow of `nodes`, so the chain has no fixed-depth ceiling. It fails
+/// closed exactly as [`fault_domain_owner`] does — an absent `node_id`, a root
+/// (nothing owns it), or a broken parent chain ends the walk with no further
+/// owner — and it is cycle-safe: a malformed tree can never drive an unbounded
+/// walk, because the iterator is bounded to at most `nodes.len()` steps (a
+/// chain of strict ancestors visits distinct nodes, so a valid chain is never
+/// truncated, and a cyclic one simply stops rather than spins).
+#[must_use]
+pub fn fault_domain_chain(nodes: &[HwNode], node_id: u32) -> FaultDomainChain<'_> {
+    FaultDomainChain {
+        nodes,
+        current: Some(node_id),
+        remaining: nodes.len(),
+    }
+}
+
+/// Lazy iterator over the nested fault-domain owners of a hardware-tree node,
+/// nearest first. Created by [`fault_domain_chain`]; see it for the semantics
+/// and the fail-closed / cycle-safe guarantees.
+#[derive(Clone, Debug)]
+pub struct FaultDomainChain<'a> {
+    nodes: &'a [HwNode],
+    /// The node whose owner the next [`Iterator::next`] resolves. `None` once
+    /// the walk has reached the top (a root has no owner) or failed closed, so
+    /// the iterator is fused.
+    current: Option<u32>,
+    /// Remaining steps, initialised to the node count. A strict-ancestor chain
+    /// visits distinct nodes, so it is at most `nodes.len()` long; the bound
+    /// makes a broken or cyclic tree end the walk rather than spin instead of
+    /// being trusted into an unbounded traversal.
+    remaining: usize,
+}
+
+impl Iterator for FaultDomainChain<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let current = self.current?;
+        if self.remaining == 0 {
+            // A well-formed chain has terminated before now; reaching the bound
+            // means a cyclic tree. Fail closed rather than yield forever.
+            self.current = None;
+            return None;
+        }
+        self.remaining -= 1;
+        // Fail closed and fuse the iterator once an owner cannot be resolved.
+        let owner = fault_domain_owner(self.nodes, current);
+        self.current = owner;
+        owner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2288,5 +2354,93 @@ mod tests {
             HwNode::new(31, 30, HwDeviceClass::Other),
         ];
         assert_eq!(fault_domain_owner(&cyclic, 30), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_yields_every_nested_owner_nearest_first() {
+        let nodes = usb_shaped_tree();
+        // The disk on the hub blips with the hub, then the controller, then
+        // the root — the full chain of nested fault domains, nearest first.
+        let mut chain = fault_domain_chain(&nodes, 3);
+        assert_eq!(chain.next(), Some(2));
+        assert_eq!(chain.next(), Some(1));
+        assert_eq!(chain.next(), Some(0));
+        assert_eq!(chain.next(), None);
+        // Fused: exhausted stays exhausted.
+        assert_eq!(chain.next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_from_an_interior_node_starts_above_it() {
+        let nodes = usb_shaped_tree();
+        // A device directly on the controller has the controller then the root.
+        let mut chain = fault_domain_chain(&nodes, 4);
+        assert_eq!(chain.next(), Some(1));
+        assert_eq!(chain.next(), Some(0));
+        assert_eq!(chain.next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_falls_back_to_just_the_root() {
+        let nodes = usb_shaped_tree();
+        // A device directly on the root has only the root as its domain.
+        let mut chain = fault_domain_chain(&nodes, 5);
+        assert_eq!(chain.next(), Some(0));
+        assert_eq!(chain.next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_of_the_root_itself_is_empty() {
+        let nodes = usb_shaped_tree();
+        // The root owns no domain above it, so its chain is empty.
+        assert_eq!(fault_domain_chain(&nodes, 0).next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_skips_a_non_owning_ancestor() {
+        // The disk(11) under a non-owning node(10) resolves to the bus(1) then
+        // the root(0), skipping the intervening non-owning node.
+        let nodes = [
+            HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(1, 0, HwDeviceClass::Bus),
+            HwNode::new(10, 1, HwDeviceClass::Other),
+            HwNode::new(11, 10, HwDeviceClass::Storage),
+        ];
+        let mut chain = fault_domain_chain(&nodes, 11);
+        assert_eq!(chain.next(), Some(1));
+        assert_eq!(chain.next(), Some(0));
+        assert_eq!(chain.next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_fails_closed_on_absent_or_broken_trees() {
+        let nodes = usb_shaped_tree();
+        // A node not in the tree yields nothing.
+        assert_eq!(fault_domain_chain(&nodes, 999).next(), None);
+
+        // A device whose parent id dangles yields nothing rather than
+        // fabricating an owner.
+        let broken = [HwNode::new(20, 21, HwDeviceClass::Storage)];
+        assert_eq!(fault_domain_chain(&broken, 20).next(), None);
+    }
+
+    #[test]
+    fn fault_domain_chain_is_bounded_on_a_cyclic_bus_tree() {
+        // Two buses that parent each other would drive a naive re-application
+        // forever (each resolves the other as its owner on the first hop). The
+        // chain is bounded by the node count, so it terminates.
+        let cyclic = [
+            HwNode::new(40, 41, HwDeviceClass::Bus),
+            HwNode::new(41, 40, HwDeviceClass::Bus),
+            HwNode::new(42, 40, HwDeviceClass::Storage),
+        ];
+        let mut yielded = 0usize;
+        for owner in fault_domain_chain(&cyclic, 42) {
+            assert!(owner == 40 || owner == 41);
+            yielded += 1;
+            assert!(yielded <= cyclic.len(), "the chain must be bounded");
+        }
+        // It made at least one hop and then stopped inside the bound.
+        assert!((1..=cyclic.len()).contains(&yielded));
     }
 }
