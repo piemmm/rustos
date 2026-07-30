@@ -87,6 +87,28 @@ keep serving and the array reports `ArrayHealth::Degraded`. A flush commits
 every copy and drops any that cannot, keeping at least one durable copy or
 failing closed.
 
+A **missing member** — a slot the array is defined to have but which holds no
+device — is a first-class `MemberState::Absent`, the equivalent of a Linux md
+"removed" slot. `MirrorArray::assemble` is given the array's *full* member
+table, one `MirrorMember::absent()` per missing copy, so the assembled array
+counts the empty slot toward its member count and reports `Degraded` for the
+reduced redundancy rather than silently presenting as a smaller, optimal
+array: a mirror short a member never masquerades as fully redundant
+(`AGENTS.md` §26.5). An absent slot serves no read, receives no write, and
+never fabricates a device; it is simply held open until a spare fills it.
+
+The runtime disk-replacement workflow mirrors mdadm's remove/add:
+`MirrorArray::remove_member` pulls a faulted disk, vacating its slot to
+`Absent` and returning the removed device to the caller (only a faulted
+member may be pulled — a live one is still participating); and
+`MirrorArray::add_member` installs a fresh spare into an absent slot, which
+begins `Resyncing` and rebuilds from a surviving copy exactly as a returned
+member does. Both fail closed on a bad index, and `add_member` refuses an
+already-occupied slot (`SlotOccupied`) or a spare whose geometry does not
+match (leaving the spare `Faulted`, never admitted as a rebuild source). The
+whole cycle — fault, remove, add, rebuild — restores full redundancy without
+a reboot (`AGENTS.md` §18.4).
+
 ### Rebuild — bounded, interruptible resync
 
 A returning member (via its own recovery grace window, `plans/FIX-IO.md` IO3)
@@ -199,11 +221,20 @@ in place, never versioned alongside an old one.
 
 ### States
 
-A member is `InSync` (a full copy: read source and write target), `Faulted`
-(dropped after a whole-device fault or a failed write; neither serves nor
-receives I/O until re-added), or `Resyncing` (being rebuilt; receives
-synced-region writes, not yet a read source). A faulted copy is
-sticky-but-recoverable: it stays out of the array until it demonstrably returns
-through `readd_member`/`replace_member`, so a flapping disk cannot masquerade
-as a healthy copy, yet a genuine return always rejoins without a reboot
-(`AGENTS.md` §18.4).
+A member slot is `InSync` (a full copy: read source and write target),
+`Faulted` (dropped after a whole-device fault or a failed write; its device is
+retained in the slot for a re-add, but it neither serves nor receives I/O),
+`Resyncing` (being rebuilt; receives synced-region writes, not yet a read
+source), or `Absent` (no device present — a missing member the array is
+defined to have). The slot's device presence is exactly determined by this
+state: every state but `Absent` has a backing device, and `Absent` has none;
+the constructors and reconfiguration operations preserve that invariant so the
+two cannot drift.
+
+A faulted copy is sticky-but-recoverable: it stays out of the array until it
+demonstrably returns through `readd_member` (re-probing its retained device)
+or `replace_member` (hot-swapping in a fresh device), so a flapping disk
+cannot masquerade as a healthy copy, yet a genuine return always rejoins
+without a reboot (`AGENTS.md` §18.4). A faulted disk can instead be pulled
+entirely with `remove_member` (slot → `Absent`) and a spare later inserted
+with `add_member`; see *Degrade — never fail the system* above.

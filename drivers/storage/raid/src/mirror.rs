@@ -12,26 +12,42 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::sysinfo::MountAvailability;
 
-/// The membership state of one mirror copy.
+/// The membership state of one mirror slot.
 ///
 /// A member is only ever a read source while [`InSync`](Self::InSync). A
 /// [`Faulted`](Self::Faulted) member has been dropped from the array (a
 /// whole-device fault, or a failed write/repair) and no longer serves or
-/// receives I/O until it is re-added. A [`Resyncing`](Self::Resyncing) member
+/// receives I/O until it is re-added, but it still *occupies its slot* (its
+/// device is retained for a re-add). A [`Resyncing`](Self::Resyncing) member
 /// is being rebuilt from an in-sync copy: it receives writes to its
 /// already-synced region so it never falls behind, but is not yet a read
-/// source.
+/// source. An [`Absent`](Self::Absent) slot holds no device at all.
+///
+/// The slot's device presence is exactly determined by this state: every
+/// state but [`Absent`](Self::Absent) has a backing device, and
+/// [`Absent`](Self::Absent) has none. The constructors and reconfiguration
+/// operations are the only mutators and they preserve that invariant, so the
+/// two can never drift.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MemberState {
     /// A full, current copy. A read source and a write target.
     InSync,
     /// Dropped from the array after a whole-device fault or a failed write.
-    /// Neither serves reads nor receives writes until re-added.
+    /// Neither serves reads nor receives writes until re-added. Its device is
+    /// retained in the slot so [`MirrorArray::readd_member`] can re-probe it.
     Faulted,
     /// Being rebuilt from an in-sync copy. Receives writes to its
     /// already-synced region; becomes [`InSync`](Self::InSync) when the
     /// rebuild cursor reaches the end of the array.
     Resyncing,
+    /// No device occupies this slot: a member the array is *defined* to have
+    /// but which is currently missing — never inserted, or removed after a
+    /// fault ([`MirrorArray::remove_member`]). Like a Linux md "removed"
+    /// slot, an absent member reduces the array's redundancy, so the array
+    /// reports [`ArrayHealth::Degraded`] while one is present. A spare can be
+    /// installed into an absent slot with [`MirrorArray::add_member`], which
+    /// then rebuilds it from a surviving copy.
+    Absent,
 }
 
 /// Whether a member joining the array holds a copy believed **current** or
@@ -83,11 +99,16 @@ impl MemberRole {
     }
 }
 
-/// One mirror copy: a child [`Block`] device plus the role it joined with, its
-/// membership state and, while [`MemberState::Resyncing`], the rebuild cursor
-/// (the first not-yet-copied logical block).
+/// One mirror slot: an *optional* child [`Block`] device plus the role it
+/// joined with, its membership state and, while [`MemberState::Resyncing`],
+/// the rebuild cursor (the first not-yet-copied logical block).
+///
+/// A slot with no device is [`MemberState::Absent`] (a missing member the
+/// array is defined to have); every other state has a device. That invariant
+/// (`device.is_some()` iff the state is not `Absent`) is established by the
+/// constructors and preserved by every reconfiguration operation.
 pub struct MirrorMember<B: Block> {
-    device: B,
+    device: Option<B>,
     role: MemberRole,
     state: MemberState,
     resync_next_lba: u64,
@@ -113,9 +134,30 @@ impl<B: Block> MirrorMember<B> {
     #[must_use]
     pub const fn with_role(device: B, role: MemberRole) -> Self {
         Self {
-            device,
+            device: Some(device),
             role,
             state: MemberState::InSync,
+            resync_next_lba: 0,
+        }
+    }
+
+    /// A slot the array is *defined* to have but for which no device is
+    /// present ([`MemberState::Absent`]) — a missing member, the equivalent
+    /// of a Linux md "removed" slot.
+    ///
+    /// Pass one per missing member when assembling so the array knows its
+    /// full width: the assembled array counts the absent slot toward its
+    /// member count and reports [`ArrayHealth::Degraded`] for the reduced
+    /// redundancy, and a spare can later be installed into it with
+    /// [`MirrorArray::add_member`]. This is how a reassembler represents a
+    /// [`SlotDisposition::Missing`] slot, for which [`MemberRole::for_slot`]
+    /// yields [`None`].
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            device: None,
+            role: MemberRole::Current,
+            state: MemberState::Absent,
             resync_next_lba: 0,
         }
     }
@@ -139,10 +181,11 @@ impl<B: Block> MirrorMember<B> {
         self.resync_next_lba
     }
 
-    /// Borrow the underlying device (for identity/health queries).
+    /// Borrow the underlying device (for identity/health queries), or [`None`]
+    /// for an [`MemberState::Absent`] slot that has no device.
     #[must_use]
-    pub const fn device(&self) -> &B {
-        &self.device
+    pub const fn device(&self) -> Option<&B> {
+        self.device.as_ref()
     }
 }
 
@@ -151,9 +194,9 @@ impl<B: Block> MirrorMember<B> {
 pub enum ArrayHealth {
     /// Every member is in sync: full redundancy.
     Optimal,
-    /// At least one copy is serving, but redundancy is reduced (a member is
-    /// faulted and none is currently rebuilding). Data is safe on the
-    /// survivors; a tool shows the array as at-risk.
+    /// At least one copy is serving, but redundancy is reduced — a member is
+    /// faulted or absent (missing) and none is currently rebuilding. Data is
+    /// safe on the survivors; a tool shows the array as at-risk.
     Degraded,
     /// At least one copy is serving and a member is being rebuilt.
     Recovering,
@@ -206,6 +249,11 @@ pub enum MirrorError {
     /// A re-add/replace member's device could not be probed (absent/unwell),
     /// so it cannot begin rebuilding yet.
     ProbeFailed,
+    /// [`MirrorArray::add_member`] was asked to populate a slot that already
+    /// holds a device (it is not [`MemberState::Absent`]). Vacate it first
+    /// with [`MirrorArray::remove_member`], or hot-swap it with
+    /// [`MirrorArray::replace_member`].
+    SlotOccupied,
 }
 
 /// A RAID1 mirror presenting several child [`Block`] copies as one logical
@@ -226,29 +274,49 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// Assemble a mirror from `members`, establishing the array geometry from
     /// the members that can report it.
     ///
-    /// Every member's device is probed for geometry. The first that reports
-    /// one fixes the array geometry; a member reporting a *different*
+    /// The `members` slice is the array's full member table: one entry per
+    /// slot the array is *defined* to have, in slot order. A missing member
+    /// (a slot no device currently fills) is passed as
+    /// [`MirrorMember::absent`] so the assembled array knows its true width
+    /// and reports the reduced redundancy as [`ArrayHealth::Degraded`] rather
+    /// than silently presenting as a smaller, optimal array.
+    ///
+    /// Every *present* member's device is probed for geometry. The first that
+    /// reports one fixes the array geometry; a member reporting a *different*
     /// geometry fails the whole assembly closed
     /// ([`MirrorError::GeometryMismatch`]) — differently-sized copies are not
-    /// a mirror. A member whose probe *errors* (absent/unwell) is admitted as
-    /// [`MemberState::Faulted`] so the array assembles degraded rather than
-    /// refusing to come up while one copy is down; it can be re-added later.
+    /// a mirror. A present member whose probe *errors* (absent/unwell) is
+    /// admitted [`MemberState::Faulted`] so the array assembles degraded
+    /// rather than refusing to come up while one copy is down; it can be
+    /// re-added later. An [`MirrorMember::absent`] slot contributes no device
+    /// to probe and stays [`MemberState::Absent`].
     ///
     /// # Errors
     ///
     /// * [`MirrorError::NoMembers`] if `members` is empty.
     /// * [`MirrorError::GeometryMismatch`] if two members disagree on
     ///   geometry.
-    /// * [`MirrorError::NoUsableMember`] if no member could report geometry.
+    /// * [`MirrorError::NoUsableMember`] if no member could report geometry
+    ///   (every slot is absent, or every present copy is unwell).
     pub fn assemble(members: &'a mut [MirrorMember<B>]) -> Result<Self, MirrorError> {
         if members.is_empty() {
             return Err(MirrorError::NoMembers);
         }
         let mut geometry: Option<BlockGeometry> = None;
         for member in &mut *members {
-            let Ok(g) = member.device.geometry() else {
-                // A copy that cannot report its geometry is absent/unwell:
-                // admit it faulted so the array still comes up on the rest.
+            // An absent slot has no device to probe: it stays absent and
+            // counts toward the array width so a missing member degrades the
+            // array rather than shrinking it.
+            let Some(device) = member.device.as_ref() else {
+                member.state = MemberState::Absent;
+                member.resync_next_lba = 0;
+                continue;
+            };
+            let probe = device.geometry();
+            let Ok(g) = probe else {
+                // A present copy that cannot report its geometry is
+                // absent/unwell: admit it faulted (device retained) so the
+                // array still comes up on the rest.
                 member.state = MemberState::Faulted;
                 member.resync_next_lba = 0;
                 continue;
@@ -283,7 +351,8 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         self.geometry
     }
 
-    /// The number of member slots (in sync, faulted, or resyncing alike).
+    /// The number of member slots the array is defined to have (in sync,
+    /// faulted, resyncing, or absent alike).
     #[must_use]
     pub const fn member_count(&self) -> usize {
         self.members.len()
@@ -304,23 +373,33 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     }
 
     /// The current [`ArrayHealth`], derived from the members' states.
+    ///
+    /// The array is [`Optimal`](ArrayHealth::Optimal) only when *every* slot
+    /// holds an in-sync copy: a faulted **or absent** (missing) slot reduces
+    /// redundancy and reports [`Degraded`](ArrayHealth::Degraded), so a
+    /// mirror short a member never masquerades as fully redundant
+    /// (`AGENTS.md` §26.5). A slot actively rebuilding reports
+    /// [`Recovering`](ArrayHealth::Recovering); no in-sync copy at all is
+    /// [`Failed`](ArrayHealth::Failed).
     #[must_use]
     pub fn health(&self) -> ArrayHealth {
         let mut in_sync = 0usize;
         let mut resyncing = 0usize;
-        let mut faulted = 0usize;
+        let mut degraded_slots = 0usize;
         for member in &*self.members {
             match member.state {
                 MemberState::InSync => in_sync += 1,
                 MemberState::Resyncing => resyncing += 1,
-                MemberState::Faulted => faulted += 1,
+                // A faulted or absent slot each reduces redundancy the same
+                // way: a copy the array is defined to have is not serving.
+                MemberState::Faulted | MemberState::Absent => degraded_slots += 1,
             }
         }
         if in_sync == 0 {
             ArrayHealth::Failed
         } else if resyncing > 0 {
             ArrayHealth::Recovering
-        } else if faulted > 0 {
+        } else if degraded_slots > 0 {
             ArrayHealth::Degraded
         } else {
             ArrayHealth::Optimal
@@ -381,10 +460,15 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             if self.members[i].state != MemberState::InSync {
                 continue;
             }
-            match self.members[i]
-                .device
-                .read_blocks_with_class(lba, buf, class)
-            {
+            let Some(device) = self.members[i].device.as_mut() else {
+                // An in-sync slot must hold a device; a broken invariant
+                // fails closed rather than reading from nothing.
+                self.members[i].state = MemberState::Faulted;
+                self.members[i].resync_next_lba = 0;
+                continue;
+            };
+            let outcome = device.read_blocks_with_class(lba, buf, class);
+            match outcome {
                 Ok(()) => {
                     source = Some(i);
                     break;
@@ -407,12 +491,15 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         // good data back so the device reallocates the bad sector. A repair
         // that fails drops that copy.
         for i in 0..src {
-            if self.members[i].state == MemberState::InSync
-                && self.members[i]
-                    .device
-                    .write_blocks_with_class(lba, buf, class)
-                    .is_err()
-            {
+            if self.members[i].state != MemberState::InSync {
+                continue;
+            }
+            let Some(device) = self.members[i].device.as_mut() else {
+                self.members[i].state = MemberState::Faulted;
+                self.members[i].resync_next_lba = 0;
+                continue;
+            };
+            if device.write_blocks_with_class(lba, buf, class).is_err() {
                 self.members[i].state = MemberState::Faulted;
                 self.members[i].resync_next_lba = 0;
             }
@@ -433,10 +520,13 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         for i in 0..self.members.len() {
             match self.members[i].state {
                 MemberState::InSync => {
-                    match self.members[i]
-                        .device
-                        .write_blocks_with_class(lba, buf, class)
-                    {
+                    let Some(device) = self.members[i].device.as_mut() else {
+                        self.members[i].state = MemberState::Faulted;
+                        self.members[i].resync_next_lba = 0;
+                        continue;
+                    };
+                    let outcome = device.write_blocks_with_class(lba, buf, class);
+                    match outcome {
                         Ok(()) => accepted += 1,
                         Err(e) => {
                             worst = Some(most_severe(worst, e));
@@ -456,8 +546,12 @@ impl<'a, B: Block> MirrorArray<'a, B> {
                         let overlap = usize::try_from(end.min(cursor) - lba)
                             .map_err(|_| DriverError::LengthOutOfRange)?;
                         let bytes = overlap * bs;
-                        if self.members[i]
-                            .device
+                        let Some(device) = self.members[i].device.as_mut() else {
+                            self.members[i].state = MemberState::Faulted;
+                            self.members[i].resync_next_lba = 0;
+                            continue;
+                        };
+                        if device
                             .write_blocks_with_class(lba, &buf[..bytes], class)
                             .is_err()
                         {
@@ -466,7 +560,9 @@ impl<'a, B: Block> MirrorArray<'a, B> {
                         }
                     }
                 }
-                MemberState::Faulted => {}
+                // A faulted or absent slot receives no write: the former is
+                // dropped pending re-add, the latter holds no device.
+                MemberState::Faulted | MemberState::Absent => {}
             }
         }
         if accepted > 0 {
@@ -521,22 +617,28 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             let this = chunk_blocks.min(remaining);
             let this_usize = usize::try_from(this).map_err(|_| DriverError::LengthOutOfRange)?;
             let bytes = this_usize * bs;
-            if let Err(e) = self.members[src].device.read_blocks_with_class(
-                cursor,
-                &mut scratch[..bytes],
-                BufferClass::Sensitive,
-            ) {
+            let read_result = match self.members[src].device.as_mut() {
+                Some(device) => {
+                    device.read_blocks_with_class(cursor, &mut scratch[..bytes], BufferClass::Sensitive)
+                }
+                // An in-sync source must hold a device; fail closed if not.
+                None => Err(DriverError::DeviceOffline),
+            };
+            if let Err(e) = read_result {
                 if member_faulting(e) {
                     self.members[src].state = MemberState::Faulted;
                     self.members[src].resync_next_lba = 0;
                 }
                 return Err(e);
             }
-            if self.members[t]
-                .device
-                .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
-                .is_err()
-            {
+            let write_failed = match self.members[t].device.as_mut() {
+                Some(device) => device
+                    .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
+                    .is_err(),
+                // A resyncing target must hold a device; fail closed.
+                None => true,
+            };
+            if write_failed {
                 // The rebuild target failed a write: drop it back to faulted
                 // rather than leaving a partial copy pretending to be in sync.
                 self.members[t].state = MemberState::Faulted;
@@ -648,11 +750,15 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             if self.members[i].state != MemberState::InSync {
                 continue;
             }
-            match self.members[i].device.read_blocks_with_class(
-                cursor,
-                &mut scratch[..bytes],
-                BufferClass::Sensitive,
-            ) {
+            let outcome = if let Some(device) = self.members[i].device.as_mut() {
+                device.read_blocks_with_class(cursor, &mut scratch[..bytes], BufferClass::Sensitive)
+            } else {
+                // An in-sync slot must hold a device; fail closed.
+                self.members[i].state = MemberState::Faulted;
+                self.members[i].resync_next_lba = 0;
+                continue;
+            };
+            match outcome {
                 Ok(()) => {}
                 Err(e) if member_faulting(e) => {
                     self.members[i].state = MemberState::Faulted;
@@ -690,17 +796,26 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             if j == target || self.members[j].state != MemberState::InSync {
                 continue;
             }
-            match self.members[j].device.read_blocks_with_class(
-                cursor,
-                &mut scratch[..bytes],
-                BufferClass::Sensitive,
-            ) {
+            let source_read = if let Some(device) = self.members[j].device.as_mut() {
+                device.read_blocks_with_class(cursor, &mut scratch[..bytes], BufferClass::Sensitive)
+            } else {
+                // An in-sync source must hold a device; fail closed.
+                self.members[j].state = MemberState::Faulted;
+                self.members[j].resync_next_lba = 0;
+                continue;
+            };
+            match source_read {
                 Ok(()) => {
-                    if self.members[target]
-                        .device
-                        .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
-                        .is_err()
-                    {
+                    let write_failed = match self.members[target].device.as_mut() {
+                        Some(device) => device
+                            .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
+                            .is_err(),
+                        // The repair target holds no device: nothing to write
+                        // back to, but the data is safe on the source, so this
+                        // is still a successful recovery for the read/scrub.
+                        None => true,
+                    };
+                    if write_failed {
                         self.members[target].state = MemberState::Faulted;
                         self.members[target].resync_next_lba = 0;
                     }
@@ -730,6 +845,7 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// * [`MirrorError::GeometryMismatch`] if the device's geometry no longer
     ///   matches the array.
     pub fn readd_member(&mut self, index: usize) -> Result<(), MirrorError> {
+        let geometry = self.geometry;
         let member = self
             .members
             .get_mut(index)
@@ -737,8 +853,13 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         if member.state != MemberState::Faulted {
             return Err(MirrorError::NotFaulted);
         }
-        match member.device.geometry() {
-            Ok(g) if g == self.geometry => {
+        let Some(device) = member.device.as_ref() else {
+            // A faulted slot must retain its device to be re-added; a broken
+            // invariant leaves nothing to probe, so fail closed.
+            return Err(MirrorError::ProbeFailed);
+        };
+        match device.geometry() {
+            Ok(g) if g == geometry => {
                 member.state = MemberState::Resyncing;
                 member.resync_next_lba = 0;
                 Ok(())
@@ -749,15 +870,73 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     }
 
     /// Replace a faulted member's device with a fresh one and begin rebuilding
-    /// it (a physically-replaced disk). The new device must match the array
-    /// geometry.
+    /// it (a physically-replaced disk hot-swapped into a still-occupied slot).
+    /// The new device must match the array geometry.
     ///
     /// # Errors
     ///
-    /// As for [`readd_member`](Self::readd_member); on any error the member is
-    /// left [`MemberState::Faulted`] holding the new device.
+    /// * [`MirrorError::UnknownMember`] if `index` is out of range.
+    /// * [`MirrorError::NotFaulted`] if the member is not currently faulted
+    ///   (only a dropped member is replaced; an absent slot uses
+    ///   [`add_member`](Self::add_member)).
+    /// * [`MirrorError::GeometryMismatch`] / [`MirrorError::ProbeFailed`] if
+    ///   the new device's geometry does not match or it cannot be probed; on
+    ///   either the slot is left [`MemberState::Faulted`] holding the new
+    ///   device.
     pub fn replace_member(&mut self, index: usize, device: B) -> Result<(), MirrorError> {
-        let geometry = self.geometry;
+        match self.members.get(index) {
+            Some(member) if member.state == MemberState::Faulted => {}
+            Some(_) => return Err(MirrorError::NotFaulted),
+            None => return Err(MirrorError::UnknownMember),
+        }
+        self.install_rebuild_target(index, device)
+    }
+
+    /// Install a spare `device` into a currently-[`MemberState::Absent`]
+    /// (missing) slot and begin rebuilding it from a surviving copy — the
+    /// Linux md "add a spare to a removed slot" operation that restores a
+    /// missing member's redundancy without a reboot (`AGENTS.md` §18.4).
+    ///
+    /// The slot moves [`MemberState::Absent`] → [`MemberState::Resyncing`] on
+    /// success; the rebuild is driven by [`resync_step`](Self::resync_step)
+    /// exactly as for a returned copy, so a spare never serves reads until it
+    /// is fully in sync.
+    ///
+    /// # Errors
+    ///
+    /// * [`MirrorError::UnknownMember`] if `index` is out of range.
+    /// * [`MirrorError::SlotOccupied`] if the slot already holds a device
+    ///   (it is not absent); vacate it first with
+    ///   [`remove_member`](Self::remove_member), or use
+    ///   [`replace_member`](Self::replace_member) to hot-swap a faulted one.
+    /// * [`MirrorError::GeometryMismatch`] / [`MirrorError::ProbeFailed`] if
+    ///   the spare's geometry does not match or it cannot be probed; on
+    ///   either the slot is left [`MemberState::Faulted`] holding the spare.
+    pub fn add_member(&mut self, index: usize, device: B) -> Result<(), MirrorError> {
+        match self.members.get(index) {
+            Some(member) if member.state == MemberState::Absent => {}
+            Some(_) => return Err(MirrorError::SlotOccupied),
+            None => return Err(MirrorError::UnknownMember),
+        }
+        self.install_rebuild_target(index, device)
+    }
+
+    /// Remove a faulted member's device from its slot, leaving the slot
+    /// [`MemberState::Absent`] and returning the removed device — the Linux
+    /// md "remove a failed disk" operation. The vacated slot keeps counting
+    /// toward the array's width (so the array stays
+    /// [`ArrayHealth::Degraded`]), and a spare can be installed into it with
+    /// [`add_member`](Self::add_member).
+    ///
+    /// Only a [`MemberState::Faulted`] member is removed: an in-sync or
+    /// resyncing member is still participating and must fault before it can be
+    /// pulled, and an already-absent slot has nothing to remove.
+    ///
+    /// # Errors
+    ///
+    /// * [`MirrorError::UnknownMember`] if `index` is out of range.
+    /// * [`MirrorError::NotFaulted`] if the member is not currently faulted.
+    pub fn remove_member(&mut self, index: usize) -> Result<B, MirrorError> {
         let member = self
             .members
             .get_mut(index)
@@ -765,15 +944,53 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         if member.state != MemberState::Faulted {
             return Err(MirrorError::NotFaulted);
         }
-        member.device = device;
+        let Some(device) = member.device.take() else {
+            // A faulted slot must retain its device (invariant); with none
+            // present the slot is already effectively empty — fail closed.
+            member.state = MemberState::Absent;
+            member.resync_next_lba = 0;
+            return Err(MirrorError::NotFaulted);
+        };
+        member.state = MemberState::Absent;
         member.resync_next_lba = 0;
-        match member.device.geometry() {
+        Ok(device)
+    }
+
+    /// Install `device` into slot `index` and begin rebuilding it from a
+    /// surviving copy, discarding any device the slot previously held. On a
+    /// geometry mismatch or a probe failure the slot is left
+    /// [`MemberState::Faulted`] holding the new device (present but unusable),
+    /// failing closed rather than admitting an unverified copy as a read
+    /// source. The single definition shared by
+    /// [`replace_member`](Self::replace_member) and
+    /// [`add_member`](Self::add_member), so the install-then-rebuild policy
+    /// cannot diverge between the two.
+    fn install_rebuild_target(&mut self, index: usize, device: B) -> Result<(), MirrorError> {
+        let geometry = self.geometry;
+        let member = self
+            .members
+            .get_mut(index)
+            .ok_or(MirrorError::UnknownMember)?;
+        member.device = Some(device);
+        member.resync_next_lba = 0;
+        let Some(installed) = member.device.as_ref() else {
+            // Unreachable: a device was just installed.
+            member.state = MemberState::Absent;
+            return Err(MirrorError::ProbeFailed);
+        };
+        match installed.geometry() {
             Ok(g) if g == geometry => {
                 member.state = MemberState::Resyncing;
                 Ok(())
             }
-            Ok(_) => Err(MirrorError::GeometryMismatch),
-            Err(_) => Err(MirrorError::ProbeFailed),
+            Ok(_) => {
+                member.state = MemberState::Faulted;
+                Err(MirrorError::GeometryMismatch)
+            }
+            Err(_) => {
+                member.state = MemberState::Faulted;
+                Err(MirrorError::ProbeFailed)
+            }
         }
     }
 
@@ -824,21 +1041,34 @@ impl<B: Block> Block for MirrorArray<'_, B> {
         let mut worst: Option<DriverError> = None;
         for i in 0..self.members.len() {
             match self.members[i].state {
-                MemberState::InSync => match self.members[i].device.flush() {
-                    Ok(()) => durable += 1,
-                    Err(e) => {
-                        worst = Some(most_severe(worst, e));
-                        self.members[i].state = MemberState::Faulted;
-                        self.members[i].resync_next_lba = 0;
+                MemberState::InSync => {
+                    let outcome = match self.members[i].device.as_mut() {
+                        Some(device) => device.flush(),
+                        // An in-sync slot must hold a device; fail closed.
+                        None => Err(DriverError::DeviceOffline),
+                    };
+                    match outcome {
+                        Ok(()) => durable += 1,
+                        Err(e) => {
+                            worst = Some(most_severe(worst, e));
+                            self.members[i].state = MemberState::Faulted;
+                            self.members[i].resync_next_lba = 0;
+                        }
                     }
-                },
+                }
                 MemberState::Resyncing => {
-                    if self.members[i].device.flush().is_err() {
+                    let failed = match self.members[i].device.as_mut() {
+                        Some(device) => device.flush().is_err(),
+                        None => true,
+                    };
+                    if failed {
                         self.members[i].state = MemberState::Faulted;
                         self.members[i].resync_next_lba = 0;
                     }
                 }
-                MemberState::Faulted => {}
+                // A faulted slot is dropped pending re-add; an absent slot
+                // holds no device: neither has anything to flush.
+                MemberState::Faulted | MemberState::Absent => {}
             }
         }
         if durable > 0 {

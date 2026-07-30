@@ -837,6 +837,16 @@ proven host-side over a fault-injecting `Block` double:
   `MountAvailability::{Available,Degraded,Recovering,UnavailableLost}` so a
   serving process surfaces it through the same `sysinfo` mount surface a leaf
   volume uses (IO2/IO5), never a second vocabulary (§2.2).
+- **Missing members are first-class (md-style "removed" slots).** A slot the
+  array is defined to have but which holds no device is `MemberState::Absent`:
+  `assemble` is given the array's *full* member table (one
+  `MirrorMember::absent()` per missing copy), counts the absent slot toward
+  the member count, and reports `Degraded`, so a mirror short a member never
+  masquerades as a smaller optimal array (§26.5). The runtime disk-replacement
+  cycle is `remove_member` (pull a faulted disk, slot → `Absent`, returns the
+  device) then `add_member` (install a spare into an absent slot → `Resyncing`,
+  rebuilt from a survivor), failing closed on a bad index / occupied slot /
+  geometry mismatch — full redundancy restored without a reboot (§18.4).
 - **Rebuild = bounded, interruptible resync.** A returning copy (via its own
   IO3 grace window) or a physically replaced disk is rebuilt by
   `MirrorArray::resync_step`, which copies the array from an in-sync source a
@@ -929,7 +939,13 @@ rebuilt with **current** data (including degraded-window writes); the rebuild is
 incremental (a cursor advances a chunk per step); a write during rebuild reaches
 only the already-synced region; a rebuild target that cannot be written drops
 back to faulted; a permanently-faulted copy never stops the survivor serving;
-assemble/re-add fail closed on empty/mismatched/absent members. Scrub is proven
+assemble/re-add fail closed on empty/mismatched/absent members; a missing
+member slot assembles `Absent`, counts toward the width, and reports
+`Degraded` (not `Optimal`) while an all-absent set fails closed; `remove_member`
+vacates a faulted slot to `Absent` returning the real device (and refuses a
+live one), `add_member` rebuilds a spare into an empty slot with current data
+(and refuses an occupied slot or bad geometry), and the full remove→add→rebuild
+replacement cycle restores redundancy. Scrub is proven
 the same way — a clean pass reads *every* copy (unlike a read) and is an
 idempotent no-op once complete; a latent bad sector on a non-primary copy the
 read path never repairs is found and healed by a scrub; a whole-device fault is

@@ -29,6 +29,15 @@ The first composition is the **RAID1 mirror** (`MirrorArray`):
   the write still succeeds as long as one copy accepted it.
 - A faulted copy **degrades the array, never the system** — the survivors keep
   serving and the array reports `Degraded`.
+- A **missing member slot** (`MemberState::Absent`) is first-class, like a
+  Linux md "removed" slot: the array is assembled to its full defined width
+  (one `MirrorMember::absent()` per missing copy), counts the empty slot toward
+  its member count, and reports `Degraded` for the reduced redundancy rather
+  than masquerading as a smaller, optimal array. A failed disk is pulled with
+  `remove_member` (vacating its slot and returning the device) and a fresh
+  spare inserted with `add_member`, which rebuilds it from a surviving copy —
+  the full remove-failed / add-spare replacement workflow, without a reboot
+  (`AGENTS.md` §18.4).
 - A returning copy is rebuilt by a **bounded, interruptible resync**
   (`resync_step`), so a 100 TB+ rebuild never blocks the system or busy-spins
   (`AGENTS.md` §26.6). Array health maps onto the shared

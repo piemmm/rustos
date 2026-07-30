@@ -119,6 +119,17 @@ fn block(v: u8) -> [u8; BS as usize] {
     [v; BS as usize]
 }
 
+/// Borrow the device behind a *present* member slot. The tests that call it
+/// only ever inspect slots they know hold a device, so an absent slot is a
+/// test bug and panics here.
+fn dev<'a>(array: &'a MirrorArray<'_, FaultBlock>, index: usize) -> &'a FaultBlock {
+    array
+        .member(index)
+        .expect("member index in range")
+        .device()
+        .expect("present member slot holds a device")
+}
+
 #[test]
 fn assemble_two_healthy_members_is_optimal() {
     let mut members = [
@@ -189,14 +200,8 @@ fn a_write_fans_out_to_every_copy() {
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     let data = block(0x33);
     array.write_blocks(1, &data).expect("write ok");
-    assert_eq!(
-        &array.member(0).unwrap().device().store[512..1024],
-        &data[..]
-    );
-    assert_eq!(
-        &array.member(1).unwrap().device().store[512..1024],
-        &data[..]
-    );
+    assert_eq!(&dev(&array, 0).store[512..1024], &data[..]);
+    assert_eq!(&dev(&array, 1).store[512..1024], &data[..]);
 }
 
 #[test]
@@ -208,8 +213,8 @@ fn a_read_is_served_from_the_first_copy_without_touching_the_rest() {
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     let mut buf = block(0);
     array.read_blocks(0, &mut buf).expect("read ok");
-    assert_eq!(array.member(0).unwrap().device().reads.get(), 1);
-    assert_eq!(array.member(1).unwrap().device().reads.get(), 0);
+    assert_eq!(dev(&array, 0).reads.get(), 1);
+    assert_eq!(dev(&array, 1).reads.get(), 0);
 }
 
 #[test]
@@ -222,10 +227,7 @@ fn a_bad_sector_is_recovered_from_a_copy_and_the_bad_copy_repaired() {
     let data = block(0x5A);
     array.write_blocks(2, &data).expect("seed both copies");
     // The first copy develops a permanent bad sector at this block.
-    array
-        .member(0)
-        .unwrap()
-        .device()
+    dev(&array, 0)
         .read_fault
         .set(Some(DriverError::MediumError));
 
@@ -237,7 +239,7 @@ fn a_bad_sector_is_recovered_from_a_copy_and_the_bad_copy_repaired() {
     // The bad copy was repaired in place (sector reallocated) and stays a
     // member — a single bad sector never kills a mirror leg.
     assert_eq!(array.member_state(0), Some(MemberState::InSync));
-    assert_eq!(array.member(0).unwrap().device().read_fault.get(), None);
+    assert_eq!(dev(&array, 0).read_fault.get(), None);
     assert_eq!(array.health(), ArrayHealth::Optimal);
 }
 
@@ -248,10 +250,7 @@ fn a_whole_device_read_fault_drops_the_copy_and_degrades_the_array() {
         MirrorMember::new(FaultBlock::new(0)),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
-    array
-        .member(0)
-        .unwrap()
-        .device()
+    dev(&array, 0)
         .read_fault
         .set(Some(DriverError::DeviceOffline));
     let mut buf = block(0);
@@ -271,10 +270,7 @@ fn a_read_with_no_good_copy_fails_closed_without_faulting_medium_copies() {
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     for i in 0..2 {
-        array
-            .member(i)
-            .unwrap()
-            .device()
+        dev(&array, i)
             .read_fault
             .set(Some(DriverError::MediumError));
     }
@@ -296,10 +292,7 @@ fn a_write_error_drops_the_copy_but_the_write_still_succeeds() {
         MirrorMember::new(FaultBlock::new(0)),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
-    array
-        .member(0)
-        .unwrap()
-        .device()
+    dev(&array, 0)
         .write_fault
         .set(Some(DriverError::DeviceFault));
     let data = block(0x77);
@@ -309,7 +302,7 @@ fn a_write_error_drops_the_copy_but_the_write_still_succeeds() {
     assert_eq!(array.member_state(0), Some(MemberState::Faulted));
     assert_eq!(array.member_state(1), Some(MemberState::InSync));
     assert_eq!(array.health(), ArrayHealth::Degraded);
-    assert_eq!(&array.member(1).unwrap().device().store[0..512], &data[..]);
+    assert_eq!(&dev(&array, 1).store[0..512], &data[..]);
 }
 
 #[test]
@@ -320,10 +313,7 @@ fn a_write_no_copy_accepts_fails_closed() {
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     for i in 0..2 {
-        array
-            .member(i)
-            .unwrap()
-            .device()
+        dev(&array, i)
             .write_fault
             .set(Some(DriverError::DeviceFault));
     }
@@ -344,10 +334,10 @@ fn a_flush_commits_every_copy_and_drops_one_that_cannot() {
         MirrorMember::new(FaultBlock::new(0)),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
-    array.member(0).unwrap().device().flush_fault.set(true);
+    dev(&array, 0).flush_fault.set(true);
     array.flush().expect("still durable on the surviving copy");
     assert_eq!(array.member_state(0), Some(MemberState::Faulted));
-    array.member(1).unwrap().device().flush_fault.set(true);
+    dev(&array, 1).flush_fault.set(true);
     assert!(array.flush().is_err());
 }
 
@@ -397,10 +387,7 @@ fn a_returned_member_is_rebuilt_with_current_data_including_degraded_writes() {
 
     // The second copy faults on a write, so a degraded-window write reaches
     // only the survivor.
-    array
-        .member(1)
-        .unwrap()
-        .device()
+    dev(&array, 1)
         .write_fault
         .set(Some(DriverError::DeviceFault));
     array
@@ -410,7 +397,7 @@ fn a_returned_member_is_rebuilt_with_current_data_including_degraded_writes() {
     assert_eq!(array.health(), ArrayHealth::Degraded);
 
     // The copy recovers; clear its fault and re-add it.
-    array.member(1).unwrap().device().write_fault.set(None);
+    dev(&array, 1).write_fault.set(None);
     array.readd_member(1).expect("re-add begins the rebuild");
     assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
     assert_eq!(array.health(), ArrayHealth::Recovering);
@@ -428,10 +415,7 @@ fn a_returned_member_is_rebuilt_with_current_data_including_degraded_writes() {
 
     // Prove the rebuilt copy holds current data: fault the source and read
     // every block back from the rebuilt copy.
-    array
-        .member(0)
-        .unwrap()
-        .device()
+    dev(&array, 0)
         .read_fault
         .set(Some(DriverError::DeviceOffline));
     for lba in 0..NBLK {
@@ -453,7 +437,7 @@ fn the_rebuild_is_incremental_and_advances_a_cursor() {
     let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
     fill(&mut array);
     // The absent copy returns and is re-added.
-    array.member(1).unwrap().device().present.set(true);
+    dev(&array, 1).present.set(true);
     array.readd_member(1).expect("rebuild begins");
 
     let mut scratch = [0u8; 2 * BS as usize];
@@ -477,7 +461,7 @@ fn a_write_during_rebuild_reaches_only_the_already_synced_region() {
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
     fill(&mut array);
-    array.member(1).unwrap().device().present.set(true);
+    dev(&array, 1).present.set(true);
     array.readd_member(1).expect("rebuild begins");
 
     let mut scratch = [0u8; 2 * BS as usize];
@@ -494,12 +478,9 @@ fn a_write_during_rebuild_reaches_only_the_already_synced_region() {
     array
         .write_blocks(5, &block(0xDD))
         .expect("unsynced-region write");
+    assert_eq!(&dev(&array, 1).store[0..512], &block(0xCC));
     assert_eq!(
-        &array.member(1).unwrap().device().store[0..512],
-        &block(0xCC)
-    );
-    assert_eq!(
-        &array.member(1).unwrap().device().store[5 * 512..6 * 512],
+        &dev(&array, 1).store[5 * 512..6 * 512],
         &block(0),
         "the unsynced block is not written ahead of the rebuild"
     );
@@ -509,14 +490,8 @@ fn a_write_during_rebuild_reaches_only_the_already_synced_region() {
     }
     // The rebuild copies the current source contents, so the above-cursor
     // write lands on the rebuilt copy from the source.
-    assert_eq!(
-        &array.member(1).unwrap().device().store[5 * 512..6 * 512],
-        &block(0xDD)
-    );
-    assert_eq!(
-        &array.member(1).unwrap().device().store[0..512],
-        &block(0xCC)
-    );
+    assert_eq!(&dev(&array, 1).store[5 * 512..6 * 512], &block(0xDD));
+    assert_eq!(&dev(&array, 1).store[0..512], &block(0xCC));
 }
 
 #[test]
@@ -527,12 +502,9 @@ fn a_rebuild_target_that_cannot_be_written_drops_back_to_faulted() {
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
     fill(&mut array);
-    array.member(1).unwrap().device().present.set(true);
+    dev(&array, 1).present.set(true);
     array.readd_member(1).expect("rebuild begins");
-    array
-        .member(1)
-        .unwrap()
-        .device()
+    dev(&array, 1)
         .write_fault
         .set(Some(DriverError::DeviceFault));
 
@@ -560,8 +532,8 @@ fn readd_fails_closed_on_bad_index_state_or_geometry() {
     // Member 1 is faulted and still absent: cannot be probed.
     assert_eq!(array.readd_member(1).unwrap_err(), MirrorError::ProbeFailed);
     // It returns with a different geometry: refused rather than truncated.
-    array.member(1).unwrap().device().present.set(true);
-    array.member(1).unwrap().device().geo.set(BlockGeometry {
+    dev(&array, 1).present.set(true);
+    dev(&array, 1).geo.set(BlockGeometry {
         block_size: BS,
         block_count: NBLK + 4,
     });
@@ -581,10 +553,7 @@ fn a_permanently_faulted_member_never_stops_the_survivor_serving() {
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     fill(&mut array);
     // The second copy faults for good and is never re-added.
-    array
-        .member(1)
-        .unwrap()
-        .device()
+    dev(&array, 1)
         .write_fault
         .set(Some(DriverError::DeviceOffline));
     array
@@ -622,10 +591,7 @@ fn a_replaced_member_is_rebuilt_from_the_survivor() {
         array.resync_step(&mut scratch).expect("resync step");
     }
     assert_eq!(array.health(), ArrayHealth::Optimal);
-    assert_eq!(
-        &array.member(1).unwrap().device().store[0..512],
-        &block(pat(0))
-    );
+    assert_eq!(&dev(&array, 1).store[0..512], &block(pat(0)));
 }
 
 #[test]
@@ -715,7 +681,7 @@ fn a_stale_member_joins_resyncing_and_never_serves_a_read() {
             .expect("read from the source");
         assert_eq!(buf, block(pat(lba)), "served from the current copy");
     }
-    assert_eq!(array.member(1).unwrap().device().reads.get(), 0);
+    assert_eq!(dev(&array, 1).reads.get(), 0);
     assert_eq!(array.member(1).unwrap().role(), MemberRole::Stale);
 }
 
@@ -740,10 +706,7 @@ fn a_stale_member_becomes_a_read_source_only_after_it_is_resynced() {
 
     // Now that it is in sync, fault the source and prove the rebuilt copy
     // holds the current data.
-    array
-        .member(0)
-        .unwrap()
-        .device()
+    dev(&array, 0)
         .read_fault
         .set(Some(DriverError::DeviceOffline));
     for lba in 0..NBLK {
@@ -813,8 +776,8 @@ fn scrub_verifies_every_copy_and_a_clean_pass_is_a_no_op() {
     }
     // Unlike a read (which stops at the first serving copy), a scrub reads
     // *every* in-sync copy of the whole array — here one whole-array chunk.
-    assert_eq!(array.member(0).unwrap().device().reads.get(), 1);
-    assert_eq!(array.member(1).unwrap().device().reads.get(), 1);
+    assert_eq!(dev(&array, 0).reads.get(), 1);
+    assert_eq!(dev(&array, 1).reads.get(), 1);
     assert_eq!(array.health(), ArrayHealth::Optimal);
     // A completed pass is idempotent: another step is a no-op.
     array
@@ -834,10 +797,7 @@ fn scrub_finds_and_repairs_a_latent_bad_sector_on_a_non_primary_copy() {
     let data = block(0xC4);
     array.write_blocks(0, &data).expect("seed both copies");
     // The *second* copy (never the read source) develops a latent bad sector.
-    array
-        .member(1)
-        .unwrap()
-        .device()
+    dev(&array, 1)
         .read_fault
         .set(Some(DriverError::MediumError));
     // The read path never consults the second copy, so the latent error stays
@@ -845,12 +805,12 @@ fn scrub_finds_and_repairs_a_latent_bad_sector_on_a_non_primary_copy() {
     let mut buf = block(0);
     array.read_blocks(0, &mut buf).expect("served from copy 0");
     assert_eq!(
-        array.member(1).unwrap().device().read_fault.get(),
+        dev(&array, 1).read_fault.get(),
         Some(DriverError::MediumError),
         "the read path did not touch — nor repair — the second copy"
     );
-    let seed_writes_0 = array.member(0).unwrap().device().writes.get();
-    let seed_writes_1 = array.member(1).unwrap().device().writes.get();
+    let seed_writes_0 = dev(&array, 0).writes.get();
+    let seed_writes_1 = dev(&array, 1).writes.get();
     // A scrub proactively reads the second copy, finds the bad sector, and
     // repairs it from the good copy.
     array.begin_scrub();
@@ -861,21 +821,15 @@ fn scrub_finds_and_repairs_a_latent_bad_sector_on_a_non_primary_copy() {
             .expect("scrub repairs the bad sector");
     }
     assert_eq!(
-        array.member(1).unwrap().device().read_fault.get(),
+        dev(&array, 1).read_fault.get(),
         None,
         "the bad sector was reallocated by the repair write-back"
     );
     assert_eq!(array.member_state(1), Some(MemberState::InSync));
     assert_eq!(array.health(), ArrayHealth::Optimal);
     // Only the bad copy was written (repaired); the good source was not.
-    assert_eq!(
-        array.member(0).unwrap().device().writes.get(),
-        seed_writes_0
-    );
-    assert_eq!(
-        array.member(1).unwrap().device().writes.get(),
-        seed_writes_1 + 1
-    );
+    assert_eq!(dev(&array, 0).writes.get(), seed_writes_0);
+    assert_eq!(dev(&array, 1).writes.get(), seed_writes_1 + 1);
 }
 
 #[test]
@@ -885,10 +839,7 @@ fn scrub_drops_a_whole_device_faulting_copy() {
         MirrorMember::new(FaultBlock::new(0)),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
-    array
-        .member(1)
-        .unwrap()
-        .device()
+    dev(&array, 1)
         .read_fault
         .set(Some(DriverError::DeviceOffline));
     array.begin_scrub();
@@ -911,10 +862,7 @@ fn scrub_reports_a_block_bad_on_every_copy_and_still_advances() {
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     for i in 0..2 {
-        array
-            .member(i)
-            .unwrap()
-            .device()
+        dev(&array, i)
             .read_fault
             .set(Some(DriverError::MediumError));
     }
@@ -993,4 +941,231 @@ fn scrub_step_rejects_a_bad_scratch_buffer() {
         array.scrub_step(&mut ragged).unwrap_err(),
         DriverError::BufferTooSmall
     );
+}
+
+// --- Missing (absent) member slots: md-style "removed" slots -----------------
+
+#[test]
+fn an_absent_slot_counts_toward_the_width_and_reports_degraded_not_optimal() {
+    // A slot the array is *defined* to have but which holds no device is a
+    // first-class missing member: the array comes up on its width and reports
+    // the reduced redundancy, never masquerading as a smaller, optimal array.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    assert_eq!(
+        array.member_count(),
+        2,
+        "the absent slot counts toward width"
+    );
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+    assert_eq!(array.member_state(1), Some(MemberState::Absent));
+    assert_eq!(
+        array.health(),
+        ArrayHealth::Degraded,
+        "a missing member reduces redundancy"
+    );
+    // The absent slot holds no device and never fabricates one.
+    assert!(array.member(1).unwrap().device().is_none());
+}
+
+#[test]
+fn an_all_absent_member_set_fails_closed_with_no_geometry() {
+    // No slot holds a device, so no geometry can be established: the array
+    // fails closed rather than inventing an empty one.
+    let mut members: [MirrorMember<FaultBlock>; 2] =
+        [MirrorMember::absent(), MirrorMember::absent()];
+    assert_eq!(
+        MirrorArray::assemble(&mut members).err(),
+        Some(MirrorError::NoUsableMember)
+    );
+}
+
+#[test]
+fn reads_and_writes_serve_from_the_present_copy_with_an_absent_slot() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    let data = block(0x44);
+    array
+        .write_blocks(1, &data)
+        .expect("write to the present copy");
+    let mut buf = block(0);
+    array
+        .read_blocks(1, &mut buf)
+        .expect("read from the present copy");
+    assert_eq!(buf, data);
+    // The write reached the present copy and the array stayed degraded (never
+    // faulting the absent slot, which had no device to fault).
+    assert_eq!(&dev(&array, 0).store[512..1024], &data[..]);
+    assert_eq!(array.member_state(1), Some(MemberState::Absent));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+}
+
+#[test]
+fn remove_member_vacates_a_faulted_slot_to_absent_and_returns_the_device() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    // Only a faulted member may be removed: a live one is still participating.
+    // (`.err()` rather than `unwrap_err()` so the device double needs no
+    // `Debug`; the removed device is returned by value on success.)
+    assert_eq!(array.remove_member(0).err(), Some(MirrorError::NotFaulted));
+    assert_eq!(
+        array.remove_member(9).err(),
+        Some(MirrorError::UnknownMember)
+    );
+    // Fault the second copy on a write, then pull it out of the array.
+    dev(&array, 1)
+        .write_fault
+        .set(Some(DriverError::DeviceOffline));
+    array
+        .write_blocks(0, &block(0x01))
+        .expect("survivor still serves");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    let removed = array.remove_member(1).expect("the faulted disk is pulled");
+    // The returned device is the real one: it still holds its pre-fault fill
+    // for block 0 (the faulting write never landed on it).
+    assert_eq!(&removed.store[0..512], &block(pat(0))[..]);
+    assert_eq!(array.member_state(1), Some(MemberState::Absent));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+    // The vacated slot no longer holds a device.
+    assert!(array.member(1).unwrap().device().is_none());
+    // A survivor keeps serving through the vacancy.
+    let mut buf = block(0);
+    array.read_blocks(2, &mut buf).expect("survivor reads");
+    assert_eq!(buf, block(pat(2)));
+}
+
+#[test]
+fn add_member_installs_a_spare_into_an_absent_slot_and_rebuilds_current_data() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    fill(&mut array);
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+
+    // A spare is added into the empty slot and begins rebuilding at once.
+    array
+        .add_member(1, FaultBlock::new(0xEE))
+        .expect("spare joins the empty slot");
+    assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
+    assert_eq!(array.health(), ArrayHealth::Recovering);
+
+    let mut scratch = block(0);
+    let mut steps = 0u32;
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("resync step");
+        steps += 1;
+        assert!(steps <= 100, "the rebuild terminates");
+    }
+    assert_eq!(array.member_state(1), Some(MemberState::InSync));
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+
+    // Prove the spare rebuilt with current data: fault the source and read
+    // every block back from the freshly-rebuilt copy.
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    for lba in 0..NBLK {
+        let mut buf = block(0);
+        array
+            .read_blocks(lba, &mut buf)
+            .expect("served from the rebuilt spare");
+        assert_eq!(
+            buf,
+            block(pat(lba)),
+            "block {lba} rebuilt with current data"
+        );
+    }
+}
+
+#[test]
+fn add_member_fails_closed_on_an_occupied_slot_or_bad_geometry() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    // The live slot 0 already holds a device: refuse rather than clobber it.
+    assert_eq!(
+        array.add_member(0, FaultBlock::new(1)).unwrap_err(),
+        MirrorError::SlotOccupied
+    );
+    assert_eq!(
+        array.add_member(9, FaultBlock::new(1)).unwrap_err(),
+        MirrorError::UnknownMember
+    );
+    // A spare with the wrong geometry is refused and the slot is left faulted
+    // holding it (present but unusable), never admitted as a rebuild source.
+    let other = BlockGeometry {
+        block_size: BS,
+        block_count: NBLK + 1,
+    };
+    assert_eq!(
+        array
+            .add_member(1, FaultBlock::new(1).with_geometry(other))
+            .unwrap_err(),
+        MirrorError::GeometryMismatch
+    );
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+}
+
+#[test]
+fn remove_then_add_is_the_full_disk_replacement_workflow() {
+    // The end-to-end Linux-md workflow: a failed disk is removed (vacating the
+    // slot) and a fresh spare added into it, which rebuilds to full redundancy
+    // without a reboot.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    dev(&array, 1)
+        .write_fault
+        .set(Some(DriverError::DeviceOffline));
+    array
+        .write_blocks(0, &block(0x01))
+        .expect("survivor still serves");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+
+    let _pulled = array.remove_member(1).expect("pull the failed disk");
+    assert_eq!(array.member_state(1), Some(MemberState::Absent));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+
+    array
+        .add_member(1, FaultBlock::new(0x99))
+        .expect("insert a fresh spare");
+    let mut scratch = block(0);
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("resync step");
+    }
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    // The new disk holds the array's current contents (block 0 = 0x01 written
+    // while degraded, the rest the original fill).
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    let mut buf = block(0);
+    array
+        .read_blocks(0, &mut buf)
+        .expect("served from the spare");
+    assert_eq!(buf, block(0x01));
+    for lba in 1..NBLK {
+        let mut b = block(0);
+        array
+            .read_blocks(lba, &mut b)
+            .expect("served from the spare");
+        assert_eq!(b, block(pat(lba)));
+    }
 }
