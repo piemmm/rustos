@@ -105,7 +105,7 @@ swap partition present (`SWAPSWAPSWAP.md` §15).
 
 ---
 
-## 3. Why a dedicated raw partition, not a file in an ARXFS/RustFS volume
+## 3. Why a dedicated raw partition, not a file in an ARXFS volume
 
 This is a settled design decision, defensible under a Linus-style review for
 four independent reasons. Swap is a **raw block range we own end to end**, given
@@ -669,7 +669,7 @@ Complete only when all applicable items are true:
 - Rust only; no C, C++, or new assembly; no hand-edited generated headers.
 - No public ABI/syscall/capability/service added without a current in-tree
   caller and full ABI/docs/tests/drift/`PLAN.md` in the same gated change.
-- Swap is a **dedicated raw partition**, never a file in an ARXFS/RustFS volume.
+- Swap is a **dedicated raw partition**, never a file in an ARXFS volume.
 - Encrypted-swap is unrepresentable-otherwise; **no plaintext swap** in any
   mode; the ephemeral per-boot key is never persisted.
 - **No durability redundancy** (no FEC/mirror/repair/scrub); **mandatory AEAD

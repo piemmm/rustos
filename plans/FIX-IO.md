@@ -110,7 +110,7 @@ recovery (`plans/WATCHDOG.md`).
 
 Each stage is complete and green on its own (§2.19). IO1–IO2 already stop the
 lockup; IO3 adds the grace window this issue is about; IO4–IO6 deepen the
-model. IO6 depends on RustFS existing and is gated on it.
+model. IO6 depends on ARXFS existing and is gated on it.
 
 ### Stage IO1 — Bounded, cancellable block transport. **done**
 
@@ -793,10 +793,10 @@ Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver
 process is detected and recovered.
 
-### Stage IO6 — RAID / mirror / RustFS composition. **planned, gated on RustFS**
+### Stage IO6 — RAID / mirror / ARXFS composition. **planned, gated on ARXFS**
 
 Deliverables:
-- A RAID/mirror/RustFS volume is a **virtual block device that composes child
+- A RAID/mirror/ARXFS volume is a **virtual block device that composes child
   block endpoints** through the same fault-aware `Block` seam (§2.2 one seam,
   §27 complete abstraction). It consumes health/status; it does not re-invent
   it.
@@ -836,4 +836,4 @@ green on its own. The IO1 transport shape is decided — the async
 submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
 HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6 is
-gated on RustFS existing; IO1–IO5 do not depend on it and land first.
+gated on ARXFS existing; IO1–IO5 do not depend on it and land first.
