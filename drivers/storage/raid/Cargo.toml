@@ -23,3 +23,16 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# CRC-32C block-integrity checksum for the on-disk array superblock (the one
+# first-party checksum definition, never a second; `AGENTS.md` §2.2). It is an
+# error-detecting checksum, not a security primitive: array authenticity rests
+# on the signed driver bundle and the members' own capability-gated endpoints,
+# not on this value.
+tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
+
+[dev-dependencies]
+# Shared fuzz-harness seam: one place picks the per-run PRNG seed, logs it,
+# and bounds the smoke/soak budget, so the superblock decoder's fuzz harness
+# shares the project's single definition (`AGENTS.md` §2.2, §19.6). Test
+# scaffolding only — never linked into the driver itself.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

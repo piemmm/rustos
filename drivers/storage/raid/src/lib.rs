@@ -44,19 +44,38 @@
 //! rather than fabricating success. The *operation* fails; the *system*
 //! keeps running.
 //!
+//! # On-disk metadata and reassembly ([`ArraySuperblock`], [`ArrayIdentity`])
+//!
+//! An array is discovered, not configured: each member carries a checksummed
+//! [`ArraySuperblock`] naming the array, this member's slot, the geometry, and
+//! a monotonic generation counter. [`ArrayIdentity::resolve`] reconstructs the
+//! array from a set of discovered [`Candidate`] members — the freshest member
+//! fixes the authoritative shape — and [`ArrayIdentity::fill_slots`] places
+//! each member into its slot, marking one that is behind as a stale rebuild
+//! target and refusing a foreign, mis-shaped, or duplicate claimant. The
+//! decoder is fail-closed on any malformed on-disk byte (`AGENTS.md` §5.4,
+//! §26.5) and fuzzed for panic-freedom.
+//!
 //! # Scope
 //!
-//! This crate is the host-testable composition **engine**. The autoloaded
-//! serve process that assembles members from discovered array metadata and
-//! drives resync off the members' recovery signals rides with the
+//! This crate is the host-testable composition **engine** plus the on-disk
+//! metadata layer above. The autoloaded serve process that reads each
+//! discovered device's superblock, assembles the members through
+//! [`ArrayIdentity`], drives resync off the members' recovery signals, and
+//! publishes the composed device as its own block-service node rides with the
 //! multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining); the
-//! engine is proven host-side first, exactly as the other FIX-IO primitives
-//! landed their shared logic before their live wiring.
+//! engine and its metadata are proven host-side first, exactly as the other
+//! FIX-IO primitives landed their shared logic before their live wiring.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod mirror;
+mod superblock;
 
 pub use mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use superblock::{
+    ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate, CandidateVerdict,
+    RaidLevel, RejectReason, SlotDisposition, SuperblockError, FORMAT_VERSION, MAGIC, WIRE_LEN,
+};

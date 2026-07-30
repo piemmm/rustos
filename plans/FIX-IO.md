@@ -833,15 +833,42 @@ proven host-side over a fault-injecting `Block` double:
   reboot (§18.4).
   Design: `docs/src/drivers/raid.md`.
 
+**Landed (the on-disk array metadata + reassembly logic):** the prerequisite
+for the autoloaded serve process is the shared, host-tested metadata layer in
+`drivers/storage/raid` (§2.2, §27), so an array is *discovered*, never
+configured (§18, §16.5). Each member carries a fixed-size, little-endian
+`superblock::ArraySuperblock` — a 128-bit `ArrayUuid`, the `RaidLevel`, the
+member count, this member's slot, the array geometry, a monotonic
+**generation** counter, and a `Time64` last-write stamp (§21) — sealed with a
+trailing CRC-32C (`lib/crc32c`, the one first-party checksum, an integrity
+check not a security control). `ArraySuperblock::decode` fails closed on every
+malformed byte (bad magic, unknown version, checksum mismatch, unknown level,
+zero members, out-of-range slot, degenerate geometry, non-canonical timestamp,
+§5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
+(`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
+reassembly is the pure, allocation-free `ArrayIdentity`:
+`resolve(target_uuid, candidates)` fixes the authoritative array shape and
+current generation from the **freshest** matching member (highest generation —
+the standard RAID event-count rule, so a survivor that stayed live is the
+source of truth), and `verdict_of`/`fill_slots` place each member — in sync,
+**stale** (a rebuild target), missing, or refused (foreign array, mis-shaped,
+out-of-range slot, or the losing side of a duplicate slot claim) — from **one**
+decision, so the per-member verdict and the assembled slot table cannot
+diverge (§2.2). The caller owns the candidate slice and slot buffer, so there
+is no fixed member ceiling (§24.1). The format is unfrozen and evolved in place
+(§2.13). Proven host-side (round-trip; every fail-closed decode incl. pre-1970
+/ post-2038 timestamps; resolve/verdict/fill_slots over stale/duplicate/
+missing/mismatch/foreign arrangements). Design: `docs/src/drivers/raid.md`.
+
 Remaining:
-- The autoloaded serve process that assembles members from discovered array
-  metadata (an on-disk array superblock), drives `resync_step` off the members'
-  IO3 recovery signals, and publishes the composed device as its own
+- The autoloaded serve process that reads each discovered device's superblock,
+  assembles the members through `ArrayIdentity`, drives `resync_step` off the
+  members' IO3 recovery signals, and publishes the composed device as its own
   block-service node — plus the ARXFS-native multi-device composition that
   consumes the same engine. This rides with the multi-device volume-assembly
-  work; the engine is the single shared definition both reuse (§2.2), proven
-  host-side first exactly as the other FIX-IO primitives landed their shared
-  logic before their live wiring.
+  work; the engine and its metadata are the single shared definition both reuse
+  (§2.2), proven host-side first exactly as the other FIX-IO primitives landed
+  their shared logic before their live wiring.
 - RAID levels beyond the mirror (striping, parity) are sibling compositions
   over the same seam (§2.2 parallel implementations), added when needed.
 

@@ -8,11 +8,13 @@ one logical device to the filesystem layer and multi-layered sets nest
 naturally over the recursive seam. RAID **consumes** the block-layer health
 vocabulary (`blkio::BlkStatus`, `DriverError`); it never re-invents it.
 
-The composition engine lives in `drivers/storage/raid` as a host-testable
-library. The autoloaded serve process that assembles members from discovered
-array metadata and drives resync off the members' recovery signals rides with
-the multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining); the
-engine is proven host-side first, as the other FIX-IO primitives were.
+The composition engine and its on-disk metadata layer live in
+`drivers/storage/raid` as a host-testable library. The autoloaded serve
+process that reads each discovered device's superblock, assembles the members,
+drives resync off the members' recovery signals, and publishes the composed
+device as its own block-service node rides with the multi-device
+volume-assembly work (`plans/FIX-IO.md` IO6 remaining); the engine and its
+metadata are proven host-side first, as the other FIX-IO primitives were.
 
 ## RAID1 mirror (`MirrorArray`)
 
@@ -63,6 +65,52 @@ vocabulary (`MountAvailability::Available`/`Degraded`/`Recovering`/
 `UnavailableLost`) so a serving process surfaces it through the same `sysinfo`
 mount surface a leaf volume uses (`plans/FIX-IO.md` IO2/IO5), never a second
 vocabulary.
+
+## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
+
+An array is **discovered, not configured**: there is no hand-maintained list
+of which devices form an array (`AGENTS.md` §18, §16.5). Each member carries a
+fixed-size, little-endian `ArraySuperblock` naming the array (a 128-bit
+`ArrayUuid`), the RAID level, the total member count, this member's slot, the
+array geometry, a monotonic **generation** counter, and a `Time64` last-write
+stamp. The record is sealed with a trailing CRC-32C (`lib/crc32c`, the one
+first-party checksum) — a media/transport integrity check, not a security
+control: an array's authenticity rests on the signed driver bundle and the
+members' own capability-gated block endpoints, not on this value.
+
+`ArraySuperblock::decode` **fails closed** on any malformed on-disk byte
+(`AGENTS.md` §5.4, §26.5) — a bad magic, an unknown version, a checksum
+mismatch, an unknown RAID level, a zero member count, a slot outside the
+array, a degenerate geometry, or a non-canonical timestamp is a typed
+`SuperblockError`, never a silently-trusted record. The decoder is total and
+`forbid(unsafe_code)`, and a fuzz harness (`tests/fuzz_superblock.rs`,
+`AGENTS.md` §19.6) proves it never panics on arbitrary input and that every
+accepted record round-trips.
+
+Reassembly resolves the array from a set of discovered `Candidate` members:
+
+- `ArrayIdentity::resolve(target_uuid, candidates)` fixes the authoritative
+  array shape (level, member count, geometry) and current generation from the
+  **freshest** matching member — the one reporting the highest generation.
+  Trusting the freshest member is the standard RAID rule (mdadm's event
+  count): a member that missed a membership change is behind, so a survivor
+  that stayed live is the source of truth. It fails closed with
+  `AssemblyError::NoMembers` if no candidate belongs to the target array.
+- `ArrayIdentity::verdict_of` is the single per-member decision: a member
+  whose generation matches the authoritative one is placed **in sync**; a
+  member that is behind is placed **stale** (a rebuild target the serve
+  process brings up `Resyncing`); a foreign array, a member disagreeing on the
+  array shape, an out-of-range slot, or a duplicate claim on a slot (the
+  fresher — or, on a tie, lower-tagged — copy wins) is refused and never
+  admitted, so a corrupt or clone disk cannot poison the array.
+- `ArrayIdentity::fill_slots` builds the whole slot table from that one
+  decision, so a per-member verdict and the assembled table can never disagree
+  (`AGENTS.md` §2.2). Both are pure and allocation-free — the caller owns the
+  candidate slice and the slot buffer, so there is no fixed member ceiling
+  (`AGENTS.md` §24.1).
+
+The on-disk format is unfrozen pre-release (`AGENTS.md` §2.13): it is changed
+in place, never versioned alongside an old one.
 
 ### States
 
