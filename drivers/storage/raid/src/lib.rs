@@ -56,6 +56,13 @@
 //! decoder is fail-closed on any malformed on-disk byte (`AGENTS.md` §5.4,
 //! §26.5) and fuzzed for panic-freedom.
 //!
+//! The reassembly verdict is carried into composition through one mapping,
+//! [`MemberRole::for_slot`]: a slot the metadata proved is behind
+//! (`in_sync == false`) becomes a [`MemberRole::Stale`] member, which
+//! [`MirrorArray::assemble`] admits [`MemberState::Resyncing`] — a rebuild
+//! target, never an immediate read source — so the array can never serve a
+//! reader data from a copy known to be out of date (`AGENTS.md` §5.4, §26.5).
+//!
 //! # Scope
 //!
 //! This crate is the host-testable composition **engine** plus the on-disk
@@ -74,7 +81,7 @@
 mod mirror;
 mod superblock;
 
-pub use mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use superblock::{
     ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate, CandidateVerdict,
     RaidLevel, RejectReason, SlotDisposition, SuperblockError, FORMAT_VERSION, MAGIC, WIRE_LEN,

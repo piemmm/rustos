@@ -98,16 +98,29 @@ Reassembly resolves the array from a set of discovered `Candidate` members:
   `AssemblyError::NoMembers` if no candidate belongs to the target array.
 - `ArrayIdentity::verdict_of` is the single per-member decision: a member
   whose generation matches the authoritative one is placed **in sync**; a
-  member that is behind is placed **stale** (a rebuild target the serve
-  process brings up `Resyncing`); a foreign array, a member disagreeing on the
-  array shape, an out-of-range slot, or a duplicate claim on a slot (the
-  fresher — or, on a tie, lower-tagged — copy wins) is refused and never
-  admitted, so a corrupt or clone disk cannot poison the array.
+  member that is behind is placed **stale** (a rebuild target `assemble`
+  brings up `Resyncing`, never a read source); a foreign array, a member
+  disagreeing on the array shape, an out-of-range slot, or a duplicate claim
+  on a slot (the fresher — or, on a tie, lower-tagged — copy wins) is refused
+  and never admitted, so a corrupt or clone disk cannot poison the array.
 - `ArrayIdentity::fill_slots` builds the whole slot table from that one
   decision, so a per-member verdict and the assembled table can never disagree
   (`AGENTS.md` §2.2). Both are pure and allocation-free — the caller owns the
   candidate slice and the slot buffer, so there is no fixed member ceiling
   (`AGENTS.md` §24.1).
+
+The reassembly verdict is carried into the composition through **one** mapping,
+`MemberRole::for_slot`, so the metadata layer and the mirror cannot disagree on
+what "in sync" means (`AGENTS.md` §2.2): a `SlotDisposition::Missing` slot
+offers no device (`None`); a `Present { in_sync: true }` slot becomes a
+`MemberRole::Current` member; a `Present { in_sync: false }` slot becomes a
+`MemberRole::Stale` member. `MirrorArray::assemble` turns a member's role into
+its initial state — a current copy that probes cleanly is `InSync` (a read
+source at once), a stale copy that probes cleanly is `Resyncing` (rebuilt from
+a current copy before it ever answers a read), and any copy that cannot be
+probed is `Faulted`. A copy the generation counter proved is behind therefore
+can **never** be served to a reader as if it were current (`AGENTS.md` §5.4,
+§26.5) — a disk that missed writes is a disk that can lie.
 
 The on-disk format is unfrozen pre-release (`AGENTS.md` §2.13): it is changed
 in place, never versioned alongside an old one.

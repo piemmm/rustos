@@ -6,6 +6,7 @@
 //! serve process, `AGENTS.md` §24), so the array imposes no fixed member
 //! ceiling and holds only a borrow.
 
+use crate::superblock::SlotDisposition;
 use tairix_abi::blkio::BlkStatus;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -33,27 +34,96 @@ pub enum MemberState {
     Resyncing,
 }
 
-/// One mirror copy: a child [`Block`] device plus its membership state and,
-/// while [`MemberState::Resyncing`], the rebuild cursor (the first
-/// not-yet-copied logical block).
+/// Whether a member joining the array holds a copy believed **current** or
+/// one the reassembly proved is **stale** and must be rebuilt before it can
+/// serve a read.
+///
+/// The on-disk generation counter ([`ArraySuperblock::generation`], resolved
+/// by [`ArrayIdentity`]) is the only authority on which copies are current: a
+/// member below the authoritative generation is behind and its bytes must not
+/// be trusted as a read source. Assembly ([`MirrorArray::assemble`]) turns a
+/// member's role into its initial [`MemberState`]: a [`Current`](Self::Current)
+/// copy that probes cleanly becomes [`MemberState::InSync`] (a read source at
+/// once); a [`Stale`](Self::Stale) copy that probes cleanly becomes
+/// [`MemberState::Resyncing`] so it is rebuilt from a current copy before it
+/// ever answers a read. The array can therefore never serve a reader data from
+/// a copy known to be out of date (the charter's fail-closed rule; a disk that
+/// missed writes is a disk that can lie).
+///
+/// [`ArraySuperblock::generation`]: crate::ArraySuperblock::generation
+/// [`ArrayIdentity`]: crate::ArrayIdentity
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MemberRole {
+    /// A copy believed current: at the array's authoritative generation.
+    Current,
+    /// A copy known to be behind the array: a rebuild target, admitted
+    /// [`MemberState::Resyncing`] and never a read source until resynced.
+    Stale,
+}
+
+impl MemberRole {
+    /// The role a reassembled array slot contributes, or [`None`] for a
+    /// [`SlotDisposition::Missing`] slot that offers no device to admit.
+    ///
+    /// This is the single mapping from the on-disk reassembly verdict
+    /// ([`ArrayIdentity::fill_slots`]) to the composed member's role, so the
+    /// metadata layer and the composition layer cannot disagree on what "in
+    /// sync" means (`AGENTS.md` §2.2): a slot the metadata marked a stale
+    /// rebuild target (`in_sync == false`) becomes a [`Stale`](Self::Stale)
+    /// member, never a trusted read source.
+    ///
+    /// [`ArrayIdentity::fill_slots`]: crate::ArrayIdentity::fill_slots
+    #[must_use]
+    pub const fn for_slot(slot: SlotDisposition) -> Option<Self> {
+        match slot {
+            SlotDisposition::Missing => None,
+            SlotDisposition::Present { in_sync: true, .. } => Some(Self::Current),
+            SlotDisposition::Present { in_sync: false, .. } => Some(Self::Stale),
+        }
+    }
+}
+
+/// One mirror copy: a child [`Block`] device plus the role it joined with, its
+/// membership state and, while [`MemberState::Resyncing`], the rebuild cursor
+/// (the first not-yet-copied logical block).
 pub struct MirrorMember<B: Block> {
     device: B,
+    role: MemberRole,
     state: MemberState,
     resync_next_lba: u64,
 }
 
 impl<B: Block> MirrorMember<B> {
-    /// Wrap `device` as a member presumed to hold a current copy. Assembly
-    /// ([`MirrorArray::assemble`]) re-derives the real state from the
-    /// device's geometry probe, so a member whose device is absent or unwell
-    /// at assembly is set [`MemberState::Faulted`] rather than trusted.
+    /// Wrap `device` as a member presumed to hold a **current** copy
+    /// ([`MemberRole::Current`]). Equivalent to
+    /// [`with_role(device, MemberRole::Current)`](Self::with_role).
     #[must_use]
     pub const fn new(device: B) -> Self {
+        Self::with_role(device, MemberRole::Current)
+    }
+
+    /// Wrap `device` as a member joining the array with `role`.
+    ///
+    /// Assembly ([`MirrorArray::assemble`]) re-derives the real state from the
+    /// device's geometry probe and this role: a member whose device is absent
+    /// or unwell at assembly is set [`MemberState::Faulted`] rather than
+    /// trusted; a [`MemberRole::Stale`] member that probes cleanly begins
+    /// [`MemberState::Resyncing`] rather than serving stale reads. The state
+    /// recorded here is a placeholder overwritten by `assemble`.
+    #[must_use]
+    pub const fn with_role(device: B, role: MemberRole) -> Self {
         Self {
             device,
+            role,
             state: MemberState::InSync,
             resync_next_lba: 0,
         }
+    }
+
+    /// The role this member joined the array with.
+    #[must_use]
+    pub const fn role(&self) -> MemberRole {
+        self.role
     }
 
     /// This member's current membership state.
@@ -185,7 +255,13 @@ impl<'a, B: Block> MirrorArray<'a, B> {
                 Some(existing) if existing == g => {}
                 Some(_) => return Err(MirrorError::GeometryMismatch),
             }
-            member.state = MemberState::InSync;
+            // A copy the reassembly proved is behind must be rebuilt from a
+            // current copy before it serves a read; only a copy believed
+            // current is admitted as an immediate read source.
+            member.state = match member.role {
+                MemberRole::Current => MemberState::InSync,
+                MemberRole::Stale => MemberState::Resyncing,
+            };
             member.resync_next_lba = 0;
         }
         let Some(geometry) = geometry else {

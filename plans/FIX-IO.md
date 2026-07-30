@@ -846,7 +846,15 @@ malformed byte (bad magic, unknown version, checksum mismatch, unknown level,
 zero members, out-of-range slot, degenerate geometry, non-canonical timestamp,
 §5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
 (`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
-reassembly is the pure, allocation-free `ArrayIdentity`:
+reassembly verdict is carried into the composition through one shared mapping
+`raid::MemberRole::for_slot(SlotDisposition)` (§2.2): a `Present{in_sync:false}`
+slot — a copy the generation counter proved is behind — becomes a
+`MemberRole::Stale` member, which `MirrorArray::assemble` admits `Resyncing` (a
+rebuild target, never a read source) rather than `InSync`, so a copy known to
+be out of date can never be served to a reader as if it were current
+(§5.4/§26.5 — closing a latent stale-read gap where `assemble` previously
+trusted every probeable member as an immediate read source). The reassembly is
+the pure, allocation-free `ArrayIdentity`:
 `resolve(target_uuid, candidates)` fixes the authoritative array shape and
 current generation from the **freshest** matching member (highest generation —
 the standard RAID event-count rule, so a survivor that stayed live is the

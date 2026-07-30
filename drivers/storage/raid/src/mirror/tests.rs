@@ -1,6 +1,7 @@
 //! Host tests for the RAID1 mirror over a fault-injecting [`Block`] double.
 
-use super::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+use super::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+use crate::SlotDisposition;
 use core::cell::Cell;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -666,4 +667,132 @@ fn array_health_maps_onto_the_shared_mount_availability_vocabulary() {
     );
     assert!(ArrayHealth::Degraded.is_serving());
     assert!(!ArrayHealth::Failed.is_serving());
+}
+
+#[test]
+fn member_role_maps_from_the_reassembly_slot_verdict() {
+    // The single mapping from the on-disk reassembly verdict to the composed
+    // member's role: a missing slot offers no device, a current copy joins
+    // in sync, a behind copy joins as a stale rebuild target.
+    assert_eq!(MemberRole::for_slot(SlotDisposition::Missing), None);
+    assert_eq!(
+        MemberRole::for_slot(SlotDisposition::Present {
+            tag: 7,
+            in_sync: true,
+        }),
+        Some(MemberRole::Current)
+    );
+    assert_eq!(
+        MemberRole::for_slot(SlotDisposition::Present {
+            tag: 7,
+            in_sync: false,
+        }),
+        Some(MemberRole::Stale)
+    );
+}
+
+#[test]
+fn a_stale_member_joins_resyncing_and_never_serves_a_read() {
+    // The reassembly proved copy 1 is behind (a lower generation): it must be
+    // rebuilt from the current copy before it can answer a read, so the array
+    // can never hand a reader out-of-date bytes.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0xEE), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles recovering");
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+    assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
+    assert_eq!(array.health(), ArrayHealth::Recovering);
+    fill(&mut array);
+
+    // The current copy holds the real data; a read is served only from it,
+    // never from the stale copy that still holds its pre-join fill (0xEE).
+    for lba in 0..NBLK {
+        let mut buf = block(0);
+        array
+            .read_blocks(lba, &mut buf)
+            .expect("read from the source");
+        assert_eq!(buf, block(pat(lba)), "served from the current copy");
+    }
+    assert_eq!(array.member(1).unwrap().device().reads.get(), 0);
+    assert_eq!(array.member(1).unwrap().role(), MemberRole::Stale);
+}
+
+#[test]
+fn a_stale_member_becomes_a_read_source_only_after_it_is_resynced() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0xEE), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles recovering");
+    fill(&mut array);
+
+    let mut scratch = block(0);
+    let mut steps = 0u32;
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("resync step");
+        steps += 1;
+        assert!(steps <= 100, "the rebuild terminates");
+    }
+    assert_eq!(array.member_state(1), Some(MemberState::InSync));
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+
+    // Now that it is in sync, fault the source and prove the rebuilt copy
+    // holds the current data.
+    array
+        .member(0)
+        .unwrap()
+        .device()
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    for lba in 0..NBLK {
+        let mut buf = block(0);
+        array
+            .read_blocks(lba, &mut buf)
+            .expect("served from the rebuilt copy");
+        assert_eq!(
+            buf,
+            block(pat(lba)),
+            "block {lba} rebuilt with current data"
+        );
+    }
+}
+
+#[test]
+fn an_all_stale_member_set_fails_closed_with_no_rebuild_source() {
+    // Every copy is behind and none is a trusted source: the array assembles
+    // but cannot serve or rebuild, and fails closed rather than promoting a
+    // stale copy to a read source.
+    let mut members = [
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.health(), ArrayHealth::Failed);
+    let mut buf = block(0);
+    assert_eq!(
+        array.read_blocks(0, &mut buf).unwrap_err(),
+        DriverError::DeviceOffline
+    );
+    let mut scratch = block(0);
+    assert_eq!(
+        array.resync_step(&mut scratch).unwrap_err(),
+        DriverError::DeviceOffline
+    );
+}
+
+#[test]
+fn a_stale_member_that_cannot_be_probed_joins_faulted() {
+    // A stale copy whose device is absent at assembly is admitted faulted (no
+    // usable device), exactly like a current copy that cannot be probed —
+    // never silently resyncing from a device that is not there.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::absent(), MemberRole::Stale),
+    ];
+    let array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
 }
