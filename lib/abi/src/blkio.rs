@@ -936,6 +936,42 @@ impl BlkHealth {
     }
 }
 
+/// The relative timeout a block serve loop should arm its wait on so an
+/// otherwise-quiet `Recovering` device still has its grace window expired
+/// promptly — the soonest armed grace deadline across `healths`, expressed
+/// relative to monotonic `now_ns`.
+///
+/// A serving driver owns one [`BlkHealth`] per logical unit it serves and
+/// parks on a wait-set between requests. A device that went `Recovering` but
+/// then receives no further request would, without this, stay `Recovering`
+/// forever — its grace window is only advanced by [`BlkHealth::observe`] on a
+/// request or [`BlkHealth::poll`] on a time tick. This gives the loop the
+/// single relative timeout to pass to `waitset_wait`/`irq_wait` so it wakes
+/// exactly when the nearest window is due and drives every LUN's
+/// [`BlkHealth::poll`], failing an unrecovered device closed on time without a
+/// busy-poll (event-timed, never a spin).
+///
+/// Returns:
+/// - `Some(0)` if a window has already elapsed at `now_ns` (poll immediately);
+/// - `Some(ns)` for the soonest window still `ns` nanoseconds away;
+/// - `None` if no device has an armed window (the loop waits with no timeout,
+///   the `u64::MAX` `waitset_wait` convention), which covers both the
+///   all-operational case and a class that rides out indefinitely
+///   (`grace_ns == u64::MAX`, [`BlkHealth::grace_deadline_ns`] is `None`).
+///
+/// It is pure and reused by every block serve loop so the idle-timer arithmetic
+/// exists once, never copied per driver.
+pub fn recovery_wait_timeout<'a, I>(healths: I, now_ns: u64) -> Option<u64>
+where
+    I: IntoIterator<Item = &'a BlkHealth>,
+{
+    healths
+        .into_iter()
+        .filter_map(BlkHealth::grace_deadline_ns)
+        .min()
+        .map(|deadline| deadline.saturating_sub(now_ns))
+}
+
 /// The recovery state of one interior **fault domain** — the bus, hub, USB
 /// controller, SAS/JBOD expander, or PCIe root complex that owns a group of
 /// block devices beneath it.
@@ -1758,6 +1794,60 @@ mod tests {
         // ...and a genuine return recovers it without a reboot.
         assert_eq!(health.observe(BlkStatus::Ok, grace + 2), BlkStatus::Ok);
         assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_serve_loop_with_no_recovering_device_arms_no_idle_timer() {
+        // Every LUN operational (or none at all): the loop parks with no
+        // timeout rather than waking spuriously.
+        assert_eq!(recovery_wait_timeout(core::iter::empty(), 100), None);
+
+        let healthy = BlkHealth::new(BlkDeviceClass::Rotational);
+        let degraded = {
+            let mut h = BlkHealth::new(BlkDeviceClass::SolidState);
+            assert_eq!(h.observe(BlkStatus::Degraded, 10), BlkStatus::Degraded);
+            h
+        };
+        assert_eq!(
+            recovery_wait_timeout([&healthy, &degraded], 100),
+            None,
+            "an operational set arms no window"
+        );
+    }
+
+    #[test]
+    fn a_serve_loop_arms_the_soonest_recovering_windows_deadline() {
+        // Two LUNs recovering with different-length windows: the loop waits
+        // for the *soonest* to elapse, relative to now.
+        let mut early = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut late = BlkHealth::new(BlkDeviceClass::Rotational);
+        assert_eq!(early.observe(BlkStatus::Reset, 100), BlkStatus::Reset);
+        assert_eq!(late.observe(BlkStatus::Reset, 100), BlkStatus::Reset);
+        let early_deadline = early.grace_deadline_ns().expect("early is recovering");
+        let late_deadline = late.grace_deadline_ns().expect("late is recovering");
+        assert!(
+            early_deadline < late_deadline,
+            "a removable unit's grace window is shorter than a rotational disk's"
+        );
+        // A healthy sibling contributes no deadline and is ignored.
+        let healthy = BlkHealth::new(BlkDeviceClass::SolidState);
+        assert_eq!(
+            recovery_wait_timeout([&early, &late, &healthy], 150),
+            Some(early_deadline - 150),
+            "the relative wait targets the soonest window, measured from now"
+        );
+    }
+
+    #[test]
+    fn a_serve_loop_polls_immediately_for_an_already_elapsed_window() {
+        // A window whose deadline has already passed at `now` yields a zero
+        // wait, so the loop polls at once and never over-waits (and never a
+        // negative/underflowed timeout).
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        assert_eq!(health.observe(BlkStatus::Reset, 0), BlkStatus::Reset);
+        let deadline = health.grace_deadline_ns().expect("recovering");
+        assert_eq!(recovery_wait_timeout([&health], deadline), Some(0));
+        assert_eq!(recovery_wait_timeout([&health], deadline + 1_000), Some(0));
     }
 
     // ---- The interior fault-domain machine (`FaultDomain`) ----

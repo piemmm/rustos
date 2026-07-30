@@ -341,8 +341,15 @@ timer to while `Recovering`, and `BlkHealth::poll(now_ns)` is the pure,
 event-timed transition that fails a still-`Recovering` device closed to
 `Faulted` when that window elapses with no further request to fold through
 `observe` — the shared `grace_elapsed` check keeps `observe` and `poll` from
-diverging (§2.2). Wiring a driver's one-shot timer to call `poll` is the
-remaining IO4 idle-timer work below.
+diverging (§2.2). The idle-timer wiring is landed in `usb_msd`: its serve loop
+arms its wait's one-shot timeout from the shared
+`blkio::recovery_wait_timeout` (the soonest armed grace deadline across its
+LUNs, relative to `clock_get`) and folds every LUN's `BlkHealth::poll` on each
+wake, so a LUN that stalls then goes quiet still fails closed on time (logged
+once, node/endpoint kept so its consumer gets typed fail-closed answers and a
+later genuine return recovers it — a health fault is not a surprise-removal).
+The timeout arithmetic is that one shared helper, so `virtio_blk`/`emmc2`
+reuse it unchanged when brought up (§2.2), never a per-driver copy.
 
 Remaining:
 - `virtio_blk` and `emmc2` are currently consumed **in-kernel** (root-unlock)
@@ -355,9 +362,10 @@ Remaining:
 - The bounded recovery *escalation* (retry-with-backoff → LUN/device/port
   reset) as an explicit driver action behind the reply-reissuable reporting.
   The background grace-window expiry for a `Recovering` device that receives no
-  further request now has its primitive (`BlkHealth::poll` /
-  `grace_deadline_ns`, above); only wiring a driver's own one-shot idle timer
-  to call it remains (belongs with the driver's idle timers, Stage IO4).
+  further request is landed both as its primitive (`BlkHealth::poll` /
+  `grace_deadline_ns` / `recovery_wait_timeout`) and as the live `usb_msd`
+  serve-loop wiring (above); `virtio_blk`/`emmc2` inherit the same helper when
+  brought up as user-space serve processes.
 - The consumer marking the affected volume degraded landed in IO2 above (the
   kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
   Recovering}`); the remaining observability is the audit-log health trail

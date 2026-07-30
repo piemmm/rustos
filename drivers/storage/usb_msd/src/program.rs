@@ -3,8 +3,8 @@
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
 use tairix_abi::blkio::{
-    serve_request_recovering, BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN, BLK_DATA_LEN,
-    BLK_REQUEST_LEN,
+    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, BLK_COMPLETION_LEN,
+    BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -63,6 +63,12 @@ const MSD_LUN_SKIPPED: EventId = EventId(4164);
 /// Diagnostic event id: the interface disappeared; nodes retracted and
 /// the driver exits for a clean reload on re-plug.
 const MSD_DETACHED: EventId = EventId(4165);
+
+/// Diagnostic event id: a LUN's recovery grace window elapsed with no
+/// request and no recovery, so it failed closed. The disk stays present
+/// and its endpoint keeps serving fail-closed answers — a later genuine
+/// return still recovers it (sticky-but-recoverable, no reboot).
+const MSD_GRACE_EXPIRED: EventId = EventId(4166);
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -429,6 +435,35 @@ fn retract_all(luns: &[Option<LunServe>]) {
     }
 }
 
+/// Advance every published LUN's recovery grace window on a pure time tick
+/// at monotonic `now_ns`, failing closed any unit that has stayed
+/// `Recovering` past its window without a further request to fold through
+/// `observe` (`BlkHealth::poll`). Called on every serve-loop wake — the
+/// grace-timer one-shot firing *and* a request wake (another LUN's window
+/// may have come due while parked on this one) — so a quiet stalled disk
+/// still fails closed on time, driven by the timer rather than a busy-poll.
+///
+/// A newly failed-closed LUN is logged once, keeps its node and endpoint so
+/// its consumer receives typed fail-closed answers, and stays
+/// sticky-but-recoverable: a later genuine return recovers it via `observe`
+/// with no reboot and no node retraction (retraction is surprise-removal,
+/// a distinct event).
+fn expire_idle_grace_windows(luns: &mut [Option<LunServe>], now_ns: u64) {
+    for serve in luns.iter_mut().flatten() {
+        let before = serve.health.state();
+        let after = serve.health.poll(now_ns);
+        if before != after && !after.is_operational() {
+            log_hex_event(
+                MSD_GRACE_EXPIRED,
+                Level::Warn,
+                "usb-msd: LUN recovery grace window elapsed, failing closed",
+                "node_hex",
+                u64::from(serve.node_id),
+            );
+        }
+    }
+}
+
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
 /// is set up and routes its return value through the `exit` syscall.
 ///
@@ -689,12 +724,35 @@ where
     // that park in the kernel), reply, and check for detach. Never a
     // busy-poll.
     loop {
+        // Arm the wait to the soonest LUN recovery grace-window deadline so
+        // an otherwise-quiet `Recovering` unit still fails closed on time,
+        // driven by this one-shot rather than a spin; with no unit recovering
+        // the loop parks with no timeout (the `u64::MAX` convention).
+        let arm_now_ns = tairix_rt::clock_get();
+        let timeout = recovery_wait_timeout(luns.iter().flatten().map(|s| &s.health), arm_now_ns)
+            .unwrap_or(WAIT_FOREVER_NS);
         let mut token = 0u64;
-        let ret = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+        let ret = tairix_rt::waitset_wait(set, timeout, &mut token);
+        // One fresh monotonic reading taken after waking, reused to fold the
+        // grace windows and (on a request) to time the served unit; the
+        // pre-park reading above could be arbitrarily stale after the park.
+        let now_ns = tairix_rt::clock_get();
         if ret < 0 {
+            // A timed-out wait is the grace one-shot firing, not a failure:
+            // fold the elapsed windows and re-arm. Any other error is fatal.
+            let errno =
+                Errno::from_i32(i32::try_from(-ret).unwrap_or(0)).unwrap_or(Errno::NotFound);
+            if errno == Errno::TimedOut {
+                expire_idle_grace_windows(&mut luns, now_ns);
+                continue;
+            }
             retract_all(&luns);
             return EXIT_NO_SERVICE;
         }
+        // A member is ready: fold any grace window that came due while parked
+        // on this wake before serving, so a sibling LUN's window is honoured
+        // on time even under a steady request stream to another unit.
+        expire_idle_grace_windows(&mut luns, now_ns);
         let index = usize::try_from(token).unwrap_or(MAX_LUNS);
         let Some(serve) = luns.get_mut(index).and_then(Option::as_mut) else {
             continue;
@@ -710,9 +768,6 @@ where
         let lun = index as u8;
         let read_only = serve.state.write_protected;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
-        // The monotonic reading that times this LUN's recovery grace window;
-        // `clock_get` is unprivileged and never blocks.
-        let now_ns = tairix_rt::clock_get();
         let len = {
             let mut block = LunBlock::new(&mut scsi, lun, serve.state);
             serve_request_recovering(

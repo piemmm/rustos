@@ -72,6 +72,12 @@ consumer read (`blkio::BlkHealth`), never a per-driver copy (`AGENTS.md`
   still-`Recovering` device closed to `Faulted` when that deadline passes with
   no further request. `observe` and `poll` share one `grace_elapsed` check so
   the request-driven and time-driven paths cannot diverge (`AGENTS.md` §2.2).
+  A serving driver that parks between requests arms this from
+  `tairix_abi::blkio::recovery_wait_timeout` — the soonest armed grace deadline
+  across every unit it serves, relative to now — as its wait's one-shot
+  timeout, so it wakes exactly when the nearest window is due and drives
+  `poll`. The arithmetic is that one shared helper, never copied per driver
+  (`AGENTS.md` §2.2).
 - Only a *device-level* outcome drives health. A request-level rejection (a
   write to a read-only unit, an out-of-range LBA, a malformed frame) is
   classified `BlkStatus::for_driver_health(err) == None` and framed verbatim,
@@ -91,14 +97,20 @@ refusals, the success paths, and the recovery grace window cannot diverge
 between drivers (`AGENTS.md` §2.2, §27). It is pure and alloc-free, proven
 host-side over in-memory `Block` doubles in `lib/abi`. `usb_msd` is the first
 consumer: its wait-set serve loop hands each per-LUN request to the engine with
-that LUN's `BlkHealth` (the `Removable` class) driven by the monotonic clock;
-only the usb_msd-specific block-service endpoint-id derivation
-(`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and `emmc2`
-are currently consumed in-kernel (root-unlock) and expose only their `Block`
-implementation; when either is brought up as a user-space serving process it
-reuses the same engine rather than copying it. The volume-manager consumer
-marking the affected volume degraded and health observability through
-`lib/log`/`sysinfo` are the staged remainder (`plans/FIX-IO.md` IO3–IO6).
+that LUN's `BlkHealth` (the `Removable` class) driven by the monotonic clock,
+and arms its wait's timeout from `recovery_wait_timeout` so a LUN that stalls
+and then goes quiet still has its grace window expired (`BlkHealth::poll`) and
+fails closed on time — logged once, keeping the LUN's node and endpoint so its
+consumer still receives typed fail-closed answers and a later genuine return
+recovers it with no reboot (a health fault is not a surprise-removal, so the
+node is not retracted). Only the usb_msd-specific block-service endpoint-id
+derivation (`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and
+`emmc2` are currently consumed in-kernel (root-unlock) and expose only their
+`Block` implementation; when either is brought up as a user-space serving
+process it reuses the same engine and the same idle-timer helper rather than
+copying them. The bounded recovery *escalation* (retry-with-backoff → LUN/port
+reset) and device-level health observability through `lib/log`/`sysinfo` are
+the staged remainder (`plans/FIX-IO.md` IO3–IO6).
 
 ## Consumer-side bounded reissue
 
