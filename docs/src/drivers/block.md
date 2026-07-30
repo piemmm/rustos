@@ -218,10 +218,24 @@ their grace window identically and the arithmetic cannot diverge (`AGENTS.md`
 
 The `FaultDomain` machine is pure and event-timed (the caller supplies the
 monotonic reading and drives the children's own `BlkHealth`), so the whole
-coherent quiesce/resume is proven host-side in `lib/abi`. Walking the hardware
-tree to drive a subtree's children through it — and the volume-manager degrade
-marking and health observability — are the staged remainder
-(`plans/FIX-IO.md` IO4–IO6).
+coherent quiesce/resume is proven host-side in `lib/abi`.
+
+Which interior node a device blips *with* is resolved by the shared
+`hwtree::fault_domain_owner(nodes, node_id)` helper: it walks the discovered
+hardware tree upward and returns the nearest strict ancestor that owns a group
+of devices — a bus/hub/controller/expander/PCIe-root-complex
+(`HwDeviceClass::Bus`), or the synthetic `Root` as the domain of last resort for
+a device attached directly to it. It skips non-owning ancestors, is usable
+recursively (the owner of an interior node is its own nearest such ancestor, so
+the full chain of nested fault domains is obtained by re-applying it), and fails
+closed on an absent node, a rootless node, or a broken/cyclic chain (the walk is
+bounded by the node count, never an unbounded spin, `AGENTS.md` §2.9). It reads
+the tree and hard-codes no board (`AGENTS.md` §18.1, §2.20), so it is the one
+definition every serving/bus driver uses to build a child's `FaultDomain`.
+
+Driving a subtree's children through the `FaultDomain` in the live serve loops —
+and the volume-manager degrade marking and health observability — are the staged
+remainder (`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 

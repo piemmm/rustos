@@ -468,14 +468,29 @@ discovered tree (`hwtree.rs`), never hard-coded (§18.1). The whole machine is
 pure and event-timed (the caller supplies the monotonic reading and drives the
 children's own `BlkHealth`), so the coherent quiesce/resume is proven host-side.
 
+**Landed (the tree association):** the pure resolution of *which* interior node
+owns a device's fault domain is the shared, host-tested primitive
+`hwtree::fault_domain_owner(nodes, node_id)` in `lib/abi` (§2.2, §18.1): it walks
+the discovered hardware tree upward and returns the nearest strict ancestor that
+owns a group of devices — a bus/hub/controller/expander/PCIe-root-complex
+(`HwDeviceClass::Bus`) or the synthetic `Root` as the domain of last resort —
+skipping non-owning ancestors. It is platform-neutral (reads the tree, hard-codes
+no board, §2.20), usable recursively so the full chain of nested fault domains up
+to the root is obtained by re-applying it, and fails closed (`None`) on an absent
+node, a rootless node, or a broken/cyclic chain (the walk is bounded by the node
+count, never an unbounded spin, §2.9/§5.4). Proven host-side over a USB-shaped
+tree (nearest bus, root fallback, nesting, non-owning-ancestor skip, and the
+absent/broken/cyclic fail-closed cases).
+
 Remaining:
-- **Wiring the tree.** Walk the hardware tree (`hwtree.rs`) to associate each
-  block device with its parent bus/hub/controller `FaultDomain`, so a serving
-  driver folds `child_status` into each child's completion and a serving/bus
-  driver calls `quiesce`/`resume`/`poll` around its own reset. This belongs
-  with the user-space bus/serving driver work (it needs the live serve loops and
-  timers the host doubles cannot express), like the per-device idle-timer wiring
-  in IO3.
+- **Wiring the tree into the live serve loops.** With the association resolved
+  by the shared `hwtree::fault_domain_owner` above, the remaining work is the
+  *live* wiring: a serving driver builds each child device's `FaultDomain` from
+  its resolved owner, folds `child_status` into each child's completion, and a
+  serving/bus driver calls `quiesce`/`resume`/`poll` around its own reset. This
+  belongs with the user-space bus/serving driver work (it needs the live serve
+  loops and timers the host doubles cannot express), like the per-device
+  idle-timer wiring in IO3.
 - Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
   `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
   *degrade/reset/restore* health transitions alongside add/remove.

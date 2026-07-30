@@ -1467,6 +1467,48 @@ impl HwTreeHeader {
     }
 }
 
+/// Resolve the **fault-domain owner** of hardware-tree node `node_id`: the id
+/// of its nearest strict ancestor that owns a group of devices beneath it — a
+/// bus, hub, USB controller, SAS/JBOD expander, or PCIe root complex
+/// ([`HwDeviceClass::Bus`]), or the synthetic tree [`HwDeviceClass::Root`] as
+/// the domain of last resort for a device attached directly to it.
+///
+/// This is the pure association the storage fault-isolation layer builds a
+/// [`FaultDomain`](crate::blkio::FaultDomain) around: which interior node a
+/// block device blips *together with*, read from the discovered tree and never
+/// hard-coded, so a USB hub, a SAS expander, and a PCIe root complex are all
+/// just interior nodes. It is usable recursively — the owner of an interior
+/// node is *its* own nearest such ancestor — so the full chain of nested fault
+/// domains up to the root is obtained by re-applying it to each owner in turn.
+///
+/// Only structural interior classes (`Bus`/`Root`) own a fault domain; a
+/// non-owning ancestor (an interrupt controller, a bridge inventoried as
+/// something else, or a node whose class discriminant this ABI revision does
+/// not know) is skipped and the walk continues upward.
+///
+/// Fails closed with [`None`] when there is no such owner: `node_id` is absent
+/// from `nodes`, the node is itself a root (nothing owns it), or the parent
+/// chain is broken or cyclic — a malformed tree is never trusted into an
+/// unbounded walk, so the ancestor traversal is bounded by the node count.
+#[must_use]
+pub fn fault_domain_owner(nodes: &[HwNode], node_id: u32) -> Option<u32> {
+    let mut current = nodes.iter().find(|node| node.id() == node_id)?;
+    for _ in 0..nodes.len() {
+        if current.is_root() {
+            return None;
+        }
+        let parent = nodes.iter().find(|node| node.id() == current.parent())?;
+        if matches!(
+            parent.class(),
+            Some(HwDeviceClass::Bus | HwDeviceClass::Root)
+        ) {
+            return Some(parent.id());
+        }
+        current = parent;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2175,5 +2217,76 @@ mod tests {
             HwTreeHeader::from_bytes(&[0u8; 8]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    /// A small USB-shaped tree:
+    /// root(0) → xHCI controller bus(1) → hub bus(2) → disk(3);
+    /// a disk(4) directly on the controller; a disk(5) directly on the root.
+    fn usb_shaped_tree() -> [HwNode; 6] {
+        [
+            HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(1, 0, HwDeviceClass::Bus),
+            HwNode::new(2, 1, HwDeviceClass::Bus),
+            HwNode::new(3, 2, HwDeviceClass::Storage),
+            HwNode::new(4, 1, HwDeviceClass::Storage),
+            HwNode::new(5, 0, HwDeviceClass::Storage),
+        ]
+    }
+
+    #[test]
+    fn fault_domain_owner_is_the_nearest_bus_ancestor() {
+        let nodes = usb_shaped_tree();
+        // The disk on the hub blips with the hub, not the controller above it.
+        assert_eq!(fault_domain_owner(&nodes, 3), Some(2));
+        // The disk directly on the controller blips with the controller.
+        assert_eq!(fault_domain_owner(&nodes, 4), Some(1));
+    }
+
+    #[test]
+    fn fault_domain_owner_falls_back_to_the_root_for_a_directly_attached_device() {
+        let nodes = usb_shaped_tree();
+        assert_eq!(fault_domain_owner(&nodes, 5), Some(0));
+    }
+
+    #[test]
+    fn fault_domain_owner_nests_through_interior_nodes_up_to_the_root() {
+        let nodes = usb_shaped_tree();
+        // Re-applying the resolution walks the whole chain of nested domains.
+        assert_eq!(fault_domain_owner(&nodes, 2), Some(1));
+        assert_eq!(fault_domain_owner(&nodes, 1), Some(0));
+        // The root itself has no owner above it.
+        assert_eq!(fault_domain_owner(&nodes, 0), None);
+    }
+
+    #[test]
+    fn fault_domain_owner_skips_a_non_owning_ancestor() {
+        // A disk(11) under a node(10) that is neither a bus nor the root: the
+        // owner is the bus(1) above that node, not the non-owning node.
+        let nodes = [
+            HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(1, 0, HwDeviceClass::Bus),
+            HwNode::new(10, 1, HwDeviceClass::Other),
+            HwNode::new(11, 10, HwDeviceClass::Storage),
+        ];
+        assert_eq!(fault_domain_owner(&nodes, 11), Some(1));
+    }
+
+    #[test]
+    fn fault_domain_owner_fails_closed_on_an_absent_or_broken_or_cyclic_tree() {
+        let nodes = usb_shaped_tree();
+        // A node id that is not in the tree resolves to nothing.
+        assert_eq!(fault_domain_owner(&nodes, 999), None);
+
+        // A device whose parent id is dangling fails closed rather than
+        // fabricating an owner.
+        let broken = [HwNode::new(20, 21, HwDeviceClass::Storage)];
+        assert_eq!(fault_domain_owner(&broken, 20), None);
+
+        // A cyclic chain of non-owning nodes is bounded, not walked forever.
+        let cyclic = [
+            HwNode::new(30, 31, HwDeviceClass::Other),
+            HwNode::new(31, 30, HwDeviceClass::Other),
+        ];
+        assert_eq!(fault_domain_owner(&cyclic, 30), None);
     }
 }
