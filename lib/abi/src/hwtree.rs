@@ -31,6 +31,7 @@
 //! against `WIRE_LEN` (validate every input, fail
 //! closed).
 
+use crate::blkio::FaultDomainState;
 use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
@@ -1192,14 +1193,32 @@ pub struct HwNode {
     class: u16,
     match_key_count: u8,
     resource_count: u8,
+    /// Live recovery health of the fault domain this node *owns*.
+    ///
+    /// Discovered inventory is otherwise static, but an interior node (a
+    /// bus/hub/controller/expander/root complex) that owns a group of
+    /// devices beneath it can blip: its driver publishes the domain's
+    /// [`FaultDomainState`] here through the `hw_node_health` syscall so the
+    /// reactive tree observers (the device manager) learn a hub/controller
+    /// reset is *one* fault-domain event rather than N spurious child
+    /// removals. A leaf device node has no domain of its own and always
+    /// reports [`FaultDomainState::Healthy`]; health is per *owner*, read
+    /// from the tree, never hard-coded.
+    ///
+    /// Stored as the raw [`FaultDomainState::as_u8`] discriminant (mirroring
+    /// `class`) so the `#[repr(C)]` layout stays a deterministic single byte
+    /// for the generated C view; the [`fault_health`](Self::fault_health)
+    /// accessor decodes it fail-closed.
+    fault_health: u8,
     match_keys: [HwMatchKey; HW_NODE_MAX_MATCH_KEYS],
     resources: [HwResource; HW_NODE_MAX_RESOURCES],
 }
 
 impl HwNode {
-    /// Encoded size on the wire: a 16-byte header followed by the full
-    /// fixed-size match-key and resource arrays.
-    pub const WIRE_LEN: usize = 16
+    /// Encoded size on the wire: a 17-byte header (16 fixed fields plus the
+    /// fault-domain health byte) followed by the full fixed-size match-key
+    /// and resource arrays.
+    pub const WIRE_LEN: usize = 17
         + HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN
         + HW_NODE_MAX_RESOURCES * HwResource::WIRE_LEN;
 
@@ -1213,6 +1232,7 @@ impl HwNode {
             class: class.as_u16(),
             match_key_count: 0,
             resource_count: 0,
+            fault_health: FaultDomainState::Healthy.as_u8(),
             match_keys: [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS],
             resources: [HwResource::EMPTY; HW_NODE_MAX_RESOURCES],
         }
@@ -1327,6 +1347,28 @@ impl HwNode {
         &self.resources[..usize::from(self.resource_count)]
     }
 
+    /// The live recovery health of the fault domain this node owns
+    /// (see [`fault_health`](Self::fault_health) — the struct field docs).
+    ///
+    /// A leaf device with no domain of its own always reports
+    /// [`FaultDomainState::Healthy`]; only an interior owner ever publishes a
+    /// [`Recovering`](FaultDomainState::Recovering) or
+    /// [`Offline`](FaultDomainState::Offline) reading.
+    #[must_use]
+    pub const fn fault_health(&self) -> FaultDomainState {
+        FaultDomainState::from_u8_fail_closed(self.fault_health)
+    }
+
+    /// Record the fault-domain health of the domain this node owns.
+    ///
+    /// This is the store side of the `hw_node_health` syscall: the kernel
+    /// resolves the caller to its *own* matched node before calling this, so
+    /// a driver can only ever set the health of the interior node it was
+    /// loaded for — never another driver's.
+    pub fn set_fault_health(&mut self, health: FaultDomainState) {
+        self.fault_health = health.as_u8();
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -1337,7 +1379,8 @@ impl HwNode {
         put_u16(&mut out, 12, self.class);
         out[14] = self.match_key_count;
         out[15] = self.resource_count;
-        let mut off = 16;
+        out[16] = self.fault_health;
+        let mut off = 17;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             off += HwMatchKey::WIRE_LEN;
@@ -1372,8 +1415,12 @@ impl HwNode {
         {
             return Err(Errno::LengthOutOfRange);
         }
+        // The health byte is normalised through the fail-closed decoder so a
+        // corrupt snapshot can never present a faulted subtree as healthy: an
+        // unknown discriminant is stored as Offline.
+        let fault_health = FaultDomainState::from_u8_fail_closed(bytes[16]).as_u8();
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
-        let mut off = 16;
+        let mut off = 17;
         for slot in &mut match_keys {
             *slot = HwMatchKey::from_bytes(&bytes[off..off + HwMatchKey::WIRE_LEN])?;
             off += HwMatchKey::WIRE_LEN;
@@ -1390,6 +1437,7 @@ impl HwNode {
             class,
             match_key_count,
             resource_count,
+            fault_health,
             match_keys,
             resources,
         })
@@ -2262,8 +2310,47 @@ mod tests {
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
         assert_eq!(HwResource::WIRE_LEN, 32);
         assert_eq!(GrantedResource::WIRE_LEN, 40);
-        assert_eq!(HwNode::WIRE_LEN, 576);
+        // 17-byte header (the 16 fixed fields plus the fault-domain health
+        // byte) followed by the fixed match-key and resource arrays.
+        assert_eq!(HwNode::WIRE_LEN, 577);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
+    }
+
+    #[test]
+    fn a_fresh_node_owns_a_healthy_fault_domain() {
+        // A node built by `new` reports Healthy: a leaf device has no domain
+        // of its own, and an interior owner starts up.
+        let node = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Bus);
+        assert_eq!(node.fault_health(), FaultDomainState::Healthy);
+    }
+
+    #[test]
+    fn fault_health_round_trips_through_the_wire() {
+        for health in [
+            FaultDomainState::Healthy,
+            FaultDomainState::Recovering,
+            FaultDomainState::Offline,
+        ] {
+            let mut node = sample_node();
+            node.set_fault_health(health);
+            assert_eq!(node.fault_health(), health);
+            let bytes = node.to_le_bytes();
+            // The health rides in the single header byte at offset 16.
+            assert_eq!(bytes[16], health.as_u8());
+            let decoded = HwNode::from_bytes(&bytes).expect("decodes");
+            assert_eq!(decoded.fault_health(), health);
+            assert_eq!(decoded, node);
+        }
+    }
+
+    #[test]
+    fn an_unknown_health_byte_decodes_fail_closed_to_offline() {
+        // A corrupt snapshot must never present a faulted subtree as healthy:
+        // an out-of-range health discriminant reads as Offline.
+        let mut bytes = sample_node().to_le_bytes();
+        bytes[16] = 0xFF;
+        let decoded = HwNode::from_bytes(&bytes).expect("decodes");
+        assert_eq!(decoded.fault_health(), FaultDomainState::Offline);
     }
 
     #[test]

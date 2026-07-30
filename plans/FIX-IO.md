@@ -576,23 +576,48 @@ the shared `for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
 machine is proven host-side; the serve-loop wiring is metal-only (QEMU models no
 Pi USB).
 
+**Landed (the cross-process propagation signal):** an interior fault-domain
+owner's health is now a first-class, reactive **hardware-tree node property** —
+`HwNode::fault_health` (a `FaultDomainState` byte on the wire, one shared codec
+`FaultDomainState::as_u8`/`from_u8_fail_closed`, unknown decodes fail-closed to
+`Offline`). A bus/hub/controller driver publishes its *own* node's health
+through the new `hw_node_health` syscall (number 102, arg = the
+`FaultDomainState` discriminant, `CAP_HW_EMIT`, audited): the kernel resolves
+the caller's own matched node from its task id (no forging another node's
+health), records it on the live tree, and bumps the generation so the reactive
+`hw_tree_wait` observers re-read — the *same* channel the emit/remove hotplug
+path uses, but a **distinct** signal (the node stays present, only its health
+changes, so a merely-recovering subtree is never torn down). The live emitter
+is the xHCI controller: its `log_domain_event` maps each `ControllerHealth`
+edge to `Recovering`/`Healthy`/`Offline` and publishes it best-effort (the
+audit record is authoritative; a refused publish never fails the recovery).
+The live consumer is the device manager: a bound child whose fault-domain
+**owner** (its nearest bus/hub/controller ancestor, recorded per binding as
+`NodeDriver::owner` via `fault_domain_owner` at bind time) is currently
+`Recovering` is **held**, not unloaded, when it transiently vanishes — so one
+controller reset is one recovery episode across the subtree rather than N
+spurious teardown/reload cycles; the child unloads only once the owner is no
+longer recovering (returned `Healthy` without the child, or the subtree failed
+closed). The kernel `BlkClient` already marks each affected volume
+`Degraded`/`Recovering` as the leaf transport blips (IO2/IO5), so the volumes
+under a recovering controller surface as recovering through the existing fold.
+Proven host-side: the `HwNode` health wire round-trip + fail-closed decode; the
+`FaultDomainState` codec; the `HwTreeStore::set_node_health` record/generation/
+fail-closed-`NotFound`; the `hw_node_health` handler (own-node resolution,
+fail-closed out-of-range, no-loaded-node denied); and the device manager's
+recovery-hold (`a_child_of_a_recovering_owner_is_held_not_unloaded`).
+
 Remaining:
-- **Cross-process propagation to the leaf block consumers.** The xHCI
-  controller now owns and drives its own interior `FaultDomain`, but its state
-  is not yet propagated to the leaf block consumers beneath it: a
-  hub/controller reset should mark the volumes under it `Recovering` and fail
-  them closed coherently across the subtree, rather than leaving each leaf to
-  ride out its own transport blip independently. Propagation reuses the
-  existing hotplug path (`hw_emit_node`/`hw_remove_node`, `plans/USB.md`,
-  `plans/DEVICES.md`) with a *distinct* health-transition signal (a health
-  fault is not a surprise-removal); the device manager gains reaction to
-  *degrade/reset/restore* transitions alongside add/remove.
 - **Deeper interior chains (hubs, expanders) and the multi-owner fold.** A
   device can blip with a *chain* of nested owners (`fault_domain_chain`); a
   serving driver builds one `FaultDomain` per interior node and folds them with
-  `effective_child_status`. The xHCI controller proves the single-owner shape;
-  a watched hub / SAS expander owning its own node, and a leaf folding several
-  ancestors' imposed states, land with the cross-process propagation above.
+  `effective_child_status`. The xHCI controller proves the single-owner shape
+  and the cross-process signal above carries it; a watched hub / SAS expander
+  owning its own tree node, and a leaf folding several ancestors' imposed
+  states, extend it.
+- A QEMU vertical of a modelled hub/controller with several children resetting,
+  asserting one recovery episode across the subtree (the device manager holds
+  the children through the owner's grace window rather than unloading them).
 
 Tests (§7): the pure `FaultDomain` machine is proven host-side in `lib/abi` —
 one owner reset holds the whole subtree reissuable under one window; an owner

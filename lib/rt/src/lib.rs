@@ -258,6 +258,9 @@ const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 /// `hw_remove_node` syscall number (as above).
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 
+/// `hw_node_health` syscall number (as above).
+const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
+
 /// `shm_create` syscall number (as above).
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 
@@ -915,6 +918,38 @@ pub fn hw_remove_node(node_id: u32) -> i64 {
     // side of the trap. The call passes no memory operand —
     // `node_id` is a scalar in arg 0.
     let ret = unsafe { raw_syscall(NUM_HW_REMOVE_NODE, [u64::from(node_id), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Publish the fault-domain `health` of the interior node the calling driver
+/// owns into the live hardware tree (`SyscallNumber::HW_NODE_HEALTH`),
+/// returning the raw signed register: `0` once recorded, else `-errno`.
+///
+/// A bus/hub/controller driver turns a controller-wide blip into *one*
+/// fault-domain event by reporting its own node's
+/// [`tairix_abi::blkio::FaultDomainState`] here; the device manager's
+/// reactive watch then reacts to a coherent recovery episode across the
+/// subtree rather than N spurious child removals. This is a **distinct**
+/// signal from [`hw_remove_node`] (surprise removal): the node stays
+/// present, only its health changes, so a merely-recovering subtree is never
+/// torn down. It is gated by the same [`tairix_abi::CapabilityId::HW_EMIT`],
+/// and the kernel records the health of the calling driver's *own* matched
+/// node (no ambient authority — a driver cannot report another's health). An
+/// out-of-range health, a caller with no loaded node, or an absent node
+/// fails closed with `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn hw_node_health(health: tairix_abi::blkio::FaultDomainState) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT`, the health discriminant, and resolves the caller's own
+    // node on the far side of the trap. The call passes no memory operand —
+    // the health discriminant is a scalar in arg 0.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_HW_NODE_HEALTH,
+            [u64::from(health.as_u8()), 0, 0, 0, 0, 0],
+        )
+    };
     ret as i64
 }
 

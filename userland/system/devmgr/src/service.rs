@@ -196,7 +196,24 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // that loads a newly-appeared node's driver unloads a vanished one's
     // (re-plug then re-loads it), so connect and disconnect are symmetric.
     let present: alloc::collections::BTreeSet<u32> = nodes.iter().map(HwNode::id).collect();
-    unload_vanished(&|id| present.contains(&id), store, reply_buf, state, sink);
+    // The interior nodes whose fault domain is *recovering* this snapshot: a
+    // hub/controller mid-reset transiently drops its children, so a vanished
+    // child under a recovering owner is held (one recovery episode across the
+    // subtree, not N spurious teardowns — `plans/FIX-IO.md` IO4). A node
+    // reports its own domain health; a leaf device is always Healthy.
+    let recovering: alloc::collections::BTreeSet<u32> = nodes
+        .iter()
+        .filter(|node| node.fault_health() == tairix_abi::blkio::FaultDomainState::Recovering)
+        .map(HwNode::id)
+        .collect();
+    unload_vanished(
+        &|id| present.contains(&id),
+        &|owner| recovering.contains(&owner),
+        store,
+        reply_buf,
+        state,
+        sink,
+    );
     Ok(header.generation())
 }
 

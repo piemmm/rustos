@@ -119,6 +119,7 @@ const NUM_CALL_CANCEL: u64 = SyscallNumber::CALL_CANCEL.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
+const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
@@ -1680,6 +1681,29 @@ pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_REMOVE_NODE, [node_id, 0, 0, 0, 0, 0])) }
 }
 
+/// `hw_node_health`: publish the fault-domain `health` of the interior node
+/// the calling driver owns into the live hardware tree
+/// (`SyscallNumber::HW_NODE_HEALTH`). `health` is a
+/// `tairix_abi::blkio::FaultDomainState` discriminant (`0` Healthy, `1`
+/// Recovering, `2` Offline). A bus/hub/controller driver turns a
+/// controller-wide blip into one fault-domain event by reporting its own
+/// node's health, so the device manager reacts to one coherent recovery
+/// episode across the subtree rather than N spurious child removals. This is
+/// a *distinct* signal from `tairix_sys_hw_remove_node`: the node stays
+/// present, only its health changes. Requires `TAIRIX_CAP_HW_EMIT`; the
+/// kernel records only the calling driver's *own* matched node's health
+/// (no ambient authority). An out-of-range health, a caller with no loaded
+/// node, or an absent node fails closed. Returns a `TAIRIX_E_*` code (`0` on
+/// success).
+#[must_use]
+#[export_name = "tairix_sys_hw_node_health"]
+pub extern "C" fn sys_hw_node_health(health: u64) -> i32 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT`, the health discriminant, and resolves the caller's own
+    // node on the far side of the trap. No memory operand is passed.
+    unsafe { ret_i32(raw_syscall(NUM_HW_NODE_HEALTH, [health, 0, 0, 0, 0, 0])) }
+}
+
 /// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
 /// function and write the encoded `tairix_abi::MsiAllocation` (the virtual
 /// interrupt line plus the doorbell address/data to program into the
@@ -2540,6 +2564,7 @@ mod tests {
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
+        (NUM_HW_NODE_HEALTH, "hw_node_health", 1),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 2),
@@ -2646,6 +2671,18 @@ mod tests {
         });
         assert_eq!(number, NUM_SCHED_SET_REALTIME);
         assert_eq!(args[0], 0);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hw_node_health_marshals_the_state_discriminant() {
+        // The fault-domain state rides in arg 0 as a scalar; no memory
+        // operand. Recovering == 1.
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_hw_node_health(1), 0);
+        });
+        assert_eq!(number, NUM_HW_NODE_HEALTH);
+        assert_eq!(args[0], 1);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 

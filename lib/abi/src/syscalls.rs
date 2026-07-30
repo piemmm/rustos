@@ -2505,6 +2505,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_NODE_HEALTH,
+        name: "hw_node_health",
+        arg_count: 1,
+        args: [
+            // The FaultDomainState discriminant of the caller's own node.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once the caller's own node's
+        // health is recorded, else `-errno` (an out-of-range health, a caller
+        // with no loaded node, or no store wired).
+        ret: AbiType::Errno,
+        // Shares the `CAP_HW_EMIT` grant with the emit/remove hotplug path: a
+        // driver that may publish/retract its own subtree may report its own
+        // fault-domain health. It IS audited per call — a coherent
+        // fault-domain recovery episode is a security-relevant topology event
+        // and is low-volume (a handful per blip), so the record cannot drown
+        // the log — symmetric with `hw_emit_node` / `hw_remove_node`.
+        required_capability: Some(CapabilityId::HW_EMIT),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

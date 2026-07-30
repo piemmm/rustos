@@ -24,6 +24,7 @@
 
 use alloc::collections::BTreeMap;
 
+use tairix_abi::hwtree::{fault_domain_owner, HW_NODE_ROOT};
 use tairix_abi::HwNode;
 use tairix_devmatch::{resolve, DriverCandidate, MatchResolution};
 use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
@@ -74,6 +75,16 @@ pub struct NodeDriver {
     pub bundle_id: u32,
     /// The loaded driver's handle the kernel returned.
     pub handle: u64,
+    /// The id of the interior node that owns this node's fault domain
+    /// (its nearest bus/hub/controller ancestor, or [`HW_NODE_ROOT`] when
+    /// none), resolved from the tree at bind time. It is the memory
+    /// [`unload_vanished`] needs to tell a *transient* child removal driven
+    /// by an owner mid-recovery (a hub/controller reset) apart from a
+    /// genuine hot-removal: while the owner is recovering, the vanished
+    /// child's driver is *held*, not torn down, so one fault-domain blip is
+    /// one recovery episode across the subtree rather than N teardowns
+    /// (`plans/FIX-IO.md` IO4).
+    pub owner: u32,
 }
 
 /// The driver bound to each node id, the hot-removal memory the reactive loop
@@ -206,7 +217,19 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                 // vanishes (see `unload_vanished`). A node re-matched on a
                 // re-evaluation re-records the same binding; the entry is
                 // dropped only when the node disappears or its driver unloads.
-                state.bindings.insert(id, NodeDriver { bundle_id, handle });
+                // Remember the node's fault-domain owner (its nearest
+                // bus/hub/controller ancestor) so the hot-removal diff can
+                // hold this binding through an owner's recovery grace window
+                // rather than tearing it down on a transient blip.
+                let owner = fault_domain_owner(nodes, id).unwrap_or(HW_NODE_ROOT);
+                state.bindings.insert(
+                    id,
+                    NodeDriver {
+                        bundle_id,
+                        handle,
+                        owner,
+                    },
+                );
                 if changed(&mut state.reported, id, NodeReport::Bound) {
                     let mut hbuf = [0u8; 16];
                     let handle_str = format_hex_u64(handle, &mut hbuf);
@@ -237,6 +260,18 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
 /// `reported` decision is cleared, so if the device is re-attached the
 /// driver is loaded afresh (re-plug works with no reboot).
 ///
+/// A bound node that vanished because its fault-domain **owner** (a hub /
+/// controller) is mid-recovery is **not** unloaded: `owner_recovering(owner)`
+/// answers whether the vanished node's [`owner`](NodeDriver::owner) is
+/// currently recovering, and while it is the binding is *held*. A
+/// hub/controller reset transiently drops its children (`plans/FIX-IO.md`
+/// IO4), so tearing their drivers down and reloading them would turn one
+/// fault-domain blip into N spurious teardown/reload cycles; instead the
+/// child re-appears when the owner returns and the retained binding makes
+/// the re-match a no-op. The driver is torn down only once the owner is no
+/// longer recovering — it returned Healthy without the child, or the subtree
+/// failed closed — i.e. a genuine removal, not a blip.
+///
 /// Idempotent and fail-soft: an unload that the kernel reports already gone
 /// ([`Errno::NotFound`](tairix_abi::Errno::NotFound)) still drops the local
 /// binding; a transport failure is logged and the binding dropped so the
@@ -244,17 +279,21 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
 /// ([`events::NODE_UNLOADED`]).
 pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
     present: &dyn Fn(u32) -> bool,
+    owner_recovering: &dyn Fn(u32) -> bool,
     store: &mut C,
     reply_buf: &mut [u8],
     state: &mut AutoloadState,
     sink: &dyn Sink,
 ) {
     // Collect the vanished bound node ids first: the borrow of `bindings`
-    // ends before the unload pass mutates `state`.
+    // ends before the unload pass mutates `state`. A node whose fault-domain
+    // owner is mid-recovery is *not* treated as vanished — the binding is
+    // held through the owner's grace window (one recovery episode across the
+    // subtree, not N teardowns).
     let vanished: alloc::vec::Vec<(u32, NodeDriver)> = state
         .bindings
         .iter()
-        .filter(|(id, _)| !present(**id))
+        .filter(|(id, driver)| !present(**id) && !owner_recovering(driver.owner))
         .map(|(id, driver)| (*id, *driver))
         .collect();
 
@@ -399,10 +438,26 @@ mod tests {
     }
 
     fn bound(state: &mut AutoloadState, node: u32, bundle_id: u32, handle: u64) {
-        state
-            .bindings
-            .insert(node, NodeDriver { bundle_id, handle });
+        bound_under(state, node, bundle_id, handle, HW_NODE_ROOT);
+    }
+
+    /// Bind `node` recording `owner` as its fault-domain owner, so the
+    /// recovery-hold path can be driven with a real owner id.
+    fn bound_under(state: &mut AutoloadState, node: u32, bundle_id: u32, handle: u64, owner: u32) {
+        state.bindings.insert(
+            node,
+            NodeDriver {
+                bundle_id,
+                handle,
+                owner,
+            },
+        );
         state.reported.insert(node, NodeReport::Bound);
+    }
+
+    /// Nothing is recovering — the default for the plain hot-removal tests.
+    fn none_recovering(_owner: u32) -> bool {
+        false
     }
 
     #[test]
@@ -413,7 +468,14 @@ mod tests {
         let mut reply = [0u8; 64];
 
         // Node 2 is no longer present: tear its driver down.
-        unload_vanished(&|_id| false, &mut store, &mut reply, &mut state, &NullSink);
+        unload_vanished(
+            &|_id| false,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
 
         assert_eq!(store.unloads.borrow().as_slice(), &[0x1007]);
         assert!(state.bindings.is_empty(), "the binding is dropped");
@@ -431,7 +493,14 @@ mod tests {
         let mut reply = [0u8; 64];
 
         // Node 2 is still present: nothing is torn down.
-        unload_vanished(&|id| id == 2, &mut store, &mut reply, &mut state, &NullSink);
+        unload_vanished(
+            &|id| id == 2,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
 
         assert!(store.unloads.borrow().is_empty());
         assert_eq!(state.bindings.len(), 1);
@@ -449,7 +518,14 @@ mod tests {
         let mut reply = [0u8; 64];
 
         // Node 2 vanishes, node 3 stays: only node 2's instance is torn down.
-        unload_vanished(&|id| id == 3, &mut store, &mut reply, &mut state, &NullSink);
+        unload_vanished(
+            &|id| id == 3,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
         assert_eq!(
             store.unloads.borrow().as_slice(),
             &[0x1007],
@@ -458,7 +534,14 @@ mod tests {
         assert_eq!(state.bindings.len(), 1);
 
         // Now node 3 vanishes too — its own instance is unloaded.
-        unload_vanished(&|_id| false, &mut store, &mut reply, &mut state, &NullSink);
+        unload_vanished(
+            &|_id| false,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
         assert_eq!(store.unloads.borrow().as_slice(), &[0x1007, 0x2007]);
         assert!(state.bindings.is_empty());
     }
@@ -479,8 +562,60 @@ mod tests {
         let mut store = AlreadyGone;
         let mut reply = [0u8; 64];
 
-        unload_vanished(&|_id| false, &mut store, &mut reply, &mut state, &NullSink);
+        unload_vanished(
+            &|_id| false,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
 
+        assert!(state.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_child_of_a_recovering_owner_is_held_not_unloaded() {
+        // A block device (node 3) served under an interior fault-domain owner
+        // (a controller, node 1). The controller resets: its child node
+        // transiently vanishes from the tree, but the controller is
+        // Recovering, so the child's driver must be *held*, not torn down —
+        // one fault-domain blip is one recovery episode, not a teardown.
+        let mut state = AutoloadState::default();
+        bound_under(&mut state, 3, 7, 0x1007, 1);
+        let mut store = UnloadRecorder::new();
+        let mut reply = [0u8; 64];
+
+        // Node 3 is absent this snapshot, but its owner (1) is recovering.
+        unload_vanished(
+            &|_id| false,
+            &|owner| owner == 1,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
+        assert!(
+            store.unloads.borrow().is_empty(),
+            "a child of a recovering owner is held, not torn down"
+        );
+        assert_eq!(state.bindings.len(), 1, "the binding is retained");
+
+        // The owner returns Healthy but the child is genuinely gone (not a
+        // blip): now the stale binding is torn down.
+        unload_vanished(
+            &|_id| false,
+            &none_recovering,
+            &mut store,
+            &mut reply,
+            &mut state,
+            &NullSink,
+        );
+        assert_eq!(
+            store.unloads.borrow().as_slice(),
+            &[0x1007],
+            "once the owner is no longer recovering a truly-gone child unloads"
+        );
         assert!(state.bindings.is_empty());
     }
 }

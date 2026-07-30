@@ -306,12 +306,27 @@ once the window elapses), and audits the device-wide edges through
 sticky-but-recoverable — a later successful reset clears it — and is not retried
 against forever.
 
-The remaining live wiring is the cross-process propagation of an interior node's
-state to the leaf block consumers beneath it (a hub/controller reset marking the
-volumes under it `Recovering` and failing them closed coherently), the deeper
-nested-owner chains a hub or SAS expander adds (`fault_domain_chain` +
-`effective_child_status`), and the health observability that hangs off them
-(`plans/FIX-IO.md` IO4–IO6).
+An interior node's fault-domain state reaches the leaf block consumers beneath
+it through the discovered hardware tree itself: `HwNode::fault_health` carries a
+`FaultDomainState` on the wire, and an interior-node driver publishes its *own*
+node's health with the `hw_node_health` syscall (`CAP_HW_EMIT`, audited; the
+kernel resolves the caller's own matched node, so a driver can never forge
+another's health). Recording it bumps the hardware-tree generation, so the
+reactive `hw_tree_wait` observers re-read — the same channel the hotplug
+emit/remove path uses, but a *distinct* signal: the node stays present, only its
+health changes, so a merely-recovering subtree is never torn down. The xHCI
+controller is the live emitter (each `ControllerHealth` edge → a
+`Recovering`/`Healthy`/`Offline` publish); the device manager is the live
+consumer — a bound child whose fault-domain owner (recorded per binding via
+`fault_domain_owner`) is currently `Recovering` is **held**, not unloaded, when
+it transiently vanishes, so one controller reset is one recovery episode across
+the subtree rather than N spurious teardown/reload cycles. The affected volumes
+already surface as `Recovering` through the kernel `BlkClient`'s existing
+`MountAvailability` fold as their leaf transports blip.
+
+The remaining live wiring is the deeper nested-owner chains a hub or SAS
+expander adds (`fault_domain_chain` + `effective_child_status`) and the QEMU
+vertical that exercises the whole subtree recovery (`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 

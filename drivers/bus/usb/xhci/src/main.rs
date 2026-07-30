@@ -623,32 +623,52 @@ mod program {
     }
 
     /// Record a controller interior fault-domain edge as one audit event,
-    /// naming the controller's owner id.
+    /// naming the controller's owner id, **and** publish the coherent
+    /// fault-domain state onto our own hardware-tree node so the observers
+    /// beneath us react to one recovery episode rather than N spurious child
+    /// failures (`plans/FIX-IO.md` IO4 cross-process propagation).
     ///
     /// Recovering/Recovered use the shared `BlkHealthTransition` vocabulary (via
     /// [`ControllerHealth`], over `for_fault_domain`), the same the leaf devices
     /// and the mount overlay use, so a controller recovery and a disk recovery
     /// cannot be classified differently; the fail-closed edge is the
     /// fault-domain owner's own distinct event.
+    ///
+    /// The health published on the tree is the *same edge* mapped to the
+    /// [`FaultDomainState`](tairix_abi::blkio::FaultDomainState) an interior
+    /// node reports: `Recovering` while the grace window is open, `Healthy`
+    /// once the controller returns, `Offline` when the window elapses. The
+    /// kernel records it against the controller's *own* matched node
+    /// (resolved kernel-side; the driver never names a node), and the device
+    /// manager's reactive watch reacts. It is best-effort cross-process
+    /// hinting: a build with no hardware-tree store, or a controller not
+    /// autoloaded for a node, simply has no observer to notify, and the leaf
+    /// consumers still ride out their own transport blips as before — so a
+    /// refused publish never fails the recovery, which the audit record above
+    /// already captured loudly.
     fn log_domain_event(event: ControllerDomainEvent, owner: u32) {
-        let (id, level, message) = match event {
+        let (id, level, message, health) = match event {
             ControllerDomainEvent::Recovering => (
                 HCD_DOMAIN_RECOVERING,
                 Level::Warn,
                 "usb-hcd: controller faulted, subtree held recovering under one grace window",
+                tairix_abi::blkio::FaultDomainState::Recovering,
             ),
             ControllerDomainEvent::Recovered => (
                 HCD_DOMAIN_RECOVERED,
                 Level::Info,
                 "usb-hcd: controller returned, subtree recovered",
+                tairix_abi::blkio::FaultDomainState::Healthy,
             ),
             ControllerDomainEvent::FailedClosed => (
                 HCD_DOMAIN_OFFLINE,
                 Level::Warn,
                 "usb-hcd: controller recovery grace window elapsed, subtree failed closed",
+                tairix_abi::blkio::FaultDomainState::Offline,
             ),
         };
         log_hex_event(id, level, message, "owner_hex", u64::from(owner));
+        let _ = tairix_rt::hw_node_health(health);
     }
 
     /// Recover a faulted controller under its interior fault domain, folding the

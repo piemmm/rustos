@@ -304,6 +304,13 @@ impl GrantSyscalls for MockSyscalls {
         self.emit_result.get()
     }
 
+    fn hw_node_health(&self, _health: tairix_abi::blkio::FaultDomainState) -> i64 {
+        // The health path is exercised end-to-end at the ABI and kernel
+        // layers and in the xHCI serve loop; this driver-host double just
+        // satisfies the seam by accepting the report.
+        0
+    }
+
     fn msi_alloc(&self) -> Result<tairix_abi::MsiAllocation, i64> {
         // A canned allocation: a doorbell pair and a virtual line, so a test
         // exercising the MSI-routing path sees a stable, non-failing result.

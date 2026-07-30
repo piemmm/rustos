@@ -1695,6 +1695,29 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Publish the fault-domain health of the interior node the calling
+    /// driver owns into the live hardware tree (`plans/FIX-IO.md` IO4,
+    /// cross-process fault-domain propagation).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::HW_EMIT`] (the same privilege as
+    /// [`Self::hw_emit_node`]). The implementation validates `health` as a
+    /// [`tairix_abi::blkio::FaultDomainState`] discriminant, resolves the
+    /// caller's *own* matched node (never a caller-supplied id), records the
+    /// node's health, and bumps the hardware-tree generation so the device
+    /// manager's reactive watch reacts to the coherent recovery episode. The
+    /// node stays present — a *distinct* signal from [`Self::hw_remove_node`]
+    /// so a merely-recovering subtree is never torn down. An out-of-range
+    /// health, a caller with no loaded node, or an absent node fails closed.
+    /// Returns `Ok(0)` once recorded.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn hw_node_health(&self, _caller: &CallerContext<'_>, _health: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Allocate a message-signalled interrupt vector and report the
     /// architecture-built MSI doorbell for a PCI function.
     ///
@@ -2845,6 +2868,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the `HwNode::id` to remove (a plain `u64`,
                 // resolved against the live tree by the handler).
                 self.handlers.hw_remove_node(caller, args.0[0])
+            }
+            SyscallNumber::HW_NODE_HEALTH => {
+                // args[0] is the `FaultDomainState` discriminant of the
+                // caller's own node's new health (a plain `u64`, validated and
+                // resolved against the caller's matched node by the handler).
+                self.handlers.hw_node_health(caller, args.0[0])
             }
             SyscallNumber::MSI_ALLOC => {
                 // args[0] is the non-null out `UserPtr` (dispatcher-checked);
@@ -4108,6 +4137,11 @@ mod tests {
 
         fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
             self.record("hw_remove_node");
+            Ok(0)
+        }
+
+        fn hw_node_health(&self, _c: &CallerContext<'_>, _health: u64) -> SyscallResult {
+            self.record("hw_node_health");
             Ok(0)
         }
 

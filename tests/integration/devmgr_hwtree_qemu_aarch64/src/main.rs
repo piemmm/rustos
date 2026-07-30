@@ -191,6 +191,14 @@ mod kernel {
         fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno> {
             HW_TREE_SOURCE.remove(parent_id, node_id)
         }
+
+        fn set_health(
+            &self,
+            node_id: u32,
+            health: tairix_abi::blkio::FaultDomainState,
+        ) -> Result<(), Errno> {
+            HW_TREE_SOURCE.set_health(node_id, health)
+        }
     }
 
     static WITNESS_SOURCE: WitnessSource = WitnessSource;

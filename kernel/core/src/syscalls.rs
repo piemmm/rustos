@@ -6853,6 +6853,49 @@ where
         Ok(0)
     }
 
+    fn hw_node_health(&self, caller: &CallerContext<'_>, health: u64) -> SyscallResult {
+        // The dispatcher has already checked `CAP_HW_EMIT` — the same
+        // privilege the emit/remove hotplug path requires, since reporting the
+        // health of a subtree the caller owns is of a piece with reshaping it.
+        //
+        // Step 3 (validate every input): `health` must be a defined
+        // `FaultDomainState` discriminant. An out-of-range value names no
+        // state and fails closed with `OutOfRange` — never silently coerced,
+        // so a hostile value cannot slip through as some default.
+        let health = match health {
+            0 => tairix_abi::blkio::FaultDomainState::Healthy,
+            1 => tairix_abi::blkio::FaultDomainState::Recovering,
+            2 => tairix_abi::blkio::FaultDomainState::Offline,
+            _ => return Err(Errno::OutOfRange),
+        };
+
+        // Security spine, identical to `hw_emit_node` / `hw_remove_node` (no
+        // ambient authority): resolve the caller's *own* matched node from
+        // kernel-trusted state keyed by `caller.task_id` (never a
+        // caller-supplied node id). A task with no loaded node owns no
+        // interior node and may report no health — it fails closed. So a
+        // driver can only ever set the health of the node it was autoloaded
+        // for.
+        let node_id = {
+            let aspaces = self.aspaces.read();
+            let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+                return Err(Errno::PermissionDenied);
+            };
+            node_id
+        };
+
+        // Record the caller's own node's fault-domain health, bumping the
+        // generation that wakes the device manager's reactive watch so it
+        // reacts to the coherent recovery episode (the same change channel
+        // `hw_tree_wait` observes). The node stays present — a *distinct*
+        // signal from `hw_remove_node`, so a merely-recovering subtree is
+        // never torn down. The store fails closed `NotFound` for a node that
+        // is not live; a build with no store wired fails closed
+        // `NotImplemented`. Returns `Ok(0)` once recorded.
+        self.hw_tree.set_health(node_id, health)?;
+        Ok(0)
+    }
+
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the `msi_alloc`
         // spec carries `CAP_IRQ_BIND`. Step 3 (validate every input): the out
@@ -22947,6 +22990,9 @@ mod tests {
         // Node ids this double rejects with `NotFound` (a node the caller does
         // not own / an absent node), so a test can drive the fail-closed arm.
         unremovable: RwLock<alloc::vec::Vec<u32>>,
+        // Every `(node_id, health)` the handler recorded through `set_health`,
+        // so a test can assert the resolved own-node and health it passed.
+        health_set: RwLock<alloc::vec::Vec<(u32, tairix_abi::blkio::FaultDomainState)>>,
     }
 
     impl StaticHwTree {
@@ -22957,6 +23003,7 @@ mod tests {
                 published: RwLock::new(alloc::vec::Vec::new()),
                 removed: RwLock::new(alloc::vec::Vec::new()),
                 unremovable: RwLock::new(alloc::vec::Vec::new()),
+                health_set: RwLock::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -22988,6 +23035,17 @@ mod tests {
             }
             self.removed.write().push((parent_id, node_id));
             Ok(alloc::vec![node_id])
+        }
+        fn set_health(
+            &self,
+            node_id: u32,
+            health: tairix_abi::blkio::FaultDomainState,
+        ) -> Result<(), Errno> {
+            // Record the kernel-resolved own-node id and the health the
+            // handler passed, so a test can assert the caller could only set
+            // its own node's health and that the value was validated.
+            self.health_set.write().push((node_id, health));
+            Ok(())
         }
     }
 
@@ -23780,6 +23838,85 @@ mod tests {
         // An input-class publish is not a display: no seat was minted and
         // nothing seat-related was audited.
         assert!(!sink.event_ids().contains(&AuditEvent::SeatCreated.id().0));
+    }
+
+    /// `hw_node_health` records the caller's *own* matched node's health
+    /// (resolved kernel-side), validates the discriminant fail-closed, and a
+    /// task with no loaded node reports nothing.
+    #[test]
+    fn hw_node_health_records_the_callers_own_node_health() {
+        use tairix_abi::blkio::FaultDomainState;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A one-byte owned buffer is enough to register the task's aspace;
+        // `hw_node_health` takes its health in a scalar arg, no user copy.
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The caller is a driver loaded for node 9; it can only ever set
+        // node 9's health.
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        // Recovering (1) then Healthy (0) are recorded against the resolved
+        // own node (9); the store never sees a caller-supplied node id.
+        assert_eq!(h.hw_node_health(&ctx, 1), Ok(0));
+        assert_eq!(h.hw_node_health(&ctx, 0), Ok(0));
+        assert_eq!(
+            *source.health_set.read(),
+            alloc::vec![
+                (9, FaultDomainState::Recovering),
+                (9, FaultDomainState::Healthy)
+            ]
+        );
+
+        // An out-of-range discriminant is rejected before touching the store
+        // (validate every input, fail closed) — never silently coerced.
+        assert_eq!(h.hw_node_health(&ctx, 7), Err(Errno::OutOfRange));
+        assert_eq!(
+            source.health_set.read().len(),
+            2,
+            "a rejected health never reaches the store"
+        );
+
+        // A task with no loaded node owns no interior node and reports no
+        // health — fail closed, nothing recorded.
+        let other_caps = make_caps_record(3, &[CapabilityId::HW_EMIT], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &other_caps,
+        };
+        let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(SecTaskId(3), space3, physmap3)
+            .expect("registration succeeds");
+        assert_eq!(h.hw_node_health(&other, 1), Err(Errno::PermissionDenied));
+        assert_eq!(
+            source.health_set.read().len(),
+            2,
+            "a caller with no loaded node records nothing"
+        );
     }
 
     /// A display-class node published into the live tree mints an

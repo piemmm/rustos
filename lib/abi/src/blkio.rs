@@ -1367,6 +1367,40 @@ pub enum FaultDomainState {
     Offline,
 }
 
+impl FaultDomainState {
+    /// The stable little-endian wire discriminant of this state.
+    ///
+    /// This is the single encoding of a fault-domain health value on any
+    /// wire — the hardware-tree node health byte
+    /// ([`crate::hwtree::HwNode::fault_health`]) a driver publishes about its
+    /// own interior node, and any log/introspection field that carries one —
+    /// so an interior node's health is encoded and decoded in exactly one
+    /// place and the transport and the state machine can never drift apart.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::Recovering => 1,
+            Self::Offline => 2,
+        }
+    }
+
+    /// Decode a wire discriminant, **failing closed**: any value that is not
+    /// a defined state decodes to [`FaultDomainState::Offline`], the most
+    /// conservative reading, so a corrupt or unknown health byte can never
+    /// masquerade a faulted subtree as [`Healthy`](Self::Healthy).
+    #[must_use]
+    pub const fn from_u8_fail_closed(raw: u8) -> Self {
+        match raw {
+            0 => Self::Healthy,
+            1 => Self::Recovering,
+            // Any other byte (2 == Offline, and every undefined value) is a
+            // subtree we cannot vouch for: fail closed to Offline.
+            _ => Self::Offline,
+        }
+    }
+}
+
 /// The recovery state machine of one fault-domain *owner* — a group of served
 /// block devices that a single upstream element fails and recovers together.
 ///
@@ -1754,6 +1788,32 @@ fn data_extent<B: Block>(device: &B, blocks: u32, window_len: usize) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fault_domain_state_wire_codec_round_trips_and_fails_closed() {
+        // The one encoding of a fault-domain health value: every defined
+        // state round-trips through its discriminant.
+        for state in [
+            FaultDomainState::Healthy,
+            FaultDomainState::Recovering,
+            FaultDomainState::Offline,
+        ] {
+            assert_eq!(FaultDomainState::from_u8_fail_closed(state.as_u8()), state);
+        }
+        // The discriminants are pinned (they ride the hardware-tree node
+        // health byte and any log field, one definition).
+        assert_eq!(FaultDomainState::Healthy.as_u8(), 0);
+        assert_eq!(FaultDomainState::Recovering.as_u8(), 1);
+        assert_eq!(FaultDomainState::Offline.as_u8(), 2);
+        // Every undefined byte fails closed to Offline, so a corrupt value can
+        // never present a faulted subtree as healthy.
+        for raw in [3u8, 4, 42, 0xFF] {
+            assert_eq!(
+                FaultDomainState::from_u8_fail_closed(raw),
+                FaultDomainState::Offline
+            );
+        }
+    }
 
     #[test]
     fn request_round_trips() {
