@@ -137,6 +137,7 @@ members = [
     "drivers/storage/emmc2",
     "drivers/storage/usb_msd",
     "drivers/storage/volmgr",
+    "drivers/storage/raid",
 
     # Drivers — network
     "drivers/network/virtio_net",

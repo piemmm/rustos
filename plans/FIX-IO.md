@@ -793,24 +793,69 @@ Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver
 process is detected and recovered.
 
-### Stage IO6 — RAID / mirror / ARXFS composition. **planned, gated on ARXFS**
+### Stage IO6 — RAID / mirror / ARXFS composition. **in progress**
 
-Deliverables:
-- A RAID/mirror/ARXFS volume is a **virtual block device that composes child
-  block endpoints** through the same fault-aware `Block` seam (§2.2 one seam,
-  §27 complete abstraction). It consumes health/status; it does not re-invent
-  it.
-- A child going `Faulted`/`Offline` **degrades the array, not the system**:
-  mirrors/parity serve from surviving members and the array reports `Degraded`
-  upward. A returning disk (via the IO3 grace window) triggers **resync/rebuild**
-  (bounded, incremental, interruptible per §26.6), and its transition back to
-  `Healthy` is logged.
-- Multi-layered sets nest naturally because fault domains (IO4) and the block
-  seam (IO1) are recursive.
+**Landed (the RAID1 mirror composition engine):** a RAID volume is a **virtual
+block device that composes child block endpoints** through the same fault-aware
+`Block` seam every leaf device uses (§2.2 one seam, §27 complete abstraction),
+so it nests naturally over the recursive seam and *consumes* the block-layer
+health vocabulary (`blkio::BlkStatus`, `DriverError`) rather than re-inventing
+it. The first composition is the RAID1 mirror `raid::MirrorArray`
+(`drivers/storage/raid`, host-testable `lib`): it is `no_std`,
+`forbid(unsafe_code)`, and **allocation-free** — it borrows a caller-owned
+member slice, so there is no fixed member ceiling (§24.1) and the growable
+member tier lives in the assembling serve process. Its complete behaviour is
+proven host-side over a fault-injecting `Block` double:
+- **Read = recover + repair.** Reads are served from an in-sync copy in a
+  deterministic order; a *per-block* `MediumError` is recovered from a good
+  copy and the bad copy is **repaired** in place (the mirror's auto-scrub), and
+  only a *whole-device* fault (`DeviceOffline`/`DeviceFault`, or a member
+  returning a request-level error for a request the array already validated)
+  drops a copy. A read with no surviving copy fails closed (§5.4).
+- **Write = fan-out + drop.** Writes fan out to every copy; a copy that fails a
+  write is dropped immediately and the write still succeeds as long as one copy
+  accepted it, failing closed only when none did. A rebuilding copy receives
+  writes to its already-synced region so it never falls behind the source.
+- **Degrade, never fail the system.** A faulted copy degrades the array
+  (`ArrayHealth::Degraded`) while the survivors keep serving; flush keeps at
+  least one durable copy or fails closed. Array health maps onto the shared
+  `MountAvailability::{Available,Degraded,Recovering,UnavailableLost}` so a
+  serving process surfaces it through the same `sysinfo` mount surface a leaf
+  volume uses (IO2/IO5), never a second vocabulary (§2.2).
+- **Rebuild = bounded, interruptible resync.** A returning copy (via its own
+  IO3 grace window) or a physically replaced disk is rebuilt by
+  `MirrorArray::resync_step`, which copies the array from an in-sync source a
+  caller-sized chunk at a time, so a 100 TB+ rebuild never blocks the system or
+  busy-spins (§26.6, §2.23). A rebuilding copy is a read source only once fully
+  in sync (`ArrayHealth::Recovering` meanwhile). A faulted copy is
+  sticky-but-recoverable (`readd_member`/`replace_member`), so a flapping disk
+  never masquerades as a healthy copy yet a genuine return rejoins without a
+  reboot (§18.4).
+  Design: `docs/src/drivers/raid.md`.
 
-Tests (§7): a composed mirror over fault-injecting children — one child faults
-and recovers inside its grace window (array degrades then resyncs), one child
-expires (array stays degraded, system unaffected).
+Remaining:
+- The autoloaded serve process that assembles members from discovered array
+  metadata (an on-disk array superblock), drives `resync_step` off the members'
+  IO3 recovery signals, and publishes the composed device as its own
+  block-service node — plus the ARXFS-native multi-device composition that
+  consumes the same engine. This rides with the multi-device volume-assembly
+  work; the engine is the single shared definition both reuse (§2.2), proven
+  host-side first exactly as the other FIX-IO primitives landed their shared
+  logic before their live wiring.
+- RAID levels beyond the mirror (striping, parity) are sibling compositions
+  over the same seam (§2.2 parallel implementations), added when needed.
+
+Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
+over a fault-injecting `Block` double — two healthy copies assemble optimal; a
+bad sector is recovered from a copy and the bad copy repaired; a whole-device
+read fault drops a copy and degrades the array; a read with no good copy fails
+closed without faulting medium copies; a write error drops a copy while the
+write still succeeds; a write no copy accepts fails closed; a returned copy is
+rebuilt with **current** data (including degraded-window writes); the rebuild is
+incremental (a cursor advances a chunk per step); a write during rebuild reaches
+only the already-synced region; a rebuild target that cannot be written drops
+back to faulted; a permanently-faulted copy never stops the survivor serving;
+assemble/re-add fail closed on empty/mismatched/absent members.
 
 ---
 
@@ -835,5 +880,8 @@ larger than one change, hence the staging above: each stage lands complete and
 green on its own. The IO1 transport shape is decided — the async
 submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
-HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6 is
-gated on ARXFS existing; IO1–IO5 do not depend on it and land first.
+HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
+composition **engine** (the `drivers/storage/raid` mirror) is independent of
+ARXFS and has landed host-side; only its live serve process and the
+ARXFS-native multi-device composition that consumes the same engine remain, and
+those ride with the multi-device volume-assembly work.

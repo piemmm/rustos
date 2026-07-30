@@ -91,6 +91,7 @@
 - [Bus drivers](./drivers/bus.md)
 - [Virtio transport](./drivers/virtio.md)
 - [Block drivers](./drivers/block.md)
+- [RAID composition](./drivers/raid.md)
 - [Network drivers](./drivers/network.md)
 - [Display drivers](./drivers/display.md)
 - [Input drivers](./drivers/input.md)

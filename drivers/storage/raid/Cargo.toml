@@ -1,0 +1,25 @@
+[package]
+name = "tairix-drv-storage-raid"
+description = "TAIRiX RAID composition driver: a fault-aware virtual block device that composes child block endpoints through the public block seam (plans/FIX-IO.md IO6). The RAID1 mirror serves reads from any healthy member, auto-repairs a proven-bad copy from a good one, fans writes out to every copy, degrades (never fails the system) when a member faults, and rebuilds a returning member with a bounded, interruptible resync."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is a host-testable `lib`: the RAID composition engine
+# (`MirrorArray`) that consumes child `Block` endpoints through the public
+# block seam and the shared health classification (`tairix_abi::blkio`). It
+# depends only on `lib/abi`, so the layered dependency direction holds (no
+# `drivers/*`->`drivers/*` edge: a member is reached through the `Block` trait
+# the composing serve process is handed, never a sibling driver crate). The
+# autoloaded serve process that assembles members from discovered array
+# metadata rides with the multi-device volume-assembly work (plans/FIX-IO.md
+# IO6 remaining); this engine is proven host-side first.
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
