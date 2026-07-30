@@ -17,7 +17,7 @@
 //! `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
-use crate::blkio::BlkStatus;
+use crate::blkio::{BlkHealthState, BlkStatus};
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
@@ -2145,6 +2145,64 @@ pub enum BlkHealthTransition {
     Recovered,
 }
 
+impl BlkHealthTransition {
+    /// Classify a *device-level* health-state change — the edge a serving
+    /// block driver's own [`BlkHealth`](crate::blkio::BlkHealth) machine makes
+    /// from `prev` to `next` — as a storage-health audit transition, or
+    /// [`None`] when the change carries no such signal.
+    ///
+    /// This is the device-side counterpart of the consumer-side
+    /// [`MountAvailability::health_transition`], sharing the **same**
+    /// vocabulary so a driver process and the kernel block client cannot
+    /// classify a recovery or a degrade differently
+    /// (`plans/FIX-IO.md` IO5, §2.2). Both are edge-triggered: an unchanged
+    /// state yields [`None`], so a run of identical outcomes logs one event,
+    /// not one per request.
+    ///
+    /// Only the healthy/unwell/recovering edges take part, and they map to the
+    /// same three events the mount side emits:
+    /// * into [`BlkHealthState::Degraded`] → [`Degraded`](Self::Degraded);
+    /// * into [`BlkHealthState::Recovering`] → [`Recovering`](Self::Recovering)
+    ///   (the device entered its bounded grace window);
+    /// * back to [`BlkHealthState::Healthy`] from any unwell-but-not-removed
+    ///   state → [`Recovered`](Self::Recovered) (the disk came back).
+    ///
+    /// The fail-closed edges (into [`BlkHealthState::Faulted`] /
+    /// [`Offline`](BlkHealthState::Offline) / [`Failed`](BlkHealthState::Failed))
+    /// yield [`None`]: they are not a Degraded/Recovering/Recovered signal but
+    /// the grace window elapsing, which the driver logs as its own distinct
+    /// fail-closed event. Any edge touching
+    /// [`BlkHealthState::Removed`] also yields [`None`]: a surprise removal and
+    /// its verified re-insert are owned by the D4 hotplug path, exactly as the
+    /// mount-side classifier excludes its vanish states, so a removal is never
+    /// double-counted and a re-insert never fabricates a recovery here.
+    #[must_use]
+    pub const fn for_device(prev: BlkHealthState, next: BlkHealthState) -> Option<Self> {
+        use crate::blkio::BlkHealthState::{
+            Degraded, Failed, Faulted, Healthy, Offline, Recovering, Removed,
+        };
+        match (prev, next) {
+            // No health edge is derived here in two cases. A surprise removal
+            // and its verified re-insert (either direction) are owned by the
+            // D4 hotplug path, which logs its own events, so a removal is never
+            // double-counted nor a re-insert turned into a fabricated recovery.
+            // And an unchanged live/recovering state is not a transition, so a
+            // run of identical outcomes logs one event, not one per request.
+            (Removed, _)
+            | (_, Removed)
+            | (Healthy, Healthy)
+            | (Degraded, Degraded)
+            | (Recovering, Recovering) => None,
+            (_, Degraded) => Some(Self::Degraded),
+            (_, Recovering) => Some(Self::Recovering),
+            // A return to healthy service from any unwell-but-present state is
+            // the "came back" recovery.
+            (Degraded | Recovering | Faulted | Offline | Failed, Healthy) => Some(Self::Recovered),
+            _ => None,
+        }
+    }
+}
+
 /// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
 ///
 /// Structurally parallel to [`ProcessListRequest`] but a distinct frozen
@@ -4150,14 +4208,14 @@ impl CrashRecord {
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, BlkHealthTransition, CpuTimeListRequest, CpuTimeRecord,
-        HardwareTreeRequest, KernelMemoryStats, LoadAverage, MountAvailability, MountListRequest,
-        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE,
-        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
-        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeListRequest,
+        CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage, MountAvailability,
+        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
+        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, VolumeStats,
+        ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
+        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
@@ -5083,6 +5141,65 @@ mod tests {
                 assert_eq!(MountAvailability::health_transition(v, other), None);
                 assert_eq!(MountAvailability::health_transition(other, v), None);
             }
+        }
+    }
+
+    #[test]
+    fn device_health_transition_maps_the_shared_vocabulary() {
+        use BlkHealthState::{Degraded, Failed, Faulted, Healthy, Offline, Recovering};
+        // Entering the grace window, reporting degraded, and coming back are
+        // exactly the three shared events — the same the mount side emits.
+        assert_eq!(
+            BlkHealthTransition::for_device(Healthy, Degraded),
+            Some(BlkHealthTransition::Degraded)
+        );
+        assert_eq!(
+            BlkHealthTransition::for_device(Healthy, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        assert_eq!(
+            BlkHealthTransition::for_device(Degraded, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        // A disk that came back from any unwell-but-present state is a
+        // recovery, whether it merely blipped or was fully failed closed.
+        for from in [Degraded, Recovering, Faulted, Offline, Failed] {
+            assert_eq!(
+                BlkHealthTransition::for_device(from, Healthy),
+                Some(BlkHealthTransition::Recovered),
+                "a returning disk is a recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn device_health_transition_is_edge_triggered() {
+        use BlkHealthState::{Degraded, Failed, Faulted, Healthy, Offline, Recovering, Removed};
+        // A run of identical outcomes is one event, not one per request.
+        for state in [
+            Healthy, Degraded, Recovering, Faulted, Offline, Removed, Failed,
+        ] {
+            assert_eq!(BlkHealthTransition::for_device(state, state), None);
+        }
+    }
+
+    #[test]
+    fn device_health_transition_excludes_fail_closed_and_removal_edges() {
+        use BlkHealthState::{Degraded, Failed, Faulted, Healthy, Offline, Recovering, Removed};
+        // Failing closed is the grace window elapsing, logged by the driver's
+        // own distinct fail-closed event, not this Degraded/Recovering/
+        // Recovered vocabulary.
+        for from in [Healthy, Degraded, Recovering] {
+            for to in [Faulted, Offline, Failed] {
+                assert_eq!(BlkHealthTransition::for_device(from, to), None);
+            }
+        }
+        // Surprise-removal and its verified re-insert are the D4 hotplug
+        // path's events: no health edge is fabricated here in either
+        // direction.
+        for other in [Healthy, Degraded, Recovering, Faulted, Failed] {
+            assert_eq!(BlkHealthTransition::for_device(other, Removed), None);
+            assert_eq!(BlkHealthTransition::for_device(Removed, other), None);
         }
     }
 

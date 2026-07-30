@@ -3,10 +3,11 @@
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
 use tairix_abi::blkio::{
-    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, RecoveryAction,
-    RecoveryLadder, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
+    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, BlkHealthState,
+    RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 use tairix_caps::CapabilitySet;
@@ -74,6 +75,21 @@ const MSD_GRACE_EXPIRED: EventId = EventId(4166);
 /// for a stalling LUN — the bounded step taken to try to bring a recovering
 /// unit back before its grace window is left to fail it closed.
 const MSD_RECOVERY_RESET: EventId = EventId(4167);
+
+/// Diagnostic event id: a LUN reported itself unhealthy while still serving
+/// valid data (a recovered-error threshold, a pending sector reallocation) —
+/// the device-level [`BlkHealthTransition::Degraded`] edge.
+const MSD_HEALTH_DEGRADED: EventId = EventId(4168);
+
+/// Diagnostic event id: a LUN stalled or reset and entered its bounded
+/// recovery grace window — the device-level [`BlkHealthTransition::Recovering`]
+/// edge. Its I/O is ridden out reissuably while it is given a chance to return.
+const MSD_HEALTH_RECOVERING: EventId = EventId(4169);
+
+/// Diagnostic event id: a degraded, recovering, or failed-closed LUN returned
+/// to healthy service — the device-level [`BlkHealthTransition::Recovered`]
+/// edge. "The disk came back": logged as a recovery, not a fault.
+const MSD_HEALTH_RECOVERED: EventId = EventId(4170);
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -462,15 +478,59 @@ fn expire_idle_grace_windows(luns: &mut [Option<LunServe>], now_ns: u64) {
     for serve in luns.iter_mut().flatten() {
         let before = serve.health.state();
         let after = serve.health.poll(now_ns);
-        if before != after && !after.is_operational() {
-            log_hex_event(
-                MSD_GRACE_EXPIRED,
+        note_health_edge(before, after, serve.node_id);
+    }
+}
+
+/// Record a LUN's device-level health edge from `before` to `after` as one
+/// audit event, naming the unit's fault-domain node, so a returning disk, a
+/// degrade, a grace-window entry, and a fail-closed each land on the health
+/// trail (`plans/FIX-IO.md` IO5).
+///
+/// The Degraded / Recovering / Recovered edges use the **shared**
+/// [`BlkHealthTransition`] vocabulary — the same the kernel block client emits
+/// for a volume — so a driver process and the consumer cannot classify a
+/// recovery or a degrade differently. A fail-closed edge (the grace window
+/// elapsing, or a hard fault) is not part of that vocabulary and is logged as
+/// the distinct [`MSD_GRACE_EXPIRED`] event; the disk stays present and
+/// sticky-but-recoverable, so a later genuine return is a `Recovered` edge, not
+/// a surprise-removal. Surprise removal itself is the hotplug path's event and
+/// is never logged here. Edge-triggered: an unchanged state logs nothing, so a
+/// run of identical outcomes is one event, not one per request.
+fn note_health_edge(before: BlkHealthState, after: BlkHealthState, node_id: u32) {
+    if before == after {
+        return;
+    }
+    if let Some(transition) = BlkHealthTransition::for_device(before, after) {
+        let (id, level, message) = match transition {
+            BlkHealthTransition::Degraded => (
+                MSD_HEALTH_DEGRADED,
                 Level::Warn,
-                "usb-msd: LUN recovery grace window elapsed, failing closed",
-                "node_hex",
-                u64::from(serve.node_id),
-            );
-        }
+                "usb-msd: LUN reports itself degraded but still serving",
+            ),
+            BlkHealthTransition::Recovering => (
+                MSD_HEALTH_RECOVERING,
+                Level::Warn,
+                "usb-msd: LUN stalled/reset, entered its recovery grace window",
+            ),
+            BlkHealthTransition::Recovered => (
+                MSD_HEALTH_RECOVERED,
+                Level::Info,
+                "usb-msd: LUN recovered, serving normally again",
+            ),
+        };
+        log_hex_event(id, level, message, "node_hex", u64::from(node_id));
+    } else if matches!(
+        after,
+        BlkHealthState::Faulted | BlkHealthState::Offline | BlkHealthState::Failed
+    ) {
+        log_hex_event(
+            MSD_GRACE_EXPIRED,
+            Level::Warn,
+            "usb-msd: LUN recovery grace window elapsed, failing closed",
+            "node_hex",
+            u64::from(node_id),
+        );
     }
 }
 
@@ -779,6 +839,10 @@ where
         let lun = index as u8;
         let read_only = serve.state.write_protected;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
+        // Snapshot the unit's health before serving so the outcome's effect on
+        // it is one auditable edge (Degraded/Recovering/Recovered, or a
+        // fail-closed) rather than silent.
+        let before_health = serve.health.state();
         let len = {
             let mut block = LunBlock::new(&mut scsi, lun, serve.state);
             serve_request_recovering(
@@ -792,6 +856,7 @@ where
             )
         };
         let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
+        note_health_edge(before_health, serve.health.state(), serve.node_id);
         // Drive the bounded recovery-escalation ladder from the unit's health.
         // A unit that just answered normally re-arms the ladder; a `Recovering`
         // unit escalates — a first gentle retry, then a data-path reset (this

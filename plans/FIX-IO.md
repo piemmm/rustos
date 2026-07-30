@@ -518,19 +518,41 @@ recovering→recovered trail over the live transfer path, and a direct
 edge-triggered journey (degrade, duplicate-suppressed, recovering, recovered,
 medium-error-no-event, degrade). Level-dependent tests are serialised through
 one shared `tairix_kernel_core::test_sink::with_log_level` guard so they cannot
-flake against a concurrent global-threshold change. The finer *device-level*
-events (retry/reset/grace entry-expiry, naming the fault-domain node) are the
-serving driver's to emit against this **same** `BlkHealthTransition` vocabulary
-in its own event-id range; they land with the user-space serve loops that own
-the `BlkHealth`/`FaultDomain` machines (IO3/IO4 remaining), not a second
-definition.
+flake against a concurrent global-threshold change.
+
+**Landed (the serving-driver device-level health half — `usb_msd`):** the
+device-side counterpart of the mount-side classifier is the **same** vocabulary,
+one definition (§2.2): `BlkHealthTransition::for_device(prev, next) ->
+Option<BlkHealthTransition>` (`lib/abi/sysinfo.rs`) maps a serving driver's own
+`BlkHealthState` edge to the shared `Degraded`/`Recovering`/`Recovered` events,
+edge-triggered, excluding both the fail-closed edges (the grace window
+elapsing — the driver's own distinct event) and every edge touching `Removed`
+(owned by the D4 hotplug path), so a driver process and the kernel block client
+cannot classify a recovery or a degrade differently. It is pure and proven
+host-side (the shared-vocabulary mapping, edge-triggering, and
+fail-closed/removal exclusion). The first serving consumer is `usb_msd`: its
+serve loop snapshots each LUN's health around `serve_request_recovering` and
+folds every idle grace-window `poll` through one shared `note_health_edge(before,
+after, node_id)` helper, emitting exactly one `lib/log` record per real edge,
+each naming the LUN's fault-domain node (`node_hex`) and never a secret —
+`MSD_HEALTH_DEGRADED (4168, Warn)`, `MSD_HEALTH_RECOVERING (4169, Warn`, the
+grace-window entry`)`, `MSD_HEALTH_RECOVERED (4170, Info`, "the disk came
+back"`)`, with the fail-closed edge remaining the existing `MSD_GRACE_EXPIRED
+(4166, Warn)` in the driver's own event-id range. `virtio_blk`/`emmc2` reuse the
+same classifier and `note_health_edge` shape when brought up as user-space serve
+processes (§2.2), never a second definition. The retry/reset events and the
+interior *fault-domain node's* own quiesce/resume events remain for the
+`RecoveryLadder`/`FaultDomain` wiring (IO4 remaining), emitted against this same
+vocabulary.
 
 Remaining deliverables:
-- **Serving-driver device-level health events** (`plans/SYSLOG.md`): every
-  retry, reset (naming the fault-domain node), and grace-window entry/expiry the
-  serving driver's `BlkHealth`/`FaultDomain` machines observe, emitted against
-  the shared `BlkHealthTransition` vocabulary above. Lands with the user-space
-  serve loops (IO3/IO4 remaining), which own those machines and their timers.
+- **Fault-domain-node health events** (`plans/SYSLOG.md`): the interior-node
+  quiesce/resume/grace-expiry events the `FaultDomain` machine observes (naming
+  the fault-domain node), emitted against the shared `BlkHealthTransition`
+  vocabulary above. Land with the fault-domain tree wiring (IO4 remaining),
+  which owns those machines and their timers. (The per-device `usb_msd` reset
+  already logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/
+  Recovered/fail-closed edges landed above.)
 - **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
   availability already landed above: a capability-gated device/array health
   query (fault-domain node, retry/reset counts) following the bond-member and
