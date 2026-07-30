@@ -48,3 +48,8 @@ tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # §2.2; the empty default document means "no managed interfaces beyond
 # loopback", which the first-boot installer later fills in).
 tairix-netconfig = { path = "../../lib/netconfig", version = "=0.0.0" }
+# The machine-wide program-library catalog is derived from the planted
+# bundles' own signed manifests and rendered through the one
+# `tairix_proglib` engine, so the shipped store and the desktop's readers
+# cannot drift and no hand-maintained app list exists anywhere.
+tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }

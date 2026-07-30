@@ -12,10 +12,13 @@
 //! * [`AppInfoHeader`] — the fixed-size, signed manifest prefix: bundle
 //!   identity (id / name / version), the target ABI version and syscall
 //!   table hash, the count of requested capabilities and declared MIME
-//!   types, a hash binding the signature to the bundle's contents, and the
-//!   Ed25519 signer key + signature. The variable body that follows is a
-//!   capability-id list (decoded by [`crate::decode_capability_ids`])
-//!   followed by the MIME-type table ([`mime_type_at`]).
+//!   types, the bundle's program-library listing ([`LibraryCategory`] +
+//!   optional icon asset — how the desktop's launcher discovers which
+//!   folder a graphical application files under), a hash binding the
+//!   signature to the bundle's contents, and the Ed25519 signer key +
+//!   signature. The variable body that follows is a capability-id list
+//!   (decoded by [`crate::decode_capability_ids`]) followed by the
+//!   MIME-type table ([`mime_type_at`]).
 //! * [`resolve_library`] — the dynamic-loader policy: a shared-library
 //!   reference resolves only against the requesting bundle's own
 //!   `Libraries/` directory or the curated [`SYSTEM_LIBRARIES_DIR`]; any
@@ -58,6 +61,157 @@ pub const MIME_TYPE_MAX: usize = 64;
 /// Encoded length of one MIME-type body entry: a length byte plus a
 /// fixed [`MIME_TYPE_MAX`] buffer.
 pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
+
+/// Maximum length, in bytes, of the library icon asset name a manifest may
+/// declare — a plain file name inside the bundle's own `Resources/`
+/// directory, so a short bound is ample and keeps the fixed header small.
+pub const LIBRARY_ICON_MAX: usize = 64;
+
+/// One of the fixed folders the desktop's program library organises
+/// launchable applications into.
+///
+/// The set is **closed** and its spellings are locale-neutral identifiers,
+/// not display text: a manifest or catalog naming anything else is refused
+/// outright, so the library can never grow a free-form folder. The names
+/// follow the well-understood freedesktop.org main-menu categories, so a
+/// third-party packager already knows where a bundle lands. Presentation —
+/// the localised folder label a launcher shows — belongs to the surface
+/// that draws the folder, never to this identifier.
+///
+/// There is deliberately **no settings folder**: system settings are
+/// reached from the system overview, not from the program library, so a
+/// bundle cannot file itself among the applications a user launches.
+///
+/// This is manifest vocabulary: a bundle declares its folder in its signed
+/// `AppInfo` ([`AppInfoHeader::library_category`]), and the program-library
+/// catalog engine (`lib/proglib`) stores the same identifiers, so the two
+/// can never disagree about what a folder is called.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum LibraryCategory {
+    /// Calculator, text editor, clock, notes, archive tools.
+    Accessories,
+    /// Image viewers and editors, screenshot tools.
+    Graphics,
+    /// Browser, mail, chat, remote access.
+    Internet,
+    /// Audio and video players and recorders.
+    Multimedia,
+    /// Documents, spreadsheets, PDF.
+    Office,
+    /// Editors, IDEs, terminals used as development tools, debuggers.
+    Programming,
+    /// Games.
+    Games,
+    /// Monitors, disk tools, task shells.
+    SystemTools,
+    /// Small single-purpose tools that fit no folder above.
+    Utilities,
+    /// The catch-all a bundle that declares no category lands in.
+    #[default]
+    Other,
+}
+
+impl LibraryCategory {
+    /// Every folder, in the order a launcher presents them.
+    ///
+    /// The order is the declaration order — the curated reading order of
+    /// the taxonomy — and is the total order [`Ord`] derives, so a folder
+    /// list and a sort of the same folders can never disagree.
+    pub const ALL: [Self; 10] = [
+        Self::Accessories,
+        Self::Graphics,
+        Self::Internet,
+        Self::Multimedia,
+        Self::Office,
+        Self::Programming,
+        Self::Games,
+        Self::SystemTools,
+        Self::Utilities,
+        Self::Other,
+    ];
+
+    /// The canonical, locale-neutral identifier a manifest source or
+    /// catalog store spells this folder with.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accessories => "Accessories",
+            Self::Graphics => "Graphics",
+            Self::Internet => "Internet",
+            Self::Multimedia => "Multimedia",
+            Self::Office => "Office",
+            Self::Programming => "Programming",
+            Self::Games => "Games",
+            Self::SystemTools => "SystemTools",
+            Self::Utilities => "Utilities",
+            Self::Other => "Other",
+        }
+    }
+
+    /// Decode a folder identifier; `None` for anything outside the closed
+    /// set.
+    ///
+    /// The match is exact and case-sensitive: one canonical spelling, so a
+    /// rendered store has exactly one valid form and two catalogs cannot
+    /// disagree over `games` and `Games`.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == id)
+    }
+
+    /// The longest folder identifier, in bytes: the widest a folder value
+    /// can render to, and the bound a store's line budget is derived from.
+    pub const MAX_ID_LEN: usize = {
+        let mut longest = 0;
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            let len = Self::ALL[index].as_str().len();
+            if len > longest {
+                longest = len;
+            }
+            index += 1;
+        }
+        longest
+    };
+
+    /// Encode an optional program-library listing as the manifest wire
+    /// byte ([`AppInfoHeader::library`]): `0` for a bundle the library
+    /// never lists, else the folder's [`Self::ALL`] position plus one.
+    #[must_use]
+    pub const fn to_wire(listing: Option<Self>) -> u8 {
+        match listing {
+            None => 0,
+            Some(category) => category as u8 + 1,
+        }
+    }
+
+    /// Decode the manifest wire byte: `0` is "not listed", `1..=10` name a
+    /// folder, and anything else is refused — an unknown folder is a
+    /// malformed manifest, never a guessed default.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a byte outside the encoding.
+    pub fn from_wire(byte: u8) -> Result<Option<Self>, Errno> {
+        if byte == 0 {
+            return Ok(None);
+        }
+        let index = usize::from(byte - 1);
+        Self::ALL
+            .get(index)
+            .copied()
+            .map(Some)
+            .ok_or(Errno::OutOfRange)
+    }
+}
+
+impl core::fmt::Display for LibraryCategory {
+    /// Renders the canonical identifier [`from_id`](Self::from_id) accepts
+    /// back unchanged.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Absolute path of the curated, OS-provided shared-library directory. The dynamic loader resolves a reference against
 /// this directory or the calling bundle's own `Libraries/`, and nothing
@@ -359,14 +513,28 @@ pub struct AppInfoHeader {
     /// Valid byte count of the inline `version` buffer
     /// (`<= BUNDLE_VERSION_MAX`).
     pub version_len: u8,
+    /// Valid byte count of the inline `library_icon` buffer
+    /// (`<= LIBRARY_ICON_MAX`); zero when the bundle declares no icon.
+    /// Non-zero only on a listed bundle (`library != 0`) — an icon on a
+    /// bundle the library never shows is a malformed manifest.
+    pub library_icon_len: u8,
+    /// The bundle's program-library listing ([`LibraryCategory::to_wire`]):
+    /// `0` for a bundle the desktop's program library never lists (every
+    /// plain command app and service), else the folder it is filed under.
+    pub library: u8,
     /// Reserved; must be zero in `abi-v1`.
-    pub reserved0: u8,
+    pub reserved0: [u8; 3],
     /// Bundle identifier bytes; the valid prefix is `id_len` long.
     pub id: [u8; BUNDLE_ID_MAX],
     /// Human-readable name bytes; the valid prefix is `name_len` long.
     pub name: [u8; BUNDLE_NAME_MAX],
     /// Version-string bytes; the valid prefix is `version_len` long.
     pub version: [u8; BUNDLE_VERSION_MAX],
+    /// Library icon asset name bytes — a plain file name resolved inside
+    /// the bundle's own `Resources/` directory; the valid prefix is
+    /// `library_icon_len` long. All zero when the bundle declares no icon
+    /// (a launcher then draws its class fallback icon).
+    pub library_icon: [u8; LIBRARY_ICON_MAX],
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Digest binding the signature to the bundle's contents
@@ -385,11 +553,15 @@ impl AppInfoHeader {
     const OFF_ID_LEN: usize = 16;
     const OFF_NAME_LEN: usize = 17;
     const OFF_VERSION_LEN: usize = 18;
-    const OFF_RESERVED0: usize = 19;
-    const OFF_ID: usize = 20;
+    const OFF_LIBRARY_ICON_LEN: usize = 19;
+    const OFF_LIBRARY: usize = 20;
+    const OFF_RESERVED0: usize = 21;
+    const RESERVED0_LEN: usize = 3;
+    const OFF_ID: usize = 24;
     const OFF_NAME: usize = Self::OFF_ID + BUNDLE_ID_MAX;
     const OFF_VERSION: usize = Self::OFF_NAME + BUNDLE_NAME_MAX;
-    const OFF_SYSCALL_HASH: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
+    const OFF_LIBRARY_ICON: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
+    const OFF_SYSCALL_HASH: usize = Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX;
     const OFF_CONTENT_HASH: usize = Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN;
     const OFF_SIGNER: usize = Self::OFF_CONTENT_HASH + 32;
     const OFF_SIGNATURE: usize = Self::OFF_SIGNER + 32;
@@ -423,11 +595,16 @@ impl AppInfoHeader {
         out[Self::OFF_ID_LEN] = self.id_len;
         out[Self::OFF_NAME_LEN] = self.name_len;
         out[Self::OFF_VERSION_LEN] = self.version_len;
-        out[Self::OFF_RESERVED0] = self.reserved0;
+        out[Self::OFF_LIBRARY_ICON_LEN] = self.library_icon_len;
+        out[Self::OFF_LIBRARY] = self.library;
+        out[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN]
+            .copy_from_slice(&self.reserved0);
         out[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX].copy_from_slice(&self.id);
         out[Self::OFF_NAME..Self::OFF_NAME + BUNDLE_NAME_MAX].copy_from_slice(&self.name);
         out[Self::OFF_VERSION..Self::OFF_VERSION + BUNDLE_VERSION_MAX]
             .copy_from_slice(&self.version);
+        out[Self::OFF_LIBRARY_ICON..Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX]
+            .copy_from_slice(&self.library_icon);
         out[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN]
             .copy_from_slice(&self.syscall_table_hash);
         out[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]
@@ -449,7 +626,10 @@ impl AppInfoHeader {
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`, or
     ///   any inline string length exceeds its cap.
     /// * [`Errno::OutOfRange`] if a mandatory identity string (`id`, `name`,
-    ///   `version`) is empty or is not valid UTF-8.
+    ///   `version`) is empty or is not valid UTF-8, if the `library` byte is
+    ///   outside the [`LibraryCategory::from_wire`] encoding, if the icon
+    ///   bytes are not valid UTF-8, or if an icon is declared on a bundle
+    ///   the library never lists.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -474,9 +654,20 @@ impl AppInfoHeader {
         let id_len = bytes[Self::OFF_ID_LEN];
         let name_len = bytes[Self::OFF_NAME_LEN];
         let version_len = bytes[Self::OFF_VERSION_LEN];
-        let reserved0 = bytes[Self::OFF_RESERVED0];
-        if reserved0 != 0 {
+        let library_icon_len = bytes[Self::OFF_LIBRARY_ICON_LEN];
+        let library = bytes[Self::OFF_LIBRARY];
+        let mut reserved0 = [0u8; Self::RESERVED0_LEN];
+        reserved0.copy_from_slice(
+            &bytes[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN],
+        );
+        if reserved0 != [0; Self::RESERVED0_LEN] {
             return Err(Errno::BadMagic);
+        }
+        LibraryCategory::from_wire(library)?;
+        if library == 0 && library_icon_len != 0 {
+            // An icon on a bundle the library never lists is incoherent; a
+            // manifest that says both is refused whole rather than half-read.
+            return Err(Errno::OutOfRange);
         }
 
         let mut id = [0u8; BUNDLE_ID_MAX];
@@ -485,6 +676,10 @@ impl AppInfoHeader {
         name.copy_from_slice(&bytes[Self::OFF_NAME..Self::OFF_NAME + BUNDLE_NAME_MAX]);
         let mut version = [0u8; BUNDLE_VERSION_MAX];
         version.copy_from_slice(&bytes[Self::OFF_VERSION..Self::OFF_VERSION + BUNDLE_VERSION_MAX]);
+        let mut library_icon = [0u8; LIBRARY_ICON_MAX];
+        library_icon.copy_from_slice(
+            &bytes[Self::OFF_LIBRARY_ICON..Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX],
+        );
         let mut syscall_table_hash = [0u8; SYSCALL_TABLE_HASH_LEN];
         syscall_table_hash.copy_from_slice(
             &bytes[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN],
@@ -505,10 +700,13 @@ impl AppInfoHeader {
             id_len,
             name_len,
             version_len,
+            library_icon_len,
+            library,
             reserved0,
             id,
             name,
             version,
+            library_icon,
             syscall_table_hash,
             content_hash,
             signer_pubkey,
@@ -517,6 +715,11 @@ impl AppInfoHeader {
         validate_identity(header.id_len, BUNDLE_ID_MAX, &header.id)?;
         validate_identity(header.name_len, BUNDLE_NAME_MAX, &header.name)?;
         validate_identity(header.version_len, BUNDLE_VERSION_MAX, &header.version)?;
+        validate_optional_text(
+            header.library_icon_len,
+            LIBRARY_ICON_MAX,
+            &header.library_icon,
+        )?;
         Ok(header)
     }
 
@@ -537,6 +740,27 @@ impl AppInfoHeader {
     #[must_use]
     pub fn bundle_version(&self) -> &str {
         inline_str(&self.version, self.version_len)
+    }
+
+    /// The program-library folder this bundle asks to be listed under, or
+    /// `None` for a bundle the library never lists (every plain command app
+    /// and service, and a graphical application that opts out).
+    #[must_use]
+    pub fn library_category(&self) -> Option<LibraryCategory> {
+        // `from_bytes` validated the byte; an out-of-encoding value on a
+        // hand-built header reads as "not listed" rather than a guess.
+        LibraryCategory::from_wire(self.library).ok().flatten()
+    }
+
+    /// The library icon asset name — a plain file name inside the bundle's
+    /// own `Resources/` directory — or `None` when the bundle declares no
+    /// icon and the launcher draws its class fallback.
+    #[must_use]
+    pub fn library_icon(&self) -> Option<&str> {
+        if self.library_icon_len == 0 {
+            return None;
+        }
+        Some(inline_str(&self.library_icon, self.library_icon_len))
     }
 
     /// Number of body bytes a manifest with these counts must carry: the
@@ -609,6 +833,17 @@ fn validate_identity(len: u8, max: usize, buf: &[u8]) -> Result<(), Errno> {
     if len == 0 {
         return Err(Errno::OutOfRange);
     }
+    if len > max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    core::str::from_utf8(&buf[..len]).map_err(|_| Errno::OutOfRange)?;
+    Ok(())
+}
+
+/// Validate one optional inline text field: length within bound and a
+/// valid UTF-8 prefix; empty is the ordinary "not declared".
+fn validate_optional_text(len: u8, max: usize, buf: &[u8]) -> Result<(), Errno> {
+    let len = usize::from(len);
     if len > max {
         return Err(Errno::LengthOutOfRange);
     }
@@ -711,8 +946,8 @@ fn validate_digest_path(path: &str) -> Result<(), Errno> {
 mod tests {
     use super::{
         body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
-        AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryError,
-        LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+        AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
+        LibraryError, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
         BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
         SYSTEM_LIBRARIES_DIR,
     };
@@ -730,6 +965,7 @@ mod tests {
         let (id, id_len) = inline("com.example.editor");
         let (name, name_len) = inline("Example Editor");
         let (version, version_len) = inline("1.2.3");
+        let (library_icon, library_icon_len) = inline("editor.svg");
         AppInfoHeader {
             magic: APPINFO_MAGIC,
             abi_version: ABI_VERSION_CURRENT,
@@ -739,10 +975,13 @@ mod tests {
             id_len,
             name_len,
             version_len,
-            reserved0: 0,
+            library_icon_len,
+            library: LibraryCategory::to_wire(Some(LibraryCategory::Office)),
+            reserved0: [0; 3],
             id,
             name,
             version,
+            library_icon,
             syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
             content_hash: [0xCD; 32],
             signer_pubkey: [0xEF; 32],
@@ -853,7 +1092,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 340);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 408);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -869,6 +1108,86 @@ mod tests {
         assert_eq!(decoded.bundle_id(), "com.example.editor");
         assert_eq!(decoded.bundle_name(), "Example Editor");
         assert_eq!(decoded.bundle_version(), "1.2.3");
+        assert_eq!(decoded.library_category(), Some(LibraryCategory::Office));
+        assert_eq!(decoded.library_icon(), Some("editor.svg"));
+    }
+
+    #[test]
+    fn an_unlisted_header_reads_no_category_and_no_icon() {
+        let mut h = sample();
+        h.library = LibraryCategory::to_wire(None);
+        h.library_icon = [0; super::LIBRARY_ICON_MAX];
+        h.library_icon_len = 0;
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("valid");
+        assert_eq!(decoded.library_category(), None);
+        assert_eq!(decoded.library_icon(), None);
+    }
+
+    #[test]
+    fn every_library_category_round_trips_the_wire_byte() {
+        assert_eq!(LibraryCategory::from_wire(0), Ok(None));
+        for category in LibraryCategory::ALL {
+            let byte = LibraryCategory::to_wire(Some(category));
+            assert_eq!(LibraryCategory::from_wire(byte), Ok(Some(category)));
+        }
+        let beyond = u8::try_from(LibraryCategory::ALL.len()).expect("small set") + 1;
+        assert_eq!(LibraryCategory::from_wire(beyond), Err(Errno::OutOfRange));
+        assert_eq!(LibraryCategory::from_wire(0xFF), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_library_identifier_round_trips_the_decoder() {
+        for category in LibraryCategory::ALL {
+            assert_eq!(LibraryCategory::from_id(category.as_str()), Some(category));
+        }
+        for hostile in ["games", "GAMES", "Settings", "", " Games", "Games "] {
+            assert_eq!(LibraryCategory::from_id(hostile), None, "{hostile:?}");
+        }
+        assert_eq!(LibraryCategory::default(), LibraryCategory::Other);
+        let mut sorted = LibraryCategory::ALL;
+        sorted.sort_unstable();
+        assert_eq!(sorted, LibraryCategory::ALL, "presentation order is Ord");
+        assert!(LibraryCategory::ALL
+            .into_iter()
+            .all(|c| c.as_str().len() <= LibraryCategory::MAX_ID_LEN));
+        assert!(LibraryCategory::ALL
+            .into_iter()
+            .any(|c| c.as_str().len() == LibraryCategory::MAX_ID_LEN));
+    }
+
+    #[test]
+    fn header_rejects_a_malformed_library_listing() {
+        // A library byte outside the encoding.
+        let mut h = sample();
+        h.library = u8::try_from(LibraryCategory::ALL.len()).expect("small set") + 1;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+
+        // An icon on a bundle the library never lists.
+        let mut h = sample();
+        h.library = LibraryCategory::to_wire(None);
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+
+        // An over-long icon length.
+        let mut h = sample();
+        h.library_icon_len = u8::try_from(super::LIBRARY_ICON_MAX + 1).unwrap();
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // Non-UTF-8 icon bytes.
+        let mut h = sample();
+        h.library_icon[0] = 0xFF;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -900,7 +1219,7 @@ mod tests {
         );
 
         let mut h = sample();
-        h.reserved0 = 1;
+        h.reserved0 = [0, 1, 0];
         assert_eq!(
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
             Err(Errno::BadMagic)

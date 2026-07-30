@@ -542,6 +542,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-applib"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-proglib",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-appload"
 version = "0.0.0"
 dependencies = [
@@ -1803,6 +1813,7 @@ dependencies = [
  "tairix-log",
  "tairix-netconfig",
  "tairix-partition",
+ "tairix-proglib",
  "tairix-syshelp",
  "tairix-users",
 ]

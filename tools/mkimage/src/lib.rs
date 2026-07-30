@@ -55,6 +55,7 @@ pub mod device;
 pub mod elfflat;
 pub mod fatboot;
 pub mod firmware;
+pub mod library;
 pub mod rootfs;
 
 pub use tairix_drv_fs_arxfs::{
@@ -130,6 +131,9 @@ pub enum MkimageError {
     UsersDb(String),
     /// Authoring the seeded group registry failed.
     GroupsDb(String),
+    /// Deriving the shipped program-library catalog from the planted
+    /// bundles failed.
+    LibraryCatalog(String),
 }
 
 impl fmt::Display for MkimageError {
@@ -146,6 +150,7 @@ impl fmt::Display for MkimageError {
             Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
             Self::GroupsDb(msg) => write!(f, "group registry: {msg}"),
+            Self::LibraryCatalog(msg) => write!(f, "program-library catalog: {msg}"),
         }
     }
 }
@@ -513,6 +518,10 @@ pub fn build_rpi_image(
         ImageProfile::Debug => Some(debug_machine_id(entropy)?),
         ImageProfile::Installer => None,
     };
+    // The machine-wide program-library catalog ships derived from the very
+    // bundles this image plants (never a hand-maintained list); an image
+    // with no listed application ships the canonical empty store.
+    let library_conf = library::library_catalog(apps)?;
     let kernel8 = elfflat::elf_to_flat(kernel_elf, elfflat::KERNEL_LOAD_ADDR)?;
 
     // Derive the root volume key from the profile's passphrase under a
@@ -547,6 +556,7 @@ pub fn build_rpi_image(
             home_dirs,
             log_attestation_key: log_key_file.as_deref(),
             machine_id: machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
+            library_conf: &library_conf,
         },
     )?;
 
@@ -876,14 +886,21 @@ mod tests {
         // Synthetic bundle files: this test proves the *planting* of a
         // complete self-contained bundle (`AppInfo` + `Run` beside the
         // discovered `Help/` tree), not signature validity — the signed
-        // composition is exercised where it is built. The store paths mirror
+        // composition is exercised where it is built. The manifests must
+        // still *decode* (the program-library derivation reads every
+        // planted app-store manifest and fails the build closed on
+        // garbage); the `Run` bytes stay synthetic. The store paths mirror
         // the real installs (`Apps/<name>.app/…`, `Services/<name>.app/…`).
-        const APPINFO: &[u8] = b"a signed AppInfo manifest's bytes (synthetic)";
         const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
+        let ls_appinfo = crate::library::test_manifest("ls", None, None);
+        let login_appinfo = crate::library::test_manifest("login", None, None);
         let app_files: [(&[&[u8]], &[u8]); 4] = [
-            (&[b"Apps", b"ls.app", b"AppInfo"], APPINFO),
+            (&[b"Apps", b"ls.app", b"AppInfo"], ls_appinfo.as_slice()),
             (&[b"Apps", b"ls.app", b"Run"], RUN),
-            (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
+            (
+                &[b"Services", b"login.app", b"AppInfo"],
+                login_appinfo.as_slice(),
+            ),
             (&[b"Services", b"login.app", b"Run"], RUN),
         ];
 

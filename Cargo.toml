@@ -159,6 +159,7 @@ members = [
     "userland/shell/log",
     "userland/shell/sysinfo",
     "userland/shell/users",
+    "userland/apps/applib",
     "userland/apps/basename",
     "userland/apps/cat",
     "userland/apps/chmod",

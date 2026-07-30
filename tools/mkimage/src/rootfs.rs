@@ -145,6 +145,12 @@ pub struct RootSeed<'a> {
     pub log_attestation_key: Option<&'a [u8]>,
     /// The debug image's baked non-secret machine-id bytes, if any.
     pub machine_id: Option<&'a [u8]>,
+    /// The machine-wide program-library catalog document
+    /// (`/System/Settings/ProgramLibrary/library.conf`), derived from the
+    /// planted bundles' own manifests ([`crate::library::library_catalog`])
+    /// — the canonical empty document when no planted application lists
+    /// itself.
+    pub library_conf: &'a str,
 }
 
 /// Author the `ARXFS` root partition: format `sectors` sectors under
@@ -320,6 +326,7 @@ fn populate_system_subtree(
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
     write_network_config(fs, system)?;
+    write_library_config(fs, system, seed.library_conf)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
@@ -453,6 +460,55 @@ fn write_network_config(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), 
     Ok(())
 }
 
+/// Lay out the program-library store on the writable root: create
+/// `/System/Settings/ProgramLibrary` and write the machine-wide catalog
+/// document the desktop's Program Library reads.
+///
+/// The document is derived from the planted bundles' own signed manifests
+/// ([`crate::library::library_catalog`]) — an image with no listed
+/// application ships the canonical **empty** store, which readers treat as
+/// "no catalogued applications". The file keeps the authored default
+/// security record (system-user-owned), so an ordinary account reads the
+/// catalog but only the system identity rewrites it; a user personalises
+/// through their own overlay instead. A short write is a build failure,
+/// never a truncated store.
+fn write_library_config(
+    fs: &mut ARXFS<MemBlock>,
+    system: NodeId,
+    text: &str,
+) -> Result<(), MkimageError> {
+    let settings = fs
+        .lookup(system, b"Settings")
+        .map_err(MkimageError::RootPartition)?;
+    let library = fs
+        .create(
+            settings,
+            tairix_proglib::LIBRARY_SETTINGS_SUBDIR.as_bytes(),
+            NodeKind::Directory,
+        )
+        .map_err(MkimageError::RootPartition)?;
+    fs.create(
+        library,
+        tairix_proglib::LIBRARY_FILE.as_bytes(),
+        NodeKind::RegularFile,
+    )
+    .map_err(MkimageError::RootPartition)?;
+    let written = fs
+        .write_at(
+            library,
+            tairix_proglib::LIBRARY_FILE.as_bytes(),
+            0,
+            text.as_bytes(),
+        )
+        .map_err(MkimageError::RootPartition)?;
+    if written != text.len() {
+        return Err(MkimageError::RootPartition(
+            tairix_abi::DriverError::DeviceFault,
+        ));
+    }
+    Ok(())
+}
+
 /// Create `/System/Security/Keys/<name>`, write the secret `bytes` into it
 /// whole, and lock it down to system-user-owned, owner-read/write-only
 /// ([`LOG_ATTESTATION_KEY_MODE`]). A short write is a build failure, never a
@@ -505,6 +561,12 @@ mod tests {
     /// `/Users/root`, owned by the first user-band uid/gid.
     const TEST_HOMES: &[(&str, u32, u32)] = &[("root", 1000, 1000)];
 
+    /// A recognisable catalog document for the seeding contract ("the given
+    /// text is written verbatim"); the real derivation is pinned by
+    /// `crate::library`'s own tests.
+    const TEST_LIBRARY: &str =
+        "editor.name Editor\neditor.bundle /Apps/Editor.app\neditor.category Office\n";
+
     /// The debug-shaped seed most tests build with: databases + home, no
     /// baked key or machine-id.
     const TEST_SEED: RootSeed<'static> = RootSeed {
@@ -513,6 +575,7 @@ mod tests {
         home_dirs: TEST_HOMES,
         log_attestation_key: None,
         machine_id: None,
+        library_conf: TEST_LIBRARY,
     };
 
     /// Deterministic test entropy; production uses the host RNG.
@@ -593,6 +656,30 @@ mod tests {
         let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
         let parsed = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
         assert!(parsed.interfaces().is_empty(), "the default store is empty");
+    }
+
+    #[test]
+    fn the_writable_root_ships_the_seeded_program_library() {
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let settings = fs.lookup(system, b"Settings").expect("Settings exists");
+        let library = fs
+            .lookup(settings, tairix_proglib::LIBRARY_SETTINGS_SUBDIR.as_bytes())
+            .expect("Settings/ProgramLibrary exists");
+        let conf = fs
+            .lookup(library, tairix_proglib::LIBRARY_FILE.as_bytes())
+            .expect("library.conf exists");
+        // The seeded document is written verbatim and parses through the
+        // one catalog engine the desktop reads it with.
+        let mut buf = [0u8; 256];
+        let read = fs.read_at(conf, 0, &mut buf).expect("library.conf reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
+        assert_eq!(text, TEST_LIBRARY);
+        let parsed = tairix_proglib::parse(text).expect("parses");
+        assert_eq!(parsed.len(), 1);
     }
 
     #[test]

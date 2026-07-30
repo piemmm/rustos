@@ -1,0 +1,20 @@
+# Signed-AppInfo manifest source for the `applib` command app
+# (plans/NEW-TASKBAR.md T2). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the library
+# listing (and the short help) written to the inherited standard output
+# and the fd-3 advisory records; CAP_FS_ACCESS covers the catalog
+# read/write under /System/Settings/ProgramLibrary and the user's own
+# overlay, the bundle-manifest reads `add`/`rescan` perform, and the
+# short-help read of the bundle's own Help/ documents — all through the
+# secured VFS, which authorises every path per-inode under the caller's
+# attested identity, so only a principal the /System/Settings policy
+# admits can change the machine-wide catalog. The tool reads no input,
+# so it requests no CAP_CONSOLE_READ and nothing else. It is not listed
+# in the program library itself: it is a shell command, not a desktop
+# application.
+id = "os.tairix.applib"
+name = "applib"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

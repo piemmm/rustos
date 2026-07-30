@@ -9,9 +9,10 @@
 //!    within [`MAX_CATALOG_LEN`], so a writer can never emit a store the
 //!    reader would refuse as too long.
 //! 3. [`merge`] never panics for any pair of accepted catalogs, resolves
-//!    every patch, stays within the record bound, and honours every hide —
-//!    a user's overlay can never resurrect an application a machine-wide
-//!    policy hid.
+//!    every patch, stays within the record bound, and resolves visibility
+//!    with the overlay's verdict last: an identifier survives exactly when
+//!    the last word on it — the user's patch, else the machine's, else its
+//!    own declaration — shows it.
 //!
 //! The generator emits *whole records* and mutates them at a low rate, so
 //! most documents are accepted and the round-trip and merge invariants are
@@ -22,7 +23,7 @@
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
 
-use tairix_proglib::{merge, parse, render, Record, MAX_CATALOG_LEN, MAX_ENTRIES};
+use tairix_proglib::{merge, parse, render, EntryPatch, Record, MAX_CATALOG_LEN, MAX_ENTRIES};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
@@ -169,10 +170,17 @@ fn record(rng: &mut Lcg, id: &str, out: &mut String) {
         out.push_str(&line(rng, id, "icon", icon));
         out.push('\n');
     }
-    // `hidden` belongs only on a patch; setting it on a declared entry is a
-    // refusal the parser must catch, so emit it there occasionally too.
-    if (!declared && rng.chance(2)) || rng.chance(64) {
-        let flag = if rng.chance(8) { "yes" } else { "true" };
+    // `hidden` is legal on any record — a declaration may suppress itself,
+    // a patch carries the overlay's verdict — so emit it on both, walking
+    // the flag grammar's accept/reject boundary with the odd bad spelling.
+    if rng.chance(3) {
+        let flag = if rng.chance(8) {
+            "yes"
+        } else if rng.chance(2) {
+            "false"
+        } else {
+            "true"
+        };
         out.push_str(&line(rng, id, "hidden", flag));
         out.push('\n');
     }
@@ -220,12 +228,6 @@ fn check_merge(machine: &str, overlay: &str) {
     let (Ok(machine), Ok(overlay)) = (parse(machine), parse(overlay)) else {
         return;
     };
-    let hidden: Vec<_> = machine
-        .patches()
-        .chain(overlay.patches())
-        .filter(|(_, patch)| patch.hidden() == Some(true))
-        .map(|(id, _)| id.clone())
-        .collect();
 
     let resolved = merge(&machine, &overlay);
     assert!(resolved.len() <= MAX_ENTRIES);
@@ -235,12 +237,27 @@ fn check_merge(machine: &str, overlay: &str) {
             "merge left a patch unresolved"
         );
     }
-    for id in hidden {
-        assert!(
-            resolved.entry(&id).is_none(),
-            "an entry a patch hid survived the merge"
+
+    // The visibility oracle: an identifier resolves to an entry exactly
+    // when some document declares it and the last verdict on it — the
+    // overlay's patch, else the machine's, else the declaration's own
+    // flag — shows it.
+    for (id, _) in machine.records().chain(overlay.records()) {
+        let declared = overlay.entry(id).or_else(|| machine.entry(id));
+        let shown = declared.map(|entry| {
+            !overlay
+                .entry_patch(id)
+                .and_then(EntryPatch::hidden)
+                .or_else(|| machine.entry_patch(id).and_then(EntryPatch::hidden))
+                .unwrap_or(entry.hidden())
+        });
+        assert_eq!(
+            resolved.entry(id).is_some(),
+            shown.unwrap_or(false),
+            "merge and the visibility oracle disagree for {id}"
         );
     }
+
     let rendered = render(&resolved);
     let reparsed = parse(&rendered).expect("a rendered resolved catalog re-parses");
     assert_eq!(resolved, reparsed);
