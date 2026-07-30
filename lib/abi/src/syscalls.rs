@@ -2531,6 +2531,23 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::HW_EMIT),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_SELF_NODE,
+        name: "hw_self_node",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `U64` register convention: the caller's own node id on success, else
+        // `-errno` (a caller with no matched node fails closed `NotFound`).
+        ret: AbiType::U64,
+        // Needs no capability: a driver learning *its own* node id is the
+        // unprivileged self-identity baseline (the "read my own pid" / `mem_map`
+        // precedent) — it reveals only which node the caller itself bound to,
+        // never the global tree, which `hw_tree_read` guards. Not audited: a
+        // read of one's own identity is not a security decision and is polled on
+        // the leaf's recovery path (it must not flood the log).
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

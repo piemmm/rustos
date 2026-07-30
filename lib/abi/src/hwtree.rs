@@ -31,7 +31,7 @@
 //! against `WIRE_LEN` (validate every input, fail
 //! closed).
 
-use crate::blkio::FaultDomainState;
+use crate::blkio::{BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
@@ -1540,21 +1540,95 @@ impl HwTreeHeader {
 /// unbounded walk, so the ancestor traversal is bounded by the node count.
 #[must_use]
 pub fn fault_domain_owner(nodes: &[HwNode], node_id: u32) -> Option<u32> {
-    let mut current = nodes.iter().find(|node| node.id() == node_id)?;
-    for _ in 0..nodes.len() {
+    resolve_owner(node_id, nodes.len(), &|id| {
+        nodes.iter().find(|node| node.id() == id).map(FaultNode::of)
+    })
+}
+
+/// The handful of fields the fault-domain walk needs from one node, decoded
+/// once from whichever backing the walk runs over — a [`HwNode`] slice
+/// (in-memory) or the wire snapshot (`hw_tree_read`). Sharing this view lets
+/// the traversal itself be written **once** and reused by both, so the
+/// slice-based and snapshot-based fault-domain resolution can never drift
+/// apart.
+#[derive(Copy, Clone)]
+struct FaultNode {
+    id: u32,
+    parent: u32,
+    class: Option<HwDeviceClass>,
+    fault_health: FaultDomainState,
+}
+
+impl FaultNode {
+    fn of(node: &HwNode) -> Self {
+        Self {
+            id: node.id(),
+            parent: node.parent(),
+            class: node.class(),
+            fault_health: node.fault_health(),
+        }
+    }
+
+    const fn is_root(&self) -> bool {
+        self.parent == HW_NODE_ROOT
+    }
+}
+
+/// Resolve the nearest fault-domain owner of `node_id`, looking each node up
+/// by id through `lookup` — the single traversal behind both
+/// [`fault_domain_owner`] (a slice lookup) and the wire-snapshot ancestor
+/// fold ([`ancestor_imposed_status_from_snapshot`], a byte lookup).
+///
+/// It walks strictly upward to the nearest [`HwDeviceClass::Bus`] /
+/// [`HwDeviceClass::Root`] owner exactly as [`fault_domain_owner`] documents,
+/// and is bounded by `bound` (the node count) so a broken or cyclic chain
+/// ends the walk rather than spinning (fail closed, `None`).
+fn resolve_owner<F>(node_id: u32, bound: usize, lookup: &F) -> Option<u32>
+where
+    F: Fn(u32) -> Option<FaultNode>,
+{
+    let mut current = lookup(node_id)?;
+    for _ in 0..bound {
         if current.is_root() {
             return None;
         }
-        let parent = nodes.iter().find(|node| node.id() == current.parent())?;
-        if matches!(
-            parent.class(),
-            Some(HwDeviceClass::Bus | HwDeviceClass::Root)
-        ) {
-            return Some(parent.id());
+        let parent = lookup(current.parent)?;
+        if matches!(parent.class, Some(HwDeviceClass::Bus | HwDeviceClass::Root)) {
+            return Some(parent.id);
         }
         current = parent;
     }
     None
+}
+
+/// Fold the imposed child status of every interior fault-domain ancestor of
+/// `node_id`, nearest first, looking nodes up through `lookup` — the single
+/// definition behind both [`ancestor_imposed_status`] (a slice lookup) and
+/// [`ancestor_imposed_status_from_snapshot`] (a byte lookup).
+///
+/// Each owner in the chain contributes its published
+/// [`FaultDomainState::imposed_child_status`], combined through
+/// [`BlkStatus::combine`]'s severity total order, so a deep failing ancestor
+/// is never masked by a shallower healthy one. Bounded by `bound` and
+/// fail-closed exactly as [`resolve_owner`].
+fn fold_ancestor_status<F>(node_id: u32, bound: usize, lookup: &F) -> BlkStatus
+where
+    F: Fn(u32) -> Option<FaultNode>,
+{
+    let mut status = BlkStatus::Ok;
+    let mut current = node_id;
+    for _ in 0..bound {
+        let Some(owner_id) = resolve_owner(current, bound, lookup) else {
+            break;
+        };
+        if let Some(owner) = lookup(owner_id) {
+            if let Some(imposed) = owner.fault_health.imposed_child_status() {
+                status = status.combine(imposed);
+            }
+        }
+        current = owner_id;
+    }
+    status
 }
 
 /// The ordered chain of nested fault-domain owners of hardware-tree node
@@ -1621,6 +1695,101 @@ impl Iterator for FaultDomainChain<'_> {
         self.current = owner;
         owner
     }
+}
+
+/// The [`BlkStatus`] the *published* health of hardware-tree node `node_id`'s
+/// interior fault-domain ancestors imposes on that leaf device's block-service
+/// completions, at the moment `nodes` was snapshotted.
+///
+/// This is the leaf-driver counterpart of
+/// [`effective_child_status`](crate::blkio::effective_child_status): where that
+/// folds fault [`domains`](crate::blkio::FaultDomain) a serving driver owns and
+/// clocks itself, a leaf block device's interior ancestors — the USB
+/// controller, the hub, the PCIe root complex — live in *other* driver
+/// processes, which publish their own recovery health onto the shared tree
+/// through [`crate::SyscallNumber::HW_NODE_HEALTH`] (recorded on
+/// [`HwNode::fault_health`]). A leaf driver reads that published health for its
+/// whole ancestor [`chain`](fault_domain_chain) and folds each owner's imposed
+/// [`FaultDomainState::imposed_child_status`] through [`BlkStatus::combine`], so
+/// one controller/hub reset is attributed to the *fault domain* — the leaf's
+/// completions carry the reissuable [`BlkStatus::Reset`] (or, once an ancestor
+/// has failed closed, [`BlkStatus::Offline`]) — rather than looking like an
+/// independent failure of the disk itself. A published state is already
+/// resolved by its owner (the owner ran its own grace window before emitting),
+/// so no clock is read here; the fold uses the one shared owner-health rule
+/// [`FaultDomainState::imposed_child_status`] defines, exactly as an owned
+/// [`FaultDomain`](crate::blkio::FaultDomain) does.
+///
+/// Returns [`BlkStatus::Ok`] when every ancestor is
+/// [`Healthy`](FaultDomainState::Healthy) (or the chain is empty / fails
+/// closed): a healthy tree imposes nothing and the leaf answers on its own
+/// per-device health. It inherits [`fault_domain_chain`]'s fail-closed,
+/// cycle-safe, allocation-free walk — an absent, rootless, or broken node
+/// simply yields no imposing ancestor. The `combine` fold is over
+/// [`BlkStatus`]'s severity total order, so a deep failing ancestor is never
+/// masked by a shallower healthy one.
+#[must_use]
+pub fn ancestor_imposed_status(nodes: &[HwNode], node_id: u32) -> BlkStatus {
+    fold_ancestor_status(node_id, nodes.len(), &|id| {
+        nodes.iter().find(|node| node.id() == id).map(FaultNode::of)
+    })
+}
+
+/// [`ancestor_imposed_status`] over the **wire snapshot** a driver reads with
+/// `hw_tree_read`, rather than an in-memory [`HwNode`] slice.
+///
+/// A leaf block driver does not hold the tree as a slice — it reads the
+/// kernel's wire snapshot (a [`HwTreeHeader`] followed by
+/// [`HwTreeHeader::node_count`] records of [`HwNode::WIRE_LEN`] bytes) into a
+/// buffer. This computes the same interior-ancestor fold directly over those
+/// bytes, so the driver need not materialise the whole tree (no allocation on
+/// its recovery path). It shares the one traversal `fold_ancestor_status`
+/// defines — only the per-id lookup differs (a byte scan here, a slice scan in
+/// [`ancestor_imposed_status`]) — so the two can never diverge.
+///
+/// A malformed or truncated snapshot (a short header, a length whose byte span
+/// overflows, or a buffer shorter than the records it promises) imposes
+/// nothing and returns [`BlkStatus::Ok`]: the driver **degrades safe** to
+/// answering on the device's own health rather than fabricating a fault from a
+/// snapshot it cannot trust. This is the read side of the cross-process
+/// fault-domain signal (`plans/FIX-IO.md` IO4): a leaf attributes a
+/// controller/hub blip to the fault domain instead of to the disk.
+#[must_use]
+pub fn ancestor_imposed_status_from_snapshot(blob: &[u8], node_id: u32) -> BlkStatus {
+    // Validate the whole promised extent up front (identical shape to the
+    // device manager's snapshot walk): a malformed or truncated snapshot is
+    // never partially interpreted — it imposes nothing (degrade safe to `Ok`).
+    let Ok(header) = HwTreeHeader::from_bytes(blob) else {
+        return BlkStatus::Ok;
+    };
+    let Ok(count) = usize::try_from(header.node_count()) else {
+        return BlkStatus::Ok;
+    };
+    let within_bounds = count
+        .checked_mul(HwNode::WIRE_LEN)
+        .and_then(|records| records.checked_add(HwTreeHeader::WIRE_LEN))
+        .is_some_and(|span| blob.len() >= span);
+    if !within_bounds {
+        return BlkStatus::Ok;
+    }
+
+    // Look one node up by id by scanning the records in wire order and
+    // decoding each through the shared, bounds-checked `HwNode::from_bytes`
+    // (one decoder, no reimplemented field offsets). A record that fails to
+    // decode is skipped, never trusted.
+    let lookup = |id: u32| -> Option<FaultNode> {
+        let mut off = HwTreeHeader::WIRE_LEN;
+        for _ in 0..count {
+            if let Ok(node) = HwNode::from_bytes(&blob[off..off + HwNode::WIRE_LEN]) {
+                if node.id() == id {
+                    return Some(FaultNode::of(&node));
+                }
+            }
+            off += HwNode::WIRE_LEN;
+        }
+        None
+    };
+    fold_ancestor_status(node_id, count, &lookup)
 }
 
 #[cfg(test)]
@@ -2529,5 +2698,126 @@ mod tests {
         }
         // It made at least one hop and then stopped inside the bound.
         assert!((1..=cyclic.len()).contains(&yielded));
+    }
+
+    #[test]
+    fn ancestor_imposed_status_is_ok_when_the_whole_chain_is_healthy() {
+        let nodes = usb_shaped_tree();
+        // Every ancestor (hub, controller, root) is Healthy, so nothing is
+        // imposed and the leaf answers on its own per-device health.
+        assert_eq!(ancestor_imposed_status(&nodes, 3), BlkStatus::Ok);
+        // The root itself has no ancestors: also nothing imposed.
+        assert_eq!(ancestor_imposed_status(&nodes, 0), BlkStatus::Ok);
+    }
+
+    #[test]
+    fn a_recovering_ancestor_makes_a_leaf_reissuable() {
+        let mut nodes = usb_shaped_tree();
+        // The USB controller (node 1) is mid-reset: the disk on the hub below
+        // it (node 3) is held reissuable under the controller's window, so one
+        // controller blip is attributed to the fault domain, not the disk.
+        nodes[1].set_fault_health(FaultDomainState::Recovering);
+        assert_eq!(ancestor_imposed_status(&nodes, 3), BlkStatus::Reset);
+        // The disk directly on the controller (node 4) is affected too.
+        assert_eq!(ancestor_imposed_status(&nodes, 4), BlkStatus::Reset);
+        // A disk on a different branch (directly on the root, node 5) is not.
+        assert_eq!(ancestor_imposed_status(&nodes, 5), BlkStatus::Ok);
+    }
+
+    #[test]
+    fn an_offline_ancestor_fails_a_leaf_closed() {
+        let mut nodes = usb_shaped_tree();
+        // The hub (node 2) failed closed (its grace window elapsed): the disk
+        // beneath it (node 3) is failed closed to Offline.
+        nodes[2].set_fault_health(FaultDomainState::Offline);
+        assert_eq!(ancestor_imposed_status(&nodes, 3), BlkStatus::Offline);
+        // The disk directly on the controller (node 4) is on a healthy branch.
+        assert_eq!(ancestor_imposed_status(&nodes, 4), BlkStatus::Ok);
+    }
+
+    #[test]
+    fn a_deep_failing_ancestor_is_never_masked_by_a_shallow_healthy_one() {
+        let mut nodes = usb_shaped_tree();
+        // The nearest ancestor (the hub, node 2) is Healthy, but the
+        // controller above it (node 1) has failed closed: the leaf (node 3)
+        // must still see Offline — the shallow healthy hub cannot mask the
+        // deep failing controller (the severity total order wins).
+        nodes[1].set_fault_health(FaultDomainState::Offline);
+        assert_eq!(ancestor_imposed_status(&nodes, 3), BlkStatus::Offline);
+    }
+
+    #[test]
+    fn ancestor_imposed_status_fails_closed_to_ok_on_absent_or_broken_trees() {
+        let nodes = usb_shaped_tree();
+        // A node not in the tree has no resolvable chain: nothing imposed.
+        assert_eq!(ancestor_imposed_status(&nodes, 999), BlkStatus::Ok);
+        // A dangling parent yields no owner, so no ancestor imposes anything.
+        let broken = [HwNode::new(20, 21, HwDeviceClass::Storage)];
+        assert_eq!(ancestor_imposed_status(&broken, 20), BlkStatus::Ok);
+    }
+
+    /// Encode `[HwTreeHeader][HwNode; n]` into `out` exactly as the kernel
+    /// source does, returning the encoded length. Alloc-free so it runs in
+    /// the `no_std` `lib/abi` test build.
+    fn encode_snapshot(out: &mut [u8], generation: u64, nodes: &[HwNode]) -> usize {
+        let header = HwTreeHeader::new(generation, nodes.len() as u64).to_le_bytes();
+        out[..HwTreeHeader::WIRE_LEN].copy_from_slice(&header);
+        let mut off = HwTreeHeader::WIRE_LEN;
+        for node in nodes {
+            out[off..off + HwNode::WIRE_LEN].copy_from_slice(&node.to_le_bytes());
+            off += HwNode::WIRE_LEN;
+        }
+        off
+    }
+
+    #[test]
+    fn the_snapshot_ancestor_fold_matches_the_slice_fold_for_every_health() {
+        // The byte-backed and slice-backed folds share one traversal, so they
+        // must agree node-for-node under every ancestor health arrangement.
+        const CAP: usize = HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN;
+        for (recovering, offline) in [
+            (None, None),         // whole tree healthy
+            (Some(1usize), None), // controller recovering
+            (Some(2), None),      // hub recovering
+            (None, Some(2usize)), // hub offline
+            (None, Some(1)),      // controller offline (deep)
+            (Some(2), Some(1)),   // hub recovering under an offline controller
+        ] {
+            let mut nodes = usb_shaped_tree();
+            if let Some(i) = recovering {
+                nodes[i].set_fault_health(FaultDomainState::Recovering);
+            }
+            if let Some(i) = offline {
+                nodes[i].set_fault_health(FaultDomainState::Offline);
+            }
+            let mut blob = [0u8; CAP];
+            let len = encode_snapshot(&mut blob, 7, &nodes);
+            for leaf in [3u32, 4, 5, 0, 999] {
+                assert_eq!(
+                    ancestor_imposed_status_from_snapshot(&blob[..len], leaf),
+                    ancestor_imposed_status(&nodes, leaf),
+                    "snapshot and slice folds must agree for leaf {leaf}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_snapshot_ancestor_fold_degrades_safe_on_a_malformed_blob() {
+        // A short header, and a header promising more records than the buffer
+        // holds, both impose nothing (degrade safe) rather than fabricating a
+        // fault from a snapshot that cannot be trusted.
+        assert_eq!(
+            ancestor_imposed_status_from_snapshot(&[0u8; 4], 3),
+            BlkStatus::Ok
+        );
+        let nodes = usb_shaped_tree();
+        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
+        let len = encode_snapshot(&mut blob, 1, &nodes);
+        // Truncate the final record: the header still promises 6 nodes.
+        assert_eq!(
+            ancestor_imposed_status_from_snapshot(&blob[..len - 1], 3),
+            BlkStatus::Ok
+        );
     }
 }

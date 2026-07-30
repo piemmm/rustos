@@ -536,6 +536,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn hw_self_node(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn msi_alloc(&self, _c: &CallerContext<'_>, _out: u64, _out_len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

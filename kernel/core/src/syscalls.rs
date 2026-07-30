@@ -6896,6 +6896,25 @@ where
         Ok(0)
     }
 
+    fn hw_self_node(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // No capability (checked by the dispatcher: the spec carries none): a
+        // driver learning its *own* node id is the unprivileged self-identity
+        // baseline. Security spine (no ambient authority): resolve the
+        // caller's own matched node from kernel-trusted state keyed by
+        // `caller.task_id`, never a caller-supplied id — so a task only ever
+        // learns the identity of the node it was autoloaded for, never
+        // another's, and never the global tree (that stays behind
+        // `hw_tree_read`'s privileged gate). A task with no loaded node is not
+        // an autoloaded driver and fails closed with `NotFound` (no oracle:
+        // the same answer whether the caller could never have a node or simply
+        // does not).
+        let aspaces = self.aspaces.read();
+        let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+            return Err(Errno::NotFound);
+        };
+        Ok(u64::from(node_id))
+    }
+
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the `msi_alloc`
         // spec carries `CAP_IRQ_BIND`. Step 3 (validate every input): the out
@@ -23917,6 +23936,57 @@ mod tests {
             2,
             "a caller with no loaded node records nothing"
         );
+    }
+
+    /// `hw_self_node` returns the caller's *own* matched node id (resolved
+    /// kernel-side from the task id, never caller-supplied), needs no
+    /// capability, and a task with no loaded node fails closed with
+    /// `NotFound`.
+    #[test]
+    fn hw_self_node_returns_the_callers_own_matched_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The caller is a driver autoloaded for node 9.
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No capability granted: learning one's own node id is unprivileged.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // The caller learns its own node id — never a caller-supplied one.
+        assert_eq!(h.hw_self_node(&ctx), Ok(9));
+
+        // A task with no loaded node is not an autoloaded driver: fail closed
+        // with `NotFound` (no oracle, no fabricated identity).
+        let other_caps = make_caps_record(3, &[], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &other_caps,
+        };
+        let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(SecTaskId(3), space3, physmap3)
+            .expect("registration succeeds");
+        assert_eq!(h.hw_self_node(&other), Err(Errno::NotFound));
     }
 
     /// A display-class node published into the live tree mints an

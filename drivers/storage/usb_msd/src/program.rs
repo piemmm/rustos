@@ -4,10 +4,10 @@
 
 use tairix_abi::blkio::{
     fault_domain_wait_timeout, recovery_wait_timeout, BlkDeviceClass, BlkHealth, BlkHealthState,
-    FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN,
+    BlkStatus, FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN,
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
-use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::hwtree::{ancestor_imposed_status_from_snapshot, HW_NODE_ROOT};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
@@ -18,7 +18,7 @@ use tairix_drv_storage_usb_msd::desc::{
     configuration_total_length, find_storage_interface, StorageProtocol, UasEndpoints,
     CONFIGURATION_HEADER_LEN,
 };
-use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery};
+use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, ServeBuffers};
 use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
@@ -596,6 +596,40 @@ fn note_domain_edge(before: FaultDomainState, after: FaultDomainState, owner: u3
     }
 }
 
+/// Bounded read buffer for the best-effort ancestor-health snapshot read.
+///
+/// This is **not** a capacity limit on anything: it sizes the stack buffer the
+/// recovery-path tree read uses. A discovered tree that does not fit simply
+/// leaves ancestor attribution unavailable for that read — the leaf then
+/// answers on its own device health, which is always correct — so the read
+/// never grows an unbounded buffer on a driver's recovery path and never
+/// fails a request. Ample for the trees TAIRiX's Tier-1 targets discover.
+const TREE_SNAPSHOT_BUF: usize = 8192;
+
+/// The [`BlkStatus`] this driver's interior fault-domain ancestors currently
+/// impose on a LUN request, read from the live hardware-tree snapshot.
+///
+/// Called by [`serve_lun_with_domain`] **only on the recovery path** (a stall
+/// the device did not answer definitively), so a healthy transfer never reads
+/// the tree. It reads the current snapshot into a bounded stack buffer and
+/// folds the published health of this driver's ancestor chain
+/// ([`ancestor_imposed_status_from_snapshot`]), so a resetting controller/hub
+/// is attributed to the fault domain rather than to the disk.
+///
+/// It fails **safe**: no matched node ([`self_node`] is `None`), a refused
+/// read, or a snapshot larger than the buffer all yield [`BlkStatus::Ok`] (no
+/// ancestor imposes anything), so the leaf simply answers on its own health.
+fn ancestor_status(self_node: Option<u32>) -> BlkStatus {
+    let Some(node) = self_node else {
+        return BlkStatus::Ok;
+    };
+    let mut buf = [0u8; TREE_SNAPSHOT_BUF];
+    match tairix_rt::hw_tree_read(&mut buf) {
+        Ok(len) => ancestor_imposed_status_from_snapshot(&buf[..len], node),
+        Err(_) => BlkStatus::Ok,
+    }
+}
+
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
 /// is set up and routes its return value through the `exit` syscall.
 ///
@@ -862,6 +896,20 @@ where
     let domain_owner = u32::try_from(urb_endpoint & 0xFFFF_FFFF).unwrap_or(u32::MAX);
     let mut domain = FaultDomain::new(domain_owner, BlkDeviceClass::Removable.budget().grace_ns);
 
+    // This driver's own place in the discovered hardware tree, learned once so
+    // it can attribute a stall to an interior ancestor (the USB controller, a
+    // hub) that is resetting rather than to the disk (`plans/FIX-IO.md` IO4).
+    // `None` (no matched node) simply disables ancestor attribution — the leaf
+    // then answers on its own health, which is the pre-IO4 behaviour.
+    let self_node = {
+        let ret = tairix_rt::hw_self_node();
+        if ret < 0 {
+            None
+        } else {
+            u32::try_from(ret).ok()
+        }
+    };
+
     // Event-driven service loop: park on the wait-set until a consumer's
     // request arrives, serve it (the data moves via blocking URB calls
     // that park in the kernel), reply, and check for detach. Never a
@@ -943,11 +991,18 @@ where
             serve_lun_with_domain(
                 &mut block,
                 read_only,
-                &request[..n],
-                serve.window,
-                &mut reply,
+                ServeBuffers {
+                    request: &request[..n],
+                    window: serve.window,
+                    reply: &mut reply,
+                },
                 &mut recovery,
                 now_ns,
+                // Consulted only on the recovery path (a stall the device did
+                // not answer definitively), so a healthy transfer never reads
+                // the tree: report what this LUN's interior fault-domain
+                // ancestors currently impose.
+                || ancestor_status(self_node),
             )
         };
         let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);

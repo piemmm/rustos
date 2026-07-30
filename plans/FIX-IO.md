@@ -607,17 +607,54 @@ fail-closed-`NotFound`; the `hw_node_health` handler (own-node resolution,
 fail-closed out-of-range, no-loaded-node denied); and the device manager's
 recovery-hold (`a_child_of_a_recovering_owner_is_held_not_unloaded`).
 
+**Landed (the leaf-side multi-owner fold — a leaf attributes its ancestors'
+published blip to the fault domain):** the read side of the cross-process
+signal now reaches the *block completions themselves*, not just the device
+manager's teardown decision. A leaf block driver folds the published
+`FaultDomainState` of its whole interior-ancestor chain into each completion,
+so one controller/hub reset is attributed to the fault domain — the leaf's
+completions carry a reissuable `Reset` (or `Offline` once an ancestor has
+failed closed) instead of N spurious per-LUN faults — rather than each LUN's
+own `BlkHealth` degrading independently. The primitives:
+- `FaultDomainState::imposed_child_status` (`lib/abi`) is the *one* owner-health
+  → child-status rule (`Healthy` imposes nothing, `Recovering → Reset`,
+  `Offline → Offline`); `FaultDomain::child_status` now resolves its grace
+  window and delegates to it, so an owned (clocked) domain and a published
+  (already-resolved) ancestor state impose identically (§2.2).
+- `hwtree::ancestor_imposed_status` (slice) and
+  `hwtree::ancestor_imposed_status_from_snapshot` (the wire snapshot a driver
+  reads with `hw_tree_read`, alloc-free) fold the chain's published health;
+  both share one traversal (`resolve_owner`/`fold_ancestor_status` over a
+  generic per-id `lookup`), so the byte- and slice-backed folds cannot diverge,
+  and a malformed/truncated snapshot degrades safe to `Ok`. Proven host-side:
+  the mapping, owned/published agreement, the snapshot↔slice agreement across
+  every health arrangement, deep-not-masked-by-shallow, and fail-closed cases.
+- A driver learns *its own* place in the tree through the new `hw_self_node`
+  syscall (number 103, `lib/abi` + `kernel/core` + `lib/rt`/`lib/abi-sys` +
+  generated C header): the kernel resolves the caller's own matched node from
+  its task id (never caller-supplied — no ambient authority, no global-tree
+  window), needs no capability (self-identity baseline, like reading one's own
+  pid), and fails closed `NotFound` for a task with no matched node. Proven
+  host-side (own-node resolution + fail-closed).
+- `usb_msd` is the first live consumer: `recover::serve_lun_with_domain` now
+  folds an ancestor status supplied by a **lazy closure** invoked *only on the
+  recovery path* (a stall the device did not answer definitively —
+  `transport_alive` gates it out), so a healthy hot-path transfer never reads
+  the tree (§2.16); a data-valid or medium answer proves the path above is up
+  and always wins, so no valid read is ever masked. The serve loop fetches
+  `hw_self_node` once and its closure reads the current snapshot into a bounded
+  degrade-safe buffer and calls `ancestor_imposed_status_from_snapshot`. Proven
+  host-side (recovering ancestor → reissuable, offline ancestor → closed,
+  medium/data wins, offline ancestor dominates a recovering transport).
+
 Remaining:
-- **Deeper interior chains (hubs, expanders) and the multi-owner fold.** A
-  device can blip with a *chain* of nested owners (`fault_domain_chain`); a
-  serving driver builds one `FaultDomain` per interior node and folds them with
-  `effective_child_status`. The xHCI controller proves the single-owner shape
-  and the cross-process signal above carries it; a watched hub / SAS expander
-  owning its own tree node, and a leaf folding several ancestors' imposed
-  states, extend it.
 - A QEMU vertical of a modelled hub/controller with several children resetting,
   asserting one recovery episode across the subtree (the device manager holds
-  the children through the owner's grace window rather than unloading them).
+  the children through the owner's grace window rather than unloading them, and
+  the leaf's completions carry the attributed reissuable status). A watched hub
+  / SAS expander *owning its own tree node* (publishing its own
+  `hw_node_health`) extends the xHCI single-owner emitter shape; the leaf fold
+  already composes an arbitrarily deep published chain.
 
 Tests (§7): the pure `FaultDomain` machine is proven host-side in `lib/abi` —
 one owner reset holds the whole subtree reissuable under one window; an owner

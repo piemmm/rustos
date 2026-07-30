@@ -1399,6 +1399,34 @@ impl FaultDomainState {
             _ => Self::Offline,
         }
     }
+
+    /// The [`BlkStatus`] this *already-resolved* fault-domain state imposes on
+    /// a child device's request, or `None` when the state imposes nothing and
+    /// the child answers on its own per-device health.
+    ///
+    /// This is the single mapping of an owner's health onto its children's
+    /// completions, shared by both the owned, clocked [`FaultDomain`]
+    /// ([`FaultDomain::child_status`] resolves its grace window to a state and
+    /// delegates here) and the *published* cross-process signal a leaf driver
+    /// reads from an ancestor's [`crate::hwtree::HwNode::fault_health`]
+    /// ([`crate::hwtree::ancestor_imposed_status`]) — so a subtree's health
+    /// folds into a child's outcome by one rule whether the domain is owned
+    /// locally or observed on the wire. A `Recovering` owner holds the child
+    /// reissuable ([`BlkStatus::Reset`]); an `Offline` owner fails it closed
+    /// ([`BlkStatus::Offline`]).
+    ///
+    /// The state is presumed already window-resolved: a `Recovering` value is
+    /// still inside its owner's grace window (a published state is resolved by
+    /// its owner before it is emitted; an owned [`FaultDomain`] resolves the
+    /// elapsed window to `Offline` before calling here), so no clock is read.
+    #[must_use]
+    pub const fn imposed_child_status(self) -> Option<BlkStatus> {
+        match self {
+            Self::Healthy => None,
+            Self::Recovering => Some(BlkStatus::Reset),
+            Self::Offline => Some(BlkStatus::Offline),
+        }
+    }
 }
 
 /// The recovery state machine of one fault-domain *owner* — a group of served
@@ -1548,17 +1576,15 @@ impl FaultDomain {
     /// — so reading it never mutates the machine.
     #[must_use]
     pub const fn child_status(&self, now_ns: u64) -> Option<BlkStatus> {
-        match self.state {
-            FaultDomainState::Healthy => None,
-            FaultDomainState::Recovering => {
-                if self.grace.elapsed(now_ns) {
-                    Some(BlkStatus::Offline)
-                } else {
-                    Some(BlkStatus::Reset)
-                }
-            }
-            FaultDomainState::Offline => Some(BlkStatus::Offline),
-        }
+        // Resolve the grace window to a definite state, then map it through the
+        // one shared owner-health → child-status rule (so an owned domain and a
+        // published ancestor state impose identically): a `Recovering` window
+        // that has elapsed is `Offline`; every other state stands as-is.
+        let resolved = match self.state {
+            FaultDomainState::Recovering if self.grace.elapsed(now_ns) => FaultDomainState::Offline,
+            other => other,
+        };
+        resolved.imposed_child_status()
     }
 }
 
@@ -1813,6 +1839,62 @@ mod tests {
                 FaultDomainState::Offline
             );
         }
+    }
+
+    #[test]
+    fn a_fault_domain_state_imposes_one_shared_child_status_rule() {
+        // The one owner-health → child-status mapping: a healthy owner imposes
+        // nothing (the child answers on its own health), a recovering owner
+        // holds the child reissuable, an offline owner fails it closed.
+        assert_eq!(FaultDomainState::Healthy.imposed_child_status(), None);
+        assert_eq!(
+            FaultDomainState::Recovering.imposed_child_status(),
+            Some(BlkStatus::Reset)
+        );
+        assert_eq!(
+            FaultDomainState::Offline.imposed_child_status(),
+            Some(BlkStatus::Offline)
+        );
+    }
+
+    #[test]
+    fn an_owned_domain_and_its_resolved_state_impose_the_same_status() {
+        // `FaultDomain::child_status` must agree with the shared mapping for
+        // every reachable resolved state, so an owned (clocked) domain and a
+        // published (already-resolved) ancestor state can never diverge.
+        let grace = 1_000u64;
+
+        // Healthy → imposes nothing.
+        let healthy = FaultDomain::new(7, grace);
+        assert_eq!(
+            healthy.child_status(0),
+            FaultDomainState::Healthy.imposed_child_status()
+        );
+
+        // Recovering, inside the window → Reset (matches Recovering's mapping).
+        let mut recovering = FaultDomain::new(7, grace);
+        recovering.quiesce(0);
+        assert_eq!(
+            recovering.child_status(grace / 2),
+            FaultDomainState::Recovering.imposed_child_status()
+        );
+
+        // Recovering, window elapsed → the owned domain resolves to Offline
+        // and so imposes Offline's status, not Recovering's.
+        assert_eq!(
+            recovering.child_status(grace + 1),
+            FaultDomainState::Offline.imposed_child_status()
+        );
+
+        // Offline → Offline's mapping.
+        let mut offline = FaultDomain::new(7, grace);
+        offline.quiesce(0);
+        offline.poll(grace + 1);
+        assert_eq!(offline.state(), FaultDomainState::Offline);
+        assert_eq!(
+            offline.child_status(grace + 2),
+            FaultDomainState::Offline.imposed_child_status()
+        );
     }
 
     #[test]

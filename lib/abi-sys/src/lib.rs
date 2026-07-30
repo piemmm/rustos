@@ -120,6 +120,7 @@ const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
+const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
@@ -1704,6 +1705,28 @@ pub extern "C" fn sys_hw_node_health(health: u64) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_NODE_HEALTH, [health, 0, 0, 0, 0, 0])) }
 }
 
+/// `hw_self_node`: report the hardware-tree node id the calling driver was
+/// autoloaded for (`SyscallNumber::HW_SELF_NODE`). Returns the caller's own
+/// node id (`≥ 0`) on success, or a `TAIRIX_E_*` code reinterpreted into the
+/// result.
+///
+/// A leaf block driver uses this to locate itself in the discovered topology,
+/// so it can read the published fault-domain health of its parent
+/// bus/hub/controller chain and attribute a controller-wide blip to the fault
+/// domain rather than to the disk. It needs no capability (learning one's
+/// *own* node id is the unprivileged self-identity baseline); the kernel
+/// resolves the node from the caller's task id, never a caller-supplied id, so
+/// a driver only ever learns its own identity and never the global tree. A
+/// caller with no matched node fails closed.
+#[must_use]
+#[export_name = "tairix_sys_hw_self_node"]
+pub extern "C" fn sys_hw_self_node() -> u64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel resolves the
+    // caller's own matched node on the far side of the trap. No memory operand
+    // is passed.
+    unsafe { raw_syscall(NUM_HW_SELF_NODE, [0, 0, 0, 0, 0, 0]) }
+}
+
 /// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
 /// function and write the encoded `tairix_abi::MsiAllocation` (the virtual
 /// interrupt line plus the doorbell address/data to program into the
@@ -2565,6 +2588,7 @@ mod tests {
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
         (NUM_HW_NODE_HEALTH, "hw_node_health", 1),
+        (NUM_HW_SELF_NODE, "hw_self_node", 0),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 2),

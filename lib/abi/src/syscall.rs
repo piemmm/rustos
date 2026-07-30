@@ -1982,6 +1982,31 @@ impl SyscallNumber {
     /// [`Errno::NotImplemented`]).
     pub const HW_NODE_HEALTH: Self = Self(102);
 
+    /// Report the hardware-tree node id the calling driver was autoloaded for
+    /// — the driver's own place in the discovered topology
+    /// (`plans/FIX-IO.md` IO4, leaf-side fault-domain attribution).
+    ///
+    /// A user-space driver receives its device-resource grants at spawn, but
+    /// not its node's *identity*, so it cannot locate itself in the hardware
+    /// tree ([`SyscallNumber::HW_TREE_READ`]) to resolve its fault-domain
+    /// ancestors. This returns that identity: the id of the node the driver
+    /// bound to, so a leaf block driver can read the published
+    /// [`crate::blkio::FaultDomainState`] of its parent bus/hub/controller
+    /// chain ([`crate::hwtree::ancestor_imposed_status`]) and attribute a
+    /// controller-wide blip to the fault domain rather than to the disk.
+    ///
+    /// Takes no argument. Returns the caller's own node id (a non-negative
+    /// [`crate::hwtree::HwNode`] id) on success, or `-errno`.
+    ///
+    /// The kernel resolves the node from the caller's task id (never a
+    /// caller-supplied id), so a driver only ever learns its *own* identity —
+    /// no ambient authority and no window onto the global tree. It is the
+    /// unprivileged self-identity baseline (like reading one's own pid or
+    /// growing one's own address space with [`SyscallNumber::MEM_MAP`]): it
+    /// needs no capability and is not audited. A caller with no matched node
+    /// (not an autoloaded driver) fails closed with [`Errno::NotFound`].
+    pub const HW_SELF_NODE: Self = Self(103);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

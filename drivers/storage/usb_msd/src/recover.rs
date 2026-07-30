@@ -49,6 +49,20 @@ pub struct LunRecovery<'a> {
     pub domain: &'a mut FaultDomain,
 }
 
+/// The three per-request I/O buffers one served block request threads through
+/// [`serve_lun_with_domain`]: the decoded-in-place `request` bytes, the shared
+/// data `window` the transfer moves through, and the `reply` the framed
+/// completion is written into. Grouped so the serve entry point takes one
+/// coherent I/O bundle rather than three loose slice arguments.
+pub struct ServeBuffers<'a> {
+    /// The block-service request bytes received on the LUN endpoint.
+    pub request: &'a [u8],
+    /// The LUN's shared data window the transfer reads/writes.
+    pub window: &'a mut [u8],
+    /// The buffer the framed [`BlkCompletion`] is written into.
+    pub reply: &'a mut [u8; BLK_COMPLETION_LEN],
+}
+
 /// Whether a device-level outcome proves the *shared transport* is alive
 /// again.
 ///
@@ -96,16 +110,38 @@ pub fn transport_alive(status: BlkStatus) -> bool {
 /// recovers the domain in step 1), so re-framing with a default geometry never
 /// discards data a consumer would have read. Framing cannot fail on the sized
 /// `reply` buffer; a defensive fallback keeps the function panic-free.
+///
+/// # Interior-ancestor attribution (`ancestor_status`)
+///
+/// A leaf device also hangs below interior fault domains — the USB controller,
+/// a hub — that live in *other* driver processes and publish their own recovery
+/// health onto the shared hardware tree. `ancestor_status` supplies the folded
+/// [`BlkStatus`] those ancestors currently impose (computed by
+/// [`ancestor_imposed_status`](tairix_abi::hwtree::ancestor_imposed_status) from
+/// the caller's node's chain — `Ok` when the tree above is healthy). It is a
+/// closure so the caller only reads the tree when it is actually consulted:
+/// this happens **only on the recovery path** — when the device's own outcome
+/// did *not* demonstrably reach the medium ([`transport_alive`] is false), so a
+/// controller-wide blip is attributed to the fault domain (the completion
+/// carries the reissuable [`BlkStatus::Reset`], or [`BlkStatus::Offline`] once
+/// an ancestor has failed closed) rather than looking like an independent disk
+/// failure. A device that *did* reach the medium demonstrably proves the path
+/// above it is up, so its answer always wins and the closure is never even
+/// called (off the hot path entirely, `plans/FIX-IO.md` IO4).
 #[must_use]
 pub fn serve_lun_with_domain<B: Block>(
     device: &mut B,
     read_only: bool,
-    request: &[u8],
-    window: &mut [u8],
-    reply: &mut [u8; BLK_COMPLETION_LEN],
+    bufs: ServeBuffers<'_>,
     recovery: &mut LunRecovery<'_>,
     now_ns: u64,
+    ancestor_status: impl FnOnce() -> BlkStatus,
 ) -> usize {
+    let ServeBuffers {
+        request,
+        window,
+        reply,
+    } = bufs;
     let len = serve_request_recovering(
         device,
         read_only,
@@ -116,13 +152,23 @@ pub fn serve_lun_with_domain<B: Block>(
         now_ns,
     );
     let device_status = decode_outcome(&reply[..len]).status;
+    let alive = transport_alive(device_status);
 
-    if recovery.domain.state() != FaultDomainState::Healthy && transport_alive(device_status) {
+    if recovery.domain.state() != FaultDomainState::Healthy && alive {
         recovery.domain.resume();
     }
 
-    let effective =
+    let mut effective =
         effective_child_status(device_status, core::iter::once(&*recovery.domain), now_ns);
+    if !alive {
+        // The device did not demonstrably reach the medium, so a resetting or
+        // offline interior ancestor (controller/hub) may be the real fault
+        // domain. Fold its published health in — read lazily here, on the
+        // recovery path only, so a healthy hot-path transfer never pays for it.
+        // A data-valid or medium answer proved the path above is up, so this is
+        // skipped and the disk's own answer always wins (no valid read masked).
+        effective = effective.combine(ancestor_status());
+    }
     if effective == device_status {
         return len;
     }
@@ -227,17 +273,32 @@ mod tests {
         domain: &mut FaultDomain,
         now_ns: u64,
     ) -> BlkStatus {
+        // No interior ancestor imposes anything: the healthy-tree case.
+        serve_read_with_ancestor(device, health, domain, now_ns, BlkStatus::Ok)
+    }
+
+    fn serve_read_with_ancestor(
+        device: &mut ScriptedBlock,
+        health: &mut BlkHealth,
+        domain: &mut FaultDomain,
+        now_ns: u64,
+        ancestor: BlkStatus,
+    ) -> BlkStatus {
         let mut window = vec![0u8; BLOCK_SIZE];
         let mut reply = [0u8; BLK_COMPLETION_LEN];
+        let request = read_one();
         let mut recovery = LunRecovery { health, domain };
         let len = serve_lun_with_domain(
             device,
             false,
-            &read_one(),
-            &mut window,
-            &mut reply,
+            ServeBuffers {
+                request: &request,
+                window: &mut window,
+                reply: &mut reply,
+            },
             &mut recovery,
             now_ns,
+            || ancestor,
         );
         decode_outcome(&reply[..len]).status
     }
@@ -352,5 +413,88 @@ mod tests {
             BlkStatus::Ok
         );
         assert_eq!(domain.state(), FaultDomainState::Healthy);
+    }
+
+    #[test]
+    fn a_recovering_interior_ancestor_holds_a_stalling_leaf_reissuable() {
+        // The device's own transport is healthy (its domain is not quiesced),
+        // but the read stalls *because* an interior ancestor — the USB
+        // controller published as Recovering — is mid-reset. The leaf's stall
+        // is attributed to the fault domain: answered reissuable (Reset) so the
+        // controller blip is invisible if it returns inside the window, not a
+        // spurious independent disk failure.
+        let mut device = ScriptedBlock::new(&[Attempt::Stall]);
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut domain = FaultDomain::new(0, grace_ns());
+        assert_eq!(
+            serve_read_with_ancestor(&mut device, &mut health, &mut domain, 0, BlkStatus::Reset),
+            BlkStatus::Reset
+        );
+    }
+
+    #[test]
+    fn an_offline_interior_ancestor_fails_a_stalling_leaf_closed() {
+        // The interior ancestor's grace window elapsed (published Offline): a
+        // stalling leaf beneath it is failed closed to Offline, coherently with
+        // the whole subtree, rather than held reissuable forever.
+        let mut device = ScriptedBlock::new(&[Attempt::Stall]);
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut domain = FaultDomain::new(0, grace_ns());
+        assert_eq!(
+            serve_read_with_ancestor(&mut device, &mut health, &mut domain, 0, BlkStatus::Offline),
+            BlkStatus::Offline
+        );
+    }
+
+    #[test]
+    fn a_leaf_that_reaches_the_medium_ignores_a_recovering_ancestor() {
+        // The device returned valid data: it demonstrably reached the medium,
+        // proving the whole path above it (controller/hub) is up for this
+        // transfer, so a stale "Recovering" ancestor state never masks the read
+        // — the disk's own answer wins and the ancestor closure's verdict is
+        // discarded. (The closure is not even consulted on this alive path.)
+        let mut device = ScriptedBlock::new(&[Attempt::Data]);
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut domain = FaultDomain::new(0, grace_ns());
+        assert_eq!(
+            serve_read_with_ancestor(&mut device, &mut health, &mut domain, 0, BlkStatus::Reset),
+            BlkStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_medium_error_wins_over_a_recovering_ancestor() {
+        // A real bad-sector sense also proves the path reached the device, so
+        // it is surfaced on its own merits rather than masked as a reissuable
+        // controller blip.
+        let mut device = ScriptedBlock::new(&[Attempt::Medium]);
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut domain = FaultDomain::new(0, grace_ns());
+        assert_eq!(
+            serve_read_with_ancestor(&mut device, &mut health, &mut domain, 0, BlkStatus::Reset),
+            BlkStatus::MediumError
+        );
+    }
+
+    #[test]
+    fn an_offline_ancestor_dominates_a_recovering_transport() {
+        // Both the leaf's own transport (quiesced → Recovering) and an interior
+        // ancestor (published Offline) impose a status on a stalling request;
+        // the more-fail-closed ancestor wins, so a subtree that has failed
+        // closed is never masked by the leaf's still-open local window.
+        let mut device = ScriptedBlock::new(&[Attempt::Stall]);
+        let mut health = BlkHealth::new(BlkDeviceClass::Removable);
+        let mut domain = FaultDomain::new(0, grace_ns());
+        domain.quiesce(0);
+        assert_eq!(
+            serve_read_with_ancestor(
+                &mut device,
+                &mut health,
+                &mut domain,
+                grace_ns() / 2,
+                BlkStatus::Offline,
+            ),
+            BlkStatus::Offline
+        );
     }
 }

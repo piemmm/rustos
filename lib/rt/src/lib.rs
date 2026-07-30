@@ -261,6 +261,9 @@ const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 /// `hw_node_health` syscall number (as above).
 const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 
+/// `hw_self_node` syscall number (as above).
+const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
+
 /// `shm_create` syscall number (as above).
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 
@@ -950,6 +953,30 @@ pub fn hw_node_health(health: tairix_abi::blkio::FaultDomainState) -> i64 {
             [u64::from(health.as_u8()), 0, 0, 0, 0, 0],
         )
     };
+    ret as i64
+}
+
+/// Report the hardware-tree node id the calling driver was autoloaded for
+/// (`SyscallNumber::HW_SELF_NODE`), returning the raw signed register: the
+/// caller's own node id (`≥ 0`) on success, else `-errno`.
+///
+/// A leaf block driver uses this to locate itself in the discovered topology
+/// so it can read the published [`tairix_abi::blkio::FaultDomainState`] of its
+/// parent bus/hub/controller chain
+/// ([`tairix_abi::hwtree::ancestor_imposed_status`]) and attribute a
+/// controller-wide blip to the fault domain rather than to the disk. It needs
+/// no capability (learning one's *own* node id is the unprivileged
+/// self-identity baseline), and the kernel resolves the node from the caller's
+/// task id — never a caller-supplied id, so a driver only ever learns its own
+/// identity, never the global tree. A caller with no matched node (not an
+/// autoloaded driver) fails closed with `-errno` (`NotFound`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 id-or-`-errno` encoding.
+pub fn hw_self_node() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel resolves the
+    // caller's own matched node on the far side of the trap. The call takes no
+    // arguments and no memory operand, so all six argument registers are zero.
+    let ret = unsafe { raw_syscall(NUM_HW_SELF_NODE, [0, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 

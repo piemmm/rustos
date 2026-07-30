@@ -126,6 +126,7 @@ extern "C" {
 #define TAIRIX_SYS_CALL_REAP 100u
 #define TAIRIX_SYS_CALL_CANCEL 101u
 #define TAIRIX_SYS_HW_NODE_HEALTH 102u
+#define TAIRIX_SYS_HW_SELF_NODE 103u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -357,6 +358,7 @@ int32_t tairix_sys_call_post(uint64_t a0, void * a1, uintptr_t a2, void * a3, ui
 uint64_t tairix_sys_call_reap(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_call_cancel(uint64_t a0, uint64_t a1);
 int32_t tairix_sys_hw_node_health(uint64_t a0);
+uint64_t tairix_sys_hw_self_node(void);
 
 #ifdef __cplusplus
 } /* extern "C" */
