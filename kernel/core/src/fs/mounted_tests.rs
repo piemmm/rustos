@@ -11,12 +11,15 @@
 //! a host test has no installed scheduler to park on.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicU8;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
 use tairix_abi::driver::DriverHandle;
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, Errno, FileKind, OpenFlags, UnlinkFlags, FS_OWNER_UNCHANGED};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{
@@ -1041,6 +1044,58 @@ fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
     assert_eq!(usage.total_blocks, 4096);
     assert!(usage.avail_blocks <= usage.free_blocks);
     assert!(usage.free_blocks <= usage.total_blocks);
+}
+
+/// The mount snapshot overlays a live device's reported I/O health onto an
+/// otherwise-`Available` volume, but a genuine surprise-removal state always
+/// wins over the overlay so a vanished volume never masquerades as merely
+/// unwell (`plans/FIX-IO.md` IO2/IO3; `plans/DEVICES.md` D4).
+#[test]
+fn mount_snapshot_overlays_reported_block_health() {
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("handle");
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
+        .expect("register");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let vol_availability = |svc: &MountedFilesystemService<RwMockFs>| {
+        svc.mount_snapshot()
+            .iter()
+            .find(|record| record.source_bytes() == b"vol")
+            .expect("the registered volume is listed")
+            .availability()
+    };
+
+    // With no health source the volume reads plainly available.
+    assert_eq!(vol_availability(&svc), MountAvailability::Available);
+
+    // A live block-health overlay reporting a blip surfaces as recovering.
+    let health = Arc::new(AtomicU8::new(MountAvailability::Recovering.as_u8()));
+    cell.set_health_source(handle, Arc::clone(&health))
+        .expect("attach health source");
+    assert_eq!(vol_availability(&svc), MountAvailability::Recovering);
+
+    // A surprise-removal state is authoritative: even with the overlay now
+    // claiming the device is fine, the vanished state stands.
+    cell.set_availability(handle, MountAvailability::UnavailableDirty)
+        .expect("mark unavailable");
+    health.store(
+        MountAvailability::Available.as_u8(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    assert_eq!(vol_availability(&svc), MountAvailability::UnavailableDirty);
+
+    // Back to a live volume, the overlay's degraded reading shows through.
+    cell.set_availability(handle, MountAvailability::Available)
+        .expect("mark available");
+    health.store(
+        MountAvailability::Degraded.as_u8(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    assert_eq!(vol_availability(&svc), MountAvailability::Degraded);
 }
 
 #[test]

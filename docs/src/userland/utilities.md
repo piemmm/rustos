@@ -351,10 +351,12 @@ and the generic `offset`/`limit` page walk — so none of it is copied
 `source on target type fstype (options)` line per mount; the option list
 opens with `ro`/`rw` and then names each restriction in force, and a
 surprise-removed volume carries a trailing ` [unavailable-dirty]` /
-` [unavailable-lost]` marker (`plans/DEVICES.md` D4b) and a re-inserted
+` [unavailable-lost]` marker (`plans/DEVICES.md` D4b), a re-inserted
 volume whose non-mutation could not be proven carries
-` [recovery-conflict]` (`plans/DEVICES.md` D4c) — additive, so a
-healthy volume's line keeps the classic shape while a dead or
+` [recovery-conflict]` (`plans/DEVICES.md` D4c), and a live volume whose
+backing device reports itself unwell carries ` [degraded]` or
+` [recovering]` from its I/O health (`plans/FIX-IO.md` IO3) — additive, so
+a healthy volume's line keeps the classic shape while an unwell, dead, or
 conflicted one never looks healthy. The query
 is ungated: the mount table is system-wide and secret-free, so any task
 may read it (`AGENTS.md` §16.6).

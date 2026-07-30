@@ -1525,6 +1525,8 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             "TAIRIX_MOUNT_RECOVERY_CONFLICT",
             MountAvailability::RecoveryConflict,
         ),
+        ("TAIRIX_MOUNT_DEGRADED", MountAvailability::Degraded),
+        ("TAIRIX_MOUNT_RECOVERING", MountAvailability::Recovering),
     ];
     for (name, state) in mount_availabilities {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());

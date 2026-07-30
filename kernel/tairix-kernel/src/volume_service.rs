@@ -76,7 +76,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
@@ -94,7 +94,7 @@ use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
-use tairix_kernel_core::{Metadata, Mode, Path, SleepLock, VolumePublishError, VolumeService};
+use tairix_kernel_core::{Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService};
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_mem::{CacheBudget, MemoryPressure};
 use tairix_kernel_sec::{GroupId, UserId};
@@ -507,6 +507,52 @@ fn open_filesystem(
     }
 }
 
+/// Mount the volume served by `handle` at `/Storage/<name>` with the
+/// removable-media flags (the device's write policy carried as `ro`),
+/// returning the mount `Path` for the caller's unwind. Fails closed with
+/// the `(cause, errno)` pair the attach path audits.
+fn mount_storage_volume(
+    vfs: &Vfs,
+    name: &str,
+    read_only: bool,
+    handle: DriverHandle,
+    map_gid: Option<GroupId>,
+) -> Result<Path, (&'static str, Errno)> {
+    let path = Path::parse(&format!("/Storage/{name}"))
+        .map_err(|_| ("mount_path_invalid", Errno::OutOfRange))?;
+    vfs.mounts_write()
+        .mount_with_template(
+            path.clone(),
+            mount_flags(read_only),
+            handle,
+            mount_template(map_gid),
+        )
+        .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
+    Ok(path)
+}
+
+/// Register `driver` under `handle` and attach the live block-health
+/// overlay the mount snapshot reads (`plans/FIX-IO.md` IO2/IO3), the one
+/// place both the attach and recover paths register a served volume so the
+/// health wiring cannot diverge between them. Returns `Err(())` when the
+/// handle is already registered (fail closed — the caller unwinds); the
+/// `set_health_source` cannot miss, the handle having just been registered
+/// under the operation lock.
+fn register_with_health(
+    handle: DriverHandle,
+    driver: alloc::boxed::Box<dyn KernelFs>,
+    source: &str,
+    fstype: &'static str,
+    volume_id: [u8; 16],
+    health: Arc<AtomicU8>,
+) -> Result<(), ()> {
+    LATE_FILESYSTEM
+        .register(handle, driver, source, fstype, volume_id)
+        .map_err(|_| ())?;
+    let _ = LATE_FILESYSTEM.set_health_source(handle, health);
+    Ok(())
+}
+
 /// The device transport an attach or recovery operates over: the
 /// connected kernel blkio client with its write policy and geometry, the
 /// requested extent already validated against the live device.
@@ -749,6 +795,9 @@ impl VolumeService for RuntimeVolumeService {
         // Thread the device through the uncommitted-write journal, its
         // mutation-evidence shadow seeded from the extent head.
         let journal = seeded_journal(&mut client, request, block_size, head.as_deref());
+        // Keep the block client's reported-health overlay for the mount
+        // snapshot before the journal chain consumes the client.
+        let health = client.health_handle();
         let journaled = JournaledBlock::new(client, Arc::clone(&journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
@@ -770,23 +819,21 @@ impl VolumeService for RuntimeVolumeService {
 
         // Mount under the catalog view location with the removable-media
         // flags; the device's write policy is carried as `ro`.
-        let path = Path::parse(&format!("/Storage/{name}"))
-            .map_err(|_| refused("mount_path_invalid", Errno::OutOfRange))?;
-        vfs.mounts_write()
-            .mount_with_template(
-                path.clone(),
-                mount_flags(read_only),
-                handle,
-                mount_template(map_gid),
-            )
-            .map_err(|_| refused("name_in_use", Errno::AlreadyExists))?;
+        let path = mount_storage_volume(vfs, name, read_only, handle, map_gid)
+            .map_err(|(cause, errno)| refused(cause, errno))?;
 
         // Register the live driver, then publish the identity last; each
         // failure unwinds everything already done, so a refused attach
         // leaves no trace.
-        if LATE_FILESYSTEM
-            .register(handle, opened.driver, name, opened.fstype, opened.identity)
-            .is_err()
+        if register_with_health(
+            handle,
+            opened.driver,
+            name,
+            opened.fstype,
+            opened.identity,
+            health,
+        )
+        .is_err()
         {
             let _ = vfs.mounts_write().unmount(&path);
             return Err(refused("handle_in_use", Errno::AlreadyExists));
@@ -1205,6 +1252,9 @@ impl RuntimeVolumeService {
         let read_only = device_read_only || conflict;
 
         // Rebuild the volume over the retained journal and new transport.
+        // Keep the block client's reported-health overlay for the remounted
+        // volume before the client is consumed by the journal chain.
+        let health = client.health_handle();
         let journaled = JournaledBlock::new(client, Arc::clone(&target.journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
@@ -1230,18 +1280,21 @@ impl RuntimeVolumeService {
         // under the operation lock (the handle was just freed, the path
         // just unmounted).
         let _ = LATE_FILESYSTEM.unregister(target.handle);
-        if LATE_FILESYSTEM
-            .register(
-                target.handle,
-                opened.driver,
-                &target.name,
-                opened.fstype,
-                target.id,
-            )
-            .is_err()
+        if register_with_health(
+            target.handle,
+            opened.driver,
+            &target.name,
+            opened.fstype,
+            target.id,
+            health,
+        )
+        .is_err()
         {
             return Err(refused("handle_in_use", Errno::AlreadyExists));
         }
+        // A conflicted volume stays read-only `RecoveryConflict`, over which
+        // the health overlay never competes; a cleanly recovered one reads
+        // `Available` and reflects its device's ongoing health.
         let _ = LATE_FILESYSTEM.set_availability(
             target.handle,
             if conflict {

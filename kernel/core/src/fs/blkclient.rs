@@ -19,7 +19,7 @@
 //! wakes the parked task.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::blkio::{
     decode_outcome, BlkCompletion, BlkDeviceClass, BlkOp, BlkOutcome, BlkRequest, IoBudget,
@@ -27,6 +27,7 @@ use tairix_abi::blkio::{
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
@@ -88,6 +89,17 @@ pub struct BlkClient {
     /// class-specific budget threads through with the health state machine
     /// (`plans/FIX-IO.md` IO3).
     budget: IoBudget,
+    /// The volume-availability overlay this device's reported health drives,
+    /// shared by [`Arc`] with the mount registry so the mount snapshot can
+    /// show a live-but-unwell device as `Degraded`/`Recovering` rather than
+    /// healthy (`plans/FIX-IO.md` IO2/IO3). It holds the wire byte of a
+    /// [`MountAvailability`]; the serving driver owns the sticky health
+    /// state machine and its grace window, so this consumer only *reflects*
+    /// each completion's reported [`tairix_abi::blkio::BlkStatus`] through
+    /// the single shared [`MountAvailability::from_block_status`] mapping
+    /// (no second, divergent state machine). Lock-free: written on the I/O
+    /// path, read asynchronously by the snapshot.
+    health: Arc<AtomicU8>,
 }
 
 impl BlkClient {
@@ -144,6 +156,7 @@ impl BlkClient {
             },
             read_only: false,
             budget: BlkDeviceClass::Rotational.budget(),
+            health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -170,6 +183,27 @@ impl BlkClient {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// A clone of the shared volume-availability overlay this device's
+    /// reported health drives, for the mount registry to consult when
+    /// building the mount snapshot (`plans/FIX-IO.md` IO2/IO3). The handle
+    /// carries a [`MountAvailability`] wire byte, updated on every completion
+    /// this client folds.
+    #[must_use]
+    pub fn health_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.health)
+    }
+
+    /// Reflect one completion's reported device-level health into the shared
+    /// availability overlay, through the single shared status→availability
+    /// mapping. A status that carries no volume-availability signal (a
+    /// per-request medium error, or a gone/dead device owned by the
+    /// surprise-removal path) leaves the overlay unchanged.
+    fn note_health(&self, status: tairix_abi::blkio::BlkStatus) {
+        if let Some(availability) = MountAvailability::from_block_status(status) {
+            self.health.store(availability.as_u8(), Ordering::Relaxed);
+        }
     }
 
     /// Commit every completed write to the medium (the blkio flush
@@ -215,6 +249,7 @@ impl BlkClient {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
+            self.note_health(outcome.status);
             if self.budget.should_reissue(outcome.status, attempts) {
                 attempts += 1;
                 continue;
@@ -909,6 +944,61 @@ mod tests {
             client.read_blocks(0, &mut buf),
             Err(DriverError::DeviceOffline)
         );
+        server.join().unwrap();
+    }
+
+    /// The shared volume-availability overlay the client currently reports.
+    fn health(client: &BlkClient) -> MountAvailability {
+        MountAvailability::from_u8(client.health_handle().load(Ordering::Relaxed))
+            .expect("overlay holds a valid availability byte")
+    }
+
+    #[test]
+    fn health_overlay_reflects_reported_block_status() {
+        // A fresh device that answered only the geometry probe reads healthy.
+        let (mut client, server) = connect_scripted(
+            vec![
+                Some(Errno::EndpointStalled),
+                Some(Errno::EndpointStalled),
+                None,
+            ],
+            4,
+        );
+        assert_eq!(health(&client), MountAvailability::Available);
+
+        // A blip ridden out inside the retry budget ends on a valid answer,
+        // so the overlay settles back to available (the transient recovering
+        // window is invisible once the device answers `Ok`).
+        let mut buf = [0u8; BLOCK_SIZE];
+        client.read_blocks(0, &mut buf).expect("read after reissue");
+        assert_eq!(health(&client), MountAvailability::Available);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn health_overlay_shows_recovering_while_a_device_keeps_resetting() {
+        // Every attempt resets and the client fails closed at the budget: the
+        // last folded status is a reissuable reset, so the volume reads as
+        // recovering (a live device riding out a blip), never healthy.
+        let (mut client, server) = connect_scripted(vec![Some(Errno::EndpointStalled); 4], 5);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
+        assert_eq!(health(&client), MountAvailability::Recovering);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_medium_error_leaves_the_health_overlay_unchanged() {
+        // A per-request bad sector says nothing about the volume's
+        // availability (the device itself is reachable): the overlay stays
+        // at its prior healthy reading rather than flipping to a fault.
+        let (mut client, server) = connect_scripted(vec![Some(Errno::MediumError)], 2);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(
+            client.read_blocks(0, &mut buf),
+            Err(DriverError::MediumError)
+        );
+        assert_eq!(health(&client), MountAvailability::Available);
         server.join().unwrap();
     }
 }

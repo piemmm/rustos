@@ -17,6 +17,7 @@
 //! `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
+use crate::blkio::BlkStatus;
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
@@ -1997,6 +1998,20 @@ pub enum MountAvailability {
     /// resolved only by the audited force-unmount, which discards the
     /// set — never silently (`plans/DEVICES.md` D4c).
     RecoveryConflict = 3,
+    /// The backing device is live and still serving I/O, but reports
+    /// itself unhealthy (a recovered-error threshold, a pending sector
+    /// reallocation): data is served, so the mount stays usable, but a
+    /// tool must show it as at-risk rather than healthy. Surfaced from the
+    /// device's reported health (`plans/FIX-IO.md` IO3), never a vanish.
+    Degraded = 4,
+    /// The backing device stalled/reset and is inside its bounded recovery
+    /// grace window: its I/O is being ridden out reissuably while it is
+    /// given a bounded chance to come back (`plans/FIX-IO.md` IO3). A
+    /// transient, live-device state — distinct from the `Unavailable*`
+    /// vanish states — that resolves to [`Available`](Self::Available) on
+    /// recovery or, if the device never comes back, to a vanish state via
+    /// the surprise-removal path.
+    Recovering = 5,
 }
 
 impl MountAvailability {
@@ -2018,7 +2033,53 @@ impl MountAvailability {
             1 => Ok(Self::UnavailableDirty),
             2 => Ok(Self::UnavailableLost),
             3 => Ok(Self::RecoveryConflict),
+            4 => Ok(Self::Degraded),
+            5 => Ok(Self::Recovering),
             _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The live-device availability a served volume should report given the
+    /// most recent device-level health [`BlkStatus`] its block client
+    /// observed, or [`None`] when that status carries no volume-availability
+    /// signal and the stored availability must stand.
+    ///
+    /// This is the single definition of how a device's reported I/O health
+    /// maps onto the mount table (`plans/FIX-IO.md` IO2/IO3), shared by
+    /// every block consumer so they cannot classify a device differently.
+    /// The serving driver owns the sticky health state machine and its
+    /// recovery grace window ([`crate::blkio::BlkHealth`]); the consumer
+    /// only *reflects* the driver's per-request verdict here, so there is no
+    /// second, divergent state machine:
+    ///
+    /// * [`BlkStatus::Ok`] → [`Available`](Self::Available): a valid answer
+    ///   demonstrates the device is serving normally (and clears a prior
+    ///   recovering/degraded overlay — the driver would not answer `Ok`
+    ///   until it genuinely recovered).
+    /// * [`BlkStatus::Degraded`] → [`Degraded`](Self::Degraded): served, but
+    ///   the device reports itself unhealthy.
+    /// * [`BlkStatus::TransientError`] / [`BlkStatus::Timeout`] /
+    ///   [`BlkStatus::Reset`] → [`Recovering`](Self::Recovering): the driver
+    ///   is riding out a blip inside its grace window.
+    /// * [`BlkStatus::MediumError`] → [`None`]: a per-request bad-sector
+    ///   verdict says nothing about the *volume's* availability (the device
+    ///   itself is reachable), so the overlay is left unchanged.
+    /// * [`BlkStatus::Offline`] / [`BlkStatus::Removed`] /
+    ///   [`BlkStatus::Fatal`] → [`None`]: a gone or dead device is owned by
+    ///   the surprise-removal path (`plans/DEVICES.md` D4), which sets the
+    ///   authoritative `Unavailable*` state; the health overlay never
+    ///   competes with it.
+    #[must_use]
+    pub const fn from_block_status(status: BlkStatus) -> Option<Self> {
+        match status {
+            BlkStatus::Ok => Some(Self::Available),
+            BlkStatus::Degraded => Some(Self::Degraded),
+            BlkStatus::TransientError | BlkStatus::Timeout | BlkStatus::Reset => {
+                Some(Self::Recovering)
+            }
+            BlkStatus::MediumError | BlkStatus::Offline | BlkStatus::Removed | BlkStatus::Fatal => {
+                None
+            }
         }
     }
 }
@@ -4866,10 +4927,49 @@ mod tests {
             MountAvailability::UnavailableDirty,
             MountAvailability::UnavailableLost,
             MountAvailability::RecoveryConflict,
+            MountAvailability::Degraded,
+            MountAvailability::Recovering,
         ] {
             assert_eq!(MountAvailability::from_u8(state.as_u8()), Ok(state));
         }
-        assert_eq!(MountAvailability::from_u8(4), Err(Errno::OutOfRange));
+        assert_eq!(MountAvailability::from_u8(6), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn mount_availability_reflects_reported_block_health() {
+        use crate::blkio::BlkStatus;
+        // A valid answer (or a recovered device answering `Ok`) reads as
+        // available; a device reporting itself unhealthy reads as degraded.
+        assert_eq!(
+            MountAvailability::from_block_status(BlkStatus::Ok),
+            Some(MountAvailability::Available)
+        );
+        assert_eq!(
+            MountAvailability::from_block_status(BlkStatus::Degraded),
+            Some(MountAvailability::Degraded)
+        );
+        // Every reissuable/blip class reads as recovering — the driver is
+        // riding out a stall inside its grace window.
+        for status in [
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+        ] {
+            assert_eq!(
+                MountAvailability::from_block_status(status),
+                Some(MountAvailability::Recovering)
+            );
+        }
+        // A per-request medium error, and every gone/dead class (owned by the
+        // surprise-removal path), carry no volume-availability overlay.
+        for status in [
+            BlkStatus::MediumError,
+            BlkStatus::Offline,
+            BlkStatus::Removed,
+            BlkStatus::Fatal,
+        ] {
+            assert_eq!(MountAvailability::from_block_status(status), None);
+        }
     }
 
     #[test]
@@ -5000,9 +5100,10 @@ mod tests {
         let mut bytes = rec.to_le_bytes();
         bytes[0] = 0xFF;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
-        // An availability byte naming no known state.
+        // An availability byte naming no known state (past the last state,
+        // `Recovering` = 5).
         let mut bytes = rec.to_le_bytes();
-        bytes[7] = 4;
+        bytes[7] = 6;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         // A length byte beyond its buffer.
         let mut bytes = rec.to_le_bytes();

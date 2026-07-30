@@ -276,10 +276,23 @@ Landed:
   transient blip that resolves inside the retry budget is ridden out (correct
   data returned), and a device that resets on every attempt fails closed as
   `Busy` at the budget.
+- **The affected volume is marked degraded, not just its callers.** The
+  kernel `BlkClient` folds every completion's reported `BlkStatus` through the
+  single shared `MountAvailability::from_block_status` mapping (`lib/abi`,
+  §2.2) into a lock-free per-volume overlay handle it exposes
+  (`health_handle`); the mount registry (`kernel/core` `mounted.rs`) attaches
+  that handle per mount (`set_health_source`) and the mount snapshot overlays
+  a live `Degraded`/`Recovering` reading onto an otherwise-`Available` volume
+  (`overlaid_availability`), so `sysinfo`/`mount`/`df`/`sysmon` show a
+  live-but-unwell volume distinctly (new `MountAvailability::{Degraded,
+  Recovering}`). The authoritative D4 `Unavailable*`/`RecoveryConflict` vanish
+  states always win over the overlay, so a vanished volume never masquerades
+  as merely unwell; the serving driver still owns the sticky `BlkHealth`
+  machine, so the consumer only reflects its verdict (no second, divergent
+  state machine). Proven host-side: the status→availability mapping, the
+  consumer fold, and the snapshot overlay (incl. stored-state precedence).
 
 Remaining:
-- Mark the affected volume degraded (Stage IO3 state) rather than only
-  surfacing the typed error to its callers.
 - A QEMU vertical with a wedged/removed virtio-blk or USB MSD device beside a
   live volume, asserting the live device's throughput is unaffected while the
   wedged one fails closed at its deadline (true concurrent head-of-line
@@ -345,8 +358,10 @@ Remaining:
   further request now has its primitive (`BlkHealth::poll` /
   `grace_deadline_ns`, above); only wiring a driver's own one-shot idle timer
   to call it remains (belongs with the driver's idle timers, Stage IO4).
-- The volume-manager consumer marking the affected volume degraded (below) and
-  the health observability (Stage IO5).
+- The consumer marking the affected volume degraded landed in IO2 above (the
+  kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
+  Recovering}`); the remaining observability is the audit-log health trail
+  (Stage IO5).
 - A QEMU vertical driving a device through fault → grace(recovering) →
   return-inside-window → Healthy and fault → grace-expiry → Faulted →
   fail-closed, which the host doubles cannot express without the live kernel
@@ -445,21 +460,28 @@ is sticky until a demonstrated return. A QEMU vertical of a modelled hub with
 several children resetting (asserting one recovery episode across the subtree)
 lands with the tree wiring above.
 
-### Stage IO5 — Health observability (audit log + `sysinfo`). **planned**
+### Stage IO5 — Health observability (audit log + `sysinfo`). **in progress**
 
-Deliverables:
+**Landed (the mount-availability half):** the `sysinfo` mount table already
+distinguishes a live-but-unwell volume — `MountAvailability::{Degraded,
+Recovering}` (`lib/abi/sysinfo.rs`) are surfaced by the IO2 consumer overlay
+(the mount snapshot's `overlaid_availability`), and `mount`/`df`/`sysmon`
+render them with a `[degraded]`/`[recovering]` marker while the vanish states
+stay authoritative. The C-ABI view (`include/tairix/tairix_sysinfo.h`)
+regenerated through the drift guard.
+
+Remaining deliverables:
 - **Health events through `lib/log`** (`plans/SYSLOG.md`) with stable event IDs
   on the hash-chained audit trail (§19.4): every fault, retry, reset (naming the
   fault-domain node), degrade, grace-window entry/expiry, and — importantly —
   every *recovery* ("disk came back"). Security-relevant decisions (driver
   quarantine/restart) stay on the audit log; routine advisories may also use
   `stdinfo` (§20) but never *instead of* the audit log.
-- **Device/volume/array health via `sysinfo`** (§16.6) behind a capability,
-  following the bond-member and surprise-removed-volume precedents in
-  `sysinfo.rs` — never a `/proc`-style scrape (§16.1). Extend
-  `MountAvailability` (or a sibling health field) to distinguish
-  `Recovering`/`Degraded` from the existing `Unavailable*`/`RecoveryConflict`
-  states, so a tool can show "recovering (grace)" distinctly from "lost".
+- **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
+  availability already landed above: a capability-gated device/array health
+  query (fault-domain node, retry/reset counts) following the bond-member and
+  surprise-removed-volume precedents in `sysinfo.rs` — never a `/proc`-style
+  scrape (§16.1).
 - **Watchdog tie-in** (`plans/WATCHDOG.md`): a driver process that itself wedges
   is a lockup the watchdog detects and recovers (restart the driver, mark the
   device `Failed`) — closing the loop where the *driver*, not the disk, is the

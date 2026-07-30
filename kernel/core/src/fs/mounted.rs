@@ -39,6 +39,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
@@ -96,6 +97,18 @@ struct DriverEntry<F: 'static> {
     /// the volume behind its fail-closed stand-in, so the mount snapshot
     /// never shows a vanished volume as healthy.
     availability: MountAvailability,
+    /// The live block client's reported-health overlay, when the backing
+    /// volume is served by a fault-aware block device
+    /// (`plans/FIX-IO.md` IO2/IO3). It carries a [`MountAvailability`] wire
+    /// byte the block client updates on every completion. When the stored
+    /// `availability` is still [`MountAvailability::Available`] (no surprise
+    /// removal has parked the volume), the snapshot overlays a live
+    /// `Degraded`/`Recovering` reading from here so a live-but-unwell device
+    /// never reads as healthy; the authoritative `Unavailable*`/
+    /// `RecoveryConflict` vanish states always win over the overlay. `None`
+    /// for a volume with no fault-aware block source (the in-RAM layout
+    /// mounts, a boot volume over a non-block backing).
+    health: Option<Arc<AtomicU8>>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
@@ -107,6 +120,35 @@ struct SnapshotEntry<F: 'static> {
     driver: Arc<SleepLock<F>>,
     volume_id: [u8; 16],
     availability: MountAvailability,
+}
+
+/// The availability the mount snapshot reports for one registered volume:
+/// its stored state, with a live block-health overlay applied only when the
+/// stored state is [`MountAvailability::Available`].
+///
+/// The surprise-removal path owns the authoritative `Unavailable*`/
+/// `RecoveryConflict` states, so once it has parked a volume the overlay
+/// never competes with it. For a still-`Available` volume served by a
+/// fault-aware block device, the block client's reported health is reflected
+/// so a live-but-unwell device reads as `Degraded`/`Recovering` rather than
+/// healthy. A missing or unreadable overlay leaves the volume `Available`
+/// (the block client seeds it `Available` and only ever stores a live
+/// health state), never a fabricated unavailable reading.
+fn overlaid_availability(
+    stored: MountAvailability,
+    health: Option<&Arc<AtomicU8>>,
+) -> MountAvailability {
+    if !matches!(stored, MountAvailability::Available) {
+        return stored;
+    }
+    match health.map(|h| MountAvailability::from_u8(h.load(Ordering::Relaxed))) {
+        Some(Ok(
+            live @ (MountAvailability::Available
+            | MountAvailability::Degraded
+            | MountAvailability::Recovering),
+        )) => live,
+        _ => MountAvailability::Available,
+    }
 }
 
 /// A set-once VFS policy layer plus a registry of backing filesystem drivers
@@ -220,6 +262,7 @@ impl<F: 'static> LateFilesystem<F> {
             fstype: String::from(fstype),
             volume_id,
             availability: MountAvailability::Available,
+            health: None,
         });
         Ok(driver)
     }
@@ -244,6 +287,34 @@ impl<F: 'static> LateFilesystem<F> {
             .find(|e| e.handle == handle)
             .ok_or(Errno::NotImplemented)?;
         entry.availability = availability;
+        Ok(())
+    }
+
+    /// Attach the live block-health overlay `health` to the volume registered
+    /// for `handle`, so the mount snapshot reflects the backing device's
+    /// reported health (`Degraded`/`Recovering`) while the volume is still
+    /// [`MountAvailability::Available`] (`plans/FIX-IO.md` IO2/IO3).
+    ///
+    /// The handle carries a [`MountAvailability`] wire byte the block client
+    /// updates on every completion; the registry only reads it. Idempotent —
+    /// re-registering a recovered volume replaces the overlay.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when `handle` names no registered volume
+    /// (fail closed — nothing is attached).
+    pub fn set_health_source(
+        &self,
+        handle: DriverHandle,
+        health: Arc<AtomicU8>,
+    ) -> Result<(), Errno> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        let entry = drivers
+            .iter_mut()
+            .find(|e| e.handle == handle)
+            .ok_or(Errno::NotImplemented)?;
+        entry.health = Some(health);
         Ok(())
     }
 
@@ -333,7 +404,7 @@ impl<F: 'static> LateFilesystem<F> {
                 fstype: e.fstype.clone(),
                 driver: Arc::clone(&e.driver),
                 volume_id: e.volume_id,
-                availability: e.availability,
+                availability: overlaid_availability(e.availability, e.health.as_ref()),
             })
     }
 }

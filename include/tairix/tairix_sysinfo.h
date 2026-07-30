@@ -72,6 +72,8 @@
 #define TAIRIX_MOUNT_UNAVAILABLE_DIRTY ((uint8_t)1u)
 #define TAIRIX_MOUNT_UNAVAILABLE_LOST ((uint8_t)2u)
 #define TAIRIX_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
+#define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
+#define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
 #define TAIRIX_USER_DIRECTORY_NAME_MAX 32u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */

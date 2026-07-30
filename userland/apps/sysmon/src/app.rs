@@ -418,6 +418,8 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
             MountAvailability::UnavailableDirty => "  [unavailable-dirty]",
             MountAvailability::UnavailableLost => "  [unavailable-lost]",
             MountAvailability::RecoveryConflict => "  [recovery-conflict]",
+            MountAvailability::Degraded => "  [degraded]",
+            MountAvailability::Recovering => "  [recovering]",
         };
         let text = if total == 0 {
             // No capacity known: state the identity, never a fabricated size.
