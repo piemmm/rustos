@@ -560,14 +560,30 @@ interior *fault-domain node's* own quiesce/resume events remain for the
 `RecoveryLadder`/`FaultDomain` wiring (IO4 remaining), emitted against this same
 vocabulary.
 
+**Landed (the fault-domain-node classifier — the shared vocabulary's third
+member):** the interior-node counterpart of `for_device` is
+`BlkHealthTransition::for_fault_domain(prev, next)` (`lib/abi/sysinfo.rs`),
+completing the shared health-event vocabulary so a hub/controller reset, a leaf
+device blip, and a mount overlay cannot classify a recovery differently (§2.2,
+§27). It maps a `FaultDomainState` edge to the shared events: a quiesce
+(`Healthy → Recovering`, and defensively a re-entry from `Offline`) is
+`Recovering`; the owner demonstrably returning (`Recovering | Offline →
+Healthy`, incl. a `resume` clearing a failed subtree with no reboot) is
+`Recovered`; the fail-closed edge (`→ Offline`, the grace window elapsing) and
+every unchanged state yield `None` — the fail-closed edge is the fault-domain
+driver's own distinct event, exactly as `for_device` excludes its fail-closed/
+removal edges. An interior node has no degraded-but-serving state of its own, so
+it never emits `Degraded`. Pure and proven host-side (the shared-vocabulary
+mapping, edge-triggering, fail-closed exclusion, and never-`Degraded`).
+
 Remaining deliverables:
-- **Fault-domain-node health events** (`plans/SYSLOG.md`): the interior-node
-  quiesce/resume/grace-expiry events the `FaultDomain` machine observes (naming
-  the fault-domain node), emitted against the shared `BlkHealthTransition`
-  vocabulary above. Land with the fault-domain tree wiring (IO4 remaining),
-  which owns those machines and their timers. (The per-device `usb_msd` reset
-  already logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/
-  Recovered/fail-closed edges landed above.)
+- **Fault-domain-node health events** (`plans/SYSLOG.md`): the live emission of
+  the interior-node quiesce/resume/grace-expiry events, naming the fault-domain
+  node and classified through the landed `for_fault_domain` above. Land with the
+  fault-domain tree wiring (IO4 remaining), which owns those machines, their
+  timers, and the `lib/log` event ids. (The per-device `usb_msd` reset already
+  logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/Recovered/
+  fail-closed edges landed above.)
 - **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
   availability already landed above: a capability-gated device/array health
   query (fault-domain node, retry/reset counts) following the bond-member and

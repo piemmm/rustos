@@ -2201,6 +2201,61 @@ impl BlkHealthTransition {
             _ => None,
         }
     }
+
+    /// Classify a *fault-domain* health-state change — the edge an interior
+    /// node's [`FaultDomain`](crate::blkio::FaultDomain) machine (a bus, hub,
+    /// USB/SAS controller, expander, or PCIe root complex) makes from `prev`
+    /// to `next` — as a storage-health audit transition, or [`None`] when the
+    /// change carries no such signal.
+    ///
+    /// This is the interior-node counterpart of the per-device
+    /// [`for_device`](Self::for_device) and the consumer-side
+    /// [`MountAvailability::health_transition`], sharing the **same**
+    /// vocabulary so a hub reset, a leaf-device blip, and a mount overlay
+    /// cannot classify a recovery differently (`plans/FIX-IO.md` IO5, §2.2).
+    /// It is edge-triggered exactly like its siblings: an unchanged state
+    /// yields [`None`], so an owner that keeps resetting logs one grace-window
+    /// event, not one per reset.
+    ///
+    /// An interior fault domain has no "degraded-but-serving" state of its own
+    /// (that is per-device), so this classifier emits only two of the three
+    /// events:
+    /// * into [`FaultDomainState::Recovering`](crate::blkio::FaultDomainState::Recovering)
+    ///   → [`Recovering`](Self::Recovering) — the owner blipped and the whole
+    ///   subtree entered its one shared grace window;
+    /// * back to [`FaultDomainState::Healthy`](crate::blkio::FaultDomainState::Healthy)
+    ///   from a recovering *or an already-failed* subtree →
+    ///   [`Recovered`](Self::Recovered) — the owner demonstrably returned (a
+    ///   `resume` clears an `Offline` subtree with no reboot), the "the hub
+    ///   came back" recovery.
+    ///
+    /// The fail-closed edge (into
+    /// [`FaultDomainState::Offline`](crate::blkio::FaultDomainState::Offline),
+    /// the grace window elapsing without the owner returning) yields [`None`]:
+    /// like the per-device fail-closed edges, it is not a
+    /// Degraded/Recovering/Recovered signal but the subtree failing closed,
+    /// which the fault-domain driver logs as its own distinct event.
+    #[must_use]
+    pub const fn for_fault_domain(
+        prev: crate::blkio::FaultDomainState,
+        next: crate::blkio::FaultDomainState,
+    ) -> Option<Self> {
+        use crate::blkio::FaultDomainState::{Healthy, Offline, Recovering};
+        match (prev, next) {
+            // No recovery-vocabulary edge in two cases. The subtree failing
+            // closed (into `Offline`, including the unchanged `Offline` case)
+            // is the fault-domain driver's own distinct fail-closed event, not
+            // a Recovering/Recovered signal. And an unchanged live/recovering
+            // state is not a transition, so a run of identical observations (a
+            // continuing owner reset) logs one event.
+            (_, Offline) | (Healthy, Healthy) | (Recovering, Recovering) => None,
+            // The owner blipped and the subtree entered its shared grace window.
+            (_, Recovering) => Some(Self::Recovering),
+            // The owner demonstrably returned — from inside the window or from
+            // an already-failed subtree — the "came back" recovery.
+            (_, Healthy) => Some(Self::Recovered),
+        }
+    }
 }
 
 /// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
@@ -5200,6 +5255,68 @@ mod tests {
         for other in [Healthy, Degraded, Recovering, Faulted, Failed] {
             assert_eq!(BlkHealthTransition::for_device(other, Removed), None);
             assert_eq!(BlkHealthTransition::for_device(Removed, other), None);
+        }
+    }
+
+    #[test]
+    fn fault_domain_health_transition_maps_the_shared_vocabulary() {
+        use crate::blkio::FaultDomainState::{Healthy, Offline, Recovering};
+        // An owner blip opening the shared grace window is a Recovering event —
+        // whether the subtree was healthy or (defensively) re-entering from a
+        // previously-failed state.
+        assert_eq!(
+            BlkHealthTransition::for_fault_domain(Healthy, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        assert_eq!(
+            BlkHealthTransition::for_fault_domain(Offline, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        // The owner demonstrably returning is the "the hub came back" recovery,
+        // both from inside the window and by clearing an already-failed subtree
+        // (a resume with no reboot).
+        assert_eq!(
+            BlkHealthTransition::for_fault_domain(Recovering, Healthy),
+            Some(BlkHealthTransition::Recovered)
+        );
+        assert_eq!(
+            BlkHealthTransition::for_fault_domain(Offline, Healthy),
+            Some(BlkHealthTransition::Recovered)
+        );
+        // An interior node never emits Degraded: it has no degraded-but-serving
+        // state of its own.
+        for prev in [Healthy, Recovering, Offline] {
+            for next in [Healthy, Recovering, Offline] {
+                assert_ne!(
+                    BlkHealthTransition::for_fault_domain(prev, next),
+                    Some(BlkHealthTransition::Degraded)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fault_domain_health_transition_is_edge_triggered() {
+        use crate::blkio::FaultDomainState::{Healthy, Offline, Recovering};
+        // A run of identical observations (a continuing owner reset) is one
+        // event, not one per reset.
+        for state in [Healthy, Recovering, Offline] {
+            assert_eq!(BlkHealthTransition::for_fault_domain(state, state), None);
+        }
+    }
+
+    #[test]
+    fn fault_domain_health_transition_excludes_the_fail_closed_edge() {
+        use crate::blkio::FaultDomainState::{Healthy, Offline, Recovering};
+        // The subtree failing closed (into Offline) is the fault-domain
+        // driver's own distinct fail-closed event, not this Recovering/
+        // Recovered vocabulary.
+        for from in [Healthy, Recovering] {
+            assert_eq!(
+                BlkHealthTransition::for_fault_domain(from, Offline),
+                None,
+                "failing a subtree closed is not a recovery-vocabulary edge"
+            );
         }
     }
 
