@@ -129,4 +129,4 @@ pub use resinfo::{
 pub use resolve::{resolve, ResolveInfoError};
 pub use resolver::{for_each_resolver_server, RESOLVER_SERVER_PAGE};
 pub use transport::{Output, Transport};
-pub use users::{for_each_user, user_names, USER_DIRECTORY_PAGE};
+pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};

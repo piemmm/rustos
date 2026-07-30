@@ -64,6 +64,36 @@ pub fn for_each_user(
     )
 }
 
+/// The account name `uid` holds in the directory, or `None` when the
+/// directory holds no entry for it.
+///
+/// The one definition of "which account is this uid?", so a tool resolving a
+/// single identity re-derives neither the directory walk, the duplicate-uid
+/// rule, nor the lossy name decode. The walk always completes, and a uid the
+/// directory lists twice keeps its first name, so the answer is
+/// deterministic whatever order the service returns records in.
+///
+/// A failure is reported rather than turned into a missing name: a caller
+/// that cannot reach the directory must not conclude the account does not
+/// exist.
+///
+/// # Errors
+///
+/// [`ListError`] when the transport failed or a reply did not decode.
+pub fn user_name(
+    transport: &dyn Transport,
+    uid: u32,
+) -> Result<Option<alloc::string::String>, ListError> {
+    let mut name = None;
+    for_each_user(transport, |record| {
+        if record.uid == uid && name.is_none() {
+            name = Some(crate::list::field_lossy(record.name_bytes()));
+        }
+        Ok(())
+    })?;
+    Ok(name)
+}
+
 /// Collect the whole account directory into an owned `(uid, name)` list,
 /// decoding each name lossily for display.
 ///
@@ -86,7 +116,7 @@ pub fn user_names(transport: &dyn Transport) -> Vec<(u32, alloc::string::String)
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_user, user_names, USER_DIRECTORY_PAGE};
+    use super::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -191,5 +221,29 @@ mod tests {
         assert_eq!(names[1].1, "alice");
 
         assert!(user_names(&Failing).is_empty());
+    }
+
+    #[test]
+    fn user_name_resolves_listed_uid_and_reports_absent_and_failure() {
+        let fixture = Fixture::new(alloc::vec![record(0, b"root"), record(1000, b"alice")]);
+        assert_eq!(
+            user_name(&fixture, 1000).expect("ok").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(user_name(&fixture, 0).expect("ok").as_deref(), Some("root"));
+        assert_eq!(user_name(&fixture, 4242).expect("ok"), None);
+        assert_eq!(
+            user_name(&Failing, 0),
+            Err(ListError::Call(CallError::Service(Errno::NotFound)))
+        );
+    }
+
+    #[test]
+    fn user_name_keeps_the_first_of_a_duplicated_uid() {
+        let fixture = Fixture::new(alloc::vec![record(7, b"first"), record(7, b"second")]);
+        assert_eq!(
+            user_name(&fixture, 7).expect("ok").as_deref(),
+            Some("first")
+        );
     }
 }

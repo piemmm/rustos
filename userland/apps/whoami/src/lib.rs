@@ -22,7 +22,7 @@
 //!   `whoami foo -x` diagnoses `-x`.
 //! * [`run`] — the engine: read the caller's uid through the injected
 //!   [`Identity`] seam, walk the shared account directory
-//!   ([`tairix_procinfo::for_each_user`]) for the matching name, and write
+//!   ([`tairix_procinfo::user_name`]) for the matching name, and write
 //!   it through the injected [`Output`]. A missing name is the GNU
 //!   `cannot find name for user ID` diagnostic; a failed directory walk is
 //!   a service error, never misreported as a missing name.
@@ -53,7 +53,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_user, CallError, ListError, Output, Transport};
+use tairix_procinfo::{user_name, CallError, ListError, Output, Transport};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `whoami`'s own Help tree is unavailable.
@@ -222,14 +222,7 @@ pub fn run(
         Command::Help => short_help(locale, help, out),
         Command::Whoami => {
             let uid = identity.uid().map_err(WhoamiError::Service)?;
-            let mut name: Option<String> = None;
-            for_each_user(transport, |record| {
-                if record.uid == uid && name.is_none() {
-                    name = Some(String::from_utf8_lossy(record.name_bytes()).into_owned());
-                }
-                Ok(())
-            })?;
-            let name = name.ok_or(WhoamiError::NoName(uid))?;
+            let name = user_name(transport, uid)?.ok_or(WhoamiError::NoName(uid))?;
             out.write_line(&name).map_err(WhoamiError::Output)
         }
     }
