@@ -301,6 +301,60 @@ impl BlkStatus {
             _ => None,
         }
     }
+
+    /// How fail-closed this status is, as a rank a consumer can order two
+    /// statuses by: the higher the rank, the less the completion can be
+    /// trusted and the more conservatively it must be treated. The order is
+    /// healthy → served-but-unwell → reissuable → permanent → gone:
+    /// `Ok` < `Degraded` < `TransientError` < `Timeout` < `Reset` <
+    /// `MediumError` < `Offline` < `Removed` < `Fatal`.
+    ///
+    /// This is the single, explicit definition of "which health signal wins"
+    /// when more than one applies to one request — a leaf device's own outcome
+    /// and each interior fault domain above it in the tree
+    /// ([`FaultDomain::child_status`]) — so [`combine`](Self::combine) and
+    /// every consumer that folds statuses cannot order them differently. It is
+    /// kept deliberately independent of the wire value [`as_u32`](Self::as_u32)
+    /// so the transport encoding and the recovery precedence are separate
+    /// concerns that can never silently couple.
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Degraded => 1,
+            Self::TransientError => 2,
+            Self::Timeout => 3,
+            Self::Reset => 4,
+            Self::MediumError => 5,
+            Self::Offline => 6,
+            Self::Removed => 7,
+            Self::Fatal => 8,
+        }
+    }
+
+    /// The single status that most conservatively describes a request to which
+    /// both `self` and `other` apply: the more fail-closed of the two by
+    /// [`severity`](Self::severity).
+    ///
+    /// This is how a serving driver folds a leaf device's own completion
+    /// outcome with what each interior fault domain above it imposes
+    /// ([`FaultDomain::child_status`]). It is the reason the fold is *correct*
+    /// rather than ad-hoc: a hub mid-reset ([`BlkStatus::Reset`]) overriding a
+    /// device's own [`BlkStatus::Ok`] means the aborted transfer is answered
+    /// reissuably and its data is *not* consumed (`Reset` outranks `Ok`),
+    /// while a device's own definitive [`BlkStatus::MediumError`] still wins
+    /// over a concurrent `Reset` (a bad sector is real and must not be retried
+    /// into the same failure). Because it is a total order, the fold is
+    /// associative and commutative, so the chain can be walked in any order
+    /// with the same result.
+    #[must_use]
+    pub const fn combine(self, other: Self) -> Self {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Byte offsets of the completion frame: `status(4) || errno(4) ||
@@ -1137,9 +1191,30 @@ pub fn recovery_wait_timeout<'a, I>(healths: I, now_ns: u64) -> Option<u64>
 where
     I: IntoIterator<Item = &'a BlkHealth>,
 {
-    healths
+    nearest_relative_deadline(
+        healths.into_iter().filter_map(BlkHealth::grace_deadline_ns),
+        now_ns,
+    )
+}
+
+/// The relative timeout a serve loop should arm so the soonest of a set of
+/// absolute one-shot `deadlines` elapses promptly, expressed relative to
+/// monotonic `now_ns`.
+///
+/// This is the shared arithmetic behind both [`recovery_wait_timeout`] (over
+/// per-device [`BlkHealth`] windows) and [`fault_domain_wait_timeout`] (over
+/// interior [`FaultDomain`] windows), so the "nearest armed grace window,
+/// measured from now, saturating at zero" rule lives in exactly one place and
+/// the two seams cannot drift apart. Returns `Some(0)` for a window already
+/// due (poll at once, never an underflowed timeout), `Some(ns)` for the
+/// soonest still `ns` away, and `None` when the set arms no window (park with
+/// no timeout, the `u64::MAX` `waitset_wait` convention).
+fn nearest_relative_deadline<I>(deadlines: I, now_ns: u64) -> Option<u64>
+where
+    I: IntoIterator<Item = u64>,
+{
+    deadlines
         .into_iter()
-        .filter_map(BlkHealth::grace_deadline_ns)
         .min()
         .map(|deadline| deadline.saturating_sub(now_ns))
 }
@@ -1440,6 +1515,76 @@ impl FaultDomain {
             FaultDomainState::Offline => Some(BlkStatus::Offline),
         }
     }
+}
+
+/// The relative timeout a serving/bus driver should arm its wait on so an
+/// otherwise-quiet `Recovering` interior [`FaultDomain`] still has its shared
+/// grace window expired promptly — the soonest armed deadline across
+/// `domains`, expressed relative to monotonic `now_ns`.
+///
+/// This is the interior-node counterpart of [`recovery_wait_timeout`]: a
+/// serve loop that owns fault domains (a hub/controller reset holds its whole
+/// subtree reissuable under one window) parks between events exactly as it
+/// does for per-device windows, and would, without this, leave a quiesced
+/// domain `Recovering` forever if no child request arrived to fold — its
+/// window is only advanced by [`FaultDomain::poll`] on a time tick or a fresh
+/// [`FaultDomain::quiesce`]. It gives the loop the single relative timeout to
+/// pass to `waitset_wait`/`irq_wait` so it wakes when the nearest subtree
+/// window is due and drives every domain's `poll`, failing an unrecovered
+/// subtree closed on time without a busy-poll (event-timed, never a spin).
+///
+/// Its return convention matches [`recovery_wait_timeout`] exactly — both
+/// delegate to the same `nearest_relative_deadline` core (§2.2) — so a serve
+/// loop that owns *both* per-device and fault-domain windows takes the min of
+/// the two and cannot compute them by different rules: `Some(0)` for a window
+/// already due, `Some(ns)` for the soonest still `ns` away, and `None` when no
+/// domain has an armed window (park with no timeout).
+pub fn fault_domain_wait_timeout<'a, I>(domains: I, now_ns: u64) -> Option<u64>
+where
+    I: IntoIterator<Item = &'a FaultDomain>,
+{
+    nearest_relative_deadline(
+        domains
+            .into_iter()
+            .filter_map(FaultDomain::grace_deadline_ns),
+        now_ns,
+    )
+}
+
+/// The effective [`BlkStatus`] one child device's completion should carry,
+/// given the device's own `device_status` and the chain of interior fault
+/// [`domains`](FaultDomain) above it in the discovered hardware tree
+/// (nearest-owner first, up to the root — resolved by re-applying
+/// [`hwtree::fault_domain_owner`](crate::hwtree::fault_domain_owner)), at
+/// monotonic `now_ns`.
+///
+/// This is the single definition of how a serving driver folds a leaf
+/// device's own outcome with what each ancestor bus/hub/controller imposes,
+/// so the leaf-device machine ([`BlkHealth`]) and the interior-node machine
+/// ([`FaultDomain`]) compose coherently rather than through a rule each serve
+/// loop re-derives. A hub mid-reset ([`FaultDomain::child_status`] returns
+/// [`BlkStatus::Reset`]) turns a child's `Ok` into a reissuable `Reset` so the
+/// blip is invisible if the owner returns inside the window; an ancestor whose
+/// window has elapsed fails the child closed to [`BlkStatus::Offline`]; and a
+/// device's own definitive verdict (a bad-sector [`BlkStatus::MediumError`])
+/// still wins over a less-severe ancestor status. The precedence is
+/// [`BlkStatus::combine`]'s total order, folded over the device status and
+/// every domain that imposes one, so the chain composes associatively and a
+/// deeper failing domain can never be masked by a shallower healthy one.
+///
+/// It is a pure query over the domains' states (each domain's fail-closed
+/// *transition* still happens in its own [`FaultDomain::poll`] /
+/// [`quiesce`](FaultDomain::quiesce)), so reading the effective status never
+/// mutates a machine.
+#[must_use]
+pub fn effective_child_status<'a, I>(device_status: BlkStatus, domains: I, now_ns: u64) -> BlkStatus
+where
+    I: IntoIterator<Item = &'a FaultDomain>,
+{
+    domains
+        .into_iter()
+        .filter_map(|domain| domain.child_status(now_ns))
+        .fold(device_status, BlkStatus::combine)
 }
 
 /// One validated request's outcome, kept separate at the source so device
@@ -1753,6 +1898,92 @@ mod tests {
         assert!(BlkStatus::TransientError.is_retryable());
         assert!(!BlkStatus::MediumError.is_retryable());
         assert!(!BlkStatus::Offline.is_retryable());
+    }
+
+    /// The statuses in ascending fail-closed severity — the one order
+    /// `combine` folds by. Kept here so the precedence is asserted, not
+    /// assumed from the enum declaration.
+    const SEVERITY_ORDER: [BlkStatus; 9] = [
+        BlkStatus::Ok,
+        BlkStatus::Degraded,
+        BlkStatus::TransientError,
+        BlkStatus::Timeout,
+        BlkStatus::Reset,
+        BlkStatus::MediumError,
+        BlkStatus::Offline,
+        BlkStatus::Removed,
+        BlkStatus::Fatal,
+    ];
+
+    #[test]
+    fn blk_status_severity_is_a_strict_total_order() {
+        // Severity is strictly increasing across the whole vocabulary, so
+        // `combine` has a well-defined winner for every pair — healthy least,
+        // an unclassified fatal most.
+        for pair in SEVERITY_ORDER.windows(2) {
+            let [lower, higher] = [pair[0], pair[1]];
+            assert!(
+                lower.severity() < higher.severity(),
+                "{lower:?} must rank below {higher:?}"
+            );
+        }
+        // The two data-valid statuses rank below every error status, so a
+        // completion whose data may be consumed can never be "worse" than one
+        // that must be rejected.
+        assert!(BlkStatus::Ok.severity() < BlkStatus::TransientError.severity());
+        assert!(BlkStatus::Degraded.severity() < BlkStatus::TransientError.severity());
+        // Every reissuable status ranks below every permanent/gone one, so a
+        // fold never downgrades a definitive verdict to "retry".
+        for retryable in [
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+        ] {
+            for permanent in [
+                BlkStatus::MediumError,
+                BlkStatus::Offline,
+                BlkStatus::Removed,
+                BlkStatus::Fatal,
+            ] {
+                assert!(retryable.severity() < permanent.severity());
+            }
+        }
+    }
+
+    #[test]
+    fn blk_status_combine_is_the_more_fail_closed_and_forms_a_lattice() {
+        // `combine` picks the higher-severity status, and does so as a proper
+        // fold: commutative, associative, and idempotent, so a chain of
+        // statuses can be folded in any order with the same result.
+        for &a in &SEVERITY_ORDER {
+            assert_eq!(a.combine(a), a, "idempotent");
+            for &b in &SEVERITY_ORDER {
+                let winner = if a.severity() >= b.severity() { a } else { b };
+                assert_eq!(a.combine(b), winner);
+                assert_eq!(a.combine(b), b.combine(a), "commutative");
+                for &c in &SEVERITY_ORDER {
+                    assert_eq!(
+                        a.combine(b).combine(c),
+                        a.combine(b.combine(c)),
+                        "associative"
+                    );
+                }
+            }
+        }
+        // The two precedence decisions the fold exists to make: a hub reset
+        // overrides a child's Ok (the aborted transfer is answered reissuably,
+        // its data not consumed)...
+        assert_eq!(BlkStatus::Ok.combine(BlkStatus::Reset), BlkStatus::Reset);
+        assert!(!BlkStatus::Ok.combine(BlkStatus::Reset).data_valid());
+        // ...but a device's own definitive medium error still wins over a
+        // concurrent reset (a bad sector is real; do not retry into it).
+        assert_eq!(
+            BlkStatus::Reset.combine(BlkStatus::MediumError),
+            BlkStatus::MediumError
+        );
+        assert!(!BlkStatus::Reset
+            .combine(BlkStatus::MediumError)
+            .is_retryable());
     }
 
     #[test]
@@ -2522,6 +2753,138 @@ mod tests {
         assert_eq!(domain.grace_deadline_ns(), None);
         assert_eq!(domain.poll(u64::MAX), FaultDomainState::Recovering);
         assert_eq!(domain.child_status(u64::MAX), Some(BlkStatus::Reset));
+    }
+
+    // ---- Fault-domain composition (`fault_domain_wait_timeout`,
+    // `effective_child_status`) ----
+    //
+    // A serve loop that owns fault domains must time their shared windows and
+    // fold what each imposes onto its children exactly as it does per-device.
+    // These prove the interior-node timing mirrors `recovery_wait_timeout` and
+    // that a device's own health composes coherently with its ancestor chain.
+
+    #[test]
+    fn a_serve_loop_with_no_recovering_domain_arms_no_idle_timer() {
+        // No domain, and an all-`Healthy` set, both arm no window: the loop
+        // parks with no timeout rather than waking spuriously — the same
+        // convention as the per-device timer.
+        assert_eq!(fault_domain_wait_timeout(core::iter::empty(), 100), None);
+        let healthy = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(fault_domain_wait_timeout([&healthy], 100), None);
+    }
+
+    #[test]
+    fn a_serve_loop_arms_the_soonest_recovering_domain_deadline() {
+        // Two owners recovering under different windows: the loop waits for the
+        // soonest to elapse, relative to now; a healthy sibling is ignored.
+        let mut early = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        let mut late = FaultDomain::new(2, DOMAIN_GRACE_NS * 4);
+        early.quiesce(50);
+        late.quiesce(50);
+        let healthy = FaultDomain::new(3, DOMAIN_GRACE_NS);
+        assert_eq!(
+            fault_domain_wait_timeout([&early, &late, &healthy], 100),
+            Some((50 + DOMAIN_GRACE_NS) - 100),
+            "targets the soonest subtree window, measured from now"
+        );
+        // A window already past at `now` yields a zero wait (poll at once,
+        // never an underflow), matching `recovery_wait_timeout`.
+        assert_eq!(
+            fault_domain_wait_timeout([&early], 50 + DOMAIN_GRACE_NS),
+            Some(0)
+        );
+        assert_eq!(
+            fault_domain_wait_timeout([&early], 50 + DOMAIN_GRACE_NS + 5_000),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_child_with_no_fault_domain_answers_on_its_own_health() {
+        // With no interior domain imposing anything, the effective status is
+        // exactly the device's own outcome — the fold is the identity.
+        for status in SEVERITY_ORDER {
+            assert_eq!(
+                effective_child_status(status, core::iter::empty(), 0),
+                status
+            );
+        }
+        // A healthy ancestor imposes nothing, so it too leaves the child's own
+        // status untouched.
+        let healthy = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&healthy], 0),
+            BlkStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_recovering_ancestor_makes_a_healthy_child_reissuable() {
+        // A hub mid-reset turns a child's `Ok` into a reissuable `Reset`, so
+        // the aborted transfer is retried rather than its stale data consumed
+        // — the ride-out-the-blip behaviour, seen from the child.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        let effective = effective_child_status(BlkStatus::Ok, [&hub], 10);
+        assert_eq!(effective, BlkStatus::Reset);
+        assert!(!effective.data_valid());
+        assert!(effective.is_retryable());
+    }
+
+    #[test]
+    fn a_devices_own_medium_error_wins_over_a_recovering_ancestor() {
+        // A definitive bad-sector verdict from the device itself is not masked
+        // by a concurrent hub reset: the child fails closed to the medium
+        // error rather than being told to retry into the same failure.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        let effective = effective_child_status(BlkStatus::MediumError, [&hub], 10);
+        assert_eq!(effective, BlkStatus::MediumError);
+        assert!(!effective.is_retryable());
+    }
+
+    #[test]
+    fn a_failed_ancestor_fails_the_child_closed_regardless_of_its_own_health() {
+        // An ancestor whose grace window has elapsed (or is already offline)
+        // fails the whole subtree closed: even a child reporting `Ok` is told
+        // `Offline`.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        // Observed at/after the window: the domain imposes `Offline`.
+        let effective = effective_child_status(BlkStatus::Ok, [&hub], DOMAIN_GRACE_NS);
+        assert_eq!(effective, BlkStatus::Offline);
+        assert!(!effective.data_valid());
+    }
+
+    #[test]
+    fn a_deep_failing_domain_is_never_masked_by_a_shallow_healthy_one() {
+        // Nested domains (a healthy hub under a recovering root complex): the
+        // most fail-closed status in the whole chain wins, so a healthy nearer
+        // owner cannot hide a failing further one. Order-independent, since the
+        // fold is associative/commutative.
+        let nearest_healthy = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        let mut root_recovering = FaultDomain::new(2, DOMAIN_GRACE_NS);
+        root_recovering.quiesce(0);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&nearest_healthy, &root_recovering], 10),
+            BlkStatus::Reset
+        );
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&root_recovering, &nearest_healthy], 10),
+            BlkStatus::Reset
+        );
+        // If both a nearer hub is recovering and a further root has failed
+        // closed, the child is `Offline` (the strictest ancestor wins).
+        let mut hub_recovering = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        hub_recovering.quiesce(0);
+        let mut root_offline = FaultDomain::new(2, DOMAIN_GRACE_NS);
+        root_offline.quiesce(0);
+        root_offline.poll(DOMAIN_GRACE_NS);
+        assert_eq!(root_offline.state(), FaultDomainState::Offline);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&hub_recovering, &root_offline], 10),
+            BlkStatus::Offline
+        );
     }
 
     // ---- The shared block-service request engine (`serve_request_recovering`)

@@ -482,11 +482,42 @@ count, never an unbounded spin, §2.9/§5.4). Proven host-side over a USB-shaped
 tree (nearest bus, root fallback, nesting, non-owning-ancestor skip, and the
 absent/broken/cyclic fail-closed cases).
 
+**Landed (the composition primitives — the shared fold + timing the live
+wiring consumes):** two pure helpers in `lib/abi` let a serve loop use its
+fault domains exactly as it already uses the per-device machinery, so the live
+wiring cannot re-derive the rules (§2.2, §27):
+- `BlkStatus::severity` + `BlkStatus::combine` are the single, explicit
+  definition of *which health signal wins* when more than one applies to one
+  request. `severity` ranks the vocabulary healthy → served-but-unwell →
+  reissuable → permanent → gone (`Ok` < `Degraded` < `TransientError` <
+  `Timeout` < `Reset` < `MediumError` < `Offline` < `Removed` < `Fatal`), kept
+  deliberately independent of the wire value `as_u32` so the transport encoding
+  and the recovery precedence can never silently couple; `combine` is the
+  more-fail-closed of two, a total order so the fold is associative/commutative.
+- `blkio::effective_child_status(device_status, domains, now_ns)` folds a leaf
+  device's own outcome with what each ancestor fault domain imposes
+  (`FaultDomain::child_status`, over the chain `fault_domain_owner` resolves)
+  into the one status the child's completion carries. A hub mid-reset turns a
+  child's `Ok` into a reissuable `Reset` (aborted data not consumed); a
+  window-elapsed ancestor fails the child closed to `Offline`; a device's own
+  definitive `MediumError` still wins over a concurrent reset; and a deep
+  failing domain is never masked by a shallow healthy one.
+- `blkio::fault_domain_wait_timeout(domains, now_ns)` is the interior-node
+  counterpart of `recovery_wait_timeout` — the soonest armed subtree window,
+  relative to now. Both now delegate to one private `nearest_relative_deadline`
+  core, so a loop owning both per-device and fault-domain windows takes the min
+  of the two and cannot time them by different rules.
+All three are pure and proven host-side (severity total-order + combine lattice
+laws; the child-status fold with precedence and nesting; the interior-node
+timeout mirroring the per-device one).
+
 Remaining:
 - **Wiring the tree into the live serve loops.** With the association resolved
-  by the shared `hwtree::fault_domain_owner` above, the remaining work is the
-  *live* wiring: a serving driver builds each child device's `FaultDomain` from
-  its resolved owner, folds `child_status` into each child's completion, and a
+  by `hwtree::fault_domain_owner` and the fold/timing now the shared
+  `effective_child_status` / `fault_domain_wait_timeout` above, the remaining
+  work is the *live* wiring: a serving driver builds each child device's
+  `FaultDomain` from its resolved owner, folds `effective_child_status` into
+  each completion, arms its wait from `fault_domain_wait_timeout`, and a
   serving/bus driver calls `quiesce`/`resume`/`poll` around its own reset. This
   belongs with the user-space bus/serving driver work (it needs the live serve
   loops and timers the host doubles cannot express), like the per-device

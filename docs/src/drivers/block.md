@@ -233,9 +233,40 @@ bounded by the node count, never an unbounded spin, `AGENTS.md` §2.9). It reads
 the tree and hard-codes no board (`AGENTS.md` §18.1, §2.20), so it is the one
 definition every serving/bus driver uses to build a child's `FaultDomain`.
 
-Driving a subtree's children through the `FaultDomain` in the live serve loops —
-and the volume-manager degrade marking and health observability — are the staged
-remainder (`plans/FIX-IO.md` IO4–IO6).
+Two pure composition helpers let a serve loop use those fault domains exactly
+as it already uses the per-device machinery, without re-deriving the rules
+(`AGENTS.md` §2.2):
+
+- `blkio::fault_domain_wait_timeout(domains, now_ns)` is the interior-node
+  counterpart of the per-device `recovery_wait_timeout`: the soonest armed
+  subtree grace window, relative to now, so a serve loop parks on the nearest
+  event and never leaves a quiesced-but-quiet domain `Recovering` forever. Both
+  delegate to one shared `nearest_relative_deadline` core, so a loop that owns
+  *both* per-device and fault-domain windows takes the min of the two and
+  cannot compute them by different rules (`Some(0)` = poll now, `None` = park
+  with no timeout, matching the `waitset_wait` convention).
+- `blkio::effective_child_status(device_status, domains, now_ns)` folds a
+  child's own outcome with what each ancestor imposes into the one status its
+  completion carries, using `BlkStatus::combine`'s total order
+  (`BlkStatus::severity`). A hub mid-reset turns a child's `Ok` into a
+  reissuable `Reset` (its aborted data is not consumed); an ancestor whose
+  window has elapsed fails the child closed to `Offline`; and a device's own
+  definitive `MediumError` still wins over a concurrent reset — a bad sector is
+  real and must not be retried into. The fold is associative and commutative,
+  so a deeper failing domain can never be masked by a shallower healthy one,
+  whatever order the chain is walked in.
+
+`BlkStatus::severity`/`combine` are the single, explicit definition of "which
+health signal wins" when more than one applies to one request, kept independent
+of the wire value `BlkStatus::as_u32` so the transport encoding and the recovery
+precedence can never silently couple. All of these are pure and proven
+host-side in `lib/abi`.
+
+Driving a subtree's children through the `FaultDomain` in the live serve loops
+— building each child's domain from its resolved owner, folding
+`effective_child_status` into completions, and arming the loop's wait from
+`fault_domain_wait_timeout` — and the volume-manager degrade marking and health
+observability are the staged remainder (`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 
