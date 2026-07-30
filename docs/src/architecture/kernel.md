@@ -227,6 +227,28 @@ record under the `log` phase and halts.
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
 | 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
 | 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
+| 4130 | Warn  | `VOLUME_DEGRADED`           | audit  |
+| 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
+| 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
+
+`VOLUME_DEGRADED` / `VOLUME_RECOVERING` / `VOLUME_RECOVERED` are the
+storage-health audit trail (`plans/FIX-IO.md` IO5). The kernel block client
+(`tairix_kernel_core::fs::blkclient`) keeps a live per-volume availability
+overlay folded from each completion's reported `BlkStatus`, and emits exactly
+one record on a genuine *edge* of that overlay — classified through the one
+shared `MountAvailability::health_transition` rule, so a run of identical
+completions logs once, not per request. A device reporting itself unwell while
+still serving is `VOLUME_DEGRADED` (`Warn`); a device that stalled or reset and
+entered its bounded recovery grace window is `VOLUME_RECOVERING` (`Warn`); and a
+degraded/recovering volume returning to healthy service — the disk came back —
+is `VOLUME_RECOVERED` (`Info`), logged as a recovery rather than a fault. Each
+carries `dev`, the block-service endpoint id, and never a secret or capability
+token. Transitions into or out of the surprise-removal vanish states
+(`plans/DEVICES.md` D4) carry no health edge here: that path owns its own
+records, so a removal is never double-counted and a re-insert never fabricates a
+recovery. A user-space block driver that later owns the finer device-level
+health machine (retry/reset/grace entry-expiry) emits those in its own
+event-id range against the same shared transition vocabulary.
 
 `FS_NODE_MUTATED` / `FS_MUTATION_DENIED` are the filesystem-mutation audit
 pair. Every state-changing filesystem syscall — `fs_mkdir`, `fs_unlink`

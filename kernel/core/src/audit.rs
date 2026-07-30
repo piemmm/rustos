@@ -38,6 +38,9 @@
 //! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
 //! | 4100 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
 //! | 4101 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
+//! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
+//! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
+//! | 4132 | Info | `VOLUME_RECOVERED`  | audit | A degraded/recovering volume returned to healthy service (the disk came back). Emitted once on the edge back to `Available`; `dev` names the block-service endpoint. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -458,6 +461,23 @@ pub enum AuditEvent {
     /// discipline: a failed POST renders the module inoperable). Carries the
     /// `family` whose self-test failed.
     CryptoSelfTestFailed,
+    /// A served volume's backing block device began reporting itself
+    /// unhealthy while still serving I/O (a recovered-error threshold, a
+    /// pending sector reallocation). The `dev` field names the block-service
+    /// endpoint. Emitted once on the healthy/recovering -> degraded edge, not
+    /// per request.
+    VolumeDegraded,
+    /// A served volume's backing block device stalled or reset and entered
+    /// its bounded recovery grace window; its I/O is being ridden out
+    /// reissuably while it is given a bounded chance to come back. The `dev`
+    /// field names the block-service endpoint. Emitted once on entry to the
+    /// recovering edge.
+    VolumeRecovering,
+    /// A degraded or recovering volume returned to healthy service — the
+    /// disk came back. The `dev` field names the block-service endpoint.
+    /// Logged as a recovery, not a fault, and emitted once on the return
+    /// edge so a disk that comes back to life is noted in the health trail.
+    VolumeRecovered,
 }
 
 impl AuditEvent {
@@ -511,6 +531,9 @@ impl AuditEvent {
             Self::SystemConfigRejected => 4111,
             Self::CpuOpsRoutineSelected => 4120,
             Self::CryptoSelfTestFailed => 4121,
+            Self::VolumeDegraded => 4130,
+            Self::VolumeRecovering => 4131,
+            Self::VolumeRecovered => 4132,
         })
     }
 
@@ -566,6 +589,9 @@ impl AuditEvent {
             Self::SystemConfigRejected => "system configuration rejected",
             Self::CpuOpsRoutineSelected => "cpu accelerated routine selected",
             Self::CryptoSelfTestFailed => "crypto power-on self-test failed",
+            Self::VolumeDegraded => "volume backing device degraded",
+            Self::VolumeRecovering => "volume backing device recovering",
+            Self::VolumeRecovered => "volume backing device recovered",
         }
     }
 }
@@ -603,6 +629,7 @@ mod tests {
             AuditEvent::ProcessSpawnFailed,
             AuditEvent::DriverUnloaded,
             AuditEvent::TaskFaultKilled,
+            AuditEvent::TaskExitedNonzero,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
             AuditEvent::GroupsDbLoaded,
@@ -635,6 +662,9 @@ mod tests {
             AuditEvent::SystemConfigRejected,
             AuditEvent::CpuOpsRoutineSelected,
             AuditEvent::CryptoSelfTestFailed,
+            AuditEvent::VolumeDegraded,
+            AuditEvent::VolumeRecovering,
+            AuditEvent::VolumeRecovered,
         ] {
             let id = ev.id().0;
             assert!(
@@ -660,6 +690,7 @@ mod tests {
             AuditEvent::ProcessSpawnFailed.id().0,
             AuditEvent::DriverUnloaded.id().0,
             AuditEvent::TaskFaultKilled.id().0,
+            AuditEvent::TaskExitedNonzero.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
             AuditEvent::GroupsDbLoaded.id().0,
@@ -692,6 +723,9 @@ mod tests {
             AuditEvent::SystemConfigRejected.id().0,
             AuditEvent::CpuOpsRoutineSelected.id().0,
             AuditEvent::CryptoSelfTestFailed.id().0,
+            AuditEvent::VolumeDegraded.id().0,
+            AuditEvent::VolumeRecovering.id().0,
+            AuditEvent::VolumeRecovered.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

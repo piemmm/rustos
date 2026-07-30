@@ -470,13 +470,38 @@ render them with a `[degraded]`/`[recovering]` marker while the vanish states
 stay authoritative. The C-ABI view (`include/tairix/tairix_sysinfo.h`)
 regenerated through the drift guard.
 
+**Landed (the consumer-side health audit trail):** the shared edge classifier
+`MountAvailability::health_transition(prev, next) -> Option<BlkHealthTransition>`
+(`lib/abi/sysinfo.rs`) is the single definition of *when a served volume's
+health materially changed* — `Degraded` / `Recovering` / `Recovered` — and is
+edge-triggered (an unchanged state, and any transition touching a
+surprise-removal vanish state, yields no event, so D4 removals are never
+double-counted and a re-insert never fabricates a recovery). The kernel block
+client (`kernel/core/src/fs/blkclient.rs`) folds each completion's reported
+`BlkStatus` through it via an atomic swap that yields the prior state, and emits
+exactly one `lib/log` record per real edge through the audit sink it already
+holds: `AuditEvent::{VolumeDegraded (4130, Warn), VolumeRecovering (4131, Warn),
+VolumeRecovered (4132, Info)}` (`kernel/core/src/audit.rs`), each naming the
+block-service endpoint (`dev`) and never a secret. A recovery — "the disk came
+back" — is logged as an `Info` recovery, not a fault. Proven host-side: the
+classifier (edge-triggering + vanish-state exclusion), an end-to-end
+recovering→recovered trail over the live transfer path, and a direct
+edge-triggered journey (degrade, duplicate-suppressed, recovering, recovered,
+medium-error-no-event, degrade). Level-dependent tests are serialised through
+one shared `tairix_kernel_core::test_sink::with_log_level` guard so they cannot
+flake against a concurrent global-threshold change. The finer *device-level*
+events (retry/reset/grace entry-expiry, naming the fault-domain node) are the
+serving driver's to emit against this **same** `BlkHealthTransition` vocabulary
+in its own event-id range; they land with the user-space serve loops that own
+the `BlkHealth`/`FaultDomain` machines (IO3/IO4 remaining), not a second
+definition.
+
 Remaining deliverables:
-- **Health events through `lib/log`** (`plans/SYSLOG.md`) with stable event IDs
-  on the hash-chained audit trail (§19.4): every fault, retry, reset (naming the
-  fault-domain node), degrade, grace-window entry/expiry, and — importantly —
-  every *recovery* ("disk came back"). Security-relevant decisions (driver
-  quarantine/restart) stay on the audit log; routine advisories may also use
-  `stdinfo` (§20) but never *instead of* the audit log.
+- **Serving-driver device-level health events** (`plans/SYSLOG.md`): every
+  retry, reset (naming the fault-domain node), and grace-window entry/expiry the
+  serving driver's `BlkHealth`/`FaultDomain` machines observe, emitted against
+  the shared `BlkHealthTransition` vocabulary above. Lands with the user-space
+  serve loops (IO3/IO4 remaining), which own those machines and their timers.
 - **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
   availability already landed above: a capability-gated device/array health
   query (fault-domain node, retry/reset counts) following the bond-member and

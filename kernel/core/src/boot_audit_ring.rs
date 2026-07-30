@@ -381,7 +381,7 @@ mod tests {
     use super::{BootAuditRing, TAIL_MESSAGE_MAX};
     use core::sync::atomic::{AtomicU64, Ordering};
     use tairix_abi::Duration64;
-    use tairix_log::{log, set_max_level, Event, EventId, Level, Sink};
+    use tairix_log::{log, Event, EventId, Level, Sink};
 
     /// A scripted monotonic clock: each read returns a strictly increasing
     /// second so stored timestamps are distinguishable.
@@ -543,24 +543,19 @@ mod tests {
     #[test]
     fn filters_below_threshold_are_never_recorded() {
         // The ring is a `Sink`, so the shared `log()` level filter gates it:
-        // a record below the threshold never reaches `write_event`.
-        let guard = LEVEL_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // a record below the threshold never reaches `write_event`. The
+        // shared level guard serialises this against every other test that
+        // depends on the process-global threshold.
         reset_clock();
-        set_max_level(Level::Warn);
         let ring: BootAuditRing<8> = BootAuditRing::new(scripted_clock);
-        assert!(!log(&ring, &event(1, Level::Info, "dropped")));
-        assert!(log(&ring, &event(2, Level::Error, "kept")));
-        set_max_level(Level::Info);
-        drop(guard);
+        crate::test_sink::with_log_level(Level::Warn, || {
+            assert!(!log(&ring, &event(1, Level::Info, "dropped")));
+            assert!(log(&ring, &event(2, Level::Error, "kept")));
+        });
 
         assert_eq!(ring.len(), 1);
         assert_eq!(ring.record(0).expect("kept").id.0, 2);
     }
-
-    // Serialises tests that touch the shared global level filter.
-    static LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use std::string::{String, ToString};
     use std::vec;

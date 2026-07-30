@@ -90,3 +90,26 @@ impl Sink for TestSink {
         });
     }
 }
+
+/// Serialise host tests that depend on the process-global `tairix_log`
+/// level filter, pinning it to `level` for the duration of `body` and
+/// restoring the prior threshold afterward.
+///
+/// The `tairix_log` level filter is a single process-global atomic, so a
+/// test that raises or lowers it races every other test in the binary. A
+/// test asserting on a level-gated emission must therefore hold this one
+/// shared lock rather than each rolling its own (two independent mutexes
+/// exclude nothing), so a record can never be intermittently lost to a
+/// concurrent threshold change — keeping such tests deterministic.
+#[cfg(test)]
+pub fn with_log_level<R>(level: Level, body: impl FnOnce() -> R) -> R {
+    static LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LEVEL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = tairix_log::max_level();
+    tairix_log::set_max_level(level);
+    let result = body();
+    tairix_log::set_max_level(previous);
+    result
+}

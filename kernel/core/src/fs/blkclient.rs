@@ -27,13 +27,14 @@ use tairix_abi::blkio::{
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
-use tairix_abi::sysinfo::MountAvailability;
+use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
 use tairix_kernel_sec::{TaskCapabilities, TaskId as SecTaskId, UserId};
-use tairix_log::Sink;
+use tairix_log::{Field, FieldValue, Level, Sink};
 
+use crate::audit::AuditEvent;
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
 use crate::sharedreg::KernelHold;
@@ -197,13 +198,54 @@ impl BlkClient {
 
     /// Reflect one completion's reported device-level health into the shared
     /// availability overlay, through the single shared status→availability
-    /// mapping. A status that carries no volume-availability signal (a
-    /// per-request medium error, or a gone/dead device owned by the
-    /// surprise-removal path) leaves the overlay unchanged.
+    /// mapping, and record a health-transition audit event on a genuine
+    /// change of state. A status that carries no volume-availability signal
+    /// (a per-request medium error, or a gone/dead device owned by the
+    /// surprise-removal path) leaves the overlay unchanged and logs nothing.
+    ///
+    /// The overlay update is a single atomic swap that yields the prior
+    /// state, so the transition is classified edge-triggered through the one
+    /// shared [`MountAvailability::health_transition`] rule: a run of
+    /// identical completions logs one event, not one per request, and a disk
+    /// that comes back is logged exactly once as a recovery. The overlay byte
+    /// is only ever a state this method stored, so its decode cannot fail;
+    /// were it ever corrupt, it fails closed to "no transition" (no forged
+    /// health event).
     fn note_health(&self, status: tairix_abi::blkio::BlkStatus) {
-        if let Some(availability) = MountAvailability::from_block_status(status) {
-            self.health.store(availability.as_u8(), Ordering::Relaxed);
+        let Some(next) = MountAvailability::from_block_status(status) else {
+            return;
+        };
+        let prev = self.health.swap(next.as_u8(), Ordering::Relaxed);
+        if prev == next.as_u8() {
+            return;
         }
+        if let Ok(prev) = MountAvailability::from_u8(prev) {
+            if let Some(transition) = MountAvailability::health_transition(prev, next) {
+                self.emit_health(transition);
+            }
+        }
+    }
+
+    /// Emit one storage-health audit record for a real availability edge,
+    /// naming the block-service endpoint in the `dev` field (never a secret
+    /// or a capability token). A degrade or entry into recovery is a
+    /// recoverable anomaly ([`Level::Warn`]); a recovery — the disk came
+    /// back — is a routine operational event ([`Level::Info`]).
+    fn emit_health(&self, transition: BlkHealthTransition) {
+        let (event, level) = match transition {
+            BlkHealthTransition::Degraded => (AuditEvent::VolumeDegraded, Level::Warn),
+            BlkHealthTransition::Recovering => (AuditEvent::VolumeRecovering, Level::Warn),
+            BlkHealthTransition::Recovered => (AuditEvent::VolumeRecovered, Level::Info),
+        };
+        crate::audit::emit(
+            self.audit,
+            level,
+            event,
+            &[Field {
+                key: "dev",
+                value: FieldValue::UnsignedInt(self.endpoint.id().0),
+            }],
+        );
     }
 
     /// Commit every completed write to the medium (the blkio flush
@@ -1000,5 +1042,121 @@ mod tests {
         );
         assert_eq!(health(&client), MountAvailability::Available);
         server.join().unwrap();
+    }
+
+    /// An audit sink that records `(event id, dev)` for every event it
+    /// receives. Shared across the parallel tests, so each test filters the
+    /// record by its own unique block-service endpoint id (`dev`).
+    struct RecordingSink {
+        events: Mutex<Vec<(u32, u64)>>,
+    }
+    impl Sink for RecordingSink {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            let dev = event
+                .fields
+                .iter()
+                .find(|f| f.key == "dev")
+                .and_then(|f| match f.value {
+                    tairix_log::FieldValue::UnsignedInt(v) => Some(v),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            self.events.lock().unwrap().push((event.id.0, dev));
+        }
+    }
+    static REC: RecordingSink = RecordingSink {
+        events: Mutex::new(Vec::new()),
+    };
+
+    /// The audit event ids `REC` recorded for the endpoint `dev`, in order.
+    fn recorded_for(dev: u64) -> Vec<u32> {
+        REC.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, d)| *d == dev)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// As [`connect_scripted`], but audits through `audit` and returns the
+    /// endpoint id so a caller can pick its own records out of a shared sink.
+    fn connect_scripted_audited(
+        script: Vec<Option<Errno>>,
+        count: usize,
+        audit: &'static (dyn Sink + Sync),
+    ) -> (BlkClient, u64, thread::JoinHandle<()>) {
+        let id = fresh_endpoint_id();
+        let endpoint = register_endpoint(id);
+        let window = leak_window();
+        let script = StdArc::new(Mutex::new(script));
+        let server = serve_scripted(endpoint, script, count);
+        let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+        let client = BlkClient::connect(id, hold, audit).expect("connect");
+        (client, id, server)
+    }
+
+    #[test]
+    fn a_blip_ridden_out_end_to_end_audits_recovering_then_recovered() {
+        use tairix_abi::blkio::BlkStatus;
+        assert_eq!(
+            BlkStatus::for_errno(Errno::EndpointStalled),
+            BlkStatus::Reset
+        );
+        // Pin the log level so a concurrent test raising the global
+        // threshold cannot drop the `Info`-level recovery record.
+        crate::test_sink::with_log_level(Level::Trace, || {
+            // Geometry (Ok, no edge), then one reset ridden out inside the
+            // retry budget and a good read. The live transfer path folds the
+            // reset (available -> recovering) then the recovery (recovering ->
+            // available), so the audit trail is exactly one recovering edge
+            // followed by one recovery edge.
+            let (mut client, id, server) =
+                connect_scripted_audited(vec![Some(Errno::EndpointStalled), None], 3, &REC);
+            let mut buf = [0u8; BLOCK_SIZE];
+            client.read_blocks(0, &mut buf).expect("read after reissue");
+            server.join().unwrap();
+            assert_eq!(
+                recorded_for(id),
+                vec![
+                    AuditEvent::VolumeRecovering.id().0,
+                    AuditEvent::VolumeRecovered.id().0,
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn health_transitions_are_audited_edge_triggered() {
+        use tairix_abi::blkio::BlkStatus;
+        // Pin the log level so a concurrent test raising the global
+        // threshold cannot drop the `Info`-level recovery record.
+        crate::test_sink::with_log_level(Level::Trace, || {
+            // Geometry only; its `Ok` is no edge, so the trail starts empty.
+            let (client, id, server) = connect_scripted_audited(vec![], 1, &REC);
+            server.join().unwrap();
+            assert_eq!(recorded_for(id), Vec::<u32>::new());
+
+            // Drive a full health journey through the fold point directly: a
+            // degrade edge, a duplicate that is *not* re-logged, a move into
+            // recovery, the disk coming back, a medium error that carries no
+            // availability signal (no event), and finally another degrade.
+            client.note_health(BlkStatus::Degraded); // available -> degraded
+            client.note_health(BlkStatus::Degraded); // no edge: not re-logged
+            client.note_health(BlkStatus::Reset); // degraded -> recovering
+            client.note_health(BlkStatus::Ok); // recovering -> available
+            client.note_health(BlkStatus::MediumError); // no signal, no event
+            client.note_health(BlkStatus::Degraded); // available -> degraded
+
+            assert_eq!(
+                recorded_for(id),
+                vec![
+                    AuditEvent::VolumeDegraded.id().0,
+                    AuditEvent::VolumeRecovering.id().0,
+                    AuditEvent::VolumeRecovered.id().0,
+                    AuditEvent::VolumeDegraded.id().0,
+                ]
+            );
+        });
     }
 }

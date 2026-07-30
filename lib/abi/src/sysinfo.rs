@@ -2082,6 +2082,67 @@ impl MountAvailability {
             }
         }
     }
+
+    /// Classify the change from `prev` to `next` as a storage-health audit
+    /// transition, or [`None`] when the change carries no such signal.
+    ///
+    /// This is the single definition of *when a served volume's health has
+    /// materially changed* (`plans/FIX-IO.md` IO5), shared by every consumer
+    /// that keeps a live availability overlay so they cannot classify a
+    /// transition differently and cannot each emit their own idea of a
+    /// recovery. It is edge-triggered: an unchanged state yields [`None`], so
+    /// a run of identical completions logs one event, not one per request.
+    ///
+    /// Only the live health overlay's own states — [`Available`](Self::Available),
+    /// [`Degraded`](Self::Degraded), and [`Recovering`](Self::Recovering) —
+    /// take part. Any transition into or out of a vanish state
+    /// ([`UnavailableDirty`](Self::UnavailableDirty) /
+    /// [`UnavailableLost`](Self::UnavailableLost) /
+    /// [`RecoveryConflict`](Self::RecoveryConflict)) yields [`None`]: those
+    /// are owned by the D4 surprise-removal path (`plans/DEVICES.md`), which
+    /// logs its own events, and letting them produce a health event here
+    /// would double-count a removal or fabricate a "recovery" for a
+    /// re-inserted disk that the re-insert path already reports.
+    #[must_use]
+    pub const fn health_transition(prev: Self, next: Self) -> Option<BlkHealthTransition> {
+        match (prev, next) {
+            (Self::Available | Self::Recovering, Self::Degraded) => {
+                Some(BlkHealthTransition::Degraded)
+            }
+            (Self::Available | Self::Degraded, Self::Recovering) => {
+                Some(BlkHealthTransition::Recovering)
+            }
+            (Self::Degraded | Self::Recovering, Self::Available) => {
+                Some(BlkHealthTransition::Recovered)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An edge-triggered change in a served volume's live health, derived by
+/// [`MountAvailability::health_transition`] for the storage-health audit
+/// trail (`plans/FIX-IO.md` IO5).
+///
+/// This names *what changed*; the numeric audit-log event id is assigned by
+/// the subsystem that emits the record (the kernel block client, a user-space
+/// block driver), each in its own reserved event-id range, exactly as the
+/// same logical driver/lifecycle events already carry per-subsystem ids.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BlkHealthTransition {
+    /// A volume that was healthy or recovering began reporting itself
+    /// unhealthy while still serving I/O (a recovered-error threshold, a
+    /// pending sector reallocation).
+    Degraded,
+    /// A volume's backing device stalled or reset and entered its bounded
+    /// recovery grace window; its I/O is being ridden out reissuably while it
+    /// is given a bounded chance to come back.
+    Recovering,
+    /// A degraded or recovering volume returned to healthy service — the
+    /// "the disk came back to life" recovery: a disk that stalled or reported
+    /// itself unwell can recover, and that return is logged as a recovery
+    /// rather than a fault.
+    Recovered,
 }
 
 /// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
@@ -4089,10 +4150,10 @@ impl CrashRecord {
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
-        KernelMemoryStats, LoadAverage, MountAvailability, MountListRequest, MountRecord,
-        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        encoded_query_table, spec_for, BlkHealthTransition, CpuTimeListRequest, CpuTimeRecord,
+        HardwareTreeRequest, KernelMemoryStats, LoadAverage, MountAvailability, MountListRequest,
+        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE,
         ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
         MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
@@ -4969,6 +5030,59 @@ mod tests {
             BlkStatus::Fatal,
         ] {
             assert_eq!(MountAvailability::from_block_status(status), None);
+        }
+    }
+
+    #[test]
+    fn health_transition_is_edge_triggered_among_live_states() {
+        use MountAvailability::{Available, Degraded, Recovering};
+        // A device going unwell, then into recovery, then back to healthy —
+        // each is exactly one audit edge; the "came back" recovery is logged.
+        assert_eq!(
+            MountAvailability::health_transition(Available, Degraded),
+            Some(BlkHealthTransition::Degraded)
+        );
+        assert_eq!(
+            MountAvailability::health_transition(Degraded, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        assert_eq!(
+            MountAvailability::health_transition(Available, Recovering),
+            Some(BlkHealthTransition::Recovering)
+        );
+        assert_eq!(
+            MountAvailability::health_transition(Recovering, Degraded),
+            Some(BlkHealthTransition::Degraded)
+        );
+        for from in [Degraded, Recovering] {
+            assert_eq!(
+                MountAvailability::health_transition(from, Available),
+                Some(BlkHealthTransition::Recovered),
+                "a returning disk is a recovery"
+            );
+        }
+        // An unchanged state is not an edge: a run of identical completions
+        // logs one event, not one per request.
+        for state in [Available, Degraded, Recovering] {
+            assert_eq!(MountAvailability::health_transition(state, state), None);
+        }
+    }
+
+    #[test]
+    fn health_transition_ignores_the_surprise_removal_vanish_states() {
+        use MountAvailability::{
+            Available, Degraded, Recovering, RecoveryConflict, UnavailableDirty, UnavailableLost,
+        };
+        // Every transition touching a vanish state carries no health edge:
+        // the D4 surprise-removal path owns those, so a removal is never
+        // double-counted and a re-insert never fabricates a recovery here.
+        let vanish = [UnavailableDirty, UnavailableLost, RecoveryConflict];
+        let live = [Available, Degraded, Recovering];
+        for &v in &vanish {
+            for &other in live.iter().chain(vanish.iter()) {
+                assert_eq!(MountAvailability::health_transition(v, other), None);
+                assert_eq!(MountAvailability::health_transition(other, v), None);
+            }
         }
     }
 
