@@ -88,6 +88,7 @@ mod program {
     use tairix_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     };
+    use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth};
     use tairix_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{log, Event, EventId, Field, Level};
@@ -148,6 +149,21 @@ mod program {
     /// Logged once per interface at node publish, so a metal capture shows how
     /// a keyboard/mouse's reports will be read (QEMU models no Pi USB).
     const HCD_HID_ENUM: EventId = EventId(4150);
+
+    /// Interior fault-domain event id: the controller faulted and the whole
+    /// subtree entered its shared recovery grace window (`plans/FIX-IO.md`
+    /// IO4/IO5). Classified through the shared `for_fault_domain` vocabulary.
+    const HCD_DOMAIN_RECOVERING: EventId = EventId(4190);
+
+    /// Interior fault-domain event id: the controller demonstrably returned and
+    /// the subtree recovered with no reboot.
+    const HCD_DOMAIN_RECOVERED: EventId = EventId(4191);
+
+    /// Interior fault-domain event id: the recovery grace window elapsed with
+    /// the controller still faulted — the subtree is failed closed (the
+    /// fault-domain owner's own distinct fail-closed event, sticky but
+    /// recoverable).
+    const HCD_DOMAIN_OFFLINE: EventId = EventId(4192);
 
     /// Reserved base of the URB call-endpoint id range the HCDs allocate from.
     ///
@@ -603,6 +619,75 @@ mod program {
             retract_interface(transport);
         }
         reset_reenumerate_and_publish(device, transports, set, urb_base, delay);
+        true
+    }
+
+    /// Record a controller interior fault-domain edge as one audit event,
+    /// naming the controller's owner id.
+    ///
+    /// Recovering/Recovered use the shared `BlkHealthTransition` vocabulary (via
+    /// [`ControllerHealth`], over `for_fault_domain`), the same the leaf devices
+    /// and the mount overlay use, so a controller recovery and a disk recovery
+    /// cannot be classified differently; the fail-closed edge is the
+    /// fault-domain owner's own distinct event.
+    fn log_domain_event(event: ControllerDomainEvent, owner: u32) {
+        let (id, level, message) = match event {
+            ControllerDomainEvent::Recovering => (
+                HCD_DOMAIN_RECOVERING,
+                Level::Warn,
+                "usb-hcd: controller faulted, subtree held recovering under one grace window",
+            ),
+            ControllerDomainEvent::Recovered => (
+                HCD_DOMAIN_RECOVERED,
+                Level::Info,
+                "usb-hcd: controller returned, subtree recovered",
+            ),
+            ControllerDomainEvent::FailedClosed => (
+                HCD_DOMAIN_OFFLINE,
+                Level::Warn,
+                "usb-hcd: controller recovery grace window elapsed, subtree failed closed",
+            ),
+        };
+        log_hex_event(id, level, message, "owner_hex", u64::from(owner));
+    }
+
+    /// Recover a faulted controller under its interior fault domain, folding the
+    /// outcome into `health` and auditing each edge.
+    ///
+    /// This wraps [`recover_if_controller_faulted`] with the controller's
+    /// [`ControllerHealth`] machine so a controller blip is one coherent
+    /// recovery episode over the whole subtree (`plans/FIX-IO.md` IO4), ridden
+    /// out within a bounded grace window rather than either silently retried
+    /// forever or — on a failed reset — left faulted with no timer to retry it
+    /// (a faulted controller raises no further interrupts, xHCI §4.24.1, so the
+    /// event loop would otherwise park indefinitely).
+    ///
+    /// A controller already **failed closed** (its grace window elapsed) is
+    /// declared dead and is not retried: one that raises no interrupt and will
+    /// not reset stays failed closed rather than re-opening its window forever
+    /// (fail closed, sticky-but-recoverable — a later successful reset clears
+    /// it). Returns whether a recovery was attempted, so the caller restarts its
+    /// service pass on the freshly reset controller.
+    fn recover_controller(
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
+        delay: &ClockDelay,
+        health: &mut ControllerHealth,
+    ) -> bool {
+        if !device.controller_faulted() || health.is_failed_closed() {
+            return false;
+        }
+        let owner = health.owner();
+        if let Some(event) = health.begin_recovery(tairix_rt::clock_get()) {
+            log_domain_event(event, owner);
+        }
+        recover_if_controller_faulted(device, transports, set, urb_base, delay);
+        let recovered = !device.controller_faulted();
+        if let Some(event) = health.note_reset(recovered, tairix_rt::clock_get()) {
+            log_domain_event(event, owner);
+        }
         true
     }
 
@@ -1390,6 +1475,17 @@ mod program {
             },
         );
 
+        // The controller is the interior fault-domain owner of every device
+        // below it (`plans/FIX-IO.md` IO4): a controller-wide fault (a latched
+        // Host System Error, HCHalted, the HCRST reset) is one recovery episode
+        // over the whole subtree, ridden out within a bounded grace window
+        // before it is failed closed — not one spurious failure per device. The
+        // owner id is this controller's own runtime-discovered URB endpoint
+        // block base (never a board constant), naming the owner in the audit
+        // log.
+        let controller_owner = u32::try_from(urb_base & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        let mut controller_health = ControllerHealth::new(controller_owner);
+
         // The asynchronous event loop: park — unbounded, with no periodic
         // wakes — until a transport endpoint or the controller interrupt is
         // ready, never spinning a quiet controller. Downstream hot-plug
@@ -1398,8 +1494,39 @@ mod program {
         // Port Status Change interrupt.
         loop {
             let mut token = 0u64;
-            let wait_ret = tairix_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
+            // While the controller is recovering, park only until its grace
+            // one-shot comes due, so a faulted controller — which raises no
+            // further interrupt (xHCI §4.24.1) — is retried and failed closed
+            // on time off a one-shot rather than parking forever. With nothing
+            // recovering the loop parks unbounded (never a spin).
+            let timeout = controller_health
+                .wait_timeout(tairix_rt::clock_get())
+                .unwrap_or(super::WAIT_FOREVER_NS);
+            let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
             if wait_ret < 0 {
+                let errno = Errno::from_i32(i32::try_from(-wait_ret).unwrap_or(0))
+                    .unwrap_or(Errno::NotFound);
+                if errno == Errno::TimedOut {
+                    // The controller grace one-shot fired. Retry the reset (a
+                    // faulted controller raises no interrupt to wake us); this
+                    // fails it closed once the window has elapsed. If it is no
+                    // longer faulted it returned on its own — record that.
+                    if device.controller_faulted() {
+                        let _ = recover_controller(
+                            &mut device,
+                            &mut transports,
+                            set,
+                            urb_base,
+                            &delay,
+                            &mut controller_health,
+                        );
+                    } else if let Some(event) =
+                        controller_health.note_reset(true, tairix_rt::clock_get())
+                    {
+                        log_domain_event(event, controller_health.owner());
+                    }
+                    continue;
+                }
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,
@@ -1542,12 +1669,13 @@ mod program {
                     // detach or a hub-assembly detach) can leave the controller
                     // halted with a latched Host System Error on the Pi 4 VL805;
                     // recover before servicing so the re-plug is still seen.
-                    if recover_if_controller_faulted(
+                    if recover_controller(
                         &mut device,
                         &mut transports,
                         set,
                         urb_base,
                         &delay,
+                        &mut controller_health,
                     ) {
                         continue;
                     }
@@ -1575,12 +1703,13 @@ mod program {
                     // fault on the Pi 4 VL805 after it completes; recover here too
                     // so the re-plug is seen rather than the controller staying
                     // halted and silent.
-                    let _ = recover_if_controller_faulted(
+                    let _ = recover_controller(
                         &mut device,
                         &mut transports,
                         set,
                         urb_base,
                         &delay,
+                        &mut controller_health,
                     );
                 }
                 _ => {}

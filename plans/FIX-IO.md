@@ -547,18 +547,52 @@ vocabulary (`MSD_DOMAIN_RECOVERING 4171`, `MSD_DOMAIN_RECOVERED 4172`,
 `MSD_DOMAIN_OFFLINE 4173`). So one shared-transport blip is one recovery episode
 across the device, not N spurious LUN failures.
 
+**Landed (the first live *interior hardware-tree* fault domain — the xHCI
+controller):** the first bus/HCD driver to own an interior tree node's
+`FaultDomain` is the xHCI host-controller driver (`drivers/bus/usb/xhci`). The
+controller is the interior node every USB device below it hangs from, so a
+controller-wide fault — a latched Host System Error / HCHalted, or the
+`USBCMD.HCRST` reset the driver performs to recover — is one recovery episode
+over the whole subtree, not one spurious failure per device. The pure,
+host-tested coordinator `domain::ControllerHealth` (the crate's `lib`) wraps one
+`FaultDomain` (owner = the controller's own discovered URB endpoint-block base,
+never a board constant; grace = the documented `CONTROLLER_GRACE_NS`, matching
+the removable-storage window it sits above so the controller and the storage
+beneath it ride a blip out under one coherent budget) and encapsulates the
+recovery sequencing over the landed primitives: `begin_recovery` opens the
+shared window on the first fault, `note_reset(ok)` recovers on a demonstrated
+return or advances the window on a failed reset, `poll` fails a quiet recovering
+controller closed on the one-shot deadline `wait_timeout` names, and
+`is_failed_closed` declares a dead controller so it is not retried forever
+(sticky-but-recoverable — a later successful reset clears it). The freestanding
+serve loop drives it around the existing synchronous
+`recover_if_controller_faulted` (the `recover_controller` wrapper), arms its wait
+from `wait_timeout` (previously always `WAIT_FOREVER`), and retries on the grace
+one-shot — the fix for the real gap that a faulted controller raises no further
+interrupt (xHCI §4.24.1), so a failed reset previously left the event loop
+parked forever with no timer to retry it. Device-wide edges are audited through
+the shared `for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
+`HCD_DOMAIN_RECOVERED 4191`, `HCD_DOMAIN_OFFLINE 4192`). The controller-node
+machine is proven host-side; the serve-loop wiring is metal-only (QEMU models no
+Pi USB).
+
 Remaining:
-- **The interior hardware-tree fault domains (hub/controller/expander).** With
-  the `usb_msd` leaf-transport wiring above proving the shape, the remaining
-  work is the *cross-process* case a bus driver owns: a serving driver builds
-  one `FaultDomain` per interior node in a device's `fault_domain_chain`, and a
-  **bus/HCD** driver (the xHCI controller, a hub) `quiesce`/`resume`/`poll`s the
-  node it owns around *its* reset and propagates that state to the leaf block
-  consumers beneath it. This needs the live user-space bus serve loops and a
-  cross-process propagation path (below), which the host doubles cannot express.
-- Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
-  `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
-  *degrade/reset/restore* health transitions alongside add/remove.
+- **Cross-process propagation to the leaf block consumers.** The xHCI
+  controller now owns and drives its own interior `FaultDomain`, but its state
+  is not yet propagated to the leaf block consumers beneath it: a
+  hub/controller reset should mark the volumes under it `Recovering` and fail
+  them closed coherently across the subtree, rather than leaving each leaf to
+  ride out its own transport blip independently. Propagation reuses the
+  existing hotplug path (`hw_emit_node`/`hw_remove_node`, `plans/USB.md`,
+  `plans/DEVICES.md`) with a *distinct* health-transition signal (a health
+  fault is not a surprise-removal); the device manager gains reaction to
+  *degrade/reset/restore* transitions alongside add/remove.
+- **Deeper interior chains (hubs, expanders) and the multi-owner fold.** A
+  device can blip with a *chain* of nested owners (`fault_domain_chain`); a
+  serving driver builds one `FaultDomain` per interior node and folds them with
+  `effective_child_status`. The xHCI controller proves the single-owner shape;
+  a watched hub / SAS expander owning its own node, and a leaf folding several
+  ancestors' imposed states, land with the cross-process propagation above.
 
 Tests (§7): the pure `FaultDomain` machine is proven host-side in `lib/abi` —
 one owner reset holds the whole subtree reissuable under one window; an owner
@@ -570,9 +604,15 @@ proven host-side over `recover::serve_lun_with_domain` (a healthy transport
 passes a unit's own status through; a quiesced transport holds a stalling
 sibling reissuable under one window; any unit's definitive answer — data or a
 medium error — recovers the whole device; the elapsed window fails a sibling
-closed; a return after the window still recovers). A QEMU vertical of a modelled
-hub with several children resetting (asserting one recovery episode across the
-subtree) lands with the interior-node tree wiring above.
+closed; a return after the window still recovers). The xHCI controller
+interior-node wiring is proven host-side over `domain::ControllerHealth` (a
+first fault enters recovery and arms a one-shot; a continuing fault does not
+postpone the fail-closed; a reset inside the window recovers; a failed reset
+past the window and an idle poll each fail closed; a failed-closed controller
+recovers on a later successful reset; a spurious success on a healthy controller
+is silent). A QEMU vertical of a modelled hub with several children resetting
+(asserting one recovery episode across the subtree) lands with the cross-process
+propagation above.
 
 ### Stage IO5 — Health observability (audit log + `sysinfo`). **in progress**
 
@@ -649,14 +689,18 @@ it never emits `Degraded`. Pure and proven host-side (the shared-vocabulary
 mapping, edge-triggering, fail-closed exclusion, and never-`Degraded`).
 
 Remaining deliverables:
-- **Interior-node fault-domain health events** (`plans/SYSLOG.md`): the live
-  emission of a *hardware-tree* interior node's quiesce/resume/grace-expiry
-  events (a bus/HCD driver's), naming the fault-domain node and classified
-  through the landed `for_fault_domain` above. Land with the interior-node tree
-  wiring (IO4 remaining), which owns those machines, their timers, and the
-  `lib/log` event ids. (The per-device `usb_msd` reset logs `MSD_RECOVERY_RESET`,
-  the per-device Degraded/Recovering/Recovered/fail-closed edges landed above,
-  and the `usb_msd` shared-*transport* fault-domain edges landed with IO4.)
+- **Interior-node fault-domain health events** (`plans/SYSLOG.md`): the first
+  *hardware-tree* interior node's quiesce/resume/grace-expiry events **landed**
+  with the xHCI controller wiring (IO4): the HCD serve loop emits
+  `HCD_DOMAIN_RECOVERING 4190` / `HCD_DOMAIN_RECOVERED 4191` /
+  `HCD_DOMAIN_OFFLINE 4192`, naming the controller's owner id and classified
+  through the shared `for_fault_domain` vocabulary (the fail-closed edge its own
+  distinct event). Remaining are the *other* interior nodes' events (a watched
+  hub, a SAS/JBOD expander), emitted against this same vocabulary, landing with
+  their live serve-loop / propagation wiring (IO4 remaining). (The per-device
+  `usb_msd` reset logs `MSD_RECOVERY_RESET`, the per-device
+  Degraded/Recovering/Recovered/fail-closed edges landed above, and the
+  `usb_msd` shared-*transport* fault-domain edges landed with IO4.)
 - **Device/array health via `sysinfo`** (§16.6): **landed** for the
   kernel-observed volume I/O health surface. A new capability-gated
   `SysinfoQueryId::VOLUME_IO_HEALTH` (id 27, `CAP_SYSINFO_KERNEL`, audited)

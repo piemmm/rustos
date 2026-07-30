@@ -38,6 +38,7 @@ use tairix_abi::{DriverBindKey, HwMatchKey};
 use tairix_usb::XHCI_COMPATIBLE;
 
 pub mod bringup;
+pub mod domain;
 pub mod serve;
 
 /// The bind priority [`BIND_KEYS`] carries.

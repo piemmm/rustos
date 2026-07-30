@@ -287,11 +287,31 @@ audits the device-wide edges through `BlkHealthTransition::for_fault_domain`
 (`drivers/storage/usb_msd/src/recover.rs`). So one shared-transport blip is one
 recovery episode across the device, not N spurious LUN failures.
 
-The remaining live wiring is the cross-process *interior hardware-tree node*
-case a bus/HCD driver owns (a hub or controller `quiesce`/`resume`/`poll`ing the
-node it resets and propagating that to the leaf block consumers beneath it),
-together with the health observability that hangs off it (`plans/FIX-IO.md`
-IO4–IO6).
+The first live *interior hardware-tree node* consumer is the **xHCI host
+controller** (`drivers/bus/usb/xhci`). The controller is the interior node every
+USB device below it hangs from, so a controller-wide fault — a latched Host
+System Error / HCHalted, or the `HCRST` reset the driver performs to recover — is
+one recovery episode over the whole subtree. Its pure, host-tested
+`domain::ControllerHealth` coordinator wraps one `FaultDomain` (owner = the
+controller's own discovered URB endpoint-block base; grace =
+`CONTROLLER_GRACE_NS`, matching the removable-storage window it sits above) and
+the freestanding serve loop drives it around the controller reset: it
+`begin_recovery`s on the first fault, arms its wait from `wait_timeout` and
+retries on the grace one-shot (the fix for a faulted controller raising no
+further interrupt, xHCI §4.24.1, which previously parked the loop forever),
+`note_reset`s each attempt (recovering on a demonstrated return, failing closed
+once the window elapses), and audits the device-wide edges through
+`BlkHealthTransition::for_fault_domain` (`HCD_DOMAIN_RECOVERING` /
+`HCD_DOMAIN_RECOVERED` / `HCD_DOMAIN_OFFLINE`). A controller failed closed stays
+sticky-but-recoverable — a later successful reset clears it — and is not retried
+against forever.
+
+The remaining live wiring is the cross-process propagation of an interior node's
+state to the leaf block consumers beneath it (a hub/controller reset marking the
+volumes under it `Recovering` and failing them closed coherently), the deeper
+nested-owner chains a hub or SAS expander adds (`fault_domain_chain` +
+`effective_child_status`), and the health observability that hangs off them
+(`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 
