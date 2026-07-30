@@ -20,6 +20,7 @@ use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
     LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
     ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+    VolumeIoHealthRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
@@ -351,4 +352,19 @@ pub trait SysinfoSource {
     /// returned whole and [`crate::serve`] applies the `offset`/`limit`
     /// paging; ordering (newest first) is stable across paged calls.
     fn crashes(&self, caller: &Caller) -> Result<Vec<CrashRecord>, Errno>;
+
+    /// Return the per-volume storage I/O health: one record per fault-aware
+    /// block-backed volume the kernel serves (its durable volume id, the
+    /// serving block-service endpoint, its current availability, and the
+    /// cumulative outcome counters the kernel filesystem client folded)
+    /// (`plans/FIX-IO.md` IO5).
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed: the
+    /// per-device outcome tallies are kernel-wide storage operational state —
+    /// the same boundary as [`memory_pressure`](Self::memory_pressure) and
+    /// [`reclaim_records`](Self::reclaim_records), not the ungated mount
+    /// table. The owned list is returned whole and [`crate::serve`] applies
+    /// the `offset`/`limit` paging; ordering must be stable across paged
+    /// calls.
+    fn volume_io_health(&self, caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno>;
 }

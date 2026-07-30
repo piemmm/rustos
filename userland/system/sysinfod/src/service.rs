@@ -12,7 +12,7 @@ use tairix_abi::sysinfo::{
     MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
     ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
     SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
-    UserDirectoryRequest,
+    UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -197,6 +197,8 @@ fn dispatch(
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
         crash_record_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::VOLUME_IO_HEALTH {
+        volume_io_health_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -540,6 +542,26 @@ fn cpu_time_list(
     )
 }
 
+/// Decode the [`VolumeIoHealthRequest`], apply paging, and pack the selected
+/// [`VolumeIoHealthRecord`]s into `response`.
+fn volume_io_health_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = VolumeIoHealthRequest::from_bytes(payload)?;
+    let records = source.volume_io_health(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        VolumeIoHealthRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`IrqListRequest`], apply paging, and pack the selected
 /// [`IrqRecord`]s into `response`.
 fn irq_list(
@@ -686,6 +708,7 @@ mod tests {
     use crate::events;
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
+    use tairix_abi::blkio::BlkHealthCounters;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
@@ -700,10 +723,10 @@ mod tests {
         MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
         ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
         SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
-        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
+        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
+        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
@@ -1102,6 +1125,35 @@ mod tests {
             Ok(alloc::vec![
                 fixture_crash(2, b"crasher"),
                 fixture_crash(3, b"other"),
+            ])
+        }
+        fn volume_io_health(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<VolumeIoHealthRecord>, Errno> {
+            Ok(alloc::vec![
+                VolumeIoHealthRecord::new(
+                    [0xAA; 16],
+                    0x5953_2001,
+                    MountAvailability::Available,
+                    BlkHealthCounters {
+                        completions: 2048,
+                        ok: 2048,
+                        ..BlkHealthCounters::default()
+                    },
+                ),
+                VolumeIoHealthRecord::new(
+                    [0xBB; 16],
+                    0x5953_2002,
+                    MountAvailability::Recovering,
+                    BlkHealthCounters {
+                        completions: 130,
+                        ok: 100,
+                        resets: 30,
+                        reissues: 12,
+                        ..BlkHealthCounters::default()
+                    },
+                ),
             ])
         }
         fn resource_limits(
@@ -2099,6 +2151,68 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::IRQ_LIST, &end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn volume_io_health_is_gated_on_kernel_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = VolumeIoHealthRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &request.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_KERNEL` (the per-device tallies are
+        // kernel operational state); the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_KERNEL` holder: both
+        // volumes, in order, with their availability and folded counters.
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * VolumeIoHealthRecord::WIRE_LEN);
+        let first = VolumeIoHealthRecord::from_bytes(&resp[..VolumeIoHealthRecord::WIRE_LEN])
+            .expect("decode first");
+        let second = VolumeIoHealthRecord::from_bytes(&resp[VolumeIoHealthRecord::WIRE_LEN..n])
+            .expect("decode second");
+        assert_eq!(first.dev(), 0x5953_2001);
+        assert_eq!(first.availability(), MountAvailability::Available);
+        assert_eq!(first.counters().completions, 2048);
+        assert_eq!(second.dev(), 0x5953_2002);
+        assert_eq!(second.availability(), MountAvailability::Recovering);
+        assert_eq!(second.counters().resets, 30);
+        assert_eq!(second.counters().reissues, 12);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // Paging past the last volume returns the empty terminator.
+        let end = VolumeIoHealthRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

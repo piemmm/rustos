@@ -79,7 +79,7 @@ use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashNamedReg,
     CrashRecord, IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
-    UserDirectoryRecord, CRASH_MAX_FRAMES,
+    UserDirectoryRecord, VolumeIoHealthRecord, CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
@@ -3226,6 +3226,19 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
     Errno::BadAddress
 }
 
+/// The number of whole `record_len`-byte records that fit in `out_cap`.
+///
+/// The one shared cap every record-paged `sysinfo_introspect` domain applies:
+/// the kernel never frames a partial record, so a buffer too small to hold
+/// even one record fails closed with [`Errno::BufferTooSmall`] rather than
+/// serving a truncated head the broker cannot decode.
+fn records_that_fit(out_cap: usize, record_len: usize) -> Result<usize, Errno> {
+    if out_cap < record_len {
+        return Err(Errno::BufferTooSmall);
+    }
+    Ok(out_cap / record_len)
+}
+
 /// Wake the `ipc_call` caller a just-completed `CallEndpoint::reply`
 /// belongs to.
 ///
@@ -5685,106 +5698,59 @@ where
         // before any state is read.
         let domain = IntrospectDomain::from_u32(domain)?;
 
-        // Assemble the encoded answer. The list domains page by record: the
-        // kernel knows the fixed stride (from `lib/abi`) and asks the source
-        // for at most as many whole records as fit, so a truncated window is
-        // always a whole number of records the broker can decode. The source
-        // always returns the global, unfiltered view — the broker does all
-        // per-client scoping.
+        // Assemble the encoded answer. The source always returns the global,
+        // unfiltered view — the broker does all per-client scoping.
+        // Each record-paged domain caps its record count to what fits the
+        // buffer through the one shared `records_that_fit` helper, so a
+        // truncated window is always a whole number of records and the
+        // fail-closed-when-none-fits check lives in one place. The
+        // seat/IRQ/crash domains are served from the kernel's own registries
+        // in this crate (the one definition), the rest from the introspect
+        // seam; every list is stably ordered and an offset past the end
+        // returns the empty terminator.
         let blob = match domain {
-            IntrospectDomain::Processes => {
-                if out_cap < ProcessRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / ProcessRecord::WIRE_LEN;
-                self.introspect.processes(arg, max_records)?
-            }
-            IntrospectDomain::Mounts => {
-                if out_cap < MountRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / MountRecord::WIRE_LEN;
-                self.introspect.mounts(arg, max_records)?
-            }
+            IntrospectDomain::Processes => self
+                .introspect
+                .processes(arg, records_that_fit(out_cap, ProcessRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Mounts => self
+                .introspect
+                .mounts(arg, records_that_fit(out_cap, MountRecord::WIRE_LEN)?)?,
+            IntrospectDomain::VolumeIoHealth => self.introspect.volume_io_health(
+                arg,
+                records_that_fit(out_cap, VolumeIoHealthRecord::WIRE_LEN)?,
+            )?,
             IntrospectDomain::KernelMemory => self.introspect.kernel_memory()?,
             IntrospectDomain::Identity => self.introspect.identity()?,
             IntrospectDomain::Uptime => self.introspect.uptime()?,
             IntrospectDomain::LoadAverage => self.introspect.load_average()?,
-            IntrospectDomain::UserDirectory => {
-                if out_cap < UserDirectoryRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / UserDirectoryRecord::WIRE_LEN;
-                self.introspect.user_directory(arg, max_records)?
-            }
-            IntrospectDomain::CpuTimes => {
-                if out_cap < CpuTimeRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuTimeRecord::WIRE_LEN;
-                self.introspect.cpu_times(arg, max_records)?
-            }
-            IntrospectDomain::Seats => {
-                if out_cap < SeatRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / SeatRecord::WIRE_LEN;
-                // Served from the kernel's own seat registry rather than the
-                // introspect seam: the seat state lives in this crate, so the
-                // one definition answers directly. Pages by whole record —
-                // the boot seat first, then every discovery-created seat in
-                // creation order; an offset past the end returns the empty
-                // terminator.
-                self.seat_registry.records(arg, max_records)
-            }
+            IntrospectDomain::UserDirectory => self.introspect.user_directory(
+                arg,
+                records_that_fit(out_cap, UserDirectoryRecord::WIRE_LEN)?,
+            )?,
+            IntrospectDomain::CpuTimes => self
+                .introspect
+                .cpu_times(arg, records_that_fit(out_cap, CpuTimeRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Seats => self
+                .seat_registry
+                .records(arg, records_that_fit(out_cap, SeatRecord::WIRE_LEN)?),
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
-            IntrospectDomain::Reclaim => {
-                if out_cap < ReclaimClassRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / ReclaimClassRecord::WIRE_LEN;
-                self.introspect.reclaim(arg, max_records)?
-            }
+            IntrospectDomain::Reclaim => self.introspect.reclaim(
+                arg,
+                records_that_fit(out_cap, ReclaimClassRecord::WIRE_LEN)?,
+            )?,
             IntrospectDomain::Ramzip => self.introspect.ramzip()?,
-            IntrospectDomain::CpuLoad => {
-                if out_cap < CpuLoadRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuLoadRecord::WIRE_LEN;
-                self.introspect.cpu_load(arg, max_records)?
-            }
-            IntrospectDomain::CpuInfo => {
-                if out_cap < CpuInfoRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuInfoRecord::WIRE_LEN;
-                self.introspect.cpu_info(arg, max_records)?
-            }
-            IntrospectDomain::Irqs => {
-                if out_cap < IrqRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / IrqRecord::WIRE_LEN;
-                // Served from the kernel's own IRQ table rather than the
-                // introspect seam: the binding table lives in this crate, so
-                // the one definition answers directly (like the seat
-                // registry). Pages by whole record in ascending line order;
-                // an offset past the end returns the empty terminator.
-                self.irq.records(arg, max_records)
-            }
-            IntrospectDomain::Crashes => {
-                if out_cap < CrashRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CrashRecord::WIRE_LEN;
-                // Served from the kernel's own crash-record store rather
-                // than the introspect seam: the store lives in this crate,
-                // so the one definition answers directly (like the seat
-                // registry and the IRQ table). Pages by whole record,
-                // newest first; an offset past the end returns the empty
-                // terminator.
-                self.crashes.page(arg, max_records)
-            }
+            IntrospectDomain::CpuLoad => self
+                .introspect
+                .cpu_load(arg, records_that_fit(out_cap, CpuLoadRecord::WIRE_LEN)?)?,
+            IntrospectDomain::CpuInfo => self
+                .introspect
+                .cpu_info(arg, records_that_fit(out_cap, CpuInfoRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Irqs => self
+                .irq
+                .records(arg, records_that_fit(out_cap, IrqRecord::WIRE_LEN)?),
+            IntrospectDomain::Crashes => self
+                .crashes
+                .page(arg, records_that_fit(out_cap, CrashRecord::WIRE_LEN)?),
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
                 // so the caller writes it into the output buffer on entry; the
@@ -23061,6 +23027,13 @@ mod tests {
             Ok(self.kernel_memory.clone())
         }
         fn mounts(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn volume_io_health(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(alloc::vec::Vec::new())
         }
         fn identity(&self) -> Result<alloc::vec::Vec<u8>, Errno> {

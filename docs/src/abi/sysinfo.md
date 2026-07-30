@@ -55,6 +55,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_BOND_MEMBERS`      | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_RESOLVER_SERVERS`  | none                   | no      |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
+| `VOLUME_IO_HEALTH`      | `CAP_SYSINFO_KERNEL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -91,9 +92,10 @@ like `HARDWARE_TREE` and audited: each `SeatRecord` names which task owns
 a physical display — cross-principal surface topology, not a self-scoped
 observer.
 
-The four kernel-statistics queries (`plans/STRESSTEST.md` ST1) share
-`KERNEL_MEMORY_STATS`'s security boundary — gated on `CAP_SYSINFO_KERNEL`
-and audited — because each exposes kernel-wide operational state:
+The kernel-statistics queries (`plans/STRESSTEST.md` ST1; storage health
+`plans/FIX-IO.md` IO5) share `KERNEL_MEMORY_STATS`'s security boundary —
+gated on `CAP_SYSINFO_KERNEL` and audited — because each exposes
+kernel-wide operational state:
 
 - `MEMORY_PRESSURE` — a single `MemoryPressureStats`: the live five-band
   gauge's current band (an index into `PRESSURE_BAND_NAMES`), the
@@ -126,6 +128,20 @@ and audited — because each exposes kernel-wide operational state:
   observation — so it moves under load even on the tickless default
   policy (EEVDF), which takes no periodic scheduler tick. All are kernel
   internals, hence the gate the utilisation split does not carry.
+- `VOLUME_IO_HEALTH` — one `VolumeIoHealthRecord` per fault-aware
+  block-backed volume the kernel serves (paged by a
+  `VolumeIoHealthRequest`): the volume's durable id, the serving
+  block-service endpoint, its current `MountAvailability` (the same live
+  reading the mount table overlays), and the cumulative
+  `BlkHealthCounters` the kernel filesystem client folds from every
+  completion — the per-status outcome tallies (`ok`, `degraded`,
+  `transient`, `timeouts`, `resets`, `medium_errors`, `offline`,
+  `faults`) plus the consumer `reissues` count. The per-status buckets
+  partition every folded completion exactly once. Monotonic since the
+  volume was attached, these tallies are the storage analogue of the
+  per-line `IRQ_LIST` counters and the surface a failing or flapping
+  disk becomes visible on; they are kernel-wide storage operational
+  state, hence the gate the ungated `MOUNT_LIST` does not carry.
 
 `IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
 `CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which

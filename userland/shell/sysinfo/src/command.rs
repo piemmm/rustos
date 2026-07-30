@@ -54,6 +54,11 @@ pub enum Command {
     /// whether the line is quarantined (`IRQ_LIST`, which the service gates
     /// on `CAP_SYSINFO_HW`).
     Irqs,
+    /// List per-volume storage I/O health, one row per fault-aware
+    /// block-backed volume — its durable id, the serving block-service
+    /// endpoint, its current availability, and the folded outcome counters
+    /// (`VOLUME_IO_HEALTH`, which the service gates on `CAP_SYSINFO_KERNEL`).
+    Storage,
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -88,6 +93,7 @@ pub enum Command {
 /// | `cpu`                 | [`Command::CpuLoad`]             |
 /// | `cpuinfo`             | [`Command::CpuInfo`]             |
 /// | `irq`, `irqs`         | [`Command::Irqs`]                |
+/// | `storage`, `io`       | [`Command::Storage`]             |
 ///
 /// # Errors
 ///
@@ -111,6 +117,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "cpu" => no_more(rest).map(|()| Command::CpuLoad),
         "cpuinfo" => no_more(rest).map(|()| Command::CpuInfo),
         "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
+        "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -183,6 +190,8 @@ mod tests {
         assert_eq!(parse(&["cpuinfo"]), Ok(Command::CpuInfo));
         assert_eq!(parse(&["irq"]), Ok(Command::Irqs));
         assert_eq!(parse(&["irqs"]), Ok(Command::Irqs));
+        assert_eq!(parse(&["storage"]), Ok(Command::Storage));
+        assert_eq!(parse(&["io"]), Ok(Command::Storage));
     }
 
     #[test]
@@ -203,6 +212,7 @@ mod tests {
         assert_eq!(parse(&["pressure", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["cpu", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["irq", "0"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["storage", "0"]), Err(SysinfoError::Usage));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

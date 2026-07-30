@@ -70,6 +70,20 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn mounts(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
+    /// Encode up to `max_records`
+    /// [`tairix_abi::sysinfo::VolumeIoHealthRecord`]s beginning at record
+    /// index `offset`, in a stable order, packed little-endian back-to-back —
+    /// the live I/O health (availability + folded outcome counters) of every
+    /// fault-aware block-backed volume the kernel serves
+    /// (`plans/FIX-IO.md` IO5). A volume with no fault-aware block source is
+    /// omitted rather than reported with fabricated health; an `offset` past
+    /// the end returns an empty `Vec` (the paging terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn volume_io_health(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
     /// The wire image of the current
     /// [`tairix_abi::sysinfo::SystemIdentity`] (machine id, OS version,
     /// hostname).
@@ -222,6 +236,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn mounts(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn volume_io_health(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

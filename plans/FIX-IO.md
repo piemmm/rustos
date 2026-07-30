@@ -584,11 +584,27 @@ Remaining deliverables:
   timers, and the `lib/log` event ids. (The per-device `usb_msd` reset already
   logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/Recovered/
   fail-closed edges landed above.)
-- **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
-  availability already landed above: a capability-gated device/array health
-  query (fault-domain node, retry/reset counts) following the bond-member and
-  surprise-removed-volume precedents in `sysinfo.rs` — never a `/proc`-style
-  scrape (§16.1).
+- **Device/array health via `sysinfo`** (§16.6): **landed** for the
+  kernel-observed volume I/O health surface. A new capability-gated
+  `SysinfoQueryId::VOLUME_IO_HEALTH` (id 27, `CAP_SYSINFO_KERNEL`, audited)
+  over `IntrospectDomain::VolumeIoHealth` returns one `VolumeIoHealthRecord`
+  per fault-aware block-backed volume: its durable id, the serving
+  block-service endpoint, its current `MountAvailability`, and the cumulative
+  `blkio::BlkHealthCounters` the kernel `BlkClient` folds from every completion
+  (per-status outcome tallies + consumer reissue count). The counters are a
+  shared `lib/abi` primitive whose status→bucket assignment is one definition
+  (`BlkHealthCounters::bucket_index`), so the kernel's lock-free
+  `BlkHealthCountersAtomic` and the pure value type cannot diverge; the mount
+  registry snapshots them through the `FilesystemService::volume_io_health_snapshot`
+  seam and `sysinfod` fronts the query, exposed by `sysinfo storage`. Proven
+  host-side end to end (ABI round-trip/fail-closed, the `BlkClient` fold, the
+  mount-registry snapshot, the gated/audited/paged broker, and the CLI render).
+  Retry/reset *ladder* counts the driver performs on the hardware, and the
+  fault-domain **node** identity, are **not** in this record: they need the
+  endpoint→hardware-tree-node association and the live serving-driver ladder,
+  which are IO4 (fault-domain tree wiring) — this query reports the health the
+  kernel block *consumer* observes, a complete and coherent surface on its own.
+  Never a `/proc`-style scrape (§16.1).
 - **Watchdog tie-in** (`plans/WATCHDOG.md`): a driver process that itself wedges
   is a lockup the watchdog detects and recovers (restart the driver, mark the
   device `Failed`) — closing the loop where the *driver*, not the disk, is the

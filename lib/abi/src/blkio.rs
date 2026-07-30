@@ -646,6 +646,178 @@ impl IoBudget {
     }
 }
 
+/// Encoded length of a [`BlkHealthCounters`] snapshot: ten little-endian
+/// `u64` tallies.
+pub const BLK_HEALTH_COUNTERS_LEN: usize = 10 * 8;
+
+/// Cumulative, monotonic tallies of the device-level outcomes a block
+/// consumer has observed from one served device since it was attached, plus
+/// the number of reissues (retries) the consumer itself performed.
+///
+/// This is the single shared definition of the storage-health *counters*, so
+/// every consumer of a served block device — the kernel filesystem client
+/// today, a future user-space serve loop — folds outcomes into the same
+/// buckets and cannot drift apart in what a "reset" or a "medium error" counts
+/// as (`plans/FIX-IO.md` IO5). It is a pure value type: the live counters are
+/// held as atomics by whichever component owns the I/O path, and a
+/// [`BlkHealthCounters`] is a point-in-time snapshot the System Information
+/// API reports (`AGENTS.md` §16.6) — never `/proc`-style scraped.
+///
+/// The per-status buckets partition every folded completion exactly once, so
+/// `ok + degraded + transient + timeouts + resets + medium_errors + offline +
+/// faults == completions` always holds; `reissues` is orthogonal (a single
+/// logical request that is reissued twice folds three completions). Every
+/// bucket saturates rather than wrapping: a tally is operational observability,
+/// never a security or format bound (`AGENTS.md` §24.4), so an
+/// implausibly-long-lived device pins a counter at [`u64::MAX`] instead of
+/// silently wrapping to a smaller, misleading value.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlkHealthCounters {
+    /// Total device-level completions folded (the sum of the buckets below).
+    pub completions: u64,
+    /// Reissuable completions the consumer retried under the shared
+    /// bounded-reissue policy ([`IoBudget::should_reissue`]).
+    pub reissues: u64,
+    /// Completions the device answered healthy ([`BlkStatus::Ok`]).
+    pub ok: u64,
+    /// Completions served but with the device self-reporting unhealthy
+    /// ([`BlkStatus::Degraded`]).
+    pub degraded: u64,
+    /// Recovered-error / comms-glitch completions ([`BlkStatus::TransientError`]).
+    pub transient: u64,
+    /// Completions reaped on the per-request deadline ([`BlkStatus::Timeout`]).
+    pub timeouts: u64,
+    /// Completions aborted by a device/hub reset ([`BlkStatus::Reset`]).
+    pub resets: u64,
+    /// Permanent bad-sector completions ([`BlkStatus::MediumError`]).
+    pub medium_errors: u64,
+    /// Completions where the device was unresponsive or surprise-removed
+    /// ([`BlkStatus::Offline`] / [`BlkStatus::Removed`]).
+    pub offline: u64,
+    /// Unclassifiable / hard-fault completions ([`BlkStatus::Fatal`]).
+    pub faults: u64,
+}
+
+impl BlkHealthCounters {
+    /// Number of `u64` tallies a snapshot carries.
+    pub const FIELD_COUNT: usize = 10;
+
+    /// Index of the `completions` tally in wire order.
+    pub const COMPLETIONS: usize = 0;
+    /// Index of the `reissues` tally in wire order.
+    pub const REISSUES: usize = 1;
+
+    /// The wire-order index of the bucket a device-level `status` folds into.
+    ///
+    /// This is the single definition of the status → bucket assignment, so a
+    /// pure [`fold`](Self::fold) and any lock-free counter that mirrors these
+    /// tallies (the kernel filesystem client's atomics) place a completion in
+    /// the same bucket and cannot diverge.
+    #[must_use]
+    pub const fn bucket_index(status: BlkStatus) -> usize {
+        match status {
+            BlkStatus::Ok => 2,
+            BlkStatus::Degraded => 3,
+            BlkStatus::TransientError => 4,
+            BlkStatus::Timeout => 5,
+            BlkStatus::Reset => 6,
+            BlkStatus::MediumError => 7,
+            BlkStatus::Offline | BlkStatus::Removed => 8,
+            BlkStatus::Fatal => 9,
+        }
+    }
+
+    /// Fold one device-level completion of `status` into the tallies: bump
+    /// [`completions`](Self::completions) and the single bucket `status`
+    /// belongs to (via [`bucket_index`](Self::bucket_index), the one shared
+    /// assignment). Every bucket saturates, so a long-lived device never wraps
+    /// a counter to a misleadingly-small value.
+    pub const fn fold(&mut self, status: BlkStatus) {
+        let mut fields = self.fields();
+        fields[Self::COMPLETIONS] = fields[Self::COMPLETIONS].saturating_add(1);
+        let bucket = Self::bucket_index(status);
+        fields[bucket] = fields[bucket].saturating_add(1);
+        *self = Self::from_fields(fields);
+    }
+
+    /// Record that the consumer reissued a reissuable completion. Orthogonal
+    /// to [`fold`](Self::fold): the reissued attempt folds its own completion
+    /// when it lands.
+    pub const fn note_reissue(&mut self) {
+        self.reissues = self.reissues.saturating_add(1);
+    }
+
+    /// The ten tallies in wire order, for encode/decode.
+    const fn fields(&self) -> [u64; Self::FIELD_COUNT] {
+        [
+            self.completions,
+            self.reissues,
+            self.ok,
+            self.degraded,
+            self.transient,
+            self.timeouts,
+            self.resets,
+            self.medium_errors,
+            self.offline,
+            self.faults,
+        ]
+    }
+
+    /// Rebuild a snapshot from the wire-order tallies — the inverse of
+    /// [`to_le_bytes`](Self::to_le_bytes)'s field order, so a lock-free counter
+    /// can snapshot its atomics into one value without duplicating that order.
+    #[must_use]
+    pub const fn from_fields(fields: [u64; Self::FIELD_COUNT]) -> Self {
+        Self {
+            completions: fields[0],
+            reissues: fields[1],
+            ok: fields[2],
+            degraded: fields[3],
+            transient: fields[4],
+            timeouts: fields[5],
+            resets: fields[6],
+            medium_errors: fields[7],
+            offline: fields[8],
+            faults: fields[9],
+        }
+    }
+
+    /// Encode the snapshot as [`BLK_HEALTH_COUNTERS_LEN`] little-endian bytes.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; BLK_HEALTH_COUNTERS_LEN] {
+        let mut out = [0u8; BLK_HEALTH_COUNTERS_LEN];
+        for (i, value) in self.fields().iter().enumerate() {
+            put_u64(&mut out, i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode a snapshot from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `bytes` is shorter than
+    /// [`BLK_HEALTH_COUNTERS_LEN`]. Every field value is valid (a tally is any
+    /// `u64`), so there is no further shape to fail closed on.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < BLK_HEALTH_COUNTERS_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            completions: read_u64(bytes, 0),
+            reissues: read_u64(bytes, 8),
+            ok: read_u64(bytes, 16),
+            degraded: read_u64(bytes, 24),
+            transient: read_u64(bytes, 32),
+            timeouts: read_u64(bytes, 40),
+            resets: read_u64(bytes, 48),
+            medium_errors: read_u64(bytes, 56),
+            offline: read_u64(bytes, 64),
+            faults: read_u64(bytes, 72),
+        })
+    }
+}
+
 /// The shared recovery **grace-window** timer: a bounded, event-timed window a
 /// stalling storage element — a single served device ([`BlkHealth`]) or a
 /// whole interior fault domain ([`FaultDomain`]) — is held open before it is
@@ -1678,6 +1850,101 @@ mod tests {
         for block_size in [512usize, 4096] {
             assert_eq!(BLK_DATA_LEN % block_size, 0);
         }
+    }
+
+    #[test]
+    fn health_counters_fold_every_status_into_exactly_one_bucket() {
+        let mut counters = BlkHealthCounters::default();
+        // Fold one of every device-level status, plus a couple of repeats so
+        // the buckets are distinguishable.
+        let statuses = [
+            BlkStatus::Ok,
+            BlkStatus::Ok,
+            BlkStatus::Degraded,
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+            BlkStatus::Reset,
+            BlkStatus::MediumError,
+            BlkStatus::Offline,
+            BlkStatus::Removed,
+            BlkStatus::Fatal,
+        ];
+        for status in statuses {
+            counters.fold(status);
+        }
+        assert_eq!(counters.completions, statuses.len() as u64);
+        assert_eq!(counters.ok, 2);
+        assert_eq!(counters.degraded, 1);
+        assert_eq!(counters.transient, 1);
+        assert_eq!(counters.timeouts, 1);
+        assert_eq!(counters.resets, 2);
+        assert_eq!(counters.medium_errors, 1);
+        // Offline and Removed share one bucket.
+        assert_eq!(counters.offline, 2);
+        assert_eq!(counters.faults, 1);
+        // The buckets partition every completion exactly once.
+        let bucket_sum = counters.ok
+            + counters.degraded
+            + counters.transient
+            + counters.timeouts
+            + counters.resets
+            + counters.medium_errors
+            + counters.offline
+            + counters.faults;
+        assert_eq!(bucket_sum, counters.completions);
+        // Reissues are orthogonal to folded completions.
+        assert_eq!(counters.reissues, 0);
+        counters.note_reissue();
+        counters.note_reissue();
+        assert_eq!(counters.reissues, 2);
+        assert_eq!(counters.completions, statuses.len() as u64);
+    }
+
+    #[test]
+    fn health_counters_round_trip_on_the_wire() {
+        let counters = BlkHealthCounters {
+            completions: 100,
+            reissues: 7,
+            ok: 80,
+            degraded: 3,
+            transient: 4,
+            timeouts: 2,
+            resets: 5,
+            medium_errors: 1,
+            offline: 3,
+            faults: 2,
+        };
+        let bytes = counters.to_le_bytes();
+        assert_eq!(bytes.len(), BLK_HEALTH_COUNTERS_LEN);
+        assert_eq!(BlkHealthCounters::from_bytes(&bytes), Ok(counters));
+        // A trailing surplus is ignored (the record embeds the snapshot as a
+        // fixed prefix); a short slice fails closed.
+        let mut padded = bytes.to_vec();
+        padded.push(0xAB);
+        assert_eq!(BlkHealthCounters::from_bytes(&padded), Ok(counters));
+        assert_eq!(
+            BlkHealthCounters::from_bytes(&bytes[..BLK_HEALTH_COUNTERS_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn health_counters_saturate_rather_than_wrap() {
+        // A tally is operational observability, never a wrapping ring: a
+        // counter pinned at the ceiling stays pinned rather than rolling to a
+        // misleadingly-small value.
+        let mut counters = BlkHealthCounters {
+            completions: u64::MAX,
+            ok: u64::MAX,
+            reissues: u64::MAX,
+            ..BlkHealthCounters::default()
+        };
+        counters.fold(BlkStatus::Ok);
+        counters.note_reissue();
+        assert_eq!(counters.completions, u64::MAX);
+        assert_eq!(counters.ok, u64::MAX);
+        assert_eq!(counters.reissues, u64::MAX);
     }
 
     #[test]

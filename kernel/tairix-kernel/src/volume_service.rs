@@ -76,7 +76,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
@@ -91,7 +91,7 @@ use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
-use tairix_kernel_core::fs::blkclient::BlkClient;
+use tairix_kernel_core::fs::blkclient::{BlkClient, VolumeHealthSource};
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService};
@@ -544,7 +544,7 @@ fn register_with_health(
     source: &str,
     fstype: &'static str,
     volume_id: [u8; 16],
-    health: Arc<AtomicU8>,
+    health: VolumeHealthSource,
 ) -> Result<(), ()> {
     LATE_FILESYSTEM
         .register(handle, driver, source, fstype, volume_id)
@@ -797,7 +797,7 @@ impl VolumeService for RuntimeVolumeService {
         let journal = seeded_journal(&mut client, request, block_size, head.as_deref());
         // Keep the block client's reported-health overlay for the mount
         // snapshot before the journal chain consumes the client.
-        let health = client.health_handle();
+        let health = client.health_source();
         let journaled = JournaledBlock::new(client, Arc::clone(&journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
@@ -1254,7 +1254,7 @@ impl RuntimeVolumeService {
         // Rebuild the volume over the retained journal and new transport.
         // Keep the block client's reported-health overlay for the remounted
         // volume before the client is consumed by the journal chain.
-        let health = client.health_handle();
+        let health = client.health_source();
         let journaled = JournaledBlock::new(client, Arc::clone(&target.journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;

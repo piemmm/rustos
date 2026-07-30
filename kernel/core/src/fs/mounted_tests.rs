@@ -28,6 +28,7 @@ use tairix_kernel_sec::{
 use tairix_log::{Event, Sink};
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
+use crate::fs::blkclient::{BlkHealthCountersAtomic, VolumeHealthSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
@@ -1072,17 +1073,40 @@ fn mount_snapshot_overlays_reported_block_health() {
     // With no health source the volume reads plainly available.
     assert_eq!(vol_availability(&svc), MountAvailability::Available);
 
+    // With no health source the volume-health query lists no device.
+    assert!(svc.volume_io_health_snapshot().is_empty());
+
     // A live block-health overlay reporting a blip surfaces as recovering.
-    let health = Arc::new(AtomicU8::new(MountAvailability::Recovering.as_u8()));
-    cell.set_health_source(handle, Arc::clone(&health))
-        .expect("attach health source");
+    let availability = Arc::new(AtomicU8::new(MountAvailability::Recovering.as_u8()));
+    let counters = Arc::new(BlkHealthCountersAtomic::default());
+    cell.set_health_source(
+        handle,
+        VolumeHealthSource {
+            dev: 0x42,
+            availability: Arc::clone(&availability),
+            counters: Arc::clone(&counters),
+        },
+    )
+    .expect("attach health source");
     assert_eq!(vol_availability(&svc), MountAvailability::Recovering);
+
+    // The volume-health query now lists exactly this device, naming its
+    // serving endpoint and overlaying the same live availability the mount
+    // snapshot shows.
+    let health_records = svc.volume_io_health_snapshot();
+    assert_eq!(health_records.len(), 1);
+    assert_eq!(health_records[0].dev(), 0x42);
+    assert_eq!(
+        health_records[0].availability(),
+        MountAvailability::Recovering
+    );
+    assert_eq!(health_records[0].counters().completions, 0);
 
     // A surprise-removal state is authoritative: even with the overlay now
     // claiming the device is fine, the vanished state stands.
     cell.set_availability(handle, MountAvailability::UnavailableDirty)
         .expect("mark unavailable");
-    health.store(
+    availability.store(
         MountAvailability::Available.as_u8(),
         core::sync::atomic::Ordering::Relaxed,
     );
@@ -1091,11 +1115,16 @@ fn mount_snapshot_overlays_reported_block_health() {
     // Back to a live volume, the overlay's degraded reading shows through.
     cell.set_availability(handle, MountAvailability::Available)
         .expect("mark available");
-    health.store(
+    availability.store(
         MountAvailability::Degraded.as_u8(),
         core::sync::atomic::Ordering::Relaxed,
     );
     assert_eq!(vol_availability(&svc), MountAvailability::Degraded);
+    // The volume-health query reflects the same degraded overlay.
+    assert_eq!(
+        svc.volume_io_health_snapshot()[0].availability(),
+        MountAvailability::Degraded
+    );
 }
 
 #[test]

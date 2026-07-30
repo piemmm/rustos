@@ -42,6 +42,13 @@ The queries:
 - `irq`, `irqs` — the kernel IRQ table: one row per bound interrupt
   line — its id, the owning driver task, the interrupt count since
   boot, and whether the line is quarantined (needs `CAP_SYSINFO_HW`).
+- `storage`, `io` — per-volume storage I/O health: one row per
+  fault-aware block-backed volume — a prefix of its durable id, the
+  serving block-service endpoint, its current availability
+  (available/degraded/recovering/lost), and the cumulative outcome
+  counters (completions, resets, timeouts, medium errors, reissues) a
+  failing or flapping disk becomes visible on (needs
+  `CAP_SYSINFO_KERNEL`).
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

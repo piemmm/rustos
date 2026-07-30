@@ -23,7 +23,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::sysinfo::MountRecord;
+use tairix_abi::sysinfo::{MountRecord, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
@@ -361,6 +361,23 @@ pub trait FilesystemService: Send + Sync {
     /// [`NullFilesystemService`]) truthfully reports "no mounts" rather than
     /// fabricating one.
     fn mount_snapshot(&self) -> Vec<MountRecord> {
+        Vec::new()
+    }
+
+    /// Snapshot every fault-aware block-backed volume's live I/O health as
+    /// wire-ready [`VolumeIoHealthRecord`]s, one per volume whose backing
+    /// device the kernel observes, for the `sysinfo` volume-health query
+    /// (`plans/FIX-IO.md` IO5).
+    ///
+    /// Like [`mount_snapshot`](Self::mount_snapshot) this is a read-only,
+    /// system-wide, secret-free observation (the per-device outcome tallies
+    /// and current availability, never file contents); the
+    /// `sysinfo_introspect` syscall that reaches it is capability-gated and
+    /// the `sysinfod` broker applies the per-client `CAP_SYSINFO_KERNEL`
+    /// policy. The default returns an empty snapshot, so a service owning no
+    /// mount table (the fail-closed [`NullFilesystemService`]) truthfully
+    /// reports "no volumes" rather than fabricating one.
+    fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
         Vec::new()
     }
 }
