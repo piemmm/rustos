@@ -56,9 +56,11 @@
 //!
 //! An array is discovered, not configured: each member carries a checksummed
 //! [`ArraySuperblock`] naming the array, this member's slot, the geometry, and
-//! a monotonic generation counter. [`ArrayIdentity::resolve`] reconstructs the
-//! array from a set of discovered [`Candidate`] members — the freshest member
-//! fixes the authoritative shape — and [`ArrayIdentity::fill_slots`] places
+//! a monotonic generation counter. [`distinct_arrays`] partitions a
+//! heterogeneous set of discovered [`Candidate`] members into the distinct
+//! arrays present among them, then [`ArrayIdentity::resolve`] reconstructs each
+//! array from its members — the freshest member fixes the authoritative
+//! shape — and [`ArrayIdentity::fill_slots`] places
 //! each member into its slot, marking one that is behind as a stale rebuild
 //! target and refusing a foreign, mis-shaped, or duplicate claimant. The
 //! decoder is fail-closed on any malformed on-disk byte (`AGENTS.md` §5.4,
@@ -91,6 +93,7 @@ mod superblock;
 
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use superblock::{
-    ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate, CandidateVerdict,
-    RaidLevel, RejectReason, SlotDisposition, SuperblockError, FORMAT_VERSION, MAGIC, WIRE_LEN,
+    distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,
+    CandidateVerdict, DistinctArrays, RaidLevel, RejectReason, SlotDisposition, SuperblockError,
+    FORMAT_VERSION, MAGIC, WIRE_LEN,
 };

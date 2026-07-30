@@ -1,9 +1,9 @@
 //! Host tests for the RAID array superblock codec and reassembly logic.
 
 use super::{
-    ArrayIdentity, ArraySuperblock, AssemblyError, Candidate, CandidateVerdict, RaidLevel,
-    RejectReason, SlotDisposition, SuperblockError, MAGIC, OFF_CHECKSUM, OFF_LEVEL, OFF_MAGIC,
-    OFF_VERSION, WIRE_LEN,
+    distinct_arrays, ArrayIdentity, ArraySuperblock, AssemblyError, Candidate, CandidateVerdict,
+    RaidLevel, RejectReason, SlotDisposition, SuperblockError, MAGIC, OFF_CHECKSUM, OFF_LEVEL,
+    OFF_MAGIC, OFF_VERSION, WIRE_LEN,
 };
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::time::Time64;
@@ -541,4 +541,55 @@ fn promoting_a_rebuilt_member_makes_it_current_again() {
 fn reseal(bytes: &mut [u8; WIRE_LEN]) {
     let crc = tairix_crc32c::checksum(&bytes[..OFF_CHECKSUM]);
     bytes[OFF_CHECKSUM..OFF_CHECKSUM + 4].copy_from_slice(&crc.to_le_bytes());
+}
+
+const UUID_C: [u8; 16] = [0xC3; 16];
+
+#[test]
+fn distinct_arrays_of_empty_set_is_empty() {
+    let candidates: [Candidate; 0] = [];
+    assert_eq!(distinct_arrays(&candidates).count(), 0);
+}
+
+#[test]
+fn distinct_arrays_of_one_array_yields_it_once() {
+    // Three members of the same array collapse to a single distinct identity.
+    let candidates = [
+        candidate(0, sb(UUID_A, 3, 0, 5)),
+        candidate(1, sb(UUID_A, 3, 1, 5)),
+        candidate(2, sb(UUID_A, 3, 2, 5)),
+    ];
+    assert!(distinct_arrays(&candidates).eq([UUID_A]));
+}
+
+#[test]
+fn distinct_arrays_partitions_a_mixed_set_in_first_appearance_order() {
+    // Members of three arrays are interleaved across the discovered devices;
+    // each array is enumerated exactly once, in the order it first appears.
+    let candidates = [
+        candidate(0, sb(UUID_B, 2, 0, 1)),
+        candidate(1, sb(UUID_A, 2, 0, 9)),
+        candidate(2, sb(UUID_B, 2, 1, 1)),
+        candidate(3, sb(UUID_C, 1, 0, 3)),
+        candidate(4, sb(UUID_A, 2, 1, 9)),
+    ];
+    assert!(distinct_arrays(&candidates).eq([UUID_B, UUID_A, UUID_C]));
+}
+
+#[test]
+fn distinct_arrays_composes_with_resolve_for_every_array() {
+    // The intended use: enumerate the arrays, then resolve each one. Every
+    // yielded UUID resolves (never `NoMembers`) because it came from a member.
+    let candidates = [
+        candidate(0, sb(UUID_A, 2, 0, 4)),
+        candidate(1, sb(UUID_B, 1, 0, 7)),
+        candidate(2, sb(UUID_A, 2, 1, 4)),
+    ];
+    let mut resolved = 0;
+    for uuid in distinct_arrays(&candidates) {
+        let id = ArrayIdentity::resolve(uuid, &candidates).expect("a yielded array has members");
+        assert_eq!(id.array_uuid, uuid);
+        resolved += 1;
+    }
+    assert_eq!(resolved, 2);
 }

@@ -31,6 +31,11 @@
 //!
 //! # Reassembly
 //!
+//! Discovery hands the assembler a heterogeneous set of members that need not
+//! all belong to the same array. [`distinct_arrays`] enumerates the distinct
+//! [`ArrayUuid`]s present among them — the "which arrays are on these disks"
+//! step — so the assembler resolves each array in turn.
+//!
 //! [`ArrayIdentity::resolve`] establishes the authoritative array identity
 //! from a set of [`Candidate`] members: the member reporting the **highest
 //! generation** is freshest, so it fixes the array's level, member count,
@@ -593,6 +598,79 @@ impl ArrayIdentity {
             generation: self.generation,
             updated_at,
         })
+    }
+}
+
+/// A lazy iterator over the **distinct** array identifiers present in a
+/// candidate set, in first-appearance order.
+///
+/// Built by [`distinct_arrays`]. See that function for the contract; this type
+/// is its return value and holds only a borrow of the candidate slice and a
+/// cursor, so it allocates nothing and imposes no ceiling on the number of
+/// arrays it can enumerate (`AGENTS.md` §24.1).
+#[derive(Clone, Debug)]
+pub struct DistinctArrays<'a> {
+    candidates: &'a [Candidate],
+    next: usize,
+}
+
+impl Iterator for DistinctArrays<'_> {
+    type Item = ArrayUuid;
+
+    fn next(&mut self) -> Option<ArrayUuid> {
+        while let Some(candidate) = self.candidates.get(self.next) {
+            let index = self.next;
+            self.next += 1;
+            let uuid = candidate.superblock.array_uuid;
+            // Yield a UUID only on its *first* appearance: a UUID already seen
+            // among the candidates before this one has been yielded, so
+            // skipping it here deduplicates without holding any state beyond
+            // the cursor. The scan of the prefix is bounded by the candidate
+            // count (the number of discovered devices, tiny), never unbounded.
+            let seen_earlier = self.candidates[..index]
+                .iter()
+                .any(|earlier| earlier.superblock.array_uuid == uuid);
+            if !seen_earlier {
+                return Some(uuid);
+            }
+        }
+        None
+    }
+}
+
+/// Enumerate the distinct array identifiers present among `candidates`, so the
+/// assembling serve process can discover *which* arrays exist before resolving
+/// each one with [`ArrayIdentity::resolve`].
+///
+/// Device discovery (`AGENTS.md` §18) hands the serve process a heterogeneous
+/// set of block devices whose superblocks decoded: some may be members of one
+/// array, some of another, and any two need not belong to the same array. This
+/// is the primitive that partitions that set by array identity — the "which
+/// arrays are on these disks" step that precedes assembly, so an array is
+/// *discovered*, never configured (`AGENTS.md` §18, §16.5).
+///
+/// The returned [`DistinctArrays`] yields each array's [`ArrayUuid`] exactly
+/// once, in the order it first appears in `candidates`, so enumeration is
+/// deterministic. It borrows `candidates` and allocates nothing, imposing no
+/// ceiling on the number of arrays (`AGENTS.md` §24.1); the caller drives it to
+/// build one [`ArrayIdentity`] per array:
+///
+/// ```ignore
+/// for uuid in distinct_arrays(&candidates) {
+///     let identity = ArrayIdentity::resolve(uuid, &candidates)?;
+///     // …assemble this array from its members in `candidates`…
+/// }
+/// ```
+///
+/// A `Candidate` is only offered once its superblock passed
+/// [`ArraySuperblock::decode`], so every enumerated array has at least one
+/// member and [`ArrayIdentity::resolve`] cannot fail with
+/// [`AssemblyError::NoMembers`] for a UUID this iterator yields.
+#[must_use]
+pub fn distinct_arrays(candidates: &[Candidate]) -> DistinctArrays<'_> {
+    DistinctArrays {
+        candidates,
+        next: 0,
     }
 }
 

@@ -122,7 +122,14 @@ array, a degenerate geometry, or a non-canonical timestamp is a typed
 `AGENTS.md` §19.6) proves it never panics on arbitrary input and that every
 accepted record round-trips.
 
-Reassembly resolves the array from a set of discovered `Candidate` members:
+Discovery hands the assembler a heterogeneous set of `Candidate` members whose
+superblocks decoded — some may belong to one array, some to another. The
+`distinct_arrays(candidates)` iterator is the "which arrays are on these disks"
+step: it enumerates the distinct `ArrayUuid`s present, each exactly once and in
+first-appearance order, allocating nothing and imposing no ceiling on the number
+of arrays (`AGENTS.md` §24.1), so the assembler resolves each array in turn.
+
+Reassembly then resolves each array from the members claiming it:
 
 - `ArrayIdentity::resolve(target_uuid, candidates)` fixes the authoritative
   array shape (level, member count, geometry) and current generation from the

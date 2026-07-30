@@ -895,14 +895,23 @@ that can lie"); promoting a rebuilt member back to current is the same
 / post-2038 timestamps; resolve/verdict/fill_slots over stale/duplicate/
 missing/mismatch/foreign arrangements; the generation bump incl. saturation,
 `member_superblock` round-trip/fail-closed, and the end-to-end
-absent-member-returns-stale and rebuilt-member-promoted-current journeys).
+absent-member-returns-stale and rebuilt-member-promoted-current journeys). The
+discovery-grouping step that precedes per-array assembly is the pure,
+alloc-free `raid::distinct_arrays(candidates)` iterator: discovery hands the
+assembler a heterogeneous set of decoded-superblock candidates that need not
+all belong to one array, and this enumerates the distinct `ArrayUuid`s present
+(each once, first-appearance order, no member/array ceiling, §24.1) so the
+serve process resolves each array through `ArrayIdentity::resolve` in turn — an
+array is *discovered*, never configured (§18, §16.5). Proven host-side (empty,
+single-array dedup, interleaved multi-array first-appearance order, and
+compose-with-`resolve`).
 Design: `docs/src/drivers/raid.md`.
 
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
-  assembles the members through `ArrayIdentity`, drives `resync_step` off the
-  members' IO3 recovery signals, and publishes the composed device as its own
-  block-service node — plus the ARXFS-native multi-device composition that
+  groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
+  drives `resync_step` off the members' IO3 recovery signals, and publishes the
+  composed device as its own block-service node — plus the ARXFS-native multi-device composition that
   consumes the same engine. This rides with the multi-device volume-assembly
   work; the engine and its metadata are the single shared definition both reuse
   (§2.2), proven host-side first exactly as the other FIX-IO primitives landed
