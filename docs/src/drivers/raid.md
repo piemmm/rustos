@@ -30,12 +30,47 @@ Reads are served from an in-sync member, trying members in a deterministic
 order (no coin-flip). A member that returns a *per-block* error
 (`DriverError::MediumError`) does not kill the array: the data is recovered
 from a good copy and the bad copy is **repaired** in place by writing the good
-data back, forcing the device to reallocate the sector — the auto-scrub a
-mirror exists to provide. Only a *whole-device* fault
-(`DeviceOffline`/`DeviceFault`, or a member returning a request-level error for
-a request the array already validated) drops the copy from the array. A read
-with no surviving copy fails closed and never fabricates data (`AGENTS.md`
-§5.4).
+data back, forcing the device to reallocate the sector. Only a *whole-device*
+fault (`DeviceOffline`/`DeviceFault`, or a member returning a request-level
+error for a request the array already validated) drops the copy from the array.
+A read with no surviving copy fails closed and never fabricates data
+(`AGENTS.md` §5.4).
+
+This read-path repair is **opportunistic**: it only ever touches the copies a
+read consults *before* the first that serves the block, so a latent media error
+on a copy that is never chosen as the read source stays invisible until the
+copies ahead of it are gone. The proactive scrub below is the complement that
+finds such latent errors.
+
+### Scrub — proactive verify and repair
+
+`MirrorArray::begin_scrub` / `scrub_step` drive a bounded, interruptible pass
+that reads **every** in-sync copy of **every** block and repairs a copy that
+cannot read a block from one that can — the auto-scrub a mirror exists to
+provide (`AGENTS.md` §26.5). `scrub_step` verifies one caller-sized chunk and
+advances a cursor, so a 100 TB+ array is scrubbed a chunk at a time and never
+in one unbounded sweep or a busy-spin (`AGENTS.md` §26.6, §2.23); a larger
+scratch buffer scrubs faster, a smaller one yields sooner. `scrubbing` reports
+whether a pass is still in progress and `scrub_cursor` its position (for
+progress logging).
+
+Within a chunk a copy that reads cleanly is verified good; a *whole-device*
+fault drops the copy exactly as on the read path; and a *per-block* media error
+is repaired by writing back data read from a good copy (a repair whose
+write-back fails drops that copy, but the data is safe on the source, so it is
+not a loss). If a block is bad on **every** copy the loss is surfaced as a
+typed error, but the cursor still advances past it so a repeated call makes
+progress rather than looping on the unrepairable block; the bad block is left
+for the read path to surface. A scrub on a failed array (no in-sync copy) fails
+closed without advancing.
+
+A scrub deliberately does **not** arbitrate a *content* disagreement between
+two copies that both read cleanly: a bare mirror has no authority to decide
+which differing copy is correct, and overwriting one from another could
+propagate corruption. Detecting silent divergence is the checksummed
+filesystem layer's job (ARXFS), not the block mirror's; the scrub's remit is
+latent *media* errors. Scrub buffers hold opaque on-disk bytes that may include
+secrets, so they are staged as `BufferClass::Sensitive`.
 
 ### Write — fan out and drop
 

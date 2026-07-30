@@ -21,8 +21,16 @@
 //!   ([`DriverError::MediumError`](tairix_abi::DriverError::MediumError)) does
 //!   not kill the array: the data is
 //!   recovered from a good copy and the bad copy is **repaired** in place by
-//!   writing the good data back, forcing the device to reallocate the sector
-//!   — the auto-scrub a mirror exists to provide.
+//!   writing the good data back, forcing the device to reallocate the sector.
+//!   This read-path repair is opportunistic (it only touches copies read
+//!   before the serving one), complemented by the proactive scrub below.
+//! - **Scrub** ([`MirrorArray::begin_scrub`]/[`MirrorArray::scrub_step`]) is a
+//!   bounded, interruptible pass that proactively reads *every* in-sync copy
+//!   of *every* block and repairs a latent media error on any copy from a good
+//!   one, so a bad sector on a copy the read path never consults is found and
+//!   healed while a good copy still exists (`AGENTS.md` §26.5) — the auto-scrub
+//!   a mirror exists to provide, chunked so a 100 TB+ array never scrubs in one
+//!   sweep (`AGENTS.md` §26.6).
 //! - **Writes** fan out to every copy. A member that fails a write is
 //!   dropped from the array (a write error is a member fault, not an array
 //!   fault); the write still succeeds as long as one copy accepted it.

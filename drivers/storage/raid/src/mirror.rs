@@ -217,6 +217,9 @@ pub enum MirrorError {
 pub struct MirrorArray<'a, B: Block> {
     members: &'a mut [MirrorMember<B>],
     geometry: BlockGeometry,
+    /// The next logical block a scrub pass will verify, or the array block
+    /// count when no scrub is in progress (`AGENTS.md` §26.5 auto-scrub).
+    scrub_next_lba: u64,
 }
 
 impl<'a, B: Block> MirrorArray<'a, B> {
@@ -267,7 +270,11 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         let Some(geometry) = geometry else {
             return Err(MirrorError::NoUsableMember);
         };
-        Ok(Self { members, geometry })
+        Ok(Self {
+            members,
+            geometry,
+            scrub_next_lba: geometry.block_count,
+        })
     }
 
     /// The array's logical geometry (shared by every copy).
@@ -545,6 +552,168 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             }
         }
         Ok(())
+    }
+
+    /// Whether a proactive scrub pass is in progress (i.e.
+    /// [`scrub_step`](Self::scrub_step) has more of the array left to verify).
+    #[must_use]
+    pub const fn scrubbing(&self) -> bool {
+        self.scrub_next_lba < self.geometry.block_count
+    }
+
+    /// The next logical block a scrub pass will verify (the scrub cursor);
+    /// equal to the array block count when no scrub is in progress. Exposed so
+    /// the serving process can report scrub progress when logging.
+    #[must_use]
+    pub const fn scrub_cursor(&self) -> u64 {
+        self.scrub_next_lba
+    }
+
+    /// Begin a proactive scrub pass from block 0.
+    ///
+    /// A scrub complements the opportunistic read-repair on the read path. The
+    /// read path only ever verifies the copies it consults *before* the first
+    /// that serves a block, so a latent media error on a copy that is never
+    /// chosen as the read source stays invisible — until the copies ahead of
+    /// it are gone, at which point that block is unrecoverable. A scrub
+    /// proactively reads *every* in-sync copy of *every* block and repairs a
+    /// copy that cannot read a block from one that can, so a bad sector is
+    /// found and healed while a good copy still exists (the auto-scrub a
+    /// mirror exists to provide, `AGENTS.md` §26.5).
+    ///
+    /// Drive the pass by calling [`scrub_step`](Self::scrub_step) until
+    /// [`scrubbing`](Self::scrubbing) is false. Calling `begin_scrub` again
+    /// restarts the pass from block 0.
+    pub fn begin_scrub(&mut self) {
+        self.scrub_next_lba = 0;
+    }
+
+    /// Verify and repair one bounded chunk of a scrub pass, advancing the
+    /// scrub cursor. Call repeatedly while [`scrubbing`](Self::scrubbing) is
+    /// true; a no-op returning `Ok(())` once the pass is complete.
+    ///
+    /// `scratch` sizes the chunk (a multiple of the block size); a larger
+    /// scratch scrubs faster, a smaller one yields to other work sooner
+    /// (`AGENTS.md` §26.6 — bounded, interruptible, never a busy-spin). For the
+    /// chunk, every in-sync copy is read:
+    ///
+    /// * a copy that reads the chunk cleanly is verified good;
+    /// * a copy that returns a *whole-device* fault is dropped from the array
+    ///   ([`MemberState::Faulted`]), exactly as on the read path;
+    /// * a copy that returns a *per-block* media error is **repaired** by
+    ///   writing back data read from a good copy, forcing the device to
+    ///   reallocate the sector; a repair whose write-back fails drops that
+    ///   copy, but the data is safe on the source so it is not a loss.
+    ///
+    /// A scrub deliberately does **not** arbitrate a *content* disagreement
+    /// between two copies that both read cleanly: a bare mirror has no
+    /// authority to decide which differing copy is correct, and overwriting
+    /// one from another could propagate corruption. Detecting silent
+    /// divergence is the checksummed filesystem layer's job (ARXFS), not the
+    /// block mirror's; the scrub's remit is latent *media* errors, which it
+    /// surfaces and heals here.
+    ///
+    /// Scrub reads opaque on-disk bytes that may include secrets, so the
+    /// staging buffer is treated as [`BufferClass::Sensitive`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] if `scratch` is empty or not a
+    ///   block-size multiple.
+    /// * [`DriverError::DeviceOffline`] if no in-sync copy exists to scrub
+    ///   from (the array has failed); the cursor does not advance.
+    /// * The most fail-closed media error seen if a block in this chunk was bad
+    ///   on *every* copy and could not be repaired (a genuine data loss). The
+    ///   cursor **still advances** past the chunk in this case — the bad block
+    ///   is left for the read path to surface — so a repeated call makes
+    ///   progress rather than looping on the loss.
+    pub fn scrub_step(&mut self, scratch: &mut [u8]) -> Result<(), DriverError> {
+        let bs = self.geometry.block_size as usize;
+        if scratch.is_empty() || bs == 0 || !scratch.len().is_multiple_of(bs) {
+            return Err(DriverError::BufferTooSmall);
+        }
+        if self.scrub_next_lba >= self.geometry.block_count {
+            return Ok(());
+        }
+        if self.in_sync_count() == 0 {
+            return Err(DriverError::DeviceOffline);
+        }
+        let chunk_blocks = (scratch.len() / bs) as u64;
+        let cursor = self.scrub_next_lba;
+        let this = chunk_blocks.min(self.geometry.block_count - cursor);
+        let this_usize = usize::try_from(this).map_err(|_| DriverError::LengthOutOfRange)?;
+        let bytes = this_usize * bs;
+        let mut unrepairable: Option<DriverError> = None;
+        for i in 0..self.members.len() {
+            if self.members[i].state != MemberState::InSync {
+                continue;
+            }
+            match self.members[i].device.read_blocks_with_class(
+                cursor,
+                &mut scratch[..bytes],
+                BufferClass::Sensitive,
+            ) {
+                Ok(()) => {}
+                Err(e) if member_faulting(e) => {
+                    self.members[i].state = MemberState::Faulted;
+                    self.members[i].resync_next_lba = 0;
+                }
+                Err(e) => {
+                    if !self.repair_chunk(i, cursor, bytes, scratch) {
+                        unrepairable = Some(most_severe(unrepairable, e));
+                    }
+                }
+            }
+        }
+        self.scrub_next_lba = cursor + this;
+        match unrepairable {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
+    /// Repair member `target`'s copy of the chunk at `[cursor, cursor+bytes)`
+    /// by writing back data read from another in-sync copy. Returns `true`
+    /// once the data was recovered from some copy (whether or not the write
+    /// back to `target` succeeded — the data is safe on the source either
+    /// way), or `false` if no in-sync copy could read the chunk (a genuine
+    /// loss). A whole-device fault in a source drops that source; a write-back
+    /// failure drops `target`. `scratch` is the staging buffer.
+    fn repair_chunk(
+        &mut self,
+        target: usize,
+        cursor: u64,
+        bytes: usize,
+        scratch: &mut [u8],
+    ) -> bool {
+        for j in 0..self.members.len() {
+            if j == target || self.members[j].state != MemberState::InSync {
+                continue;
+            }
+            match self.members[j].device.read_blocks_with_class(
+                cursor,
+                &mut scratch[..bytes],
+                BufferClass::Sensitive,
+            ) {
+                Ok(()) => {
+                    if self.members[target]
+                        .device
+                        .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
+                        .is_err()
+                    {
+                        self.members[target].state = MemberState::Faulted;
+                        self.members[target].resync_next_lba = 0;
+                    }
+                    return true;
+                }
+                Err(e) if member_faulting(e) => {
+                    self.members[j].state = MemberState::Faulted;
+                    self.members[j].resync_next_lba = 0;
+                }
+                Err(_) => {}
+            }
+        }
+        false
     }
 
     /// Begin rebuilding a currently-faulted member from its existing device

@@ -19,7 +19,12 @@ The first composition is the **RAID1 mirror** (`MirrorArray`):
 
 - **Reads** are served from any in-sync copy; a per-block `MediumError` is
   recovered from a good copy and the bad copy is **repaired** in place
-  (auto-scrub), while only a whole-device fault drops a copy.
+  (opportunistic read-repair), while only a whole-device fault drops a copy.
+- **Scrub** (`begin_scrub`/`scrub_step`) is a bounded, interruptible pass that
+  proactively reads *every* in-sync copy of *every* block and repairs a latent
+  media error the read path would never consult — the auto-scrub a mirror
+  exists to provide (`AGENTS.md` §26.5), chunked so a 100 TB+ array never
+  scrubs in one sweep (`AGENTS.md` §26.6).
 - **Writes** fan out to every copy; a copy that fails a write is dropped and
   the write still succeeds as long as one copy accepted it.
 - A faulted copy **degrades the array, never the system** — the survivors keep

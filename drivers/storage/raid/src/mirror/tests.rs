@@ -796,3 +796,201 @@ fn a_stale_member_that_cannot_be_probed_joins_faulted() {
     assert_eq!(array.member_state(1), Some(MemberState::Faulted));
     assert_eq!(array.health(), ArrayHealth::Degraded);
 }
+
+#[test]
+fn scrub_verifies_every_copy_and_a_clean_pass_is_a_no_op() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert!(!array.scrubbing(), "no scrub in progress after assembly");
+    array.begin_scrub();
+    assert!(array.scrubbing());
+    let mut scratch = [0u8; CAP];
+    while array.scrubbing() {
+        array.scrub_step(&mut scratch).expect("clean scrub step");
+    }
+    // Unlike a read (which stops at the first serving copy), a scrub reads
+    // *every* in-sync copy of the whole array — here one whole-array chunk.
+    assert_eq!(array.member(0).unwrap().device().reads.get(), 1);
+    assert_eq!(array.member(1).unwrap().device().reads.get(), 1);
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    // A completed pass is idempotent: another step is a no-op.
+    array
+        .scrub_step(&mut scratch)
+        .expect("no-op after completion");
+    assert!(!array.scrubbing());
+    assert_eq!(array.scrub_cursor(), NBLK);
+}
+
+#[test]
+fn scrub_finds_and_repairs_a_latent_bad_sector_on_a_non_primary_copy() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    let data = block(0xC4);
+    array.write_blocks(0, &data).expect("seed both copies");
+    // The *second* copy (never the read source) develops a latent bad sector.
+    array
+        .member(1)
+        .unwrap()
+        .device()
+        .read_fault
+        .set(Some(DriverError::MediumError));
+    // The read path never consults the second copy, so the latent error stays
+    // invisible — the gap a scrub exists to close.
+    let mut buf = block(0);
+    array.read_blocks(0, &mut buf).expect("served from copy 0");
+    assert_eq!(
+        array.member(1).unwrap().device().read_fault.get(),
+        Some(DriverError::MediumError),
+        "the read path did not touch — nor repair — the second copy"
+    );
+    let seed_writes_0 = array.member(0).unwrap().device().writes.get();
+    let seed_writes_1 = array.member(1).unwrap().device().writes.get();
+    // A scrub proactively reads the second copy, finds the bad sector, and
+    // repairs it from the good copy.
+    array.begin_scrub();
+    let mut scratch = [0u8; CAP];
+    while array.scrubbing() {
+        array
+            .scrub_step(&mut scratch)
+            .expect("scrub repairs the bad sector");
+    }
+    assert_eq!(
+        array.member(1).unwrap().device().read_fault.get(),
+        None,
+        "the bad sector was reallocated by the repair write-back"
+    );
+    assert_eq!(array.member_state(1), Some(MemberState::InSync));
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    // Only the bad copy was written (repaired); the good source was not.
+    assert_eq!(
+        array.member(0).unwrap().device().writes.get(),
+        seed_writes_0
+    );
+    assert_eq!(
+        array.member(1).unwrap().device().writes.get(),
+        seed_writes_1 + 1
+    );
+}
+
+#[test]
+fn scrub_drops_a_whole_device_faulting_copy() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    array
+        .member(1)
+        .unwrap()
+        .device()
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    array.begin_scrub();
+    let mut scratch = [0u8; CAP];
+    while array.scrubbing() {
+        array
+            .scrub_step(&mut scratch)
+            .expect("scrub survives a dropped copy");
+    }
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+}
+
+#[test]
+fn scrub_reports_a_block_bad_on_every_copy_and_still_advances() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    for i in 0..2 {
+        array
+            .member(i)
+            .unwrap()
+            .device()
+            .read_fault
+            .set(Some(DriverError::MediumError));
+    }
+    array.begin_scrub();
+    let mut scratch = [0u8; CAP];
+    // Bad on every copy: the loss is surfaced, but the cursor advances past it
+    // so the pass makes progress rather than looping on the unrepairable block.
+    assert_eq!(
+        array.scrub_step(&mut scratch).unwrap_err(),
+        DriverError::MediumError
+    );
+    assert!(!array.scrubbing(), "cursor advanced past the whole array");
+    // A per-block error on every copy is a data loss, not a device fault: no
+    // copy is dropped.
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+    assert_eq!(array.member_state(1), Some(MemberState::InSync));
+}
+
+#[test]
+fn scrub_is_bounded_and_interruptible() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    array.begin_scrub();
+    // A two-block scratch advances the cursor two blocks at a time, yielding
+    // between chunks — a 100 TB+ array never scrubs in one unbounded sweep.
+    let mut two = [0u8; 2 * BS as usize];
+    let mut steps = 0u64;
+    let mut expected = 2u64;
+    while array.scrubbing() {
+        array.scrub_step(&mut two).expect("bounded scrub step");
+        assert_eq!(array.scrub_cursor(), expected.min(NBLK));
+        expected += 2;
+        steps += 1;
+    }
+    assert_eq!(steps, NBLK / 2, "one step per two-block chunk");
+    // begin_scrub restarts the pass from block 0.
+    array.begin_scrub();
+    assert_eq!(array.scrub_cursor(), 0);
+    assert!(array.scrubbing());
+}
+
+#[test]
+fn scrub_on_a_failed_array_fails_closed_without_advancing() {
+    let mut members = [
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.health(), ArrayHealth::Failed);
+    array.begin_scrub();
+    let mut scratch = [0u8; CAP];
+    assert_eq!(
+        array.scrub_step(&mut scratch).unwrap_err(),
+        DriverError::DeviceOffline
+    );
+    assert_eq!(array.scrub_cursor(), 0, "a failed array does not advance");
+}
+
+#[test]
+fn scrub_step_rejects_a_bad_scratch_buffer() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    array.begin_scrub();
+    assert_eq!(
+        array.scrub_step(&mut []).unwrap_err(),
+        DriverError::BufferTooSmall
+    );
+    let mut ragged = [0u8; BS as usize - 12];
+    assert_eq!(
+        array.scrub_step(&mut ragged).unwrap_err(),
+        DriverError::BufferTooSmall
+    );
+}

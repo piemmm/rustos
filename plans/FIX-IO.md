@@ -808,10 +808,25 @@ member tier lives in the assembling serve process. Its complete behaviour is
 proven host-side over a fault-injecting `Block` double:
 - **Read = recover + repair.** Reads are served from an in-sync copy in a
   deterministic order; a *per-block* `MediumError` is recovered from a good
-  copy and the bad copy is **repaired** in place (the mirror's auto-scrub), and
-  only a *whole-device* fault (`DeviceOffline`/`DeviceFault`, or a member
+  copy and the bad copy is **repaired** in place (opportunistic read-repair),
+  and only a *whole-device* fault (`DeviceOffline`/`DeviceFault`, or a member
   returning a request-level error for a request the array already validated)
   drops a copy. A read with no surviving copy fails closed (§5.4).
+- **Scrub = proactive verify + repair.** The read-path repair only ever touches
+  the copies a read consults *before* the serving one, so a latent media error
+  on a copy that is never the read source stays invisible until the copies
+  ahead of it are gone — the classic latent-sector data-loss window (§26.5).
+  `MirrorArray::begin_scrub`/`scrub_step` close it: a bounded, interruptible
+  pass (`scrub_cursor`/`scrubbing`) reads *every* in-sync copy of *every* block
+  and repairs a per-block media error from a good copy, dropping only
+  whole-device faults — the auto-scrub a mirror exists to provide, chunked so a
+  100 TB+ array never scrubs in one sweep or a busy-spin (§26.6, §2.23). A block
+  bad on every copy is surfaced as a typed loss but the cursor still advances
+  (no loop on the unrepairable block); a failed array (no in-sync copy) fails
+  closed without advancing. It deliberately does **not** arbitrate a *content*
+  disagreement between two readable copies — a bare mirror has no authority to
+  pick the correct one; that is the checksummed FS layer's job (ARXFS) — so its
+  remit is latent *media* errors. Scrub buffers are `BufferClass::Sensitive`.
 - **Write = fan-out + drop.** Writes fan out to every copy; a copy that fails a
   write is dropped immediately and the write still succeeds as long as one copy
   accepted it, failing closed only when none did. A rebuilding copy receives
@@ -890,7 +905,14 @@ rebuilt with **current** data (including degraded-window writes); the rebuild is
 incremental (a cursor advances a chunk per step); a write during rebuild reaches
 only the already-synced region; a rebuild target that cannot be written drops
 back to faulted; a permanently-faulted copy never stops the survivor serving;
-assemble/re-add fail closed on empty/mismatched/absent members.
+assemble/re-add fail closed on empty/mismatched/absent members. Scrub is proven
+the same way — a clean pass reads *every* copy (unlike a read) and is an
+idempotent no-op once complete; a latent bad sector on a non-primary copy the
+read path never repairs is found and healed by a scrub; a whole-device fault is
+dropped; a block bad on every copy is surfaced yet the cursor still advances; a
+two-block scratch scrubs the array a chunk at a time and `begin_scrub` restarts
+it; a failed array fails closed without advancing; a ragged/empty scratch is
+rejected.
 
 ---
 
