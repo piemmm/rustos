@@ -77,6 +77,19 @@ binary works behind any host controller that speaks the URB transport
      Sense IU sequencing over the four pipes (USB 2.0 non-stream
      operation), with autosense delivered in-band and every hostile IU
      refused closed.
+
+   Every LUN behind one device shares the *same* bulk pipe pair, so that
+   bulk-pipe reset is a **transport-wide** event, not a per-LUN one. The serve
+   loop therefore wraps the per-unit health in one shared-transport
+   `blkio::FaultDomain` (owned by the device's own discovered URB transport
+   grant, never a board constant): a reset opens a single recovery window over
+   the whole device — every LUN's request is held reissuable under it, the
+   device recovers the moment *any* unit completes a real transfer (or reports
+   a medium error, which proves the transport delivered the command), and only
+   a window that elapses with the transport still wedged fails the whole device
+   closed. So one shared-transport blip is one recovery episode, not N spurious
+   LUN failures (`src/recover.rs`, `plans/FIX-IO.md` IO4).
+
    Write-protected media refuse writes driver-side before any byte reaches
    the device. A vanished interface retracts every LUN node and exits `0` so
    `devmgr` reloads the driver on re-plug.
@@ -127,8 +140,12 @@ the floppy geometry, in-band UFI sense with no `REQUEST SENSE`, and the
 not-ready ready drain), `src/uas_tests.rs` (IU sequencing, tag checking,
 autosense in both sense formats, hostile IUs, `REPORT LUNS`),
 `src/desc_tests.rs` (transport classification and hostile descriptor
-streams, including UAS Pipe Usage validation), and `src/serve.rs` (the
-block-service request surface over an in-memory device). The URB transport
+streams, including UAS Pipe Usage validation), `src/serve.rs` (the per-LUN
+block-service endpoint-id derivation), and `src/recover.rs` (the
+shared-transport fault-domain coordination over fault-injecting doubles: a
+quiesced transport holds a stalling sibling reissuable, any unit's definitive
+answer recovers the whole device, and an elapsed window fails a sibling
+closed). The URB transport
 is proven in `lib/usb` (bulk, the no-data and data-stage control-OUT, the
 EP0 stall recovery, and the per-pipe bulk routing). The end-to-end path is
 the metal acceptance item (QEMU models no Pi USB; `plans/PI.md` §0.4).

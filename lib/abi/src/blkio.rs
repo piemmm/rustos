@@ -1367,11 +1367,19 @@ pub enum FaultDomainState {
     Offline,
 }
 
-/// The recovery state machine of one interior fault-domain node (a bus, hub,
-/// controller, expander, or root complex) that owns a group of served block
-/// devices, read from the discovered hardware tree
-/// ([`crate::hwtree`]) — never hard-coded, so a USB hub, a SAS
-/// expander, and a PCIe root complex are all just interior nodes.
+/// The recovery state machine of one fault-domain *owner* — a group of served
+/// block devices that a single upstream element fails and recovers together.
+///
+/// The owner is usually an interior node of the discovered hardware tree
+/// ([`crate::hwtree`]) — a bus, hub, controller, expander, or root complex —
+/// read from the tree, never hard-coded, so a USB hub, a SAS expander, and a
+/// PCIe root complex are all just interior nodes. It need not be a *bus* node,
+/// though: a leaf driver's own shared transport that fans out to several
+/// logical units (a USB mass-storage device's Bulk-Only pipe pair over its
+/// LUNs) is equally a fault-domain owner of those units — a reset of that one
+/// transport hits all of them at once — identified by the driver's own
+/// discovered transport grant rather than a tree node. Either way the owner id
+/// is opaque here and never a board constant.
 ///
 /// It turns an *owner-level* event — the owner began a reset/blip
 /// ([`quiesce`](Self::quiesce)), the owner demonstrably returned
@@ -1395,8 +1403,9 @@ pub enum FaultDomainState {
 /// as healthy, yet a genuine return always recovers the subtree.
 #[derive(Copy, Clone, Debug)]
 pub struct FaultDomain {
-    /// The owning bus/hub/controller node's hardware-tree id (opaque here; the
-    /// caller reads parenthood from [`crate::hwtree`]).
+    /// The owner's opaque id — an interior hardware-tree node id (the caller
+    /// reads parenthood from [`crate::hwtree`]) or a leaf driver's own shared
+    /// transport grant. Identity only; never dereferenced here.
     owner: u32,
     state: FaultDomainState,
     /// The shared recovery window for the whole subtree, open only while
@@ -1405,7 +1414,8 @@ pub struct FaultDomain {
 }
 
 impl FaultDomain {
-    /// A freshly-`Healthy` fault domain owned by hardware-tree node `owner`,
+    /// A freshly-`Healthy` fault domain owned by `owner` (an interior
+    /// hardware-tree node id, or a leaf driver's own shared-transport id),
     /// whose recovery window lasts `grace_ns`.
     ///
     /// `grace_ns` is **policy**, derived by the caller from the owner's
@@ -1422,7 +1432,8 @@ impl FaultDomain {
         }
     }
 
-    /// The owning bus/hub/controller node's hardware-tree id.
+    /// The owner's opaque id (an interior hardware-tree node, or a leaf
+    /// driver's shared transport).
     #[must_use]
     pub const fn owner(&self) -> u32 {
         self.owner

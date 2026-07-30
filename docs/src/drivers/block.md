@@ -273,11 +273,25 @@ of the wire value `BlkStatus::as_u32` so the transport encoding and the recovery
 precedence can never silently couple. All of these are pure and proven
 host-side in `lib/abi`.
 
-Driving a subtree's children through the `FaultDomain` in the live serve loops
-— building each child's domain from its resolved owner, folding
-`effective_child_status` into completions, and arming the loop's wait from
-`fault_domain_wait_timeout` — and the volume-manager degrade marking and health
-observability are the staged remainder (`plans/FIX-IO.md` IO4–IO6).
+A `FaultDomain` owner need not be a *bus* node in the tree: a leaf driver's own
+shared transport that fans out to several logical units is equally a
+fault-domain owner of those units. `usb_msd` is the first live consumer — every
+LUN behind one USB mass-storage device shares one Bulk-Only pipe pair, so the
+data-path reset it escalates is a transport-wide event. Its serve loop owns one
+`FaultDomain` for that shared transport (owner = the device's own discovered URB
+transport grant), `quiesce`s it around the reset, drives each LUN through the
+per-request engine and folds the domain's verdict with `effective_child_status`,
+`resume`s the whole device when any unit completes a real transfer, arms its
+wait from the min of `recovery_wait_timeout` and `fault_domain_wait_timeout`, and
+audits the device-wide edges through `BlkHealthTransition::for_fault_domain`
+(`drivers/storage/usb_msd/src/recover.rs`). So one shared-transport blip is one
+recovery episode across the device, not N spurious LUN failures.
+
+The remaining live wiring is the cross-process *interior hardware-tree node*
+case a bus/HCD driver owns (a hub or controller `quiesce`/`resume`/`poll`ing the
+node it resets and propagating that to the leaf block consumers beneath it),
+together with the health observability that hangs off it (`plans/FIX-IO.md`
+IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 

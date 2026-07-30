@@ -521,17 +521,41 @@ All three are pure and proven host-side (severity total-order + combine lattice
 laws; the child-status fold with precedence and nesting; the interior-node
 timeout mirroring the per-device one).
 
+**Landed (the first live wiring — the `usb_msd` shared-transport fault
+domain):** a fault-domain owner need not be a *bus* node in the tree — a leaf
+driver's own shared transport that fans out to several logical units is equally
+a fault-domain owner of those units (the `FaultDomain` doc now states this), and
+`usb_msd` is the first live consumer. Every LUN behind one Bulk-Only / UAS
+device shares the *same* bulk pipe pair, so the data-path reset the recovery
+ladder escalates (`ScsiDevice::scrub_window`) is a transport-wide event, not a
+per-LUN one. The serve loop now owns one `FaultDomain` for that shared transport
+(owner = the device's own discovered URB transport grant, never a board
+constant; the removable-class grace window). The per-request coordination is the
+pure, host-tested `recover::serve_lun_with_domain` in the crate's `lib`: it
+always drives the unit through `blkio::serve_request_recovering` (so a returning
+transport is *discovered* — a definitive answer, `data_valid`/`MediumError`, is
+the only demonstrated proof the shared pipes are back), recovers the whole
+device on that proof (`resume`) before folding, then folds the transport
+domain's verdict with `effective_child_status` (a sibling LUN's request during
+the window is answered reissuably under the one shared window, failed closed to
+`Offline` once it elapses) — re-framing only ever over a non-data-valid status,
+so no valid read is discarded. The loop `quiesce`s the domain around the scrub,
+arms its wait from the min of `recovery_wait_timeout` and
+`fault_domain_wait_timeout`, `poll`s the domain on every wake, and audits the
+device-wide edges through the shared `BlkHealthTransition::for_fault_domain`
+vocabulary (`MSD_DOMAIN_RECOVERING 4171`, `MSD_DOMAIN_RECOVERED 4172`,
+`MSD_DOMAIN_OFFLINE 4173`). So one shared-transport blip is one recovery episode
+across the device, not N spurious LUN failures.
+
 Remaining:
-- **Wiring the tree into the live serve loops.** With the nested-owner chain
-  resolved by `hwtree::fault_domain_chain`, and the fold/timing now the shared
-  `effective_child_status` / `fault_domain_wait_timeout` above, the remaining
-  work is the *live* wiring: a serving driver builds one `FaultDomain` per
-  interior node in a device's `fault_domain_chain`, folds `effective_child_status`
-  into each completion, arms its wait from `fault_domain_wait_timeout`, and a
-  serving/bus driver calls `quiesce`/`resume`/`poll` around its own reset. This
-  belongs with the user-space bus/serving driver work (it needs the live serve
-  loops and timers the host doubles cannot express), like the per-device
-  idle-timer wiring in IO3.
+- **The interior hardware-tree fault domains (hub/controller/expander).** With
+  the `usb_msd` leaf-transport wiring above proving the shape, the remaining
+  work is the *cross-process* case a bus driver owns: a serving driver builds
+  one `FaultDomain` per interior node in a device's `fault_domain_chain`, and a
+  **bus/HCD** driver (the xHCI controller, a hub) `quiesce`/`resume`/`poll`s the
+  node it owns around *its* reset and propagates that state to the leaf block
+  consumers beneath it. This needs the live user-space bus serve loops and a
+  cross-process propagation path (below), which the host doubles cannot express.
 - Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
   `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
   *degrade/reset/restore* health transitions alongside add/remove.
@@ -541,9 +565,14 @@ one owner reset holds the whole subtree reissuable under one window; an owner
 returning inside the window recovers the subtree leaving no scar; an owner that
 outlasts it fails the subtree closed; a quiet domain expires on the one-shot
 time poll; a continuing reset cannot postpone the fail-closed; a failed subtree
-is sticky until a demonstrated return. A QEMU vertical of a modelled hub with
-several children resetting (asserting one recovery episode across the subtree)
-lands with the tree wiring above.
+is sticky until a demonstrated return. The `usb_msd` shared-transport wiring is
+proven host-side over `recover::serve_lun_with_domain` (a healthy transport
+passes a unit's own status through; a quiesced transport holds a stalling
+sibling reissuable under one window; any unit's definitive answer — data or a
+medium error — recovers the whole device; the elapsed window fails a sibling
+closed; a return after the window still recovers). A QEMU vertical of a modelled
+hub with several children resetting (asserting one recovery episode across the
+subtree) lands with the interior-node tree wiring above.
 
 ### Stage IO5 — Health observability (audit log + `sysinfo`). **in progress**
 
@@ -596,10 +625,12 @@ grace-window entry`)`, `MSD_HEALTH_RECOVERED (4170, Info`, "the disk came
 back"`)`, with the fail-closed edge remaining the existing `MSD_GRACE_EXPIRED
 (4166, Warn)` in the driver's own event-id range. `virtio_blk`/`emmc2` reuse the
 same classifier and `note_health_edge` shape when brought up as user-space serve
-processes (§2.2), never a second definition. The retry/reset events and the
-interior *fault-domain node's* own quiesce/resume events remain for the
-`RecoveryLadder`/`FaultDomain` wiring (IO4 remaining), emitted against this same
-vocabulary.
+processes (§2.2), never a second definition. The `usb_msd` per-device retry/reset
+event (`MSD_RECOVERY_RESET`) and the shared-transport fault-domain edges
+(`MSD_DOMAIN_{RECOVERING,RECOVERED,OFFLINE}`, classified through
+`for_fault_domain`) also landed with the IO4 leaf-transport wiring; only the
+*interior hardware-tree node's* own quiesce/resume events (a bus/HCD driver)
+remain (IO4 remaining), emitted against this same vocabulary.
 
 **Landed (the fault-domain-node classifier — the shared vocabulary's third
 member):** the interior-node counterpart of `for_device` is
@@ -618,13 +649,14 @@ it never emits `Degraded`. Pure and proven host-side (the shared-vocabulary
 mapping, edge-triggering, fail-closed exclusion, and never-`Degraded`).
 
 Remaining deliverables:
-- **Fault-domain-node health events** (`plans/SYSLOG.md`): the live emission of
-  the interior-node quiesce/resume/grace-expiry events, naming the fault-domain
-  node and classified through the landed `for_fault_domain` above. Land with the
-  fault-domain tree wiring (IO4 remaining), which owns those machines, their
-  timers, and the `lib/log` event ids. (The per-device `usb_msd` reset already
-  logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/Recovered/
-  fail-closed edges landed above.)
+- **Interior-node fault-domain health events** (`plans/SYSLOG.md`): the live
+  emission of a *hardware-tree* interior node's quiesce/resume/grace-expiry
+  events (a bus/HCD driver's), naming the fault-domain node and classified
+  through the landed `for_fault_domain` above. Land with the interior-node tree
+  wiring (IO4 remaining), which owns those machines, their timers, and the
+  `lib/log` event ids. (The per-device `usb_msd` reset logs `MSD_RECOVERY_RESET`,
+  the per-device Degraded/Recovering/Recovered/fail-closed edges landed above,
+  and the `usb_msd` shared-*transport* fault-domain edges landed with IO4.)
 - **Device/array health via `sysinfo`** (§16.6): **landed** for the
   kernel-observed volume I/O health surface. A new capability-gated
   `SysinfoQueryId::VOLUME_IO_HEALTH` (id 27, `CAP_SYSINFO_KERNEL`, audited)
