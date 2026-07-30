@@ -26,6 +26,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::FaultDomainState;
 use tairix_abi::hwtree::{HwResource, HW_NODE_ROOT};
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::HwTreeSource;
@@ -220,6 +221,42 @@ impl HwTreeStore {
         Ok(doomed)
     }
 
+    /// Record the fault-domain `health` of the live non-root node `node_id`
+    /// and bump the generation, waking every parked `hw_tree_wait` caller so
+    /// it re-reads and reacts to the coherent recovery episode. Returns
+    /// [`Errno::NotFound`] fail-closed if no live non-root node has that id.
+    ///
+    /// This is the store side of the `hw_node_health` syscall. The handler
+    /// has already resolved `node_id` to the caller's *own* matched node, so
+    /// a driver only ever sets the health of the interior node it was loaded
+    /// for. Only the health byte and the generation change — the node set is
+    /// untouched, so this is a *distinct* signal from [`Self::remove_child`]
+    /// (a merely-recovering subtree is never torn down). The root sentinel is
+    /// never a health target (a driver is loaded for a discovered device,
+    /// never the tree root), so it is excluded.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
+    pub fn set_node_health(&self, node_id: u32, health: FaultDomainState) -> Result<(), Errno> {
+        {
+            let mut inner = self.inner.lock();
+            let Some(node) = inner
+                .nodes
+                .iter_mut()
+                .find(|node| !node.is_root() && node.id() == node_id)
+            else {
+                return Err(Errno::NotFound);
+            };
+            node.set_fault_health(health);
+            inner.generation += 1;
+        }
+        // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
+        // done after the inner lock is dropped.
+        tairix_kernel_core::hw_tree_wake();
+        Ok(())
+    }
+
     /// Bump the generation **without** changing the node set, waking every
     /// parked `hw_tree_wait` caller so it re-reads and re-evaluates.
     ///
@@ -364,6 +401,17 @@ impl HwTreeSource for HwTreeStoreSource {
         // assigns identity and records it. The assigned id flows back to the
         // emitter so it can later retract this child by id.
         Ok(HW_TREE.publish_child(parent_id, node))
+    }
+
+    fn set_health(&self, node_id: u32, health: FaultDomainState) -> Result<(), Errno> {
+        // Record the caller's own node's fault-domain health into the one
+        // authoritative inventory and bump the generation so the device
+        // manager re-reads and reacts. The `hw_node_health` handler has
+        // already resolved `node_id` to the caller's own matched node
+        // (no ambient authority) and validated the health value; the store
+        // only updates the byte and fails closed `NotFound` for a node that
+        // is not live.
+        HW_TREE.set_node_health(node_id, health)
     }
 
     fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno> {
@@ -522,6 +570,53 @@ mod tests {
         // A fail-closed removal changes nothing, including the generation.
         assert_eq!(store.remove_child(2, 3), Err(Errno::NotFound));
         assert_eq!(store.generation(), before + 1);
+    }
+
+    #[test]
+    fn set_node_health_records_health_and_bumps_the_generation() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
+        let before = store.generation();
+
+        // A live non-root node's health is recorded and the generation bumps
+        // so a parked `hw_tree_wait` caller (the device manager) wakes.
+        assert_eq!(
+            store.set_node_health(2, FaultDomainState::Recovering),
+            Ok(())
+        );
+        assert_eq!(store.generation(), before + 1);
+        let snap = store.snapshot();
+        assert_eq!(snap[1].id(), 2);
+        assert_eq!(snap[1].fault_health(), FaultDomainState::Recovering);
+        // The node set is untouched — a health update is *not* a removal.
+        assert_eq!(snap.len(), 2);
+
+        // A recovery clears it back to Healthy.
+        assert_eq!(store.set_node_health(2, FaultDomainState::Healthy), Ok(()));
+        assert_eq!(
+            store.snapshot()[1].fault_health(),
+            FaultDomainState::Healthy
+        );
+    }
+
+    #[test]
+    fn set_node_health_fails_closed_for_the_root_or_an_absent_node() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
+        let before = store.generation();
+
+        // The tree root is never a health target.
+        assert_eq!(
+            store.set_node_health(1, FaultDomainState::Recovering),
+            Err(Errno::NotFound)
+        );
+        // An absent id fails closed identically.
+        assert_eq!(
+            store.set_node_health(4242, FaultDomainState::Offline),
+            Err(Errno::NotFound)
+        );
+        // A fail-closed health update changes nothing, including the generation.
+        assert_eq!(store.generation(), before);
     }
 
     #[test]

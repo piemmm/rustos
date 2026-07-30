@@ -1138,6 +1138,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-storage-raid"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-crc32c",
+ "tairix-fuzzseed",
+]
+
+[[package]]
 name = "tairix-drv-storage-usb-msd"
 version = "0.0.0"
 dependencies = [

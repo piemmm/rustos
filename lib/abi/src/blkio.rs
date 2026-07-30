@@ -301,6 +301,60 @@ impl BlkStatus {
             _ => None,
         }
     }
+
+    /// How fail-closed this status is, as a rank a consumer can order two
+    /// statuses by: the higher the rank, the less the completion can be
+    /// trusted and the more conservatively it must be treated. The order is
+    /// healthy → served-but-unwell → reissuable → permanent → gone:
+    /// `Ok` < `Degraded` < `TransientError` < `Timeout` < `Reset` <
+    /// `MediumError` < `Offline` < `Removed` < `Fatal`.
+    ///
+    /// This is the single, explicit definition of "which health signal wins"
+    /// when more than one applies to one request — a leaf device's own outcome
+    /// and each interior fault domain above it in the tree
+    /// ([`FaultDomain::child_status`]) — so [`combine`](Self::combine) and
+    /// every consumer that folds statuses cannot order them differently. It is
+    /// kept deliberately independent of the wire value [`as_u32`](Self::as_u32)
+    /// so the transport encoding and the recovery precedence are separate
+    /// concerns that can never silently couple.
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Degraded => 1,
+            Self::TransientError => 2,
+            Self::Timeout => 3,
+            Self::Reset => 4,
+            Self::MediumError => 5,
+            Self::Offline => 6,
+            Self::Removed => 7,
+            Self::Fatal => 8,
+        }
+    }
+
+    /// The single status that most conservatively describes a request to which
+    /// both `self` and `other` apply: the more fail-closed of the two by
+    /// [`severity`](Self::severity).
+    ///
+    /// This is how a serving driver folds a leaf device's own completion
+    /// outcome with what each interior fault domain above it imposes
+    /// ([`FaultDomain::child_status`]). It is the reason the fold is *correct*
+    /// rather than ad-hoc: a hub mid-reset ([`BlkStatus::Reset`]) overriding a
+    /// device's own [`BlkStatus::Ok`] means the aborted transfer is answered
+    /// reissuably and its data is *not* consumed (`Reset` outranks `Ok`),
+    /// while a device's own definitive [`BlkStatus::MediumError`] still wins
+    /// over a concurrent `Reset` (a bad sector is real and must not be retried
+    /// into the same failure). Because it is a total order, the fold is
+    /// associative and commutative, so the chain can be walked in any order
+    /// with the same result.
+    #[must_use]
+    pub const fn combine(self, other: Self) -> Self {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Byte offsets of the completion frame: `status(4) || errno(4) ||
@@ -646,6 +700,178 @@ impl IoBudget {
     }
 }
 
+/// Encoded length of a [`BlkHealthCounters`] snapshot: ten little-endian
+/// `u64` tallies.
+pub const BLK_HEALTH_COUNTERS_LEN: usize = 10 * 8;
+
+/// Cumulative, monotonic tallies of the device-level outcomes a block
+/// consumer has observed from one served device since it was attached, plus
+/// the number of reissues (retries) the consumer itself performed.
+///
+/// This is the single shared definition of the storage-health *counters*, so
+/// every consumer of a served block device — the kernel filesystem client
+/// today, a future user-space serve loop — folds outcomes into the same
+/// buckets and cannot drift apart in what a "reset" or a "medium error" counts
+/// as (`plans/FIX-IO.md` IO5). It is a pure value type: the live counters are
+/// held as atomics by whichever component owns the I/O path, and a
+/// [`BlkHealthCounters`] is a point-in-time snapshot the System Information
+/// API reports (`AGENTS.md` §16.6) — never `/proc`-style scraped.
+///
+/// The per-status buckets partition every folded completion exactly once, so
+/// `ok + degraded + transient + timeouts + resets + medium_errors + offline +
+/// faults == completions` always holds; `reissues` is orthogonal (a single
+/// logical request that is reissued twice folds three completions). Every
+/// bucket saturates rather than wrapping: a tally is operational observability,
+/// never a security or format bound (`AGENTS.md` §24.4), so an
+/// implausibly-long-lived device pins a counter at [`u64::MAX`] instead of
+/// silently wrapping to a smaller, misleading value.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlkHealthCounters {
+    /// Total device-level completions folded (the sum of the buckets below).
+    pub completions: u64,
+    /// Reissuable completions the consumer retried under the shared
+    /// bounded-reissue policy ([`IoBudget::should_reissue`]).
+    pub reissues: u64,
+    /// Completions the device answered healthy ([`BlkStatus::Ok`]).
+    pub ok: u64,
+    /// Completions served but with the device self-reporting unhealthy
+    /// ([`BlkStatus::Degraded`]).
+    pub degraded: u64,
+    /// Recovered-error / comms-glitch completions ([`BlkStatus::TransientError`]).
+    pub transient: u64,
+    /// Completions reaped on the per-request deadline ([`BlkStatus::Timeout`]).
+    pub timeouts: u64,
+    /// Completions aborted by a device/hub reset ([`BlkStatus::Reset`]).
+    pub resets: u64,
+    /// Permanent bad-sector completions ([`BlkStatus::MediumError`]).
+    pub medium_errors: u64,
+    /// Completions where the device was unresponsive or surprise-removed
+    /// ([`BlkStatus::Offline`] / [`BlkStatus::Removed`]).
+    pub offline: u64,
+    /// Unclassifiable / hard-fault completions ([`BlkStatus::Fatal`]).
+    pub faults: u64,
+}
+
+impl BlkHealthCounters {
+    /// Number of `u64` tallies a snapshot carries.
+    pub const FIELD_COUNT: usize = 10;
+
+    /// Index of the `completions` tally in wire order.
+    pub const COMPLETIONS: usize = 0;
+    /// Index of the `reissues` tally in wire order.
+    pub const REISSUES: usize = 1;
+
+    /// The wire-order index of the bucket a device-level `status` folds into.
+    ///
+    /// This is the single definition of the status → bucket assignment, so a
+    /// pure [`fold`](Self::fold) and any lock-free counter that mirrors these
+    /// tallies (the kernel filesystem client's atomics) place a completion in
+    /// the same bucket and cannot diverge.
+    #[must_use]
+    pub const fn bucket_index(status: BlkStatus) -> usize {
+        match status {
+            BlkStatus::Ok => 2,
+            BlkStatus::Degraded => 3,
+            BlkStatus::TransientError => 4,
+            BlkStatus::Timeout => 5,
+            BlkStatus::Reset => 6,
+            BlkStatus::MediumError => 7,
+            BlkStatus::Offline | BlkStatus::Removed => 8,
+            BlkStatus::Fatal => 9,
+        }
+    }
+
+    /// Fold one device-level completion of `status` into the tallies: bump
+    /// [`completions`](Self::completions) and the single bucket `status`
+    /// belongs to (via [`bucket_index`](Self::bucket_index), the one shared
+    /// assignment). Every bucket saturates, so a long-lived device never wraps
+    /// a counter to a misleadingly-small value.
+    pub const fn fold(&mut self, status: BlkStatus) {
+        let mut fields = self.fields();
+        fields[Self::COMPLETIONS] = fields[Self::COMPLETIONS].saturating_add(1);
+        let bucket = Self::bucket_index(status);
+        fields[bucket] = fields[bucket].saturating_add(1);
+        *self = Self::from_fields(fields);
+    }
+
+    /// Record that the consumer reissued a reissuable completion. Orthogonal
+    /// to [`fold`](Self::fold): the reissued attempt folds its own completion
+    /// when it lands.
+    pub const fn note_reissue(&mut self) {
+        self.reissues = self.reissues.saturating_add(1);
+    }
+
+    /// The ten tallies in wire order, for encode/decode.
+    const fn fields(&self) -> [u64; Self::FIELD_COUNT] {
+        [
+            self.completions,
+            self.reissues,
+            self.ok,
+            self.degraded,
+            self.transient,
+            self.timeouts,
+            self.resets,
+            self.medium_errors,
+            self.offline,
+            self.faults,
+        ]
+    }
+
+    /// Rebuild a snapshot from the wire-order tallies — the inverse of
+    /// [`to_le_bytes`](Self::to_le_bytes)'s field order, so a lock-free counter
+    /// can snapshot its atomics into one value without duplicating that order.
+    #[must_use]
+    pub const fn from_fields(fields: [u64; Self::FIELD_COUNT]) -> Self {
+        Self {
+            completions: fields[0],
+            reissues: fields[1],
+            ok: fields[2],
+            degraded: fields[3],
+            transient: fields[4],
+            timeouts: fields[5],
+            resets: fields[6],
+            medium_errors: fields[7],
+            offline: fields[8],
+            faults: fields[9],
+        }
+    }
+
+    /// Encode the snapshot as [`BLK_HEALTH_COUNTERS_LEN`] little-endian bytes.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; BLK_HEALTH_COUNTERS_LEN] {
+        let mut out = [0u8; BLK_HEALTH_COUNTERS_LEN];
+        for (i, value) in self.fields().iter().enumerate() {
+            put_u64(&mut out, i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode a snapshot from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `bytes` is shorter than
+    /// [`BLK_HEALTH_COUNTERS_LEN`]. Every field value is valid (a tally is any
+    /// `u64`), so there is no further shape to fail closed on.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < BLK_HEALTH_COUNTERS_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            completions: read_u64(bytes, 0),
+            reissues: read_u64(bytes, 8),
+            ok: read_u64(bytes, 16),
+            degraded: read_u64(bytes, 24),
+            transient: read_u64(bytes, 32),
+            timeouts: read_u64(bytes, 40),
+            resets: read_u64(bytes, 48),
+            medium_errors: read_u64(bytes, 56),
+            offline: read_u64(bytes, 64),
+            faults: read_u64(bytes, 72),
+        })
+    }
+}
+
 /// The shared recovery **grace-window** timer: a bounded, event-timed window a
 /// stalling storage element — a single served device ([`BlkHealth`]) or a
 /// whole interior fault domain ([`FaultDomain`]) — is held open before it is
@@ -965,9 +1191,30 @@ pub fn recovery_wait_timeout<'a, I>(healths: I, now_ns: u64) -> Option<u64>
 where
     I: IntoIterator<Item = &'a BlkHealth>,
 {
-    healths
+    nearest_relative_deadline(
+        healths.into_iter().filter_map(BlkHealth::grace_deadline_ns),
+        now_ns,
+    )
+}
+
+/// The relative timeout a serve loop should arm so the soonest of a set of
+/// absolute one-shot `deadlines` elapses promptly, expressed relative to
+/// monotonic `now_ns`.
+///
+/// This is the shared arithmetic behind both [`recovery_wait_timeout`] (over
+/// per-device [`BlkHealth`] windows) and [`fault_domain_wait_timeout`] (over
+/// interior [`FaultDomain`] windows), so the "nearest armed grace window,
+/// measured from now, saturating at zero" rule lives in exactly one place and
+/// the two seams cannot drift apart. Returns `Some(0)` for a window already
+/// due (poll at once, never an underflowed timeout), `Some(ns)` for the
+/// soonest still `ns` away, and `None` when the set arms no window (park with
+/// no timeout, the `u64::MAX` `waitset_wait` convention).
+fn nearest_relative_deadline<I>(deadlines: I, now_ns: u64) -> Option<u64>
+where
+    I: IntoIterator<Item = u64>,
+{
+    deadlines
         .into_iter()
-        .filter_map(BlkHealth::grace_deadline_ns)
         .min()
         .map(|deadline| deadline.saturating_sub(now_ns))
 }
@@ -1120,11 +1367,81 @@ pub enum FaultDomainState {
     Offline,
 }
 
-/// The recovery state machine of one interior fault-domain node (a bus, hub,
-/// controller, expander, or root complex) that owns a group of served block
-/// devices, read from the discovered hardware tree
-/// ([`crate::hwtree`]) — never hard-coded, so a USB hub, a SAS
-/// expander, and a PCIe root complex are all just interior nodes.
+impl FaultDomainState {
+    /// The stable little-endian wire discriminant of this state.
+    ///
+    /// This is the single encoding of a fault-domain health value on any
+    /// wire — the hardware-tree node health byte
+    /// ([`crate::hwtree::HwNode::fault_health`]) a driver publishes about its
+    /// own interior node, and any log/introspection field that carries one —
+    /// so an interior node's health is encoded and decoded in exactly one
+    /// place and the transport and the state machine can never drift apart.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::Recovering => 1,
+            Self::Offline => 2,
+        }
+    }
+
+    /// Decode a wire discriminant, **failing closed**: any value that is not
+    /// a defined state decodes to [`FaultDomainState::Offline`], the most
+    /// conservative reading, so a corrupt or unknown health byte can never
+    /// masquerade a faulted subtree as [`Healthy`](Self::Healthy).
+    #[must_use]
+    pub const fn from_u8_fail_closed(raw: u8) -> Self {
+        match raw {
+            0 => Self::Healthy,
+            1 => Self::Recovering,
+            // Any other byte (2 == Offline, and every undefined value) is a
+            // subtree we cannot vouch for: fail closed to Offline.
+            _ => Self::Offline,
+        }
+    }
+
+    /// The [`BlkStatus`] this *already-resolved* fault-domain state imposes on
+    /// a child device's request, or `None` when the state imposes nothing and
+    /// the child answers on its own per-device health.
+    ///
+    /// This is the single mapping of an owner's health onto its children's
+    /// completions, shared by both the owned, clocked [`FaultDomain`]
+    /// ([`FaultDomain::child_status`] resolves its grace window to a state and
+    /// delegates here) and the *published* cross-process signal a leaf driver
+    /// reads from an ancestor's [`crate::hwtree::HwNode::fault_health`]
+    /// ([`crate::hwtree::ancestor_imposed_status`]) — so a subtree's health
+    /// folds into a child's outcome by one rule whether the domain is owned
+    /// locally or observed on the wire. A `Recovering` owner holds the child
+    /// reissuable ([`BlkStatus::Reset`]); an `Offline` owner fails it closed
+    /// ([`BlkStatus::Offline`]).
+    ///
+    /// The state is presumed already window-resolved: a `Recovering` value is
+    /// still inside its owner's grace window (a published state is resolved by
+    /// its owner before it is emitted; an owned [`FaultDomain`] resolves the
+    /// elapsed window to `Offline` before calling here), so no clock is read.
+    #[must_use]
+    pub const fn imposed_child_status(self) -> Option<BlkStatus> {
+        match self {
+            Self::Healthy => None,
+            Self::Recovering => Some(BlkStatus::Reset),
+            Self::Offline => Some(BlkStatus::Offline),
+        }
+    }
+}
+
+/// The recovery state machine of one fault-domain *owner* — a group of served
+/// block devices that a single upstream element fails and recovers together.
+///
+/// The owner is usually an interior node of the discovered hardware tree
+/// ([`crate::hwtree`]) — a bus, hub, controller, expander, or root complex —
+/// read from the tree, never hard-coded, so a USB hub, a SAS expander, and a
+/// PCIe root complex are all just interior nodes. It need not be a *bus* node,
+/// though: a leaf driver's own shared transport that fans out to several
+/// logical units (a USB mass-storage device's Bulk-Only pipe pair over its
+/// LUNs) is equally a fault-domain owner of those units — a reset of that one
+/// transport hits all of them at once — identified by the driver's own
+/// discovered transport grant rather than a tree node. Either way the owner id
+/// is opaque here and never a board constant.
 ///
 /// It turns an *owner-level* event — the owner began a reset/blip
 /// ([`quiesce`](Self::quiesce)), the owner demonstrably returned
@@ -1148,8 +1465,9 @@ pub enum FaultDomainState {
 /// as healthy, yet a genuine return always recovers the subtree.
 #[derive(Copy, Clone, Debug)]
 pub struct FaultDomain {
-    /// The owning bus/hub/controller node's hardware-tree id (opaque here; the
-    /// caller reads parenthood from [`crate::hwtree`]).
+    /// The owner's opaque id — an interior hardware-tree node id (the caller
+    /// reads parenthood from [`crate::hwtree`]) or a leaf driver's own shared
+    /// transport grant. Identity only; never dereferenced here.
     owner: u32,
     state: FaultDomainState,
     /// The shared recovery window for the whole subtree, open only while
@@ -1158,7 +1476,8 @@ pub struct FaultDomain {
 }
 
 impl FaultDomain {
-    /// A freshly-`Healthy` fault domain owned by hardware-tree node `owner`,
+    /// A freshly-`Healthy` fault domain owned by `owner` (an interior
+    /// hardware-tree node id, or a leaf driver's own shared-transport id),
     /// whose recovery window lasts `grace_ns`.
     ///
     /// `grace_ns` is **policy**, derived by the caller from the owner's
@@ -1175,7 +1494,8 @@ impl FaultDomain {
         }
     }
 
-    /// The owning bus/hub/controller node's hardware-tree id.
+    /// The owner's opaque id (an interior hardware-tree node, or a leaf
+    /// driver's shared transport).
     #[must_use]
     pub const fn owner(&self) -> u32 {
         self.owner
@@ -1256,18 +1576,86 @@ impl FaultDomain {
     /// — so reading it never mutates the machine.
     #[must_use]
     pub const fn child_status(&self, now_ns: u64) -> Option<BlkStatus> {
-        match self.state {
-            FaultDomainState::Healthy => None,
-            FaultDomainState::Recovering => {
-                if self.grace.elapsed(now_ns) {
-                    Some(BlkStatus::Offline)
-                } else {
-                    Some(BlkStatus::Reset)
-                }
-            }
-            FaultDomainState::Offline => Some(BlkStatus::Offline),
-        }
+        // Resolve the grace window to a definite state, then map it through the
+        // one shared owner-health → child-status rule (so an owned domain and a
+        // published ancestor state impose identically): a `Recovering` window
+        // that has elapsed is `Offline`; every other state stands as-is.
+        let resolved = match self.state {
+            FaultDomainState::Recovering if self.grace.elapsed(now_ns) => FaultDomainState::Offline,
+            other => other,
+        };
+        resolved.imposed_child_status()
     }
+}
+
+/// The relative timeout a serving/bus driver should arm its wait on so an
+/// otherwise-quiet `Recovering` interior [`FaultDomain`] still has its shared
+/// grace window expired promptly — the soonest armed deadline across
+/// `domains`, expressed relative to monotonic `now_ns`.
+///
+/// This is the interior-node counterpart of [`recovery_wait_timeout`]: a
+/// serve loop that owns fault domains (a hub/controller reset holds its whole
+/// subtree reissuable under one window) parks between events exactly as it
+/// does for per-device windows, and would, without this, leave a quiesced
+/// domain `Recovering` forever if no child request arrived to fold — its
+/// window is only advanced by [`FaultDomain::poll`] on a time tick or a fresh
+/// [`FaultDomain::quiesce`]. It gives the loop the single relative timeout to
+/// pass to `waitset_wait`/`irq_wait` so it wakes when the nearest subtree
+/// window is due and drives every domain's `poll`, failing an unrecovered
+/// subtree closed on time without a busy-poll (event-timed, never a spin).
+///
+/// Its return convention matches [`recovery_wait_timeout`] exactly — both
+/// delegate to the same `nearest_relative_deadline` core (§2.2) — so a serve
+/// loop that owns *both* per-device and fault-domain windows takes the min of
+/// the two and cannot compute them by different rules: `Some(0)` for a window
+/// already due, `Some(ns)` for the soonest still `ns` away, and `None` when no
+/// domain has an armed window (park with no timeout).
+pub fn fault_domain_wait_timeout<'a, I>(domains: I, now_ns: u64) -> Option<u64>
+where
+    I: IntoIterator<Item = &'a FaultDomain>,
+{
+    nearest_relative_deadline(
+        domains
+            .into_iter()
+            .filter_map(FaultDomain::grace_deadline_ns),
+        now_ns,
+    )
+}
+
+/// The effective [`BlkStatus`] one child device's completion should carry,
+/// given the device's own `device_status` and the chain of interior fault
+/// [`domains`](FaultDomain) above it in the discovered hardware tree
+/// (nearest-owner first, up to the root — resolved by re-applying
+/// [`hwtree::fault_domain_owner`](crate::hwtree::fault_domain_owner)), at
+/// monotonic `now_ns`.
+///
+/// This is the single definition of how a serving driver folds a leaf
+/// device's own outcome with what each ancestor bus/hub/controller imposes,
+/// so the leaf-device machine ([`BlkHealth`]) and the interior-node machine
+/// ([`FaultDomain`]) compose coherently rather than through a rule each serve
+/// loop re-derives. A hub mid-reset ([`FaultDomain::child_status`] returns
+/// [`BlkStatus::Reset`]) turns a child's `Ok` into a reissuable `Reset` so the
+/// blip is invisible if the owner returns inside the window; an ancestor whose
+/// window has elapsed fails the child closed to [`BlkStatus::Offline`]; and a
+/// device's own definitive verdict (a bad-sector [`BlkStatus::MediumError`])
+/// still wins over a less-severe ancestor status. The precedence is
+/// [`BlkStatus::combine`]'s total order, folded over the device status and
+/// every domain that imposes one, so the chain composes associatively and a
+/// deeper failing domain can never be masked by a shallower healthy one.
+///
+/// It is a pure query over the domains' states (each domain's fail-closed
+/// *transition* still happens in its own [`FaultDomain::poll`] /
+/// [`quiesce`](FaultDomain::quiesce)), so reading the effective status never
+/// mutates a machine.
+#[must_use]
+pub fn effective_child_status<'a, I>(device_status: BlkStatus, domains: I, now_ns: u64) -> BlkStatus
+where
+    I: IntoIterator<Item = &'a FaultDomain>,
+{
+    domains
+        .into_iter()
+        .filter_map(|domain| domain.child_status(now_ns))
+        .fold(device_status, BlkStatus::combine)
 }
 
 /// One validated request's outcome, kept separate at the source so device
@@ -1428,6 +1816,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fault_domain_state_wire_codec_round_trips_and_fails_closed() {
+        // The one encoding of a fault-domain health value: every defined
+        // state round-trips through its discriminant.
+        for state in [
+            FaultDomainState::Healthy,
+            FaultDomainState::Recovering,
+            FaultDomainState::Offline,
+        ] {
+            assert_eq!(FaultDomainState::from_u8_fail_closed(state.as_u8()), state);
+        }
+        // The discriminants are pinned (they ride the hardware-tree node
+        // health byte and any log field, one definition).
+        assert_eq!(FaultDomainState::Healthy.as_u8(), 0);
+        assert_eq!(FaultDomainState::Recovering.as_u8(), 1);
+        assert_eq!(FaultDomainState::Offline.as_u8(), 2);
+        // Every undefined byte fails closed to Offline, so a corrupt value can
+        // never present a faulted subtree as healthy.
+        for raw in [3u8, 4, 42, 0xFF] {
+            assert_eq!(
+                FaultDomainState::from_u8_fail_closed(raw),
+                FaultDomainState::Offline
+            );
+        }
+    }
+
+    #[test]
+    fn a_fault_domain_state_imposes_one_shared_child_status_rule() {
+        // The one owner-health → child-status mapping: a healthy owner imposes
+        // nothing (the child answers on its own health), a recovering owner
+        // holds the child reissuable, an offline owner fails it closed.
+        assert_eq!(FaultDomainState::Healthy.imposed_child_status(), None);
+        assert_eq!(
+            FaultDomainState::Recovering.imposed_child_status(),
+            Some(BlkStatus::Reset)
+        );
+        assert_eq!(
+            FaultDomainState::Offline.imposed_child_status(),
+            Some(BlkStatus::Offline)
+        );
+    }
+
+    #[test]
+    fn an_owned_domain_and_its_resolved_state_impose_the_same_status() {
+        // `FaultDomain::child_status` must agree with the shared mapping for
+        // every reachable resolved state, so an owned (clocked) domain and a
+        // published (already-resolved) ancestor state can never diverge.
+        let grace = 1_000u64;
+
+        // Healthy → imposes nothing.
+        let healthy = FaultDomain::new(7, grace);
+        assert_eq!(
+            healthy.child_status(0),
+            FaultDomainState::Healthy.imposed_child_status()
+        );
+
+        // Recovering, inside the window → Reset (matches Recovering's mapping).
+        let mut recovering = FaultDomain::new(7, grace);
+        recovering.quiesce(0);
+        assert_eq!(
+            recovering.child_status(grace / 2),
+            FaultDomainState::Recovering.imposed_child_status()
+        );
+
+        // Recovering, window elapsed → the owned domain resolves to Offline
+        // and so imposes Offline's status, not Recovering's.
+        assert_eq!(
+            recovering.child_status(grace + 1),
+            FaultDomainState::Offline.imposed_child_status()
+        );
+
+        // Offline → Offline's mapping.
+        let mut offline = FaultDomain::new(7, grace);
+        offline.quiesce(0);
+        offline.poll(grace + 1);
+        assert_eq!(offline.state(), FaultDomainState::Offline);
+        assert_eq!(
+            offline.child_status(grace + 2),
+            FaultDomainState::Offline.imposed_child_status()
+        );
+    }
+
+    #[test]
     fn request_round_trips() {
         let req = BlkRequest {
             op: BlkOp::Read,
@@ -1583,6 +2053,92 @@ mod tests {
         assert!(!BlkStatus::Offline.is_retryable());
     }
 
+    /// The statuses in ascending fail-closed severity — the one order
+    /// `combine` folds by. Kept here so the precedence is asserted, not
+    /// assumed from the enum declaration.
+    const SEVERITY_ORDER: [BlkStatus; 9] = [
+        BlkStatus::Ok,
+        BlkStatus::Degraded,
+        BlkStatus::TransientError,
+        BlkStatus::Timeout,
+        BlkStatus::Reset,
+        BlkStatus::MediumError,
+        BlkStatus::Offline,
+        BlkStatus::Removed,
+        BlkStatus::Fatal,
+    ];
+
+    #[test]
+    fn blk_status_severity_is_a_strict_total_order() {
+        // Severity is strictly increasing across the whole vocabulary, so
+        // `combine` has a well-defined winner for every pair — healthy least,
+        // an unclassified fatal most.
+        for pair in SEVERITY_ORDER.windows(2) {
+            let [lower, higher] = [pair[0], pair[1]];
+            assert!(
+                lower.severity() < higher.severity(),
+                "{lower:?} must rank below {higher:?}"
+            );
+        }
+        // The two data-valid statuses rank below every error status, so a
+        // completion whose data may be consumed can never be "worse" than one
+        // that must be rejected.
+        assert!(BlkStatus::Ok.severity() < BlkStatus::TransientError.severity());
+        assert!(BlkStatus::Degraded.severity() < BlkStatus::TransientError.severity());
+        // Every reissuable status ranks below every permanent/gone one, so a
+        // fold never downgrades a definitive verdict to "retry".
+        for retryable in [
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+        ] {
+            for permanent in [
+                BlkStatus::MediumError,
+                BlkStatus::Offline,
+                BlkStatus::Removed,
+                BlkStatus::Fatal,
+            ] {
+                assert!(retryable.severity() < permanent.severity());
+            }
+        }
+    }
+
+    #[test]
+    fn blk_status_combine_is_the_more_fail_closed_and_forms_a_lattice() {
+        // `combine` picks the higher-severity status, and does so as a proper
+        // fold: commutative, associative, and idempotent, so a chain of
+        // statuses can be folded in any order with the same result.
+        for &a in &SEVERITY_ORDER {
+            assert_eq!(a.combine(a), a, "idempotent");
+            for &b in &SEVERITY_ORDER {
+                let winner = if a.severity() >= b.severity() { a } else { b };
+                assert_eq!(a.combine(b), winner);
+                assert_eq!(a.combine(b), b.combine(a), "commutative");
+                for &c in &SEVERITY_ORDER {
+                    assert_eq!(
+                        a.combine(b).combine(c),
+                        a.combine(b.combine(c)),
+                        "associative"
+                    );
+                }
+            }
+        }
+        // The two precedence decisions the fold exists to make: a hub reset
+        // overrides a child's Ok (the aborted transfer is answered reissuably,
+        // its data not consumed)...
+        assert_eq!(BlkStatus::Ok.combine(BlkStatus::Reset), BlkStatus::Reset);
+        assert!(!BlkStatus::Ok.combine(BlkStatus::Reset).data_valid());
+        // ...but a device's own definitive medium error still wins over a
+        // concurrent reset (a bad sector is real; do not retry into it).
+        assert_eq!(
+            BlkStatus::Reset.combine(BlkStatus::MediumError),
+            BlkStatus::MediumError
+        );
+        assert!(!BlkStatus::Reset
+            .combine(BlkStatus::MediumError)
+            .is_retryable());
+    }
+
     #[test]
     fn truncated_or_corrupt_completion_fails_closed_to_fatal() {
         let mut buf = [0u8; BLK_COMPLETION_LEN];
@@ -1678,6 +2234,101 @@ mod tests {
         for block_size in [512usize, 4096] {
             assert_eq!(BLK_DATA_LEN % block_size, 0);
         }
+    }
+
+    #[test]
+    fn health_counters_fold_every_status_into_exactly_one_bucket() {
+        let mut counters = BlkHealthCounters::default();
+        // Fold one of every device-level status, plus a couple of repeats so
+        // the buckets are distinguishable.
+        let statuses = [
+            BlkStatus::Ok,
+            BlkStatus::Ok,
+            BlkStatus::Degraded,
+            BlkStatus::TransientError,
+            BlkStatus::Timeout,
+            BlkStatus::Reset,
+            BlkStatus::Reset,
+            BlkStatus::MediumError,
+            BlkStatus::Offline,
+            BlkStatus::Removed,
+            BlkStatus::Fatal,
+        ];
+        for status in statuses {
+            counters.fold(status);
+        }
+        assert_eq!(counters.completions, statuses.len() as u64);
+        assert_eq!(counters.ok, 2);
+        assert_eq!(counters.degraded, 1);
+        assert_eq!(counters.transient, 1);
+        assert_eq!(counters.timeouts, 1);
+        assert_eq!(counters.resets, 2);
+        assert_eq!(counters.medium_errors, 1);
+        // Offline and Removed share one bucket.
+        assert_eq!(counters.offline, 2);
+        assert_eq!(counters.faults, 1);
+        // The buckets partition every completion exactly once.
+        let bucket_sum = counters.ok
+            + counters.degraded
+            + counters.transient
+            + counters.timeouts
+            + counters.resets
+            + counters.medium_errors
+            + counters.offline
+            + counters.faults;
+        assert_eq!(bucket_sum, counters.completions);
+        // Reissues are orthogonal to folded completions.
+        assert_eq!(counters.reissues, 0);
+        counters.note_reissue();
+        counters.note_reissue();
+        assert_eq!(counters.reissues, 2);
+        assert_eq!(counters.completions, statuses.len() as u64);
+    }
+
+    #[test]
+    fn health_counters_round_trip_on_the_wire() {
+        let counters = BlkHealthCounters {
+            completions: 100,
+            reissues: 7,
+            ok: 80,
+            degraded: 3,
+            transient: 4,
+            timeouts: 2,
+            resets: 5,
+            medium_errors: 1,
+            offline: 3,
+            faults: 2,
+        };
+        let bytes = counters.to_le_bytes();
+        assert_eq!(bytes.len(), BLK_HEALTH_COUNTERS_LEN);
+        assert_eq!(BlkHealthCounters::from_bytes(&bytes), Ok(counters));
+        // A trailing surplus is ignored (the record embeds the snapshot as a
+        // fixed prefix); a short slice fails closed.
+        let mut padded = bytes.to_vec();
+        padded.push(0xAB);
+        assert_eq!(BlkHealthCounters::from_bytes(&padded), Ok(counters));
+        assert_eq!(
+            BlkHealthCounters::from_bytes(&bytes[..BLK_HEALTH_COUNTERS_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn health_counters_saturate_rather_than_wrap() {
+        // A tally is operational observability, never a wrapping ring: a
+        // counter pinned at the ceiling stays pinned rather than rolling to a
+        // misleadingly-small value.
+        let mut counters = BlkHealthCounters {
+            completions: u64::MAX,
+            ok: u64::MAX,
+            reissues: u64::MAX,
+            ..BlkHealthCounters::default()
+        };
+        counters.fold(BlkStatus::Ok);
+        counters.note_reissue();
+        assert_eq!(counters.completions, u64::MAX);
+        assert_eq!(counters.ok, u64::MAX);
+        assert_eq!(counters.reissues, u64::MAX);
     }
 
     #[test]
@@ -2255,6 +2906,138 @@ mod tests {
         assert_eq!(domain.grace_deadline_ns(), None);
         assert_eq!(domain.poll(u64::MAX), FaultDomainState::Recovering);
         assert_eq!(domain.child_status(u64::MAX), Some(BlkStatus::Reset));
+    }
+
+    // ---- Fault-domain composition (`fault_domain_wait_timeout`,
+    // `effective_child_status`) ----
+    //
+    // A serve loop that owns fault domains must time their shared windows and
+    // fold what each imposes onto its children exactly as it does per-device.
+    // These prove the interior-node timing mirrors `recovery_wait_timeout` and
+    // that a device's own health composes coherently with its ancestor chain.
+
+    #[test]
+    fn a_serve_loop_with_no_recovering_domain_arms_no_idle_timer() {
+        // No domain, and an all-`Healthy` set, both arm no window: the loop
+        // parks with no timeout rather than waking spuriously — the same
+        // convention as the per-device timer.
+        assert_eq!(fault_domain_wait_timeout(core::iter::empty(), 100), None);
+        let healthy = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(fault_domain_wait_timeout([&healthy], 100), None);
+    }
+
+    #[test]
+    fn a_serve_loop_arms_the_soonest_recovering_domain_deadline() {
+        // Two owners recovering under different windows: the loop waits for the
+        // soonest to elapse, relative to now; a healthy sibling is ignored.
+        let mut early = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        let mut late = FaultDomain::new(2, DOMAIN_GRACE_NS * 4);
+        early.quiesce(50);
+        late.quiesce(50);
+        let healthy = FaultDomain::new(3, DOMAIN_GRACE_NS);
+        assert_eq!(
+            fault_domain_wait_timeout([&early, &late, &healthy], 100),
+            Some((50 + DOMAIN_GRACE_NS) - 100),
+            "targets the soonest subtree window, measured from now"
+        );
+        // A window already past at `now` yields a zero wait (poll at once,
+        // never an underflow), matching `recovery_wait_timeout`.
+        assert_eq!(
+            fault_domain_wait_timeout([&early], 50 + DOMAIN_GRACE_NS),
+            Some(0)
+        );
+        assert_eq!(
+            fault_domain_wait_timeout([&early], 50 + DOMAIN_GRACE_NS + 5_000),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_child_with_no_fault_domain_answers_on_its_own_health() {
+        // With no interior domain imposing anything, the effective status is
+        // exactly the device's own outcome — the fold is the identity.
+        for status in SEVERITY_ORDER {
+            assert_eq!(
+                effective_child_status(status, core::iter::empty(), 0),
+                status
+            );
+        }
+        // A healthy ancestor imposes nothing, so it too leaves the child's own
+        // status untouched.
+        let healthy = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&healthy], 0),
+            BlkStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_recovering_ancestor_makes_a_healthy_child_reissuable() {
+        // A hub mid-reset turns a child's `Ok` into a reissuable `Reset`, so
+        // the aborted transfer is retried rather than its stale data consumed
+        // — the ride-out-the-blip behaviour, seen from the child.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        let effective = effective_child_status(BlkStatus::Ok, [&hub], 10);
+        assert_eq!(effective, BlkStatus::Reset);
+        assert!(!effective.data_valid());
+        assert!(effective.is_retryable());
+    }
+
+    #[test]
+    fn a_devices_own_medium_error_wins_over_a_recovering_ancestor() {
+        // A definitive bad-sector verdict from the device itself is not masked
+        // by a concurrent hub reset: the child fails closed to the medium
+        // error rather than being told to retry into the same failure.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        let effective = effective_child_status(BlkStatus::MediumError, [&hub], 10);
+        assert_eq!(effective, BlkStatus::MediumError);
+        assert!(!effective.is_retryable());
+    }
+
+    #[test]
+    fn a_failed_ancestor_fails_the_child_closed_regardless_of_its_own_health() {
+        // An ancestor whose grace window has elapsed (or is already offline)
+        // fails the whole subtree closed: even a child reporting `Ok` is told
+        // `Offline`.
+        let mut hub = FaultDomain::new(OWNER_ID, DOMAIN_GRACE_NS);
+        hub.quiesce(0);
+        // Observed at/after the window: the domain imposes `Offline`.
+        let effective = effective_child_status(BlkStatus::Ok, [&hub], DOMAIN_GRACE_NS);
+        assert_eq!(effective, BlkStatus::Offline);
+        assert!(!effective.data_valid());
+    }
+
+    #[test]
+    fn a_deep_failing_domain_is_never_masked_by_a_shallow_healthy_one() {
+        // Nested domains (a healthy hub under a recovering root complex): the
+        // most fail-closed status in the whole chain wins, so a healthy nearer
+        // owner cannot hide a failing further one. Order-independent, since the
+        // fold is associative/commutative.
+        let nearest_healthy = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        let mut root_recovering = FaultDomain::new(2, DOMAIN_GRACE_NS);
+        root_recovering.quiesce(0);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&nearest_healthy, &root_recovering], 10),
+            BlkStatus::Reset
+        );
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&root_recovering, &nearest_healthy], 10),
+            BlkStatus::Reset
+        );
+        // If both a nearer hub is recovering and a further root has failed
+        // closed, the child is `Offline` (the strictest ancestor wins).
+        let mut hub_recovering = FaultDomain::new(1, DOMAIN_GRACE_NS);
+        hub_recovering.quiesce(0);
+        let mut root_offline = FaultDomain::new(2, DOMAIN_GRACE_NS);
+        root_offline.quiesce(0);
+        root_offline.poll(DOMAIN_GRACE_NS);
+        assert_eq!(root_offline.state(), FaultDomainState::Offline);
+        assert_eq!(
+            effective_child_status(BlkStatus::Ok, [&hub_recovering, &root_offline], 10),
+            BlkStatus::Offline
+        );
     }
 
     // ---- The shared block-service request engine (`serve_request_recovering`)

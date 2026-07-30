@@ -17,6 +17,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::FaultDomainState;
 use tairix_abi::{Errno, HwNode};
 
 /// The kernel-held discovered hardware tree the hardware-tree syscalls
@@ -119,6 +120,32 @@ pub trait HwTreeSource: Sync {
     ///   is not `parent_id` (the caller does not own it) — fail closed,
     ///   never a hint that distinguishes the two.
     fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno>;
+
+    /// Record the fault-domain `health` of the live node `node_id` and bump
+    /// the generation so every parked `hw_tree_wait` caller (the device
+    /// manager) re-reads and reacts to the coherent recovery episode.
+    ///
+    /// This is the store side of the `hw_node_health` syscall. The handler
+    /// in [`crate::syscalls`] has already verified the calling driver holds
+    /// [`tairix_abi::CapabilityId::HW_EMIT`] and resolved `node_id` to the
+    /// caller's *own* matched node (never a caller-supplied id), so a driver
+    /// can only ever set the health of the interior node it was autoloaded
+    /// for — no ambient authority, no forging another driver's health. The
+    /// node stays present and only its health byte changes, so this is a
+    /// *distinct* signal from [`Self::remove`] (surprise removal): a merely-
+    /// recovering subtree is never torn down.
+    ///
+    /// Unlike [`Self::publish`] this does **not** change the node set, so a
+    /// health update that lands on the same value as before is idempotent
+    /// apart from the generation bump the reactive observers need.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
+    ///   build with no store wired never records health.
+    /// * [`Errno::NotFound`] if no live non-root node has id `node_id` — fail
+    ///   closed, never fabricating a node.
+    fn set_health(&self, node_id: u32, health: FaultDomainState) -> Result<(), Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -142,6 +169,10 @@ impl HwTreeSource for NullHwTreeSource {
     }
 
     fn remove(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u32>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn set_health(&self, _node_id: u32, _health: FaultDomainState) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }

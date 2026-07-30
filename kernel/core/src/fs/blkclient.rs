@@ -22,8 +22,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkOp, BlkOutcome, BlkRequest, IoBudget,
-    BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkHealthCounters, BlkOp, BlkOutcome,
+    BlkRequest, BlkStatus, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY,
+    BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -58,6 +59,76 @@ const MIN_BLOCK_SIZE: u32 = 512;
 
 /// Largest logical block size the client accepts from a device.
 const MAX_BLOCK_SIZE: u32 = 4096;
+
+/// Lock-free cumulative I/O-health tallies for one served block device.
+///
+/// The atomic mirror of [`BlkHealthCounters`]: the block client folds every
+/// completion into these counters on the I/O path (never a lock — a driver may
+/// park across a completion), and the mount registry snapshots them for the
+/// `sysinfo` volume-health query. The status → bucket assignment is *not*
+/// duplicated here: it is the one shared [`BlkHealthCounters::bucket_index`]
+/// mapping, so the atomic tallies and the pure value type can never disagree
+/// on what a "reset" or a "medium error" counts as.
+#[derive(Debug)]
+pub struct BlkHealthCountersAtomic {
+    fields: [AtomicU64; BlkHealthCounters::FIELD_COUNT],
+}
+
+impl Default for BlkHealthCountersAtomic {
+    fn default() -> Self {
+        Self {
+            fields: core::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl BlkHealthCountersAtomic {
+    /// Fold one device-level completion of `status`: bump the completion
+    /// total and the single bucket `status` maps to, through the shared
+    /// [`BlkHealthCounters::bucket_index`]. A plain `fetch_add` — a `u64`
+    /// completion tally cannot wrap on any real device lifetime.
+    fn fold(&self, status: BlkStatus) {
+        self.fields[BlkHealthCounters::COMPLETIONS].fetch_add(1, Ordering::Relaxed);
+        self.fields[BlkHealthCounters::bucket_index(status)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one consumer reissue (retry) of a reissuable completion.
+    fn note_reissue(&self) {
+        self.fields[BlkHealthCounters::REISSUES].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A consistent-enough point-in-time snapshot of the tallies, rebuilt
+    /// through the shared [`BlkHealthCounters::from_fields`]. The reads are
+    /// individually atomic and observability-only, so a snapshot taken during
+    /// a concurrent fold may straddle a single increment — never a torn or
+    /// invalid value.
+    #[must_use]
+    pub fn snapshot(&self) -> BlkHealthCounters {
+        let mut fields = [0u64; BlkHealthCounters::FIELD_COUNT];
+        for (slot, atomic) in fields.iter_mut().zip(self.fields.iter()) {
+            *slot = atomic.load(Ordering::Relaxed);
+        }
+        BlkHealthCounters::from_fields(fields)
+    }
+}
+
+/// One served block device's live health handles, shared by [`Arc`] with the
+/// mount registry so the `sysinfo` volume-health query and the mount snapshot
+/// can read a live device's health without holding any I/O-path lock
+/// (`plans/FIX-IO.md` IO2/IO3/IO5).
+///
+/// It names the serving block-service endpoint (`dev`), the availability
+/// overlay the client updates on every completion, and the cumulative
+/// [`BlkHealthCountersAtomic`] the client folds. It carries no capability
+/// token and no secret.
+pub struct VolumeHealthSource {
+    /// The block-service call-endpoint id serving this volume's device.
+    pub dev: u64,
+    /// The volume-availability overlay (a [`MountAvailability`] wire byte).
+    pub availability: Arc<AtomicU8>,
+    /// The cumulative I/O-health tallies folded from every completion.
+    pub counters: Arc<BlkHealthCountersAtomic>,
+}
 
 /// A [`Block`] device served by a user-space block driver over a call
 /// endpoint and a shared data window.
@@ -101,6 +172,12 @@ pub struct BlkClient {
     /// (no second, divergent state machine). Lock-free: written on the I/O
     /// path, read asynchronously by the snapshot.
     health: Arc<AtomicU8>,
+    /// The cumulative I/O-health tallies this client folds from every
+    /// completion (and every reissue it performs), shared by [`Arc`] with the
+    /// mount registry so the `sysinfo` volume-health query reports the same
+    /// live counters the client observes (`plans/FIX-IO.md` IO5). Lock-free,
+    /// like `health`.
+    counters: Arc<BlkHealthCountersAtomic>,
 }
 
 impl BlkClient {
@@ -158,6 +235,7 @@ impl BlkClient {
             read_only: false,
             budget: BlkDeviceClass::Rotational.budget(),
             health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
+            counters: Arc::new(BlkHealthCountersAtomic::default()),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -186,14 +264,20 @@ impl BlkClient {
         self.read_only
     }
 
-    /// A clone of the shared volume-availability overlay this device's
-    /// reported health drives, for the mount registry to consult when
-    /// building the mount snapshot (`plans/FIX-IO.md` IO2/IO3). The handle
-    /// carries a [`MountAvailability`] wire byte, updated on every completion
-    /// this client folds.
+    /// The shared live-health handles for this device (the serving endpoint
+    /// id, the volume-availability overlay, and the cumulative I/O-health
+    /// counters), for the mount registry to consult when building the mount
+    /// snapshot and answering the `sysinfo` volume-health query
+    /// (`plans/FIX-IO.md` IO2/IO3/IO5). The availability handle carries a
+    /// [`MountAvailability`] wire byte and the counters the folded tallies,
+    /// both updated on every completion this client folds.
     #[must_use]
-    pub fn health_handle(&self) -> Arc<AtomicU8> {
-        Arc::clone(&self.health)
+    pub fn health_source(&self) -> VolumeHealthSource {
+        VolumeHealthSource {
+            dev: self.endpoint.id().0,
+            availability: Arc::clone(&self.health),
+            counters: Arc::clone(&self.counters),
+        }
     }
 
     /// Reflect one completion's reported device-level health into the shared
@@ -292,7 +376,9 @@ impl BlkClient {
         loop {
             let outcome = self.transfer_once(request)?;
             self.note_health(outcome.status);
+            self.counters.fold(outcome.status);
             if self.budget.should_reissue(outcome.status, attempts) {
+                self.counters.note_reissue();
                 attempts += 1;
                 continue;
             }
@@ -991,8 +1077,48 @@ mod tests {
 
     /// The shared volume-availability overlay the client currently reports.
     fn health(client: &BlkClient) -> MountAvailability {
-        MountAvailability::from_u8(client.health_handle().load(Ordering::Relaxed))
+        MountAvailability::from_u8(client.health_source().availability.load(Ordering::Relaxed))
             .expect("overlay holds a valid availability byte")
+    }
+
+    #[test]
+    fn the_client_tallies_every_completion_and_reissue_it_folds() {
+        // Geometry (Ok), then two reissuable resets ridden out inside the
+        // retry budget and a final good read. The client folds a completion
+        // for every attempt and counts a reissue for each of the two resets.
+        let (mut client, server) = connect_scripted(
+            vec![
+                Some(Errno::EndpointStalled),
+                Some(Errno::EndpointStalled),
+                None,
+            ],
+            4,
+        );
+        let mut buf = [0u8; BLOCK_SIZE];
+        client.read_blocks(0, &mut buf).expect("read after reissue");
+        server.join().unwrap();
+
+        let counters = client.health_source().counters.snapshot();
+        // Geometry + two resets + the successful read = four completions.
+        assert_eq!(counters.completions, 4);
+        // Geometry and the final read answered `Ok`.
+        assert_eq!(counters.ok, 2);
+        // The two `EndpointStalled` completions classify as resets.
+        assert_eq!(counters.resets, 2);
+        // Two reissues were performed to ride out those resets.
+        assert_eq!(counters.reissues, 2);
+        // The buckets partition every completion exactly once.
+        assert_eq!(
+            counters.ok
+                + counters.degraded
+                + counters.transient
+                + counters.timeouts
+                + counters.resets
+                + counters.medium_errors
+                + counters.offline
+                + counters.faults,
+            counters.completions
+        );
     }
 
     #[test]

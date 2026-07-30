@@ -79,7 +79,7 @@ use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashNamedReg,
     CrashRecord, IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
-    UserDirectoryRecord, CRASH_MAX_FRAMES,
+    UserDirectoryRecord, VolumeIoHealthRecord, CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
@@ -3226,6 +3226,19 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
     Errno::BadAddress
 }
 
+/// The number of whole `record_len`-byte records that fit in `out_cap`.
+///
+/// The one shared cap every record-paged `sysinfo_introspect` domain applies:
+/// the kernel never frames a partial record, so a buffer too small to hold
+/// even one record fails closed with [`Errno::BufferTooSmall`] rather than
+/// serving a truncated head the broker cannot decode.
+fn records_that_fit(out_cap: usize, record_len: usize) -> Result<usize, Errno> {
+    if out_cap < record_len {
+        return Err(Errno::BufferTooSmall);
+    }
+    Ok(out_cap / record_len)
+}
+
 /// Wake the `ipc_call` caller a just-completed `CallEndpoint::reply`
 /// belongs to.
 ///
@@ -5685,106 +5698,59 @@ where
         // before any state is read.
         let domain = IntrospectDomain::from_u32(domain)?;
 
-        // Assemble the encoded answer. The list domains page by record: the
-        // kernel knows the fixed stride (from `lib/abi`) and asks the source
-        // for at most as many whole records as fit, so a truncated window is
-        // always a whole number of records the broker can decode. The source
-        // always returns the global, unfiltered view — the broker does all
-        // per-client scoping.
+        // Assemble the encoded answer. The source always returns the global,
+        // unfiltered view — the broker does all per-client scoping.
+        // Each record-paged domain caps its record count to what fits the
+        // buffer through the one shared `records_that_fit` helper, so a
+        // truncated window is always a whole number of records and the
+        // fail-closed-when-none-fits check lives in one place. The
+        // seat/IRQ/crash domains are served from the kernel's own registries
+        // in this crate (the one definition), the rest from the introspect
+        // seam; every list is stably ordered and an offset past the end
+        // returns the empty terminator.
         let blob = match domain {
-            IntrospectDomain::Processes => {
-                if out_cap < ProcessRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / ProcessRecord::WIRE_LEN;
-                self.introspect.processes(arg, max_records)?
-            }
-            IntrospectDomain::Mounts => {
-                if out_cap < MountRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / MountRecord::WIRE_LEN;
-                self.introspect.mounts(arg, max_records)?
-            }
+            IntrospectDomain::Processes => self
+                .introspect
+                .processes(arg, records_that_fit(out_cap, ProcessRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Mounts => self
+                .introspect
+                .mounts(arg, records_that_fit(out_cap, MountRecord::WIRE_LEN)?)?,
+            IntrospectDomain::VolumeIoHealth => self.introspect.volume_io_health(
+                arg,
+                records_that_fit(out_cap, VolumeIoHealthRecord::WIRE_LEN)?,
+            )?,
             IntrospectDomain::KernelMemory => self.introspect.kernel_memory()?,
             IntrospectDomain::Identity => self.introspect.identity()?,
             IntrospectDomain::Uptime => self.introspect.uptime()?,
             IntrospectDomain::LoadAverage => self.introspect.load_average()?,
-            IntrospectDomain::UserDirectory => {
-                if out_cap < UserDirectoryRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / UserDirectoryRecord::WIRE_LEN;
-                self.introspect.user_directory(arg, max_records)?
-            }
-            IntrospectDomain::CpuTimes => {
-                if out_cap < CpuTimeRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuTimeRecord::WIRE_LEN;
-                self.introspect.cpu_times(arg, max_records)?
-            }
-            IntrospectDomain::Seats => {
-                if out_cap < SeatRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / SeatRecord::WIRE_LEN;
-                // Served from the kernel's own seat registry rather than the
-                // introspect seam: the seat state lives in this crate, so the
-                // one definition answers directly. Pages by whole record —
-                // the boot seat first, then every discovery-created seat in
-                // creation order; an offset past the end returns the empty
-                // terminator.
-                self.seat_registry.records(arg, max_records)
-            }
+            IntrospectDomain::UserDirectory => self.introspect.user_directory(
+                arg,
+                records_that_fit(out_cap, UserDirectoryRecord::WIRE_LEN)?,
+            )?,
+            IntrospectDomain::CpuTimes => self
+                .introspect
+                .cpu_times(arg, records_that_fit(out_cap, CpuTimeRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Seats => self
+                .seat_registry
+                .records(arg, records_that_fit(out_cap, SeatRecord::WIRE_LEN)?),
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
-            IntrospectDomain::Reclaim => {
-                if out_cap < ReclaimClassRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / ReclaimClassRecord::WIRE_LEN;
-                self.introspect.reclaim(arg, max_records)?
-            }
+            IntrospectDomain::Reclaim => self.introspect.reclaim(
+                arg,
+                records_that_fit(out_cap, ReclaimClassRecord::WIRE_LEN)?,
+            )?,
             IntrospectDomain::Ramzip => self.introspect.ramzip()?,
-            IntrospectDomain::CpuLoad => {
-                if out_cap < CpuLoadRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuLoadRecord::WIRE_LEN;
-                self.introspect.cpu_load(arg, max_records)?
-            }
-            IntrospectDomain::CpuInfo => {
-                if out_cap < CpuInfoRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CpuInfoRecord::WIRE_LEN;
-                self.introspect.cpu_info(arg, max_records)?
-            }
-            IntrospectDomain::Irqs => {
-                if out_cap < IrqRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / IrqRecord::WIRE_LEN;
-                // Served from the kernel's own IRQ table rather than the
-                // introspect seam: the binding table lives in this crate, so
-                // the one definition answers directly (like the seat
-                // registry). Pages by whole record in ascending line order;
-                // an offset past the end returns the empty terminator.
-                self.irq.records(arg, max_records)
-            }
-            IntrospectDomain::Crashes => {
-                if out_cap < CrashRecord::WIRE_LEN {
-                    return Err(Errno::BufferTooSmall);
-                }
-                let max_records = out_cap / CrashRecord::WIRE_LEN;
-                // Served from the kernel's own crash-record store rather
-                // than the introspect seam: the store lives in this crate,
-                // so the one definition answers directly (like the seat
-                // registry and the IRQ table). Pages by whole record,
-                // newest first; an offset past the end returns the empty
-                // terminator.
-                self.crashes.page(arg, max_records)
-            }
+            IntrospectDomain::CpuLoad => self
+                .introspect
+                .cpu_load(arg, records_that_fit(out_cap, CpuLoadRecord::WIRE_LEN)?)?,
+            IntrospectDomain::CpuInfo => self
+                .introspect
+                .cpu_info(arg, records_that_fit(out_cap, CpuInfoRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Irqs => self
+                .irq
+                .records(arg, records_that_fit(out_cap, IrqRecord::WIRE_LEN)?),
+            IntrospectDomain::Crashes => self
+                .crashes
+                .page(arg, records_that_fit(out_cap, CrashRecord::WIRE_LEN)?),
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
                 // so the caller writes it into the output buffer on entry; the
@@ -6885,6 +6851,68 @@ where
             }
         }
         Ok(0)
+    }
+
+    fn hw_node_health(&self, caller: &CallerContext<'_>, health: u64) -> SyscallResult {
+        // The dispatcher has already checked `CAP_HW_EMIT` — the same
+        // privilege the emit/remove hotplug path requires, since reporting the
+        // health of a subtree the caller owns is of a piece with reshaping it.
+        //
+        // Step 3 (validate every input): `health` must be a defined
+        // `FaultDomainState` discriminant. An out-of-range value names no
+        // state and fails closed with `OutOfRange` — never silently coerced,
+        // so a hostile value cannot slip through as some default.
+        let health = match health {
+            0 => tairix_abi::blkio::FaultDomainState::Healthy,
+            1 => tairix_abi::blkio::FaultDomainState::Recovering,
+            2 => tairix_abi::blkio::FaultDomainState::Offline,
+            _ => return Err(Errno::OutOfRange),
+        };
+
+        // Security spine, identical to `hw_emit_node` / `hw_remove_node` (no
+        // ambient authority): resolve the caller's *own* matched node from
+        // kernel-trusted state keyed by `caller.task_id` (never a
+        // caller-supplied node id). A task with no loaded node owns no
+        // interior node and may report no health — it fails closed. So a
+        // driver can only ever set the health of the node it was autoloaded
+        // for.
+        let node_id = {
+            let aspaces = self.aspaces.read();
+            let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+                return Err(Errno::PermissionDenied);
+            };
+            node_id
+        };
+
+        // Record the caller's own node's fault-domain health, bumping the
+        // generation that wakes the device manager's reactive watch so it
+        // reacts to the coherent recovery episode (the same change channel
+        // `hw_tree_wait` observes). The node stays present — a *distinct*
+        // signal from `hw_remove_node`, so a merely-recovering subtree is
+        // never torn down. The store fails closed `NotFound` for a node that
+        // is not live; a build with no store wired fails closed
+        // `NotImplemented`. Returns `Ok(0)` once recorded.
+        self.hw_tree.set_health(node_id, health)?;
+        Ok(0)
+    }
+
+    fn hw_self_node(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // No capability (checked by the dispatcher: the spec carries none): a
+        // driver learning its *own* node id is the unprivileged self-identity
+        // baseline. Security spine (no ambient authority): resolve the
+        // caller's own matched node from kernel-trusted state keyed by
+        // `caller.task_id`, never a caller-supplied id — so a task only ever
+        // learns the identity of the node it was autoloaded for, never
+        // another's, and never the global tree (that stays behind
+        // `hw_tree_read`'s privileged gate). A task with no loaded node is not
+        // an autoloaded driver and fails closed with `NotFound` (no oracle:
+        // the same answer whether the caller could never have a node or simply
+        // does not).
+        let aspaces = self.aspaces.read();
+        let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+            return Err(Errno::NotFound);
+        };
+        Ok(u64::from(node_id))
     }
 
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
@@ -22981,6 +23009,9 @@ mod tests {
         // Node ids this double rejects with `NotFound` (a node the caller does
         // not own / an absent node), so a test can drive the fail-closed arm.
         unremovable: RwLock<alloc::vec::Vec<u32>>,
+        // Every `(node_id, health)` the handler recorded through `set_health`,
+        // so a test can assert the resolved own-node and health it passed.
+        health_set: RwLock<alloc::vec::Vec<(u32, tairix_abi::blkio::FaultDomainState)>>,
     }
 
     impl StaticHwTree {
@@ -22991,6 +23022,7 @@ mod tests {
                 published: RwLock::new(alloc::vec::Vec::new()),
                 removed: RwLock::new(alloc::vec::Vec::new()),
                 unremovable: RwLock::new(alloc::vec::Vec::new()),
+                health_set: RwLock::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -23022,6 +23054,17 @@ mod tests {
             }
             self.removed.write().push((parent_id, node_id));
             Ok(alloc::vec![node_id])
+        }
+        fn set_health(
+            &self,
+            node_id: u32,
+            health: tairix_abi::blkio::FaultDomainState,
+        ) -> Result<(), Errno> {
+            // Record the kernel-resolved own-node id and the health the
+            // handler passed, so a test can assert the caller could only set
+            // its own node's health and that the value was validated.
+            self.health_set.write().push((node_id, health));
+            Ok(())
         }
     }
 
@@ -23061,6 +23104,13 @@ mod tests {
             Ok(self.kernel_memory.clone())
         }
         fn mounts(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn volume_io_health(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(alloc::vec::Vec::new())
         }
         fn identity(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
@@ -23807,6 +23857,136 @@ mod tests {
         // An input-class publish is not a display: no seat was minted and
         // nothing seat-related was audited.
         assert!(!sink.event_ids().contains(&AuditEvent::SeatCreated.id().0));
+    }
+
+    /// `hw_node_health` records the caller's *own* matched node's health
+    /// (resolved kernel-side), validates the discriminant fail-closed, and a
+    /// task with no loaded node reports nothing.
+    #[test]
+    fn hw_node_health_records_the_callers_own_node_health() {
+        use tairix_abi::blkio::FaultDomainState;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A one-byte owned buffer is enough to register the task's aspace;
+        // `hw_node_health` takes its health in a scalar arg, no user copy.
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The caller is a driver loaded for node 9; it can only ever set
+        // node 9's health.
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        // Recovering (1) then Healthy (0) are recorded against the resolved
+        // own node (9); the store never sees a caller-supplied node id.
+        assert_eq!(h.hw_node_health(&ctx, 1), Ok(0));
+        assert_eq!(h.hw_node_health(&ctx, 0), Ok(0));
+        assert_eq!(
+            *source.health_set.read(),
+            alloc::vec![
+                (9, FaultDomainState::Recovering),
+                (9, FaultDomainState::Healthy)
+            ]
+        );
+
+        // An out-of-range discriminant is rejected before touching the store
+        // (validate every input, fail closed) — never silently coerced.
+        assert_eq!(h.hw_node_health(&ctx, 7), Err(Errno::OutOfRange));
+        assert_eq!(
+            source.health_set.read().len(),
+            2,
+            "a rejected health never reaches the store"
+        );
+
+        // A task with no loaded node owns no interior node and reports no
+        // health — fail closed, nothing recorded.
+        let other_caps = make_caps_record(3, &[CapabilityId::HW_EMIT], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &other_caps,
+        };
+        let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(SecTaskId(3), space3, physmap3)
+            .expect("registration succeeds");
+        assert_eq!(h.hw_node_health(&other, 1), Err(Errno::PermissionDenied));
+        assert_eq!(
+            source.health_set.read().len(),
+            2,
+            "a caller with no loaded node records nothing"
+        );
+    }
+
+    /// `hw_self_node` returns the caller's *own* matched node id (resolved
+    /// kernel-side from the task id, never caller-supplied), needs no
+    /// capability, and a task with no loaded node fails closed with
+    /// `NotFound`.
+    #[test]
+    fn hw_self_node_returns_the_callers_own_matched_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The caller is a driver autoloaded for node 9.
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No capability granted: learning one's own node id is unprivileged.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // The caller learns its own node id — never a caller-supplied one.
+        assert_eq!(h.hw_self_node(&ctx), Ok(9));
+
+        // A task with no loaded node is not an autoloaded driver: fail closed
+        // with `NotFound` (no oracle, no fabricated identity).
+        let other_caps = make_caps_record(3, &[], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &other_caps,
+        };
+        let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(SecTaskId(3), space3, physmap3)
+            .expect("registration succeeds");
+        assert_eq!(h.hw_self_node(&other), Err(Errno::NotFound));
     }
 
     /// A display-class node published into the live tree mints an

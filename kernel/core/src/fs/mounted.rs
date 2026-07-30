@@ -39,14 +39,14 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::Ordering;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NodeKind as DriverNodeKind, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
-use tairix_abi::sysinfo::{MountAvailability, MountRecord};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
@@ -57,6 +57,8 @@ use tairix_sync::{OnceCell, RwLock, SpinLock};
 
 use crate::fswatch;
 use crate::sleeplock::SleepLock;
+
+use super::blkclient::VolumeHealthSource;
 
 use super::path::Path;
 use super::perm::Credentials;
@@ -108,7 +110,12 @@ struct DriverEntry<F: 'static> {
     /// `RecoveryConflict` vanish states always win over the overlay. `None`
     /// for a volume with no fault-aware block source (the in-RAM layout
     /// mounts, a boot volume over a non-block backing).
-    health: Option<Arc<AtomicU8>>,
+    ///
+    /// Besides the availability overlay it also carries the serving
+    /// block-service endpoint id and the cumulative I/O-health counters the
+    /// block client folds, so the `sysinfo` volume-health query can report a
+    /// device's live health and tallies (`plans/FIX-IO.md` IO5).
+    health: Option<VolumeHealthSource>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
@@ -136,12 +143,12 @@ struct SnapshotEntry<F: 'static> {
 /// health state), never a fabricated unavailable reading.
 fn overlaid_availability(
     stored: MountAvailability,
-    health: Option<&Arc<AtomicU8>>,
+    health: Option<&VolumeHealthSource>,
 ) -> MountAvailability {
     if !matches!(stored, MountAvailability::Available) {
         return stored;
     }
-    match health.map(|h| MountAvailability::from_u8(h.load(Ordering::Relaxed))) {
+    match health.map(|h| MountAvailability::from_u8(h.availability.load(Ordering::Relaxed))) {
         Some(Ok(
             live @ (MountAvailability::Available
             | MountAvailability::Degraded
@@ -306,7 +313,7 @@ impl<F: 'static> LateFilesystem<F> {
     pub fn set_health_source(
         &self,
         handle: DriverHandle,
-        health: Arc<AtomicU8>,
+        health: VolumeHealthSource,
     ) -> Result<(), Errno> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
@@ -316,6 +323,35 @@ impl<F: 'static> LateFilesystem<F> {
             .ok_or(Errno::NotImplemented)?;
         entry.health = Some(health);
         Ok(())
+    }
+
+    /// A snapshot of every fault-aware block-backed volume's live I/O health,
+    /// one [`VolumeIoHealthRecord`] per registered volume that has a block
+    /// health source, for the `sysinfo` volume-health query
+    /// (`plans/FIX-IO.md` IO5).
+    ///
+    /// A volume with no fault-aware block source (the in-RAM layout mounts, a
+    /// boot volume over a non-block backing) is omitted rather than reported
+    /// with fabricated health — the query lists exactly the devices whose
+    /// health the kernel actually observes. The order is the registry's
+    /// registration order, stable across a walk. Each record overlays the
+    /// live availability the same way the mount snapshot does, names the
+    /// serving endpoint, and carries the counters snapshot; it holds no
+    /// secret.
+    fn volume_io_health_records(&self) -> Vec<VolumeIoHealthRecord> {
+        self.drivers
+            .lock()
+            .iter()
+            .filter_map(|entry| {
+                let source = entry.health.as_ref()?;
+                Some(VolumeIoHealthRecord::new(
+                    entry.volume_id,
+                    source.dev,
+                    overlaid_availability(entry.availability, Some(source)),
+                    source.counters.snapshot(),
+                ))
+            })
+            .collect()
     }
 
     /// Withdraw the driver registered for `handle` (a runtime volume
@@ -1190,6 +1226,13 @@ where
                 .ok()
             })
             .collect()
+    }
+
+    fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
+        // Served straight from the driver registry, which holds each volume's
+        // block-health source; a system with no mount table registers no
+        // driver and so truthfully reports no volumes.
+        self.mount.volume_io_health_records()
     }
 }
 

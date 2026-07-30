@@ -2505,6 +2505,49 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_NODE_HEALTH,
+        name: "hw_node_health",
+        arg_count: 1,
+        args: [
+            // The FaultDomainState discriminant of the caller's own node.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once the caller's own node's
+        // health is recorded, else `-errno` (an out-of-range health, a caller
+        // with no loaded node, or no store wired).
+        ret: AbiType::Errno,
+        // Shares the `CAP_HW_EMIT` grant with the emit/remove hotplug path: a
+        // driver that may publish/retract its own subtree may report its own
+        // fault-domain health. It IS audited per call — a coherent
+        // fault-domain recovery episode is a security-relevant topology event
+        // and is low-volume (a handful per blip), so the record cannot drown
+        // the log — symmetric with `hw_emit_node` / `hw_remove_node`.
+        required_capability: Some(CapabilityId::HW_EMIT),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::HW_SELF_NODE,
+        name: "hw_self_node",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `U64` register convention: the caller's own node id on success, else
+        // `-errno` (a caller with no matched node fails closed `NotFound`).
+        ret: AbiType::U64,
+        // Needs no capability: a driver learning *its own* node id is the
+        // unprivileged self-identity baseline (the "read my own pid" / `mem_map`
+        // precedent) — it reveals only which node the caller itself bound to,
+        // never the global tree, which `hw_tree_read` guards. Not audited: a
+        // read of one's own identity is not a security decision and is polled on
+        // the leaf's recovery path (it must not flood the log).
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

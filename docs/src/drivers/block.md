@@ -225,17 +225,108 @@ Which interior node a device blips *with* is resolved by the shared
 hardware tree upward and returns the nearest strict ancestor that owns a group
 of devices — a bus/hub/controller/expander/PCIe-root-complex
 (`HwDeviceClass::Bus`), or the synthetic `Root` as the domain of last resort for
-a device attached directly to it. It skips non-owning ancestors, is usable
-recursively (the owner of an interior node is its own nearest such ancestor, so
-the full chain of nested fault domains is obtained by re-applying it), and fails
+a device attached directly to it. It skips non-owning ancestors and fails
 closed on an absent node, a rootless node, or a broken/cyclic chain (the walk is
 bounded by the node count, never an unbounded spin, `AGENTS.md` §2.9). It reads
 the tree and hard-codes no board (`AGENTS.md` §18.1, §2.20), so it is the one
 definition every serving/bus driver uses to build a child's `FaultDomain`.
 
-Driving a subtree's children through the `FaultDomain` in the live serve loops —
-and the volume-manager degrade marking and health observability — are the staged
-remainder (`plans/FIX-IO.md` IO4–IO6).
+A device usually blips with more than one interior node — a disk on a hub on a
+controller shares a fault domain with the hub *and* the controller *and* the
+root. The **full ordered chain** of those nested owners, nearest first, is the
+shared lazy iterator `hwtree::fault_domain_chain(nodes, node_id)`, built by
+re-applying `fault_domain_owner` to each owner in turn — so a serving driver
+builds one `FaultDomain` per interior node in the chain without re-deriving the
+walk itself (`AGENTS.md` §2.2). It is allocation-free (it holds only a borrow of
+the tree, so no fixed-depth ceiling, `AGENTS.md` §24.1), inherits
+`fault_domain_owner`'s fail-closed behaviour at every level, and is cycle-safe:
+bounded to at most one step per node, so even a malformed tree terminates rather
+than spins. The chain is exactly the `domains` argument the two composition
+helpers below consume.
+
+Two pure composition helpers let a serve loop use those fault domains exactly
+as it already uses the per-device machinery, without re-deriving the rules
+(`AGENTS.md` §2.2):
+
+- `blkio::fault_domain_wait_timeout(domains, now_ns)` is the interior-node
+  counterpart of the per-device `recovery_wait_timeout`: the soonest armed
+  subtree grace window, relative to now, so a serve loop parks on the nearest
+  event and never leaves a quiesced-but-quiet domain `Recovering` forever. Both
+  delegate to one shared `nearest_relative_deadline` core, so a loop that owns
+  *both* per-device and fault-domain windows takes the min of the two and
+  cannot compute them by different rules (`Some(0)` = poll now, `None` = park
+  with no timeout, matching the `waitset_wait` convention).
+- `blkio::effective_child_status(device_status, domains, now_ns)` folds a
+  child's own outcome with what each ancestor imposes into the one status its
+  completion carries, using `BlkStatus::combine`'s total order
+  (`BlkStatus::severity`). A hub mid-reset turns a child's `Ok` into a
+  reissuable `Reset` (its aborted data is not consumed); an ancestor whose
+  window has elapsed fails the child closed to `Offline`; and a device's own
+  definitive `MediumError` still wins over a concurrent reset — a bad sector is
+  real and must not be retried into. The fold is associative and commutative,
+  so a deeper failing domain can never be masked by a shallower healthy one,
+  whatever order the chain is walked in.
+
+`BlkStatus::severity`/`combine` are the single, explicit definition of "which
+health signal wins" when more than one applies to one request, kept independent
+of the wire value `BlkStatus::as_u32` so the transport encoding and the recovery
+precedence can never silently couple. All of these are pure and proven
+host-side in `lib/abi`.
+
+A `FaultDomain` owner need not be a *bus* node in the tree: a leaf driver's own
+shared transport that fans out to several logical units is equally a
+fault-domain owner of those units. `usb_msd` is the first live consumer — every
+LUN behind one USB mass-storage device shares one Bulk-Only pipe pair, so the
+data-path reset it escalates is a transport-wide event. Its serve loop owns one
+`FaultDomain` for that shared transport (owner = the device's own discovered URB
+transport grant), `quiesce`s it around the reset, drives each LUN through the
+per-request engine and folds the domain's verdict with `effective_child_status`,
+`resume`s the whole device when any unit completes a real transfer, arms its
+wait from the min of `recovery_wait_timeout` and `fault_domain_wait_timeout`, and
+audits the device-wide edges through `BlkHealthTransition::for_fault_domain`
+(`drivers/storage/usb_msd/src/recover.rs`). So one shared-transport blip is one
+recovery episode across the device, not N spurious LUN failures.
+
+The first live *interior hardware-tree node* consumer is the **xHCI host
+controller** (`drivers/bus/usb/xhci`). The controller is the interior node every
+USB device below it hangs from, so a controller-wide fault — a latched Host
+System Error / HCHalted, or the `HCRST` reset the driver performs to recover — is
+one recovery episode over the whole subtree. Its pure, host-tested
+`domain::ControllerHealth` coordinator wraps one `FaultDomain` (owner = the
+controller's own discovered URB endpoint-block base; grace =
+`CONTROLLER_GRACE_NS`, matching the removable-storage window it sits above) and
+the freestanding serve loop drives it around the controller reset: it
+`begin_recovery`s on the first fault, arms its wait from `wait_timeout` and
+retries on the grace one-shot (the fix for a faulted controller raising no
+further interrupt, xHCI §4.24.1, which previously parked the loop forever),
+`note_reset`s each attempt (recovering on a demonstrated return, failing closed
+once the window elapses), and audits the device-wide edges through
+`BlkHealthTransition::for_fault_domain` (`HCD_DOMAIN_RECOVERING` /
+`HCD_DOMAIN_RECOVERED` / `HCD_DOMAIN_OFFLINE`). A controller failed closed stays
+sticky-but-recoverable — a later successful reset clears it — and is not retried
+against forever.
+
+An interior node's fault-domain state reaches the leaf block consumers beneath
+it through the discovered hardware tree itself: `HwNode::fault_health` carries a
+`FaultDomainState` on the wire, and an interior-node driver publishes its *own*
+node's health with the `hw_node_health` syscall (`CAP_HW_EMIT`, audited; the
+kernel resolves the caller's own matched node, so a driver can never forge
+another's health). Recording it bumps the hardware-tree generation, so the
+reactive `hw_tree_wait` observers re-read — the same channel the hotplug
+emit/remove path uses, but a *distinct* signal: the node stays present, only its
+health changes, so a merely-recovering subtree is never torn down. The xHCI
+controller is the live emitter (each `ControllerHealth` edge → a
+`Recovering`/`Healthy`/`Offline` publish); the device manager is the live
+consumer — a bound child whose fault-domain owner (recorded per binding via
+`fault_domain_owner`) is currently `Recovering` is **held**, not unloaded, when
+it transiently vanishes, so one controller reset is one recovery episode across
+the subtree rather than N spurious teardown/reload cycles. The affected volumes
+already surface as `Recovering` through the kernel `BlkClient`'s existing
+`MountAvailability` fold as their leaf transports blip.
+
+The remaining live wiring is the deeper nested-owner chains a hub or SAS
+expander adds (`fault_domain_chain` + `effective_child_status`) and the QEMU
+vertical that exercises the whole subtree recovery (`plans/FIX-IO.md` IO4–IO6).
 
 ## `BufferClass` and zero-on-free
 

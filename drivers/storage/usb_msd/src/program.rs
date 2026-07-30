@@ -3,10 +3,11 @@
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
 use tairix_abi::blkio::{
-    recovery_wait_timeout, serve_request_recovering, BlkDeviceClass, BlkHealth, BlkHealthState,
-    RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
+    fault_domain_wait_timeout, recovery_wait_timeout, BlkDeviceClass, BlkHealth, BlkHealthState,
+    BlkStatus, FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN,
+    BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
-use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::hwtree::{ancestor_imposed_status_from_snapshot, HW_NODE_ROOT};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
@@ -17,6 +18,7 @@ use tairix_drv_storage_usb_msd::desc::{
     configuration_total_length, find_storage_interface, StorageProtocol, UasEndpoints,
     CONFIGURATION_HEADER_LEN,
 };
+use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, ServeBuffers};
 use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
@@ -90,6 +92,21 @@ const MSD_HEALTH_RECOVERING: EventId = EventId(4169);
 /// to healthy service — the device-level [`BlkHealthTransition::Recovered`]
 /// edge. "The disk came back": logged as a recovery, not a fault.
 const MSD_HEALTH_RECOVERED: EventId = EventId(4170);
+
+/// Diagnostic event id: the device's shared transport reset, holding every
+/// LUN reissuable under one recovery window — the fault-domain
+/// [`BlkHealthTransition::Recovering`] edge for the shared BOT transport.
+const MSD_DOMAIN_RECOVERING: EventId = EventId(4171);
+
+/// Diagnostic event id: the device's shared transport demonstrably returned
+/// (a unit completed a real transfer), recovering the whole device — the
+/// fault-domain [`BlkHealthTransition::Recovered`] edge.
+const MSD_DOMAIN_RECOVERED: EventId = EventId(4172);
+
+/// Diagnostic event id: the shared-transport recovery window elapsed without a
+/// return, failing the whole device closed. It stays sticky-but-recoverable —
+/// a later genuine transfer recovers it with no reboot.
+const MSD_DOMAIN_OFFLINE: EventId = EventId(4173);
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -534,6 +551,85 @@ fn note_health_edge(before: BlkHealthState, after: BlkHealthState, node_id: u32)
     }
 }
 
+/// Record a shared-transport fault-domain edge from `before` to `after` as
+/// one audit event, naming the device's transport owner id.
+///
+/// It uses the **shared** [`BlkHealthTransition`] vocabulary — the same the
+/// per-device LUN edges and the kernel block client use — so a device-wide
+/// transport recovery and a per-LUN recovery cannot be classified differently.
+/// A quiesce (`Healthy → Recovering`, or a re-entry from `Offline`) is
+/// [`BlkHealthTransition::Recovering`]; a demonstrated return
+/// (`Recovering | Offline → Healthy`) is [`BlkHealthTransition::Recovered`].
+/// The fail-closed edge (`→ Offline`, the shared window elapsing) is not part
+/// of that vocabulary and is logged as the distinct [`MSD_DOMAIN_OFFLINE`]
+/// event; an interior transport has no degraded-but-serving state of its own,
+/// so [`BlkHealthTransition::Degraded`] cannot occur. Edge-triggered: an
+/// unchanged state logs nothing.
+fn note_domain_edge(before: FaultDomainState, after: FaultDomainState, owner: u32) {
+    if before == after {
+        return;
+    }
+    if let Some(transition) = BlkHealthTransition::for_fault_domain(before, after) {
+        let (id, level, message) = match transition {
+            BlkHealthTransition::Recovering => (
+                MSD_DOMAIN_RECOVERING,
+                Level::Warn,
+                "usb-msd: shared transport reset, whole device held recovering under one window",
+            ),
+            BlkHealthTransition::Recovered => (
+                MSD_DOMAIN_RECOVERED,
+                Level::Info,
+                "usb-msd: shared transport returned, device recovered",
+            ),
+            // An interior transport never reports itself degraded-but-serving.
+            BlkHealthTransition::Degraded => return,
+        };
+        log_hex_event(id, level, message, "owner_hex", u64::from(owner));
+    } else if matches!(after, FaultDomainState::Offline) {
+        log_hex_event(
+            MSD_DOMAIN_OFFLINE,
+            Level::Warn,
+            "usb-msd: shared transport recovery window elapsed, device failed closed",
+            "owner_hex",
+            u64::from(owner),
+        );
+    }
+}
+
+/// Bounded read buffer for the best-effort ancestor-health snapshot read.
+///
+/// This is **not** a capacity limit on anything: it sizes the stack buffer the
+/// recovery-path tree read uses. A discovered tree that does not fit simply
+/// leaves ancestor attribution unavailable for that read — the leaf then
+/// answers on its own device health, which is always correct — so the read
+/// never grows an unbounded buffer on a driver's recovery path and never
+/// fails a request. Ample for the trees TAIRiX's Tier-1 targets discover.
+const TREE_SNAPSHOT_BUF: usize = 8192;
+
+/// The [`BlkStatus`] this driver's interior fault-domain ancestors currently
+/// impose on a LUN request, read from the live hardware-tree snapshot.
+///
+/// Called by [`serve_lun_with_domain`] **only on the recovery path** (a stall
+/// the device did not answer definitively), so a healthy transfer never reads
+/// the tree. It reads the current snapshot into a bounded stack buffer and
+/// folds the published health of this driver's ancestor chain
+/// ([`ancestor_imposed_status_from_snapshot`]), so a resetting controller/hub
+/// is attributed to the fault domain rather than to the disk.
+///
+/// It fails **safe**: no matched node ([`self_node`] is `None`), a refused
+/// read, or a snapshot larger than the buffer all yield [`BlkStatus::Ok`] (no
+/// ancestor imposes anything), so the leaf simply answers on its own health.
+fn ancestor_status(self_node: Option<u32>) -> BlkStatus {
+    let Some(node) = self_node else {
+        return BlkStatus::Ok;
+    };
+    let mut buf = [0u8; TREE_SNAPSHOT_BUF];
+    match tairix_rt::hw_tree_read(&mut buf) {
+        Ok(len) => ancestor_imposed_status_from_snapshot(&buf[..len], node),
+        Err(_) => BlkStatus::Ok,
+    }
+}
+
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
 /// is set up and routes its return value through the `exit` syscall.
 ///
@@ -790,18 +886,49 @@ where
         },
     );
 
+    // The shared BOT transport is the fault domain of this device's LUNs: a
+    // transport-wide reset (the recovery ladder's data-path scrub, a port
+    // reset, a bus blip) hits every unit at once, so it is one recovery
+    // episode across the whole device, not N independent LUN failures. The
+    // owner id is this device's own URB transport grant (runtime-discovered,
+    // never a board constant); the shared grace window is the removable
+    // class's — the same the LUNs ride their own blips out under.
+    let domain_owner = u32::try_from(urb_endpoint & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+    let mut domain = FaultDomain::new(domain_owner, BlkDeviceClass::Removable.budget().grace_ns);
+
+    // This driver's own place in the discovered hardware tree, learned once so
+    // it can attribute a stall to an interior ancestor (the USB controller, a
+    // hub) that is resetting rather than to the disk (`plans/FIX-IO.md` IO4).
+    // `None` (no matched node) simply disables ancestor attribution — the leaf
+    // then answers on its own health, which is the pre-IO4 behaviour.
+    let self_node = {
+        let ret = tairix_rt::hw_self_node();
+        if ret < 0 {
+            None
+        } else {
+            u32::try_from(ret).ok()
+        }
+    };
+
     // Event-driven service loop: park on the wait-set until a consumer's
     // request arrives, serve it (the data moves via blocking URB calls
     // that park in the kernel), reply, and check for detach. Never a
     // busy-poll.
     loop {
-        // Arm the wait to the soonest LUN recovery grace-window deadline so
-        // an otherwise-quiet `Recovering` unit still fails closed on time,
-        // driven by this one-shot rather than a spin; with no unit recovering
-        // the loop parks with no timeout (the `u64::MAX` convention).
         let arm_now_ns = tairix_rt::clock_get();
-        let timeout = recovery_wait_timeout(luns.iter().flatten().map(|s| &s.health), arm_now_ns)
-            .unwrap_or(WAIT_FOREVER_NS);
+        // Park until the soonest of any per-LUN grace window and the shared
+        // transport's fault-domain window comes due (each computed by one
+        // shared rule), so a quiet recovering unit *and* a quiet recovering
+        // transport both fail closed on time off a one-shot, never a spin;
+        // with nothing recovering the loop parks with no timeout.
+        let device_deadline =
+            recovery_wait_timeout(luns.iter().flatten().map(|s| &s.health), arm_now_ns);
+        let domain_deadline = fault_domain_wait_timeout(core::iter::once(&domain), arm_now_ns);
+        let timeout = match (device_deadline, domain_deadline) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(t), None) | (None, Some(t)) => t,
+            (None, None) => WAIT_FOREVER_NS,
+        };
         let mut token = 0u64;
         let ret = tairix_rt::waitset_wait(set, timeout, &mut token);
         // One fresh monotonic reading taken after waking, reused to fold the
@@ -815,6 +942,8 @@ where
                 Errno::from_i32(i32::try_from(-ret).unwrap_or(0)).unwrap_or(Errno::NotFound);
             if errno == Errno::TimedOut {
                 expire_idle_grace_windows(&mut luns, now_ns);
+                let domain_before = domain.state();
+                note_domain_edge(domain_before, domain.poll(now_ns), domain_owner);
                 continue;
             }
             retract_all(&luns);
@@ -824,6 +953,11 @@ where
         // on this wake before serving, so a sibling LUN's window is honoured
         // on time even under a steady request stream to another unit.
         expire_idle_grace_windows(&mut luns, now_ns);
+        // Advance the shared-transport window on this wake too, so a quiesced
+        // transport still fails closed on time even under a steady request
+        // stream to a healthy unit.
+        let domain_poll_before = domain.state();
+        note_domain_edge(domain_poll_before, domain.poll(now_ns), domain_owner);
         let index = usize::try_from(token).unwrap_or(MAX_LUNS);
         let Some(serve) = luns.get_mut(index).and_then(Option::as_mut) else {
             continue;
@@ -843,20 +977,37 @@ where
         // it is one auditable edge (Degraded/Recovering/Recovered, or a
         // fail-closed) rather than silent.
         let before_health = serve.health.state();
+        // Snapshot the shared-transport domain too: serving folds the unit's
+        // own outcome with what the transport imposes and may recover the
+        // whole device when a unit demonstrates the transport is back, so that
+        // is one auditable device-wide edge as well.
+        let domain_before = domain.state();
         let len = {
             let mut block = LunBlock::new(&mut scsi, lun, serve.state);
-            serve_request_recovering(
+            let mut recovery = LunRecovery {
+                health: &mut serve.health,
+                domain: &mut domain,
+            };
+            serve_lun_with_domain(
                 &mut block,
                 read_only,
-                &request[..n],
-                serve.window,
-                &mut reply,
-                &mut serve.health,
+                ServeBuffers {
+                    request: &request[..n],
+                    window: serve.window,
+                    reply: &mut reply,
+                },
+                &mut recovery,
                 now_ns,
+                // Consulted only on the recovery path (a stall the device did
+                // not answer definitively), so a healthy transfer never reads
+                // the tree: report what this LUN's interior fault-domain
+                // ancestors currently impose.
+                || ancestor_status(self_node),
             )
         };
         let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
         note_health_edge(before_health, serve.health.state(), serve.node_id);
+        note_domain_edge(domain_before, domain.state(), domain_owner);
         // Drive the bounded recovery-escalation ladder from the unit's health.
         // A unit that just answered normally re-arms the ladder; a `Recovering`
         // unit escalates — a first gentle retry, then a data-path reset (this
@@ -867,6 +1018,14 @@ where
         // being answered reissuably, so head-of-line freedom holds.
         let health_state = serve.health.state();
         if serve.ladder.next_action(health_state) == RecoveryAction::Reset {
+            // The scrub clears the *shared* bulk pipes, so it is a
+            // transport-wide event: open (or continue) the one shared recovery
+            // window over the whole device before touching the transport, so a
+            // sibling LUN's next request is held reissuable under it rather
+            // than surfacing as an independent failure.
+            let domain_before = domain.state();
+            domain.quiesce(now_ns);
+            note_domain_edge(domain_before, domain.state(), domain_owner);
             scsi.scrub_window();
             log_hex_event(
                 MSD_RECOVERY_RESET,

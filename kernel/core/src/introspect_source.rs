@@ -274,6 +274,19 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         Ok(out)
     }
 
+    fn volume_io_health(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        let records = self.filesystem.volume_io_health_snapshot();
+        let mut out = Vec::new();
+        for record in records
+            .iter()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(max_records)
+        {
+            out.extend_from_slice(&record.to_le_bytes());
+        }
+        Ok(out)
+    }
+
     fn identity(&self) -> Result<Vec<u8>, Errno> {
         // Machine id / hostname are the honest "unprovisioned" sentinel until
         // the installer mints them; the OS version is the real build version.

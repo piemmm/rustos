@@ -25,6 +25,7 @@ extern crate alloc;
 pub mod bot;
 pub mod cbi;
 pub mod desc;
+pub mod recover;
 pub mod scsi;
 pub mod serve;
 #[cfg(test)]

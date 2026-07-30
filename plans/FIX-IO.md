@@ -110,7 +110,7 @@ recovery (`plans/WATCHDOG.md`).
 
 Each stage is complete and green on its own (§2.19). IO1–IO2 already stop the
 lockup; IO3 adds the grace window this issue is about; IO4–IO6 deepen the
-model. IO6 depends on RustFS existing and is gated on it.
+model. IO6 depends on ARXFS existing and is gated on it.
 
 ### Stage IO1 — Bounded, cancellable block transport. **done**
 
@@ -475,34 +475,206 @@ the discovered hardware tree upward and returns the nearest strict ancestor that
 owns a group of devices — a bus/hub/controller/expander/PCIe-root-complex
 (`HwDeviceClass::Bus`) or the synthetic `Root` as the domain of last resort —
 skipping non-owning ancestors. It is platform-neutral (reads the tree, hard-codes
-no board, §2.20), usable recursively so the full chain of nested fault domains up
-to the root is obtained by re-applying it, and fails closed (`None`) on an absent
+no board, §2.20) and fails closed (`None`) on an absent
 node, a rootless node, or a broken/cyclic chain (the walk is bounded by the node
 count, never an unbounded spin, §2.9/§5.4). Proven host-side over a USB-shaped
 tree (nearest bus, root fallback, nesting, non-owning-ancestor skip, and the
-absent/broken/cyclic fail-closed cases).
+absent/broken/cyclic fail-closed cases). The **full ordered chain** of nested
+fault-domain owners a device blips with (leaf → hub → controller → root, nearest
+first) is the shared lazy iterator `hwtree::fault_domain_chain(nodes, node_id)`
+built by re-applying `fault_domain_owner` to each owner in turn, so a serving
+driver builds one `FaultDomain` per interior node without re-deriving the walk
+itself (§2.2). It is allocation-free (holds only a borrow of the tree, so no
+fixed-depth ceiling, §24.1), inherits `fault_domain_owner`'s fail-closed
+behaviour at every level, and is cycle-safe — bounded to at most one step per
+node, so even a bus pair that parents each other terminates rather than spins
+(§2.9). Proven host-side (the nested chain nearest-first, the interior-node and
+root-fallback starts, the empty chain of the root itself, the non-owning-ancestor
+skip, the absent/broken fail-closed cases, and the bounded cyclic-bus walk).
+
+**Landed (the composition primitives — the shared fold + timing the live
+wiring consumes):** two pure helpers in `lib/abi` let a serve loop use its
+fault domains exactly as it already uses the per-device machinery, so the live
+wiring cannot re-derive the rules (§2.2, §27):
+- `BlkStatus::severity` + `BlkStatus::combine` are the single, explicit
+  definition of *which health signal wins* when more than one applies to one
+  request. `severity` ranks the vocabulary healthy → served-but-unwell →
+  reissuable → permanent → gone (`Ok` < `Degraded` < `TransientError` <
+  `Timeout` < `Reset` < `MediumError` < `Offline` < `Removed` < `Fatal`), kept
+  deliberately independent of the wire value `as_u32` so the transport encoding
+  and the recovery precedence can never silently couple; `combine` is the
+  more-fail-closed of two, a total order so the fold is associative/commutative.
+- `blkio::effective_child_status(device_status, domains, now_ns)` folds a leaf
+  device's own outcome with what each ancestor fault domain imposes
+  (`FaultDomain::child_status`, over the chain `fault_domain_owner` resolves)
+  into the one status the child's completion carries. A hub mid-reset turns a
+  child's `Ok` into a reissuable `Reset` (aborted data not consumed); a
+  window-elapsed ancestor fails the child closed to `Offline`; a device's own
+  definitive `MediumError` still wins over a concurrent reset; and a deep
+  failing domain is never masked by a shallow healthy one.
+- `blkio::fault_domain_wait_timeout(domains, now_ns)` is the interior-node
+  counterpart of `recovery_wait_timeout` — the soonest armed subtree window,
+  relative to now. Both now delegate to one private `nearest_relative_deadline`
+  core, so a loop owning both per-device and fault-domain windows takes the min
+  of the two and cannot time them by different rules.
+All three are pure and proven host-side (severity total-order + combine lattice
+laws; the child-status fold with precedence and nesting; the interior-node
+timeout mirroring the per-device one).
+
+**Landed (the first live wiring — the `usb_msd` shared-transport fault
+domain):** a fault-domain owner need not be a *bus* node in the tree — a leaf
+driver's own shared transport that fans out to several logical units is equally
+a fault-domain owner of those units (the `FaultDomain` doc now states this), and
+`usb_msd` is the first live consumer. Every LUN behind one Bulk-Only / UAS
+device shares the *same* bulk pipe pair, so the data-path reset the recovery
+ladder escalates (`ScsiDevice::scrub_window`) is a transport-wide event, not a
+per-LUN one. The serve loop now owns one `FaultDomain` for that shared transport
+(owner = the device's own discovered URB transport grant, never a board
+constant; the removable-class grace window). The per-request coordination is the
+pure, host-tested `recover::serve_lun_with_domain` in the crate's `lib`: it
+always drives the unit through `blkio::serve_request_recovering` (so a returning
+transport is *discovered* — a definitive answer, `data_valid`/`MediumError`, is
+the only demonstrated proof the shared pipes are back), recovers the whole
+device on that proof (`resume`) before folding, then folds the transport
+domain's verdict with `effective_child_status` (a sibling LUN's request during
+the window is answered reissuably under the one shared window, failed closed to
+`Offline` once it elapses) — re-framing only ever over a non-data-valid status,
+so no valid read is discarded. The loop `quiesce`s the domain around the scrub,
+arms its wait from the min of `recovery_wait_timeout` and
+`fault_domain_wait_timeout`, `poll`s the domain on every wake, and audits the
+device-wide edges through the shared `BlkHealthTransition::for_fault_domain`
+vocabulary (`MSD_DOMAIN_RECOVERING 4171`, `MSD_DOMAIN_RECOVERED 4172`,
+`MSD_DOMAIN_OFFLINE 4173`). So one shared-transport blip is one recovery episode
+across the device, not N spurious LUN failures.
+
+**Landed (the first live *interior hardware-tree* fault domain — the xHCI
+controller):** the first bus/HCD driver to own an interior tree node's
+`FaultDomain` is the xHCI host-controller driver (`drivers/bus/usb/xhci`). The
+controller is the interior node every USB device below it hangs from, so a
+controller-wide fault — a latched Host System Error / HCHalted, or the
+`USBCMD.HCRST` reset the driver performs to recover — is one recovery episode
+over the whole subtree, not one spurious failure per device. The pure,
+host-tested coordinator `domain::ControllerHealth` (the crate's `lib`) wraps one
+`FaultDomain` (owner = the controller's own discovered URB endpoint-block base,
+never a board constant; grace = the documented `CONTROLLER_GRACE_NS`, matching
+the removable-storage window it sits above so the controller and the storage
+beneath it ride a blip out under one coherent budget) and encapsulates the
+recovery sequencing over the landed primitives: `begin_recovery` opens the
+shared window on the first fault, `note_reset(ok)` recovers on a demonstrated
+return or advances the window on a failed reset, `poll` fails a quiet recovering
+controller closed on the one-shot deadline `wait_timeout` names, and
+`is_failed_closed` declares a dead controller so it is not retried forever
+(sticky-but-recoverable — a later successful reset clears it). The freestanding
+serve loop drives it around the existing synchronous
+`recover_if_controller_faulted` (the `recover_controller` wrapper), arms its wait
+from `wait_timeout` (previously always `WAIT_FOREVER`), and retries on the grace
+one-shot — the fix for the real gap that a faulted controller raises no further
+interrupt (xHCI §4.24.1), so a failed reset previously left the event loop
+parked forever with no timer to retry it. Device-wide edges are audited through
+the shared `for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
+`HCD_DOMAIN_RECOVERED 4191`, `HCD_DOMAIN_OFFLINE 4192`). The controller-node
+machine is proven host-side; the serve-loop wiring is metal-only (QEMU models no
+Pi USB).
+
+**Landed (the cross-process propagation signal):** an interior fault-domain
+owner's health is now a first-class, reactive **hardware-tree node property** —
+`HwNode::fault_health` (a `FaultDomainState` byte on the wire, one shared codec
+`FaultDomainState::as_u8`/`from_u8_fail_closed`, unknown decodes fail-closed to
+`Offline`). A bus/hub/controller driver publishes its *own* node's health
+through the new `hw_node_health` syscall (number 102, arg = the
+`FaultDomainState` discriminant, `CAP_HW_EMIT`, audited): the kernel resolves
+the caller's own matched node from its task id (no forging another node's
+health), records it on the live tree, and bumps the generation so the reactive
+`hw_tree_wait` observers re-read — the *same* channel the emit/remove hotplug
+path uses, but a **distinct** signal (the node stays present, only its health
+changes, so a merely-recovering subtree is never torn down). The live emitter
+is the xHCI controller: its `log_domain_event` maps each `ControllerHealth`
+edge to `Recovering`/`Healthy`/`Offline` and publishes it best-effort (the
+audit record is authoritative; a refused publish never fails the recovery).
+The live consumer is the device manager: a bound child whose fault-domain
+**owner** (its nearest bus/hub/controller ancestor, recorded per binding as
+`NodeDriver::owner` via `fault_domain_owner` at bind time) is currently
+`Recovering` is **held**, not unloaded, when it transiently vanishes — so one
+controller reset is one recovery episode across the subtree rather than N
+spurious teardown/reload cycles; the child unloads only once the owner is no
+longer recovering (returned `Healthy` without the child, or the subtree failed
+closed). The kernel `BlkClient` already marks each affected volume
+`Degraded`/`Recovering` as the leaf transport blips (IO2/IO5), so the volumes
+under a recovering controller surface as recovering through the existing fold.
+Proven host-side: the `HwNode` health wire round-trip + fail-closed decode; the
+`FaultDomainState` codec; the `HwTreeStore::set_node_health` record/generation/
+fail-closed-`NotFound`; the `hw_node_health` handler (own-node resolution,
+fail-closed out-of-range, no-loaded-node denied); and the device manager's
+recovery-hold (`a_child_of_a_recovering_owner_is_held_not_unloaded`).
+
+**Landed (the leaf-side multi-owner fold — a leaf attributes its ancestors'
+published blip to the fault domain):** the read side of the cross-process
+signal now reaches the *block completions themselves*, not just the device
+manager's teardown decision. A leaf block driver folds the published
+`FaultDomainState` of its whole interior-ancestor chain into each completion,
+so one controller/hub reset is attributed to the fault domain — the leaf's
+completions carry a reissuable `Reset` (or `Offline` once an ancestor has
+failed closed) instead of N spurious per-LUN faults — rather than each LUN's
+own `BlkHealth` degrading independently. The primitives:
+- `FaultDomainState::imposed_child_status` (`lib/abi`) is the *one* owner-health
+  → child-status rule (`Healthy` imposes nothing, `Recovering → Reset`,
+  `Offline → Offline`); `FaultDomain::child_status` now resolves its grace
+  window and delegates to it, so an owned (clocked) domain and a published
+  (already-resolved) ancestor state impose identically (§2.2).
+- `hwtree::ancestor_imposed_status` (slice) and
+  `hwtree::ancestor_imposed_status_from_snapshot` (the wire snapshot a driver
+  reads with `hw_tree_read`, alloc-free) fold the chain's published health;
+  both share one traversal (`resolve_owner`/`fold_ancestor_status` over a
+  generic per-id `lookup`), so the byte- and slice-backed folds cannot diverge,
+  and a malformed/truncated snapshot degrades safe to `Ok`. Proven host-side:
+  the mapping, owned/published agreement, the snapshot↔slice agreement across
+  every health arrangement, deep-not-masked-by-shallow, and fail-closed cases.
+- A driver learns *its own* place in the tree through the new `hw_self_node`
+  syscall (number 103, `lib/abi` + `kernel/core` + `lib/rt`/`lib/abi-sys` +
+  generated C header): the kernel resolves the caller's own matched node from
+  its task id (never caller-supplied — no ambient authority, no global-tree
+  window), needs no capability (self-identity baseline, like reading one's own
+  pid), and fails closed `NotFound` for a task with no matched node. Proven
+  host-side (own-node resolution + fail-closed).
+- `usb_msd` is the first live consumer: `recover::serve_lun_with_domain` now
+  folds an ancestor status supplied by a **lazy closure** invoked *only on the
+  recovery path* (a stall the device did not answer definitively —
+  `transport_alive` gates it out), so a healthy hot-path transfer never reads
+  the tree (§2.16); a data-valid or medium answer proves the path above is up
+  and always wins, so no valid read is ever masked. The serve loop fetches
+  `hw_self_node` once and its closure reads the current snapshot into a bounded
+  degrade-safe buffer and calls `ancestor_imposed_status_from_snapshot`. Proven
+  host-side (recovering ancestor → reissuable, offline ancestor → closed,
+  medium/data wins, offline ancestor dominates a recovering transport).
 
 Remaining:
-- **Wiring the tree into the live serve loops.** With the association resolved
-  by the shared `hwtree::fault_domain_owner` above, the remaining work is the
-  *live* wiring: a serving driver builds each child device's `FaultDomain` from
-  its resolved owner, folds `child_status` into each child's completion, and a
-  serving/bus driver calls `quiesce`/`resume`/`poll` around its own reset. This
-  belongs with the user-space bus/serving driver work (it needs the live serve
-  loops and timers the host doubles cannot express), like the per-device
-  idle-timer wiring in IO3.
-- Propagation reuses the existing hotplug path (`hw_emit_node`/`hw_remove_node`,
-  `plans/USB.md`, `plans/DEVICES.md`); the device manager gains reaction to
-  *degrade/reset/restore* health transitions alongside add/remove.
+- A QEMU vertical of a modelled hub/controller with several children resetting,
+  asserting one recovery episode across the subtree (the device manager holds
+  the children through the owner's grace window rather than unloading them, and
+  the leaf's completions carry the attributed reissuable status). A watched hub
+  / SAS expander *owning its own tree node* (publishing its own
+  `hw_node_health`) extends the xHCI single-owner emitter shape; the leaf fold
+  already composes an arbitrarily deep published chain.
 
 Tests (§7): the pure `FaultDomain` machine is proven host-side in `lib/abi` —
 one owner reset holds the whole subtree reissuable under one window; an owner
 returning inside the window recovers the subtree leaving no scar; an owner that
 outlasts it fails the subtree closed; a quiet domain expires on the one-shot
 time poll; a continuing reset cannot postpone the fail-closed; a failed subtree
-is sticky until a demonstrated return. A QEMU vertical of a modelled hub with
-several children resetting (asserting one recovery episode across the subtree)
-lands with the tree wiring above.
+is sticky until a demonstrated return. The `usb_msd` shared-transport wiring is
+proven host-side over `recover::serve_lun_with_domain` (a healthy transport
+passes a unit's own status through; a quiesced transport holds a stalling
+sibling reissuable under one window; any unit's definitive answer — data or a
+medium error — recovers the whole device; the elapsed window fails a sibling
+closed; a return after the window still recovers). The xHCI controller
+interior-node wiring is proven host-side over `domain::ControllerHealth` (a
+first fault enters recovery and arms a one-shot; a continuing fault does not
+postpone the fail-closed; a reset inside the window recovers; a failed reset
+past the window and an idle poll each fail closed; a failed-closed controller
+recovers on a later successful reset; a spurious success on a healthy controller
+is silent). A QEMU vertical of a modelled hub with several children resetting
+(asserting one recovery episode across the subtree) lands with the cross-process
+propagation above.
 
 ### Stage IO5 — Health observability (audit log + `sysinfo`). **in progress**
 
@@ -555,10 +727,12 @@ grace-window entry`)`, `MSD_HEALTH_RECOVERED (4170, Info`, "the disk came
 back"`)`, with the fail-closed edge remaining the existing `MSD_GRACE_EXPIRED
 (4166, Warn)` in the driver's own event-id range. `virtio_blk`/`emmc2` reuse the
 same classifier and `note_health_edge` shape when brought up as user-space serve
-processes (§2.2), never a second definition. The retry/reset events and the
-interior *fault-domain node's* own quiesce/resume events remain for the
-`RecoveryLadder`/`FaultDomain` wiring (IO4 remaining), emitted against this same
-vocabulary.
+processes (§2.2), never a second definition. The `usb_msd` per-device retry/reset
+event (`MSD_RECOVERY_RESET`) and the shared-transport fault-domain edges
+(`MSD_DOMAIN_{RECOVERING,RECOVERED,OFFLINE}`, classified through
+`for_fault_domain`) also landed with the IO4 leaf-transport wiring; only the
+*interior hardware-tree node's* own quiesce/resume events (a bus/HCD driver)
+remain (IO4 remaining), emitted against this same vocabulary.
 
 **Landed (the fault-domain-node classifier — the shared vocabulary's third
 member):** the interior-node counterpart of `for_device` is
@@ -577,18 +751,39 @@ it never emits `Degraded`. Pure and proven host-side (the shared-vocabulary
 mapping, edge-triggering, fail-closed exclusion, and never-`Degraded`).
 
 Remaining deliverables:
-- **Fault-domain-node health events** (`plans/SYSLOG.md`): the live emission of
-  the interior-node quiesce/resume/grace-expiry events, naming the fault-domain
-  node and classified through the landed `for_fault_domain` above. Land with the
-  fault-domain tree wiring (IO4 remaining), which owns those machines, their
-  timers, and the `lib/log` event ids. (The per-device `usb_msd` reset already
-  logs `MSD_RECOVERY_RESET`, and the per-device Degraded/Recovering/Recovered/
-  fail-closed edges landed above.)
-- **Device/array health via `sysinfo`** (§16.6) beyond the per-volume mount
-  availability already landed above: a capability-gated device/array health
-  query (fault-domain node, retry/reset counts) following the bond-member and
-  surprise-removed-volume precedents in `sysinfo.rs` — never a `/proc`-style
-  scrape (§16.1).
+- **Interior-node fault-domain health events** (`plans/SYSLOG.md`): the first
+  *hardware-tree* interior node's quiesce/resume/grace-expiry events **landed**
+  with the xHCI controller wiring (IO4): the HCD serve loop emits
+  `HCD_DOMAIN_RECOVERING 4190` / `HCD_DOMAIN_RECOVERED 4191` /
+  `HCD_DOMAIN_OFFLINE 4192`, naming the controller's owner id and classified
+  through the shared `for_fault_domain` vocabulary (the fail-closed edge its own
+  distinct event). Remaining are the *other* interior nodes' events (a watched
+  hub, a SAS/JBOD expander), emitted against this same vocabulary, landing with
+  their live serve-loop / propagation wiring (IO4 remaining). (The per-device
+  `usb_msd` reset logs `MSD_RECOVERY_RESET`, the per-device
+  Degraded/Recovering/Recovered/fail-closed edges landed above, and the
+  `usb_msd` shared-*transport* fault-domain edges landed with IO4.)
+- **Device/array health via `sysinfo`** (§16.6): **landed** for the
+  kernel-observed volume I/O health surface. A new capability-gated
+  `SysinfoQueryId::VOLUME_IO_HEALTH` (id 27, `CAP_SYSINFO_KERNEL`, audited)
+  over `IntrospectDomain::VolumeIoHealth` returns one `VolumeIoHealthRecord`
+  per fault-aware block-backed volume: its durable id, the serving
+  block-service endpoint, its current `MountAvailability`, and the cumulative
+  `blkio::BlkHealthCounters` the kernel `BlkClient` folds from every completion
+  (per-status outcome tallies + consumer reissue count). The counters are a
+  shared `lib/abi` primitive whose status→bucket assignment is one definition
+  (`BlkHealthCounters::bucket_index`), so the kernel's lock-free
+  `BlkHealthCountersAtomic` and the pure value type cannot diverge; the mount
+  registry snapshots them through the `FilesystemService::volume_io_health_snapshot`
+  seam and `sysinfod` fronts the query, exposed by `sysinfo storage`. Proven
+  host-side end to end (ABI round-trip/fail-closed, the `BlkClient` fold, the
+  mount-registry snapshot, the gated/audited/paged broker, and the CLI render).
+  Retry/reset *ladder* counts the driver performs on the hardware, and the
+  fault-domain **node** identity, are **not** in this record: they need the
+  endpoint→hardware-tree-node association and the live serving-driver ladder,
+  which are IO4 (fault-domain tree wiring) — this query reports the health the
+  kernel block *consumer* observes, a complete and coherent surface on its own.
+  Never a `/proc`-style scrape (§16.1).
 - **Watchdog tie-in** (`plans/WATCHDOG.md`): a driver process that itself wedges
   is a lockup the watchdog detects and recovers (restart the driver, mark the
   device `Failed`) — closing the loop where the *driver*, not the disk, is the
@@ -598,24 +793,141 @@ Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver
 process is detected and recovered.
 
-### Stage IO6 — RAID / mirror / RustFS composition. **planned, gated on RustFS**
+### Stage IO6 — RAID / mirror / ARXFS composition. **in progress**
 
-Deliverables:
-- A RAID/mirror/RustFS volume is a **virtual block device that composes child
-  block endpoints** through the same fault-aware `Block` seam (§2.2 one seam,
-  §27 complete abstraction). It consumes health/status; it does not re-invent
-  it.
-- A child going `Faulted`/`Offline` **degrades the array, not the system**:
-  mirrors/parity serve from surviving members and the array reports `Degraded`
-  upward. A returning disk (via the IO3 grace window) triggers **resync/rebuild**
-  (bounded, incremental, interruptible per §26.6), and its transition back to
-  `Healthy` is logged.
-- Multi-layered sets nest naturally because fault domains (IO4) and the block
-  seam (IO1) are recursive.
+**Landed (the RAID1 mirror composition engine):** a RAID volume is a **virtual
+block device that composes child block endpoints** through the same fault-aware
+`Block` seam every leaf device uses (§2.2 one seam, §27 complete abstraction),
+so it nests naturally over the recursive seam and *consumes* the block-layer
+health vocabulary (`blkio::BlkStatus`, `DriverError`) rather than re-inventing
+it. The first composition is the RAID1 mirror `raid::MirrorArray`
+(`drivers/storage/raid`, host-testable `lib`): it is `no_std`,
+`forbid(unsafe_code)`, and **allocation-free** — it borrows a caller-owned
+member slice, so there is no fixed member ceiling (§24.1) and the growable
+member tier lives in the assembling serve process. Its complete behaviour is
+proven host-side over a fault-injecting `Block` double:
+- **Read = recover + repair.** Reads are served from an in-sync copy in a
+  deterministic order; a *per-block* `MediumError` is recovered from a good
+  copy and the bad copy is **repaired** in place (opportunistic read-repair),
+  and only a *whole-device* fault (`DeviceOffline`/`DeviceFault`, or a member
+  returning a request-level error for a request the array already validated)
+  drops a copy. A read with no surviving copy fails closed (§5.4).
+- **Scrub = proactive verify + repair.** The read-path repair only ever touches
+  the copies a read consults *before* the serving one, so a latent media error
+  on a copy that is never the read source stays invisible until the copies
+  ahead of it are gone — the classic latent-sector data-loss window (§26.5).
+  `MirrorArray::begin_scrub`/`scrub_step` close it: a bounded, interruptible
+  pass (`scrub_cursor`/`scrubbing`) reads *every* in-sync copy of *every* block
+  and repairs a per-block media error from a good copy, dropping only
+  whole-device faults — the auto-scrub a mirror exists to provide, chunked so a
+  100 TB+ array never scrubs in one sweep or a busy-spin (§26.6, §2.23). A block
+  bad on every copy is surfaced as a typed loss but the cursor still advances
+  (no loop on the unrepairable block); a failed array (no in-sync copy) fails
+  closed without advancing. It deliberately does **not** arbitrate a *content*
+  disagreement between two readable copies — a bare mirror has no authority to
+  pick the correct one; that is the checksummed FS layer's job (ARXFS) — so its
+  remit is latent *media* errors. Scrub buffers are `BufferClass::Sensitive`.
+- **Write = fan-out + drop.** Writes fan out to every copy; a copy that fails a
+  write is dropped immediately and the write still succeeds as long as one copy
+  accepted it, failing closed only when none did. A rebuilding copy receives
+  writes to its already-synced region so it never falls behind the source.
+- **Degrade, never fail the system.** A faulted copy degrades the array
+  (`ArrayHealth::Degraded`) while the survivors keep serving; flush keeps at
+  least one durable copy or fails closed. Array health maps onto the shared
+  `MountAvailability::{Available,Degraded,Recovering,UnavailableLost}` so a
+  serving process surfaces it through the same `sysinfo` mount surface a leaf
+  volume uses (IO2/IO5), never a second vocabulary (§2.2).
+- **Rebuild = bounded, interruptible resync.** A returning copy (via its own
+  IO3 grace window) or a physically replaced disk is rebuilt by
+  `MirrorArray::resync_step`, which copies the array from an in-sync source a
+  caller-sized chunk at a time, so a 100 TB+ rebuild never blocks the system or
+  busy-spins (§26.6, §2.23). A rebuilding copy is a read source only once fully
+  in sync (`ArrayHealth::Recovering` meanwhile). A faulted copy is
+  sticky-but-recoverable (`readd_member`/`replace_member`), so a flapping disk
+  never masquerades as a healthy copy yet a genuine return rejoins without a
+  reboot (§18.4).
+  Design: `docs/src/drivers/raid.md`.
 
-Tests (§7): a composed mirror over fault-injecting children — one child faults
-and recovers inside its grace window (array degrades then resyncs), one child
-expires (array stays degraded, system unaffected).
+**Landed (the on-disk array metadata + reassembly logic):** the prerequisite
+for the autoloaded serve process is the shared, host-tested metadata layer in
+`drivers/storage/raid` (§2.2, §27), so an array is *discovered*, never
+configured (§18, §16.5). Each member carries a fixed-size, little-endian
+`superblock::ArraySuperblock` — a 128-bit `ArrayUuid`, the `RaidLevel`, the
+member count, this member's slot, the array geometry, a monotonic
+**generation** counter, and a `Time64` last-write stamp (§21) — sealed with a
+trailing CRC-32C (`lib/crc32c`, the one first-party checksum, an integrity
+check not a security control). `ArraySuperblock::decode` fails closed on every
+malformed byte (bad magic, unknown version, checksum mismatch, unknown level,
+zero members, out-of-range slot, degenerate geometry, non-canonical timestamp,
+§5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
+(`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
+reassembly verdict is carried into the composition through one shared mapping
+`raid::MemberRole::for_slot(SlotDisposition)` (§2.2): a `Present{in_sync:false}`
+slot — a copy the generation counter proved is behind — becomes a
+`MemberRole::Stale` member, which `MirrorArray::assemble` admits `Resyncing` (a
+rebuild target, never a read source) rather than `InSync`, so a copy known to
+be out of date can never be served to a reader as if it were current
+(§5.4/§26.5 — closing a latent stale-read gap where `assemble` previously
+trusted every probeable member as an immediate read source). The reassembly is
+the pure, allocation-free `ArrayIdentity`:
+`resolve(target_uuid, candidates)` fixes the authoritative array shape and
+current generation from the **freshest** matching member (highest generation —
+the standard RAID event-count rule, so a survivor that stayed live is the
+source of truth), and `verdict_of`/`fill_slots` place each member — in sync,
+**stale** (a rebuild target), missing, or refused (foreign array, mis-shaped,
+out-of-range slot, or the losing side of a duplicate slot claim) — from **one**
+decision, so the per-member verdict and the assembled slot table cannot
+diverge (§2.2). The caller owns the candidate slice and slot buffer, so there
+is no fixed member ceiling (§24.1). The metadata **write** side — the
+counterpart to the read/reassemble side — is the two pure `ArrayIdentity`
+primitives `bump_generation` (advance the array event count on a membership
+change, saturating at `u64::MAX` rather than wrapping to a value an
+already-written member could match) and `member_superblock(slot, updated_at)`
+(the on-disk record a *current* member persists at the array's generation,
+fail-closed `None` for an out-of-range slot). On a member drop the survivors
+re-stamp at the bumped generation while the absent member keeps its lower one,
+so it returns a **stale rebuild target** and can never masquerade as current —
+closing the stale-read window (§5.4/§26.5, "a disk that missed writes is a disk
+that can lie"); promoting a rebuilt member back to current is the same
+`member_superblock` write, so the read and write halves share one notion of
+"current" and cannot diverge (§2.2). The format is unfrozen and evolved in place
+(§2.13). Proven host-side (round-trip; every fail-closed decode incl. pre-1970
+/ post-2038 timestamps; resolve/verdict/fill_slots over stale/duplicate/
+missing/mismatch/foreign arrangements; the generation bump incl. saturation,
+`member_superblock` round-trip/fail-closed, and the end-to-end
+absent-member-returns-stale and rebuilt-member-promoted-current journeys).
+Design: `docs/src/drivers/raid.md`.
+
+Remaining:
+- The autoloaded serve process that reads each discovered device's superblock,
+  assembles the members through `ArrayIdentity`, drives `resync_step` off the
+  members' IO3 recovery signals, and publishes the composed device as its own
+  block-service node — plus the ARXFS-native multi-device composition that
+  consumes the same engine. This rides with the multi-device volume-assembly
+  work; the engine and its metadata are the single shared definition both reuse
+  (§2.2), proven host-side first exactly as the other FIX-IO primitives landed
+  their shared logic before their live wiring.
+- RAID levels beyond the mirror (striping, parity) are sibling compositions
+  over the same seam (§2.2 parallel implementations), added when needed.
+
+Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
+over a fault-injecting `Block` double — two healthy copies assemble optimal; a
+bad sector is recovered from a copy and the bad copy repaired; a whole-device
+read fault drops a copy and degrades the array; a read with no good copy fails
+closed without faulting medium copies; a write error drops a copy while the
+write still succeeds; a write no copy accepts fails closed; a returned copy is
+rebuilt with **current** data (including degraded-window writes); the rebuild is
+incremental (a cursor advances a chunk per step); a write during rebuild reaches
+only the already-synced region; a rebuild target that cannot be written drops
+back to faulted; a permanently-faulted copy never stops the survivor serving;
+assemble/re-add fail closed on empty/mismatched/absent members. Scrub is proven
+the same way — a clean pass reads *every* copy (unlike a read) and is an
+idempotent no-op once complete; a latent bad sector on a non-primary copy the
+read path never repairs is found and healed by a scrub; a whole-device fault is
+dropped; a block bad on every copy is surfaced yet the cursor still advances; a
+two-block scratch scrubs the array a chunk at a time and `begin_scrub` restarts
+it; a failed array fails closed without advancing; a ragged/empty scratch is
+rejected.
 
 ---
 
@@ -640,5 +952,8 @@ larger than one change, hence the staging above: each stage lands complete and
 green on its own. The IO1 transport shape is decided — the async
 submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
-HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6 is
-gated on RustFS existing; IO1–IO5 do not depend on it and land first.
+HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
+composition **engine** (the `drivers/storage/raid` mirror) is independent of
+ARXFS and has landed host-side; only its live serve process and the
+ARXFS-native multi-device composition that consumes the same engine remain, and
+those ride with the multi-device volume-assembly work.

@@ -59,8 +59,8 @@ mod program {
         CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
         MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
         ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST,
-        SYSINFO_REPLY_STATUS_LEN,
+        VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
+        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -318,6 +318,18 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.as_chunks::<{ CrashRecord::WIRE_LEN }>().0 {
                 records.push(CrashRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn volume_io_health(&self, _caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno> {
+            let bytes = read_list(
+                IntrospectDomain::VolumeIoHealth,
+                VolumeIoHealthRecord::WIRE_LEN,
+            )?;
+            let mut records = Vec::new();
+            for chunk in bytes.as_chunks::<{ VolumeIoHealthRecord::WIRE_LEN }>().0 {
+                records.push(VolumeIoHealthRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

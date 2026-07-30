@@ -9,9 +9,10 @@ use core::fmt::Write;
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-    KernelMemoryStats, MemoryPressureStats, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SystemIdentity, Uptime,
-    PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
+    KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats, ReclaimClassRecord,
+    ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest, PRESSURE_BAND_NAMES,
+    RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
 };
 use tairix_abi::{Errno, LimitKind};
 
@@ -43,6 +44,7 @@ queries:
   cpu                 per-CPU queue depth, switches, preemptions (needs CAP_SYSINFO_KERNEL)
   cpuinfo             per-CPU model, class, flags, and live/reference MHz
   irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
+  storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -83,6 +85,7 @@ pub fn run(
         Command::CpuLoad => run_cpu_load(transport, out),
         Command::CpuInfo => run_cpu_info(transport, out),
         Command::Irqs => run_irqs(transport, out),
+        Command::Storage => run_storage(transport, out),
     }
 }
 
@@ -592,6 +595,76 @@ fn run_irqs(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
     .map_err(SysinfoError::from)
 }
 
+/// The short display name of a volume's availability, for the `storage`
+/// row. A closed match so a future [`MountAvailability`] variant is a
+/// compile error here rather than a silent blank.
+fn availability_name(availability: MountAvailability) -> &'static str {
+    match availability {
+        MountAvailability::Available => "available",
+        MountAvailability::Degraded => "degraded",
+        MountAvailability::Recovering => "recovering",
+        MountAvailability::UnavailableDirty => "lost-dirty",
+        MountAvailability::UnavailableLost => "lost",
+        MountAvailability::RecoveryConflict => "conflict",
+    }
+}
+
+/// Fetch and render the per-volume storage I/O health, one aligned row per
+/// fault-aware block-backed volume: a short prefix of its durable id, the
+/// serving block-service endpoint, its current availability, and the folded
+/// outcome counters that a failing or flapping disk becomes visible on. The
+/// paged walk and fail-closed decode mirror [`run_cpu_load`]; the service
+/// gates the query on `CAP_SYSINFO_KERNEL`.
+fn run_storage(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    /// Records requested per page: bounds the reply without bounding how
+    /// many volumes may be mounted.
+    const PAGE: u16 = 64;
+    emit(
+        out,
+        "volume            dev                 health      done  resets  tmout  medium  reissue",
+    )?;
+    let mut offset: u32 = 0;
+    loop {
+        let request = VolumeIoHealthRequest {
+            offset,
+            limit: PAGE,
+            flags: 0,
+        };
+        let reply = service_call(
+            transport,
+            SysinfoQueryId::VOLUME_IO_HEALTH,
+            &request.to_le_bytes(),
+        )?;
+        if reply.len() % VolumeIoHealthRecord::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / VolumeIoHealthRecord::WIRE_LEN;
+        for chunk in reply.as_chunks::<{ VolumeIoHealthRecord::WIRE_LEN }>().0 {
+            let record = VolumeIoHealthRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            let volume_id = record.volume_id();
+            let counters = record.counters();
+            emit(
+                out,
+                &format!(
+                    "{:<16}  {:#018x}  {:<10}  {:>4}  {:>6}  {:>5}  {:>6}  {:>7}",
+                    hex(&volume_id[..8]),
+                    record.dev(),
+                    availability_name(record.availability()),
+                    counters.completions,
+                    counters.resets,
+                    counters.timeouts,
+                    counters.medium_errors,
+                    counters.reissues,
+                ),
+            )?;
+        }
+        if records < usize::from(PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(PAGE));
+    }
+}
+
 /// Render `bytes` as lowercase hex with no separators.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -616,13 +689,15 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::blkio::BlkHealthCounters;
     use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::sysinfo::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-        KernelMemoryStats, MemoryPressureStats, ProcessListRequest, ProcessRecord, ProcessState,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        KernelMemoryStats, MemoryPressureStats, MountAvailability, ProcessListRequest,
+        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
         CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
@@ -876,6 +951,32 @@ mod tests {
                     CpuInfoRecord::new(1, CpuCoreClass::Efficiency, 0, 0, 0, 0, 54_000_000, b"")
                         .unwrap(),
                 ];
+                let offset = req.offset as usize;
+                if offset >= records.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(records.len() - offset, req.limit as usize);
+                let mut out = Vec::new();
+                for record in &records[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
+            } else if header.query == SysinfoQueryId::VOLUME_IO_HEALTH {
+                let req = VolumeIoHealthRequest::from_bytes(payload)?;
+                let records = [VolumeIoHealthRecord::new(
+                    [0xAB; 16],
+                    0x5953_2001,
+                    MountAvailability::Recovering,
+                    BlkHealthCounters {
+                        completions: 4096,
+                        ok: 4000,
+                        resets: 30,
+                        timeouts: 3,
+                        medium_errors: 5,
+                        reissues: 12,
+                        ..BlkHealthCounters::default()
+                    },
+                )];
                 let offset = req.offset as usize;
                 if offset >= records.len() {
                     return Ok(Vec::new());
@@ -1332,6 +1433,41 @@ mod tests {
         assert!(lines.iter().any(|l| l == "flags         : (none)"));
         // Exactly one blank line separates the two blocks.
         assert_eq!(lines.iter().filter(|l| l.is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn storage_renders_rows_and_fails_closed_on_denial() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Storage, &fixture, &out).expect("storage renders");
+        let lines = out.lines();
+        assert!(lines[0].starts_with("volume"));
+        assert!(lines[0].contains("health"));
+        // The one fixture volume: its recovering health, serving endpoint,
+        // and folded outcome counters.
+        assert_eq!(lines.len(), 2, "header plus one volume");
+        assert!(
+            lines[1].starts_with("abababababababab"),
+            "row: {}",
+            lines[1]
+        );
+        assert!(lines[1].contains("recovering"), "row: {}", lines[1]);
+        assert!(lines[1].contains("4096"), "completions: {}", lines[1]);
+        assert!(lines[1].contains("30"), "resets: {}", lines[1]);
+        assert!(lines[1].contains("12"), "reissues: {}", lines[1]);
+        // The query routed to VOLUME_IO_HEALTH.
+        assert!(fixture
+            .seen
+            .borrow()
+            .contains(&SysinfoQueryId::VOLUME_IO_HEALTH));
+
+        // A denial maps to the CLI's permission error.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::VOLUME_IO_HEALTH);
+        assert_eq!(
+            run(Command::Storage, &denied, &Recorder::new()),
+            Err(SysinfoError::PermissionDenied)
+        );
     }
 
     #[test]

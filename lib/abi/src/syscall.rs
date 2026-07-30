@@ -1951,6 +1951,62 @@ impl SyscallNumber {
     /// [`crate::Errno::NotFound`] (no existence oracle).
     pub const CALL_CANCEL: Self = Self(101);
 
+    /// Publish the recovery health of the fault domain the calling driver
+    /// *owns* — its own interior hardware-tree node — into the live tree
+    /// (`plans/FIX-IO.md` IO4, cross-process fault-domain propagation).
+    ///
+    /// A bus/hub/controller driver that owns an interior node beneath which a
+    /// group of devices hang turns a controller-wide blip (an HC reset, a hub
+    /// mid-reset) into *one* fault-domain event: it records the node's
+    /// [`crate::blkio::FaultDomainState`] here, and the reactive tree
+    /// observers — the device manager — see a coherent recovery episode
+    /// across the subtree rather than N spurious child removals. This is a
+    /// **distinct** signal from the surprise-removal hotplug path
+    /// ([`SyscallNumber::HW_REMOVE_NODE`]): the node stays present, only its
+    /// health changes, so a merely-recovering subtree is never torn down.
+    ///
+    /// Argument: `health: u64` — the [`crate::blkio::FaultDomainState::as_u8`]
+    /// discriminant of the new health (`0` Healthy, `1` Recovering, `2`
+    /// Offline). Any other value fails closed with [`Errno::OutOfRange`].
+    /// Returns `0`, or `-errno`.
+    ///
+    /// The kernel resolves the *caller's own* matched node from its task id
+    /// (never a caller-supplied node id), so a driver can only ever set the
+    /// health of the interior node it was autoloaded for — no ambient
+    /// authority, no forging another driver's health. It shares the
+    /// [`crate::CapabilityId::HW_EMIT`] grant with the emit/remove hotplug
+    /// path (a driver that may reshape its own subtree may report its own
+    /// health) and is audited per call (low-volume, security-relevant). A
+    /// caller with no loaded node, or a build with no hardware-tree store
+    /// wired, fails closed ([`Errno::PermissionDenied`] /
+    /// [`Errno::NotImplemented`]).
+    pub const HW_NODE_HEALTH: Self = Self(102);
+
+    /// Report the hardware-tree node id the calling driver was autoloaded for
+    /// — the driver's own place in the discovered topology
+    /// (`plans/FIX-IO.md` IO4, leaf-side fault-domain attribution).
+    ///
+    /// A user-space driver receives its device-resource grants at spawn, but
+    /// not its node's *identity*, so it cannot locate itself in the hardware
+    /// tree ([`SyscallNumber::HW_TREE_READ`]) to resolve its fault-domain
+    /// ancestors. This returns that identity: the id of the node the driver
+    /// bound to, so a leaf block driver can read the published
+    /// [`crate::blkio::FaultDomainState`] of its parent bus/hub/controller
+    /// chain ([`crate::hwtree::ancestor_imposed_status`]) and attribute a
+    /// controller-wide blip to the fault domain rather than to the disk.
+    ///
+    /// Takes no argument. Returns the caller's own node id (a non-negative
+    /// [`crate::hwtree::HwNode`] id) on success, or `-errno`.
+    ///
+    /// The kernel resolves the node from the caller's task id (never a
+    /// caller-supplied id), so a driver only ever learns its *own* identity —
+    /// no ambient authority and no window onto the global tree. It is the
+    /// unprivileged self-identity baseline (like reading one's own pid or
+    /// growing one's own address space with [`SyscallNumber::MEM_MAP`]): it
+    /// needs no capability and is not audited. A caller with no matched node
+    /// (not an autoloaded driver) fails closed with [`Errno::NotFound`].
+    pub const HW_SELF_NODE: Self = Self(103);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

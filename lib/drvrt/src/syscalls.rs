@@ -110,6 +110,18 @@ pub trait GrantSyscalls {
     /// Mirrors [`tairix_rt::hw_emit_node`].
     fn hw_emit_node(&self, node: &tairix_abi::HwNode) -> i64;
 
+    /// Publish the fault-domain `health` of the interior node the calling
+    /// driver owns into the live hardware tree, returning `0` once recorded,
+    /// else `-errno`. A bus/hub/controller driver reports its own node's
+    /// [`tairix_abi::blkio::FaultDomainState`] so the device manager reacts to
+    /// *one* coherent fault-domain recovery episode across the subtree rather
+    /// than N spurious child removals; the node stays present (a distinct
+    /// signal from a surprise removal), and the kernel records only the
+    /// calling driver's *own* matched node's health (no ambient authority).
+    ///
+    /// Mirrors [`tairix_rt::hw_node_health`].
+    fn hw_node_health(&self, health: tairix_abi::blkio::FaultDomainState) -> i64;
+
     /// Allocate a message-signalled interrupt (MSI) vector for a PCI
     /// function, returning the [`tairix_abi::MsiAllocation`] the kernel
     /// minted (the virtual interrupt line plus the doorbell to program into
@@ -178,6 +190,11 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn hw_emit_node(&self, node: &tairix_abi::HwNode) -> i64 {
         tairix_rt::hw_emit_node(node)
+    }
+
+    #[inline]
+    fn hw_node_health(&self, health: tairix_abi::blkio::FaultDomainState) -> i64 {
+        tairix_rt::hw_node_health(health)
     }
 
     #[inline]

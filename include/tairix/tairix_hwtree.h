@@ -30,7 +30,7 @@
 /* Packed little-endian wire sizes, in bytes. */
 #define TAIRIX_HW_MATCH_KEY_WIRE_LEN 76u
 #define TAIRIX_HW_RESOURCE_WIRE_LEN 32u
-#define TAIRIX_HW_NODE_WIRE_LEN 576u
+#define TAIRIX_HW_NODE_WIRE_LEN 577u
 
 /* Device classes (uint16_t). */
 #define TAIRIX_HW_CLASS_ROOT ((uint16_t)0u)

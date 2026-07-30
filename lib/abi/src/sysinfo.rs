@@ -17,7 +17,7 @@
 //! `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
-use crate::blkio::{BlkHealthState, BlkStatus};
+use crate::blkio::{BlkHealthCounters, BlkHealthState, BlkStatus, BLK_HEALTH_COUNTERS_LEN};
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
@@ -317,6 +317,26 @@ impl SysinfoQueryId {
     /// *client* surface the broker fronts.)
     pub const NET_RESOLVER_SERVERS: Self = Self(26);
 
+    /// List per-volume storage I/O health: one [`VolumeIoHealthRecord`] per
+    /// mounted block-backed volume (its durable volume id, the block-service
+    /// endpoint serving it, its current live availability, and the cumulative
+    /// [`BlkHealthCounters`] the kernel
+    /// filesystem client folded from every completion), paged by a
+    /// [`VolumeIoHealthRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited: the per-device outcome
+    /// tallies (resets, timeouts, reissues, medium errors) are kernel-wide
+    /// storage operational state — the surface a failing or flapping disk
+    /// becomes visible on (`plans/FIX-IO.md` IO5), the same class of
+    /// kernel-internal operational metric as [`Self::MEMORY_PRESSURE`] and
+    /// [`Self::RECLAIM_STATS`], not the ungated mount table
+    /// ([`Self::MOUNT_LIST`]) every user may read. The current availability
+    /// reported here is the same live health the mount table's
+    /// [`MountAvailability`] surfaces; this query adds the counters and names
+    /// the serving endpoint. It exposes no per-principal secret and no
+    /// capability token.
+    pub const VOLUME_IO_HEALTH: Self = Self(27);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -412,6 +432,12 @@ pub enum IntrospectDomain {
     /// core-clock frequency), with the syscall's `arg` naming the record
     /// offset to page from.
     CpuInfo = 16,
+    /// Per-volume storage I/O health: every mounted block-backed volume, one
+    /// packed [`VolumeIoHealthRecord`] (durable volume id, serving
+    /// block-service endpoint, current availability, and the folded
+    /// [`BlkHealthCounters`]), with the
+    /// syscall's `arg` naming the record offset to page from.
+    VolumeIoHealth = 17,
 }
 
 impl IntrospectDomain {
@@ -443,6 +469,7 @@ impl IntrospectDomain {
             14 => Ok(Self::Irqs),
             15 => Ok(Self::Crashes),
             16 => Ok(Self::CpuInfo),
+            17 => Ok(Self::VolumeIoHealth),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -658,6 +685,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "net_resolver_servers",
         required_capability: None,
         audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::VOLUME_IO_HEALTH,
+        name: "volume_io_health",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
     },
 ];
 
@@ -3707,6 +3740,171 @@ impl IrqRecord {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::VOLUME_IO_HEALTH`].
+///
+/// Identical paging shape to [`IrqListRequest`]: `offset` names the first
+/// volume-health-record index to return and `limit` bounds the page.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct VolumeIoHealthRequest {
+    /// Index of the first volume-health record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl VolumeIoHealthRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One mounted block-backed volume's live I/O health inside a
+/// [`SysinfoQueryId::VOLUME_IO_HEALTH`] response.
+///
+/// Every field is filled from the kernel's own filesystem-client state — the
+/// durable volume identity, the block-service endpoint serving it, its current
+/// [`MountAvailability`] (the same live reading the mount table overlays), and
+/// the cumulative [`BlkHealthCounters`] the client folded from every
+/// completion. The counters are the storage analogue of the per-line
+/// `/proc/interrupts` totals [`IrqRecord`] carries: monotonic since the volume
+/// was attached, never reset, and named against the serving endpoint rather
+/// than any secret. There is one record per attached block-backed volume, in a
+/// stable order the source defines, so a client walking the list never skips
+/// or repeats a record.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeIoHealthRecord {
+    /// The volume's durable 16-byte identity (the mount registry's
+    /// `volume_id`), zero when the volume has no published identity.
+    volume_id: [u8; 16],
+    /// The block-service call-endpoint id serving this volume's device.
+    dev: u64,
+    /// The volume's current live availability (the overlaid mount health).
+    availability: MountAvailability,
+    /// The cumulative outcome tallies folded from every completion.
+    counters: BlkHealthCounters,
+}
+
+impl VolumeIoHealthRecord {
+    /// Encoded size on the wire: `volume_id(16) || dev(8) || availability(1) ||
+    /// reserved(7) || counters`. The seven reserved bytes keep the counters
+    /// block eight-byte aligned and must be zero on the wire.
+    pub const WIRE_LEN: usize = 16 + 8 + 8 + BLK_HEALTH_COUNTERS_LEN;
+
+    /// Build a record from its parts.
+    #[must_use]
+    pub const fn new(
+        volume_id: [u8; 16],
+        dev: u64,
+        availability: MountAvailability,
+        counters: BlkHealthCounters,
+    ) -> Self {
+        Self {
+            volume_id,
+            dev,
+            availability,
+            counters,
+        }
+    }
+
+    /// The volume's durable 16-byte identity.
+    #[must_use]
+    pub const fn volume_id(&self) -> [u8; 16] {
+        self.volume_id
+    }
+
+    /// The block-service endpoint id serving the volume's device.
+    #[must_use]
+    pub const fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    /// The volume's current live availability.
+    #[must_use]
+    pub const fn availability(&self) -> MountAvailability {
+        self.availability
+    }
+
+    /// The cumulative I/O-health counters folded for the volume.
+    #[must_use]
+    pub const fn counters(&self) -> BlkHealthCounters {
+        self.counters
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..16].copy_from_slice(&self.volume_id);
+        put_u64(&mut out, 16, self.dev);
+        out[24] = self.availability.as_u8();
+        // out[25..32] are the reserved padding, left zero.
+        out[32..].copy_from_slice(&self.counters.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`, validating the availability discriminant and the
+    /// reserved padding.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    ///   [`Self::WIRE_LEN`].
+    /// * [`Errno::OutOfRange`] if the availability byte is not a known
+    ///   [`MountAvailability`] discriminant.
+    /// * [`Errno::BadMagic`] if any reserved padding byte is non-zero (fail
+    ///   closed on an unknown record shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[25..32].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let mut volume_id = [0u8; 16];
+        volume_id.copy_from_slice(&bytes[0..16]);
+        let availability = MountAvailability::from_u8(bytes[24])?;
+        let counters = BlkHealthCounters::from_bytes(&bytes[32..Self::WIRE_LEN])?;
+        Ok(Self {
+            volume_id,
+            dev: read_u64(bytes, 16),
+            availability,
+            counters,
+        })
+    }
+}
+
 /// Maximum number of backtrace frames a [`CrashRecord`] carries.
 ///
 /// The user-stack unwinder is hard-capped at 64 frames, but the innermost
@@ -4283,6 +4481,8 @@ mod tests {
         CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
+    use super::{VolumeIoHealthRecord, VolumeIoHealthRequest};
+    use crate::blkio::{BlkHealthCounters, BLK_HEALTH_COUNTERS_LEN};
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
     use crate::rlimit::{LimitKind, ResourceLimit};
@@ -4353,6 +4553,17 @@ mod tests {
                 .unwrap()
                 .audit
         );
+        assert_eq!(SysinfoQueryId::VOLUME_IO_HEALTH.as_u16(), 27);
+        // Per-device storage I/O health is kernel-wide operational state:
+        // gated on `CAP_SYSINFO_KERNEL` and audited, like the memory-pressure
+        // and reclaim gauges.
+        assert_eq!(
+            spec_for(SysinfoQueryId::VOLUME_IO_HEALTH)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_KERNEL)
+        );
+        assert!(spec_for(SysinfoQueryId::VOLUME_IO_HEALTH).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -4411,12 +4622,13 @@ mod tests {
             (14, IntrospectDomain::Irqs),
             (15, IntrospectDomain::Crashes),
             (16, IntrospectDomain::CpuInfo),
+            (17, IntrospectDomain::VolumeIoHealth),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(17), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(18), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -4598,6 +4810,7 @@ mod tests {
             SysinfoQueryId::RAMZIP_STATS,
             SysinfoQueryId::CPU_LOAD,
             SysinfoQueryId::CRASH_RECORD,
+            SysinfoQueryId::VOLUME_IO_HEALTH,
         ] {
             let spec = spec_for(id).unwrap();
             assert_eq!(
@@ -5830,6 +6043,96 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 0x02;
         assert_eq!(IrqRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn volume_io_health_request_round_trips_and_rejects_reserved() {
+        let req = VolumeIoHealthRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        assert_eq!(
+            VolumeIoHealthRequest::from_bytes(&req.to_le_bytes()),
+            Ok(req)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(
+            VolumeIoHealthRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            VolumeIoHealthRequest::from_bytes(&[0u8; VolumeIoHealthRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn volume_io_health_record_round_trips_and_preserves_health_and_counters() {
+        let counters = BlkHealthCounters {
+            completions: 4096,
+            reissues: 12,
+            ok: 4000,
+            degraded: 8,
+            transient: 40,
+            timeouts: 3,
+            resets: 30,
+            medium_errors: 5,
+            offline: 7,
+            faults: 3,
+        };
+        let volume_id = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
+        let record = VolumeIoHealthRecord::new(
+            volume_id,
+            0x5953_2001,
+            MountAvailability::Recovering,
+            counters,
+        );
+        let decoded = VolumeIoHealthRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.volume_id(), volume_id);
+        assert_eq!(decoded.dev(), 0x5953_2001);
+        assert_eq!(decoded.availability(), MountAvailability::Recovering);
+        assert_eq!(decoded.counters(), counters);
+        // The record leads with the volume id and carries the counters block
+        // as its tail.
+        let bytes = record.to_le_bytes();
+        assert_eq!(&bytes[0..16], &volume_id);
+        assert_eq!(&bytes[32..], &counters.to_le_bytes());
+        assert_eq!(VolumeIoHealthRecord::WIRE_LEN, 32 + BLK_HEALTH_COUNTERS_LEN);
+    }
+
+    #[test]
+    fn volume_io_health_record_fails_closed_on_a_corrupt_wire() {
+        let record = VolumeIoHealthRecord::new(
+            [0u8; 16],
+            7,
+            MountAvailability::Available,
+            BlkHealthCounters::default(),
+        );
+        // Short buffer.
+        assert_eq!(
+            VolumeIoHealthRecord::from_bytes(&[0u8; VolumeIoHealthRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // An unknown availability discriminant is rejected, not guessed.
+        let mut bytes = record.to_le_bytes();
+        bytes[24] = 0xFF;
+        assert_eq!(
+            VolumeIoHealthRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+        // A non-zero reserved padding byte fails closed on an unknown shape.
+        let mut bytes = record.to_le_bytes();
+        bytes[28] = 1;
+        assert_eq!(
+            VolumeIoHealthRecord::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

@@ -1336,7 +1336,7 @@ You are not exempt from any rule above. In addition:
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | Name resolution: the DNS stub resolver (RFC 1035/RFC 5452) engine and its socket integration | `plans/DNS.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
-    | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/RustFS composition | `plans/FIX-IO.md` |
+    | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/ARXFS composition | `plans/FIX-IO.md` |
     | TPM / measured boot | `plans/TPM.md` |
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
