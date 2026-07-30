@@ -157,6 +157,36 @@ probed is `Faulted`. A copy the generation counter proved is behind therefore
 can **never** be served to a reader as if it were current (`AGENTS.md` §5.4,
 §26.5) — a disk that missed writes is a disk that can lie.
 
+### Metadata updates (membership changes)
+
+Reassembly *reads* the generation counter; the write side *advances* it. When
+the array's membership changes — a member drops out on a fault, or a rebuilt
+member rejoins — the serve process advances the generation and re-stamps the
+survivors:
+
+- `ArrayIdentity::bump_generation` returns the identity at the next generation
+  (the array's event count, mdadm-style). It saturates at `u64::MAX` rather
+  than wrapping, since a wrapped generation could match an already-written
+  member's value; saturation is the safe direction, and `2^64` membership
+  changes is unreachable in practice.
+- `ArrayIdentity::member_superblock(slot, updated_at)` builds the on-disk
+  record a **current** member persists: the array's shape and its current
+  generation. It fails closed with `None` for a slot outside the array. This
+  is the record written to a survivor re-stamped after a membership bump, to a
+  freshly-created member, and to a rebuilt member promoted back to current on
+  resync completion — writing the current generation is exactly what makes a
+  formerly-stale copy resolve as in sync again.
+
+A member that was **absent** for a bump is never re-stamped, so it keeps its
+lower generation and returns as a stale rebuild target rather than a trusted
+read source — this is what closes the stale-read window (`AGENTS.md` §5.4,
+§26.5): a disk that missed writes while it was gone can never come back
+masquerading as up to date. The read and write halves share one notion of
+"current" (the generation equality `verdict_of` tests), so they cannot diverge
+(`AGENTS.md` §2.2). A still-rebuilding member is deliberately left at its lower
+generation until its resync finishes, so it stays read-excluded until it is
+genuinely caught up.
+
 The on-disk format is unfrozen pre-release (`AGENTS.md` §2.13): it is changed
 in place, never versioned alongside an old one.
 

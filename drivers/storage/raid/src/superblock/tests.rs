@@ -396,6 +396,145 @@ fn fill_slots_rejects_a_wrongly_sized_buffer() {
     );
 }
 
+#[test]
+fn bump_generation_increments_and_preserves_shape() {
+    let candidates = [candidate(10, sb(UUID_A, 2, 0, 8))];
+    let id = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    let next = id.bump_generation();
+    assert_eq!(next.generation, id.generation + 1);
+    assert_eq!(next.array_uuid, id.array_uuid);
+    assert_eq!(next.raid_level, id.raid_level);
+    assert_eq!(next.member_count, id.member_count);
+    assert_eq!(next.geometry, id.geometry);
+}
+
+#[test]
+fn bump_generation_saturates_at_the_ceiling_rather_than_wrapping() {
+    let candidates = [candidate(10, sb(UUID_A, 2, 0, u64::MAX))];
+    let id = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    assert_eq!(id.generation, u64::MAX);
+    // Saturates rather than wrapping to 0, which an already-written member
+    // could match and be wrongly trusted as current.
+    assert_eq!(id.bump_generation().generation, u64::MAX);
+}
+
+#[test]
+fn member_superblock_round_trips_through_decode_and_resolves_current() {
+    let candidates = [candidate(10, sb(UUID_A, 3, 0, 8))];
+    let id = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    let stamp = Time64::new(1_800_000_000, 42).unwrap();
+    let written = id.member_superblock(2, stamp).unwrap();
+    assert_eq!(written.array_uuid, UUID_A);
+    assert_eq!(written.member_slot, 2);
+    assert_eq!(written.member_count, 3);
+    assert_eq!(written.generation, id.generation);
+    assert_eq!(written.updated_at, stamp);
+    // It survives an encode/decode round trip (a real on-disk write) …
+    assert_eq!(ArraySuperblock::decode(&written.encode()).unwrap(), written);
+    // … and resolves as a current (in-sync) member of the same array.
+    let round = [candidate(10, written)];
+    let id2 = ArrayIdentity::resolve(UUID_A, &round).unwrap();
+    assert_eq!(
+        id2.verdict_of(&round, 0),
+        CandidateVerdict::Placed {
+            slot: 2,
+            in_sync: true
+        }
+    );
+}
+
+#[test]
+fn member_superblock_fails_closed_on_an_out_of_range_slot() {
+    let candidates = [candidate(10, sb(UUID_A, 2, 0, 8))];
+    let id = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    let stamp = Time64::from_secs(1_700_000_100);
+    assert_eq!(id.member_superblock(2, stamp), None);
+    assert_eq!(id.member_superblock(u16::MAX, stamp), None);
+    assert!(id.member_superblock(1, stamp).is_some());
+}
+
+#[test]
+fn a_member_absent_for_a_membership_bump_returns_stale() {
+    // A two-member array at generation 8; both current.
+    let id = ArrayIdentity::resolve(
+        UUID_A,
+        &[
+            candidate(10, sb(UUID_A, 2, 0, 8)),
+            candidate(11, sb(UUID_A, 2, 1, 8)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(id.generation, 8);
+
+    // Member 1 faults and drops out. The array records the membership change
+    // and re-stamps only the *surviving* member (slot 0) at the new
+    // generation; the absent member is left at generation 8.
+    let stamp = Time64::from_secs(1_700_000_200);
+    let next = id.bump_generation();
+    let survivor = next.member_superblock(0, stamp).unwrap();
+    assert_eq!(next.generation, 9);
+    assert_eq!(survivor.generation, 9);
+
+    // Member 1 comes back still carrying its stale generation-8 superblock.
+    let candidates = [candidate(10, survivor), candidate(11, sb(UUID_A, 2, 1, 8))];
+    let reassembled = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    assert_eq!(reassembled.generation, 9);
+    let mut slots = [SlotDisposition::Missing; 2];
+    reassembled.fill_slots(&candidates, &mut slots).unwrap();
+    assert_eq!(
+        slots[0],
+        SlotDisposition::Present {
+            tag: 10,
+            in_sync: true
+        }
+    );
+    // The returned member missed a write while it was gone: it is a stale
+    // rebuild target, never trusted as a current read source.
+    assert_eq!(
+        slots[1],
+        SlotDisposition::Present {
+            tag: 11,
+            in_sync: false
+        }
+    );
+}
+
+#[test]
+fn promoting_a_rebuilt_member_makes_it_current_again() {
+    // The array is at generation 9 with one current member; the other has been
+    // rebuilt and is being promoted back to current.
+    let id = ArrayIdentity::resolve(
+        UUID_A,
+        &[
+            candidate(10, sb(UUID_A, 2, 0, 9)),
+            candidate(11, sb(UUID_A, 2, 1, 6)), // stale rebuild target
+        ],
+    )
+    .unwrap();
+    assert_eq!(id.generation, 9);
+    let stamp = Time64::from_secs(1_700_000_300);
+    let promoted = id.member_superblock(1, stamp).unwrap();
+    let candidates = [candidate(10, sb(UUID_A, 2, 0, 9)), candidate(11, promoted)];
+    let reassembled = ArrayIdentity::resolve(UUID_A, &candidates).unwrap();
+    let mut slots = [SlotDisposition::Missing; 2];
+    reassembled.fill_slots(&candidates, &mut slots).unwrap();
+    // Both members are now current; the array is whole again.
+    assert_eq!(
+        slots[0],
+        SlotDisposition::Present {
+            tag: 10,
+            in_sync: true
+        }
+    );
+    assert_eq!(
+        slots[1],
+        SlotDisposition::Present {
+            tag: 11,
+            in_sync: true
+        }
+    );
+}
+
 /// Recompute and rewrite the trailing CRC after a test mutates the body, so a
 /// test that targets a *semantic* rejection is not masked by the checksum
 /// check firing first.

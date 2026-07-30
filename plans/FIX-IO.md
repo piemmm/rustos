@@ -878,10 +878,25 @@ source of truth), and `verdict_of`/`fill_slots` place each member — in sync,
 out-of-range slot, or the losing side of a duplicate slot claim) — from **one**
 decision, so the per-member verdict and the assembled slot table cannot
 diverge (§2.2). The caller owns the candidate slice and slot buffer, so there
-is no fixed member ceiling (§24.1). The format is unfrozen and evolved in place
+is no fixed member ceiling (§24.1). The metadata **write** side — the
+counterpart to the read/reassemble side — is the two pure `ArrayIdentity`
+primitives `bump_generation` (advance the array event count on a membership
+change, saturating at `u64::MAX` rather than wrapping to a value an
+already-written member could match) and `member_superblock(slot, updated_at)`
+(the on-disk record a *current* member persists at the array's generation,
+fail-closed `None` for an out-of-range slot). On a member drop the survivors
+re-stamp at the bumped generation while the absent member keeps its lower one,
+so it returns a **stale rebuild target** and can never masquerade as current —
+closing the stale-read window (§5.4/§26.5, "a disk that missed writes is a disk
+that can lie"); promoting a rebuilt member back to current is the same
+`member_superblock` write, so the read and write halves share one notion of
+"current" and cannot diverge (§2.2). The format is unfrozen and evolved in place
 (§2.13). Proven host-side (round-trip; every fail-closed decode incl. pre-1970
 / post-2038 timestamps; resolve/verdict/fill_slots over stale/duplicate/
-missing/mismatch/foreign arrangements). Design: `docs/src/drivers/raid.md`.
+missing/mismatch/foreign arrangements; the generation bump incl. saturation,
+`member_superblock` round-trip/fail-closed, and the end-to-end
+absent-member-returns-stale and rebuilt-member-promoted-current journeys).
+Design: `docs/src/drivers/raid.md`.
 
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,

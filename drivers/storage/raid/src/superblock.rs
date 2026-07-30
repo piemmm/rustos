@@ -46,6 +46,21 @@
 //! and fills a caller-owned slot buffer, so it imposes no fixed member ceiling
 //! (`AGENTS.md` §24.1); the growable member tier lives in the assembling serve
 //! process.
+//!
+//! # Metadata updates (membership changes)
+//!
+//! Reassembly reads the generation counter; the write side *advances* it.
+//! When the array's membership changes — a member drops out on a fault, or a
+//! rebuilt member rejoins — the serve process calls
+//! [`ArrayIdentity::bump_generation`] and re-stamps every **current** member's
+//! superblock with [`ArrayIdentity::member_superblock`] at the new generation.
+//! A member that was absent for that bump keeps its lower generation, so on
+//! return it resolves as a stale rebuild target rather than being trusted as
+//! current: this is what closes the stale-read window (`AGENTS.md` §5.4,
+//! §26.5 — a disk that missed writes is a disk that can lie). Promoting a
+//! rebuilt member back to current is the same `member_superblock` write, so
+//! the read and write halves share one notion of "current" and cannot diverge
+//! (`AGENTS.md` §2.2).
 
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::time::Time64;
@@ -508,6 +523,76 @@ impl ArrayIdentity {
             }
         }
         Ok(())
+    }
+
+    /// Advance this identity to the next array generation, returning the
+    /// identity the survivors of a membership change persist.
+    ///
+    /// The generation counter is the array's event count: every membership
+    /// change (a member dropping out on a fault, a rebuilt member rejoining)
+    /// bumps it, and the survivors re-stamp their superblocks
+    /// ([`member_superblock`](Self::member_superblock)) at the new value. A
+    /// member that was *absent* for the bump keeps its lower generation, so on
+    /// return it resolves as a **stale** rebuild target
+    /// ([`verdict_of`](Self::verdict_of) reports `in_sync == false`) rather
+    /// than being trusted as current. This is the write-side counterpart of
+    /// [`resolve`](Self::resolve) that closes the stale-read window: a disk
+    /// that missed writes while it was gone can never come back masquerading
+    /// as up to date (the charter's fail-closed rule; §26.5 "a disk that
+    /// missed writes is a disk that can lie").
+    ///
+    /// The bump saturates at [`u64::MAX`]: an array that somehow reached
+    /// `2^64 - 1` membership changes stops advancing rather than wrapping to a
+    /// generation an already-written member could match. Saturation is the
+    /// safe direction — every live member simply shares the ceiling and stays
+    /// in sync — and is unreachable in practice.
+    #[must_use]
+    pub const fn bump_generation(self) -> Self {
+        Self {
+            generation: self.generation.saturating_add(1),
+            ..self
+        }
+    }
+
+    /// Build the on-disk [`ArraySuperblock`] a **current** member in `slot`
+    /// persists for this array: the identity's shape and its current
+    /// generation, stamped `updated_at`.
+    ///
+    /// This is the record written to a member the array considers in sync — a
+    /// survivor re-stamped after a [`bump_generation`](Self::bump_generation),
+    /// a freshly-created member, or a rebuilt member being promoted to current
+    /// on resync completion (writing the current generation is exactly what
+    /// makes a formerly-stale copy resolve as in sync again). It is never
+    /// written to a member that is still behind: such a member must keep its
+    /// lower generation until its rebuild finishes, so that it stays a
+    /// [`stale`](SlotDisposition) read-excluded rebuild target
+    /// (`AGENTS.md` §5.4, §26.5).
+    ///
+    /// # Errors / bounds
+    ///
+    /// Returns [`None`] if `slot` is not less than
+    /// [`member_count`](Self::member_count): there is no such member slot, so
+    /// the call fails closed rather than minting a superblock for a slot the
+    /// array cannot admit ([`decode`](ArraySuperblock::decode) would reject it
+    /// anyway as [`SlotOutOfRange`](SuperblockError::SlotOutOfRange)).
+    #[must_use]
+    pub const fn member_superblock(
+        &self,
+        slot: u16,
+        updated_at: Time64,
+    ) -> Option<ArraySuperblock> {
+        if slot >= self.member_count {
+            return None;
+        }
+        Some(ArraySuperblock {
+            array_uuid: self.array_uuid,
+            raid_level: self.raid_level,
+            member_count: self.member_count,
+            member_slot: slot,
+            geometry: self.geometry,
+            generation: self.generation,
+            updated_at,
+        })
     }
 }
 
