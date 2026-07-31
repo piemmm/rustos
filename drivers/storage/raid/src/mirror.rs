@@ -8,7 +8,7 @@
 
 use crate::superblock::SlotDisposition;
 use tairix_abi::blkio::BlkStatus;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::sysinfo::MountAvailability;
 
@@ -1082,6 +1082,16 @@ impl<B: Block> Block for MirrorArray<'_, B> {
         } else {
             Err(worst.unwrap_or(DriverError::DeviceOffline))
         }
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(crate::health::aggregate_device_health(
+            self.members
+                .iter()
+                .filter(|m| matches!(m.state, MemberState::InSync | MemberState::Resyncing))
+                .filter_map(|m| m.device.as_ref())
+                .map(Block::device_health),
+        ))
     }
 }
 

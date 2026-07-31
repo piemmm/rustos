@@ -2,7 +2,7 @@
 
 use super::{ArrayHealth, StripeArray, StripeError, StripeMember};
 use core::cell::Cell;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 
 const BS: u32 = 512;
@@ -29,6 +29,7 @@ struct StripeBlock {
     /// on read — a latent bad sector, not a dead device.
     medium_block: Cell<Option<u64>>,
     flush_fault: Cell<bool>,
+    health: Cell<DeviceHealth>,
 }
 
 impl StripeBlock {
@@ -44,7 +45,27 @@ impl StripeBlock {
             write_fault: Cell::new(None),
             medium_block: Cell::new(None),
             flush_fault: Cell::new(false),
+            health: Cell::new(DeviceHealth::Unavailable),
         }
+    }
+
+    /// A device reporting `media_errors` integrity faults through its health
+    /// telemetry.
+    fn with_media_errors(self, media_errors: u64) -> Self {
+        self.health.set(DeviceHealth::Available(HealthSnapshot {
+            power_on_hours: 0,
+            unsafe_shutdowns: 0,
+            media_errors,
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            uncorrectable_sectors: 0,
+            crc_errors: 0,
+            percentage_used: 0,
+            available_spare: 100,
+            temperature_kelvin: 300,
+            critical_warning: false,
+        }));
+        self
     }
 
     fn with_geometry(self, geo: BlockGeometry) -> Self {
@@ -113,6 +134,10 @@ impl Block for StripeBlock {
         let (start, end) = Self::span(lba, buf.len())?;
         self.store[start..end].copy_from_slice(buf);
         Ok(())
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(self.health.get())
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
@@ -383,4 +408,45 @@ fn buffer_class_is_forwarded_to_the_members() {
         .read_blocks_with_class(2, &mut back, BufferClass::Sensitive)
         .unwrap();
     assert_eq!(payload, back);
+}
+
+#[test]
+fn device_health_aggregates_and_excludes_a_faulted_member() {
+    // A composed stripe surfaces its members' telemetry rather than the trait
+    // default (`Unavailable`).
+    let mut m = [
+        StripeMember::new(StripeBlock::new().with_media_errors(1)),
+        StripeMember::new(StripeBlock::new().with_media_errors(2)),
+        StripeMember::new(StripeBlock::new().with_media_errors(4)),
+    ];
+    let mut array = StripeArray::assemble(&mut m, CHUNK).unwrap();
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected aggregated telemetry, not Unavailable");
+    };
+    assert_eq!(h.media_errors, 7);
+
+    // Faulting member 0 (a whole-device write fault on a block that lands on
+    // it) drops it; a dropped member contributes no telemetry.
+    array
+        .member(0)
+        .unwrap()
+        .device()
+        .write_fault
+        .set(Some(DriverError::DeviceOffline));
+    assert!(array.write_blocks(0, &[9u8; BS as usize]).is_err());
+    assert!(array.member(0).unwrap().faulted());
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected the survivors' telemetry");
+    };
+    assert_eq!(h.media_errors, 6);
+}
+
+#[test]
+fn device_health_is_unavailable_without_member_telemetry() {
+    let mut m = members();
+    let array = StripeArray::assemble(&mut m, CHUNK).unwrap();
+    assert_eq!(
+        array.device_health().expect("health read"),
+        DeviceHealth::Unavailable
+    );
 }

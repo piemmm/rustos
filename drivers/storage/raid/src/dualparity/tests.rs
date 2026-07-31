@@ -4,7 +4,7 @@
 use super::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 use crate::mirror::{ArrayHealth, MemberState};
 use core::cell::RefCell;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 
 // A small block size keeps the fault-injecting device doubles off the stack's
@@ -39,6 +39,8 @@ struct Inner {
     /// The [`BufferClass`] of the most recent `write_blocks_with_class` this
     /// member observed, so a test can prove the caller's class is forwarded.
     last_write_class: Option<BufferClass>,
+    /// The health telemetry this member reports.
+    health: DeviceHealth,
 }
 
 impl MemBlock {
@@ -51,8 +53,27 @@ impl MemBlock {
                 write_fault: None,
                 medium_block: None,
                 last_write_class: None,
+                health: DeviceHealth::Unavailable,
             }),
         }
+    }
+
+    /// Make this member report `media_errors` integrity faults through its
+    /// health telemetry.
+    fn set_media_errors(&self, media_errors: u64) {
+        self.inner.borrow_mut().health = DeviceHealth::Available(HealthSnapshot {
+            power_on_hours: 0,
+            unsafe_shutdowns: 0,
+            media_errors,
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            uncorrectable_sectors: 0,
+            crc_errors: 0,
+            percentage_used: 0,
+            available_spare: 100,
+            temperature_kelvin: 300,
+            critical_warning: false,
+        });
     }
 
     fn set_read_fault(&self, e: Option<DriverError>) {
@@ -150,6 +171,10 @@ impl Block for MemBlock {
     ) -> Result<(), DriverError> {
         self.inner.borrow_mut().last_write_class = Some(class);
         self.write_blocks(lba, buf)
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(self.inner.borrow().health)
     }
 }
 
@@ -642,5 +667,61 @@ fn assemble_fails_closed_on_bad_shapes() {
     assert_eq!(
         DualParityArray::assemble(&mut redundancy, &mut s, CHUNK).map(|_| ()),
         Err(DualParityError::InsufficientRedundancy)
+    );
+}
+
+#[test]
+fn device_health_aggregates_and_excludes_a_faulted_member() {
+    // A composed double-parity array surfaces its members' telemetry rather
+    // than the trait default (`Unavailable`); integrity faults sum across all
+    // members (data and syndrome alike).
+    let m0 = MemBlock::new();
+    m0.set_media_errors(1);
+    let m1 = MemBlock::new();
+    m1.set_media_errors(2);
+    let m2 = MemBlock::new();
+    m2.set_media_errors(4);
+    let m3 = MemBlock::new();
+    m3.set_media_errors(8);
+    let mut m = [
+        DualParityMember::new(m0),
+        DualParityMember::new(m1),
+        DualParityMember::new(m2),
+        DualParityMember::new(m3),
+    ];
+    let mut s = scratch();
+    let mut array = DualParityArray::assemble(&mut m, &mut s, CHUNK).unwrap();
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected aggregated telemetry, not Unavailable");
+    };
+    assert_eq!(h.media_errors, 15);
+
+    // Member 0 goes offline; a faulted member contributes no telemetry, and
+    // the double-parity array still serves from its survivors.
+    array
+        .member(0)
+        .unwrap()
+        .device()
+        .unwrap()
+        .set_read_fault(Some(DriverError::DeviceOffline));
+    let mut buf = [0u8; BS as usize];
+    for blk in 0..LOGICAL {
+        let _ = array.read_blocks(blk, &mut buf);
+    }
+    assert_eq!(array.member_state(0), Some(MemberState::Faulted));
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected the survivors' telemetry");
+    };
+    assert_eq!(h.media_errors, 14);
+}
+
+#[test]
+fn device_health_is_unavailable_without_member_telemetry() {
+    let mut m = members();
+    let mut s = scratch();
+    let array = DualParityArray::assemble(&mut m, &mut s, CHUNK).unwrap();
+    assert_eq!(
+        array.device_health().expect("health read"),
+        DeviceHealth::Unavailable
     );
 }

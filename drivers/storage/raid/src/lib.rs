@@ -156,6 +156,20 @@
 //! rather than fabricating success. The *operation* fails; the *system*
 //! keeps running.
 //!
+//! # Device health (`AGENTS.md` §26.5)
+//!
+//! Because every composition is itself a
+//! [`Block`](tairix_abi::driver::block::Block), a consumer that schedules a
+//! scrub from a device's `SMART` / `NVMe` telemetry queries the *array*, so all
+//! four arrays override
+//! [`device_health`](tairix_abi::driver::block::Block::device_health) to
+//! aggregate their live members' telemetry through one shared definition
+//! (`health::aggregate_device_health`) rather than inherit the trait default
+//! and hide every member's health. Independent integrity counters sum
+//! (saturating), shared conditions take the worst member, a faulted/absent slot
+//! or a member with no telemetry contributes nothing, and the array reports
+//! `Unavailable` only when no live member exposes telemetry.
+//!
 //! # On-disk metadata and reassembly ([`ArraySuperblock`], [`ArrayIdentity`])
 //!
 //! An array is discovered, not configured: each member carries a checksummed
@@ -194,6 +208,7 @@
 
 mod dualparity;
 mod gf256;
+mod health;
 mod mirror;
 mod parity;
 mod stripe;

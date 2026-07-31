@@ -50,7 +50,7 @@
 //! §24.1); the growable member tier lives in the assembling serve process.
 
 use crate::mirror::{member_faulting, ArrayHealth};
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
 /// One member of a [`StripeArray`]: a child [`Block`] device and whether it
@@ -408,6 +408,15 @@ impl<B: Block> Block for StripeArray<'_, B> {
             }
         }
         Ok(())
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(crate::health::aggregate_device_health(
+            self.members
+                .iter()
+                .filter(|m| !m.faulted())
+                .map(|m| m.device().device_health()),
+        ))
     }
 }
 

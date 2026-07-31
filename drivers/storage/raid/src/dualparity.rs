@@ -49,7 +49,7 @@
 use crate::gf256;
 use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
 use crate::superblock::RaidLevel;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
 #[cfg(test)]
@@ -1537,5 +1537,15 @@ impl<B: Block> Block for DualParityArray<'_, B> {
         } else {
             Err(worst.unwrap_or(DriverError::DeviceOffline))
         }
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(crate::health::aggregate_device_health(
+            self.members
+                .iter()
+                .filter(|m| matches!(m.state, MemberState::InSync | MemberState::Resyncing))
+                .filter_map(|m| m.device.as_ref())
+                .map(Block::device_health),
+        ))
     }
 }

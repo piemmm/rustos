@@ -459,3 +459,40 @@ cannot masquerade as a healthy copy, yet a genuine return always rejoins
 without a reboot (`AGENTS.md` §18.4). A faulted disk can instead be pulled
 entirely with `remove_member` (slot → `Absent`) and a spare later inserted
 with `add_member`; see *Degrade — never fail the system* above.
+
+## Device health (`device_health`)
+
+Every composition is itself a [`Block`](./block.md), so a consumer that
+schedules a scrub from a device's `SMART` / `NVMe` telemetry
+(`docs/src/filesystem/arxfs-spec.md` §11) queries the *array* through
+`Block::device_health` and must still see the health of the disks underneath
+it. Rather than inherit the trait default (`Unavailable`) — which would hide
+every member's telemetry and make a failing disk in an array look like a
+device with no health data at all (`AGENTS.md` §26.5) — all four arrays
+aggregate their live members' snapshots through one shared definition
+(`aggregate_device_health`, `AGENTS.md` §2.2), so they cannot fold health
+differently.
+
+The fold keeps a baseline comparison meaningful for an array:
+
+- **Independent per-device integrity faults are summed** — `media_errors`,
+  `reallocated_sectors`, `pending_sectors`, `uncorrectable_sectors`, and
+  `crc_errors`. Each member's errors are its own, so the array total is their
+  sum, and a rise in the sum is what schedules a deep scrub. Sums saturate
+  rather than wrap, so a very wide array of old disks can never overflow a
+  counter (`AGENTS.md` §2.9, §26.6).
+- **Shared / whole-array conditions take the worst member** — `unsafe_shutdowns`
+  and `power_on_hours` are the maximum (an unclean shutdown hits every member
+  together, so summing would fabricate a fault), `percentage_used` and
+  `temperature_kelvin` are the maximum (the most-worn / hottest member bounds
+  the array), `available_spare` is the minimum (the weakest link), and
+  `critical_warning` is the logical OR.
+
+Only live, participating devices contribute: an in-sync copy and a resyncing
+copy (a real device being rebuilt) report valid telemetry, while a faulted or
+absent slot has none. A member that itself reports `Unavailable`, or whose
+health read *errors*, is skipped rather than failing the whole array-level
+query — a single member with no telemetry never denies the consumer the health
+of the members that can be read (`AGENTS.md` §26.5). The array reports
+`Unavailable` only when no participating member exposes telemetry, so an
+absence of data is never mistaken for a perfectly-healthy array.

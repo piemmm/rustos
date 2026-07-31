@@ -864,6 +864,16 @@ proven host-side over a fault-injecting `Block` double:
   sticky-but-recoverable (`readd_member`/`replace_member`), so a flapping disk
   never masquerades as a healthy copy yet a genuine return rejoins without a
   reboot (§18.4).
+- **Composed device health.** Because each array is itself a `Block`, all four
+  compositions override `Block::device_health` to aggregate their live members'
+  `SMART`/`NVMe` telemetry through one shared `raid::health::
+  aggregate_device_health` (§2.2) rather than inherit the trait default and hide
+  every member's health from the FS scrub scheduler (§26.5, ARXFS §11):
+  independent integrity counters sum (saturating), shared conditions take the
+  worst member, faulted/absent slots and members with no telemetry contribute
+  nothing, and the array reports `Unavailable` only when no live member exposes
+  any. Proven host-side per array (aggregate, faulted/absent exclusion,
+  resyncing inclusion, all-unavailable, errored-member skip).
   Design: `docs/src/drivers/raid.md`.
 
 **Landed (the on-disk array metadata + reassembly logic):** the prerequisite

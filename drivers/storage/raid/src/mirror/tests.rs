@@ -3,7 +3,7 @@
 use super::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 use crate::SlotDisposition;
 use core::cell::Cell;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 
 const BS: u32 = 512;
@@ -22,6 +22,8 @@ struct FaultBlock {
     read_fault: Cell<Option<DriverError>>,
     write_fault: Cell<Option<DriverError>>,
     flush_fault: Cell<bool>,
+    health: Cell<DeviceHealth>,
+    health_fault: Cell<bool>,
     reads: Cell<u32>,
     writes: Cell<u32>,
 }
@@ -38,9 +40,30 @@ impl FaultBlock {
             read_fault: Cell::new(None),
             write_fault: Cell::new(None),
             flush_fault: Cell::new(false),
+            health: Cell::new(DeviceHealth::Unavailable),
+            health_fault: Cell::new(false),
             reads: Cell::new(0),
             writes: Cell::new(0),
         }
+    }
+
+    /// A device reporting `media_errors` integrity faults through its
+    /// health telemetry.
+    fn with_media_errors(self, media_errors: u64) -> Self {
+        self.health.set(DeviceHealth::Available(HealthSnapshot {
+            power_on_hours: 0,
+            unsafe_shutdowns: 0,
+            media_errors,
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            uncorrectable_sectors: 0,
+            crc_errors: 0,
+            percentage_used: 0,
+            available_spare: 100,
+            temperature_kelvin: 300,
+            critical_warning: false,
+        }));
+        self
     }
 
     fn absent() -> Self {
@@ -110,6 +133,14 @@ impl Block for FaultBlock {
             Err(DriverError::DeviceFault)
         } else {
             Ok(())
+        }
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        if self.health_fault.get() {
+            Err(DriverError::DeviceFault)
+        } else {
+            Ok(self.health.get())
         }
     }
 }
@@ -1168,4 +1199,85 @@ fn remove_then_add_is_the_full_disk_replacement_workflow() {
             .expect("served from the spare");
         assert_eq!(b, block(pat(lba)));
     }
+}
+
+#[test]
+fn device_health_sums_in_sync_members() {
+    // A composed mirror surfaces its members' telemetry rather than the
+    // trait default (`Unavailable`): independent integrity faults sum.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(3)),
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(5)),
+    ];
+    let array = MirrorArray::assemble(&mut members).expect("assembles");
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected aggregated telemetry, not Unavailable");
+    };
+    assert_eq!(h.media_errors, 8);
+}
+
+#[test]
+fn device_health_excludes_faulted_and_absent_and_includes_resyncing() {
+    // Slot 0 in-sync (3 media errors), slot 1 a live device (5) we will fault
+    // then re-add, slot 2 an empty slot with no device.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(3)),
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(5)),
+        MirrorMember::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+
+    // A whole-device write fault on slot 1 drops it; the write still succeeds
+    // through slot 0. An absent slot never held a device.
+    dev(&array, 1)
+        .write_fault
+        .set(Some(DriverError::DeviceOffline));
+    array
+        .write_blocks(0, &block(9))
+        .expect("write succeeds via the healthy copy");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+
+    // A faulted slot and an absent slot contribute nothing: only slot 0.
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected aggregated telemetry");
+    };
+    assert_eq!(h.media_errors, 3);
+
+    // Re-adding slot 1 makes it a resyncing (live) member again, so its
+    // telemetry rejoins the aggregate.
+    dev(&array, 1).write_fault.set(None);
+    array.readd_member(1).expect("re-add begins the rebuild");
+    assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected aggregated telemetry");
+    };
+    assert_eq!(h.media_errors, 8);
+}
+
+#[test]
+fn device_health_is_unavailable_when_no_member_reports_and_skips_an_errored_member() {
+    // No member exposes telemetry -> the array reports Unavailable, never a
+    // zeroed snapshot that would look perfectly healthy.
+    let mut none = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let array = MirrorArray::assemble(&mut none).expect("assembles");
+    assert_eq!(
+        array.device_health().expect("health read"),
+        DeviceHealth::Unavailable
+    );
+
+    // A member whose telemetry read errors is skipped, never failing the
+    // whole array-level query: the readable member still speaks.
+    let mut mixed = [
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(7)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let array = MirrorArray::assemble(&mut mixed).expect("assembles");
+    dev(&array, 1).health_fault.set(true);
+    let DeviceHealth::Available(h) = array.device_health().expect("health read") else {
+        panic!("expected the readable member's telemetry");
+    };
+    assert_eq!(h.media_errors, 7);
 }
