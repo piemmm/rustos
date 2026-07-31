@@ -571,6 +571,7 @@ tairix/
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
 │   ├── proglib/         # Program-library catalog store engine (folders/entries).
+│   ├── raidmeta/        # RAID array-member superblock format + reassembly.
 │   ├── raster/          # Shared software rasterisation.
 │   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
 │   ├── resref/          # Shared resource-reference parser.

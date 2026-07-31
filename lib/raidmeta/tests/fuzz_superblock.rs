@@ -17,7 +17,7 @@
 
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::time::Time64;
-use tairix_drv_storage_raid::{ArraySuperblock, RaidLevel, WIRE_LEN};
+use tairix_raidmeta::{ArraySuperblock, RaidLevel, WIRE_LEN};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 200_000;

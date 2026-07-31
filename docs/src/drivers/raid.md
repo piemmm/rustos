@@ -331,6 +331,19 @@ sticky-but-recoverable, so a flapping disk never masquerades as a healthy copy.
 
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
+The on-disk metadata format and the reassembly logic live in the shared
+`lib/raidmeta` crate, not in this driver, so the RAID composition engines here
+and the **storage-discovery probe** (`lib/fsprobe`, used by
+`drivers/storage/volmgr`) read one definition of what a member is and can never
+disagree (`AGENTS.md` §2.2) — and without a `drivers/*`→`drivers/*` edge
+(§17.4). The driver re-exports the types (`tairix_drv_storage_raid::ArraySuperblock`,
+…) for its own use. The probe consumes the same decode to **refuse mounting a
+bare, un-assembled member**: a member carries its superblock at block 0, so
+`fsprobe::probe_raid_member` recognises it before any filesystem signature and
+the volume manager skips it rather than attaching one raw mirror copy
+read-write (which would diverge the array or serve stale data, `AGENTS.md`
+§26.5).
+
 An array is **discovered, not configured**: there is no hand-maintained list
 of which devices form an array (`AGENTS.md` §18, §16.5). Each member carries a
 fixed-size, little-endian `ArraySuperblock` naming the array (a 128-bit
@@ -369,7 +382,7 @@ non-canonical timestamp is a typed `SuperblockError`, never a silently-trusted
 record. (`chunk_blocks` is part of
 the array shape `resolve`/`verdict_of` compare, so a member disagreeing on the
 stripe unit is refused like any other shape mismatch.) The decoder is total and
-`forbid(unsafe_code)`, and a fuzz harness (`tests/fuzz_superblock.rs`,
+`forbid(unsafe_code)`, and a fuzz harness (`lib/raidmeta/tests/fuzz_superblock.rs`,
 `AGENTS.md` §19.6) proves it never panics on arbitrary input and that every
 accepted record round-trips.
 

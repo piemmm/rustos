@@ -11,28 +11,23 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is a host-testable `lib`: the RAID composition engine
-# (`MirrorArray`) that consumes child `Block` endpoints through the public
-# block seam and the shared health classification (`tairix_abi::blkio`). It
-# depends only on `lib/abi`, so the layered dependency direction holds (no
-# `drivers/*`->`drivers/*` edge: a member is reached through the `Block` trait
-# the composing serve process is handed, never a sibling driver crate). The
-# autoloaded serve process that assembles members from discovered array
-# metadata rides with the multi-device volume-assembly work (plans/FIX-IO.md
-# IO6 remaining); this engine is proven host-side first.
+# The crate is a host-testable `lib`: the RAID composition engines
+# (`MirrorArray`/`StripeArray`/`ParityArray`/`DualParityArray`) that consume
+# child `Block` endpoints through the public block seam and the shared health
+# classification (`tairix_abi::blkio`). It depends only on `lib/*`, so the
+# layered dependency direction holds (no `drivers/*`->`drivers/*` edge: a member
+# is reached through the `Block` trait the composing serve process is handed,
+# never a sibling driver crate). The autoloaded serve process that assembles
+# members from discovered array metadata rides with the multi-device
+# volume-assembly work (plans/FIX-IO.md IO6 remaining); this engine is proven
+# host-side first.
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# CRC-32C block-integrity checksum for the on-disk array superblock (the one
-# first-party checksum definition, never a second; `AGENTS.md` §2.2). It is an
-# error-detecting checksum, not a security primitive: array authenticity rests
-# on the signed driver bundle and the members' own capability-gated endpoints,
-# not on this value.
-tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
-
-[dev-dependencies]
-# Shared fuzz-harness seam: one place picks the per-run PRNG seed, logs it,
-# and bounds the smoke/soak budget, so the superblock decoder's fuzz harness
-# shares the project's single definition (`AGENTS.md` §2.2, §19.6). Test
-# scaffolding only — never linked into the driver itself.
-tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The on-disk array-member superblock format and reassembly logic
+# (`tairix_raidmeta`) — the single definition shared with the storage-discovery
+# probe (`lib/fsprobe`/volmgr) so the composition and discovery sides can never
+# disagree about what a member is (`AGENTS.md` §2.2), without a
+# `drivers/*`->`drivers/*` edge (§17.4). This crate consumes it to assemble the
+# engines from decoded members.
+tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }

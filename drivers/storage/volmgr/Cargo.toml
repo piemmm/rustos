@@ -32,6 +32,12 @@ tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
 # fingerprint the collision-suffix naming policy renders.
 tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
 
+[dev-dependencies]
+# The shared RAID on-disk metadata layer, used only by the host tests to
+# author a valid array-member superblock on an in-memory device and assert the
+# probe plan recognises the member and refuses to attach it as a filesystem.
+tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
+
 # Everything the freestanding program links beyond the `lib` is pulled in only
 # for the bare-metal targets the binary is actually built for; on the host the
 # binary is an inert stub.

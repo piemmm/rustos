@@ -1147,8 +1147,7 @@ name = "tairix-drv-storage-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-crc32c",
- "tairix-fuzzseed",
+ "tairix-raidmeta",
 ]
 
 [[package]]
@@ -1182,6 +1181,7 @@ dependencies = [
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
+ "tairix-raidmeta",
  "tairix-rt",
  "tairix-util",
 ]
@@ -1330,6 +1330,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-raidmeta",
 ]
 
 [[package]]
@@ -1979,6 +1980,15 @@ dependencies = [
 [[package]]
 name = "tairix-qemu"
 version = "0.0.0"
+
+[[package]]
+name = "tairix-raidmeta"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-crc32c",
+ "tairix-fuzzseed",
+]
 
 [[package]]
 name = "tairix-raster"

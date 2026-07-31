@@ -188,7 +188,7 @@ pub const TARGETS: &[Target] = &[
             "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
     },
     Target {
-        package: "tairix-drv-storage-raid",
+        package: "tairix-raidmeta",
         test: "fuzz_superblock",
         description:
             "RAID array-superblock decode (untrusted on-disk member metadata: magic, bounds, CRC)",

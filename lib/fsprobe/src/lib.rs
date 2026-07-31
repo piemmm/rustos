@@ -98,6 +98,31 @@ pub fn probe(head: &[u8]) -> Option<ProbedVolume> {
         .or_else(|| probe_fat32(head))
 }
 
+/// Recognise a **RAID array member** from the first bytes of a device or
+/// partition extent, returning the array's UUID.
+///
+/// A member of a RAID array (`plans/FIX-IO.md` IO6) carries a checksummed
+/// [`tairix_raidmeta::ArraySuperblock`] in the leading bytes of its first block
+/// (member block 0). This validates that record — magic, version, CRC-32C, and
+/// every bounds check the decoder enforces — through the one shared metadata
+/// definition, so the probe and the RAID composition driver can never disagree
+/// about what a member is (one definition, `AGENTS.md` §2.2).
+///
+/// It is the discovery hook that lets a volume manager route a member to RAID
+/// assembly and, crucially, **refuse to mount it as a standalone filesystem**:
+/// a bare mirror copy holds a full filesystem at the array's data offset, so
+/// attaching one raw copy read-write would silently diverge the mirror's copies
+/// or serve stale data from a member that missed writes (`AGENTS.md` §26.5).
+/// A member is therefore recognised *before* the filesystem signatures are
+/// tried. Returns `None` for anything that is not a valid member — fail closed,
+/// never a guess (`AGENTS.md` §5.4).
+#[must_use]
+pub fn probe_raid_member(head: &[u8]) -> Option<[u8; 16]> {
+    tairix_raidmeta::ArraySuperblock::decode(head)
+        .ok()
+        .map(|superblock| superblock.array_uuid)
+}
+
 /// Ceiling on a mutation-evidence extent ([`evidence_len`]), in bytes: the
 /// largest any supported format's declaration can reach (the `ARXFS`
 /// superblock ring of eight 4 KiB blocks). A head whose declared evidence
@@ -391,6 +416,64 @@ mod tests {
         head[8..12].copy_from_slice(&1u32.to_le_bytes());
         head[16..32].copy_from_slice(&uuid);
         head
+    }
+
+    /// A RAID array-member head: a valid `tairix_raidmeta::ArraySuperblock`
+    /// (a RAID1 mirror, member 0 of 2) written into the leading bytes of a
+    /// head, exactly as a member carries it at block 0.
+    fn raid_member_head(uuid: [u8; 16]) -> [u8; PROBE_HEAD_LEN] {
+        let superblock = tairix_raidmeta::ArraySuperblock {
+            array_uuid: uuid,
+            raid_level: tairix_raidmeta::RaidLevel::Mirror,
+            member_count: 2,
+            member_slot: 0,
+            geometry: tairix_abi::driver::block::BlockGeometry {
+                block_size: 512,
+                block_count: 4096,
+            },
+            generation: 7,
+            updated_at: tairix_abi::time::Time64::from_secs(1_700_000_000),
+            chunk_blocks: 0,
+        };
+        let mut head = [0u8; PROBE_HEAD_LEN];
+        let encoded = superblock.encode();
+        head[..encoded.len()].copy_from_slice(&encoded);
+        head
+    }
+
+    #[test]
+    fn recognises_a_raid_array_member_by_its_superblock() {
+        let uuid = [0x5A; 16];
+        let head = raid_member_head(uuid);
+        assert_eq!(probe_raid_member(&head), Some(uuid));
+        // A member is not a mountable filesystem: the filesystem probe must
+        // not claim it, so the volume manager routes it to assembly rather
+        // than mounting one bare copy read-write (`AGENTS.md` §26.5).
+        assert_eq!(probe(&head), None);
+    }
+
+    #[test]
+    fn probe_raid_member_fails_closed_on_non_members() {
+        // Blank bytes, real filesystem heads, and a too-short buffer are all
+        // rejected — a member is recognised only by a valid superblock, never
+        // guessed (`AGENTS.md` §5.4).
+        assert_eq!(probe_raid_member(&[0u8; PROBE_HEAD_LEN]), None);
+        assert_eq!(
+            probe_raid_member(&fat32_boot(*b"SRLN", b"MYDISK     ")),
+            None
+        );
+        assert_eq!(probe_raid_member(&ext4_head([7u8; 16], b"backup")), None);
+        assert_eq!(probe_raid_member(&arxfs_head([9u8; 16])), None);
+        assert_eq!(probe_raid_member(&[0u8; 4]), None);
+    }
+
+    #[test]
+    fn a_corrupted_raid_member_superblock_is_refused() {
+        let mut head = raid_member_head([0x9C; 16]);
+        // Flip a body byte: the trailing CRC-32C no longer matches, so the
+        // record fails closed rather than being trusted.
+        head[20] ^= 0xFF;
+        assert_eq!(probe_raid_member(&head), None);
     }
 
     #[test]

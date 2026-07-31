@@ -82,6 +82,7 @@ members = [
     "lib/pci",
     "lib/procinfo",
     "lib/proglib",
+    "lib/raidmeta",
     "lib/raster",
     "lib/resolver",
     "lib/resref",

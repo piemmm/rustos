@@ -3,7 +3,17 @@
 //!
 //! The engine reads only device *heads* — never whole volumes — and is
 //! pure policy over the [`Block`] seam, so it is host-tested against
-//! in-memory images. The order is fixed and documented:
+//! in-memory images.
+//!
+//! At each extent (the whole device, then each partition) a **RAID array
+//! member** is recognised first ([`tairix_fsprobe::probe_raid_member`]): a
+//! member carries a RAID superblock at its block 0, belongs to an array
+//! awaiting assembly, and must never be mounted as a bare filesystem — one
+//! copy of a mirror mounted read-write diverges the array, and a member that
+//! missed writes serves stale data (`AGENTS.md` §26.5). Such an extent is
+//! counted ([`PlanSummary::raid_members`]) and skipped, never attached. Only
+//! when an extent is *not* a member is it probed for a filesystem, in the
+//! fixed and documented order:
 //!
 //! 1. **Whole-device filesystem first.** A supported signature at LBA 0
 //!    (`tairix_fsprobe::probe`) means an unpartitioned "superfloppy"
@@ -27,7 +37,7 @@
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
-use tairix_fsprobe::{probe, ProbedVolume, PROBE_HEAD_LEN};
+use tairix_fsprobe::{probe, probe_raid_member, ProbedVolume, PROBE_HEAD_LEN};
 use tairix_partition::{parse_partition_table, Partition, PartitionError};
 
 use crate::name::{fallback_name, sanitise_label, VolumeName};
@@ -61,6 +71,12 @@ pub struct PlanSummary {
     pub planned: u32,
     /// Present partitions whose head matched no supported filesystem.
     pub unrecognised: u32,
+    /// Extents (the whole device, or a partition) recognised as a **RAID
+    /// array member** and deliberately *not* attached: a member belongs to a
+    /// RAID array awaiting assembly, and mounting one bare copy read-write
+    /// would diverge a mirror's copies or serve stale data (`AGENTS.md`
+    /// §26.5). Not an error, and never counted as blank/unrecognised.
+    pub raid_members: u32,
     /// `true` when the device carried no partition table and no
     /// whole-device filesystem (nothing attachable, not an error).
     pub no_scheme: bool,
@@ -84,11 +100,23 @@ pub fn plan_volumes<B: Block>(
     // in device order so the derivation is stable per layout.
     let mut ordinals = [0u32; 3];
 
-    // Whole-device filesystem first (see the module docs for why).
-    if let Some(probed) = probe_extent(dev, &geometry, 0, geometry.block_count)? {
-        sink(&plan_from(&probed, 0, geometry.block_count, &mut ordinals));
-        summary.planned = 1;
-        return Ok(summary);
+    // Whole-device: a RAID array member first, then a whole-device
+    // filesystem (see the module docs for the order and why).
+    if let Some((head, len)) = read_head(dev, &geometry, 0, geometry.block_count)? {
+        let head = &head[..len];
+        if probe_raid_member(head).is_some() {
+            // A member occupies the whole device: it belongs to a RAID array
+            // awaiting assembly, so it is not attachable as a standalone
+            // volume and is emphatically not blank. Fail closed rather than
+            // ever mounting one bare copy.
+            summary.raid_members = 1;
+            return Ok(summary);
+        }
+        if let Some(probed) = probe(head) {
+            sink(&plan_from(&probed, 0, geometry.block_count, &mut ordinals));
+            summary.planned = 1;
+            return Ok(summary);
+        }
     }
 
     let table = match parse_partition_table(dev) {
@@ -108,10 +136,19 @@ pub fn plan_volumes<B: Block>(
             summary.unrecognised += 1;
             continue;
         };
-        match probe_extent(dev, &geometry, extent.0, extent.1)? {
-            Some(probed) => {
-                sink(&plan_from(&probed, extent.0, extent.1, &mut ordinals));
-                summary.planned += 1;
+        match read_head(dev, &geometry, extent.0, extent.1)? {
+            Some((head, len)) => {
+                let head = &head[..len];
+                if probe_raid_member(head).is_some() {
+                    // A partition that is a RAID array member is skipped for
+                    // the same reason as a whole-device member above.
+                    summary.raid_members += 1;
+                } else if let Some(probed) = probe(head) {
+                    sink(&plan_from(&probed, extent.0, extent.1, &mut ordinals));
+                    summary.planned += 1;
+                } else {
+                    summary.unrecognised += 1;
+                }
             }
             None => summary.unrecognised += 1,
         }
@@ -132,13 +169,20 @@ fn bounded_extent(partition: &Partition, geometry: &BlockGeometry) -> Option<(u6
     Some((partition.start_lba, partition.block_count))
 }
 
-/// Read an extent's head and probe it for a supported filesystem.
-fn probe_extent<B: Block>(
+/// Read an extent's head into a buffer, returning it with the valid byte
+/// length, or `None` when the geometry cannot be used to read a head (a zero
+/// or oversized block size, or a zero-length extent).
+///
+/// One read serves both classifiers: the caller passes the returned slice to
+/// [`probe_raid_member`] (is this a RAID array member?) and, failing that, to
+/// [`probe`] (is this a supported filesystem?), so a device head is read once
+/// (`AGENTS.md` §2.16).
+fn read_head<B: Block>(
     dev: &mut B,
     geometry: &BlockGeometry,
     first_lba: u64,
     blocks: u64,
-) -> Result<Option<ProbedVolume>, DriverError> {
+) -> Result<Option<([u8; HEAD_BUF_LEN], usize)>, DriverError> {
     let block_size = geometry.block_size as usize;
     if block_size == 0 || block_size > HEAD_BUF_LEN || blocks == 0 {
         return Ok(None);
@@ -151,9 +195,8 @@ fn probe_extent<B: Block>(
     let read_bytes = read_blocks * block_size;
     let mut head = [0u8; HEAD_BUF_LEN];
     let take = read_bytes.min(HEAD_BUF_LEN);
-    let buf = &mut head[..take];
-    dev.read_blocks(first_lba, buf)?;
-    Ok(probe(buf))
+    dev.read_blocks(first_lba, &mut head[..take])?;
+    Ok(Some((head, take)))
 }
 
 /// Build the plan record for one recognised volume, deriving its base
@@ -414,5 +457,71 @@ mod tests {
         let (plans, _) = collect(&mut dev);
         assert_eq!(plans[0].base.as_bytes(), b"fat1");
         assert_eq!(plans[1].base.as_bytes(), b"fat2");
+    }
+
+    /// Write a valid RAID array-member superblock (a RAID1 mirror, member 0 of
+    /// 2) into the first bytes of the extent at byte `offset`, exactly as a
+    /// member carries it at its block 0.
+    fn write_raid_member(image: &mut [u8], offset: usize, uuid: [u8; 16]) {
+        let superblock = tairix_raidmeta::ArraySuperblock {
+            array_uuid: uuid,
+            raid_level: tairix_raidmeta::RaidLevel::Mirror,
+            member_count: 2,
+            member_slot: 0,
+            geometry: BlockGeometry {
+                block_size: BS_U32,
+                block_count: 64,
+            },
+            generation: 5,
+            updated_at: tairix_abi::time::Time64::from_secs(1_700_000_000),
+            chunk_blocks: 0,
+        };
+        let encoded = superblock.encode();
+        image[offset..offset + encoded.len()].copy_from_slice(&encoded);
+    }
+
+    #[test]
+    fn a_whole_device_raid_member_is_recognised_and_never_attached() {
+        // The device's block 0 is a RAID member superblock, not a partition
+        // table or a filesystem. It must be recognised and skipped — mounting
+        // one bare copy of an array would diverge the array or serve stale
+        // data — never mistaken for a blank device.
+        let mut image = vec![0u8; 64 * BS];
+        write_raid_member(&mut image, 0, [0x5A; 16]);
+        let mut dev = MemBlock {
+            image,
+            faulty: false,
+        };
+        let (plans, summary) = collect(&mut dev);
+        assert!(plans.is_empty(), "a bare RAID member is never attached");
+        assert_eq!(summary.raid_members, 1);
+        assert_eq!(summary.planned, 0);
+        assert_eq!(summary.unrecognised, 0);
+        assert!(!summary.no_scheme, "a member is not a blank device");
+    }
+
+    #[test]
+    fn a_partition_that_is_a_raid_member_is_recognised_and_never_attached() {
+        // A partitioned disk whose one partition is a RAID member: the table
+        // parses, but the member partition is skipped rather than attached.
+        let mut image = vec![0u8; 64 * BS];
+        let parts = [Partition {
+            ty: PartitionType::FatBoot,
+            start_lba: 8,
+            block_count: 32,
+        }];
+        let mut sector = mbr::encode(&parts).expect("encodes");
+        set_type_byte(&mut sector, 0, 0x83);
+        image[..512].copy_from_slice(&sector);
+        write_raid_member(&mut image, 8 * BS, [0xC3; 16]);
+        let mut dev = MemBlock {
+            image,
+            faulty: false,
+        };
+        let (plans, summary) = collect(&mut dev);
+        assert!(plans.is_empty());
+        assert_eq!(summary.raid_members, 1);
+        assert_eq!(summary.planned, 0);
+        assert_eq!(summary.unrecognised, 0);
     }
 }

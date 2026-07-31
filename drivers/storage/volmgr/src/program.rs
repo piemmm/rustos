@@ -49,6 +49,14 @@ const VOLMGR_NOTHING_ATTACHABLE: EventId = EventId(4183);
 /// device fault) and this instance is exiting for supervision.
 const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
 
+/// Diagnostic event id: an extent (the whole device, or a partition) was
+/// recognised as a RAID array member and deliberately not attached — it
+/// belongs to a RAID array awaiting assembly, and mounting one bare copy
+/// would diverge a mirror or serve stale data (`plans/FIX-IO.md` IO6,
+/// `AGENTS.md` §26.5). A normal outcome, logged so a member disk is
+/// diagnosable rather than looking blank.
+const VOLMGR_RAID_MEMBER: EventId = EventId(4185);
+
 /// The capability set the driver host re-checks up front; the kernel is
 /// the authority and re-checks every trap. It is the least-privilege set
 /// this policy driver needs — no MMIO, DMA, IRQ, or node emission.
@@ -309,14 +317,27 @@ fn main() -> i32 {
         }
     };
 
-    if summary.planned == 0 {
+    if summary.raid_members > 0 {
         log_hex_event(
-            VOLMGR_NOTHING_ATTACHABLE,
+            VOLMGR_RAID_MEMBER,
             Level::Info,
-            "volmgr: no attachable volume on this device",
-            "unrecognised_hex",
-            u64::from(summary.unrecognised),
+            "volmgr: RAID array member(s) present; not attaching (awaiting assembly)",
+            "raid_members_hex",
+            u64::from(summary.raid_members),
         );
+    }
+    if summary.planned == 0 {
+        // Only genuinely blank when there is also no RAID member: a member is
+        // reported above, never as "nothing attachable".
+        if summary.raid_members == 0 {
+            log_hex_event(
+                VOLMGR_NOTHING_ATTACHABLE,
+                Level::Info,
+                "volmgr: no attachable volume on this device",
+                "unrecognised_hex",
+                u64::from(summary.unrecognised),
+            );
+        }
         return 0;
     }
     // A refused sibling volume was logged above; the exit stays `0` so a

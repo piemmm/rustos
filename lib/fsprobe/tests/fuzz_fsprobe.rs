@@ -15,7 +15,8 @@
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use tairix_fsprobe::{
-    fingerprint, probe, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, PROBE_HEAD_LEN,
+    fingerprint, probe, probe_raid_member, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC,
+    PROBE_HEAD_LEN,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -61,6 +62,29 @@ fn arxfs_head() -> Vec<u8> {
     head
 }
 
+/// A RAID array-member head (a valid mirror superblock at block 0), so the
+/// mutator hammers the `probe_raid_member` decode path with plausible member
+/// bytes as well as pure noise.
+fn raid_member_head() -> Vec<u8> {
+    let superblock = tairix_raidmeta::ArraySuperblock {
+        array_uuid: [0x5A; 16],
+        raid_level: tairix_raidmeta::RaidLevel::Mirror,
+        member_count: 2,
+        member_slot: 0,
+        geometry: tairix_abi::driver::block::BlockGeometry {
+            block_size: 512,
+            block_count: 4096,
+        },
+        generation: 7,
+        updated_at: tairix_abi::time::Time64::from_secs(1_700_000_000),
+        chunk_blocks: 0,
+    };
+    let mut head = vec![0u8; PROBE_HEAD_LEN];
+    let encoded = superblock.encode();
+    head[..encoded.len()].copy_from_slice(&encoded);
+    head
+}
+
 /// `x` reduced into `0..=max`, without a narrowing `as` cast.
 fn bounded(x: u64, max: usize) -> usize {
     let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
@@ -81,12 +105,15 @@ fn exercise_never_panics(bytes: &[u8]) {
         // produced.
         let _ = fingerprint(&probed.identity);
     }
+    // The RAID-member recogniser parses the same untrusted head; it must
+    // also refuse a malformed record cleanly rather than panic.
+    let _ = probe_raid_member(bytes);
 }
 
 #[test]
 fn probing_any_head_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let corpus = [fat32_head(), ext4_head(), arxfs_head()];
+    let corpus = [fat32_head(), ext4_head(), arxfs_head(), raid_member_head()];
 
     let mut state: u64 = tairix_fuzzseed::start(
         "probing_any_head_never_panics",

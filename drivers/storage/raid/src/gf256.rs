@@ -59,11 +59,6 @@ pub(crate) const fn gpow(exp: u64) -> u8 {
     result
 }
 
-/// The largest data-member count a GF(2^8) Q syndrome keeps distinct,
-/// non-zero coefficients for: `g⁰ … g²⁵⁴`. A double-parity array may not have
-/// more than this many data members.
-pub(crate) const MAX_DATA_MEMBERS: u16 = 255;
-
 /// The multiplicative inverse of `x` in GF(2^8). `x` must be non-zero (zero has
 /// no inverse); the caller guarantees this. Computed as `x^254` (Fermat:
 /// `x^(q-1) = 1`, so `x^(q-2)` is the inverse) by square-and-multiply.

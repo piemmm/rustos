@@ -5416,7 +5416,14 @@ themselves), derives the deterministic catalog name (sanitised label →
 `<fstype><n>` → identity-fingerprint suffix on collision), and issues the
 audited `volume_attach` per volume, exiting 0 run-to-completion — the
 `mbr::encode` silently-drops-`Other`-partitions defect was fixed en route
-with a regression test. D3d (done) landed the user-facing mount policy:
+with a regression test. It now recognises a **RAID array member** at each
+extent's block 0 (via `fsprobe::probe_raid_member`) *before* any filesystem
+signature and refuses to attach a bare member — mounting one raw mirror copy
+would diverge the array or serve stale data (§26.5); the on-disk RAID
+array-superblock format and reassembly were hoisted into the new `lib/raidmeta`
+crate so the RAID composition driver (`drivers/storage/raid`) and this probe
+share one definition (§2.2) without a `drivers/*`→`drivers/*` edge (§17.4).
+D3d (done) landed the user-facing mount policy:
 the well-known `storage` group (`tairix_users::STORAGE_GROUP`, resolved by
 name from the loaded group registry at root unlock into the set-once
 `volume_policy::LATE_STORAGE_GID` cell), the `GroupMappedFs` identity map

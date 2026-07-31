@@ -896,9 +896,13 @@ proven host-side over a fault-injecting `Block` double:
 
 **Landed (the on-disk array metadata + reassembly logic):** the prerequisite
 for the autoloaded serve process is the shared, host-tested metadata layer in
-`drivers/storage/raid` (§2.2, §27), so an array is *discovered*, never
-configured (§18, §16.5). Each member carries a fixed-size, little-endian
-`superblock::ArraySuperblock` — a 128-bit `ArrayUuid`, the `RaidLevel`, the
+the `lib/raidmeta` crate (§2.2, §27), so an array is *discovered*, never
+configured (§18, §16.5). It lives in `lib/*`, not the driver, because a second
+consumer — the storage-discovery probe (`lib/fsprobe`/volmgr) — reads the same
+definition to refuse mounting a bare member (below), which a `drivers/*` crate
+could not without a `drivers/*`→`drivers/*` edge (§17.4). Each member carries a
+fixed-size, little-endian `ArraySuperblock` — a 128-bit `ArrayUuid`, the
+`RaidLevel`, the
 member count, this member's slot, the array geometry, a monotonic
 **generation** counter, and a `Time64` last-write stamp (§21) — sealed with a
 trailing CRC-32C (`lib/crc32c`, the one first-party checksum, an integrity
@@ -911,7 +915,7 @@ source — `RaidLevel::data_members`/`logical_block_count`, from which the
 concatenating engines size the composed geometry so it cannot drift, §2.2) —
 out-of-range slot, degenerate geometry,
 non-canonical timestamp, §5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
-(`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
+(`lib/raidmeta/tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
 reassembly verdict is carried into the composition through one shared mapping
 `raid::MemberRole::for_slot(SlotDisposition)` (§2.2): a `Present{in_sync:false}`
 slot — a copy the generation counter proved is behind — becomes a
@@ -979,6 +983,27 @@ exactly as the stripe engine reports only `Optimal`/`Failed`. Proven host-side
 mirror and block-budget parity maintenance dispatch, the stripe `NotRedundant`
 refusals, `BadScratch`, and the `RaidError` `From` mapping incl. its defensive
 catch). Design: `docs/src/drivers/raid.md`.
+
+**Landed (discovery-side member recognition — a bare member is never mounted):**
+the on-disk metadata format and reassembly were hoisted from the driver into
+the shared `lib/raidmeta` crate so the composition driver *and* the
+storage-discovery probe read one definition of what a member is (§2.2) without
+a `drivers/*`→`drivers/*` edge (§17.4). `lib/fsprobe` gained
+`probe_raid_member` (a validated `ArraySuperblock::decode` at an extent's
+block 0 — magic, version, CRC, and every bounds check — returning the array
+UUID, fail-closed), and `drivers/storage/volmgr`'s probe plan now recognises a
+RAID array member — whole-device *or* per-partition — **before** any filesystem
+signature and refuses to attach it (`PlanSummary::raid_members`, a distinct
+`VOLMGR_RAID_MEMBER` audit event, never counted as blank). This closes a
+latent data-integrity hole: a bare mirror copy holds a full filesystem at the
+array's data offset, so mounting one raw copy read-write would silently diverge
+the array or serve stale data from a member that missed writes (§26.5). Proven
+host-side (fsprobe recognises and round-trips a member, fails closed on
+blank/filesystem/short/corrupt input, and fuzzes the new decoder; volmgr skips
+a whole-device and a partition member while still attaching sibling
+filesystems). The member superblock's block-0 placement is the contract this
+recognition reads; how the array's data is laid out relative to it is fixed by
+the assembling serve process below.
 
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
