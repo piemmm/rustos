@@ -792,10 +792,28 @@ Remaining deliverables:
   which are IO4 (fault-domain tree wiring) — this query reports the health the
   kernel block *consumer* observes, a complete and coherent surface on its own.
   Never a `/proc`-style scrape (§16.1).
-- **Watchdog tie-in** (`plans/WATCHDOG.md`): a driver process that itself wedges
-  is a lockup the watchdog detects and recovers (restart the driver, mark the
-  device `Failed`) — closing the loop where the *driver*, not the disk, is the
-  problem.
+- **Watchdog tie-in** (`plans/WATCHDOG.md`, `plans/NEW-SERVICEMANAGER.md`): a
+  driver process that itself wedges is a lockup the supervisor detects and
+  recovers (restart the driver, so the device recovers rather than staying
+  failed) — closing the loop where the *driver*, not the disk, is the problem.
+  This is **not** a FIX-IO-local mechanism: bounded, backed-off, crash-loop-
+  guarded restart already lives in the service manager (SVC-7), so re-inventing
+  it here would duplicate it (§2.2). The **liveness-watchdog engine core** that
+  turns a *wedged* (present-but-unresponsive) supervised process into that same
+  restart path landed in the service manager as SVC-8: a per-service
+  `WatchdogSec`-equivalent interval in the signed unit metadata
+  (`lib/abi::ServiceUnit::watchdog`), and the `Init` engine's
+  `arm_watchdogs`/`heartbeat`/`watchdog_deadline`/`expire_watchdog` (a missed
+  heartbeat force-kills the wedged process and drives the existing
+  `RestartPolicy`/backoff/crash-loop budget), proven host-side. The **live
+  wiring** — a user-space block-driver serve loop renewing its heartbeat to its
+  manager as it makes progress, so a wedged serve loop is force-restarted —
+  rides with the SVC-5/SVC-8 control transport (the heartbeat-renewal path and
+  the reactor that arms the real one-shot off `watchdog_deadline`), exactly as
+  the other FIX-IO primitives landed their shared logic before their live
+  wiring. A driver process that keeps wedging past the crash-loop budget is left
+  down, and its device fails closed to its consumers through the existing IO1
+  per-request deadline / IO3 health machinery.
 
 Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver

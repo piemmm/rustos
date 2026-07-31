@@ -621,17 +621,20 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   reset; reverse-dependency `shutdown` and `stop` ordering (dependents first,
   independents untouched); fail-closed unknown-service stop; and shutdown
   cancelling a pending restart.
-- Health-check/watchdog restart (`plans/WATCHDOG.md`) and the capability-gated
-  control surface that gates *who* may `stop`/restart a service are SVC-8; the
-  live one-shot-timer wiring off `restart_deadline` rides with the loader/kernel
-  transport seam SVC-5/SVC-8 wire, on the `lib/rt` heap for the growable tier
-  (§3.10). A blind periodic restart is not offered (§2.1, §3.7).
+- The capability-gated control surface that gates *who* may `stop`/restart a
+  service is SVC-8; the live one-shot-timer wiring off `restart_deadline` rides
+  with the loader/kernel transport seam SVC-5/SVC-8 wire, on the `lib/rt` heap
+  for the growable tier (§3.10). A blind periodic restart is not offered (§2.1,
+  §3.7). The health-check/liveness **watchdog** that turns a *wedged* (rather
+  than exited) service into that same restart path landed as an engine core in
+  SVC-8 (below).
 
 ### SVC-8 — Control API + tool + audit + rlimits + docs/gate
 - **Per-service `rlimit` unit metadata — DONE (ABI + engine core).** The
   `ServiceManifest`/`ServiceUnit` SUM1 record carries an optional
   per-service resource-limit section: a `limits_count u16` at prefix offset
-  48 (prefix grown 48→50, `reserved0` kept reserved) and a body of
+  48 (`reserved0` kept reserved; the fixed prefix has since grown to hold the
+  watchdog field below) and a body of
   `ServiceLimit { kind: LimitKind, limit: ResourceLimit }` entries encoded as
   `(u32 kind ‖ u64 soft ‖ u64 hard)`. The section is **canonical** — strictly
   ascending by `LimitKind` discriminant, so a duplicate or descending kind, a
@@ -668,12 +671,45 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   idempotent, condition-gated (headless fails closed, §17.3), and supersedes a
   pending restart backoff. Host-tested; enable/disable (store-write) and status
   (§16.6) are deliberately *not* on this endpoint.
+- **Liveness watchdog + restart — DONE (ABI + engine core).** The
+  health-check source `plans/WATCHDOG.md` names, wired to the SVC-7 restart
+  engine so a *wedged* (still-present-but-unresponsive) service is recovered
+  exactly like a crashed one — the service-manager home of the storage
+  driver-lockup tie-in (`plans/FIX-IO.md` IO5). The SUM1 record grows a
+  `watchdog Duration64` (offset 50, fixed prefix 50→62; zero = opt-out; a
+  negative interval fails the record closed), the analogue of systemd's
+  `WatchdogSec`; it stays an IPC-protocol module (no `abi-check`/`c-header`
+  change) and rides the `fuzz_decode` round-trip arm. `ServiceUnit`/
+  `ServiceManifest`/`ServiceSpec` gain `watchdog`/`with_watchdog`/`watchdog()`
+  and `from_manifest` threads it. The `Init` engine gains, beside the existing
+  one-shot deadlines and reusing them exactly (no second restart engine, §2.2):
+  `arm_watchdogs(now)` (idempotently arms a running, opted-in service's
+  `watchdog_deadline = now + interval`, audit `SERVICE_WATCHDOG_ARMED` 9024),
+  `heartbeat(name, now)` (a running service renews its deadline; fail-safe
+  no-op otherwise; never audited — high-frequency), `watchdog_deadline(name)`
+  (the one-shot the transport arms), and `expire_watchdog(name, now)` (a missed
+  deadline force-terminates the wedged process, audit `SERVICE_WATCHDOG_TIMEOUT`
+  9025, and marks `killed_by_watchdog` so `reap` classifies the exit as an
+  abnormal failure — regardless of the reported code — feeding the *existing*
+  `schedule_restart`/backoff/crash-loop budget). A heartbeat cancels a stale
+  one-shot, and `begin_stop` disarms the watchdog so a deliberate stop is never
+  fought as a wedge. Host-tested: arm+idempotent+renew, healthy service never
+  killed, wedge→force-kill→reap→`on-failure` relaunch (even on a zero exit
+  code), wedge under `never` killed-but-left-down, and a deliberate stop
+  disarming it. The **live heartbeat transport** — a supervised driver/daemon
+  renewing its heartbeat to its manager, and the reactor arming the real
+  one-shot off `watchdog_deadline` — rides with the SVC-5 control transport
+  below, so `plans/FIX-IO.md`'s block drivers renew through it once it exists;
+  the engine core is complete and proven host-side first, exactly as the
+  sibling stages staged their transport.
 - **Remaining (TODO).** The **transport**: a per-manager wait-set reactor
-  (`waitset_*`) serving `SERVICE_CONTROL_ENDPOINT` alongside child-reaping and
-  the one-shot linger/grace/restart timers; the `servicectl` control tool (the
-  live holder) and the `CAP_SERVICE_CONTROL` send capability the manager binds
-  the endpoint with (added *with* that enforcement point + holder, §5.2); a QEMU
-  vertical proving live start/stop. Then `enable`/`disable` over the enrolment
+  (`waitset_*`) serving `SERVICE_CONTROL_ENDPOINT` alongside child-reaping,
+  the heartbeat-renewal path, and the one-shot linger/grace/restart/watchdog
+  timers (arming from `watchdog_deadline` and calling `expire_watchdog`); the
+  `servicectl` control tool (the live holder) and the `CAP_SERVICE_CONTROL`
+  send capability the manager binds the endpoint with (added *with* that
+  enforcement point + holder, §5.2); a QEMU vertical proving live start/stop
+  and a live watchdog kill+restart. Then `enable`/`disable` over the enrolment
   store-write seam, `status` via §16.6, and the live rlimit enforcement at spawn.
   This rides with the loader/kernel transport seam (SVC-5), the same staging the
   readiness/activation/restart engine cores already follow. README matrix and

@@ -227,6 +227,7 @@ fn exercise_service_manifest(bytes: &[u8]) {
             provides: &provides,
             dependencies: &dependencies,
             limits: &limits,
+            watchdog: manifest.watchdog(),
         };
         let mut buf = vec![0u8; unit.encoded_len().expect("an accepted record has a length")];
         let len = unit

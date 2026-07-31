@@ -603,7 +603,7 @@ pub const SERVICE_MANIFEST_MAX_LIMITS: usize = LimitKind::COUNT;
 
 /// Fixed prefix byte length of a [`ServiceManifest`] record (everything
 /// before the variable `requires`/`provides`/dependency/limits body).
-const SERVICE_MANIFEST_PREFIX_LEN: usize = 50;
+const SERVICE_MANIFEST_PREFIX_LEN: usize = 62;
 
 /// Wire length of one encoded per-service resource limit: a `u32`
 /// [`LimitKind`] discriminant followed by a [`ResourceLimit`] soft/hard pair.
@@ -632,6 +632,7 @@ const SM_OFF_DEPENDENCY_COUNT: usize = 22;
 const SM_OFF_LINGER: usize = 24;
 const SM_OFF_STOP_GRACE: usize = 36;
 const SM_OFF_LIMITS_COUNT: usize = 48;
+const SM_OFF_WATCHDOG: usize = 50;
 
 /// The unit metadata one service declares in its signed bundle manifest — the
 /// analogue of a systemd `.service` unit file, but a compact, fail-closed
@@ -658,7 +659,7 @@ const SM_OFF_LIMITS_COUNT: usize = 48;
 /// accessor below is infallible and the record fails closed on the first
 /// malformed byte.
 ///
-/// The wire layout (little-endian) is a fixed 50-byte prefix followed by the
+/// The wire layout (little-endian) is a fixed 62-byte prefix followed by the
 /// variable body:
 ///
 /// ```text
@@ -676,6 +677,7 @@ const SM_OFF_LIMITS_COUNT: usize = 48;
 /// 24  linger     Duration64  (12 bytes; must be zero unless on-demand)
 /// 36  stop_grace Duration64  (12 bytes)
 /// 48  limits_count u16
+/// 50  watchdog   Duration64  (12 bytes; zero = no liveness watchdog)
 /// --- body ---
 ///     requires:      requires_count × u16 (ReadyCondition discriminants)
 ///     provides:      provides_count × u16
@@ -713,6 +715,15 @@ pub struct ServiceUnit<'a> {
     /// the service inherits the discovered, growable default policy uncapped;
     /// a present entry caps that resource for the service and its children.
     pub limits: &'a [ServiceLimit],
+    /// Liveness-watchdog interval — the analogue of systemd's `WatchdogSec`.
+    /// While the service is running it must renew a heartbeat to its manager
+    /// at least this often; if it does not, the manager concludes the process
+    /// has *wedged* (as opposed to cleanly exiting or being stopped), forces
+    /// it down, and applies the service's [`RestartPolicy`] exactly as for any
+    /// other unexpected exit. [`Duration64::ZERO`] (the default) disables the
+    /// watchdog: a service that does not opt in is never judged on liveness.
+    /// Must be non-negative; a negative interval fails the record closed.
+    pub watchdog: Duration64,
 }
 
 /// One per-service resource limit: which resource it governs and its
@@ -788,6 +799,12 @@ impl ServiceUnit<'_> {
             }
             previous = Some(discriminant);
         }
+        // A liveness watchdog counts forward from a heartbeat; a negative
+        // interval is meaningless and fails the record closed rather than
+        // being silently clamped. Zero is the legitimate "no watchdog".
+        if self.watchdog < Duration64::ZERO {
+            return Err(Errno::OutOfRange);
+        }
         Ok(())
     }
 
@@ -839,6 +856,8 @@ impl ServiceUnit<'_> {
             .copy_from_slice(&linger.to_le_bytes());
         out[SM_OFF_STOP_GRACE..SM_OFF_STOP_GRACE + Duration64::WIRE_LEN]
             .copy_from_slice(&self.stop_grace.to_le_bytes());
+        out[SM_OFF_WATCHDOG..SM_OFF_WATCHDOG + Duration64::WIRE_LEN]
+            .copy_from_slice(&self.watchdog.to_le_bytes());
 
         let mut off = SERVICE_MANIFEST_PREFIX_LEN;
         for condition in self.requires {
@@ -882,6 +901,7 @@ pub struct ServiceManifest<'a> {
     activation: ActivationMode,
     connect_capability: Option<CapabilityId>,
     stop_grace: Duration64,
+    watchdog: Duration64,
     requires_start: usize,
     requires_count: usize,
     provides_start: usize,
@@ -909,7 +929,8 @@ impl<'a> ServiceManifest<'a> {
     /// * [`Errno::AbiVersionUnsupported`] — not `service-v1`.
     /// * [`Errno::OutOfRange`] — an enum discriminant is outside its closed
     ///   set, a count exceeds its bound, a dependency name is empty or too
-    ///   long, or trailing bytes remain after the record.
+    ///   long, the watchdog interval is negative, or trailing bytes remain
+    ///   after the record.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < SERVICE_MANIFEST_PREFIX_LEN {
             return Err(Errno::BufferTooSmall);
@@ -943,6 +964,10 @@ impl<'a> ServiceManifest<'a> {
 
         let linger = Duration64::from_bytes(&bytes[SM_OFF_LINGER..])?;
         let stop_grace = Duration64::from_bytes(&bytes[SM_OFF_STOP_GRACE..])?;
+        let watchdog = Duration64::from_bytes(&bytes[SM_OFF_WATCHDOG..])?;
+        if watchdog < Duration64::ZERO {
+            return Err(Errno::OutOfRange);
+        }
         let activation = if flags & SERVICE_MANIFEST_FLAG_ON_DEMAND != 0 {
             ActivationMode::on_demand(linger)
         } else {
@@ -985,6 +1010,7 @@ impl<'a> ServiceManifest<'a> {
             activation,
             connect_capability,
             stop_grace,
+            watchdog,
             requires_start,
             requires_count,
             provides_start,
@@ -1031,6 +1057,14 @@ impl<'a> ServiceManifest<'a> {
     #[must_use]
     pub const fn stop_grace(&self) -> Duration64 {
         self.stop_grace
+    }
+
+    /// The liveness-watchdog interval (the analogue of systemd's
+    /// `WatchdogSec`), or [`Duration64::ZERO`] if the service opts out of the
+    /// liveness watchdog. See [`ServiceUnit::watchdog`].
+    #[must_use]
+    pub const fn watchdog(&self) -> Duration64 {
+        self.watchdog
     }
 
     /// The named readiness conditions that gate this service's start.
@@ -1421,6 +1455,7 @@ mod tests {
             provides: &[ReadyCondition::BootComplete],
             dependencies: &["netstack", "sysinfod"],
             limits: &[],
+            watchdog: Duration64::from_secs(45),
         };
         let mut buf = [0u8; 256];
         let bytes = encode(&unit, &mut buf);
@@ -1444,6 +1479,40 @@ mod tests {
         ]));
         assert!(manifest.provides().eq([ReadyCondition::BootComplete]));
         assert!(manifest.dependencies().eq(["netstack", "sysinfod"]));
+        assert_eq!(manifest.watchdog(), Duration64::from_secs(45));
+    }
+
+    #[test]
+    fn service_manifest_defaults_the_watchdog_to_disabled() {
+        // A record that opts out of the watchdog decodes to a zero interval,
+        // and the minimal record re-encodes to exactly the fixed prefix.
+        let none = unit_with_limits(&[]);
+        let mut buf = [0u8; 64];
+        let bytes = encode(&none, &mut buf);
+        assert_eq!(bytes.len(), super::SERVICE_MANIFEST_PREFIX_LEN);
+        let manifest = ServiceManifest::from_bytes(bytes).expect("decode");
+        assert_eq!(manifest.watchdog(), Duration64::ZERO);
+    }
+
+    #[test]
+    fn service_manifest_rejects_a_negative_watchdog() {
+        // A negative liveness interval is meaningless; encode refuses it and
+        // a hand-forged negative field fails the decode closed.
+        let mut unit = unit_with_limits(&[]);
+        unit.watchdog = Duration64::from_secs(-1);
+        let mut buf = [0u8; 64];
+        assert_eq!(unit.encode(&mut buf), Err(Errno::OutOfRange));
+
+        // Encode a valid record, then stamp a negative watchdog second count
+        // into its wire bytes and confirm the decoder rejects it.
+        let ok = unit_with_limits(&[]);
+        let len = ok.encode(&mut buf).expect("encode");
+        buf[super::SM_OFF_WATCHDOG..super::SM_OFF_WATCHDOG + 8]
+            .copy_from_slice(&(-5i64).to_le_bytes());
+        assert_eq!(
+            ServiceManifest::from_bytes(&buf[..len]),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -1459,6 +1528,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 64];
         let bytes = encode(&unit, &mut buf);
@@ -1490,6 +1560,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut small = [0u8; 8];
         assert_eq!(unit.encode(&mut small), Err(Errno::BufferTooSmall));
@@ -1508,6 +1579,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 512];
 
@@ -1549,6 +1621,7 @@ mod tests {
             provides: &[],
             dependencies: &["dep"],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 256];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1620,6 +1693,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 64];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1645,6 +1719,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 64];
         let len = unit.encode(&mut buf).expect("encode");
@@ -1668,6 +1743,7 @@ mod tests {
             provides: &[],
             dependencies: &[],
             limits,
+            watchdog: Duration64::ZERO,
         }
     }
 

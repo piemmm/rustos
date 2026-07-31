@@ -111,6 +111,19 @@ pub const SERVICE_CONTROL_STOPPED: EventId = EventId(9_022);
 /// security-relevant refusal, audited and failing closed — the request
 /// changes nothing.
 pub const SERVICE_CONTROL_DENIED: EventId = EventId(9_023);
+/// A running service's **liveness watchdog was armed**: a service that opted
+/// into the watchdog (a non-zero
+/// [`ServiceSpec::watchdog`](crate::ServiceSpec::watchdog) interval) reached a
+/// running state, so the manager armed a single one-shot deadline by which it
+/// must renew its heartbeat.
+pub const SERVICE_WATCHDOG_ARMED: EventId = EventId(9_024);
+/// A service's **liveness watchdog elapsed**: it did not renew its heartbeat
+/// within its watchdog interval, so the manager concluded its process had
+/// wedged and force-terminated it. Classified as an abnormal failure, so the
+/// service's [`RestartPolicy`](tairix_abi::RestartPolicy) then applies (an
+/// `on-failure`/`always` service is relaunched with the crash-loop budget; a
+/// `never` service is left down). A security- and reliability-relevant event.
+pub const SERVICE_WATCHDOG_TIMEOUT: EventId = EventId(9_025);
 
 #[cfg(test)]
 mod tests {
@@ -121,9 +134,10 @@ mod tests {
         SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED, SERVICE_READY,
         SERVICE_RESTART_EXHAUSTED, SERVICE_RESTART_SCHEDULED, SERVICE_SCOPE_REJECTED,
         SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
+        SERVICE_WATCHDOG_ARMED, SERVICE_WATCHDOG_TIMEOUT,
     };
 
-    const ALL: [u32; 22] = [
+    const ALL: [u32; 24] = [
         SERVICE_STARTED.0,
         SERVICE_START_FAILED.0,
         SERVICE_SKIPPED.0,
@@ -146,6 +160,8 @@ mod tests {
         SERVICE_CONTROL_STARTED.0,
         SERVICE_CONTROL_STOPPED.0,
         SERVICE_CONTROL_DENIED.0,
+        SERVICE_WATCHDOG_ARMED.0,
+        SERVICE_WATCHDOG_TIMEOUT.0,
     ];
 
     #[test]

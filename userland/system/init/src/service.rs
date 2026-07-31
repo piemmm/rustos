@@ -125,6 +125,7 @@ pub struct ServiceSpec {
     stop_grace: Duration64,
     connect_capability: Option<CapabilityId>,
     limits: Vec<ServiceLimit>,
+    watchdog: Duration64,
 }
 
 impl ServiceSpec {
@@ -164,6 +165,7 @@ impl ServiceSpec {
             stop_grace: DEFAULT_STOP_GRACE,
             connect_capability: None,
             limits: Vec::new(),
+            watchdog: Duration64::ZERO,
         }
     }
 
@@ -215,6 +217,7 @@ impl ServiceSpec {
             .with_activation(manifest.activation())
             .with_restart(manifest.restart())
             .with_stop_grace(manifest.stop_grace())
+            .with_watchdog(manifest.watchdog())
             .requiring(requires)
             .providing(provides)
             .with_limits(manifest.limits().collect::<Vec<ServiceLimit>>());
@@ -279,6 +282,21 @@ impl ServiceSpec {
         self
     }
 
+    /// Set the liveness-watchdog interval (the analogue of systemd's
+    /// `WatchdogSec`), consuming and returning `self`.
+    ///
+    /// A running service that opts in must renew a heartbeat to the manager
+    /// at least this often ([`Init::heartbeat`](crate::Init::heartbeat)); if
+    /// it does not, the manager concludes its process has wedged, forces it
+    /// down, and applies its [`RestartPolicy`] exactly as for any other
+    /// unexpected exit. [`Duration64::ZERO`] (the default) disables the
+    /// watchdog.
+    #[must_use]
+    pub fn with_watchdog(mut self, watchdog: Duration64) -> Self {
+        self.watchdog = watchdog;
+        self
+    }
+
     /// Set how this service reaches readiness (spawn-implies-ready versus
     /// notify), consuming and returning `self` for chaining.
     #[must_use]
@@ -320,6 +338,13 @@ impl ServiceSpec {
     #[must_use]
     pub fn account(&self) -> u32 {
         self.account
+    }
+
+    /// The liveness-watchdog interval, or [`Duration64::ZERO`] if this service
+    /// opts out of the liveness watchdog. See [`with_watchdog`](Self::with_watchdog).
+    #[must_use]
+    pub fn watchdog(&self) -> Duration64 {
+        self.watchdog
     }
 
     /// Names of services that must start before this one.
@@ -641,6 +666,7 @@ mod tests {
             provides: &[ReadyCondition::SeatAvailable],
             dependencies: &["netstack", "sysinfod"],
             limits: &limits,
+            watchdog: Duration64::from_secs(15),
         };
         let mut buf = [0u8; 256];
         let len = unit.encode(&mut buf).expect("encode");
@@ -666,6 +692,7 @@ mod tests {
         assert_eq!(spec.requires(), &[ReadyCondition::NetworkUp]);
         assert_eq!(spec.provides(), &[ReadyCondition::SeatAvailable]);
         assert_eq!(spec.limits(), &limits);
+        assert_eq!(spec.watchdog(), Duration64::from_secs(15));
     }
 
     #[test]
@@ -690,6 +717,7 @@ mod tests {
             provides: &[] as &[ReadyCondition],
             dependencies: &["../escape"],
             limits: &[],
+            watchdog: Duration64::ZERO,
         };
         let mut buf = [0u8; 128];
         let len = bad_dep.encode(&mut buf).expect("encode");

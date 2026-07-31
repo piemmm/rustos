@@ -75,6 +75,18 @@ const RESTART_BACKOFF_CAP: Duration64 = Duration64::from_secs(30);
 /// budget instead of being penalised for restarts in the distant past.
 const RESTART_STABLE_WINDOW: Duration64 = Duration64::from_secs(30);
 
+/// The synthetic exit code the reaper attributes to a process the liveness
+/// watchdog force-killed for wedging ([`Init::expire_watchdog`]).
+///
+/// A wedged process is force-terminated, so the exit code a real signal
+/// kill reports is not something the manager can rely on (a port might even
+/// surface it as zero). This deterministic non-zero code makes the exit
+/// unambiguously *abnormal*, so the restart policy's `should_restart` treats
+/// a watchdog kill as a failure under `on-failure` exactly as under `always`.
+/// It is fed only to the restart-policy decision; the *real* child exit
+/// code is what the audit record reports.
+const WATCHDOG_KILL_EXIT_CODE: i32 = -1;
+
 /// The restart backoff for the `attempt`-th relaunch: `base * 2^attempt`,
 /// saturating and clamped to [`RESTART_BACKOFF_CAP`].
 ///
@@ -251,6 +263,22 @@ struct Service {
     /// crash after a long, healthy uptime does not count against the
     /// crash-loop budget.
     relaunched_at: Option<Duration64>,
+    /// When set, the absolute monotonic instant at (or after) which the
+    /// service is judged to have *wedged* because it has not renewed its
+    /// liveness heartbeat ([`Init::heartbeat`](Init::heartbeat)) since. Armed
+    /// by [`arm_watchdogs`](Init::arm_watchdogs) once a service with a
+    /// non-zero [`ServiceSpec::watchdog`](crate::ServiceSpec::watchdog)
+    /// interval is running, pushed forward on every heartbeat, and consumed
+    /// by [`expire_watchdog`](Init::expire_watchdog) — a single one-shot
+    /// deadline, never a poll. `None` means the service opts out of the
+    /// liveness watchdog or is not currently running.
+    watchdog_deadline: Option<Duration64>,
+    /// Set when [`expire_watchdog`](Init::expire_watchdog) has force-killed a
+    /// wedged process, so [`reap`](Init::reap) classifies the resulting exit
+    /// as an unexpected *failure* (driving the restart policy) rather than a
+    /// clean stop, regardless of the exit code the killed process reports.
+    /// Cleared once that exit is reaped or the service is next started.
+    killed_by_watchdog: bool,
 }
 
 /// PID 1 service manager.
@@ -379,6 +407,8 @@ impl<'a> Init<'a> {
             restart_deadline: None,
             restart_attempts: 0,
             relaunched_at: None,
+            watchdog_deadline: None,
+            killed_by_watchdog: false,
         });
         Ok(())
     }
@@ -790,6 +820,150 @@ impl<'a> Init<'a> {
         self.pump()
     }
 
+    /// Arm the liveness watchdog for every running service that has opted in
+    /// but is not yet being watched.
+    ///
+    /// A service with a non-zero
+    /// [`ServiceSpec::watchdog`](crate::ServiceSpec::watchdog) interval is
+    /// placed under the watchdog once it is running (`Ready`/`Running`) with
+    /// a live process: its [`watchdog_deadline`](Self::watchdog_deadline) is
+    /// armed to `now + interval`. Arming is idempotent — a service already
+    /// being watched (its deadline is `Some`, possibly pushed forward by a
+    /// [`heartbeat`](Self::heartbeat)) is left untouched — so the caller may
+    /// invoke this after every admission/reap pass without disturbing a live
+    /// countdown. Each newly-armed service is audited once
+    /// ([`events::SERVICE_WATCHDOG_ARMED`]).
+    ///
+    /// The caller programs its one-shot timer from the soonest armed
+    /// [`watchdog_deadline`](Self::watchdog_deadline) and calls
+    /// [`expire_watchdog`](Self::expire_watchdog) when it fires — a single
+    /// one-shot wakeup, never a poll.
+    pub fn arm_watchdogs(&mut self, now: Duration64) {
+        for idx in 0..self.services.len() {
+            let interval = self.services[idx].spec.watchdog();
+            if interval == Duration64::ZERO {
+                continue;
+            }
+            let watched = self.services[idx].pid.is_some()
+                && matches!(
+                    self.services[idx].state,
+                    ServiceState::Ready | ServiceState::Running
+                );
+            if !watched || self.services[idx].watchdog_deadline.is_some() {
+                continue;
+            }
+            self.services[idx].watchdog_deadline = Some(add_duration(now, interval));
+            let name = self.services[idx].spec.name().to_string();
+            self.audit(
+                events::SERVICE_WATCHDOG_ARMED,
+                Level::Info,
+                &name,
+                "watchdog armed",
+            );
+        }
+    }
+
+    /// Renew a running service's liveness heartbeat.
+    ///
+    /// The supervised service (a driver or daemon) calls this through the
+    /// manager's control transport to say "I am still making progress". Its
+    /// [`watchdog_deadline`](Self::watchdog_deadline) is pushed forward to
+    /// `now + interval`, so the watchdog fires only if the service later
+    /// goes silent for a whole interval. A heartbeat is a high-frequency,
+    /// steady-state signal and is deliberately **not** audited — one record
+    /// per heartbeat would flood the log with no diagnostic value.
+    ///
+    /// Returns `true` if the heartbeat was accepted (the service is
+    /// registered, opts into the watchdog, and is running with a live
+    /// process). A heartbeat from an unknown, watchdog-less, or not-running
+    /// service is a harmless no-op returning `false` (fail safe) — never an
+    /// error that could be used to probe which services exist.
+    pub fn heartbeat(&mut self, name: &str, now: Duration64) -> bool {
+        let Some(idx) = self.index_of(name) else {
+            return false;
+        };
+        let interval = self.services[idx].spec.watchdog();
+        if interval == Duration64::ZERO {
+            return false;
+        }
+        let watched = self.services[idx].pid.is_some()
+            && matches!(
+                self.services[idx].state,
+                ServiceState::Ready | ServiceState::Running
+            );
+        if !watched {
+            return false;
+        }
+        self.services[idx].watchdog_deadline = Some(add_duration(now, interval));
+        true
+    }
+
+    /// The armed liveness-watchdog deadline of a service, or `None` if it is
+    /// not currently being watched. The caller programs its one-shot timer
+    /// from this and calls [`expire_watchdog`](Self::expire_watchdog) when it
+    /// fires — a single one-shot wakeup, never a poll.
+    #[must_use]
+    pub fn watchdog_deadline(&self, name: &str) -> Option<Duration64> {
+        self.index_of(name)
+            .and_then(|idx| self.services[idx].watchdog_deadline)
+    }
+
+    /// Handle a service that has missed its liveness-watchdog deadline: its
+    /// process has wedged.
+    ///
+    /// The caller invokes this when the one-shot timer it armed from
+    /// [`watchdog_deadline`](Self::watchdog_deadline) fires. The manager
+    /// force-terminates the wedged process **only** if it is still running
+    /// (`Ready`/`Running`) with a live process and its watchdog deadline has
+    /// genuinely passed at `now`; a heartbeat since the timer was armed, or a
+    /// stop or exit already in flight, leaves it untouched (fail safe). A
+    /// healthy service keeps renewing its deadline, so it is never reached
+    /// here.
+    ///
+    /// The kill is classified as an unexpected *failure*, not a clean stop:
+    /// the watchdog deadline is cleared and `killed_by_watchdog` is set so
+    /// [`reap`](Self::reap) drives the [`RestartPolicy`](tairix_abi::RestartPolicy)
+    /// exactly as for any other abnormal exit (a wedged `on-failure` or
+    /// `always` service is relaunched with the bounded crash-loop budget and
+    /// backoff; a `never` service is killed and left down, loudly). The
+    /// manager does not itself set a terminal state — it forces the process
+    /// down and lets [`reap`](Self::reap) observe the exit, mirroring the
+    /// graceful force-terminate path ([`expire_grace`](Self::expire_grace)).
+    ///
+    /// Returns `true` if the process was force-terminated for wedging.
+    pub fn expire_watchdog(&mut self, name: &str, now: Duration64) -> bool {
+        let Some(idx) = self.index_of(name) else {
+            return false;
+        };
+        let Some(deadline) = self.services[idx].watchdog_deadline else {
+            return false;
+        };
+        let alive = matches!(
+            self.services[idx].state,
+            ServiceState::Ready | ServiceState::Running
+        );
+        if now < deadline || !alive {
+            return false;
+        }
+        let Some(pid) = self.services[idx].pid else {
+            return false;
+        };
+        // Best-effort force-down; if it cannot be delivered the process is
+        // already exiting and the reaper will observe it. The exit is
+        // classified as a watchdog failure whichever way it goes.
+        let _ = self.cfg.stopper.force_terminate(pid);
+        self.services[idx].watchdog_deadline = None;
+        self.services[idx].killed_by_watchdog = true;
+        let name = self.services[idx].spec.name().to_string();
+        self.audit(
+            events::SERVICE_WATCHDOG_TIMEOUT,
+            Level::Warn,
+            &name,
+            "liveness watchdog elapsed",
+        );
+        true
+    }
+
     /// Drain the clients whose parked connections have been satisfied since
     /// the last call.
     ///
@@ -932,6 +1106,11 @@ impl<'a> Init<'a> {
     fn begin_stop(&mut self, idx: usize, now: Duration64, reason: &str) {
         self.services[idx].linger_deadline = None;
         self.services[idx].restart_deadline = None;
+        // A stop the manager asked for must never be second-guessed by the
+        // liveness watchdog: disarm it so a service that is deliberately
+        // being torn down is not force-killed and relaunched as if wedged.
+        self.services[idx].watchdog_deadline = None;
+        self.services[idx].killed_by_watchdog = false;
         if let Some(pid) = self.services[idx].pid {
             // Best-effort graceful request; if it cannot be delivered the
             // process is already exiting and the reaper will observe it.
@@ -1268,24 +1447,39 @@ impl<'a> Init<'a> {
             if let Some(pos) = self.services.iter().position(|s| s.pid == Some(child.pid)) {
                 let name = self.services[pos].spec.name().to_string();
                 let was_stopping = self.services[pos].state == ServiceState::Stopping;
+                let watchdog_kill = self.services[pos].killed_by_watchdog;
                 self.services[pos].pid = None;
-                self.services[pos].state = if was_stopping || child.exit_code == 0 {
-                    ServiceState::Stopped
-                } else {
-                    ServiceState::Failed
-                };
+                // A watchdog kill is an unexpected *failure*, never a clean
+                // stop: the process was wedged, so it fails regardless of the
+                // exit code the forced termination happens to report.
+                self.services[pos].state =
+                    if !watchdog_kill && (was_stopping || child.exit_code == 0) {
+                        ServiceState::Stopped
+                    } else {
+                        ServiceState::Failed
+                    };
                 self.services[pos].sink.clear();
                 self.services[pos].waiters.clear();
                 self.services[pos].linger_deadline = None;
                 self.services[pos].grace_deadline = None;
                 self.services[pos].restart_deadline = None;
+                self.services[pos].watchdog_deadline = None;
+                self.services[pos].killed_by_watchdog = false;
                 self.audit_exit(&name, child);
                 // A manager-initiated stop is final: the manager asked it to
                 // go, so it is never fought with a restart. Only an
                 // *unexpected* exit of a still-wanted service is a restart
-                // candidate.
+                // candidate. A watchdog kill is such an exit, and is fed to
+                // the restart policy as an abnormal exit so `OnFailure` and
+                // `Always` both relaunch a wedged process (`Never` still
+                // leaves it down, loudly).
                 if !was_stopping {
-                    self.schedule_restart(pos, child.exit_code, now);
+                    let exit_code = if watchdog_kill {
+                        WATCHDOG_KILL_EXIT_CODE
+                    } else {
+                        child.exit_code
+                    };
+                    self.schedule_restart(pos, exit_code, now);
                 }
             } else {
                 self.audit_orphan(child);
@@ -1711,6 +1905,8 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_RESTART_SCHEDULED => "service restart scheduled",
         events::SERVICE_RESTART_EXHAUSTED => "service restart budget spent",
         events::SERVICE_SCOPE_REJECTED => "service account outside manager scope",
+        events::SERVICE_WATCHDOG_ARMED => "liveness watchdog armed",
+        events::SERVICE_WATCHDOG_TIMEOUT => "liveness watchdog elapsed: process wedged",
         _ => "init event",
     }
 }
@@ -2970,6 +3166,163 @@ mod tests {
                 Duration64::new(0, 100_000_000).unwrap()
             ))
         );
+    }
+
+    // --- SVC-8: liveness watchdog + restart (plans/WATCHDOG.md) ---------
+
+    /// A permanent, immediate service that opts into the liveness watchdog
+    /// with a 5 s interval and the given restart policy.
+    fn watchdog_spec(name: &str, policy: RestartPolicy) -> ServiceSpec {
+        spec(name, &[])
+            .with_restart(policy)
+            .with_watchdog(Duration64::from_secs(5))
+    }
+
+    #[test]
+    fn a_running_service_arms_and_renews_its_liveness_watchdog() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        // A service that opts out of the watchdog is never armed.
+        init.register(spec("plain", &[])).unwrap();
+        init.start_all().unwrap();
+
+        // Nothing is armed until the transport arms the watchdogs.
+        assert_eq!(init.watchdog_deadline("svc"), None);
+        init.arm_watchdogs(Duration64::from_secs(100));
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(105))
+        );
+        assert_eq!(init.watchdog_deadline("plain"), None);
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_ARMED), 1);
+
+        // Arming is idempotent: a service already watched keeps its live
+        // countdown and is not re-armed or re-logged.
+        init.arm_watchdogs(Duration64::from_secs(200));
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(105))
+        );
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_ARMED), 1);
+
+        // A heartbeat pushes the deadline forward; it is not audited.
+        assert!(init.heartbeat("svc", Duration64::from_secs(103)));
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(108))
+        );
+        // A watchdog-less or unknown service rejects a heartbeat (fail safe),
+        // never arming a countdown or leaking existence.
+        assert!(!init.heartbeat("plain", Duration64::from_secs(103)));
+        assert!(!init.heartbeat("ghost", Duration64::from_secs(103)));
+        assert_eq!(init.watchdog_deadline("plain"), None);
+    }
+
+    #[test]
+    fn a_wedged_service_is_force_killed_and_restarted() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+        init.arm_watchdogs(Duration64::from_secs(10));
+        let deadline = init.watchdog_deadline("svc").unwrap();
+        assert_eq!(deadline, Duration64::from_secs(15));
+
+        // Before the deadline the watchdog is a no-op (event-timed, never a
+        // busy-poll): the process is left alone.
+        assert!(!init.expire_watchdog("svc", Duration64::from_secs(14)));
+        assert!(stopper.forced.borrow().is_empty());
+
+        // A heartbeat before the deadline pushes it forward, so the stale
+        // one-shot no longer fires — a healthy, progressing service is never
+        // killed.
+        assert!(init.heartbeat("svc", Duration64::from_secs(14)));
+        assert!(!init.expire_watchdog("svc", deadline));
+        assert!(stopper.forced.borrow().is_empty());
+        let renewed = init.watchdog_deadline("svc").unwrap();
+        assert_eq!(renewed, Duration64::from_secs(19));
+
+        // The renewed deadline elapses with no further heartbeat: the process
+        // has wedged, so it is force-terminated and audited, but not yet
+        // reaped — the state stays running until the reaper observes the exit.
+        assert!(init.expire_watchdog("svc", renewed));
+        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_TIMEOUT), 1);
+        assert_eq!(init.watchdog_deadline("svc"), None);
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+
+        // Reaping the forced exit classifies it as an abnormal failure even
+        // though the killed process reports a zero exit code, and the
+        // `on-failure` policy schedules a relaunch.
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(20));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        assert_eq!(
+            init.restart_deadline("svc"),
+            Some(Duration64::new(20, 100_000_000).unwrap())
+        );
+        assert_eq!(sink.count(events::SERVICE_RESTART_SCHEDULED), 1);
+    }
+
+    #[test]
+    fn a_wedged_never_policy_service_is_killed_but_left_down() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Never))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+        init.arm_watchdogs(Duration64::from_secs(0));
+
+        assert!(init.expire_watchdog("svc", Duration64::from_secs(5)));
+        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(6));
+        // A wedge is a failure, so it is not "stopped"; but `never` leaves it
+        // down rather than relaunching it (loud, not silent).
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        assert_eq!(init.restart_deadline("svc"), None);
+        assert_eq!(sink.count(events::SERVICE_RESTART_SCHEDULED), 0);
+    }
+
+    #[test]
+    fn a_deliberate_stop_disarms_the_liveness_watchdog() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+        init.arm_watchdogs(Duration64::from_secs(1));
+        assert!(init.watchdog_deadline("svc").is_some());
+
+        // A stop the manager asked for disarms the watchdog: the graceful
+        // teardown must never be second-guessed and relaunched as a wedge.
+        init.stop("svc", Duration64::from_secs(2)).unwrap();
+        assert_eq!(init.watchdog_deadline("svc"), None);
+        assert!(!init.expire_watchdog("svc", Duration64::from_secs(100)));
+
+        // The graceful exit is a clean stop, never a watchdog failure.
+        let pid = init.running_pid("svc").unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(3));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Stopped));
+        assert_eq!(init.restart_deadline("svc"), None);
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_TIMEOUT), 0);
     }
 
     #[test]

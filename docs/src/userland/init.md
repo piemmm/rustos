@@ -268,6 +268,40 @@ gates it — lands with the loader/kernel transport seam (SVC-5/SVC-8), the
 same staging the readiness (`notify`), activation (`connect`), and restart
 paths follow.
 
+## Liveness watchdog
+
+A crashed service is one that *exited*; a **wedged** one is still present but
+no longer making progress (a deadlocked driver, a serve loop stuck on a
+hardware access that never returns). The manager recovers a wedge into the
+same restart path a crash uses, so `plans/FIX-IO.md`'s goal — "the driver,
+not the disk, is the problem" must never lock up the system — is met without
+a second restart engine (`AGENTS.md` §2.2). This is the analogue of systemd's
+`WatchdogSec`.
+
+A service opts in through a non-zero `watchdog` interval in its signed unit
+metadata (`tairix_abi::ServiceUnit::watchdog`; `Duration64::ZERO`, the
+default, opts out; a negative interval fails the manifest closed). Once such a
+service is running, `Init::arm_watchdogs(now)` arms a single one-shot deadline
+`now + interval`; the service must renew it at least that often by calling
+`Init::heartbeat(name, now)` ("I am still making progress"). A heartbeat is a
+high-frequency steady-state signal and is deliberately **not** audited. If the
+deadline elapses with no heartbeat, `Init::expire_watchdog` force-terminates
+the wedged process and marks it as a watchdog kill, so `Init::reap` classifies
+the resulting exit as an **abnormal failure** — regardless of the exit code
+the forced termination reports — and feeds it to the *existing* restart
+policy, backoff, and crash-loop budget. A wedged `on-failure`/`always` service
+is relaunched (bounded by the same crash-loop guard, so a process that wedges
+the instant it starts is eventually left down, never relaunched forever); a
+`never` service is killed and left down, loudly. A deliberate `stop` disarms
+the watchdog first, so a graceful teardown is never mistaken for a wedge.
+
+This is the **engine core**. The live heartbeat transport — a supervised
+driver/daemon renewing its heartbeat to its manager, and the reactor arming
+the real one-shot off `Init::watchdog_deadline` and calling
+`Init::expire_watchdog` when it fires — lands with the same SVC-5/SVC-8
+control transport as the control surface above; the engine is proven
+host-side first, exactly as the readiness, activation, and restart paths were.
+
 ## Reaping
 
 A PID 1 must reap the zombies of the whole system — both the services it
@@ -316,9 +350,11 @@ plumbing and exhaustively testable.
 | 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
 
 (On-demand-activation and stop/linger events `9012`–`9017`, the restart and
-scope events `9018`–`9020`, and the control-surface events `9021`
+scope events `9018`–`9020`, the control-surface events `9021`
 (`SERVICE_CONTROL_STARTED`), `9022` (`SERVICE_CONTROL_STOPPED`), and `9023`
-(`SERVICE_CONTROL_DENIED`) are defined in
+(`SERVICE_CONTROL_DENIED`), and the liveness-watchdog events `9024`
+(`SERVICE_WATCHDOG_ARMED`, Info) and `9025` (`SERVICE_WATCHDOG_TIMEOUT`, Warn —
+a wedged process was force-killed and fed to its restart policy) are defined in
 `src/events.rs`. `9003` is retired: init no longer decides capability
 grants — the kernel is the single authority and records its own denial — so
 there is no init-side capability-denial event; the number is left a gap,

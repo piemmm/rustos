@@ -4,6 +4,18 @@ Binding plan for TAIRiX's first-class CPU-lockup watchdog: detect, diagnose,
 and best-effort recover from **soft** and **hard** CPU lockups, loudly enough
 to explain *why*, without perturbing normal execution.
 
+This plan is the **CPU/core** watchdog — a hardware liveness monitor for the
+execution units themselves. It is distinct from, and complementary to, the
+service-manager's **process liveness watchdog** (the `WatchdogSec` analogue in
+`plans/NEW-SERVICEMANAGER.md` SVC-8): that one watches a *user-space service or
+driver process* for a missed heartbeat and recovers it through the restart
+policy (the "the driver, not the disk, is the problem" tie-in of
+`plans/FIX-IO.md` IO5), whereas this one watches a *CPU* for a stalled
+scheduler or a stopped interrupt sample. A wedged user-space driver that still
+takes interrupts is not a CPU lockup and is the service watchdog's to catch; a
+core that has stopped executing is this watchdog's. Where a wedged *kernel*
+task also hard-locks a CPU, this watchdog is the last line.
+
 ## Model (done)
 
 Two per-CPU heartbeats plus an activity class, all in
