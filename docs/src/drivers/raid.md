@@ -184,6 +184,79 @@ narrowing to a slot index fails closed rather than panicking (`AGENTS.md`
 the block space and durability requires all of them; a member that cannot
 flush fails the whole flush closed (`AGENTS.md` §5.4).
 
+## RAID5 distributed parity (`ParityArray`)
+
+The third composition is a RAID5 distributed-parity array: it combines the
+stripe's capacity aggregation with single-fault redundancy. The logical block
+space is striped in fixed-size chunks across the members, and each stripe
+reserves one member's chunk for the parity (bytewise XOR) of the other `n - 1`
+data chunks. The parity slot **rotates** one member per stripe (left-symmetric
+placement), so no single member is a parity write bottleneck — the RAID4→RAID5
+distinction. The array's usable capacity is that of `member_count - 1` members,
+and a RAID5 array needs at least three members. Like its siblings it borrows a
+caller-owned member slice (no fixed member ceiling, `AGENTS.md` §24.1); because
+parity computation and reconstruction need a working buffer the `Block`
+read/write methods do not carry, it also borrows a caller-owned **scratch**
+buffer of at least two logical blocks.
+
+### Layout
+
+For a stripe `s` of `n` members the parity member is `p = (n - 1) - (s mod n)`,
+and the `n - 1` data chunks are placed on the non-parity members in ascending
+order starting just after `p`: data position `k` sits on member
+`(p + 1 + k) mod n`. Every member's chunk of a given stripe lives at the same
+member-local LBA, so the XOR of all members' blocks at any member-local LBA is
+zero — the invariant that makes reconstruction uniform for a data chunk and a
+parity chunk alike.
+
+### Read — direct, reconstruct, and repair
+
+A healthy read goes straight to the data member holding the block. A read of a
+block on a lost member is **reconstructed** by XOR-ing the same offset from
+every surviving member (data and parity). A *per-block* media error on an
+otherwise-healthy member is reconstructed from the survivors and **repaired**
+in place (forcing sector reallocation), exactly as the mirror does. A read that
+would need two members it cannot get fails closed (`AGENTS.md` §5.4) rather than
+fabricate data.
+
+### Write — read-modify-write and degraded parity
+
+A write updates the affected stripe's parity. When the old data and old parity
+are both readable it uses read-modify-write
+(`new_parity = old_parity XOR old_data XOR new_data`), the 2-read/2-write path
+that is independent of member count. When they are not — the data member is
+lost, or its old data hit a media error — it recomputes the parity from the
+surviving data members (`new_parity = new_data XOR other data`), so a lost
+member's data stays reconstructable. If the parity member itself is lost the
+data is written directly and the parity is rebuilt later. A resyncing member's
+already-rebuilt region is kept current so it never falls behind mid-rebuild.
+
+### Scrub — proactive verify and repair
+
+`ParityArray::begin_scrub` / `scrub_step` drive a bounded, interruptible pass
+that reads every in-sync member's copy of every stripe row and repairs a latent
+media error from the survivors (`AGENTS.md` §26.5), chunked so a 100 TB+ array
+never scrubs in one sweep or a busy-spin (`AGENTS.md` §26.6, §2.23). Like the
+mirror, a parity scrub heals latent *media* errors; it does **not** arbitrate a
+parity *content* disagreement (a bare parity array cannot know which member is
+wrong — that is the checksummed filesystem layer's job).
+
+### Degrade, rebuild, and replace
+
+A faulted member, or a missing slot (`MemberState::Absent`), degrades the array
+(`ArrayHealth::Degraded`) while the survivors keep serving; a *second* loss
+makes a stripe unrecoverable and the array fails closed
+(`ArrayHealth::Failed`). A returning or physically replaced member is rebuilt
+by `ParityArray::resync_step`, which reconstructs its blocks from the survivors
+a caller-sized budget of blocks at a time (`AGENTS.md` §26.6), becoming a read
+source only once fully in sync (`ArrayHealth::Recovering` meanwhile). The
+disk-replacement workflow mirrors the RAID1 one — `remove_member` vacates a
+faulted slot to `Absent` (returning the device), `add_member` installs a spare
+into an absent slot, and `replace_member` hot-swaps a faulted one — each
+rebuilding from the survivors and restoring redundancy without a reboot
+(`AGENTS.md` §18.4). A faulted member is sticky-but-recoverable, so a flapping
+disk never masquerades as a healthy copy.
+
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 An array is **discovered, not configured**: there is no hand-maintained list

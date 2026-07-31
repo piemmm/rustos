@@ -92,6 +92,14 @@ pub enum RaidLevel {
     /// member fault loses the array. Carries a non-zero stripe unit
     /// ([`ArraySuperblock::chunk_blocks`]).
     Stripe = 2,
+    /// RAID5 distributed parity ([`crate::ParityArray`]): the logical block
+    /// space is striped in fixed-size chunks across the members, and each
+    /// stripe reserves one member's chunk for the parity (XOR) of the others,
+    /// with the parity slot rotating across stripes so parity load is spread.
+    /// The array has the capacity of `member_count - 1` members and survives
+    /// any single member fault by reconstructing its data from the survivors.
+    /// Carries a non-zero stripe unit ([`ArraySuperblock::chunk_blocks`]).
+    Parity = 3,
 }
 
 impl RaidLevel {
@@ -106,7 +114,7 @@ impl RaidLevel {
     /// that stores a full copy per member (the mirror) does not.
     #[must_use]
     pub const fn is_striped(self) -> bool {
-        matches!(self, Self::Stripe)
+        matches!(self, Self::Stripe | Self::Parity)
     }
 
     /// Decode an on-disk level byte, failing closed on an unknown value.
@@ -118,6 +126,7 @@ impl RaidLevel {
         match raw {
             1 => Ok(Self::Mirror),
             2 => Ok(Self::Stripe),
+            3 => Ok(Self::Parity),
             _ => Err(SuperblockError::UnknownRaidLevel),
         }
     }

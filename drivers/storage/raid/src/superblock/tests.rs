@@ -244,14 +244,57 @@ fn raid_level_round_trips_and_fails_closed() {
         RaidLevel::from_u8(RaidLevel::Stripe.as_u8()),
         Ok(RaidLevel::Stripe)
     );
+    assert_eq!(
+        RaidLevel::from_u8(RaidLevel::Parity.as_u8()),
+        Ok(RaidLevel::Parity)
+    );
     assert!(!RaidLevel::Mirror.is_striped());
     assert!(RaidLevel::Stripe.is_striped());
-    for raw in [0u8, 3, 4, 255] {
+    assert!(RaidLevel::Parity.is_striped());
+    for raw in [0u8, 4, 5, 255] {
         assert_eq!(
             RaidLevel::from_u8(raw),
             Err(SuperblockError::UnknownRaidLevel)
         );
     }
+}
+
+/// A parity (RAID5) superblock for `array`, `slot` of `count`, at
+/// `generation`, with stripe unit `chunk_blocks`.
+fn parity_sb(
+    array: [u8; 16],
+    count: u16,
+    slot: u16,
+    generation: u64,
+    chunk_blocks: u32,
+) -> ArraySuperblock {
+    ArraySuperblock {
+        array_uuid: array,
+        raid_level: RaidLevel::Parity,
+        member_count: count,
+        member_slot: slot,
+        geometry: GEO,
+        generation,
+        updated_at: Time64::from_secs(1_700_000_000),
+        chunk_blocks,
+    }
+}
+
+#[test]
+fn a_parity_superblock_round_trips_and_rejects_a_zero_stripe_unit() {
+    let original = parity_sb(UUID_A, 4, 2, 7, 128);
+    let decoded = ArraySuperblock::decode(&original.encode()).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.raid_level, RaidLevel::Parity);
+    assert_eq!(decoded.chunk_blocks, 128);
+
+    // A parity level with a zero stripe unit contradicts itself: fail closed.
+    let mut parity_zero = parity_sb(UUID_A, 3, 0, 1, 0);
+    parity_zero.chunk_blocks = 0;
+    assert_eq!(
+        ArraySuperblock::decode(&parity_zero.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
 }
 
 #[test]

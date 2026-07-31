@@ -949,9 +949,36 @@ Remaining:
   (striping-map white-box, cross-stripe gather, every assemble refusal, the
   whole-device-fail-closed and per-block-media-only journeys, all-member flush,
   range validation, buffer-class forwarding). Design: `docs/src/drivers/raid.md`.
-- RAID levels beyond the mirror and the stripe (parity: RAID5/6) are further
-  sibling compositions over the same seam (§2.2 parallel implementations),
-  added when needed.
+- **Landed (the RAID5 distributed-parity sibling):** `raid::ParityArray`
+  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 1`
+  members' worth of capacity as one logical device with single-fault
+  redundancy — the capacity-plus-redundancy sibling of the mirror and the
+  stripe over the same seam (§2.2 parallel implementations), reusing their
+  `MemberState`/`MemberRole`/`ArrayHealth` vocabulary and `member_faulting`
+  classification rather than re-inventing them. It stripes fixed-size chunks
+  (`ArraySuperblock::chunk_blocks`) with a left-symmetric rotating parity slot,
+  so no member is a parity bottleneck. Its complete behaviour is proven
+  host-side over a fault-injecting `Block` double: healthy reads go direct while
+  a lost member's chunk is reconstructed (XOR of the survivors) and a per-block
+  media error is reconstructed **and repaired**; writes update parity by
+  read-modify-write, or recompute it from the surviving data members when the
+  data/parity member is lost (a degraded write keeps the missing data
+  reconstructable); a proactive `begin_scrub`/`scrub_step` pass heals latent
+  media errors chunked so a 100 TB+ array never scrubs in one sweep (§26.6,
+  §2.23); one lost member degrades the array while two fail it closed (§5.4,
+  §26.5, never fabricating unreconstructable data); a returning or replaced
+  member is rebuilt by a bounded, interruptible `resync_step`, and the
+  `remove_member`/`add_member`/`replace_member` disk-replacement cycle restores
+  redundancy without a reboot (§18.4). It is `no_std`, `forbid(unsafe_code)`,
+  and allocation-free — it borrows a caller-owned member slice (no fixed member
+  ceiling, §24.1) plus a caller-owned scratch buffer for parity/reconstruction.
+  The on-disk `ArraySuperblock` grew a `RaidLevel::Parity` (evolved in place,
+  §2.13; level and stripe unit must agree or the record is refused
+  `BadStripeChunk`), threaded through `ArrayIdentity`'s shape match. Design:
+  `docs/src/drivers/raid.md`.
+- RAID levels beyond the mirror, the stripe, and single parity (double parity:
+  RAID6) are further sibling compositions over the same seam (§2.2 parallel
+  implementations), added when needed.
 
 Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
 over a fault-injecting `Block` double — two healthy copies assemble optimal; a

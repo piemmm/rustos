@@ -20,7 +20,7 @@
 //!
 //! - **Assembly requires every member present and aligned.** Unlike a mirror,
 //!   a stripe cannot come up "degraded" over a missing or unwell member —
-//!   there is no other copy to serve the blocks that member holds. [`assemble`]
+//!   there is no other copy to serve the blocks that member holds. [`StripeArray::assemble`]
 //!   probes every member and fails closed
 //!   ([`StripeError::MemberUnavailable`]) if any cannot report geometry, if the
 //!   members disagree on geometry ([`StripeError::GeometryMismatch`]), or if a

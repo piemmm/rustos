@@ -10,10 +10,12 @@
 //! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
 //! re-invent it.
 //!
-//! Two compositions are provided as siblings over that one seam (`AGENTS.md`
+//! Three compositions are provided as siblings over that one seam (`AGENTS.md`
 //! §2.2 parallel implementations): the redundant RAID1 mirror
-//! ([`MirrorArray`]) and the capacity-aggregating RAID0 stripe
-//! ([`StripeArray`]).
+//! ([`MirrorArray`]), the capacity-aggregating RAID0 stripe
+//! ([`StripeArray`]), and the RAID5 distributed-parity array
+//! ([`ParityArray`]) that combines capacity aggregation with single-fault
+//! redundancy.
 //!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
@@ -74,6 +76,44 @@
 //! It shares the mirror's whole-device-fault classification and the
 //! [`ArrayHealth`] vocabulary rather than re-inventing them.
 //!
+//! # RAID5 distributed parity ([`ParityArray`])
+//!
+//! The third composition is a RAID5 distributed-parity array. The logical
+//! block space is striped across the members like RAID0, but each stripe
+//! reserves one member's chunk for the parity (XOR) of the others, and the
+//! parity slot rotates across stripes so no member is a parity bottleneck. The
+//! array has the capacity of `member_count - 1` members and survives any
+//! single member being lost:
+//!
+//! - **Reads** in the healthy case go straight to the data member that holds
+//!   the block; a read of a lost member's chunk is **reconstructed** by
+//!   XOR-ing the surviving members (data and parity), and a per-block media
+//!   error on an otherwise-healthy member is reconstructed and repaired in
+//!   place, complemented by the proactive scrub below.
+//! - **Writes** update the affected stripe's parity, by read-modify-write when
+//!   the old data and parity are readable and by recomputing the parity from
+//!   the surviving data members when they are not (a degraded write), so a
+//!   lost member's data stays reconstructable.
+//! - **Scrub** ([`ParityArray::begin_scrub`]/[`ParityArray::scrub_step`]) is a
+//!   bounded, interruptible pass that reads every member's copy of every stripe
+//!   row and repairs a latent media error from the survivors (`AGENTS.md`
+//!   §26.5); like the mirror it heals *media* errors and leaves *content*
+//!   arbitration to the checksummed filesystem layer.
+//! - A member going faulted, or a missing slot ([`MemberState::Absent`]),
+//!   **degrades the array, never the system** ([`ArrayHealth::Degraded`]); a
+//!   *second* loss makes a stripe unrecoverable and the array fails closed
+//!   ([`ArrayHealth::Failed`]) rather than fabricate data it cannot
+//!   reconstruct.
+//! - A returning or replaced member is **rebuilt** by a bounded, interruptible
+//!   resync ([`ParityArray::resync_step`]) that reconstructs its blocks from
+//!   the survivors a caller-sized budget at a time (`AGENTS.md` §26.6); the
+//!   same [`MirrorArray::remove_member`]/[`MirrorArray::add_member`]-style
+//!   disk-replacement workflow ([`ParityArray::remove_member`] /
+//!   [`ParityArray::add_member`] / [`ParityArray::replace_member`]) restores
+//!   redundancy without a reboot (`AGENTS.md` §18.4). Parity computation and
+//!   reconstruction borrow a caller-owned **scratch** buffer (at least two
+//!   logical blocks), so the engine stays allocation-free.
+//!
 //! # Fail closed (`AGENTS.md` §5.4)
 //!
 //! At the boundary of what the array can vouch for it returns a typed error
@@ -119,10 +159,12 @@
 #![deny(missing_docs)]
 
 mod mirror;
+mod parity;
 mod stripe;
 mod superblock;
 
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use parity::{ParityArray, ParityError, ParityMember};
 pub use stripe::{StripeArray, StripeError, StripeMember};
 pub use superblock::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,
