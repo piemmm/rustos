@@ -36,6 +36,10 @@
 //!   detector: the one rule that turns primary presses into single/double
 //!   clicks so a pointer double-click activates an item exactly as `Enter`
 //!   does (`plans/NEW-FILEMANAGER.md` `FM12`).
+//! * [`drag`](mod@drag) — the [`BundleDrag`] pure drag detector: the one rule
+//!   that turns a pressed bundle row's motion into the window channel's
+//!   drag-offer/withdraw verbs, exactly one offer per gesture
+//!   (`plans/NEW-TASKBAR.md` T7).
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
 //!   enable state, the [`breadcrumbs`] path bar
@@ -115,6 +119,7 @@ pub mod chrome;
 pub mod click;
 pub mod clipboard;
 pub mod delete;
+pub mod drag;
 pub mod entry;
 pub mod error;
 pub mod execute;
@@ -147,6 +152,7 @@ pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, P
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
+pub use drag::{BundleDrag, DRAG_THRESHOLD_PX};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use execute::{

@@ -146,13 +146,14 @@ impl SessionInputRouter {
     /// Route one input `event` to the taskbar or the window manager, returning
     /// what changed.
     ///
-    /// While the program-library popup is open every event routes to the
-    /// taskbar (the popup is modal). Otherwise a primary press goes to
-    /// whichever router claims the pointer (the taskbar when the pointer is
-    /// over the bar, the window manager otherwise); motion is fanned to both
-    /// so their pointers stay in step and the window manager can drag a
-    /// grabbed window; a release goes to the window manager to end a grab.
-    /// See the [module docs](self) for the full policy.
+    /// While the taskbar's context menu or the program-library popup is open
+    /// every event routes to the taskbar (both surfaces are modal).
+    /// Otherwise a primary or secondary press goes to whichever router
+    /// claims the pointer (the taskbar when the pointer is over the bar, the
+    /// window manager otherwise); motion is fanned to both so their pointers
+    /// stay in step and the window manager can drag a grabbed window; a
+    /// release goes to the window manager to end a grab. See the
+    /// [module docs](self) for the full policy.
     pub fn handle(
         &mut self,
         event: InputEvent,
@@ -163,13 +164,13 @@ impl SessionInputRouter {
         // owns; the session reads it here rather than
         // keeping its own copy.
         let scale = compositor.scale();
-        // The open popup is modal: the whole stream is the taskbar's. Motion
-        // is still *tracked* by the window manager so its pointer stays in
-        // step for the moment the popup closes, but its outcome is discarded
-        // — nothing may be delivered to the windows beneath a modal popup,
-        // and no grab can be in flight (presses never reached the window
-        // manager while the popup was open).
-        if taskbar.library().is_open() {
+        // An open context menu or popup is modal: the whole stream is the
+        // taskbar's. Motion is still *tracked* by the window manager so its
+        // pointer stays in step for the moment the surface closes, but its
+        // outcome is discarded — nothing may be delivered to the windows
+        // beneath a modal surface, and no grab can be in flight (presses
+        // never reached the window manager while one was open).
+        if taskbar.menu().is_open() || taskbar.library().is_open() {
             if matches!(event, InputEvent::PointerMoved { .. }) {
                 let _ = self.wm.handle(event, compositor);
             }
@@ -184,8 +185,12 @@ impl SessionInputRouter {
                 wm_response(self.wm.handle(event, compositor))
             }
             InputEvent::PointerPressed {
-                button: PointerButton::Primary,
+                button: PointerButton::Primary | PointerButton::Secondary,
             } => {
+                // A press belongs to whichever surface owns the pixel under
+                // the pointer: the bar claims presses over itself (a
+                // secondary press there opens a pin's context menu), the
+                // window manager everything else.
                 if taskbar.hit_test(self.taskbar.pointer(), scale).is_some() {
                     taskbar_response(self.taskbar.handle(event, taskbar, scale))
                 } else {
@@ -193,16 +198,10 @@ impl SessionInputRouter {
                 }
             }
             // The window manager takes the rest and the taskbar none of them:
-            // a secondary (right) press opens the client's context menu (the
-            // closed bar has no right-click menu, so it never claims it; over
-            // the desktop or furniture the window manager consumes it and
-            // opens nothing), a primary release ends a move-grab, a scroll
-            // wheel routes to the root viewport under the pointer, and keys go
-            // to the focused window.
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary,
-            }
-            | InputEvent::PointerReleased {
+            // a primary release ends a move-grab, a scroll wheel routes to
+            // the root viewport under the pointer, and keys go to the
+            // focused window.
+            InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             }
             | InputEvent::PointerScrolled { .. }

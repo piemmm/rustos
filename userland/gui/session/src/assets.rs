@@ -50,6 +50,29 @@ pub trait SessionFileReader {
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
 }
 
+/// The desktop session's file-writing seam — the write-side counterpart of
+/// [`SessionFileReader`].
+///
+/// The session persists exactly one class of state: the user's own desktop
+/// configuration under their inherited home (today the taskbar pin store).
+/// On a running system the write goes through the VFS under the session's
+/// own kernel-attested identity — creating the parent directory when the
+/// settings subtree does not exist yet, then replacing the document whole —
+/// and every permission decision is the kernel's. Tests back it with an
+/// in-memory table. There is one seam, not one per consumer.
+pub trait SessionFileWriter {
+    /// Replace the file at absolute `path` with `bytes`, creating it (and
+    /// its immediate parent directory) as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel boundary's [`Errno`] when the file cannot be
+    /// written. A write failure is never fatal to the desktop: the caller
+    /// keeps its previous in-memory state (memory and disk never diverge)
+    /// and reports the refusal.
+    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno>;
+}
+
 /// The cursor SVG bytes read from disk, one optional blob per [`CursorKind`],
 /// exposed to `lib/cursor`'s decoder through [`CursorAssetSource`].
 ///

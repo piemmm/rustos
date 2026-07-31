@@ -10,6 +10,11 @@
 //!   the merged `lib/proglib` catalog), and **Files**, which opens the file
 //!   manager. Both are shared `lib/controls` icon buttons drawn with
 //!   `lib/icon` glyphs.
+//! - **Pin strip** — a [`PinStrip`] of user-pinned application shortcuts
+//!   (the per-user `lib/taskpins` store, resolved by the session into
+//!   [`PinView`]s): icon-only slots that launch when idle and follow the
+//!   click-to-activate rule when their application is running, with a
+//!   right-click [`BarMenu`] offering *Open* and *Unpin*.
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
 //! - **Trailing end** — a clock anchored to the very end, with a
@@ -58,7 +63,9 @@ pub mod edge;
 pub mod input;
 pub mod layout;
 pub mod library;
+pub mod menu;
 pub mod notifications;
+pub mod pins;
 pub mod render;
 pub mod taskbar;
 pub mod tasks;
@@ -71,7 +78,9 @@ pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit};
 pub use library::{folder_label, LibraryFocus, LibraryLayout, LibraryPopup, LibraryRow};
+pub use menu::{BarMenu, MenuLayout, MenuSubject};
 pub use notifications::{IconId, NotificationArea, NotificationIcon};
+pub use pins::{PinStrip, PinView};
 pub use render::TaskbarRenderer;
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};

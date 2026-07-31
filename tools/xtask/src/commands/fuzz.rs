@@ -155,6 +155,12 @@ pub const TARGETS: &[Target] = &[
             "program-library catalog store (entry grammar, patch merge, render round-trip, bounds)",
     },
     Target {
+        package: "tairix-taskpins",
+        test: "fuzz_taskpins",
+        description:
+            "taskbar pin store (ordered pin grammar, operations model, render round-trip, bounds)",
+    },
+    Target {
         package: "tairix-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
@@ -207,6 +213,11 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-svg",
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",
+    },
+    Target {
+        package: "tairix-image",
+        test: "fuzz_image",
+        description: "raster-image decode (untrusted PNG bytes: chunk framing, filters, interlace)",
     },
     Target {
         package: "tairix-virtio",
@@ -893,6 +904,22 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-proglib");
+    }
+
+    #[test]
+    fn taskbar_pin_store_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_taskpins"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-taskpins");
+    }
+
+    #[test]
+    fn raster_image_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_image"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-image");
     }
 
     /// Collects the harness names (`fuzz_<name>` integration-test files) a

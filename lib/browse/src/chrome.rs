@@ -20,13 +20,15 @@
 //!   offers is currently actionable. Only commands the file manager can
 //!   actually carry out today are modelled — Open
 //!   ([`activate_selected`](crate::Browser::activate_selected)), Open With…
-//!   (the [`open_with`](crate::open_with) chooser over a regular file), Rename
+//!   (the [`open_with`](crate::open_with) chooser over a regular file), Pin to
+//!   taskbar (the window channel's pin request over a bundle), Rename
 //!   ([`rename_selected`](crate::Browser::rename_selected)), Cut/Copy
 //!   ([`clipboard`](crate::Browser::clipboard)), Paste
-//!   ([`plan_paste`](crate::clipboard::plan_paste)), and Properties
-//!   ([`Properties`](crate::properties::Properties)). Delete and New Folder are
-//!   *not* modelled here: the drawn menu would have no verb to invoke for them
-//!   yet, so each lands with the stage that first wires its behaviour, never as
+//!   ([`plan_paste`](crate::clipboard::plan_paste)), Properties
+//!   ([`Properties`](crate::properties::Properties)), and Delete
+//!   ([`plan_delete`](crate::Browser::plan_delete)). New Folder is *not*
+//!   modelled here: the drawn menu would have no verb to invoke for it yet, so
+//!   it lands with the stage that first wires its behaviour, never as
 //!   speculative surface.
 //! * [`breadcrumbs`] turns the current directory's root-first components into
 //!   the ordered [`Crumb`]s of the path bar, each carrying the ancestor depth
@@ -44,7 +46,7 @@ use alloc::vec::Vec;
 use tairix_icon::IconKind;
 
 use crate::browser::Browser;
-use crate::entry::EntryKind;
+use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::sort::SortMode;
@@ -346,6 +348,11 @@ pub enum ContextCommand {
     /// for a regular file — a directory descends and a bundle launches itself,
     /// so neither has an application to choose.
     OpenWith,
+    /// Ask the desktop session to pin the selected application bundle to the
+    /// taskbar (the app sends the window channel's pin request with the
+    /// bundle's absolute path). Offered only for a bundle — pinning names an
+    /// installed application, which no plain file or directory is.
+    PinToTaskbar,
     /// Rename the selected entry in place
     /// ([`rename_selected`](Browser::rename_selected)).
     Rename,
@@ -377,6 +384,7 @@ pub enum ContextCommand {
 pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Open,
     ContextCommand::OpenWith,
+    ContextCommand::PinToTaskbar,
     ContextCommand::Rename,
     ContextCommand::Cut,
     ContextCommand::Copy,
@@ -388,12 +396,13 @@ pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
 impl ContextCommand {
     /// The label the drawn menu row shows for this command.
     ///
-    /// One definition so the menu text has a single source (§2.2).
+    /// One definition so the menu text has a single source.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
             Self::OpenWith => "Open With\u{2026}",
+            Self::PinToTaskbar => "Pin to taskbar",
             Self::Rename => "Rename",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
@@ -410,9 +419,9 @@ impl ContextCommand {
     pub const fn shortcut(self) -> &'static str {
         match self {
             Self::Open => "Enter",
-            // Open With… is a pointer-only command (no keyboard accelerator
-            // binds it), so it advertises none.
-            Self::OpenWith => "",
+            // Open With… and Pin to taskbar are pointer-only commands (no
+            // keyboard accelerator binds them), so they advertise none.
+            Self::OpenWith | Self::PinToTaskbar => "",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
@@ -434,8 +443,11 @@ impl ContextCommand {
 /// builds the same model and simply never invokes a write command).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ContextMenuModel {
-    has_selection: bool,
-    selection_is_file: bool,
+    /// What kind of entry is selected, through the one shared [`EntryKind`]
+    /// classifier — `None` when the directory is empty — so the kind-scoped
+    /// rules (Open With… wants a file, Pin to taskbar wants a bundle) read
+    /// the same classification every other surface does.
+    selection: Option<EntryKind>,
     has_clipboard: bool,
 }
 
@@ -449,10 +461,8 @@ impl ContextMenuModel {
     /// the caller's own state, threaded in here.
     #[must_use]
     pub fn for_browser<S: DirectorySource>(browser: &Browser<S>, has_clipboard: bool) -> Self {
-        let selected = browser.selected_entry();
         Self {
-            has_selection: selected.is_some(),
-            selection_is_file: selected.is_some_and(|entry| entry.kind() == EntryKind::File),
+            selection: browser.selected_entry().map(Entry::kind),
             has_clipboard,
         }
     }
@@ -474,11 +484,14 @@ impl ContextMenuModel {
             | ContextCommand::Cut
             | ContextCommand::Copy
             | ContextCommand::Properties
-            | ContextCommand::Delete => self.has_selection,
+            | ContextCommand::Delete => self.selection.is_some(),
             // Open With… offers a chooser of applications, which only a regular
             // file has: a directory descends and a bundle launches itself, so
             // neither has an application to pick.
-            ContextCommand::OpenWith => self.selection_is_file,
+            ContextCommand::OpenWith => self.selection == Some(EntryKind::File),
+            // Pinning names an installed application, so only a bundle
+            // selection can be pinned to the taskbar.
+            ContextCommand::PinToTaskbar => self.selection == Some(EntryKind::Bundle),
             ContextCommand::Paste => self.has_clipboard,
         }
     }

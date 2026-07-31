@@ -557,6 +557,7 @@ tairix/
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
 │   ├── icon/            # Shared desktop icons.
+│   ├── image/           # Fail-closed raster-image decoding (PNG).
 │   ├── input/           # Shared pointer input-event vocabulary.
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
@@ -581,6 +582,7 @@ tairix/
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
+│   ├── taskpins/        # Per-user taskbar pinned-shortcut store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).

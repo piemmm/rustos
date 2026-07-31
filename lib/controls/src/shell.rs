@@ -20,7 +20,7 @@ use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use crate::button::{Button, ButtonAction};
+use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_plate, plate_border, pointer_activation,
@@ -237,10 +237,15 @@ pub enum TaskbarItemAction {
 /// A taskbar item's window-visibility state (spec §11.26).
 ///
 /// These are mutually exclusive — a window cannot be both the active window and
-/// minimized at once — so they are one enum rather than independent flags
-/// (illegal states unrepresentable).
+/// minimized at once, and a pinned shortcut with no window at all is neither —
+/// so they are one enum rather than independent flags (illegal states
+/// unrepresentable).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum TaskVisibility {
+    /// No window: a pinned shortcut whose application is not running. The
+    /// plate stays quiet (bar-coloured) until hovered or focused, so a
+    /// launcher-only slot never masquerades as a running task.
+    Closed,
     /// Running and visible, but not the active window.
     #[default]
     Running,
@@ -248,6 +253,23 @@ pub enum TaskVisibility {
     Active,
     /// Minimized — a recessed plate and a non-colour mark, still restorable.
     Minimized,
+}
+
+/// How a [`TaskbarItem`] presents its application identity.
+///
+/// A wide running-task button shows the icon beside a truncated label; a
+/// compact square slot (a pinned shortcut) shows only the icon, centred and
+/// sized off the plate like an icon button. The label stays part of the
+/// model either way — context surfaces and accessibility read it — only the
+/// painted content changes. Status furniture (the active seam, Heat Seam,
+/// minimized tick, and Signal Bead) is identical in both presentations.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum TaskbarPresentation {
+    /// Leading icon beside a truncated label (the running-task list).
+    #[default]
+    IconAndLabel,
+    /// A centred icon filling the plate (a pinned shortcut slot).
+    Icon,
 }
 
 /// A taskbar entry for one application/window (spec §11.26).
@@ -264,6 +286,7 @@ pub enum TaskVisibility {
 pub struct TaskbarItem {
     label: String,
     icon: IconKind,
+    presentation: TaskbarPresentation,
     state: ControlState,
     visibility: TaskVisibility,
     attention: bool,
@@ -278,12 +301,20 @@ impl TaskbarItem {
         Self {
             label: label.into(),
             icon,
+            presentation: TaskbarPresentation::IconAndLabel,
             state: ControlState::idle(),
             visibility: TaskVisibility::Running,
             attention: false,
             pointer: Point::ORIGIN,
             armed: false,
         }
+    }
+
+    /// This item with the given presentation.
+    #[must_use]
+    pub fn with_presentation(mut self, presentation: TaskbarPresentation) -> Self {
+        self.presentation = presentation;
+        self
     }
 
     /// This item with the given composed state.
@@ -311,6 +342,17 @@ impl TaskbarItem {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// The item's presentation.
+    #[must_use]
+    pub fn presentation(&self) -> TaskbarPresentation {
+        self.presentation
+    }
+
+    /// Set the item's presentation.
+    pub fn set_presentation(&mut self, presentation: TaskbarPresentation) {
+        self.presentation = presentation;
     }
 
     /// The item's composed state.
@@ -364,7 +406,32 @@ impl TaskbarItem {
         None
     }
 
+    /// The pixel side the item's icon paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising
+    /// per-application artwork can produce it at exactly the size
+    /// [`Self::render`] will place — the two can never disagree. A labelled
+    /// item sizes the icon off the text line; an icon-only item sizes it off
+    /// the plate like an icon button.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        let Some((_, _, w, h)) = surface_rect(bounds) else {
+            return 0;
+        };
+        let border = plate_border(theme, scale);
+        let inner_h = h.saturating_sub(border.saturating_mul(2));
+        match self.presentation {
+            TaskbarPresentation::IconAndLabel => font.glyph_height().min(inner_h),
+            TaskbarPresentation::Icon => icon_content_side(w, h, border),
+        }
+    }
+
     /// Paint the item into `surface` at `bounds` for the active theme.
+    ///
+    /// `artwork` is the application's own icon, pre-rasterised by the owner
+    /// (at [`Self::icon_side`], through its cache); `None` falls back to the
+    /// item's built-in class glyph. The artwork is decoded and rasterised
+    /// long before it reaches this call — a control never parses image bytes.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -372,6 +439,7 @@ impl TaskbarItem {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        artwork: Option<&Surface>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -385,27 +453,37 @@ impl TaskbarItem {
         let radius = scale.scale_length(metrics.control_corner_radius);
         let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
 
-        // A minimized item recesses its plate (a flatter fill than the raised
-        // resting plate) so it reads as put-away without relying on colour.
-        let plate = if self.visibility == TaskVisibility::Minimized
-            && self.state.disposition() != ControlDisposition::DisabledByState
-        {
-            Color::from(palette.surface)
-        } else {
-            frame.plate
-        };
-        paint_plate(
-            surface,
-            (x, y, w, h),
-            &PlateStyle {
-                radius,
-                border,
-                plate,
-                rim: frame.rim,
-                focused: frame.focused,
-                ring: Color::from(palette.rim_active),
-            },
-        );
+        // A closed (not-running) pin rests without a plate at all — only the
+        // icon sits on the bar — so a launcher-only slot never reads as a
+        // running task; hover, press, or keyboard focus raise the plate as
+        // usual. A minimized item recesses its plate (a flatter fill than the
+        // raised resting plate) so it reads as put-away without relying on
+        // colour.
+        let resting_closed = self.visibility == TaskVisibility::Closed
+            && self.state.pointer == PointerState::None
+            && !self.state.focus.focused
+            && self.state.disposition() == ControlDisposition::Interactive;
+        if !resting_closed {
+            let plate = if self.visibility == TaskVisibility::Minimized
+                && self.state.disposition() != ControlDisposition::DisabledByState
+            {
+                Color::from(palette.surface)
+            } else {
+                frame.plate
+            };
+            paint_plate(
+                surface,
+                (x, y, w, h),
+                &PlateStyle {
+                    radius,
+                    border,
+                    plate,
+                    rim: frame.rim,
+                    focused: frame.focused,
+                    ring: Color::from(palette.rim_active),
+                },
+            );
+        }
 
         let inner_x = x + border;
         let inner_y = y + border;
@@ -415,17 +493,6 @@ impl TaskbarItem {
             return;
         }
         let pad = scale.scale_length(metrics.control_inset).max(1);
-
-        // The application identity: leading icon then label.
-        let side = font.glyph_height().min(inner_h);
-        let mut content_x = inner_x.saturating_add(pad);
-        if side > 0 && content_x.saturating_add(side) < inner_x + inner_w {
-            if let Some(image) = builtin_icon(self.icon, frame.label).rasterise(side) {
-                let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
-                surface.blit(to_i32(content_x), to_i32(iy), &image);
-            }
-            content_x = content_x.saturating_add(side).saturating_add(pad);
-        }
         let bead_size = self.bead(theme).map_or(0, |_| {
             scale
                 .scale_length(metrics.bead_size)
@@ -433,14 +500,36 @@ impl TaskbarItem {
                 .min(inner_w)
                 .min(inner_h)
         });
-        let label_right = (inner_x + inner_w)
-            .saturating_sub(pad)
-            .saturating_sub(if bead_size > 0 { bead_size + pad } else { 0 });
-        if label_right > content_x {
-            let fitted = font.truncate_to_width(&self.label, label_right - content_x);
-            let text_y =
-                to_i32(inner_y) + (to_i32(inner_h) - to_i32(font.glyph_height())).max(0) / 2;
-            font.draw_text(surface, to_i32(content_x), text_y, fitted, frame.label);
+
+        let side = self.icon_side(bounds, scale, theme, font);
+        match self.presentation {
+            TaskbarPresentation::IconAndLabel => {
+                // The application identity: leading icon then label.
+                let mut content_x = inner_x.saturating_add(pad);
+                if side > 0 && content_x.saturating_add(side) < inner_x + inner_w {
+                    let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
+                    self.paint_icon(surface, content_x, iy, side, frame.label, artwork);
+                    content_x = content_x.saturating_add(side).saturating_add(pad);
+                }
+                let label_right = (inner_x + inner_w)
+                    .saturating_sub(pad)
+                    .saturating_sub(if bead_size > 0 { bead_size + pad } else { 0 });
+                if label_right > content_x {
+                    let fitted = font.truncate_to_width(&self.label, label_right - content_x);
+                    let text_y = to_i32(inner_y)
+                        + (to_i32(inner_h) - to_i32(font.glyph_height())).max(0) / 2;
+                    font.draw_text(surface, to_i32(content_x), text_y, fitted, frame.label);
+                }
+            }
+            TaskbarPresentation::Icon => {
+                // The application identity alone, centred in the plate; the
+                // label stays model data for context surfaces to read.
+                if side > 0 {
+                    let ix = inner_x + (inner_w.saturating_sub(side)) / 2;
+                    let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
+                    self.paint_icon(surface, ix, iy, side, frame.label, artwork);
+                }
+            }
         }
 
         self.paint_status(
@@ -451,6 +540,28 @@ impl TaskbarItem {
             scale,
             theme,
         );
+    }
+
+    /// Paint the identity icon at `(x, y)` in a `side`-pixel slot: the
+    /// owner-supplied artwork when present (centred, so a stale cache entry
+    /// from mid-scale-change still paints sensibly), else the built-in class
+    /// glyph tinted for the resolved frame.
+    fn paint_icon(
+        &self,
+        surface: &mut Surface,
+        x: u32,
+        y: u32,
+        side: u32,
+        tint: Color,
+        artwork: Option<&Surface>,
+    ) {
+        if let Some(art) = artwork {
+            let ax = to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2;
+            let ay = to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2;
+            surface.blit(ax, ay, art);
+        } else if let Some(image) = builtin_icon(self.icon, tint).rasterise(side) {
+            surface.blit(to_i32(x), to_i32(y), &image);
+        }
     }
 
     /// Paint the item's status edges and marks: the active-window accent seam,

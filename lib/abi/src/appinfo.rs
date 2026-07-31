@@ -62,6 +62,14 @@ pub const MIME_TYPE_MAX: usize = 64;
 /// fixed [`MIME_TYPE_MAX`] buffer.
 pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
 
+/// Largest possible encoded `AppInfo` manifest: the fixed header plus the
+/// maximal capability and MIME bodies. A longer file cannot be a valid
+/// manifest, so every reader bounds its manifest read here and refuses a
+/// bigger file before decoding a byte of it.
+pub const APPINFO_WIRE_MAX: usize = AppInfoHeader::WIRE_LEN
+    + APPINFO_MAX_CAPABILITIES as usize * 2
+    + APPINFO_MAX_MIME as usize * MIME_ENTRY_LEN;
+
 /// Maximum length, in bytes, of the library icon asset name a manifest may
 /// declare — a plain file name inside the bundle's own `Resources/`
 /// directory, so a short bound is ample and keeps the fixed header small.

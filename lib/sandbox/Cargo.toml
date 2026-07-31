@@ -33,6 +33,20 @@ tairix-help = { path = "../help", version = "=0.0.0" }
 # The terminal-op vocabulary the helpdoc reply is encoded in and the
 # streaming parser the client re-validates it through.
 tairix-vt = { path = "../vt", version = "=0.0.0" }
+# The shared SVG image-decoding library the sandboxed icon-rasterisation
+# service runs over an untrusted bundle icon's SVG bytes.
+tairix-svg = { path = "../svg", version = "=0.0.0" }
+# The complete, fail-closed PNG decoder the sandboxed icon-rasterisation
+# service runs over an untrusted bundle icon's PNG bytes.
+tairix-image = { path = "../image", version = "=0.0.0" }
+# Builds the desktop's shared rasterisable vector-icon form from a decoded
+# SVG image, so the sandboxed service draws through the one polygon-fill
+# path every vector asset already shares rather than reimplementing it.
+tairix-icon = { path = "../icon", version = "=0.0.0" }
+# The premultiplied-alpha pixel surface a vector icon rasterises into; the
+# sandboxed service un-premultiplies it back to the straight-alpha wire
+# format PNG decoding already produces.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and

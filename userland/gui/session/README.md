@@ -13,15 +13,21 @@ switches serve its own `Help/` documents, anything else is a usage error.
 The taskbar deliberately owns no theme registry, no filesystem reach, and no
 spawn capability: its buttons and its program-library popup only *report*
 typed `TaskbarResponse`s (open the library, open the file manager, launch
-this catalog entry). Acting on those is the session glue's job — this crate
-owns the theme registry, loads and merges the program-library catalog, and
-resolves the responses the shell's own state suffices for, surfacing the
-rest to the capability-holding `Run` binary.
+this catalog entry, pin activation/edits). Acting on those is the session
+glue's job — this crate owns the theme registry, the per-user pin store,
+loads and merges the program-library catalog, and resolves the responses
+the shell's own state suffices for, surfacing the rest to the
+capability-holding `Run` binary.
 
 ## What this crate owns
 
 - **The shared `tairix-theme` `ThemeRegistry`** — the one runtime registry the
   whole desktop reads its theme from (`AGENTS.md` §6, §10).
+- **The user's pinned shortcuts** — per-user configuration at
+  `~/Settings/Taskbar/pins.conf` (the `tairix-taskpins` store). The `pins`
+  module loads and persists them through the `SessionFileWriter` seam: the
+  session is the store's only writer, and the in-memory list adopts an edit
+  only after the write succeeded, so memory and disk never diverge.
 - **The `tairix-taskbar` `Taskbar` model** — so a theme switch is a single
   in-place operation: the registry's active theme changes and the taskbar is
   re-themed to match (`DesktopSession::set_theme`; the interactive light/dark
@@ -45,6 +51,22 @@ calm empty library and says why on `stderr`, never guessing at a half-parsed
 store (`AGENTS.md` §2.24, §5.4). The merged catalog is handed to the popup
 with `DesktopShell::set_library`; a `LibraryLaunch { entry }` response is
 resolved back through that catalog to the entry's bundle `Run` path.
+
+## Pinned shortcuts and icon pipeline
+
+The session resolves each stored pin for display: an `entry` pin through the
+merged catalog, or a `bundle` pin through its own bounded, fail-closed
+`AppInfo` manifest read. Bundle icon bytes are untrusted third-party input,
+so the session never decodes them in-process: they go to the **parser-sandbox
+icon-rasterisation service** (the session's own binary re-entered as a
+capability-empty worker), come back as verified RGBA pixels, and are cached
+per `(path, pixel-side)`.
+
+`PinService` manages the live store, the armed drag offer, and a dirty latch
+the loop drains to re-resolve views. It implements the window-channel bridge
+(`PinBridge`): an app's `PinBundle` request is validated and applied
+fail-closed. `resolve_pin_drop` resolves a primary release over the pin band
+as a drop gesture, pins at the drop index, and consumes the offer.
 
 ## Launch bookkeeping
 
@@ -114,19 +136,18 @@ event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
 stream, so `SessionInputRouter` fans it to the right router through
 `handle(event, &mut Compositor, &mut Taskbar)`:
 
-- while the **program-library popup is open it is modal**: every press (any
-  button), release, scroll, and key event routes to the taskbar; motion is
-  still tracked by the window manager (so its pointer stays in step) but its
-  outcome is discarded — nothing is delivered to the windows beneath;
-- otherwise a **primary press** goes to the taskbar when the pointer is over
-  the bar, and to the window manager elsewhere — never both, so a click on
-  the bar never also activates a window beneath it;
+- while the **bar's context menu** OR **program-library popup** is open it is
+  modal: every press, release, scroll, and key event routes to the taskbar;
+  motion is still tracked by the window manager but its outcome is discarded;
+- otherwise a **primary OR secondary press** goes to the taskbar iff the
+  pointer is over the bar (a secondary press there opens a pin's context
+  menu), and to the window manager elsewhere — never both;
 - **pointer motion** is fanned to both so their pointers stay in step; the
   window manager acts on it (dragging a grabbed window) and the taskbar
   refreshes its launcher hover feedback;
 - a **primary release** ends a window move-grab in the window manager;
-- a **key event** goes to the window manager, which delivers it to the focused
-  window — except while the popup is open (above);
+- a **key event** goes to the window manager — which delivers them to the focused
+  window — except while a modal surface is open (above);
 - anything else is `SessionInputResponse::Ignored`.
 
 Decorations arm a title-bar drag through `begin_move`; the embedder reads the
@@ -275,10 +296,11 @@ the real seams end to end:
 - The session **parks on a `SeatInput` wait-set member** between events —
   never a poll loop — woken by input delivery *and* by lease loss. Losing
   the seat (the typed `SeatRevoked` / `SeatNotOwner` on any drain or
-  present) tears the session down fail-loud: the reason lands on `stderr`
-  and a reserved exit code (90–97, documented in `src/run.rs`) tells the
-  spawning supervisor what happened; the owner-checked `display_release`
-  runs on every exit path after the acquire.
+  present) tears the session down fail-loud.
+- The binary branches into the **worker-role** at the very start of `main`:
+  if re-entered with the reserved role argument it serves as the parser-sandbox
+  icon-rasterisation service and nothing else, using its own image as the
+  untrusted-decode host.
 
 The manifest (`AppInfo.toml`) requests exactly `CAP_DISPLAY`,
 `CAP_INPUT_READ`, and `CAP_SHM`. The bundle's image planting and the
@@ -307,10 +329,8 @@ block (`AGENTS.md` §2.10).
 
 ## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
-The pin strip's session side (T6/T7 — the per-user pin store read/written
-under the user's identity), the notification-area and Switchboard-icon
-upgrades (T8/T9), relaying the active theme to apps over live IPC, and the
-VFS-backed asset reads for `/System/Graphics` in the `Run` binary (the
-in-memory-tested loaders and their fallbacks exist; the `Run` binary
-installs the built-in artwork until then — its `SessionFileReader` today
-serves the program-library stores).
+The notification-area and Switchboard-icon upgrades (T8/T9), relaying the
+active theme to apps over live IPC, and the VFS-backed asset reads for
+`/System/Graphics` in the `Run` binary (the in-memory-tested loaders and their
+fallbacks exist; the `Run` binary installs the built-in artwork until then — its
+`SessionFileReader` today serves the program-library and pin stores).

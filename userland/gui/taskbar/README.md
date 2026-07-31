@@ -10,10 +10,11 @@ owns:
 - **Layout** — `TaskbarConfig` (edge, thickness, per-region extents) and
   `BarLayout::compute`, which lays the bar out along its main axis: the two
   permanent leading launcher buttons (**Library**, then **Files** — fixed
-  order, never removable), the running-task list in the middle, the
-  notification-icon area packed before the clock, and the clock anchored to
-  the trailing end. All arithmetic saturates, so a degenerate screen size
-  fails closed inside the bar (`AGENTS.md` §2.9).
+  order, never removable), the **pin strip** between the launchers and tasks,
+  the running-task list in the middle, the notification-icon area packed
+  before the clock, and the clock anchored to the trailing end. All
+  arithmetic saturates, so a degenerate screen size fails closed inside the
+  bar (`AGENTS.md` §2.9).
 - **Variable DPI** — the bar's extents, thickness, and corner radius are
   *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
   takes a `tairix-geometry` `Scale` and converts the logical lengths to
@@ -36,13 +37,14 @@ owns:
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
-  button opened the popup), `OpenFiles`, the task activate/minimise rule
-  (`TaskActivated`), or a notification-icon / clock press. While the
-  program-library popup is open it is modal and consumes the whole stream —
-  presses, releases, scroll, and keys all route into the popup; a press on
-  the Library button toggles it shut and a press anywhere else dismisses it
-  (`LibraryDismissed`) without acting on what it landed on — one click does
-  one thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
+  button opened the popup), `OpenFiles`, pin activation (`ActivatePin`), the
+  task activate/minimise rule (`TaskActivated`), or a notification-icon / clock
+  press. While the context menu OR the program-library popup is open it is
+  modal and consumes the whole stream — presses, releases, scroll, and keys
+  all route into the modal surface; a press on the Library button toggles the
+  popup shut and a press anywhere else dismisses it without acting on what it
+  landed on (`LibraryDismissed`, `BarMenu::Dismissed`) — one click does one
+  thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
   region, is `Ignored` (fail closed, `AGENTS.md` §2.9).
 - **The program-library popup** — `LibraryPopup` (`plans/NEW-TASKBAR.md`
   T5), a pure model over the **resolved** `tairix-proglib` `Catalog` the
@@ -63,36 +65,34 @@ owns:
   `Taskbar::library_layout` computes the popup geometry (outward from the
   bar on every edge, clamped to the screen, chrome measured by probing the
   shared `Panel` rather than re-deriving it, §2.2).
-- **Task list** — `TaskList` tracks one entry per top-level window with the
-  familiar click-to-activate / minimise-restore rule. `set_focused` mirrors the
-  window manager's keyboard focus into the highlight (and restores the focused
-  task), so a window the user clicks directly stays in step with the bar; an
-  unknown id is rejected without disturbing the highlight (`AGENTS.md` §2.9).
-  The session glue (`tairix-desktop-session`'s `TaskBridge`) drives this from
-  the window stack.
+- **Task list and pin strip** — `TaskList` tracks one entry per top-level
+  window; `PinStrip` holds the resolved views of the user's pinned shortcuts.
+  Both use the familiar click-to-activate / minimise-restore rule. Both pins
+  and tasks are rendered as `TaskbarItem` controls. `PinView` matched running
+  windows and per-application artwork are handed in by the session.
+  `set_focused` mirrors focus into the highlight. `TaskVisibility::Closed`
+  renders a pinned application that is not running: its plate rests quiet
+  (bar-coloured) until hovered or focused.
+- **The context menu** — `BarMenu`, the bar's one right-click surface. A
+  secondary press on a pin or a library entry opens this menu. Choosing a row
+  reports a typed `TaskbarResponse` (`ActivatePin`, `Unpin`, `PinEntry`, or
+  `LibraryLaunch`); the session performs the action.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).
 - **Rendering** — `TaskbarRenderer::render` paints the bar into a
-  `tairix-raster` `Surface` using the taskbar's own theme: the two leading
-  `IconButton`s (Library is the accent-filled `Primary` invoker carrying the
-  `lib/icon` `Library` glyph, pressed-in while its popup is open; Files a
-  quiet folder glyph) draw with their live hover state, each remaining
-  region is filled with its theme colour role, then the notification-icon
-  glyphs, clock label, and task titles are drawn on top with the
-  `tairix-font` face, each in the foreground role matching its background
-  and truncated to fit its region. The surface is rectangular — the window
-  manager rounds it (see below) — and the colour/blit algebra is reused from
-  `lib/*`, never duplicated (`AGENTS.md` §2.2). The renderer is stateful so
-  it can hold a `tairix-raster` `RasterCache` of the rasterised notification
-  glyphs across frames: a glyph is converted once per tint and size and
-  re-rendered only on a theme or scale change (the SVG-first rule,
-  `AGENTS.md` §10), sharing the one cache the window manager uses for
-  cursors (`AGENTS.md` §2.2). The `Taskbar` model stays pure data.
-  `render_library` (a `&self` method, no cache of its own) paints the open
-  program-library popup — panel chrome, search field, rows with
-  hover/cursor states, placeholder, scrollbar — returning `None` when
-  closed.
+  `tairix-raster` `Surface` using the taskbar's own theme: the leading
+  `IconButton`s draw with their live hover state, then each **pin** and **task
+  slot** is drawn as a shared `TaskbarItem` (pins use the `Icon` presentation;
+  tasks `IconAndLabel`). Each item blits its artwork (rasterised by the session
+  through its sandbox) or its built-in glyph. Each remaining region is filled
+  with its theme role, then the notification icons, clock, and titles are drawn
+  on top. `pin_icon_side` exposes the exact pixel geometry so owners rasterise
+  at the drawn size. The surface is rectangular — the window manager rounds it
+  — and the colour/blit algebra is reused from `lib/*` (`AGENTS.md` §2.2).
+  The renderer holds a `RasterCache` of the rasterised notification glyphs
+  across frames. `render_library` paints the open popup, and `render_menu`
+  paints the open context menu.
 - **Notification icon set** — the renderer draws each notification glyph from
   a `tairix-icon` `IconSet`: the built-in glyph set until `set_icons` installs
   one decoded from the on-disk `/System/Graphics` SVG assets
@@ -131,7 +131,6 @@ in production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
-The pin strip (T6/T7 — with the popup's right-click *Pin to taskbar*
-landing whole beside its store), the upgraded notification area (T8/T9),
-the always-rightmost Switchboard icon (T9), and selecting a font face from
-the theme's `FontSpec` roles once installed fonts exist.
+The upgraded notification area (T8/T9), the always-rightmost Switchboard icon
+(T9), and selecting a font face from the theme's `FontSpec` roles once
+installed fonts exist.

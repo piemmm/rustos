@@ -43,6 +43,24 @@ use tairix_abi::window_ipc::{
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
 
+/// Outcome of a validated `PinBundle`, decided by
+/// [`WindowHost::pin_requested`] and mapped to the request's status
+/// reply.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PinDecision {
+    /// The bundle was pinned; the reply is `Ok`.
+    Pinned,
+    /// The bundle was already pinned; the reply is `Errno::AlreadyExists`.
+    AlreadyPinned,
+    /// The pin store has no room for another shortcut; the reply is
+    /// `Errno::NoSpace`.
+    Full,
+    /// The host declines to pin the bundle for any other reason (it does
+    /// not serve pinning, or the bundle failed the host's own checks);
+    /// the reply is `Errno::PermissionDenied`.
+    Refused,
+}
+
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes:
 /// the create reply is the longest frame, and the status frame always
 /// fits inside it.
@@ -147,6 +165,35 @@ pub trait WindowHost {
     /// authority, the desktop is tearing down); the refusal is relayed
     /// to the client and no pick is recorded.
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
+
+    /// A validated `PinBundle`: the attested `owner` of live `window`
+    /// asked to pin `path` to the taskbar (`plans/NEW-TASKBAR.md` T7).
+    ///
+    /// The default refuses every pin: a host that does not compose a
+    /// taskbar (or has not wired one up yet) must fail closed rather
+    /// than silently drop or half-apply the gesture.
+    fn pin_requested(&mut self, owner: ProcId, window: u64, path: &str) -> PinDecision {
+        let _ = (owner, window, path);
+        PinDecision::Refused
+    }
+
+    /// A validated `DragOffer`: an app-reference drag naming `path`
+    /// started in the attested `owner`'s live `window`. `true` arms the
+    /// offer for a later drop; `false` (the default) refuses — a host
+    /// with no drag-drop route must fail closed rather than pretend to
+    /// track an offer it cannot honour.
+    fn drag_offered(&mut self, owner: ProcId, window: u64, path: &str) -> bool {
+        let _ = (owner, window, path);
+        false
+    }
+
+    /// A validated `DragWithdraw`: the attested `owner` cancelled the
+    /// drag it started in its live `window`. Infallible: disarming an
+    /// offer that was never armed (including one the host itself
+    /// refused) is a no-op, so the default does nothing.
+    fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
+        let _ = (owner, window);
+    }
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -337,6 +384,15 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 status(reply, self.resize(host, caller, spec))
             }
+            WindowRequest::PinBundle { window, path } => {
+                status(reply, self.pin_bundle(host, caller, window, path.as_str()))
+            }
+            WindowRequest::DragOffer { window, path } => {
+                status(reply, self.drag_offer(host, caller, window, path.as_str()))
+            }
+            WindowRequest::DragWithdraw { window } => {
+                status(reply, self.drag_withdraw(host, caller, window))
+            }
         }
     }
 
@@ -483,6 +539,56 @@ impl<M: ShmMapper> WindowServer<M> {
         // no filesystem authority) leaves no pending pick behind.
         host.pick_requested(window_id)?;
         record.pick_pending = true;
+        Ok(())
+    }
+
+    /// Ask the host to pin `path` on behalf of `caller`'s window
+    /// `window_id`, mapping the [`PinDecision`] to the request's status
+    /// reply.
+    fn pin_bundle(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        path: &str,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        match host.pin_requested(caller, window_id, path) {
+            PinDecision::Pinned => Ok(()),
+            PinDecision::AlreadyPinned => Err(Errno::AlreadyExists),
+            PinDecision::Full => Err(Errno::NoSpace),
+            PinDecision::Refused => Err(Errno::PermissionDenied),
+        }
+    }
+
+    /// Ask the host to arm a drag offer of `path` on behalf of `caller`'s
+    /// window `window_id`.
+    fn drag_offer(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        path: &str,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        if host.drag_offered(caller, window_id, path) {
+            Ok(())
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
+    /// Tell the host to disarm `caller`'s drag offer, if any, for window
+    /// `window_id`. Always succeeds for an owned window: there is
+    /// nothing left to fail once ownership holds.
+    fn drag_withdraw(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        host.drag_withdrawn(caller, window_id);
         Ok(())
     }
 

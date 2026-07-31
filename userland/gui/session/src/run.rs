@@ -79,16 +79,20 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        load_library, parse, reap_launched, window_control_event, CliError, Command, ConcludedPick,
-        DesktopShell, DeviceInputSource, KeyboardInputSource, LaunchTable, PickConclusion,
-        SeatEventReader, SeatInputChannel, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, FILES_LABEL, FILES_RUN_PATH, USAGE,
+        build_pin_views, load_library, parse, reap_launched, window_control_event, CliError,
+        Command, ConcludedPick, DesktopShell, DeviceInputSource, IconCache, IconRasteriser,
+        KeyboardInputSource, LaunchTable, PickConclusion, PinBridge, PinService, ResolvedPin,
+        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
+        SessionPins, SessionWindows, ShellWindowHost, FILES_LABEL, FILES_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_taskbar::{TaskbarConfig, TaskbarResponse};
-    use tairix_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
+    use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::{ParserSandbox, ServeEnd};
+    use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
+    use tairix_window::{CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX};
     use tairix_wm::{Compositor, InputResponse, Rect};
 
     extern crate alloc;
@@ -326,6 +330,7 @@ mod program {
     /// Bring the desktop up and run it until the seat is lost or a fault
     /// ends it. Split from `main` so every exit path after the acquire
     /// flows back through the one owner-checked `display_release`.
+    #[allow(clippy::too_many_lines)] // One linear bring-up + serve loop; splitting it would scatter the lease lifecycle.
     fn session() -> i32 {
         // --- Display bring-up: query → shared frames → grant → configure.
         let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
@@ -403,6 +408,14 @@ mod program {
         // catalog, so the desktop comes up with a calm empty library rather
         // than dying over a settings file.
         refresh_library(&mut shell, &mut compositor);
+
+        // The user's taskbar pins: load the per-user store with the same
+        // fail-closed posture (absent → empty; unusable → empty plus a
+        // loud reason), then resolve each pin against the catalog just
+        // loaded. Edits arriving later (a context-menu unpin, a pin request
+        // or drop from an app) mark the service dirty and the loop
+        // re-resolves before its next present.
+        let mut pins = load_pin_service();
 
         // First frame: place the bar, install the pointer cursor at the
         // seat's initial pointer position, and push the whole surface once;
@@ -551,6 +564,7 @@ mod program {
                             compositor: &mut compositor,
                             windows: &mut windows,
                             picker: &mut picker,
+                            pins: &mut pins.service,
                         };
                         server.serve(
                             &mut bridge,
@@ -598,6 +612,7 @@ mod program {
                                 compositor: &mut compositor,
                                 windows: &mut windows,
                                 picker: &mut picker,
+                                pins: &mut pins.service,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -627,9 +642,10 @@ mod program {
                         &mut windows,
                         &mut server,
                         &mut sink,
-                        &mut identity,
+                        &identity,
                         &mut picker,
                         &mut launched,
+                        &mut pins,
                     );
                 }
                 loop {
@@ -646,14 +662,41 @@ mod program {
                                 &mut windows,
                                 &mut server,
                                 &mut sink,
-                                &mut identity,
+                                &identity,
                                 &mut picker,
                                 &mut launched,
+                                &mut pins,
                             );
                         }
                         Err(err) => return drain_fault(err),
                     }
                 }
+            }
+            // Bring the pin strip up to date before presenting: an edit
+            // (pin, unpin, an accepted drop or app request) re-resolves the
+            // store; otherwise only the cheap running-window matches are
+            // recomputed, and the strip is re-pushed exactly when a match
+            // changed (a pinned app launched, gained its window, or exited).
+            if pins.service.take_dirty() {
+                refresh_pins(
+                    &mut pins,
+                    &mut shell,
+                    &mut compositor,
+                    &server,
+                    &windows,
+                    &identity,
+                    &launched,
+                );
+            } else {
+                sync_pin_windows(
+                    &mut pins,
+                    &mut shell,
+                    &mut compositor,
+                    &server,
+                    &windows,
+                    &identity,
+                    &launched,
+                );
             }
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
@@ -664,12 +707,140 @@ mod program {
         }
     }
 
+    /// The session's pin state: the store-owning service plus the resolved
+    /// pins, their live running-window matches, and the sandboxed icon
+    /// pipeline (rasteriser + artwork cache), kept beside the loop so a
+    /// press resolves against exactly what the strip shows.
+    struct PinPanel {
+        service: PinService<VfsFileReader, VfsFileWriter>,
+        resolved: alloc::vec::Vec<ResolvedPin>,
+        matches: alloc::vec::Vec<Option<TaskId>>,
+        rasteriser: SandboxRasteriser,
+        icons: IconCache,
+    }
+
+    /// The production [`IconRasteriser`]: untrusted icon bytes go to the
+    /// parser-sandbox icon service — this binary re-entered as a
+    /// capability-empty worker — and only a verified pixel block comes
+    /// back. Any refusal (malformed image, crashed worker, unavailable
+    /// spawn) is `None`: the pin falls back to its class glyph.
+    struct SandboxRasteriser {
+        sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+    }
+
+    impl IconRasteriser for SandboxRasteriser {
+        fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+            rasterise_icon(&mut self.sandbox, side, icon).ok()
+        }
+    }
+
+    /// Load the user's pin store (reporting an unusable one loudly) into a
+    /// service over the production file seams, alongside the sandboxed
+    /// icon pipeline.
+    fn load_pin_service() -> PinPanel {
+        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
+        let (store, warning) = SessionPins::load(&mut VfsFileReader, home);
+        if let Some(warning) = warning {
+            let _ = tairix_rt::stderr(warning.as_bytes());
+        }
+        PinPanel {
+            service: PinService::new(VfsFileReader, VfsFileWriter, store),
+            resolved: alloc::vec::Vec::new(),
+            matches: alloc::vec::Vec::new(),
+            rasteriser: SandboxRasteriser {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+            },
+            icons: IconCache::new(),
+        }
+    }
+
+    /// Re-resolve every pin (the store or the catalog changed), recompute
+    /// the running-window matches, and push fresh views to the strip.
+    fn refresh_pins(
+        pins: &mut PinPanel,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        launched: &LaunchTable,
+    ) {
+        pins.resolved = {
+            let catalog = shell.session().taskbar().library().catalog();
+            pins.service.resolve(catalog)
+        };
+        pins.matches = pin_matches(&pins.resolved, shell, server, windows, identity, launched);
+        push_pin_views(pins, shell, compositor);
+    }
+
+    /// Recompute only the pins' running-window matches, re-pushing the
+    /// strip's views exactly when a match changed. Pure in-memory
+    /// bookkeeping — no store or manifest is re-read — so it is cheap
+    /// enough to run once per wake.
+    fn sync_pin_windows(
+        pins: &mut PinPanel,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        launched: &LaunchTable,
+    ) {
+        let matches = pin_matches(&pins.resolved, shell, server, windows, identity, launched);
+        if matches != pins.matches {
+            pins.matches = matches;
+            push_pin_views(pins, shell, compositor);
+        }
+    }
+
+    /// The running desktop task behind each resolved pin: its bundle's
+    /// desktop-launched process, when that process has a served window the
+    /// bar tracks as a task. Matching is by the launch table's attested
+    /// spawn path and the window engine's attested ownership — never a
+    /// window title or any other app-controlled data.
+    fn pin_matches(
+        resolved: &[ResolvedPin],
+        shell: &DesktopShell,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        launched: &LaunchTable,
+    ) -> alloc::vec::Vec<Option<TaskId>> {
+        resolved
+            .iter()
+            .map(|pin| {
+                let run_path = pin.run_path.as_deref()?;
+                let pid = launched.running_from(run_path)?;
+                let wm = window_of_pid(pid, server, windows, identity)?;
+                shell.tasks().task_for(wm)
+            })
+            .collect()
+    }
+
+    /// Push the resolved pins (with their live matches and artwork) into
+    /// the taskbar's strip and re-present. Artwork is rasterised at the
+    /// strip's own icon geometry through the sandboxed pipeline, served
+    /// from the cache on every later push.
+    fn push_pin_views(pins: &mut PinPanel, shell: &mut DesktopShell, compositor: &mut Compositor) {
+        let side = shell.session().taskbar().pin_icon_side(compositor.scale());
+        let views = build_pin_views(
+            &pins.resolved,
+            &pins.matches,
+            &mut VfsFileReader,
+            &mut pins.rasteriser,
+            &mut pins.icons,
+            side,
+        );
+        shell.set_pins(compositor, views);
+    }
+
     /// Route one shell outcome onward: mirror focus changes and pointer
     /// presses to the owning app over the window channel, hand the raw
     /// key record to the focused served window (or the showing picker),
     /// and spawn the launcher selection. Everything else is complete
     /// inside the shell.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    #[allow(clippy::too_many_lines)] // One linear match over every outcome; splitting it would hide the routing policy.
     fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
         outcome: tairix_desktop_session::ShellOutcome,
         key: Option<KeyInput>,
@@ -682,6 +853,7 @@ mod program {
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         launched: &mut LaunchTable,
+        pins: &mut PinPanel,
     ) {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -700,6 +872,7 @@ mod program {
                                 compositor,
                                 windows,
                                 picker,
+                                &mut pins.service,
                                 &WindowEvent::Focus {
                                     window_id: old,
                                     focused: false,
@@ -714,6 +887,7 @@ mod program {
                                 compositor,
                                 windows,
                                 picker,
+                                &mut pins.service,
                                 &WindowEvent::Focus {
                                     window_id: id,
                                     focused: true,
@@ -735,6 +909,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -753,7 +928,7 @@ mod program {
                         if let Some(concluded) = picker.handle_click(local, shell, compositor) {
                             conclude_pick(
                                 concluded, server, sink, shell, compositor, windows, identity,
-                                picker,
+                                picker, pins,
                             );
                         }
                     }
@@ -776,6 +951,7 @@ mod program {
                                 compositor,
                                 windows,
                                 picker,
+                                &mut pins.service,
                                 &WindowEvent::Focus {
                                     window_id: old,
                                     focused: false,
@@ -790,6 +966,7 @@ mod program {
                                 compositor,
                                 windows,
                                 picker,
+                                &mut pins.service,
                                 &WindowEvent::Focus {
                                     window_id: id,
                                     focused: true,
@@ -808,6 +985,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -828,6 +1006,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Focus {
                                 window_id: old,
                                 focused: false,
@@ -844,7 +1023,7 @@ mod program {
                             if let Some(concluded) = picker.handle_key(&record, shell, compositor) {
                                 conclude_pick(
                                     concluded, server, sink, shell, compositor, windows, identity,
-                                    picker,
+                                    picker, pins,
                                 );
                             }
                         }
@@ -856,6 +1035,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Key {
                                 window_id: id,
                                 key: record,
@@ -879,6 +1059,7 @@ mod program {
                                 compositor,
                                 windows,
                                 picker,
+                                &mut pins.service,
                                 &WindowEvent::Scrolled { window_id, dx, dy },
                             );
                         }
@@ -896,7 +1077,16 @@ mod program {
                     if let Some(event) =
                         window_control_event(control, window, work_area, shell, compositor, windows)
                     {
-                        deliver(server, sink, shell, compositor, windows, picker, &event);
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut pins.service,
+                            &event,
+                        );
                     }
                 }
                 // An interactive edge resize-grab settled: tell the owning app
@@ -917,6 +1107,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Resized {
                                 window_id,
                                 width_px: client.width,
@@ -943,6 +1134,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -954,8 +1146,13 @@ mod program {
                 }
                 // A primary release that ended a client pointer grab: forward it
                 // so an in-content click or drag completes (a tab or combo
-                // selection, a released scrollbar thumb).
+                // selection, a released scrollbar thumb). If the releasing
+                // window has an app-reference drag armed, the release is also
+                // the drop: landing on the bar's pin band pins the offered
+                // bundle at the drop index. The release still reaches the app
+                // either way, so its own gesture state always unwinds.
                 InputResponse::ClientPointerReleased { window, local } => {
+                    resolve_drop(window, pins, shell, compositor, windows);
                     if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
@@ -968,6 +1165,7 @@ mod program {
                             compositor,
                             windows,
                             picker,
+                            &mut pins.service,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -994,7 +1192,16 @@ mod program {
                 // desktop-launched file manager's window when one is up,
                 // let an in-flight launch finish undisturbed, and only
                 // spawn when no desktop-launched copy is running.
-                open_files(shell, compositor, server, windows, identity, launched);
+                activate_bundle(
+                    shell,
+                    compositor,
+                    server,
+                    windows,
+                    identity,
+                    launched,
+                    FILES_RUN_PATH,
+                    FILES_LABEL,
+                );
             }
             ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) => {
                 // Resolve the chosen entry's bundle through the catalog the
@@ -1010,16 +1217,45 @@ mod program {
                 // always current.
                 refresh_library(shell, compositor);
             }
+            ShellOutcome::Taskbar(TaskbarResponse::ActivatePin { index }) => {
+                // A pinned application with no live window: launch it (or
+                // raise it, if a desktop-launched copy exists that the
+                // strip's view had not caught up with yet), exactly like
+                // the Files button's idempotent open.
+                activate_pin(
+                    index, pins, shell, compositor, server, windows, identity, launched,
+                );
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::Unpin { index }) => {
+                // Remove the pin and persist; a refused edit changes
+                // nothing and says why. The dirty latch re-resolves the
+                // strip before the next present.
+                if let Err(err) = pins.service.unpin(index) {
+                    let _ = tairix_rt::stderr(
+                        alloc::format!("desktop: unpin refused: {err}\n").as_bytes(),
+                    );
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::PinEntry { entry }) => {
+                // Pin a program-library entry from its context menu and
+                // persist; a refused edit changes nothing and says why.
+                if let Err(err) = pins.service.pin_entry(entry) {
+                    let _ = tairix_rt::stderr(
+                        alloc::format!("desktop: pin refused: {err}\n").as_bytes(),
+                    );
+                }
+            }
             _ => {}
         }
     }
 
-    /// The Files button's idempotent open: raise the running file manager's
-    /// window when the desktop launched one and it has a window up; do
-    /// nothing while its launch is still in flight (no window yet — the
-    /// press is already satisfied); spawn it only when no desktop-launched
-    /// copy is alive.
-    fn open_files(
+    /// Resolve a press on the pin at `index`: launch its bundle, or raise
+    /// the running copy's window. A pin whose target no longer resolves
+    /// refuses loudly rather than spawning a guessed path.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn activate_pin(
+        index: usize,
+        pins: &PinPanel,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         server: &WindowServer<RtShmMapper>,
@@ -1027,18 +1263,80 @@ mod program {
         identity: &RtWindowIdentity,
         launched: &mut LaunchTable,
     ) {
-        if let Some(pid) = launched.running_from(FILES_RUN_PATH) {
+        let Some(pin) = pins.resolved.get(index) else {
+            return;
+        };
+        let Some(run_path) = pin.run_path.as_deref() else {
+            let _ = tairix_rt::stderr(
+                alloc::format!(
+                    "desktop: pin '{}' no longer resolves to an application\n",
+                    pin.label
+                )
+                .as_bytes(),
+            );
+            return;
+        };
+        activate_bundle(
+            shell, compositor, server, windows, identity, launched, run_path, &pin.label,
+        );
+    }
+
+    /// Resolve a drop of the armed app-reference drag: a primary release
+    /// from the offering window that lands on the bar's pin band pins the
+    /// offered bundle at the drop index; anywhere else, the gesture simply
+    /// ends (the shared, host-tested `resolve_pin_drop` policy). A refused
+    /// admission is reported loudly; the desktop carries on.
+    fn resolve_drop(
+        window: tairix_wm::WindowId,
+        pins: &mut PinPanel,
+        shell: &DesktopShell,
+        compositor: &Compositor,
+        windows: &SessionWindows,
+    ) {
+        let layout = shell.session().taskbar().layout(compositor.scale());
+        let decision = tairix_desktop_session::resolve_pin_drop(
+            &mut pins.service,
+            windows.ipc_id(window),
+            &layout,
+            shell.router().pointer(),
+        );
+        match decision {
+            None | Some(PinDecision::Pinned) => {}
+            Some(PinDecision::AlreadyPinned) => {
+                let _ = tairix_rt::stderr(b"desktop: pin drop: already pinned\n");
+            }
+            Some(PinDecision::Full) => {
+                let _ = tairix_rt::stderr(b"desktop: pin drop: the pin strip is full\n");
+            }
+            Some(PinDecision::Refused) => {
+                let _ = tairix_rt::stderr(b"desktop: pin drop refused\n");
+            }
+        }
+    }
+
+    /// An idempotent bundle activation: raise the running copy's window
+    /// when the desktop launched one and it has a window up; do nothing
+    /// while its launch is still in flight (no window yet — the press is
+    /// already satisfied); spawn only when no desktop-launched copy is
+    /// alive. The one rule behind the Files button and every pin press.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn activate_bundle(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        launched: &mut LaunchTable,
+        run_path: &str,
+        label: &str,
+    ) {
+        if let Some(pid) = launched.running_from(run_path) {
             if let Some(wm) = window_of_pid(pid, server, windows, identity) {
                 let _ = shell.raise_window(compositor, wm);
             }
             return;
         }
-        record_launch(
-            launched,
-            spawn_app(FILES_RUN_PATH.as_bytes()),
-            FILES_LABEL,
-            FILES_RUN_PATH,
-        );
+        record_launch(launched, spawn_app(run_path.as_bytes()), label, run_path);
     }
 
     /// The compositor window of the first served window owned by `pid`,
@@ -1118,6 +1416,37 @@ mod program {
         }
     }
 
+    /// The session's live file-writing seam: whole-document replacement
+    /// through the kernel VFS under the session's own kernel-attested
+    /// identity — the write-side twin of [`VfsFileReader`], used for the
+    /// user's own desktop configuration (the taskbar pin store). The
+    /// parent directory is created first (`~/Settings/Taskbar` does not
+    /// exist until the first pin), an existing directory being the
+    /// ordinary case; every permission decision is the kernel's.
+    struct VfsFileWriter;
+
+    impl SessionFileWriter for VfsFileWriter {
+        fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+            if let Some((parent, _)) = path.rsplit_once('/') {
+                if !parent.is_empty() {
+                    let ret = tairix_rt::fs_mkdir(parent.as_bytes());
+                    if ret < 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
+                        return Err(Errno::from_syscall(ret));
+                    }
+                }
+            }
+            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
+            if written != bytes.len() {
+                // The backing stopped accepting bytes: report the stall as
+                // the out-of-space refusal it is rather than leaving a
+                // silently truncated store.
+                return Err(Errno::NoSpace);
+            }
+            Ok(())
+        }
+    }
+
     /// Read `fd` from the start until end-of-file, stopping one chunk past
     /// the catalog cap (the caller treats the oversize as the whole-document
     /// refusal it is).
@@ -1193,19 +1522,30 @@ mod program {
         windows: &mut SessionWindows,
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
+        pins: &mut PinPanel,
     ) {
         let window_id = concluded.for_window;
         let event = match concluded.conclusion {
             PickConclusion::Cancelled => WindowEvent::PickCancelled { window_id },
-            PickConclusion::Chosen(path) => match delegate(&path, window_id, server, identity) {
-                Some(handle) => WindowEvent::FilePicked { window_id, handle },
-                None => {
+            PickConclusion::Chosen(path) => {
+                if let Some(handle) = delegate(&path, window_id, server, identity) {
+                    WindowEvent::FilePicked { window_id, handle }
+                } else {
                     let _ = tairix_rt::stderr(b"desktop: picker delegation refused\n");
                     WindowEvent::PickCancelled { window_id }
                 }
-            },
+            }
         };
-        deliver(server, sink, shell, compositor, windows, picker, &event);
+        deliver(
+            server,
+            sink,
+            shell,
+            compositor,
+            windows,
+            picker,
+            &mut pins.service,
+            &event,
+        );
     }
 
     /// Open `path` read-only under the session's own authority and mint a
@@ -1231,6 +1571,7 @@ mod program {
     /// Deliver one app-ward event, tearing the owner's windows down when
     /// the kernel proves the owner is gone (its event port was reclaimed,
     /// so the send finds nothing).
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn deliver<S: DirectorySource, F: FnMut() -> S>(
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
@@ -1238,6 +1579,7 @@ mod program {
         compositor: &mut Compositor,
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
+        pins: &mut dyn PinBridge,
         event: &WindowEvent,
     ) {
         let Some(owner) = server.owner_of(event.window_id()) else {
@@ -1253,6 +1595,7 @@ mod program {
                 compositor,
                 windows,
                 picker,
+                pins,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -1282,7 +1625,18 @@ mod program {
     /// until the session ends: the loop runs until the seat is lost or a
     /// fault ends it.
     fn main() -> i32 {
-        // The command surface first: a malformed (non-UTF-8) argument
+        // The sandbox worker role first, before any argument parsing or
+        // seat work: when the session spawns its icon worker it re-enters
+        // this same binary with the reserved role argument, and that
+        // capability-empty child must serve parses and nothing else.
+        if worker_role() {
+            let mut service = IconRasterService;
+            return match serve_stdio(&mut service) {
+                ServeEnd::Finished => 0,
+                ServeEnd::Failed(_) => 1,
+            };
+        }
+        // The command surface next: a malformed (non-UTF-8) argument
         // vector is a usage error, reported rather than guessed at, and
         // the reserved short-help switches never touch the seat.
         let Some(arguments) = tairix_rt::args() else {

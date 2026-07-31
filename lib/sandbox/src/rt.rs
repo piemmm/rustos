@@ -113,19 +113,19 @@ impl Launcher for RtLauncher {
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
         // Request pipe: parent writes, worker fd 0 reads.
-        let (req_read, req_write) = tairix_rt::pipe_create().map_err(errno_from)?;
+        let (request_read, request_write) = tairix_rt::pipe_create().map_err(errno_from)?;
         // Reply pipe: worker fd 1 writes, parent reads.
-        let (rep_read, rep_write) = match tairix_rt::pipe_create() {
+        let (reply_read, reply_write) = match tairix_rt::pipe_create() {
             Ok(pair) => pair,
             Err(ret) => {
-                let _ = tairix_rt::fs_close(req_read);
-                let _ = tairix_rt::fs_close(req_write);
+                let _ = tairix_rt::fs_close(request_read);
+                let _ = tairix_rt::fs_close(request_write);
                 return Err(errno_from(ret));
             }
         };
         let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
-        wires[STDIN as usize] = FdWire::Handle(req_read);
-        wires[STDOUT as usize] = FdWire::Handle(rep_write);
+        wires[STDIN as usize] = FdWire::Handle(request_read);
+        wires[STDOUT as usize] = FdWire::Handle(reply_write);
         let attach = SpawnAttach::sandbox(wires);
         let pid =
             tairix_rt::spawn_attached(&self.path, &attach, &[&self.path, WORKER_ROLE_ARG], &[]);
@@ -133,17 +133,17 @@ impl Launcher for RtLauncher {
         // parent's own copies are closed regardless of the spawn outcome,
         // so a dead worker's reply pipe reports end-of-stream instead of
         // idling on the parent's dangling write end.
-        let _ = tairix_rt::fs_close(req_read);
-        let _ = tairix_rt::fs_close(rep_write);
+        let _ = tairix_rt::fs_close(request_read);
+        let _ = tairix_rt::fs_close(reply_write);
         if pid < 0 {
-            let _ = tairix_rt::fs_close(req_write);
-            let _ = tairix_rt::fs_close(rep_read);
+            let _ = tairix_rt::fs_close(request_write);
+            let _ = tairix_rt::fs_close(reply_read);
             return Err(errno_from(pid));
         }
         Ok(RtChannel {
             pid: pid_from(pid),
-            write_fd: req_write,
-            read_fd: rep_read,
+            write_fd: request_write,
+            read_fd: reply_read,
         })
     }
 

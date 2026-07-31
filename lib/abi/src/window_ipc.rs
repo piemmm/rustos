@@ -76,6 +76,16 @@ pub const WINDOW_MAX_REQUEST: usize = WindowRequest::WIRE_LEN;
 /// Maximum encoded length, in bytes, of a window title.
 pub const WINDOW_TITLE_MAX: usize = 64;
 
+/// Maximum encoded length, in bytes, of a taskbar pin/drag bundle path.
+///
+/// Deliberately its own constant, mirroring `lib/proglib`'s catalog-engine
+/// bundle-path bound: this crate cannot import that bound without inverting
+/// the dependency layering (`lib/proglib` depends on `lib/abi`, never the
+/// reverse), so the two are independently maintained. A path longer than
+/// this can never name a real store bundle, so nothing legitimate is ever
+/// refused by the bound.
+pub const WINDOW_BUNDLE_PATH_MAX: usize = 512;
+
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
 /// The title crosses a trust boundary into the session's taskbar and
@@ -139,6 +149,75 @@ impl WindowTitle {
 impl core::fmt::Debug for WindowTitle {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("WindowTitle").field(&self.as_str()).finish()
+    }
+}
+
+/// A validated taskbar pin/drag bundle-path reference: bounded UTF-8 with
+/// no control characters and no `#` (the resource-reference fragment
+/// separator, so a pinned path can never be mistaken for one).
+///
+/// The path crosses a trust boundary into the session's pin store and drag
+/// routing, so it is validated at construction and again at decode: at
+/// least one and at most [`WINDOW_BUNDLE_PATH_MAX`] bytes, well-formed
+/// UTF-8, no control characters, and no `#` — a malformed path is refused,
+/// never sanitised.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct BundleRef {
+    bytes: [u8; WINDOW_BUNDLE_PATH_MAX],
+    len: u16,
+}
+
+impl BundleRef {
+    /// Build a bundle reference from `text`, validating length and content.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] — empty, or longer than
+    ///   [`WINDOW_BUNDLE_PATH_MAX`] bytes when UTF-8 encoded.
+    /// * [`Errno::OutOfRange`] — contains a control character or `#`.
+    pub fn new(text: &str) -> Result<Self, Errno> {
+        let len = u16::try_from(text.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        if text.is_empty() || text.len() > WINDOW_BUNDLE_PATH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if text.chars().any(|c| char::is_control(c) || c == '#') {
+            return Err(Errno::OutOfRange);
+        }
+        let mut bytes = [0u8; WINDOW_BUNDLE_PATH_MAX];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Ok(Self { bytes, len })
+    }
+
+    /// The path text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // The buffer was validated as UTF-8 at construction/decode; an
+        // impossible failure yields the empty path, never a panic.
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
+    }
+
+    /// Decode a bundle reference from its fixed-width wire image: one
+    /// length prefix's worth of validated text, with the tail required
+    /// zero.
+    fn from_wire(len: u16, bytes: &[u8; WINDOW_BUNDLE_PATH_MAX]) -> Result<Self, Errno> {
+        let len_usize = usize::from(len);
+        if len_usize == 0 || len_usize > WINDOW_BUNDLE_PATH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if bytes[len_usize..].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let text = core::str::from_utf8(&bytes[..len_usize]).map_err(|_| Errno::OutOfRange)?;
+        if text.chars().any(|c| char::is_control(c) || c == '#') {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { bytes: *bytes, len })
+    }
+}
+
+impl core::fmt::Debug for BundleRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("BundleRef").field(&self.as_str()).finish()
     }
 }
 
@@ -239,6 +318,35 @@ pub enum WindowRequest {
         /// The requesting app's own window the pick concludes to.
         window_id: u64,
     },
+    /// A user gesture in this window asked to pin `path` to the taskbar
+    /// (`plans/NEW-TASKBAR.md` T7). The session validates that the bundle
+    /// exists and is launchable and adds the pin, replying the outcome as
+    /// the shared status frame: `Errno::AlreadyExists` when the bundle is
+    /// already pinned, `Errno::NoSpace` when the pin store is full, or
+    /// `Errno::PermissionDenied` when the host refuses pinning outright.
+    PinBundle {
+        /// The requesting app's own window the gesture originated in.
+        window: u64,
+        /// The bundle path offered for pinning.
+        path: BundleRef,
+    },
+    /// An app-reference drag naming `path` started in this window; a
+    /// primary release may drop it onto the taskbar's pin strip. The
+    /// session tracks the offer against the window until it is withdrawn
+    /// ([`Self::DragWithdraw`]) or the drop concludes elsewhere.
+    DragOffer {
+        /// The requesting app's own window the drag originated in.
+        window: u64,
+        /// The bundle path being dragged.
+        path: BundleRef,
+    },
+    /// The drag started by a preceding [`Self::DragOffer`] on this window
+    /// was cancelled by the app itself (e.g. the user pressed Escape
+    /// before releasing); disarm the offer without a drop.
+    DragWithdraw {
+        /// The window whose offer is withdrawn.
+        window: u64,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -251,12 +359,25 @@ const OP_CLOSE: u16 = 3;
 const OP_PICK_FILE: u16 = 4;
 /// Wire operation discriminant of [`WindowRequest::Resize`].
 const OP_RESIZE: u16 = 5;
+/// Wire operation discriminant of [`WindowRequest::PinBundle`].
+const OP_PIN_BUNDLE: u16 = 6;
+/// Wire operation discriminant of [`WindowRequest::DragOffer`].
+const OP_DRAG_OFFER: u16 = 7;
+/// Wire operation discriminant of [`WindowRequest::DragWithdraw`].
+const OP_DRAG_WITHDRAW: u16 = 8;
+
+/// Byte offset, within the fixed frame, of a bundle-path payload's
+/// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
+/// [`WindowRequest::DragOffer`], which carry an identical window id +
+/// path shape.
+const BUNDLE_PATH_OFFSET: usize = 18;
 
 impl WindowRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
-    /// 104-byte operation block whose unused tail must be zero (`Create`
-    /// is the widest: two handles, the frame layout, and the title).
-    pub const WIRE_LEN: usize = 112;
+    /// 522-byte operation block whose unused tail must be zero (a pin/drag
+    /// bundle path is now the widest: an 8-byte window id, a 2-byte
+    /// length, and up to [`WINDOW_BUNDLE_PATH_MAX`] path bytes).
+    pub const WIRE_LEN: usize = 4 + 2 + 2 + 8 + 2 + WINDOW_BUNDLE_PATH_MAX;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -327,6 +448,18 @@ impl WindowRequest {
                 put_u32(&mut out, 36, stride_bytes);
                 out[40] = format.as_u8();
             }
+            Self::PinBundle { window, path } => {
+                put_u16(&mut out, 6, OP_PIN_BUNDLE);
+                encode_bundle_path(&mut out, window, &path);
+            }
+            Self::DragOffer { window, path } => {
+                put_u16(&mut out, 6, OP_DRAG_OFFER);
+                encode_bundle_path(&mut out, window, &path);
+            }
+            Self::DragWithdraw { window } => {
+                put_u16(&mut out, 6, OP_DRAG_WITHDRAW);
+                put_u64(&mut out, 8, window);
+            }
         }
         out
     }
@@ -345,16 +478,18 @@ impl WindowRequest {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
-    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, or a
-    ///   dirty title tail.
+    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, a dirty
+    ///   title tail, or a dirty bundle-path tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
-    ///   closed set, a malformed title, a zero window id, or a reserved
-    ///   event endpoint.
+    ///   closed set, a malformed title, a zero window id, a reserved event
+    ///   endpoint, or a bundle path that is not UTF-8 or holds a control
+    ///   character or `#`.
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
-    ///   small for one scanline, an over-long title length, or an empty
-    ///   damage rectangle.
+    ///   small for one scanline, an over-long title length, an empty
+    ///   damage rectangle, or a bundle-path length outside
+    ///   `1..=WINDOW_BUNDLE_PATH_MAX`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -439,9 +574,48 @@ impl WindowRequest {
                     format: layout.format,
                 })
             }
+            OP_PIN_BUNDLE => {
+                let (window, path) = read_bundle_path(bytes)?;
+                Ok(Self::PinBundle { window, path })
+            }
+            OP_DRAG_OFFER => {
+                let (window, path) = read_bundle_path(bytes)?;
+                Ok(Self::DragOffer { window, path })
+            }
+            OP_DRAG_WITHDRAW => {
+                reserved_zero(bytes, 16)?;
+                let window = nonzero_window_id(read_u64(bytes, 8))?;
+                Ok(Self::DragWithdraw { window })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Encode the window id + bundle-path payload [`WindowRequest::PinBundle`]
+/// and [`WindowRequest::DragOffer`] share verbatim (mirrors
+/// [`read_bundle_path`]): the path fills the rest of the fixed frame, so
+/// there is no separate reserved tail to zero.
+fn encode_bundle_path(out: &mut [u8; WindowRequest::WIRE_LEN], window: u64, path: &BundleRef) {
+    put_u64(out, 8, window);
+    put_u16(out, 16, path.len);
+    out[BUNDLE_PATH_OFFSET..BUNDLE_PATH_OFFSET + WINDOW_BUNDLE_PATH_MAX]
+        .copy_from_slice(&path.bytes);
+}
+
+/// Decode the window id + [`BundleRef`] payload [`WindowRequest::PinBundle`]
+/// and [`WindowRequest::DragOffer`] share verbatim at the same wire offsets:
+/// an owning window id followed by a length-prefixed bundle path filling
+/// the rest of the fixed frame. The one definition both request arms share,
+/// so the path bounds can never diverge between pinning and dragging.
+fn read_bundle_path(bytes: &[u8]) -> Result<(u64, BundleRef), Errno> {
+    let window = nonzero_window_id(read_u64(bytes, 8))?;
+    let path_len = read_u16(bytes, 16);
+    let mut path_bytes = [0u8; WINDOW_BUNDLE_PATH_MAX];
+    path_bytes
+        .copy_from_slice(&bytes[BUNDLE_PATH_OFFSET..BUNDLE_PATH_OFFSET + WINDOW_BUNDLE_PATH_MAX]);
+    let path = BundleRef::from_wire(path_len, &path_bytes)?;
+    Ok((window, path))
 }
 
 /// The frame-layout fields `Create` and `Resize` share verbatim at the same
@@ -905,9 +1079,10 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_create_reply, encode_create_reply, PointerAction, WindowEvent, WindowRequest,
-        WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        decode_create_reply, encode_create_reply, BundleRef, PointerAction, WindowEvent,
+        WindowRequest, WindowTitle, WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC,
+        WINDOW_TITLE_MAX,
     };
     use crate::driver::display::{DamageRect, DisplayFormat};
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
@@ -975,7 +1150,32 @@ mod tests {
     }
 
     #[test]
+    fn bundle_refs_validate_length_and_content() {
+        let widest = "p".repeat(WINDOW_BUNDLE_PATH_MAX);
+        assert_eq!(
+            BundleRef::new(&widest).expect("max length fits").as_str(),
+            widest
+        );
+        assert_eq!(BundleRef::new("").unwrap_err(), Errno::LengthOutOfRange);
+        let over = "p".repeat(WINDOW_BUNDLE_PATH_MAX + 1);
+        assert_eq!(BundleRef::new(&over).unwrap_err(), Errno::LengthOutOfRange);
+        assert_eq!(
+            BundleRef::new("/Apps/bad\x1bescape.app").unwrap_err(),
+            Errno::OutOfRange
+        );
+        assert_eq!(
+            BundleRef::new("/Apps/two\nlines.app").unwrap_err(),
+            Errno::OutOfRange
+        );
+        assert_eq!(
+            BundleRef::new("/Apps/frag#ment.app").unwrap_err(),
+            Errno::OutOfRange
+        );
+    }
+
+    #[test]
     fn requests_round_trip() {
+        let widest_path = BundleRef::new(&"p".repeat(WINDOW_BUNDLE_PATH_MAX)).expect("max path");
         for request in [
             sample_create(),
             sample_present(),
@@ -990,6 +1190,23 @@ mod tests {
                 stride_bytes: 2560,
                 format: DisplayFormat::Bgra8888,
             },
+            WindowRequest::PinBundle {
+                window: 5,
+                path: BundleRef::new("/Apps/Editor.app").expect("a valid path"),
+            },
+            WindowRequest::PinBundle {
+                window: 5,
+                path: widest_path,
+            },
+            WindowRequest::DragOffer {
+                window: 5,
+                path: BundleRef::new("/Apps/Editor.app").expect("a valid path"),
+            },
+            WindowRequest::DragOffer {
+                window: 5,
+                path: widest_path,
+            },
+            WindowRequest::DragWithdraw { window: 5 },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
@@ -1071,6 +1288,80 @@ mod tests {
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         let mut dirty = WindowRequest::PickFile { window_id: 9 }.to_le_bytes();
+        dirty[16] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn pin_and_drag_offer_refuse_malformed_ids_and_paths() {
+        let sample_path = BundleRef::new("/Apps/Editor.app").expect("a valid path");
+        for base in [
+            WindowRequest::PinBundle {
+                window: 5,
+                path: sample_path,
+            }
+            .to_le_bytes(),
+            WindowRequest::DragOffer {
+                window: 5,
+                path: sample_path,
+            }
+            .to_le_bytes(),
+        ] {
+            // A zero window id is refused.
+            let mut zero_window = base;
+            zero_window[8..16].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&zero_window),
+                Err(Errno::OutOfRange)
+            );
+
+            // A zero path length is refused.
+            let mut zero_len = base;
+            zero_len[16..18].copy_from_slice(&0u16.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&zero_len),
+                Err(Errno::LengthOutOfRange)
+            );
+
+            // A path length past the fixed block is refused.
+            let over = u16::try_from(WINDOW_BUNDLE_PATH_MAX + 1).expect("fits a u16");
+            let mut over_len = base;
+            over_len[16..18].copy_from_slice(&over.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&over_len),
+                Err(Errno::LengthOutOfRange)
+            );
+
+            // An embedded control character is refused.
+            let mut control_char = base;
+            control_char[18] = 0x01;
+            assert_eq!(
+                WindowRequest::from_bytes(&control_char),
+                Err(Errno::OutOfRange)
+            );
+
+            // Invalid UTF-8 is refused.
+            let mut invalid_utf8 = base;
+            invalid_utf8[18] = 0xFF;
+            assert_eq!(
+                WindowRequest::from_bytes(&invalid_utf8),
+                Err(Errno::OutOfRange)
+            );
+
+            // A dirty tail past the declared path length is refused.
+            let path_len = usize::from(u16::from_le_bytes([base[16], base[17]]));
+            let mut dirty_tail = base;
+            dirty_tail[18 + path_len] = 1;
+            assert_eq!(WindowRequest::from_bytes(&dirty_tail), Err(Errno::BadMagic));
+        }
+    }
+
+    #[test]
+    fn drag_withdraw_refuses_a_zero_id_and_a_dirty_tail() {
+        let mut zero_id = WindowRequest::DragWithdraw { window: 9 }.to_le_bytes();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut dirty = WindowRequest::DragWithdraw { window: 9 }.to_le_bytes();
         dirty[16] = 1;
         assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
     }

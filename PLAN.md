@@ -3110,7 +3110,7 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T5 done) —
+Full **icon-bar** build-out (staged, `in progress` — T1–T7 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
 entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
@@ -3127,11 +3127,21 @@ glyph, resolved idempotently via the session's attested `LaunchTable`) and
 the fully keyboard-navigable, searchable, `lib/controls`-composed
 program-library popup (modal at both routers, fail-closed geometry, calm
 empty states, session-loaded catalog re-read on every open), with the
-generic start menu deleted. Next (T6+): user-pinned shortcuts
-(`lib/taskpins`, pin-to-taskbar + drag — the popup's right-click *Pin*
-lands whole with its store here), the notification area, and the
-always-rightmost Switchboard system-overview surface
-(`userland/gui/switchboard` hosting the existing
+generic start menu deleted — and **as pins** (T6/T7): the `lib/taskpins`
+per-user ordered pin store (`~/Settings/Taskbar/pins.conf`, fuzzed), the
+bar's pin strip + right-click context menu (shared `TaskbarItem`/`Menu`
+controls; live Running/Active/Minimized/Closed state derived from the task
+list; per-application icon artwork rasterised in the parser sandbox — the
+new `lib/image` fail-closed PNG decoder, `lib/compress` inflate/zlib, and
+the `lib/sandbox` icon-rasterisation service — with the class glyph as the
+fail-closed fallback), the session's store ownership (one read + one write
+seam, memory adopts an edit only after the write lands), and both
+pin-creation gestures over the window channel's new `PinBundle`/`DragOffer`/
+`DragWithdraw` ops (`BundleRef`-validated; files context action + the
+`lib/browse` `BundleDrag` drag source; drops resolve through the shared
+`resolve_pin_drop` policy at the strip's drop index). Next (T8+): the
+notification area, and the always-rightmost Switchboard system-overview
+surface (`userland/gui/switchboard` hosting the existing
 `lib/controls::switchboard`, implementing `plans/desktop1.png` /
 `plans/desktop2a.png` — where the session controls, the light/dark toggle,
 and System Settings are reached, deliberately not the library).
@@ -3175,9 +3185,10 @@ Shipped (headless-testable, model + renderer over injected seams):
     profile fix (`pie_build::cross_compile_pie_elf` reading `ImageProfile`)
     ships `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (permanent Library/Files launchers + program-library
-  popup + running-task list + clock/notification area) and
-  `userland/gui/session` glue (theme registry, taskbar model, catalog
-  loading/merging, launch table, `DesktopShell` event loop / `TaskBridge`).
+  popup + pin strip with its context menu + running-task list +
+  clock/notification area) and `userland/gui/session` glue (theme registry,
+  taskbar model, catalog loading/merging, pin-store ownership + sandboxed
+  icon pipeline, launch table, `DesktopShell` event loop / `TaskBridge`).
 - Two default apps (filesystem browser, terminal emulator) — each a
   host-tested model + renderer plus a live store bundle served over the
   window channel (`plans/APPWIN.md` AW3/AW4; the AW4 `Stream` wait source).

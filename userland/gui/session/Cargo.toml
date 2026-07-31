@@ -29,6 +29,15 @@ tairix-wm = { path = "../wm", version = "=0.0.0" }
 # merges them through the one shared `merge`, and resolves a popup launch's
 # `EntryId` back to its bundle path. The bar itself never touches the VFS.
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
+# The pinned-shortcut store engine (plans/NEW-TASKBAR.md T6): the session
+# reads and rewrites the user's own `~/Settings/Taskbar/pins.conf` under the
+# user's identity and resolves each pin for the bar. The bar itself never
+# touches the VFS.
+tairix-taskpins = { path = "../../../lib/taskpins", version = "=0.0.0" }
+# The shared pixel surface: a pin's sandbox-rasterised icon artwork is
+# rebuilt into the premultiplied surface the taskbar's shared control blits
+# (one colour-algebra home).
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # The one logical->physical UI scale (§10): the picker resolves the theme's
 # authored text sizes to physical cell heights through `Scale`, the same shared
 # conversion the window manager and taskbar use.
@@ -105,6 +114,12 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 # runtime `ipc_call` transport; the base dependency stays host-neutral so host
 # tests inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The parser-sandbox seam: untrusted bundle icon bytes (SVG or PNG) are
+# decoded and rasterised in a capability-empty worker process (the session's
+# own binary re-entered in worker mode via the `program` feature), never in
+# the session's address space. Host tests fake the `IconRasteriser` seam
+# instead.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
 
 [lints]
 workspace = true

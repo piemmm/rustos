@@ -32,7 +32,8 @@ pub mod server;
 
 pub use client::{event_endpoint_for, EventSource, WindowClient, WindowEvents, WindowTransport};
 pub use server::{
-    CallerIdentity, EventSink, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
+    CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
+    WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

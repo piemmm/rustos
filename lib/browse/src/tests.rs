@@ -3584,6 +3584,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     for command in [
         ContextCommand::Open,
         ContextCommand::OpenWith,
+        ContextCommand::PinToTaskbar,
         ContextCommand::Rename,
         ContextCommand::Cut,
         ContextCommand::Copy,
@@ -3600,12 +3601,14 @@ fn the_context_menu_enables_the_item_commands_on_a_directory() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
     // A directory descends on Open; every selection-scoped command is offered,
-    // but Open With… is not — a directory has no application to choose.
+    // but Open With… is not — a directory has no application to choose — and
+    // neither is Pin to taskbar — only a bundle names a pinnable application.
     let browser = Browser::open_root(activation_source()).expect("root");
     assert_eq!(browser.selected_name(), Some("Docs"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
+    assert!(!menu.is_enabled(ContextCommand::PinToTaskbar));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -3619,16 +3622,23 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
 
     // A bundle is a selection like any other: Open launches it, and the
     // selection-scoped commands apply. Open With… is not offered — a bundle
-    // launches itself, so there is no application to choose for it.
+    // launches itself, so there is no application to choose for it — while
+    // Pin to taskbar is offered exactly here: a bundle names an installed
+    // application the session can pin.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(1).expect("select Editor.app");
     assert!(browser.selected_entry().expect("bundle").is_bundle());
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
+    assert!(menu.is_enabled(ContextCommand::PinToTaskbar));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Properties));
     assert!(menu.is_enabled(ContextCommand::Delete));
+    // The drawn row's text: a plain label and no keyboard equivalent — the
+    // command is pointer-only, exactly like Open With….
+    assert_eq!(ContextCommand::PinToTaskbar.label(), "Pin to taskbar");
+    assert_eq!(ContextCommand::PinToTaskbar.shortcut(), "");
 }
 
 #[test]
@@ -3640,8 +3650,10 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert_eq!(browser.selected_name(), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
-    // Open With… is offered only for a regular file, so it is enabled here.
+    // Open With… is offered only for a regular file, so it is enabled here;
+    // Pin to taskbar is offered only for a bundle, so it is not.
     assert!(menu.is_enabled(ContextCommand::OpenWith));
+    assert!(!menu.is_enabled(ContextCommand::PinToTaskbar));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -3666,14 +3678,17 @@ fn context_commands_list_covers_every_variant_once() {
 
     // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
     // exactly once, in a stable order. Open With… joined with its FM6b chooser
-    // verb; Delete now joins with FM9-c's confirm-and-remove verb. New Folder
-    // stays absent — the drawn menu has no verb to invoke for it (it is a
-    // toolbar write tool), so it would be speculative surface here.
+    // verb; Delete now joins with FM9-c's confirm-and-remove verb; Pin to
+    // taskbar joins with the taskbar-pin stage's window-channel verb, beside
+    // the launch commands it belongs with. New Folder stays absent — the drawn
+    // menu has no verb to invoke for it (it is a toolbar write tool), so it
+    // would be speculative surface here.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
             ContextCommand::OpenWith,
+            ContextCommand::PinToTaskbar,
             ContextCommand::Rename,
             ContextCommand::Cut,
             ContextCommand::Copy,

@@ -22,8 +22,8 @@
 //!   wires the syscall-backed machine store and, when the environment names
 //!   a home, the caller's own overlay; tests wire in-memory fixtures).
 //! * [`Bundles`] — list a directory and read a bundle's `AppInfo` manifest,
-//!   bounded by [`APPINFO_READ_MAX`] (the `Run` binary wires the secured
-//!   VFS; tests wire an in-memory tree).
+//!   bounded by [`tairix_abi::APPINFO_WIRE_MAX`] (the `Run` binary wires the
+//!   secured VFS; tests wire an in-memory tree).
 //! * [`Output`] — write listings to standard output and emit the fd-3
 //!   `stdinfo` advisory records (best-effort, never load-bearing).
 //! * `HelpSource` (from `lib/help`) — the tool's own bundle `Help/` tree,
@@ -63,8 +63,7 @@ use core::fmt;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::{
-    AppInfoHeader, Errno, LibraryCategory, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE, USER_APP_STORE,
+    AppInfoHeader, Errno, LibraryCategory, BUNDLE_SUFFIX, SYSTEM_APP_STORE, USER_APP_STORE,
 };
 use tairix_help::{own_short_help, HelpSource};
 use tairix_proglib::{
@@ -78,14 +77,6 @@ pub const OWN_WORD: &str = "applib";
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `applib`'s own Help tree is unavailable.
 pub const USAGE: &str = "usage: applib [list [--category <folder>]]\n       applib add <bundle> [--category <folder>] [--name <name>] [--icon <asset>] [--user]\n       applib remove <id|bundle> [--user]\n       applib hide <id> [--user]\n       applib show <id> [--user]\n       applib rescan [--user]";
-
-/// Upper bound, in bytes, on a bundle's `AppInfo` manifest file: the fixed
-/// header plus the largest legal capability and MIME body. A larger file
-/// cannot be a valid manifest, so the seam refuses it before a byte of it
-/// is decoded.
-pub const APPINFO_READ_MAX: usize = AppInfoHeader::WIRE_LEN
-    + APPINFO_MAX_CAPABILITIES as usize * 2
-    + APPINFO_MAX_MIME as usize * MIME_ENTRY_LEN;
 
 /// Depth bound on the `rescan` store walk. Bundles may be filed in nested
 /// plain subdirectories, but a pathological tree must not recurse without
@@ -309,7 +300,7 @@ pub trait Bundles {
 
     /// Read the `AppInfo` manifest inside the bundle directory at `bundle`,
     /// or `None` when no manifest file exists there. The read is bounded:
-    /// a file larger than [`APPINFO_READ_MAX`] is refused with
+    /// a file larger than [`tairix_abi::APPINFO_WIRE_MAX`] is refused with
     /// [`Errno::LengthOutOfRange`], never half-read.
     ///
     /// # Errors

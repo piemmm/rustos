@@ -1,17 +1,25 @@
 //! Painting the taskbar's regions into a pixel [`Surface`].
 //!
 //! [`TaskbarRenderer::render`] turns the taskbar's computed [`BarLayout`] and
-//! live state into a premultiplied-alpha [`Surface`] sized to the bar, filling
-//! each region with a colour from the active theme's [`Palette`] and drawing
-//! the clock label and task titles on top with the shared [`BitmapFont`]. The
+//! live state into a premultiplied-alpha [`Surface`] sized to the bar. The
 //! two permanent leading launchers are the shared `lib/controls`
 //! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
-//! their live hover/pressed
-//! state. The surface is the window manager's to place and round: the taskbar
-//! paints a *rectangular* buffer and the compositor applies
+//! their live hover/pressed state; every pinned shortcut and running task is
+//! one shared [`TaskbarItem`] — an icon-only slot for a pin, an icon+title
+//! plate for a task — so the bar's application buttons have exactly one
+//! visual recipe. A pin's per-application artwork (rasterised by the
+//! session) is blitted through the control; a running task whose window
+//! matches a pin borrows that same artwork, so one application shows one
+//! icon everywhere. The surface is the window manager's to place and round:
+//! the taskbar paints a *rectangular* buffer and the compositor applies
 //! [`BarLayout::corner_radius`] through its single anti-aliased
 //! rounded-corner path, exactly as it rounds windows. There is no rounding —
 //! and no colour algebra — here.
+//!
+//! [`TaskbarRenderer::render_menu`] paints the open context menu: the shared
+//! `lib/controls` [`Menu`](tairix_controls::Menu) plate at the geometry
+//! [`Taskbar::menu_layout`] computed, presented by the window manager as its
+//! own small window above the bar.
 //!
 //! [`TaskbarRenderer::render_library`] paints the open program-library popup:
 //! the shared [`Panel`](tairix_controls::Panel) chrome anchored back at the
@@ -30,6 +38,7 @@
 //! glyph resolved from the icon's asset id, rasterised to the slot size and
 //! composited through `lib/raster`'s single blit path.
 
+use tairix_controls::{ControlState, PointerState, TaskVisibility, TaskbarItem};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconSet};
@@ -39,11 +48,8 @@ use tairix_theme::{Palette, TextRole, Theme};
 use crate::layout::BarLayout;
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::NotificationArea;
+use crate::pins::PinView;
 use crate::taskbar::Taskbar;
-use crate::tasks::TaskList;
-
-/// Padding in pixels between a task slot's edge and its title text.
-const LABEL_PADDING: u32 = 4;
 
 /// Padding in pixels between a notification slot's edge and its icon glyph.
 const ICON_PADDING: u32 = 4;
@@ -153,16 +159,96 @@ impl TaskbarRenderer {
             );
         }
 
-        paint_body(
+        let strip = taskbar.pins();
+        for (index, slot) in layout.pins.iter().enumerate() {
+            if slot.is_empty() {
+                continue;
+            }
+            let Some(item) = strip.item(index, taskbar.tasks()) else {
+                continue;
+            };
+            let artwork = strip.get(index).and_then(PinView::artwork);
+            item.render(
+                &mut surface,
+                local_rect(*slot, origin),
+                scale,
+                theme,
+                fonts.text,
+                artwork,
+            );
+        }
+
+        for (index, (slot, entry)) in layout
+            .tasks
+            .iter()
+            .zip(taskbar.tasks().entries())
+            .enumerate()
+        {
+            if slot.is_empty() {
+                continue;
+            }
+            let visibility = if taskbar.tasks().focused() == Some(entry.id) {
+                TaskVisibility::Active
+            } else if entry.minimised {
+                TaskVisibility::Minimized
+            } else {
+                TaskVisibility::Running
+            };
+            let pointer = if taskbar.task_hover() == Some(index) {
+                PointerState::Hover
+            } else {
+                PointerState::None
+            };
+            // A running window that matches a pin borrows the pin's identity
+            // — its class glyph and per-application artwork — so one
+            // application shows one icon on the bar.
+            let pin = strip.view_for_window(entry.id);
+            let icon = pin.map_or(IconKind::AppBundle, PinView::icon);
+            let artwork = pin.and_then(PinView::artwork);
+            TaskbarItem::new(entry.title.clone(), icon)
+                .with_visibility(visibility)
+                .with_state(ControlState::idle().with_pointer(pointer))
+                .render(
+                    &mut surface,
+                    local_rect(*slot, origin),
+                    scale,
+                    theme,
+                    fonts.text,
+                    artwork,
+                );
+        }
+
+        paint_trailing(
             &mut surface,
             &layout,
-            taskbar.tasks(),
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
             fonts,
             &mut icons,
         );
+        Some(surface)
+    }
+
+    /// Paint the open context menu into a [`Surface`] using the taskbar's
+    /// own theme.
+    ///
+    /// Returns `None` when the menu is closed (there is nothing to draw) or
+    /// when its pixel dimensions cannot be allocated, so the caller fails
+    /// closed rather than panicking. The window manager places the returned
+    /// surface above the bar and rounds it with
+    /// [`MenuLayout::corner_radius`](crate::menu::MenuLayout::corner_radius).
+    #[must_use]
+    pub fn render_menu(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let layout = taskbar.menu_layout(scale)?;
+        let theme = taskbar.theme();
+        let fonts = PanelFonts::resolve(theme, scale);
+        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
+        let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+        taskbar
+            .menu()
+            .control()
+            .render(&mut surface, local, scale, theme, fonts.text);
         Some(surface)
     }
 
@@ -227,7 +313,6 @@ impl TaskbarRenderer {
                 placeholder,
                 theme.palette().on_surface_muted.into(),
                 font,
-                Align::Centre,
             );
         }
 
@@ -266,13 +351,11 @@ impl PanelFonts {
     }
 }
 
-/// Fill the task, notification, and clock regions of an already-created bar
+/// Fill the notification and clock regions of an already-created bar
 /// surface.
-#[allow(clippy::too_many_arguments)]
-fn paint_body(
+fn paint_trailing(
     surface: &mut Surface,
     layout: &BarLayout,
-    tasks: &TaskList,
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
@@ -280,25 +363,6 @@ fn paint_body(
     icons: &mut IconContext<'_>,
 ) {
     let origin = layout.bar.origin;
-    for (slot, entry) in layout.tasks.iter().zip(tasks.entries()) {
-        let focused = tasks.focused() == Some(entry.id);
-        fill_region(
-            surface,
-            origin,
-            *slot,
-            task_fill(palette, focused, entry.minimised),
-        );
-        draw_label(
-            surface,
-            origin,
-            *slot,
-            &entry.title,
-            task_text(palette, focused, entry.minimised),
-            fonts.text,
-            Align::Leading,
-        );
-    }
-
     for (slot, icon) in layout.notifications.iter().zip(notifications.icons()) {
         draw_icon(
             surface,
@@ -317,51 +381,11 @@ fn paint_body(
         clock_label,
         palette.on_surface.into(),
         fonts.clock,
-        Align::Centre,
     );
 }
 
-/// Where a label sits along the main axis of its region.
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum Align {
-    /// Padded in from the leading (left/top) edge — used for task titles.
-    Leading,
-    /// Centred within the region — used for the clock and the popup's calm
-    /// placeholder.
-    Centre,
-}
-
-/// The fill colour for a task slot.
-///
-/// The focused, non-minimised task takes the accent so the active window
-/// stands out; a minimised task recedes into the bar background; every other
-/// running task gets the plain surface colour, which the palette guarantees
-/// reads as distinct from the raised bar background.
-fn task_fill(palette: &Palette, focused: bool, minimised: bool) -> Color {
-    if minimised {
-        palette.surface_raised.into()
-    } else if focused {
-        palette.accent.into()
-    } else {
-        palette.surface.into()
-    }
-}
-
-/// The title colour for a task slot, matching the foreground role of its
-/// [`task_fill`] background so the text stays legible.
-fn task_text(palette: &Palette, focused: bool, minimised: bool) -> Color {
-    if minimised {
-        palette.on_surface_muted.into()
-    } else if focused {
-        palette.on_accent.into()
-    } else {
-        palette.on_surface.into()
-    }
-}
-
-/// Draw `text` inside the screen-space `rect`, clipped to it, vertically
-/// centred and aligned along the main axis per `align`. Text wider than the
-/// region is truncated to the characters that fit.
+/// Draw `text` centred inside the screen-space `rect`, clipped to it. Text
+/// wider than the region is truncated to the characters that fit.
 fn draw_label(
     surface: &mut Surface,
     origin: Point,
@@ -369,26 +393,17 @@ fn draw_label(
     text: &str,
     color: Color,
     font: BitmapFont,
-    align: Align,
 ) {
     if rect.is_empty() || text.is_empty() {
         return;
     }
-    let inset = match align {
-        Align::Leading => LABEL_PADDING,
-        Align::Centre => 0,
-    };
-    let usable = rect.width.saturating_sub(inset.saturating_mul(2));
-    let fitted = font.truncate_to_width(text, usable);
+    let fitted = font.truncate_to_width(text, rect.width);
     if fitted.is_empty() {
         return;
     }
 
     let text_width = font.text_width(fitted);
-    let x_offset = match align {
-        Align::Leading => inset,
-        Align::Centre => rect.width.saturating_sub(text_width) / 2,
-    };
+    let x_offset = rect.width.saturating_sub(text_width) / 2;
     let y_offset = rect.height.saturating_sub(font.glyph_height()) / 2;
     let x = rect
         .left()
@@ -446,17 +461,6 @@ fn draw_icon(
 /// (`network`) the icon library knows. A dotless id maps to itself.
 fn asset_key(asset: &str) -> &str {
     asset.rsplit('.').next().unwrap_or(asset)
-}
-
-/// Fill a screen-space `rect` into the bar-local surface, offsetting by the
-/// bar's `origin`. Empty rectangles paint nothing.
-fn fill_region(surface: &mut Surface, origin: Point, rect: Rect, color: Color) {
-    if rect.is_empty() {
-        return;
-    }
-    let x = local(rect.left(), origin.x);
-    let y = local(rect.top(), origin.y);
-    surface.fill_rect(x, y, rect.width, rect.height, color);
 }
 
 /// Translate a screen-space rectangle into surface-local space.

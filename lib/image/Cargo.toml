@@ -1,0 +1,25 @@
+[package]
+name = "tairix-image"
+description = "First-party TAIRiX raster-image decoding: a complete, fail-closed PNG decoder for untrusted bundle icons (§3 `lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# PNG's `IDAT` chunk stream is zlib-wrapped DEFLATE (RFC 1950/1951); the
+# decode-only `inflate`/`zlib` modules there are the crate's one definition
+# of that foreign-format interoperability, so PNG decoding never carries a
+# second copy of it.
+tairix-compress = { path = "../compress", version = "=0.0.0" }
+
+[dev-dependencies]
+# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed" }

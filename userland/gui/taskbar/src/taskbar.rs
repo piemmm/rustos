@@ -14,16 +14,22 @@
 //! it, and the embedder drains it with [`take_repaint`](Taskbar::take_repaint)
 //! to re-present exactly when something changed.
 
-use tairix_controls::{ControlRole, IconButton, PointerState};
-use tairix_geometry::{Point, Scale};
+use alloc::vec::Vec;
+
+use tairix_controls::{ControlRole, IconButton, PointerState, TaskbarItem, TaskbarPresentation};
+use tairix_font::BitmapFont;
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_theme::Theme;
+use tairix_proglib::EntryId;
+use tairix_theme::{TextRole, Theme};
 
 use crate::clock::Clock;
 use crate::edge::Edge;
 use crate::layout::{BarLayout, Hit};
 use crate::library::{LibraryLayout, LibraryPopup};
+use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::NotificationArea;
+use crate::pins::{PinStrip, PinView};
 use crate::tasks::TaskList;
 
 /// Where the taskbar sits and how big each region is.
@@ -48,6 +54,8 @@ pub struct TaskbarConfig {
     pub thickness: u32,
     /// Main-axis length of each leading launcher button (Library, Files).
     pub launcher_extent: u32,
+    /// Main-axis length of each pinned-shortcut slot.
+    pub pin_extent: u32,
     /// Main-axis length of each task slot.
     pub task_extent: u32,
     /// Main-axis length of each notification icon.
@@ -72,6 +80,7 @@ impl TaskbarConfig {
             screen_height: self.screen_height,
             thickness: scale.scale_length(self.thickness),
             launcher_extent: scale.scale_length(self.launcher_extent),
+            pin_extent: scale.scale_length(self.pin_extent),
             task_extent: scale.scale_length(self.task_extent),
             icon_extent: scale.scale_length(self.icon_extent),
             clock_extent: scale.scale_length(self.clock_extent),
@@ -88,6 +97,7 @@ impl TaskbarConfig {
             screen_height,
             thickness: 40,
             launcher_extent: 48,
+            pin_extent: 48,
             task_extent: 160,
             icon_extent: 24,
             clock_extent: 80,
@@ -111,7 +121,10 @@ pub struct Taskbar {
     library_button: IconButton,
     files_button: IconButton,
     library: LibraryPopup,
+    pins: PinStrip,
+    menu: BarMenu,
     tasks: TaskList,
+    task_hover: Option<usize>,
     notifications: NotificationArea,
     clock: Clock,
     repaint: bool,
@@ -131,7 +144,10 @@ impl Taskbar {
             library_button: IconButton::new(IconKind::Library, ControlRole::Primary),
             files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral),
             library: LibraryPopup::new(),
+            pins: PinStrip::new(),
+            menu: BarMenu::new(),
             tasks: TaskList::new(),
+            task_hover: None,
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             repaint: false,
@@ -178,6 +194,37 @@ impl Taskbar {
     /// resolved catalog ([`LibraryPopup::set_catalog`]).
     pub fn library_mut(&mut self) -> &mut LibraryPopup {
         &mut self.library
+    }
+
+    /// The pin strip.
+    #[must_use]
+    pub const fn pins(&self) -> &PinStrip {
+        &self.pins
+    }
+
+    /// Replace the pin strip's resolved views — how the session hands the
+    /// bar its pins (and their running-window matches) whenever the store,
+    /// the catalog, or the launch table changes.
+    pub fn set_pins(&mut self, pins: Vec<PinView>) {
+        self.pins.set_pins(pins);
+        self.repaint = true;
+    }
+
+    /// The bar's context menu (open or closed).
+    #[must_use]
+    pub const fn menu(&self) -> &BarMenu {
+        &self.menu
+    }
+
+    /// The bar's context menu, mutably (input routing only).
+    pub(crate) fn menu_mut(&mut self) -> &mut BarMenu {
+        &mut self.menu
+    }
+
+    /// The hovered task-slot index, if the pointer rests on one.
+    #[must_use]
+    pub const fn task_hover(&self) -> Option<usize> {
+        self.task_hover
     }
 
     /// The running-task list.
@@ -237,14 +284,15 @@ impl Taskbar {
         self.repaint = true;
     }
 
-    /// Compute the bar's geometry for its current task and icon counts at the
-    /// desktop `scale` (the compositor's output density).
+    /// Compute the bar's geometry for its current pin, task, and icon counts
+    /// at the desktop `scale` (the compositor's output density).
     #[must_use]
     pub fn layout(&self, scale: Scale) -> BarLayout {
         BarLayout::compute(
             &self.config,
             self.theme.metrics().taskbar_corner_radius,
             scale,
+            self.pins.len(),
             self.tasks.len(),
             self.notifications.len(),
         )
@@ -276,6 +324,63 @@ impl Taskbar {
         )
     }
 
+    /// Compute the context menu's geometry, or `None` while it is closed.
+    ///
+    /// The row text is measured with the same body font the renderer paints
+    /// with (one role, one scale), so the width the layout reserves and the
+    /// width the paint fills can never disagree.
+    #[must_use]
+    pub fn menu_layout(&self, scale: Scale) -> Option<MenuLayout> {
+        let font = BitmapFont::for_role(self.theme.fonts(), TextRole::Body, scale);
+        self.menu.layout(
+            self.config.edge,
+            self.config.screen_width,
+            self.config.screen_height,
+            scale,
+            &self.theme,
+            font,
+        )
+    }
+
+    /// The pixel side a pinned shortcut's icon paints at, at the desktop
+    /// `scale` — the session rasterises per-application artwork at exactly
+    /// this size, through the same control geometry the renderer paints
+    /// with, so the artwork and the slot can never disagree.
+    #[must_use]
+    pub fn pin_icon_side(&self, scale: Scale) -> u32 {
+        let scaled = self.config.scaled(scale);
+        let bounds = Rect::new(0, 0, scaled.pin_extent.max(1), scaled.thickness.max(1));
+        let font = BitmapFont::for_role(self.theme.fonts(), TextRole::Body, scale);
+        TaskbarItem::new("", IconKind::AppBundle)
+            .with_presentation(TaskbarPresentation::Icon)
+            .icon_side(bounds, scale, &self.theme, font)
+    }
+
+    /// Open the context menu for the pin at `index`, anchored at its slot.
+    pub(crate) fn open_pin_menu(&mut self, index: usize, anchor: Rect) {
+        let running = self
+            .pins
+            .get(index)
+            .and_then(PinView::window)
+            .is_some_and(|id| self.tasks.entries().iter().any(|entry| entry.id == id));
+        self.menu.open(MenuSubject::Pin { index, running }, anchor);
+        self.repaint = true;
+    }
+
+    /// Open the context menu for a program-library entry row, anchored at
+    /// that row.
+    pub(crate) fn open_entry_menu(&mut self, entry: EntryId, anchor: Rect) {
+        let pinned = self.pins.position_of_entry(&entry);
+        self.menu.open(MenuSubject::Entry { entry, pinned }, anchor);
+        self.repaint = true;
+    }
+
+    /// Close the context menu without acting.
+    pub(crate) fn close_menu(&mut self) {
+        self.menu.close();
+        self.repaint = true;
+    }
+
     /// Open the program-library popup (fresh: search cleared, folders
     /// expanded, cursor at the top) and press the Library button in.
     pub(crate) fn open_library(&mut self) {
@@ -296,8 +401,9 @@ impl Taskbar {
         self.repaint = true;
     }
 
-    /// Track the pointer for the leading buttons' hover feedback, latching a
-    /// repaint when either button's visual state changes.
+    /// Track the pointer for the bar's hover feedback — the leading
+    /// buttons, the pin slots, and the task slots — latching a repaint when
+    /// any visual state changes.
     ///
     /// While the popup is open the Library button stays visually pressed
     /// (it is "held open"); the Files button hovers as normal.
@@ -317,6 +423,13 @@ impl Taskbar {
         };
         self.repaint |= set_pointer(&mut self.library_button, library_pointer);
         self.repaint |= set_pointer(&mut self.files_button, files_pointer);
+        let pin_hover = layout.pins.iter().position(|slot| slot.contains(point));
+        self.repaint |= self.pins.set_hover(pin_hover);
+        let task_hover = layout.tasks.iter().position(|slot| slot.contains(point));
+        if self.task_hover != task_hover {
+            self.task_hover = task_hover;
+            self.repaint = true;
+        }
     }
 }
 

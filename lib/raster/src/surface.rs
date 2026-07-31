@@ -42,6 +42,35 @@ impl Surface {
         })
     }
 
+    /// Build a surface from row-major, **straight**-alpha RGBA8 bytes (4
+    /// bytes per pixel — the shape a decoded raster image, e.g.
+    /// `tairix_image::RasterImage`, carries), premultiplying each pixel
+    /// through the crate's one conversion path ([`Color::premultiply`])
+    /// rather than duplicating that arithmetic here.
+    ///
+    /// Returns `None` if `rgba.len()` is not exactly `width * height * 4`
+    /// (checked throughout, so an absurd `width`/`height` fails closed
+    /// rather than panicking), the same failure contract [`Surface::new`]
+    /// gives for a pixel count that could never be allocated.
+    #[must_use]
+    pub fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
+        let count = pixel_count(width, height)?;
+        let expected_len = count.checked_mul(4)?;
+        if rgba.len() != expected_len {
+            return None;
+        }
+        let (quads, _remainder) = rgba.as_chunks::<4>();
+        let pixels = quads
+            .iter()
+            .map(|&[r, g, b, a]| Color::rgba(r, g, b, a).premultiply())
+            .collect();
+        Some(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     /// Surface width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {

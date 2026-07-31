@@ -21,12 +21,12 @@ use tairix_theme::{Contrast, Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TraySignal,
-    TraySignalAction,
+    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
+    TaskbarPresentation, TraySignal, TraySignalAction,
 };
 use crate::state::{
-    ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
-    ProgressValue, RecoveryState, ValidationState,
+    ActivityState, AuthorityState, ControlRole, ControlState, PointerState, PressureKind,
+    PressureState, ProgressValue, RecoveryState, ValidationState,
 };
 
 fn font() -> BitmapFont {
@@ -247,7 +247,7 @@ fn task_surface(item: &TaskbarItem, theme: &Theme, scale: Scale) -> Surface {
     );
     let (w, h) = (w.max(TW), h.max(TH));
     let mut s = Surface::new(w, h).expect("surface");
-    item.render(&mut s, Rect::new(0, 0, w, h), scale, theme, font());
+    item.render(&mut s, Rect::new(0, 0, w, h), scale, theme, font(), None);
     s
 }
 
@@ -347,6 +347,127 @@ fn taskbar_item_high_contrast_and_scale_render() {
         TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Active);
     let s = task_surface(&item, &hc, scale2());
     assert!(has_pixel(&s, premul(hc.palette().on_surface)));
+}
+
+/// A square pinned-shortcut slot.
+const PS: u32 = 40;
+
+fn pin_item() -> TaskbarItem {
+    TaskbarItem::new("Editor", IconKind::AppBundle).with_presentation(TaskbarPresentation::Icon)
+}
+
+#[test]
+fn taskbar_item_icon_presentation_centres_a_plate_sized_glyph() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, PS, PS);
+    let wide = Rect::new(0, 0, PS * 2, PS * 2);
+    let labelled = TaskbarItem::new("Editor", IconKind::AppBundle);
+    let icon_only = pin_item();
+    // The compact look sizes the glyph off the plate (it grows with the
+    // slot); the labelled look stays bound to the text line regardless.
+    assert!(
+        icon_only.icon_side(wide, Scale::ONE, &theme, font())
+            > icon_only.icon_side(bounds, Scale::ONE, &theme, font())
+    );
+    assert_eq!(
+        labelled.icon_side(wide, Scale::ONE, &theme, font()),
+        labelled.icon_side(bounds, Scale::ONE, &theme, font())
+    );
+    let mut s = Surface::new(PS, PS).expect("surface");
+    icon_only.render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+    // Glyph ink sits in the centre of the plate.
+    assert!(region_has(
+        &s,
+        (PS / 3, PS - PS / 3),
+        (PS / 3, PS - PS / 3),
+        premul(theme.palette().on_surface)
+    ));
+}
+
+#[test]
+fn taskbar_item_icon_side_is_zero_for_degenerate_bounds() {
+    let theme = Theme::dark();
+    assert_eq!(
+        pin_item().icon_side(Rect::new(-4, -4, 0, 0), Scale::ONE, &theme, font()),
+        0
+    );
+}
+
+#[test]
+fn taskbar_item_artwork_replaces_the_builtin_glyph_in_both_presentations() {
+    let theme = Theme::dark();
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    // A compact square pin slot and a wide labelled task slot both paint the
+    // owner-supplied artwork in place of the built-in class glyph.
+    let cases = [
+        (pin_item(), Rect::new(0, 0, PS, PS), PS, PS),
+        (
+            TaskbarItem::new("Editor", IconKind::AppBundle),
+            Rect::new(0, 0, TW, TH),
+            TW,
+            TH,
+        ),
+    ];
+    for (item, bounds, w, h) in cases {
+        let side = item.icon_side(bounds, Scale::ONE, &theme, font());
+        assert!(side > 0);
+        let art = Surface::filled(side, side, magenta).expect("artwork");
+        let mut s = Surface::new(w, h).expect("surface");
+        item.render(&mut s, bounds, Scale::ONE, &theme, font(), Some(&art));
+        assert!(has_pixel(&s, magenta));
+    }
+}
+
+#[test]
+fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, PS, PS);
+    let closed = pin_item().with_visibility(TaskVisibility::Closed);
+    let mut rest = Surface::new(PS, PS).expect("surface");
+    closed.render(&mut rest, bounds, Scale::ONE, &theme, font(), None);
+    // At rest a closed pin shows no plate or rim — only the glyph sits on
+    // the bar — so it never masquerades as a running task.
+    assert!(!has_pixel(&rest, premul(theme.palette().surface_raised)));
+    assert!(!has_pixel(&rest, premul(theme.palette().rim)));
+    assert!(has_pixel(&rest, premul(theme.palette().on_surface)));
+    // Hover raises the plate like any other slot.
+    let hovered = closed.with_state(ControlState::idle().with_pointer(PointerState::Hover));
+    let mut hover = Surface::new(PS, PS).expect("surface");
+    hovered.render(&mut hover, bounds, Scale::ONE, &theme, font(), None);
+    assert_ne!(rest.pixels(), hover.pixels());
+    // A denied closed pin still shows its plate and lock bead (a marked
+    // state is never hidden by the quiet resting look).
+    let denied = pin_item()
+        .with_visibility(TaskVisibility::Closed)
+        .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
+    let mut d = Surface::new(PS, PS).expect("surface");
+    denied.render(&mut d, bounds, Scale::ONE, &theme, font(), None);
+    assert!(has_pixel(&d, premul(theme.palette().denied)));
+}
+
+#[test]
+fn taskbar_item_icon_presentation_keeps_status_furniture() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, PS, PS);
+    // The active seam still paints along the bottom edge of a compact slot.
+    let active = pin_item().with_visibility(TaskVisibility::Active);
+    let mut s = Surface::new(PS, PS).expect("surface");
+    active.render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+    assert!(region_has(
+        &s,
+        (PS / 3, PS - PS / 3),
+        (PS - 3, PS - 1),
+        premul(theme.palette().accent)
+    ));
+    // A denied compact slot still shows the lock bead and refuses to act.
+    let mut denied =
+        pin_item().with_state(ControlState::idle().with_authority(AuthorityState::Denied));
+    let mut d = Surface::new(PS, PS).expect("surface");
+    denied.render(&mut d, bounds, Scale::ONE, &theme, font(), None);
+    assert!(has_pixel(&d, premul(theme.palette().denied)));
+    assert_eq!(denied.on_pointer(&moved(20, 20), bounds), None);
+    assert_eq!(denied.on_pointer(&PRESS, bounds), None);
+    assert_eq!(denied.on_pointer(&RELEASE, bounds), None);
 }
 
 // --- TraySignal (spec §11.27) ------------------------------------------

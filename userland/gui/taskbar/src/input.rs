@@ -23,14 +23,24 @@
 //! every action a keyboard path; the desktop routes key events here only
 //! while the popup is open, so the focused window's keys are untouched
 //! otherwise.
+//!
+//! A secondary press opens the bar's one context surface
+//! ([`BarMenu`](crate::BarMenu)): on a pinned shortcut with the popup
+//! closed, or on a program-library entry row inside the open popup. While
+//! the menu is open it is the top modal layer — the whole stream routes
+//! into it first, and a press outside its plate dismisses only the menu
+//! (one click does one thing), leaving whatever is beneath for the next
+//! click.
 
-use tairix_geometry::{Point, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
 
 use crate::layout::Hit;
-use crate::library::PopupOutcome;
+use crate::library::{LibraryRow, PopupOutcome};
+use crate::menu::{MenuChoice, MenuOutcome};
 use crate::notifications::IconId;
+use crate::pins::PinView;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
 
@@ -71,6 +81,26 @@ pub enum TaskbarResponse {
     },
     /// The clock was pressed.
     ClockPressed,
+    /// A pinned shortcut with no running window was activated. The embedder
+    /// launches the pinned application (a pin whose application is already
+    /// running reports [`TaskActivated`](Self::TaskActivated) instead).
+    ActivatePin {
+        /// The pin's strip index.
+        index: usize,
+    },
+    /// *Unpin* was chosen for the pin at this index. The embedder removes
+    /// it from the per-user pin store and re-resolves the strip.
+    Unpin {
+        /// The pin's strip index.
+        index: usize,
+    },
+    /// *Pin to taskbar* was chosen for a program-library entry. The
+    /// embedder appends it to the per-user pin store and re-resolves the
+    /// strip.
+    PinEntry {
+        /// The catalog identifier of the entry to pin.
+        entry: EntryId,
+    },
 }
 
 /// Routes device input into [`Taskbar`] actions.
@@ -100,10 +130,11 @@ impl TaskbarInput {
     /// desktop `scale` (the compositor's output density), returning what
     /// changed.
     ///
-    /// With the popup closed only a primary-button press acts; pointer
-    /// motion updates the tracked position (and the leading buttons' hover
-    /// feedback), and every other event is [`TaskbarResponse::Ignored`].
-    /// With the popup open the whole stream routes into it (see the
+    /// With the popup and menu closed only a primary or secondary press
+    /// acts; pointer motion updates the tracked position (and the bar's
+    /// hover feedback), and every other event is
+    /// [`TaskbarResponse::Ignored`]. With the context menu open the whole
+    /// stream routes into it; with the popup open it routes there (see the
     /// [module docs](self)).
     pub fn handle(
         &mut self,
@@ -115,6 +146,9 @@ impl TaskbarInput {
             self.pointer = to;
             taskbar.track_hover(to, scale);
         }
+        if taskbar.menu().is_open() {
+            return self.route_to_menu(event, taskbar, scale);
+        }
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale);
         }
@@ -122,6 +156,9 @@ impl TaskbarInput {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => self.press_primary(taskbar, scale),
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            } => self.press_secondary(taskbar, scale),
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. }
@@ -143,6 +180,7 @@ impl TaskbarInput {
                 TaskbarResponse::OpenLibrary
             }
             Hit::Files => TaskbarResponse::OpenFiles,
+            Hit::Pin(index) => Self::activate_pin(taskbar, index),
             Hit::Task(index) => {
                 let Some(id) = taskbar.tasks().entries().get(index).map(|entry| entry.id) else {
                     return TaskbarResponse::Ignored;
@@ -162,6 +200,114 @@ impl TaskbarInput {
                 TaskbarResponse::NotificationActivated { id }
             }
             Hit::Clock => TaskbarResponse::ClockPressed,
+        }
+    }
+
+    /// Handle a secondary-button press at the current pointer position with
+    /// the popup and menu closed: a press on a pinned shortcut opens its
+    /// context menu; anywhere else on the bar is claimed and does nothing.
+    fn press_secondary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
+        let layout = taskbar.layout(scale);
+        if let Some(Hit::Pin(index)) = layout.hit_test(self.pointer) {
+            let anchor = layout.pins.get(index).copied().unwrap_or(Rect::EMPTY);
+            taskbar.open_pin_menu(index, anchor);
+        }
+        TaskbarResponse::Ignored
+    }
+
+    /// Apply a click to the pin at `index`: a pin whose application has a
+    /// live window follows the same click-to-activate / minimise rule as
+    /// its task button; one with no window asks the embedder to launch it.
+    fn activate_pin(taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
+        if taskbar.pins().get(index).is_none() {
+            return TaskbarResponse::Ignored;
+        }
+        match Self::pin_window(taskbar, index) {
+            Some(id) => {
+                let outcome = taskbar.tasks_mut().activate(id);
+                TaskbarResponse::TaskActivated { id, outcome }
+            }
+            None => TaskbarResponse::ActivatePin { index },
+        }
+    }
+
+    /// The live window behind the pin at `index`: its matched window id,
+    /// only while the task list still knows that window (a stale match
+    /// reads as not running, fail closed).
+    fn pin_window(taskbar: &Taskbar, index: usize) -> Option<TaskId> {
+        let id = taskbar.pins().get(index).and_then(PinView::window)?;
+        taskbar
+            .tasks()
+            .entries()
+            .iter()
+            .any(|entry| entry.id == id)
+            .then_some(id)
+    }
+
+    /// Route one event into the open context menu (the top modal layer).
+    fn route_to_menu(
+        &mut self,
+        event: InputEvent,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+    ) -> TaskbarResponse {
+        let Some(layout) = taskbar.menu_layout(scale) else {
+            // An open menu always lays out; a missing layout means the menu
+            // just closed under us — drop the claim rather than guess.
+            taskbar.close_menu();
+            return TaskbarResponse::Ignored;
+        };
+        let theme = taskbar.theme().clone();
+        let outcome = match event {
+            InputEvent::KeyPressed { key, .. } => taskbar.menu_mut().route_key(key),
+            InputEvent::KeyReleased { .. } => MenuOutcome::Ignored,
+            ref pointer_event => taskbar.menu_mut().route_pointer(
+                pointer_event,
+                self.pointer,
+                &layout,
+                scale,
+                &theme,
+            ),
+        };
+        match outcome {
+            MenuOutcome::Ignored => TaskbarResponse::Ignored,
+            MenuOutcome::Changed | MenuOutcome::Dismissed => {
+                taskbar.request_repaint();
+                TaskbarResponse::Ignored
+            }
+            MenuOutcome::Choose(choice) => {
+                taskbar.request_repaint();
+                Self::apply_choice(taskbar, choice)
+            }
+        }
+    }
+
+    /// Translate a chosen menu row into the typed response the embedder
+    /// resolves.
+    fn apply_choice(taskbar: &mut Taskbar, choice: MenuChoice) -> TaskbarResponse {
+        match choice {
+            MenuChoice::RestorePin(index) => match Self::pin_window(taskbar, index) {
+                // *Open* on a running pin restores and focuses — never the
+                // press's minimise toggle.
+                Some(id) if taskbar.tasks_mut().set_focused(Some(id)) => {
+                    TaskbarResponse::TaskActivated {
+                        id,
+                        outcome: ActivateOutcome::Activated,
+                    }
+                }
+                // The window vanished while the menu was open: launching is
+                // the honest reading of *Open*.
+                _ => TaskbarResponse::ActivatePin { index },
+            },
+            MenuChoice::LaunchPin(index) => TaskbarResponse::ActivatePin { index },
+            MenuChoice::Unpin(index) => TaskbarResponse::Unpin { index },
+            MenuChoice::OpenEntry(entry) => {
+                // Launching from the entry menu behaves exactly like
+                // launching from the row itself: the popup closes.
+                taskbar.close_library();
+                TaskbarResponse::LibraryLaunch { entry }
+            }
+            MenuChoice::PinEntry(entry) => TaskbarResponse::PinEntry { entry },
         }
     }
 
@@ -185,6 +331,17 @@ impl TaskbarInput {
         {
             taskbar.close_library();
             return TaskbarResponse::LibraryDismissed;
+        }
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary
+            }
+        ) {
+            if let Some((entry, anchor)) = Self::entry_row_at(taskbar, self.pointer, scale) {
+                taskbar.open_entry_menu(entry, anchor);
+                return TaskbarResponse::Ignored;
+            }
         }
 
         let layout = taskbar.library_layout(scale);
@@ -216,6 +373,23 @@ impl TaskbarInput {
                 taskbar.close_library();
                 TaskbarResponse::LibraryDismissed
             }
+        }
+    }
+
+    /// The program-library *entry* row under `point` in the open popup, with
+    /// its screen-space rectangle — the anchor for its context menu. Folder
+    /// rows and misses return `None`.
+    fn entry_row_at(taskbar: &Taskbar, point: Point, scale: Scale) -> Option<(EntryId, Rect)> {
+        let layout = taskbar.library_layout(scale);
+        let row = layout.row_at(point)?;
+        let anchor = layout
+            .rows
+            .iter()
+            .find(|(index, _)| *index == row)
+            .map(|(_, rect)| *rect)?;
+        match taskbar.library().rows().get(row)? {
+            LibraryRow::Entry { id, .. } => Some((id.clone(), anchor)),
+            LibraryRow::Folder { .. } => None,
         }
     }
 }

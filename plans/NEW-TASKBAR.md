@@ -37,24 +37,29 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T5 done**; T6 (pins) is next. The library **data**
-layer is landed end to end: `lib/proglib` (T1 — taxonomy, entry model, store
-grammar, fail-closed parse, canonical render, `merge`, `reconcile`, fuzzed
-by `tests/fuzz_proglib.rs`), the `applib` admin command (T2 —
-`userland/apps/applib`), the manifest `library` listing + `applib rescan`
-discovery, and the image-build catalog seeding (T3 — `tools/mkimage`). The
-library **UI** layer is landed too: the two permanent leading launchers and
-the program-library popup (T4/T5 — see their done-state sections below); the
-generic start menu is gone. The rest of the starting point is Stage 7 as it
-stands: `tairix-taskbar` models the launchers / popup / task list /
-notification area / clock and emits typed `TaskbarResponse`s;
-`tairix-session` presents the bar and popup through the compositor, owns the
-theme, loads/merges the catalog stores, and resolves those responses
-(`plans/FIX-DESKTOP.md` async launch is done); `lib/controls::switchboard`
-already renders a `SwitchboardModel` → `SwitchboardAction` from the shared
-Reactive Alloy controls; the `files` app is a live windowed browser
-(`plans/APPWIN.md` AW3/AW5). This plan wires the remaining pieces together
-and fills the gaps.
+`in progress` — **T1–T7 done**; T8 (notification area) is next. The
+library **data** layer is landed end to end: `lib/proglib` (T1 — taxonomy,
+entry model, store grammar, fail-closed parse, canonical render, `merge`,
+`reconcile`, fuzzed by `tests/fuzz_proglib.rs`), the `applib` admin command
+(T2 — `userland/apps/applib`), the manifest `library` listing + `applib
+rescan` discovery, and the image-build catalog seeding (T3 —
+`tools/mkimage`). The library **UI** layer is landed too: the two permanent
+leading launchers and the program-library popup (T4/T5); the generic start
+menu is gone. The **pin** layer is landed whole (T6/T7 — see their
+done-state sections below): the `lib/taskpins` store, the bar's pin strip +
+context menu, the session's pin ownership with the sandboxed per-app icon
+pipeline (`lib/image` PNG + `lib/compress` inflate/zlib + the
+`lib/sandbox` icon-rasterisation service), and both pin-creation gestures
+(right-click *Pin to taskbar* and drag-to-taskbar). The rest of the
+starting point is Stage 7 as it stands: `tairix-taskbar` models the
+launchers / popup / pins / task list / notification area / clock and emits
+typed `TaskbarResponse`s; `tairix-session` presents the bar, popup, and
+menu through the compositor, owns the theme, loads/merges the catalog
+stores, and resolves those responses (`plans/FIX-DESKTOP.md` async launch
+is done); `lib/controls::switchboard` already renders a `SwitchboardModel`
+→ `SwitchboardAction` from the shared Reactive Alloy controls; the `files`
+app is a live windowed browser (`plans/APPWIN.md` AW3/AW5). This plan wires
+the remaining pieces together and fills the gaps.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -504,62 +509,134 @@ flow end-to-end, open-popup refresh), and the AW4 QEMU vertical, which now
 opens the popup from the planted machine store and launches the terminal
 through its catalog entry (keyed by bundle identity, not display text).
 
-## T6 — Pinned shortcuts: model, store, and taskbar region
+## T6 — Pinned shortcuts: model, store, and taskbar region — **done**
 
-**Deliverables**
-- `lib/taskpins` (new `no_std` crate; README stability, added to §3 +
-  `PLAN.md`): the ordered pin store grammar (parse/render/fail-closed), and
-  `PinList` operations `pin`/`unpin`/`move` (reorder), each referencing a
-  library entry id or a bundle path. Host-tested + fuzzed parser.
-- `userland/gui/taskbar`: a **pin strip** region between the permanent icons
-  and the running-task list. Each pin is a `TaskbarItem` (`lib/controls`) with
-  its icon+label identity and, when a matching window is open, the
-  Running/Active/Minimized `TaskVisibility` state (so a pinned app that is
-  also running shows its live state, Windows-11-style). `hit_test` →
-  `Hit::Pin(index)`; primary press → `TaskbarResponse::ActivatePin(index)`
-  (launch if not running, else activate/minimise per the existing rule);
-  right-press → `TaskbarResponse::PinContext(index)` (unpin / open).
-- `userland/gui/session`: owns the `PinList` (read/write the per-user store
-  under the user's identity), builds the taskbar's pin view models, resolves
-  `ActivatePin`/`PinContext` (launch/raise/unpin), and re-presents on change.
+What now stands, and the invariants a future change must keep:
 
-**Tests**: pin/unpin/reorder round-trip through the store; a running pinned
-app shows live `TaskVisibility`; activate launches-or-raises; context unpins;
-layout reflows as pins are added/removed; degenerate size fails closed.
+- **`lib/taskpins`** (in §3 + `PLAN.md`; fuzzed by `tests/fuzz_taskpins.rs`)
+  is the per-user ordered pin store engine: one line per pin (`entry <id>` /
+  `bundle <path>`, `#` comments), stored order = display order, targets
+  deduplicated, whole-document fail-closed refusals with the 1-based line
+  (`PinsError`), canonical render that round-trips byte-for-byte, fixed
+  bounds (`MAX_PINS = 128`, line/document caps derived from the field caps),
+  and `PinList` operations `pin`/`pin_at`/`unpin`/`move_pin`/`position`. It
+  reuses `tairix-proglib`'s validated `EntryId`/`BundlePath` so a pin's
+  reference can never diverge from the catalog's own validation. The store
+  is `~/Settings/Taskbar/pins.conf` (`user_pins_path`); there is no
+  machine-wide pin store — pins are per-user state only.
+- **The bar** (`tairix-taskbar`) has a pin strip between the permanent
+  launchers and the task list: `TaskbarConfig::pin_extent`, per-pin slots in
+  `BarLayout::pins` (+ `pin_strip`), `Hit::Pin(index)`, and
+  `BarLayout::pin_drop_index` (the strip-plus-task-list drop band, indexed
+  by slot midpoints — T7's drop target). The session hands it resolved
+  `PinView`s (label, class glyph, optional artwork, optional entry id,
+  optional matched window); `PinStrip` derives each pin's live
+  `TaskVisibility` from the `TaskList` at paint time (Active/Minimized/
+  Running; `Closed` for no or stale window — fail closed), so window state
+  has exactly one home. Every pin and every task slot paints as the shared
+  `lib/controls` `TaskbarItem` — one visual recipe — with two as-built
+  control extensions recorded in `plans/GUI-CONTROLS-DESIGN.md` §11.26: an
+  icon-only `TaskbarPresentation` for compact slots and the
+  `TaskVisibility::Closed` quiet-at-rest state, plus owner-supplied
+  pre-rasterised artwork (the control never parses image bytes;
+  `TaskbarItem::icon_side` / `Taskbar::pin_icon_side` expose the exact
+  drawn geometry). A running task whose window matches a pin borrows the
+  pin's icon identity, so one application shows one icon everywhere.
+- **Deliberate deviation, recorded**: the staged `PinContext(index)`
+  response is not how the context surface landed. The bar owns its one
+  right-click menu (`BarMenu`, composed from the shared `Menu` control,
+  opened by a secondary press on a pin, modal, outward-opening, presented
+  by the session as a third window beside the bar and popup) and emits
+  *typed outcomes* instead: *Open* → `TaskActivated` (restore/focus) or
+  `ActivatePin { index }` (launch), *Unpin* → `Unpin { index }`. A pin
+  press follows the task click rule when its window is live and reports
+  `ActivatePin` otherwise. This keeps presentation in the bar and authority
+  in the session, exactly like the popup.
+- **The session** (`tairix-desktop-session`) owns the store: it loads with
+  the library's fail-closed posture (absent → empty; unusable → empty plus
+  a loud stderr reason), edits through the one `SessionFileWriter` seam
+  (whole-document rewrite; memory adopts an edit only after the write
+  succeeded, so memory and disk never diverge), resolves each pin for
+  display (an `entry` pin through the merged catalog; a `bundle` pin
+  through its own bounded fail-closed `AppInfo` read; an unresolvable pin
+  keeps a best-effort identity with no launch path so it can still be
+  unpinned), matches running windows through the attested launch table +
+  window ownership (never titles), and re-resolves on a dirty latch before
+  the next present. `ActivatePin` resolves through the same idempotent
+  launch-or-raise rule as the Files button (the shared `activate_bundle`).
+- **Per-application icons land here too** (beyond the staged text — task
+  direction): a pin's bundle icon (the manifest's `library_icon` asset, SVG
+  or PNG) is untrusted third-party input, so the session never decodes it
+  in-process. New `lib/image` (complete fail-closed PNG decoder) +
+  `lib/compress` `inflate`/`zlib` (RFC 1951/1950 decode) + the
+  `lib/sandbox` **icon-rasterisation service** (`iconraster`: SVG via
+  `lib/svg`/`lib/icon`, PNG via `lib/image` with alpha-weighted box-filter
+  scaling and aspect-fit centring; capped input 256 KiB, side ≤ 512) do the
+  decode in a capability-empty worker — the session's own binary re-entered
+  in worker mode — and the session verifies, caches (per asset path × side,
+  refusals included), and falls back to the shared class glyph on any
+  refusal.
 
-**Done when**: pins persist per-user, render with live state, launch/raise,
-and can be unpinned; gate green.
+Tested in the taskpins suite (grammar round-trip, refusal matrix with
+exact lines, operation semantics, fuzz), the taskbar suite (strip layout/
+reflow/clipping on all four edges, drop-index mapping, visibility
+derivation, pin activation split, menu rows/modality/keyboard/click-away,
+artwork and glyph pixel probes, borrowed task artwork), the controls suite
+(presentations, Closed state, artwork, icon-side probe), the session suite
+(store load matrix, edit persistence + refusing writer, resolution matrix,
+service decisions, drag/drop policy, secondary-press menu routing), and
+the sandbox suite (the icon service's happy paths, refusals, hostile
+replies, and fuzz).
 
-## T7 — Pin gestures: *Pin to taskbar* + drag-to-taskbar
+## T7 — Pin gestures: *Pin to taskbar* + drag-to-taskbar — **done**
 
-The two ways a user creates a pin (issue requirement).
+The two ways a user creates a pin. What now stands:
 
-**Deliverables**
-- **Right-click → Pin to taskbar** from the file manager and from the library
-  popup: `userland/apps/files` (`plans/NEW-FILEMANAGER.md`) adds a context
-  action on a `.app` bundle that sends a typed *pin request* (bundle path +
-  suggested name/icon) to the session over the app-window channel
-  (`plans/APPWIN.md` AW2 — a new versioned, fuzzed request kind); the session
-  validates it (the bundle exists and is launchable) and adds the pin via
-  `lib/taskpins`, failing closed on a bad path. The library popup's
-  right-click *Pin* (T5) uses the same session path.
-- **Drag-to-taskbar**: define the WM drag payload for an app reference (a
-  typed, versioned `lib/abi` drag record carrying a bundle path). The taskbar
-  advertises the pin strip as a **drop target**; a drop over it (routed by the
-  session, which owns both the WM and taskbar routers) creates a pin at the
-  drop index. Dragging from the desktop is gated on the desktop-icons work
-  (not yet present) — the drop-target + payload + session handling land now so
-  the file-manager drag source works immediately and the desktop source is a
-  later source, not new taskbar machinery (§2.19 — the mechanism is complete,
-  only one *source* is pending and is noted here).
+- **The wire**: the app-window channel gained three ops, evolved in place
+  (`abi-v1` unfrozen): `WindowRequest::PinBundle` (6), `DragOffer` (7), and
+  `DragWithdraw` (8), each carrying the validated bounded `BundleRef` path
+  newtype (`WINDOW_BUNDLE_PATH_MAX = 512`, UTF-8, no control characters,
+  zero-tail enforced); `WindowRequest::WIRE_LEN` widened to 530 for every
+  op (one fixed frame, the house decode style). All three round-trip and
+  fuzz through `lib/abi`'s window-IPC suites; the engine validates window
+  ownership before dispatching any of them, and the `WindowHost` bridge
+  methods default to **refuse** (`PinDecision::Refused` / `false`), so a
+  host that does not serve pinning fails closed.
+- **Right-click → Pin to taskbar**: `lib/browse` gained
+  `ContextCommand::PinToTaskbar` (ordered after *Open with…*, enabled iff
+  the selection is a bundle via the shared `EntryKind` classifier — the
+  menu model now carries the selection's kind); the files app dispatches it
+  through `WindowClient::pin_bundle` and reports a refusal (already pinned
+  / bar full / refused) as one terse stderr line, never fatally. The
+  session's `PinBridge::pin_requested` validates fail-closed — store-shaped
+  path, decodable manifest — and appends via `lib/taskpins`. The library
+  popup's right-click *Pin* rides the same session path as an **entry** pin
+  (`PinEntry { entry }` through the bar's context menu, T6), so a
+  catalogued app pins by its catalog identity and an uncatalogued bundle by
+  its path.
+- **Drag-to-taskbar**: the files app's drag source is `lib/browse`'s pure
+  `BundleDrag` detector (primary press on a bundle row arms; the first
+  motion beyond `DRAG_THRESHOLD_PX = 6` sends exactly one `DragOffer` per
+  gesture; `Escape` sends `DragWithdraw`; a release disarms locally; a
+  refused offer disarms silently). The session arms at most **one** offer
+  (per gesture, keyed to the offering channel window; a new offer replaces,
+  a withdraw disarms only its own window). The drop is the shared
+  host-tested `resolve_pin_drop` policy: a primary release from the
+  offering served window consumes the offer either way; landing on the pin
+  band (`BarLayout::pin_drop_index` — the strip plus the task-list region,
+  so a first pin lands on an empty strip) re-validates the bundle fully and
+  pins at the drop index; anywhere else the gesture simply ends. Dragging
+  from the desktop is gated on the desktop-icons work (not yet present) —
+  the drop target, payload, and session handling are complete, so the
+  desktop is a later *source*, not new taskbar machinery.
 
-**Tests**: files context action produces a valid pin; a bad/absent bundle
-path is refused fail-closed; a drop on the pin strip pins at the right index;
-a drop elsewhere is ignored; the drag payload round-trips + fuzzes.
-
-**Done when**: a user can pin an app by right-click and by dragging from the
-file manager; gate green. *(Desktop-icon drag source: pending desktop-icons
-work; tracked here.)*
+Tested in the abi suites (round-trip + refusal matrix + fuzz for the three
+ops), the window-engine suite (ownership binding, decision→status mapping,
+fail-closed defaults), the browse suites (menu row/order/enable rules; the
+drag detector's arm/threshold/one-offer/withdraw semantics), and the
+session suite (request validation decisions, drag management, and the
+drop-policy matrix: unarmed / unserved window / landing drop persists at
+the index / stray release ends the gesture).
 
 ## T8 — Notification area upgrade
 

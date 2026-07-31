@@ -846,8 +846,11 @@ dependencies = [
  "tairix-help",
  "tairix-icon",
  "tairix-proglib",
+ "tairix-raster",
  "tairix-rt",
+ "tairix-sandbox",
  "tairix-taskbar",
+ "tairix-taskpins",
  "tairix-theme",
  "tairix-window",
  "tairix-wm",
@@ -1438,6 +1441,14 @@ version = "0.0.0"
 dependencies = [
  "tairix-raster",
  "tairix-svg",
+]
+
+[[package]]
+name = "tairix-image"
+version = "0.0.0"
+dependencies = [
+ "tairix-compress",
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -2052,8 +2063,12 @@ dependencies = [
  "tairix-disasm",
  "tairix-fuzzseed",
  "tairix-help",
+ "tairix-icon",
+ "tairix-image",
  "tairix-log",
+ "tairix-raster",
  "tairix-rt",
+ "tairix-svg",
  "tairix-vt",
 ]
 
@@ -2211,6 +2226,15 @@ dependencies = [
  "tairix-proglib",
  "tairix-raster",
  "tairix-theme",
+]
+
+[[package]]
+name = "tairix-taskpins"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-proglib",
+ "tairix-util",
 ]
 
 [[package]]

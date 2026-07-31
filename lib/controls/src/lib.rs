@@ -190,8 +190,8 @@ pub use scroll::{
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TraySignal,
-    TraySignalAction,
+    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
+    TaskbarPresentation, TraySignal, TraySignalAction,
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,

@@ -1,20 +1,25 @@
 //! Headless unit tests for the desktop session glue.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
-use tairix_abi::Errno;
+use tairix_abi::{
+    AppInfoHeader, Errno, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+};
 use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
 use tairix_icon::{IconKind, IconSet};
 use tairix_proglib::{
-    user_library_path, BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry,
-    MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
+    user_library_path, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory,
+    LibraryEntry, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
 };
 use tairix_taskbar::{
-    ActivateOutcome, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    ActivateOutcome, LibraryRow, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
@@ -23,9 +28,12 @@ use tairix_wm::{
 };
 
 use crate::{
-    load_icon_set, load_library, DesktopSession, DesktopShell, InputSource, SessionFileReader,
-    SessionInputResponse, SessionInputRouter, ShellOutcome, TaskBridge, TaskbarPresenter,
+    load_icon_set, load_library, DesktopSession, DesktopShell, InputSource, PinBridge,
+    PinEditError, PinIconSource, PinService, SessionFileReader, SessionFileWriter,
+    SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome, TaskBridge,
+    TaskbarPresenter,
 };
+use tairix_window::PinDecision;
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
 /// to a non-empty vector form, so loading it is observably different from the
@@ -59,6 +67,47 @@ impl SessionFileReader for MemoryAssets {
             .find(|(p, _)| p == path)
             .map(|(_, bytes)| bytes.clone())
             .ok_or(Errno::NotFound)
+    }
+}
+
+/// An in-memory [`SessionFileWriter`]: a path→bytes table recording writes,
+/// with an optional forced error to exercise the refusal paths.
+#[derive(Default)]
+struct MemoryWriter {
+    files: BTreeMap<String, Vec<u8>>,
+    force_error: Option<Errno>,
+}
+
+impl MemoryWriter {
+    fn with_error(mut self, error: Errno) -> Self {
+        self.force_error = Some(error);
+        self
+    }
+
+    fn written(&self, path: &str) -> Option<&[u8]> {
+        self.files.get(path).map(Vec::as_slice)
+    }
+}
+
+impl SessionFileReader for &mut MemoryAssets {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        (**self).read(path)
+    }
+}
+
+impl SessionFileWriter for MemoryWriter {
+    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some(err) = self.force_error {
+            return Err(err);
+        }
+        self.files.insert(String::from(path), bytes.to_vec());
+        Ok(())
+    }
+}
+
+impl SessionFileWriter for &mut MemoryWriter {
+    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+        (**self).write(path, bytes)
     }
 }
 
@@ -896,6 +945,10 @@ fn moved(x: i32, y: i32) -> InputEvent {
 
 const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Primary,
+};
+
+const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Secondary,
 };
 
 #[test]
@@ -2123,4 +2176,482 @@ fn full_launch_flow() {
         panic!("expected launch, got {outcome:?}");
     };
     assert_eq!(entry.as_str(), "os.tairix.calc");
+}
+
+#[test]
+fn session_pins_load_matrix() {
+    let home = "/Users/alice";
+    let path = tairix_taskpins::user_pins_path(home).unwrap();
+
+    // (a) absent store -> empty no warning
+    let (pins, warning) = SessionPins::load(&mut MemoryAssets::default(), Some(home));
+    assert!(pins.list().is_empty());
+    assert!(warning.is_none());
+
+    // (b) valid store -> parsed
+    let conf = "entry os.tairix.files\nbundle /Apps/editor.app\n";
+    let mut reader = MemoryAssets::default().with(&path, conf.as_bytes());
+    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
+    assert_eq!(pins.list().len(), 2);
+    assert!(warning.is_none());
+
+    // (c) malformed -> empty + warning
+    let mut reader = MemoryAssets::default().with(&path, b"invalid line");
+    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
+    assert!(pins.list().is_empty());
+    let w = warning.expect("warning");
+    assert!(w.contains(&path));
+    assert!(w.contains("unknown pin key"));
+
+    // (d) oversize
+    let mut reader =
+        MemoryAssets::default().with(&path, &vec![b'#'; tairix_taskpins::MAX_PINS_LEN + 1]);
+    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
+    assert!(pins.list().is_empty());
+    assert!(warning.unwrap().contains("longer than any valid pin store"));
+
+    // (e) non-UTF-8
+    let mut reader = MemoryAssets::default().with(&path, b"\xff\xfe");
+    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
+    assert!(pins.list().is_empty());
+    assert!(warning.unwrap().contains("not valid UTF-8"));
+
+    // (f) no home
+    let (pins, warning) = SessionPins::load(&mut MemoryAssets::default(), None);
+    assert!(pins.list().is_empty());
+    assert!(warning.is_none());
+}
+
+#[test]
+fn edit_persistence_and_refusal() {
+    let home = "/Users/alice";
+    let path = tairix_taskpins::user_pins_path(home).unwrap();
+    let mut reader = MemoryAssets::default();
+    let (mut pins, _) = SessionPins::load(&mut reader, Some(home));
+
+    let mut writer = MemoryWriter::default();
+    let entry = EntryId::new("os.tairix.files").unwrap();
+
+    // (a) pin_entry persists
+    let index = pins.pin_entry(&mut writer, entry.clone()).expect("pinned");
+    assert_eq!(index, 0);
+    assert_eq!(pins.list().len(), 1);
+    let written = writer.written(&path).expect("written");
+    assert_eq!(written, b"entry os.tairix.files\n");
+
+    // survives reload
+    let mut reader = MemoryAssets::default().with(&path, written);
+    let (pins2, _) = SessionPins::load(&mut reader, Some(home));
+    assert_eq!(pins2.list().len(), 1);
+
+    // (b) unpin rewrites
+    pins.unpin(&mut writer, 0).expect("unpinned");
+    assert!(pins.list().is_empty());
+    assert_eq!(writer.written(&path).unwrap(), b"");
+
+    // (c) refusing writer leaves memory unchanged
+    pins.pin_entry(&mut writer, entry).expect("pinned again");
+    let mut refusing = MemoryWriter::default().with_error(Errno::PermissionDenied);
+    let res = pins.unpin(&mut refusing, 0);
+    assert_eq!(res, Err(PinEditError::Write(Errno::PermissionDenied)));
+    assert_eq!(pins.list().len(), 1);
+
+    // (d) duplicates refuse
+    let res = pins.pin_entry(&mut writer, EntryId::new("os.tairix.files").unwrap());
+    assert_eq!(res, Err(PinEditError::AlreadyPinned));
+
+    // (e) no home refuses even with healthy writer
+    let (mut pins_no_home, _) = SessionPins::load(&mut MemoryAssets::default(), None);
+    let res = pins_no_home.pin_entry(&mut writer, EntryId::new("any").unwrap());
+    assert_eq!(res, Err(PinEditError::NoHome));
+
+    // (f) pin_bundle_at clamps index
+    let (mut pins, _) = SessionPins::load(&mut MemoryAssets::default(), Some(home));
+    let index = pins
+        .pin_bundle_at(
+            &mut writer,
+            99,
+            BundlePath::new("/Apps/editor.app").unwrap(),
+        )
+        .expect("pinned");
+    assert_eq!(index, 0);
+}
+
+#[test]
+fn pin_resolution() {
+    let mut catalog = Catalog::new();
+    let entry_id = EntryId::new("os.tairix.files").unwrap();
+    catalog
+        .insert(LibraryEntry::new(
+            entry_id.clone(),
+            DisplayName::new("Files").unwrap(),
+            BundlePath::new("/Apps/files.app").unwrap(),
+            LibraryCategory::Office,
+            Some(IconAsset::new("files.svg").unwrap()),
+        ))
+        .unwrap();
+
+    let mut list = tairix_taskpins::PinList::default();
+    list.pin(tairix_taskpins::PinTarget::Entry(entry_id.clone()))
+        .unwrap();
+    list.pin(tairix_taskpins::PinTarget::Entry(
+        EntryId::new("missing").unwrap(),
+    ))
+    .unwrap();
+    list.pin(tairix_taskpins::PinTarget::Bundle(
+        BundlePath::new("/Apps/editor.app").unwrap(),
+    ))
+    .unwrap();
+    list.pin(tairix_taskpins::PinTarget::Bundle(
+        BundlePath::new("/Apps/no-manifest.app").unwrap(),
+    ))
+    .unwrap();
+
+    let mut reader = MemoryAssets::default().with(
+        "/Apps/editor.app/AppInfo",
+        &manifest_fixture("Editor", Some("edit.svg")),
+    );
+
+    let resolved = crate::pins::resolve_pins(&mut reader, &list, &catalog);
+    assert_eq!(resolved.len(), 4);
+
+    // 1. Entry in catalog
+    assert_eq!(resolved[0].label, "Files");
+    assert_eq!(
+        resolved[0].run_path,
+        Some(String::from("/Apps/files.app/Run"))
+    );
+    assert_eq!(
+        resolved[0].icon,
+        Some(PinIconSource {
+            bundle: String::from("/Apps/files.app"),
+            asset: String::from("files.svg"),
+        })
+    );
+
+    // 2. Uncatalogued entry
+    assert_eq!(resolved[1].label, "missing");
+    assert_eq!(resolved[1].run_path, None);
+
+    // 3. Bundle with manifest
+    assert_eq!(resolved[2].label, "Editor");
+    assert_eq!(
+        resolved[2].run_path,
+        Some(String::from("/Apps/editor.app/Run"))
+    );
+    assert_eq!(
+        resolved[2].icon,
+        Some(PinIconSource {
+            bundle: String::from("/Apps/editor.app"),
+            asset: String::from("edit.svg"),
+        })
+    );
+
+    // 4. Bundle with no manifest
+    assert_eq!(resolved[3].label, "no-manifest");
+    assert_eq!(resolved[3].run_path, None);
+
+    // 5. Oversize manifest refused
+    let mut reader =
+        MemoryAssets::default().with("/Apps/big.app/AppInfo", &vec![0; APPINFO_WIRE_MAX + 1]);
+    let mut list = tairix_taskpins::PinList::default();
+    list.pin(tairix_taskpins::PinTarget::Bundle(
+        BundlePath::new("/Apps/big.app").unwrap(),
+    ))
+    .unwrap();
+    let resolved = crate::pins::resolve_pins(&mut reader, &list, &Catalog::new());
+    assert_eq!(resolved[0].label, "big");
+    assert_eq!(resolved[0].run_path, None);
+}
+
+#[test]
+fn pin_service_decisions() {
+    let mut reader =
+        MemoryAssets::default().with("/Apps/valid.app/AppInfo", &manifest_fixture("Valid", None));
+    let writer = MemoryWriter::default();
+    let pins = SessionPins::load(&mut reader, Some("/Users/alice")).0;
+    let mut service = PinService::new(reader, writer, pins);
+
+    // ok -> Pinned + dirty
+    assert!(!service.take_dirty());
+    assert_eq!(
+        service.pin_bundle_at(0, "/Apps/valid.app"),
+        PinDecision::Pinned
+    );
+    assert!(service.take_dirty());
+    assert!(!service.take_dirty());
+
+    // AlreadyPinned
+    assert_eq!(
+        service.pin_bundle_at(0, "/Apps/valid.app"),
+        PinDecision::AlreadyPinned
+    );
+
+    // Refused (bad path)
+    assert_eq!(service.pin_bundle_at(0, "not-a-path"), PinDecision::Refused);
+
+    // Refused (missing manifest)
+    assert_eq!(
+        service.pin_bundle_at(0, "/Apps/missing.app"),
+        PinDecision::Refused
+    );
+
+    // Full
+    let mut reader = MemoryAssets::default();
+    for i in 0..tairix_taskpins::MAX_PINS {
+        let path = format!("/Apps/app{i}.app");
+        reader
+            .files
+            .push((format!("{path}/AppInfo"), manifest_fixture("App", None)));
+    }
+    reader.files.push((
+        String::from("/Apps/full.app/AppInfo"),
+        manifest_fixture("Full", None),
+    ));
+
+    let mut writer = MemoryWriter::default();
+    let pins = SessionPins::load(&mut reader, Some("/Users/alice")).0;
+    let mut service = PinService::new(&mut reader, &mut writer, pins);
+    for i in 0..tairix_taskpins::MAX_PINS {
+        let path = format!("/Apps/app{i}.app");
+        assert_eq!(service.pin_bundle_at(i, &path), PinDecision::Pinned);
+    }
+    assert_eq!(
+        service.pin_bundle_at(99, "/Apps/full.app"),
+        PinDecision::Full
+    );
+}
+
+#[test]
+fn pin_service_drag_management() {
+    let mut service = PinService::new(
+        MemoryAssets::default(),
+        MemoryWriter::default(),
+        SessionPins::default(),
+    );
+    let path = "/Apps/editor.app";
+    let bundle = BundlePath::new(path).unwrap();
+
+    // offer
+    assert!(service.drag_offered(7, path));
+    assert!(service.drag_armed());
+
+    // different window leaves armed
+    assert_eq!(service.take_drag_for(9), None);
+    assert!(service.drag_armed());
+
+    // same window consumes
+    assert_eq!(service.take_drag_for(7), Some(bundle.clone()));
+    assert!(!service.drag_armed());
+
+    // second offer replaces
+    service.drag_offered(7, "/Apps/one.app");
+    service.drag_offered(7, "/Apps/two.app");
+    assert_eq!(
+        service.take_drag_for(7),
+        Some(BundlePath::new("/Apps/two.app").unwrap())
+    );
+
+    // withdraw
+    service.drag_offered(7, path);
+    service.drag_withdrawn(9); // no effect
+    assert!(service.drag_armed());
+    service.drag_withdrawn(7);
+    assert!(!service.drag_armed());
+
+    // malformed path
+    assert!(!service.drag_offered(7, "not-a-path"));
+    assert!(!service.drag_armed());
+}
+
+#[test]
+fn resolve_pin_drop_pins_on_the_band_and_ends_the_gesture_elsewhere() {
+    use crate::pins::resolve_pin_drop;
+    use tairix_geometry::{Point, Scale};
+    use tairix_taskbar::{Taskbar, TaskbarConfig};
+    use tairix_theme::Theme;
+
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let layout = bar.layout(Scale::ONE);
+    let on_band = Point::new(
+        layout.task_list.left() + 10,
+        layout.task_list.top() + i32::try_from(layout.task_list.height / 2).unwrap_or(0),
+    );
+    let service = || {
+        let reader = MemoryAssets::default().with(
+            "/Apps/editor.app/AppInfo",
+            &manifest_fixture("Editor", None),
+        );
+        PinService::new(reader, MemoryWriter::default(), {
+            SessionPins::load(&mut MemoryAssets::default(), Some("/Users/alice")).0
+        })
+    };
+
+    // Nothing armed: a release is never a drop.
+    let mut idle = service();
+    assert_eq!(resolve_pin_drop(&mut idle, Some(7), &layout, on_band), None);
+
+    // A release from an unserved window leaves the offer armed.
+    let mut unserved = service();
+    assert!(unserved.drag_offered(7, "/Apps/editor.app"));
+    assert_eq!(
+        resolve_pin_drop(&mut unserved, None, &layout, on_band),
+        None
+    );
+    assert!(unserved.drag_armed());
+
+    // A release from the offering window over the pin band pins at the
+    // drop index and persists the store.
+    let mut landing = service();
+    assert!(landing.drag_offered(7, "/Apps/editor.app"));
+    assert_eq!(
+        resolve_pin_drop(&mut landing, Some(7), &layout, on_band),
+        Some(PinDecision::Pinned)
+    );
+    assert!(!landing.drag_armed());
+    assert_eq!(landing.pins().list().len(), 1);
+    assert!(landing.take_dirty());
+
+    // A release from the offering window away from the band ends the
+    // gesture without pinning (the offer is consumed either way).
+    let mut stray = service();
+    assert!(stray.drag_offered(7, "/Apps/editor.app"));
+    assert_eq!(
+        resolve_pin_drop(&mut stray, Some(7), &layout, Point::new(2, 2)),
+        None
+    );
+    assert!(!stray.drag_armed());
+    assert_eq!(stray.pins().list().len(), 0);
+}
+
+#[test]
+fn secondary_press_over_pin_opens_taskbar_menu() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    // Set one pin.
+    let views = vec![PinView::new("Files", IconKind::AppBundle)];
+    shell.set_pins(&mut comp, views);
+    assert_eq!(shell.session().taskbar().pins().len(), 1);
+
+    // Secondary press over the pin slot.
+    let at = pin_slot_point(&shell, 0);
+    shell.handle(moved(at.x, at.y), &mut comp);
+    let outcome = shell.handle(SECONDARY_PRESS, &mut comp);
+
+    assert_eq!(outcome, ShellOutcome::Ignored);
+    assert!(shell.session().taskbar().menu().is_open());
+    assert!(shell.presenter().menu_window().is_some());
+
+    // While menu is open, it is modal.
+    // Primary press inside menu (e.g. at menu origin, usually first row is Open/Launch).
+    let menu_rect = shell
+        .session()
+        .taskbar()
+        .menu_layout(Scale::ONE)
+        .unwrap()
+        .panel;
+    let first_row = Point::new(menu_rect.left() + 10, menu_rect.top() + 10);
+
+    shell.handle(moved(first_row.x, first_row.y), &mut comp);
+    // Many controls activate on release.
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    let outcome = shell.handle(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+    );
+
+    // For a not-running pin, first row should be ActivatePin (which means launch).
+    if let ShellOutcome::Taskbar(TaskbarResponse::ActivatePin { index }) = outcome {
+        assert_eq!(index, 0);
+    } else {
+        panic!("expected ActivatePin, got {outcome:?}");
+    }
+
+    assert!(!shell.session().taskbar().menu().is_open());
+    // Presenter should have removed the window.
+    assert!(shell.presenter().menu_window().is_none());
+}
+
+#[test]
+fn secondary_press_over_window_reaches_window_manager() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let _win = opaque_window(&mut comp, Point::new(100, 100), 200, 200);
+    shell.handle(moved(150, 150), &mut comp);
+    let outcome = shell.handle(SECONDARY_PRESS, &mut comp);
+
+    // Existing behaviour: secondary press over window is handled by WM (e.g. for context menu).
+    if let ShellOutcome::WindowManager(InputResponse::SecondaryActivated { .. }) = outcome {
+        // ok
+    } else {
+        panic!("expected SecondaryActivated, got {outcome:?}");
+    }
+}
+
+#[test]
+fn shell_set_pins_re_presents_and_updates_length() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    assert_eq!(shell.session().taskbar().pins().len(), 0);
+
+    let views = vec![
+        PinView::new("One", IconKind::AppBundle),
+        PinView::new("Two", IconKind::AppBundle),
+    ];
+    shell.set_pins(&mut comp, views);
+    assert_eq!(shell.session().taskbar().pins().len(), 2);
+
+    // Check that it's presented (compositor window for bar exists and is updated)
+    assert!(shell.presenter().bar_window().is_some());
+}
+
+fn centre(rect: tairix_wm::Rect) -> Point {
+    assert!(!rect.is_empty());
+    #[allow(clippy::cast_possible_wrap)]
+    Point::new(
+        rect.left() + (rect.width / 2) as i32,
+        rect.top() + (rect.height / 2) as i32,
+    )
+}
+
+fn pin_slot_point(shell: &DesktopShell, index: usize) -> Point {
+    let layout = shell.session().taskbar().layout(Scale::ONE);
+    let slot = layout.pins.get(index).expect("pin slot");
+    centre(*slot)
+}
+
+fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
+    let mut h = AppInfoHeader {
+        magic: APPINFO_MAGIC,
+        abi_version: ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: 0,
+        mime_count: 0,
+        id_len: 2,
+        name_len: u8::try_from(name.len()).unwrap(),
+        version_len: 1,
+        library_icon_len: u8::try_from(icon.map_or(0, str::len)).unwrap(),
+        library: tairix_abi::LibraryCategory::to_wire(Some(tairix_abi::LibraryCategory::Other)),
+        reserved0: [0; 3],
+        id: [0; BUNDLE_ID_MAX],
+        name: [0; BUNDLE_NAME_MAX],
+        version: [0; BUNDLE_VERSION_MAX],
+        library_icon: [0; LIBRARY_ICON_MAX],
+        syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
+        content_hash: [0; 32],
+        signer_pubkey: [0; 32],
+        signature: [0; 64],
+    };
+    h.id[0..2].copy_from_slice(b"fi");
+    h.name[..name.len()].copy_from_slice(name.as_bytes());
+    h.version[0] = b'1';
+    if let Some(icon) = icon {
+        h.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
+    }
+    h.to_le_bytes().to_vec()
 }

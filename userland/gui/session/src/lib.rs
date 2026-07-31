@@ -26,6 +26,18 @@
 //! [`LibraryLaunch`](tairix_taskbar::TaskbarResponse::LibraryLaunch)
 //! responses back through the catalog to spawn the chosen bundle.
 //!
+//! # Pinned shortcuts
+//!
+//! The bar's pin strip shows the user's pinned applications
+//! (`plans/NEW-TASKBAR.md` T6/T7): the [`pins`] module owns the per-user
+//! store (`~/Settings/Taskbar/pins.conf`, via `lib/taskpins`), loading it
+//! with the same fail-closed posture as the library, editing it through the
+//! [`SessionFileWriter`] seam with the in-memory list adopting an edit only
+//! after the write succeeded, and resolving each stored pin — through the
+//! merged catalog for an `entry` pin, through the bundle's own manifest for
+//! a `bundle` pin — into the [`ResolvedPin`]s the embedder turns into the
+//! bar's views, running-window matches, and launch paths.
+//!
 //! # Presenting the taskbar through the window manager
 //!
 //! [`TaskbarPresenter`] (the [`presenter`] module) is the session's glue to
@@ -140,6 +152,7 @@ pub mod keyboard;
 pub mod launch;
 pub mod library;
 pub mod picker;
+pub mod pins;
 pub mod presenter;
 pub mod seat;
 pub mod session;
@@ -150,7 +163,9 @@ pub mod windows;
 #[cfg(test)]
 mod tests;
 
-pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, GRAPHICS_DIR};
+pub use assets::{
+    load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter, GRAPHICS_DIR,
+};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use config::{FILES_LABEL, FILES_RUN_PATH};
 pub use device::{DeviceInputSource, PointerInputChannel};
@@ -160,6 +175,10 @@ pub use launch::{launch_failure_report, reap_launched, LaunchTable, LaunchedApp}
 pub use library::{load_library, LoadedLibrary};
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
+};
+pub use pins::{
+    build_pin_views, resolve_pin_drop, resolve_pins, DragOffer, IconCache, IconRasteriser,
+    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, SessionPins,
 };
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};

@@ -4,7 +4,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_controls::TaskVisibility;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
@@ -14,7 +16,9 @@ use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
+use crate::menu::MenuSubject;
 use crate::notifications::IconId;
+use crate::pins::PinView;
 use crate::render::TaskbarRenderer;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
@@ -332,6 +336,83 @@ fn overflowing_task_slot_is_clipped_to_empty() {
 }
 
 #[test]
+fn pin_strip_sits_between_launchers_and_tasks() {
+    let mut bar = bottom_bar();
+    // Initially empty.
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(layout.pin_strip.width, 0);
+    assert_eq!(layout.pin_strip.left(), layout.files.right());
+    assert_eq!(layout.task_list.left(), layout.pin_strip.right());
+
+    // Add two pins.
+    bar.set_pins(alloc::vec![
+        PinView::new("Pin 1", IconKind::AppBundle),
+        PinView::new("Pin 2", IconKind::AppBundle),
+    ]);
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(layout.pins.len(), 2);
+    assert_eq!(layout.pin_strip.width, 48 * 2);
+    assert_eq!(layout.pin_strip.left(), layout.files.right());
+    assert_eq!(layout.pins[0].left(), layout.pin_strip.left());
+    assert_eq!(layout.pins[1].left(), layout.pins[0].right());
+    assert_eq!(layout.task_list.left(), layout.pin_strip.right());
+}
+
+#[test]
+fn adding_pins_reflows_the_task_region() {
+    let mut bar = bottom_bar();
+    let empty_tasks = bar.layout(Scale::ONE).task_list;
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let one_pin_tasks = bar.layout(Scale::ONE).task_list;
+    assert!(one_pin_tasks.width < empty_tasks.width);
+    assert_eq!(one_pin_tasks.left(), empty_tasks.left() + 48);
+}
+
+#[test]
+fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(200, 40), &Theme::dark());
+    // Launchers (48+48) take 96. Clock (80) takes 80. Total 176.
+    // Screen 200. Remaining for pins/tasks: 200 - 176 = 24.
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(layout.library.width, 48);
+    assert_eq!(layout.files.width, 48);
+    assert_eq!(layout.pins[0].width, 24, "pin clips to fit");
+    assert!(layout.task_list.is_empty(), "no room for tasks");
+
+    // Even smaller: pin is empty.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(150, 40), &Theme::dark());
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let layout = bar.layout(Scale::ONE);
+    assert!(layout.pins[0].is_empty());
+}
+
+#[test]
+fn pin_strip_positions_on_all_four_edges() {
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let config = TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1000, 800)
+        };
+        let mut bar = Taskbar::new(config, &Theme::dark());
+        bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+        let layout = bar.layout(Scale::ONE);
+        assert!(!layout.pin_strip.is_empty(), "{edge:?}");
+        assert_eq!(layout.pins.len(), 1, "{edge:?}");
+        match edge.orientation() {
+            Orientation::Horizontal => {
+                assert_eq!(layout.pin_strip.height, 40);
+                assert_eq!(layout.pin_strip.width, 48);
+            }
+            Orientation::Vertical => {
+                assert_eq!(layout.pin_strip.width, 40);
+                assert_eq!(layout.pin_strip.height, 48);
+            }
+        }
+    }
+}
+
+#[test]
 fn bar_pins_to_all_four_edges() {
     for (edge, expect) in [
         (Edge::Top, Rect::new(0, 0, 1000, 40)),
@@ -372,6 +453,78 @@ fn hit_testing_follows_the_scale() {
     assert_eq!(bar.hit_test(Point::new(100, 780), scale), Some(Hit::Files));
 }
 
+#[test]
+fn pin_drop_index_finds_the_slot_or_append_point() {
+    let mut bar = bottom_bar();
+    let layout = bar.layout(Scale::ONE);
+    // Initially empty strip. Drop in the task-list band (where the first pin would land).
+    assert_eq!(layout.pin_drop_index(Point::new(100, 780)), Some(0));
+    // Outside the strip/task band (e.g. on the clock).
+    assert_eq!(layout.pin_drop_index(Point::new(950, 780)), None);
+
+    // Add one pin.
+    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
+    let layout = bar.layout(Scale::ONE);
+    let slot = layout.pins[0];
+    // Leading half of pin 0 -> Some(0).
+    assert_eq!(
+        layout.pin_drop_index(Point::new(slot.left() + 10, 780)),
+        Some(0)
+    );
+    // Trailing half of pin 0 -> Some(1).
+    assert_eq!(
+        layout.pin_drop_index(Point::new(slot.right() - 10, 780)),
+        Some(1)
+    );
+    // Past the pin in the task band -> Some(1).
+    assert_eq!(
+        layout.pin_drop_index(Point::new(slot.right() + 10, 780)),
+        Some(1)
+    );
+}
+
+#[test]
+fn pin_drop_index_works_on_vertical_bars() {
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    bar.set_config(TaskbarConfig {
+        edge: Edge::Left,
+        ..*bar.config()
+    });
+    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
+    let layout = bar.layout(Scale::ONE);
+    let slot = layout.pins[0];
+    // Leading (top) half -> Some(0).
+    assert_eq!(
+        layout.pin_drop_index(Point::new(20, slot.top() + 10)),
+        Some(0)
+    );
+    // Trailing (bottom) half -> Some(1).
+    assert_eq!(
+        layout.pin_drop_index(Point::new(20, slot.bottom() - 10)),
+        Some(1)
+    );
+}
+
+#[test]
+fn hit_testing_resolves_pins() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let layout = bar.layout(Scale::ONE);
+    let centre = centre_of(layout.pins[0]);
+    assert_eq!(bar.hit_test(centre, Scale::ONE), Some(Hit::Pin(0)));
+
+    // Pins do not shadow launchers or tasks.
+    assert_eq!(
+        bar.hit_test(centre_of(layout.library), Scale::ONE),
+        Some(Hit::Library)
+    );
+    assert_eq!(
+        bar.hit_test(Point::new(layout.task_list.left() + 10, 780), Scale::ONE),
+        None,
+        "empty task list hits nothing"
+    );
+}
+
 // ---- theming --------------------------------------------------------
 
 #[test]
@@ -392,6 +545,89 @@ fn apply_theme_swaps_the_owned_theme_and_latches_a_repaint() {
     assert_eq!(bar.theme().id(), Theme::light().id());
     assert!(bar.take_repaint(), "a theme switch needs a repaint");
     assert!(!bar.take_repaint(), "taking the latch clears it");
+}
+
+#[test]
+fn pin_visibility_derives_from_the_task_list() {
+    let mut bar = bottom_bar();
+    let entry_id = EntryId::new("os.tairix.editor").unwrap();
+    let task_id = TaskId(1);
+    bar.set_pins(alloc::vec![
+        PinView::new("Editor", IconKind::AppBundle)
+            .with_entry(entry_id.clone())
+            .with_window(task_id),
+        PinView::new("Stale", IconKind::AppBundle).with_window(TaskId(999)),
+        PinView::new("None", IconKind::AppBundle),
+    ]);
+
+    // Index 0: Matched window but not in task list -> Closed.
+    assert_eq!(
+        bar.pins().visibility(0, bar.tasks()),
+        TaskVisibility::Closed
+    );
+    // Index 1: Stale window id -> Closed.
+    assert_eq!(
+        bar.pins().visibility(1, bar.tasks()),
+        TaskVisibility::Closed
+    );
+    // Index 2: No window -> Closed.
+    assert_eq!(
+        bar.pins().visibility(2, bar.tasks()),
+        TaskVisibility::Closed
+    );
+
+    // Add the task for the editor.
+    bar.tasks_mut().add(task_id, "Editor");
+    assert_eq!(
+        bar.pins().visibility(0, bar.tasks()),
+        TaskVisibility::Running
+    );
+
+    // Focus it.
+    bar.tasks_mut().set_focused(Some(task_id));
+    assert_eq!(
+        bar.pins().visibility(0, bar.tasks()),
+        TaskVisibility::Active
+    );
+
+    // Minimise it.
+    bar.tasks_mut().minimise(task_id);
+    assert_eq!(
+        bar.pins().visibility(0, bar.tasks()),
+        TaskVisibility::Minimized
+    );
+}
+
+#[test]
+fn set_pins_clamps_a_stale_hover() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![
+        PinView::new("Pin 0", IconKind::AppBundle),
+        PinView::new("Pin 1", IconKind::AppBundle),
+    ]);
+    let layout = bar.layout(Scale::ONE);
+    let pin1 = centre_of(layout.pins[1]);
+    bar.track_hover(pin1, Scale::ONE);
+    assert_eq!(bar.pins().hover(), Some(1));
+
+    // Replace with one pin: hover is clamped to None.
+    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
+    assert_eq!(bar.pins().hover(), None);
+}
+
+#[test]
+fn pin_accessors_resolve_correctly() {
+    let mut bar = bottom_bar();
+    let entry_id = EntryId::new("os.tairix.editor").unwrap();
+    let task_id = TaskId(1);
+    bar.set_pins(alloc::vec![PinView::new("Editor", IconKind::AppBundle)
+        .with_entry(entry_id.clone())
+        .with_window(task_id)]);
+
+    assert_eq!(bar.pins().len(), 1);
+    assert_eq!(bar.pins().position_of_entry(&entry_id), Some(0));
+    assert!(bar.pins().view_for_window(task_id).is_some());
+    assert_eq!(bar.pins().get(0).unwrap().label(), "Editor");
 }
 
 // ---- input: bar ------------------------------------------------------
@@ -457,6 +693,295 @@ fn notification_and_clock_presses_report() {
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::ClockPressed
+    );
+}
+
+#[test]
+fn pin_press_activates_or_applies_task_rule() {
+    let mut bar = bottom_bar();
+    let task_id = TaskId(1);
+    bar.set_pins(alloc::vec![
+        PinView::new("Launch", IconKind::AppBundle),
+        PinView::new("Run", IconKind::AppBundle).with_window(task_id),
+    ]);
+    let mut input = TaskbarInput::new();
+    let layout = bar.layout(Scale::ONE);
+
+    // Primary press on pin 0 (no window) -> ActivatePin.
+    let slot0 = centre_of(layout.pins[0]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot0.x, slot0.y),
+        TaskbarResponse::ActivatePin { index: 0 }
+    );
+
+    // Primary press on pin 1 (has window, but window not in task list) -> ActivatePin.
+    let slot1 = centre_of(layout.pins[1]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot1.x, slot1.y),
+        TaskbarResponse::ActivatePin { index: 1 }
+    );
+
+    // Add task for pin 1.
+    bar.tasks_mut().add(task_id, "Running");
+    // Primary press on pin 1 (has window in list) -> TaskActivated.
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot1.x, slot1.y),
+        TaskbarResponse::TaskActivated {
+            id: task_id,
+            outcome: ActivateOutcome::Activated,
+        }
+    );
+
+    // Toggle: Second click on focused pinned window minimises.
+    bar.tasks_mut().set_focused(Some(task_id));
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot1.x, slot1.y),
+        TaskbarResponse::TaskActivated {
+            id: task_id,
+            outcome: ActivateOutcome::Minimised,
+        }
+    );
+}
+
+#[test]
+fn secondary_press_on_pin_opens_menu() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
+    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            },
+            &mut bar,
+            Scale::ONE,
+        ),
+        TaskbarResponse::Ignored,
+        "secondary press is Ignored but opens the menu"
+    );
+    assert!(bar.menu().is_open());
+    assert_eq!(
+        bar.menu().subject(),
+        Some(&MenuSubject::Pin {
+            index: 0,
+            running: false
+        })
+    );
+}
+
+#[test]
+fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
+    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(bar.menu().is_open());
+
+    // Motion over the menu highlights rows and latches repaint.
+    let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
+    let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
+    bar.take_repaint();
+    input.handle(
+        InputEvent::PointerMoved { to: menu_item_0 },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(bar.take_repaint());
+    assert_eq!(bar.menu().control().current(), Some(0));
+
+    // Scroll is claimed (Ignored).
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            &mut bar,
+            Scale::ONE
+        ),
+        TaskbarResponse::Ignored
+    );
+
+    // Re-verify it is open before click-away.
+    assert!(bar.menu().is_open());
+
+    // Click away dismisses menu only.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 500, 100),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.menu().is_open());
+
+    // Move pointer back to pin before reopening.
+    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+
+    // Reopen and test Escape.
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(bar.menu().is_open());
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn menu_keyboard_navigation_chooses_rows() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
+    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+
+    // Down/Down/Enter chooses row 1 ("Unpin").
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::Unpin { index: 0 }
+    );
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn entry_menu_offers_pin_or_unpin_and_launches() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+
+    // Secondary press on an entry row opens the entry menu.
+    let (row_index, entry_rect) =
+        visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
+            .expect("an entry row is visible");
+    let entry_id = match bar.library().rows().get(row_index).unwrap() {
+        LibraryRow::Entry { id, .. } => id.clone(),
+        LibraryRow::Folder { .. } => panic!("not an entry"),
+    };
+    let inside = centre_of(entry_rect);
+    input.handle(
+        InputEvent::PointerMoved { to: inside },
+        &mut bar,
+        Scale::ONE,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(bar.menu().is_open());
+    assert!(matches!(
+        bar.menu().subject(),
+        Some(MenuSubject::Entry { pinned: None, .. })
+    ));
+
+    // Move pointer over menu row 0.
+    let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
+    let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
+    input.handle(
+        InputEvent::PointerMoved { to: menu_item_0 },
+        &mut bar,
+        Scale::ONE,
+    );
+
+    // Press and release to activate.
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    // Choose row 0 ("Open") -> LibraryLaunch and closes popup.
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            &mut bar,
+            Scale::ONE,
+        ),
+        TaskbarResponse::LibraryLaunch {
+            entry: entry_id.clone()
+        }
+    );
+    assert!(!bar.menu().is_open());
+    assert!(!bar.library().is_open());
+
+    // Pin it and check verb switch.
+    bar.set_pins(alloc::vec![
+        PinView::new("App", IconKind::AppBundle).with_entry(entry_id.clone())
+    ]);
+    open_library(&mut input, &mut bar);
+    input.handle(
+        InputEvent::PointerMoved { to: inside },
+        &mut bar,
+        Scale::ONE,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(matches!(
+        bar.menu().subject(),
+        Some(MenuSubject::Entry {
+            pinned: Some(0),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn unpin_from_entry_menu_identifies_the_pin_index() {
+    let mut bar = bottom_bar();
+    let entry_id = EntryId::new("os.tairix.app").unwrap();
+    bar.set_pins(alloc::vec![
+        PinView::new("Other", IconKind::AppBundle),
+        PinView::new("Target", IconKind::AppBundle).with_entry(entry_id.clone()),
+    ]);
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+
+    // Open menu for the entry.
+    bar.menu_mut().open(
+        MenuSubject::Entry {
+            entry: entry_id,
+            pinned: Some(1),
+        },
+        Rect::EMPTY,
+    );
+
+    // Choose row 1 ("Unpin from taskbar").
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::Unpin { index: 1 }
     );
 }
 
@@ -555,15 +1080,17 @@ fn click_away_dismisses_without_acting_on_what_it_hit() {
 }
 
 #[test]
-fn secondary_press_outside_dismisses_and_inside_is_claimed() {
+fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
-    let panel = bar.library_layout(Scale::ONE).panel;
 
-    // Inside the panel: claimed by the modal popup, which has no context
-    // actions yet — nothing happens, the popup stays.
-    let inside = centre_of(panel);
+    // Inside the panel on a folder row: claimed by the modal popup — a
+    // folder offers no context actions, so nothing happens and the popup
+    // stays.
+    let (_, folder_rect) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Folder { .. }))
+        .expect("a folder row is visible");
+    let inside = centre_of(folder_rect);
     input.handle(
         InputEvent::PointerMoved { to: inside },
         &mut bar,
@@ -580,6 +1107,7 @@ fn secondary_press_outside_dismisses_and_inside_is_claimed() {
         TaskbarResponse::Ignored
     );
     assert!(bar.library().is_open());
+    assert!(!bar.menu().is_open(), "a folder row opens no context menu");
 
     // Outside: dismisses, exactly like a primary click-away.
     input.handle(
@@ -1218,7 +1746,7 @@ fn library_button_paints_the_accent_plate_and_files_stays_quiet() {
 }
 
 #[test]
-fn focused_task_is_accent_and_others_are_surface() {
+fn focused_task_shows_the_accent_seam_and_others_stay_quiet() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
@@ -1229,16 +1757,26 @@ fn focused_task_is_accent_and_others_are_surface() {
     let surface = TaskbarRenderer::new()
         .render(&bar, Scale::ONE)
         .expect("bar renders");
-    let focused = centre_of(layout.tasks[0]);
-    let other = centre_of(layout.tasks[1]);
-    assert_eq!(
-        pixel_at(&surface, layout.bar, focused.x, focused.y),
+    // The focused task's shared control draws the lower accent seam…
+    let seam = Rect::new(
+        layout.tasks[0].left(),
+        layout.tasks[0].bottom() - 6,
+        layout.tasks[0].width,
+        6,
+    );
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        seam,
         role(theme.palette().accent)
-    );
-    assert_eq!(
-        pixel_at(&surface, layout.bar, other.x, other.y),
-        role(theme.palette().surface)
-    );
+    ));
+    // …and the unfocused task shows no accent anywhere in its slot.
+    assert!(!region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.tasks[1],
+        role(theme.palette().accent)
+    ));
 }
 
 #[test]
@@ -1253,11 +1791,21 @@ fn minimised_task_recedes_into_the_bar() {
     let surface = TaskbarRenderer::new()
         .render(&bar, Scale::ONE)
         .expect("bar renders");
-    let slot = centre_of(layout.tasks[0]);
-    assert_eq!(
-        pixel_at(&surface, layout.bar, slot.x, slot.y),
-        role(theme.palette().surface_raised)
-    );
+    // The minimised task's shared control recesses its plate to the flat
+    // surface colour, distinct from the raised bar background, and marks it
+    // with the muted leading tick.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.tasks[0],
+        role(theme.palette().surface)
+    ));
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.tasks[0],
+        role(theme.palette().on_surface_muted)
+    ));
 }
 
 #[test]
@@ -1315,6 +1863,30 @@ fn theme_switch_repaints_the_bar() {
 }
 
 #[test]
+fn pin_and_menu_actions_latch_repaints() {
+    let mut bar = bottom_bar();
+    bar.take_repaint();
+
+    // set_pins latches.
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    assert!(bar.take_repaint());
+
+    // Opening the menu latches.
+    bar.open_pin_menu(0, Rect::EMPTY);
+    assert!(bar.take_repaint());
+
+    // Motion over a pin latches.
+    let layout = bar.layout(Scale::ONE);
+    let pin_centre = centre_of(layout.pins[0]);
+    bar.track_hover(pin_centre, Scale::ONE);
+    assert!(bar.take_repaint());
+
+    // Closing the menu latches.
+    bar.close_menu();
+    assert!(bar.take_repaint());
+}
+
+#[test]
 fn clock_label_paints_and_an_empty_clock_paints_nothing() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
@@ -1352,17 +1924,168 @@ fn long_task_title_never_spills_its_slot() {
     let mut bar = bottom_bar();
     bar.tasks_mut()
         .add(TaskId(1), "An enormously long window title that cannot fit");
-    bar.tasks_mut().add(TaskId(2), "Next");
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
         .render(&bar, Scale::ONE)
         .expect("bar renders");
-    // The neighbouring slot's fill is untouched by the first task's text:
-    // its own centre is the plain surface colour.
-    let next = centre_of(layout.tasks[1]);
-    assert_eq!(
-        pixel_at(&surface, layout.bar, next.x, next.y),
-        role(theme.palette().surface)
+    // The empty bar beyond the only task's slot carries no text ink: the
+    // over-long title was truncated inside the slot, never spilled past it.
+    let beyond = Rect::new(
+        layout.tasks[0].right() + 1,
+        layout.tasks[0].top(),
+        layout.notification_area.left().unsigned_abs() - layout.tasks[0].right().unsigned_abs() - 1,
+        layout.tasks[0].height,
+    );
+    assert!(!region_has_pixel(
+        &surface,
+        layout.bar,
+        beyond,
+        role(theme.palette().on_surface)
+    ));
+}
+
+#[test]
+fn pins_render_artwork_or_fallback_glyph() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    // Pin 0: Magenta artwork.
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.set_pins(alloc::vec![
+        PinView::new("Art", IconKind::AppBundle)
+            .with_artwork(Surface::filled(16, 16, magenta).unwrap()),
+        PinView::new("Glyph", IconKind::AppBundle),
+    ]);
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+
+    // Pin 0 shows the magenta artwork.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.pins[0],
+        magenta
+    ));
+
+    // Pin 1 shows the AppBundle glyph (on_surface ink).
+    assert!(region_has_role_ink(
+        &surface,
+        layout.bar,
+        layout.pins[1],
+        theme.palette().on_surface,
+        role(theme.palette().surface_raised),
+    ));
+}
+
+#[test]
+fn active_pin_shows_the_accent_seam() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    let task_id = TaskId(1);
+    bar.set_pins(alloc::vec![
+        PinView::new("App", IconKind::AppBundle).with_window(task_id)
+    ]);
+    bar.tasks_mut().add(task_id, "App");
+    bar.tasks_mut().set_focused(Some(task_id));
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+
+    // The pin slot (not just the task slot) shows the accent seam.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.pins[0],
+        role(theme.palette().accent)
+    ));
+}
+
+#[test]
+fn task_borrows_artwork_from_pin() {
+    let mut bar = bottom_bar();
+    let task_id = TaskId(1);
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.set_pins(alloc::vec![PinView::new("App", IconKind::AppBundle)
+        .with_window(task_id)
+        .with_artwork(Surface::filled(16, 16, magenta).unwrap()),]);
+    bar.tasks_mut().add(task_id, "App");
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+
+    // The task slot shows the borrowed magenta artwork.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.tasks[0],
+        magenta
+    ));
+}
+
+#[test]
+fn render_menu_paints_the_modal_plate_and_follows_theme() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let renderer = TaskbarRenderer::new();
+
+    // None when closed.
+    assert!(renderer.render_menu(&bar, Scale::ONE).is_none());
+
+    // Open and check render.
+    bar.menu_mut().open(
+        MenuSubject::Pin {
+            index: 0,
+            running: false,
+        },
+        Rect::new(100, 760, 48, 40),
+    );
+    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
+    let dark = renderer
+        .render_menu(&bar, Scale::ONE)
+        .expect("menu renders");
+    assert_eq!(dark.width(), layout.panel.width);
+    assert_eq!(dark.height(), layout.panel.height);
+
+    // Plate is raised surface.
+    assert!(region_has_pixel(
+        &dark,
+        layout.panel,
+        Rect::new(
+            layout.panel.left(),
+            layout.panel.top(),
+            layout.panel.width,
+            layout.panel.height
+        ),
+        role(Theme::dark().palette().surface_raised)
+    ));
+    // Contains on_surface ink for labels.
+    assert!(region_has_role_ink(
+        &dark,
+        layout.panel,
+        Rect::new(
+            layout.panel.left(),
+            layout.panel.top(),
+            layout.panel.width,
+            layout.panel.height
+        ),
+        Theme::dark().palette().on_surface,
+        role(Theme::dark().palette().surface_raised),
+    ));
+
+    // Theme switch changes pixels.
+    bar.apply_theme(&Theme::light());
+    let light = renderer
+        .render_menu(&bar, Scale::ONE)
+        .expect("menu renders");
+    let centre = Point::new(layout.panel.left() + 5, layout.panel.top() + 5);
+    assert_ne!(
+        pixel_at(&dark, layout.panel, centre.x, centre.y),
+        pixel_at(&light, layout.panel, centre.x, centre.y)
     );
 }
 

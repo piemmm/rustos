@@ -4,11 +4,13 @@ The taskbar (`userland/gui/taskbar`, crate `tairix-taskbar`) is the
 GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 `PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). This page describes the **layout,
 model, and rendering**: the geometry of every region, pointer hit-testing for
-input routing, the program-library popup / task-list / notification-area
-state machines, and painting those regions — including the clock label and
-task-title **text** — into a themed pixel surface, plus **routing** pointer,
-scroll, and key events into taskbar actions and drawing **notification-icon
-artwork** (scalable, themeable vector glyphs).
+input routing, the program-library popup / pin-strip / task-list /
+notification-area state machines, the bar's right-click **context menu**,
+and painting those regions — including the clock label and task-title
+**text** — into a themed pixel surface, plus **routing** pointer, scroll,
+and key events into taskbar actions and drawing **notification-icon
+artwork** (scalable, themeable vector glyphs) and per-application **pin
+artwork** (rasterised by the session, blitted here).
 
 ## Where it sits
 
@@ -49,7 +51,13 @@ From the leading end to the trailing end:
 - **Files button** — the second permanent launcher: a quiet folder-glyph
   button that opens the file manager. The two leading buttons are fixed —
   never reordered, never removable (`plans/NEW-TASKBAR.md` T4).
-- **Task list** — the flexible middle region, between the leading launchers
+- **Pin strip** — one compact square slot per user-pinned application
+  shortcut, in the user's stored order, between the launchers and the task
+  list (`plans/NEW-TASKBAR.md` T6). Zero-length (but still positioned) when
+  nothing is pinned; `BarLayout::pin_drop_index` maps a drop point in the
+  strip-plus-task band to the pin-list insertion index for the
+  drag-to-taskbar gesture (T7).
+- **Task list** — the flexible middle region, between the pin strip
   and the notification area, holding one fixed-width slot per running task.
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
@@ -58,14 +66,17 @@ From the leading end to the trailing end:
   a string is an upstream concern, `AGENTS.md` §21); the bar stores only the
   text to draw.
 
-`BarLayout::compute` turns the config plus the current task and icon counts
-into the screen `Rect` of every region. All arithmetic saturates, so a
+`BarLayout::compute` turns the config plus the current pin, task, and icon
+counts into the screen `Rect` of every region. All arithmetic saturates, so a
 pathological screen size or extent fails closed *inside* the bar rather than
-wrapping (`AGENTS.md` §2.9); a launcher, task, or icon slot that does not fit
-its region is `Rect::EMPTY` and therefore never hit. `BarLayout::hit_test`
+wrapping (`AGENTS.md` §2.9); a launcher, pin, task, or icon slot that does
+not fit its region is `Rect::EMPTY` and therefore never hit, and the trailing
+regions clip against the permanent leading launchers (never the reverse), so
+a degenerate screen shrinks the clock and icons to nothing rather than
+overlaying them on a launcher. `BarLayout::hit_test`
 maps a pointer to the `Hit` element under it (the Library button, the Files
-button, a task index, a notification index, or the clock), which is what
-input routing dispatches (see *Input routing*).
+button, a pin index, a task index, a notification index, or the clock), which
+is what input routing dispatches (see *Input routing*).
 
 ## Rounded edges
 
@@ -98,23 +109,28 @@ colour role from the `Palette`:
   glyph — pressed in while its popup is open, hover-lit under the pointer;
 - the **Files button** is a quiet (`Neutral`) `IconButton` carrying the
   folder glyph;
-- each task slot is the **accent** when it is the focused, non-minimised task,
-  the **raised surface** colour (so it recedes into the bar) when minimised,
-  and the plain **surface** colour otherwise — which the palette guarantees
-  reads as distinct from the raised background;
+- each **pin slot** and each **task slot** is one shared `tairix-controls`
+  `TaskbarItem` — the bar's application buttons have exactly one visual
+  recipe (`AGENTS.md` §2.2). A pin uses the icon-only presentation (a
+  centred icon sized off the plate); a task shows its icon beside the
+  truncated window title. The item's `TaskVisibility` paints the state: the
+  **active** window's item shows the lower accent seam, a **minimised** one
+  recesses its plate and shows the muted tick, a running one rests on its
+  plate, and a **closed** pin (its application not running) rests without a
+  plate at all — only the icon sits on the bar — until hovered;
+- a pin's per-application **artwork** (its bundle icon, rasterised by the
+  session through the sandboxed icon pipeline — see
+  [the session](session.md)) is blitted through the control in place of the
+  built-in glyph, and a running task whose window matches a pin **borrows**
+  that same artwork, so one application shows one icon everywhere;
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour.
 
-On top of those fills, the renderer draws **text** with the shared `tairix-font`
+On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
 Hebrew family): the clock label is centred in the clock region, and each task
-slot shows its window title aligned to the leading edge. Each label takes the
-foreground role that matches its background — `on_accent` over a focused
-(accent) slot, the **muted**
-foreground over a minimised slot, and `on_surface` otherwise (and for the clock
-over the raised bar) — so text stays legible after a theme switch. A label is
-truncated to the characters that fit its region, so text never spills into a
-neighbouring slot (`AGENTS.md` §2.9), and glyphs are composited through
+item truncates its title to the characters that fit, so text never spills
+into a neighbouring slot (`AGENTS.md` §2.9). Glyphs are composited through
 `tairix-raster`'s one premultiplied-alpha `over` path — no blitter or colour
 algebra is duplicated here (`AGENTS.md` §2.2).
 
@@ -241,29 +257,77 @@ Adding a task with a duplicate id, or removing/activating an unknown id,
 changes nothing and is reported as such — the window manager assigns unique
 ids, so a clash signals a bug rather than a benign retry.
 
+## Pinned shortcuts
+
+`PinStrip` holds the session's *resolved view* of each pin
+(`plans/NEW-TASKBAR.md` T6): pins are per-user configuration (the
+[`tairix-taskpins`](../lib/taskpins.md) store, read and written by the
+session under the user's own identity), and the bar receives one `PinView`
+per pin — a display label, the class glyph, optional rasterised artwork,
+the program-library entry it references (when it is an `entry` pin), and
+the running desktop window it currently matches, if any
+(`Taskbar::set_pins`). The strip derives each pin's live `TaskVisibility`
+from the `TaskList` at paint time — Active when its matched window is
+focused, Minimized when minimised, Running otherwise, and Closed when it
+has no live window (including a stale match, fail closed) — so there is
+never a second copy of window state to fall out of step.
+
+A primary press on a pin with a live window follows the task list's own
+click-to-activate / minimise rule (reported as `TaskActivated`); one with
+no window reports `ActivatePin { index }` and the session launches the
+pinned bundle. `Taskbar::pin_icon_side` exposes the exact pixel side a pin
+icon paints at (through the same control geometry the renderer uses), so
+the session rasterises artwork at exactly the drawn size.
+
+## The context menu
+
+`BarMenu` is the bar's one right-click surface, composed from the shared
+`tairix-controls` `Menu`. A secondary press on a pin opens it over that pin
+(*Open* / *Unpin*, with *Open* restoring a running window or launching
+otherwise); a secondary press on a program-library **entry row** in the
+open popup opens it over that entry (*Open* / *Pin to taskbar*, or *Unpin
+from taskbar* when the entry is already pinned). The menu opens outward
+from the bar edge, anchored at the slot or row it is about, clamped to the
+screen (`Taskbar::menu_layout`), and is presented by the session as its own
+small rounded window above the bar. Choosing a row reports a typed response
+(`ActivatePin` / `Unpin { index }` / `PinEntry { entry }` /
+`LibraryLaunch`); the menu itself performs nothing — the session edits the
+store and re-resolves the strip (`AGENTS.md` §5.4).
+
 ## Input routing
 
 `TaskbarInput` is the taskbar's input router, the counterpart of the window
 manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
 the pointer position from motion events (which also drives the leading
-buttons' hover feedback through the repaint latch). With the popup closed it
-acts only on a primary-button press, hit-tested against the current
+buttons', pin slots', and task slots' hover feedback through the repaint
+latch). With the popup and menu closed it acts only on a primary or
+secondary press, hit-tested against the current
 `BarLayout` and reported as a `TaskbarResponse`:
 
-- a press on the **Library button** opens the program-library popup
+- a primary press on the **Library button** opens the program-library popup
   (`OpenLibrary`);
-- a press on the **Files button** reports `OpenFiles` — the session opens
-  the file manager, raising an already-open files window rather than
+- a primary press on the **Files button** reports `OpenFiles` — the session
+  opens the file manager, raising an already-open files window rather than
   launching a second copy;
-- a press on a **task slot** applies the click-to-activate / minimise rule
-  and reports the `ActivateOutcome` (`TaskActivated { id, outcome }`);
-- a press on a **notification icon** reports its `IconId`
+- a primary press on a **pin slot** activates the pin (see *Pinned
+  shortcuts*), and a **secondary** press on one opens its context menu;
+- a primary press on a **task slot** applies the click-to-activate /
+  minimise rule and reports the `ActivateOutcome`
+  (`TaskActivated { id, outcome }`);
+- a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
-- a press on the **clock** reports `ClockPressed`.
+- a primary press on the **clock** reports `ClockPressed`.
 
-A non-primary button, a release, a key, or a press that misses every region
+Any other button, a release, a key, or a press that misses every region
 changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
+
+While the context menu is **open** it is the top modal layer: the whole
+stream routes into it first — motion highlights rows, a primary press-and-
+release chooses, arrows and `Enter` drive it from the keyboard, `Escape`
+dismisses, and a press outside its plate dismisses **only the menu**,
+leaving whatever is beneath for the next click (one click does one thing,
+`AGENTS.md` §2.1).
 
 While the popup is **open** the router treats it as modal and consumes the
 whole event stream — presses, releases, scroll, and keys all route into the
@@ -301,6 +365,16 @@ and hit-testing for a bottom bar (both permanent launchers included),
 vertical-bar layout, all four edges, overflow clipping, degenerate
 (tiny-screen) fail-closed clipping of the launcher buttons, DPI scaling of
 layout and hit-testing, and the theme-driven corner radius and repaint latch.
+The pin tests cover the strip's placement between the launchers and the
+task list (and its reflow as pins come and go), pin hit-testing on every
+edge, the drop-index mapping (leading/trailing halves, the empty-strip
+first drop, appends past the last slot, vertical bars), the live visibility
+derivation (running / active / minimised / closed / stale match), pin
+activation (launch vs the task click rule), the context menu's rows,
+modality, keyboard path, click-away, entry pin/unpin verb switch, menu
+geometry on every edge, and the rendered pin plates — artwork override,
+built-in glyph fallback, a focused pin's accent seam, and a task borrowing
+its pin's artwork.
 The popup model tests cover taxonomy-ordered folders with name-sorted
 entries, hidden empty folders, folder labels, the calm empty and no-match
 placeholders, the deterministic reopen state, case-insensitive filtering with

@@ -42,10 +42,26 @@
 //! work begins (`docs/src/filesystem/arxfs-spec.md` §10 — *bound memory
 //! before allocation; malformed compressed data returns an error, never
 //! panic*).
+//!
+//! # Foreign-format interoperability: [`inflate`] and [`zlib`]
+//!
+//! The codec above is TAIRiX's own, and stays the crate's only *compressor*.
+//! [`inflate`] (RFC 1951 DEFLATE) and [`zlib`] (RFC 1950, DEFLATE's usual
+//! envelope) are **decode-only**: they exist so `lib/image`'s PNG decoder
+//! can read the `IDAT` streams a foreign PNG encoder produced, which are
+//! always zlib-wrapped DEFLATE. There is deliberately no DEFLATE
+//! *compressor* here — nothing in the tree produces a DEFLATE stream, only
+//! foreign encoders do — so only the decode direction is implemented, and
+//! it carries the same total, `unsafe`-free, fail-closed discipline as the
+//! RLZ codec: see the [`inflate`] and [`zlib`] module documentation for
+//! their own bounds and error taxonomies.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod inflate;
+pub mod zlib;
 
 #[cfg(test)]
 mod tests;

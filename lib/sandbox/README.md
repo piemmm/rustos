@@ -41,6 +41,17 @@ imports this seam; a second per-app copy is forbidden.
   canonically — a forbidden escape, colour, OSC string, or truncated
   trailing sequence refuses the whole reply. A document-parse error
   round-trips typed (`HelpError`, code for code). `man` is the consumer.
+- **The icon-rasterisation service** (`iconraster`): an application
+  bundle's icon — SVG or PNG bytes — is sniffed, decoded, and rasterised
+  to the caller's requested square side inside the worker
+  (`tairix-svg`/`tairix-image`/`tairix-icon`/`tairix-raster`), and the
+  caller-side `rasterise_icon` validates the reply's echoed side and exact
+  pixel length before trusting the returned straight-alpha RGBA8 buffer. A
+  PNG source is fitted inside the square preserving its aspect ratio and
+  scaled through a small alpha-weighted box filter (never
+  nearest-neighbour); an SVG source rasterises directly through the shared
+  vector-icon path. Either a typed refusal or a sandbox failure simply
+  means the desktop session falls back to its own built-in glyph.
 - **The production transport** (`rt`, feature `program`, bare-metal only):
   the parent launches **its own binary** in a worker role via
   `SpawnAttach::sandbox` with two pipes wired to the worker's fd 0/1, and
@@ -55,9 +66,9 @@ imports this seam; a second per-app copy is forbidden.
 - The seam adds no authority: the worker holds only the two pipe ends its
   parent wired at spawn; the kernel enforces the rest
   (`docs/src/security/sandbox.md`).
-- Fuzzed: `fuzz_sandbox` (the decode and helpdoc service request decoders
-  and the caller-side reply decoders/validators) is enrolled in
-  `cargo xtask fuzz`.
+- Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and iconraster service
+  request decoders and the caller-side reply decoders/validators) is
+  enrolled in `cargo xtask fuzz`.
 
 ## Design
 

@@ -20,10 +20,12 @@ use alloc::collections::BTreeMap;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
+use tairix_window::PinDecision;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
 use crate::picker::PickerSlot;
+use crate::pins::PinBridge;
 use crate::shell::DesktopShell;
 
 /// The freshly opened window's fill until the app's first present lands:
@@ -203,6 +205,9 @@ pub struct ShellWindowHost<'a> {
     /// validated `PickFile` opens it, and a closing window takes its own
     /// pick down with it.
     pub picker: &'a mut dyn PickerSlot,
+    /// The session's pin service ([`PinService`](crate::pins::PinService)
+    /// in production): a validated pin request or drag offer lands here.
+    pub pins: &'a mut dyn PinBridge,
 }
 
 impl tairix_window::WindowHost for ShellWindowHost<'_> {
@@ -313,6 +318,21 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // session's authority, refusing fail-closed when it cannot.
         self.picker.begin(window_id, self.shell, self.compositor)
     }
+
+    fn pin_requested(&mut self, _owner: ProcId, _window: u64, path: &str) -> PinDecision {
+        // The engine attested the caller and validated window ownership;
+        // the pin service validates the bundle itself and applies (or
+        // refuses) the edit under the session's own identity.
+        self.pins.pin_requested(path)
+    }
+
+    fn drag_offered(&mut self, _owner: ProcId, window: u64, path: &str) -> bool {
+        self.pins.drag_offered(window, path)
+    }
+
+    fn drag_withdrawn(&mut self, _owner: ProcId, window: u64) {
+        self.pins.drag_withdrawn(window);
+    }
 }
 
 /// Convert the pixels of `damage` from the presented `frame` (laid out
@@ -422,6 +442,22 @@ mod tests {
         }
     }
 
+    /// A pin seam that refuses everything: these tests exercise the window
+    /// lifecycle, not pinning (which has its own suite in `crate::tests`).
+    struct RefusingPins;
+
+    impl crate::pins::PinBridge for RefusingPins {
+        fn pin_requested(&mut self, _path: &str) -> PinDecision {
+            PinDecision::Refused
+        }
+
+        fn drag_offered(&mut self, _window: u64, _path: &str) -> bool {
+            false
+        }
+
+        fn drag_withdrawn(&mut self, _window: u64) {}
+    }
+
     /// An accepted open composes a focused desktop window, records both
     /// id mappings, and cascades successive origins.
     #[test]
@@ -435,6 +471,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             host.window_opened(7, &mode(64, 48, DisplayFormat::Rgba8888), "files", false)
                 .expect("opens");
@@ -477,6 +514,7 @@ mod tests {
                     compositor: &mut compositor,
                     windows: &mut windows,
                     picker: &mut picker,
+                    pins: &mut RefusingPins,
                 };
                 host.window_opened(1, &m, "w", false).expect("opens");
                 // One frame with the probe pixel at (2, 1).
@@ -519,6 +557,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
+            pins: &mut RefusingPins,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(1, &m, "w", false).expect("opens");
@@ -568,6 +607,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
+            pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(1, &m, "w", false).expect("opens");
@@ -591,6 +631,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             host.window_opened(3, &mode(120, 80, DisplayFormat::Rgba8888), "Files", false)
                 .expect("opens");
@@ -626,6 +667,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             open_one_sized(&mut host, 3, true)
         };
@@ -675,6 +717,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             host.window_opened(7, &mode(480, 320, DisplayFormat::Rgba8888), "Files", false)
                 .expect("opens");
@@ -872,6 +915,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -918,6 +962,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             open_one(&mut host, 7)
         };
@@ -950,6 +995,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -989,6 +1035,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
+                pins: &mut RefusingPins,
             };
             open_one(&mut host, 7)
         };
@@ -1056,6 +1103,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
+            pins: &mut RefusingPins,
         };
         let wm = open_one(&mut host, 7);
         // A resize re-maps the compositor's content surface to the new size.
@@ -1082,6 +1130,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
+            pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(1, &m, "w", false).expect("opens");

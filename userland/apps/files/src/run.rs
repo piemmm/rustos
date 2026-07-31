@@ -82,12 +82,13 @@ mod program {
     use tairix_browse::{
         applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
         suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
-        Activation, AppAssociation, Browser, BundleSource, ClickKind, Clipboard, ClipboardOp,
-        ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction,
-        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind,
-        ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy, ProgressModel,
-        ProgressOp, Properties, RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource,
-        VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        Activation, AppAssociation, Browser, BundleDrag, BundleSource, ClickKind, Clipboard,
+        ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
+        DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource,
+        DoubleClickTracker, Entry, EntryKind, ManagerTool, ManagerToolModel, OwnerChange,
+        PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
+        ToolbarCommand, TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -248,6 +249,21 @@ mod program {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
         }
+    }
+
+    /// The app's live links out of its own window, threaded through the event
+    /// handlers as one value: the launcher the activation path spawns bundles
+    /// through, and the window channel (client half + window id) the
+    /// session-facing verbs — pin, drag offer, drag withdraw — speak over.
+    /// Bundling them keeps the channel and the window it names inseparable
+    /// and every handler signature within the argument budget.
+    struct SessionLink<'a, T: WindowTransport> {
+        /// The launched-bundle bookkeeping the activation path spawns through.
+        launcher: &'a RefCell<Launcher>,
+        /// The app half of the window channel.
+        client: &'a mut WindowClient<T>,
+        /// The window the channel opened — the one every verb names.
+        window: u64,
     }
 
     /// The file manager's launched children: the application bundles it
@@ -752,6 +768,12 @@ mod program {
         /// lands on chrome rather than an item, so a click through the toolbar
         /// or path bar never pairs across it.
         double_click: DoubleClickTracker,
+        /// The bundle drag-out detector: a primary press over a bundle row
+        /// arms it, and motion beyond the shared threshold offers the bundle
+        /// to the desktop session — exactly once per gesture, with the drop
+        /// itself resolved by the session. It lives beside the double-click
+        /// tracker because both turn raw pointer events into gestures.
+        drag: BundleDrag,
     }
 
     /// The font every part of the browser window draws its text in: the
@@ -871,11 +893,13 @@ mod program {
     ///
     /// `theme` and `mode` give the reveal/scroll helpers the same font and
     /// content viewport the renderer uses, so the drawn view, the selection
-    /// reveal, and the wheel scroll all agree on the geometry.
-    fn apply_event<S: DirectorySource>(
+    /// reveal, and the wheel scroll all agree on the geometry; `link` carries
+    /// the launcher and the window channel the session-facing verbs (launch,
+    /// pin, drag offer/withdraw) go out over.
+    fn apply_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
+        link: &mut SessionLink<'_, T>,
         theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
@@ -889,19 +913,44 @@ mod program {
             return (false, true);
         }
 
+        // The drag-out gesture tracks its primary press whatever mode the
+        // window is in: the release ends it locally (what a drop means is the
+        // session's decision), and `Escape` withdraws an outstanding offer —
+        // the guard asks the detector whether one is owed — so the session
+        // never keeps a drag its source abandoned. Neither consumes the
+        // event: routing continues below. A refused withdraw needs nothing
+        // more; the gesture is already dead locally either way.
+        match event {
+            WindowEvent::Pointer {
+                action: PointerAction::Released(PointerButtonCode::Primary),
+                ..
+            } => overlays.drag.release(),
+            WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } if overlays.drag.cancel() => {
+                let _ = link.client.drag_withdraw(link.window);
+            }
+            _ => {}
+        }
+
         // The right-click context menu owns input while it is open (it opens
         // only in navigation mode, so no other overlay is up); it needs the
         // launcher for a context-menu Open, so it is handled here rather than
         // in the launcher-less modal router.
         if overlays.menu.is_some() {
-            return apply_menu_event(browser, overlays, launcher, font, theme, viewport, event);
+            return apply_menu_event(browser, overlays, link, font, theme, viewport, event);
         }
 
         // The "Open With…" chooser likewise owns input while open (it replaces
         // the context menu that opened it) and needs the launcher to hand the
         // chosen application its file.
         if overlays.open_with.is_some() {
-            return apply_open_with_event(overlays, launcher, font, theme, viewport, event);
+            return apply_open_with_event(overlays, link.launcher, font, theme, viewport, event);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
@@ -944,7 +993,7 @@ mod program {
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-                    activate(browser, launcher, font, theme, viewport)
+                    activate(browser, link.launcher, font, theme, viewport)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
@@ -982,39 +1031,9 @@ mod program {
                 (moved, false)
             }
             // A pointer event the desktop routed into this window's local
-            // coordinates. A secondary-button press opens the context menu; a
-            // primary press is routed by `apply_primary_press`. Every other
-            // pointer action is a no-op.
-            WindowEvent::Pointer { x, y, action, .. } => {
-                // The right-edge scrollbar owns its gutter: give it first
-                // refusal on a primary press/drag/release so a click on the
-                // bar (an end button, the track, or the thumb) scrolls the
-                // listing instead of selecting an item beneath it. It consumes
-                // only events that belong to it; anything else falls through to
-                // the content below.
-                let point = Point::new(
-                    i32::try_from(*x).unwrap_or(i32::MAX),
-                    i32::try_from(*y).unwrap_or(i32::MAX),
-                );
-                if let Some(event) = scroll_input_event(*action, point) {
-                    if let Some(repaint) =
-                        scroll_pointer(browser, font, theme, viewport, point, &event)
-                    {
-                        return (repaint, false);
-                    }
-                }
-                // A secondary-button (right-click) press opens the context
-                // menu on the item under the pointer; its commands are the
-                // user's own verbs, so it needs the overlay/launcher state.
-                if let Some(point) = secondary_press_point(*action, *x, *y) {
-                    return open_context_menu(browser, overlays, font, theme, viewport, point);
-                }
-                match press_point(*action, *x, *y) {
-                    Some(point) => apply_primary_press(
-                        browser, overlays, launcher, font, theme, viewport, point,
-                    ),
-                    None => (false, false),
-                }
+            // coordinates: routed by `apply_pointer`.
+            WindowEvent::Pointer { .. } => {
+                apply_pointer(browser, overlays, link, font, theme, viewport, event)
             }
             // Focus changes and key releases repaint nothing. The browser
             // never requests a pick, so a pick conclusion is a session bug and
@@ -1035,6 +1054,61 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
+        }
+    }
+
+    /// Route one pointer event in navigation mode, reporting whether the view
+    /// changed (and must re-present).
+    ///
+    /// The layers are resolved in the order they overlap on screen. The
+    /// right-edge scrollbar owns its gutter, so it gets first refusal on a
+    /// primary press/drag/release — a click on the bar scrolls the listing
+    /// instead of selecting an item beneath it, and it consumes only events
+    /// that belong to it. Pointer motion then drives an armed bundle
+    /// drag-out ([`offer_armed_drag`] — the first motion beyond the threshold
+    /// offers the bundle to the session, exactly once per gesture). A
+    /// secondary-button press opens the context menu on the item under the
+    /// pointer, and a primary press is routed by [`apply_primary_press`].
+    /// Every other pointer action is a no-op.
+    fn apply_pointer<S: DirectorySource, T: WindowTransport>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        link: &mut SessionLink<'_, T>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> (bool, bool) {
+        let WindowEvent::Pointer { x, y, action, .. } = event else {
+            return (false, false);
+        };
+        let point = Point::new(
+            i32::try_from(*x).unwrap_or(i32::MAX),
+            i32::try_from(*y).unwrap_or(i32::MAX),
+        );
+        if let Some(event) = scroll_input_event(*action, point) {
+            if let Some(repaint) = scroll_pointer(browser, font, theme, viewport, point, &event) {
+                return (repaint, false);
+            }
+        }
+        if *action == PointerAction::Moved {
+            offer_armed_drag(browser, overlays, link, point);
+            return (false, false);
+        }
+        if let Some(point) = secondary_press_point(*action, *x, *y) {
+            return open_context_menu(browser, overlays, font, theme, viewport, point);
+        }
+        match press_point(*action, *x, *y) {
+            Some(point) => apply_primary_press(
+                browser,
+                overlays,
+                link.launcher,
+                font,
+                theme,
+                viewport,
+                point,
+            ),
+            None => (false, false),
         }
     }
 
@@ -2346,6 +2420,12 @@ mod program {
         if let Some(index) =
             tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
         {
+            // Any primary press over an item also drives the drag-out
+            // detector: a bundle row arms a potential drag (the offer fires
+            // only if the held pointer travels), anything else ends one.
+            // Selection and double-click handling are untouched by it.
+            let is_bundle = browser.entries().get(index).is_some_and(Entry::is_bundle);
+            overlays.drag.press(index, is_bundle, point);
             return match overlays
                 .double_click
                 .register(tairix_rt::clock_get(), index)
@@ -2451,10 +2531,10 @@ mod program {
     /// that command's verb (and closes the menu); a press off the menu, or on
     /// a disabled row, simply dismisses it (fail closed — a disabled row never
     /// acts, §5.4). Every other event leaves the menu open.
-    fn apply_menu_event<S: DirectorySource>(
+    fn apply_menu_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
+        link: &mut SessionLink<'_, T>,
         font: BitmapFont,
         theme: &Theme,
         viewport: Rect,
@@ -2491,7 +2571,7 @@ mod program {
                         begin_open_with(browser, overlays, ctx.anchor)
                     }
                     Some(command) => dispatch_context_command(
-                        browser, overlays, launcher, font, theme, viewport, command,
+                        browser, overlays, link, font, theme, viewport, command,
                     ),
                     None => (true, false),
                 }
@@ -2504,21 +2584,22 @@ mod program {
     /// paths the toolbar and keyboard drive, so the right-click menu can never
     /// diverge from them (§2.2). Every verb is the user's own permission-
     /// checked action under their identity — the menu adds no authority.
-    fn dispatch_context_command<S: DirectorySource>(
+    fn dispatch_context_command<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
+        link: &mut SessionLink<'_, T>,
         font: BitmapFont,
         theme: &Theme,
         viewport: Rect,
         command: ContextCommand,
     ) -> (bool, bool) {
         match command {
-            ContextCommand::Open => activate(browser, launcher, font, theme, viewport),
+            ContextCommand::Open => activate(browser, link.launcher, font, theme, viewport),
             // Open With… opens a submenu anchored at the right-click point, so
             // it is dispatched by `apply_menu_event` (which holds the anchor)
             // rather than here.
             ContextCommand::OpenWith => (false, false),
+            ContextCommand::PinToTaskbar => pin_selected_bundle(browser, link),
             ContextCommand::Rename => {
                 begin_rename(browser, &mut overlays.rename, font, theme, viewport)
             }
@@ -2545,6 +2626,83 @@ mod program {
             // adds no authority — the confirmed walk is the user's own
             // permission-checked `fs_unlink`s (§2.2).
             ContextCommand::Delete => begin_delete(browser, &mut overlays.delete),
+        }
+    }
+
+    /// Ask the desktop session to pin the selected application bundle to the
+    /// taskbar, over the window channel.
+    ///
+    /// Pinning is incidental to browsing, so a refusal — already pinned, a
+    /// full bar, or a session that does not pin — is stated in one terse line
+    /// on `stderr` and the app simply carries on; it never ends over it. The
+    /// engine only *names* the bundle through the same validated path
+    /// spelling every open/stat uses; the session re-validates the path
+    /// against the store under its own authority, so composing this grants
+    /// nothing. The listing is untouched either way, so nothing repaints.
+    fn pin_selected_bundle<S: DirectorySource, T: WindowTransport>(
+        browser: &Browser<S>,
+        link: &mut SessionLink<'_, T>,
+    ) -> (bool, bool) {
+        // The menu enables the command only for a bundle; guard again so a
+        // stale menu can never pin anything else (fail closed).
+        let Some(entry) = browser.selected_entry() else {
+            return (false, false);
+        };
+        if !entry.is_bundle() {
+            return (false, false);
+        }
+        let name = entry.name().to_string();
+        let Some(Ok(path)) = browser.selected_target_path() else {
+            report_error(&alloc::format!("could not locate {name}"));
+            return (false, false);
+        };
+        match link.client.pin_bundle(link.window, &path) {
+            Ok(()) => {}
+            Err(Errno::AlreadyExists) => {
+                report_error(&alloc::format!("{name} is already pinned"));
+            }
+            Err(Errno::NoSpace) => {
+                report_error(&alloc::format!("no room on the taskbar to pin {name}"));
+            }
+            Err(_) => report_error(&alloc::format!("pinning {name} was refused")),
+        }
+        (false, false)
+    }
+
+    /// Send the drag offer for an armed bundle row whose pointer has now
+    /// travelled beyond the drag threshold, if this motion crossed it.
+    ///
+    /// The offer names the bundle through the same validated path spelling
+    /// every open/stat uses; what a later drop means is the desktop session's
+    /// decision. A gesture whose row no longer names that bundle (the listing
+    /// moved under the held press) or whose offer the session refuses dies
+    /// silently — the gesture must never disturb browsing — and the detector
+    /// forgets it so no stray withdraw follows.
+    fn offer_armed_drag<S: DirectorySource, T: WindowTransport>(
+        browser: &Browser<S>,
+        overlays: &mut Overlays,
+        link: &mut SessionLink<'_, T>,
+        to: Point,
+    ) {
+        let Some(index) = overlays.drag.motion(to) else {
+            return;
+        };
+        // The press that armed the gesture selected its row, so the selection
+        // still naming that same bundle row is the gesture's integrity check:
+        // a listing that changed under the held press must not offer a
+        // different item than the one the user grabbed.
+        let still_that_bundle = browser.selected_index() == Some(index)
+            && browser.selected_entry().is_some_and(Entry::is_bundle);
+        if !still_that_bundle {
+            overlays.drag.offer_failed();
+            return;
+        }
+        let Some(Ok(path)) = browser.selected_target_path() else {
+            overlays.drag.offer_failed();
+            return;
+        };
+        if link.client.drag_offer(link.window, &path).is_err() {
+            overlays.drag.offer_failed();
         }
     }
 
@@ -3357,6 +3515,7 @@ mod program {
             can_chown: tairix_rt::self_origin()
                 .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
             double_click: DoubleClickTracker::new(),
+            drag: BundleDrag::new(),
         }
     }
 
@@ -3469,6 +3628,10 @@ mod program {
             // do, and returning to the parked wait the instant the operation
             // finishes (§2.23).
             if overlays.operation.is_some() {
+                // The modal operation owns the window and its events bypass
+                // the normal routing, so a pressed drag gesture ends here —
+                // its release may never reach the detector.
+                overlays.drag.release();
                 let finished = overlays.operation.as_mut().is_some_and(advance_operation);
                 if present_frame(
                     &browser,
@@ -3579,8 +3742,18 @@ mod program {
                 }
                 continue;
             }
-            let (changed, close) =
-                apply_event(&mut browser, &mut overlays, &launcher, theme, &mode, &event);
+            let (changed, close) = apply_event(
+                &mut browser,
+                &mut overlays,
+                &mut SessionLink {
+                    launcher: &launcher,
+                    client: &mut client,
+                    window,
+                },
+                theme,
+                &mode,
+                &event,
+            );
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);

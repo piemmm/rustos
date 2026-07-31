@@ -57,7 +57,7 @@ use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
-use tairix_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
+use tairix_abi::window_ipc::{decode_create_reply, BundleRef, WindowEvent, WindowRequest};
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
     ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
@@ -841,6 +841,30 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
             frame[byte] ^= 1 << bit;
             exercise(&frame);
             frame[byte] ^= 1 << bit;
+        }
+    }
+}
+
+#[test]
+fn structured_window_pin_and_drag_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the taskbar pin/drag
+    // requests from well-formed frames: a random byte-level mutation of
+    // any of these must never panic, and the mutated bytes are exactly
+    // as likely to land on the bundle-path length or content as on the
+    // header — the decoder's fail-closed shape covers all of it.
+    let path = BundleRef::new("/Apps/Editor.app").expect("a valid path");
+    let frames = [
+        WindowRequest::PinBundle { window: 5, path }.to_le_bytes(),
+        WindowRequest::DragOffer { window: 5, path }.to_le_bytes(),
+        WindowRequest::DragWithdraw { window: 5 }.to_le_bytes(),
+    ];
+    for mut base in frames {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

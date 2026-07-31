@@ -15,13 +15,14 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::window_ipc::{PointerAction, WindowEvent};
+use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest};
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
 
 use crate::client::{EventSource, WindowClient, WindowEvents, WindowTransport};
 use crate::server::{
-    CallerIdentity, EventSink, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
+    CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
+    WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -113,18 +114,44 @@ impl CallerIdentity for MockIdentity {
     }
 }
 
-/// A host recording every bridge call, optionally refusing opens and
-/// picker requests.
-#[derive(Default)]
+/// A host recording every bridge call, optionally refusing opens, picker
+/// requests, pins, and drag offers.
 struct RecordingHost {
     opened: Vec<(u64, DisplayMode, String, bool)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<u64>,
+    pins: Vec<(ProcId, u64, String)>,
+    drag_offers: Vec<(ProcId, u64, String)>,
+    drag_withdraws: Vec<(ProcId, u64)>,
     refuse_open: bool,
     refuse_resize: Option<Errno>,
     refuse_pick: Option<Errno>,
+    /// The outcome the next `PinBundle` receives.
+    pin_decision: PinDecision,
+    /// Whether the next `DragOffer` is accepted.
+    drag_offer_accepts: bool,
+}
+
+impl Default for RecordingHost {
+    fn default() -> Self {
+        Self {
+            opened: Vec::new(),
+            presented: Vec::new(),
+            resized: Vec::new(),
+            closed: Vec::new(),
+            picks: Vec::new(),
+            pins: Vec::new(),
+            drag_offers: Vec::new(),
+            drag_withdraws: Vec::new(),
+            refuse_open: false,
+            refuse_resize: None,
+            refuse_pick: None,
+            pin_decision: PinDecision::Pinned,
+            drag_offer_accepts: true,
+        }
+    }
 }
 
 impl WindowHost for RecordingHost {
@@ -171,6 +198,56 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.picks.push(window_id);
+        Ok(())
+    }
+
+    fn pin_requested(&mut self, owner: ProcId, window: u64, path: &str) -> PinDecision {
+        self.pins.push((owner, window, String::from(path)));
+        self.pin_decision
+    }
+
+    fn drag_offered(&mut self, owner: ProcId, window: u64, path: &str) -> bool {
+        self.drag_offers.push((owner, window, String::from(path)));
+        self.drag_offer_accepts
+    }
+
+    fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
+        self.drag_withdraws.push((owner, window));
+    }
+}
+
+/// A host implementing only the mandatory bridge methods, so the
+/// trait's fail-closed defaults for pinning and dragging run untouched.
+struct MinimalHost;
+
+impl WindowHost for MinimalHost {
+    fn window_opened(
+        &mut self,
+        _window_id: u64,
+        _surface: &DisplayMode,
+        _title: &str,
+        _resizable: bool,
+    ) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_presented(
+        &mut self,
+        _window_id: u64,
+        _surface: &DisplayMode,
+        _frame: &[u8],
+        _damage: DamageRect,
+    ) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_closed(&mut self, _window_id: u64) {}
+
+    fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
         Ok(())
     }
 }
@@ -586,7 +663,7 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
         &mut inner.host,
         &mut inner.identity,
         TICKET_A,
-        &[0xFFu8; 112],
+        &[0xFFu8; WindowRequest::WIRE_LEN],
         &mut reply,
     );
     assert_eq!(decode_status_reply(&reply[..len]), Err(Errno::BadMagic));
@@ -786,6 +863,148 @@ fn a_refused_picker_leaves_no_pending_pick() {
     client
         .pick_file(window)
         .expect("accepted once the host can");
+}
+
+#[test]
+fn pin_bundle_is_owner_bound_and_reaches_the_host_with_the_right_arguments() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // A window the caller does not own answers exactly like one that
+    // never existed, and the host is never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.pin_bundle(window, "/Apps/Editor.app"),
+        Err(Errno::NotFound)
+    );
+    assert!(loopback.borrow().host.pins.is_empty());
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The owner's request reaches the host with its attested identity,
+    // the window, and the exact path.
+    client
+        .pin_bundle(window, "/Apps/Editor.app")
+        .expect("pinned");
+    assert_eq!(
+        loopback.borrow().host.pins,
+        alloc::vec![(proc_id(0xA1), window, String::from("/Apps/Editor.app"))]
+    );
+}
+
+#[test]
+fn pin_decision_maps_to_the_documented_status() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    for (decision, expected) in [
+        (PinDecision::Pinned, Ok(())),
+        (PinDecision::AlreadyPinned, Err(Errno::AlreadyExists)),
+        (PinDecision::Full, Err(Errno::NoSpace)),
+        (PinDecision::Refused, Err(Errno::PermissionDenied)),
+    ] {
+        loopback.borrow_mut().host.pin_decision = decision;
+        assert_eq!(client.pin_bundle(window, "/Apps/Editor.app"), expected);
+    }
+}
+
+#[test]
+fn drag_offer_and_withdraw_are_owner_bound_and_reach_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // A window the caller does not own is refused for both requests,
+    // and the host is never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.drag_offer(window, "/Apps/Editor.app"),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(client.drag_withdraw(window), Err(Errno::NotFound));
+    assert!(loopback.borrow().host.drag_offers.is_empty());
+    assert!(loopback.borrow().host.drag_withdraws.is_empty());
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The owner's offer reaches the host with its attested identity, the
+    // window, and the exact path; the later withdraw reaches it too.
+    client
+        .drag_offer(window, "/Apps/Editor.app")
+        .expect("offered");
+    assert_eq!(
+        loopback.borrow().host.drag_offers,
+        alloc::vec![(proc_id(0xA1), window, String::from("/Apps/Editor.app"))]
+    );
+    client.drag_withdraw(window).expect("withdrawn");
+    assert_eq!(
+        loopback.borrow().host.drag_withdraws,
+        alloc::vec![(proc_id(0xA1), window)]
+    );
+}
+
+#[test]
+fn a_refused_drag_offer_maps_to_permission_denied() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    loopback.borrow_mut().host.drag_offer_accepts = false;
+    assert_eq!(
+        client.drag_offer(window, "/Apps/Editor.app"),
+        Err(Errno::PermissionDenied)
+    );
+    // The gesture is never fatal to the window: a withdraw (or a fresh
+    // offer once the host recovers) still succeeds.
+    assert_eq!(client.drag_withdraw(window), Ok(()));
+}
+
+#[test]
+fn pin_and_drag_default_to_fail_closed_refusal() {
+    // A host implementing only the mandatory bridge methods exercises
+    // the trait's own defaults: a host that has not wired up pinning or
+    // dragging must refuse rather than silently accept.
+    let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
+    let mut server = WindowServer::new(mapper, SERVER);
+    let mut host = MinimalHost;
+    let mut identity = MockIdentity;
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+
+    let create = WindowRequest::Create {
+        shm_handle: 7,
+        event_endpoint: EVENTS_A,
+        frame_count: 1,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
+        resizable: false,
+    }
+    .to_le_bytes();
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
+    let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
+
+    let path = tairix_abi::window_ipc::BundleRef::new("/Apps/Editor.app").expect("valid path");
+    let pin = WindowRequest::PinBundle { window, path }.to_le_bytes();
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &pin, &mut reply);
+    assert_eq!(
+        decode_status_reply(&reply[..len]),
+        Err(Errno::PermissionDenied)
+    );
+
+    let offer = WindowRequest::DragOffer { window, path }.to_le_bytes();
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &offer, &mut reply);
+    assert_eq!(
+        decode_status_reply(&reply[..len]),
+        Err(Errno::PermissionDenied)
+    );
+
+    // Withdrawing is infallible for an owned window even with no offer
+    // to disarm: the default handler simply has nothing to do.
+    let withdraw = WindowRequest::DragWithdraw { window }.to_le_bytes();
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &withdraw, &mut reply);
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
 }
 
 #[test]

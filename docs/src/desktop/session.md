@@ -50,6 +50,57 @@ that same catalog — the entry's bundle names its `Run` binary — and spawned
 asynchronously under the session's own identity, with a refusal reported
 loudly and non-fatally (see *Launch bookkeeping*).
 
+## Pinned shortcuts
+
+The session owns the user's list of **pinned shortcuts** (`plans/NEW-TASKBAR.md`
+T6), stored as per-user configuration at `~/Settings/Taskbar/pins.conf` (the
+[`tairix-taskpins`](../lib/taskpins.md) store). It loads them with the same
+fail-closed posture as the library: an **absent** store is silently empty, and
+an **unusable** one contributes an empty list plus a loud `stderr` warning.
+
+The session is the store's only writer. Every edit (pin, unpin, or a
+drag-and-drop insertion) rewrites the document whole through the one
+`SessionFileWriter` seam — the write-side twin of the reader — and the
+in-memory list adopts the edit **only after the write succeeded**, so memory
+and disk never diverge. A refused write leaves the bar exactly as it was,
+with a diagnostic reported on `stderr`.
+
+### Resolution and icon pipeline
+
+Resolution turns each stored `PinTarget` into the view the bar renders:
+
+- an **`entry`** pin resolves through the merged program-library catalog (name,
+  icon asset, bundle);
+- a **`bundle`** pin resolves through its own bounded, fail-closed `AppInfo`
+  manifest read;
+- an **unresolvable** pin (e.g. an uncatalogued entry) keeps a best-effort
+  identity with no launch path, so it can still be seen and unpinned.
+
+Bundle icon bytes (SVG or PNG) are **untrusted third-party input**, so the
+session never decodes them in its own address space. Instead, they go to the
+**parser-sandbox icon-rasterisation service**: the session's own binary
+re-entered as a capability-empty worker ([the sandbox
+page](../security/sandbox.md)). The rasterised RGBA pixels are verified and
+cached per `(asset path, pixel side)`, including refusals; a missing or bad
+icon falls back to the shared application-class glyph. `Taskbar::pin_icon_side`
+exposes the exact geometry so the session rasterises artwork at the drawn size.
+
+Running-window matches are recomputed cheaply each loop wake from the attested
+launch table and window ownership records, never from window titles.
+
+### Pin service and window-channel bridge
+
+`PinService` manages the live store, the armed drag offer, and a dirty latch
+the loop drains to re-resolve views before its next present. It implements the
+window-channel bridge (`PinBridge`) through which apps ask to be pinned: a
+`PinBundle` request is validated (store-shaped path, decodable manifest) and
+applied fail-closed.
+
+`DragOffer` and `DragWithdraw` arm and disarm the one permitted app-reference
+drag. `resolve_pin_drop` resolves the gesture: a primary release from the
+offering served window over the pin band pins at the drop index; the offer is
+consumed either way.
+
 ## Resolving taskbar responses
 
 A `tairix_taskbar::TaskbarResponse` flows out of `DesktopShell::handle` as a
@@ -64,12 +115,20 @@ for — a `TaskActivated` outcome drives the compositor through the
   running and serving a window, that window is raised and focused
   (`DesktopShell::raise_window`); if its launch is still in flight, the
   press is already satisfied; only otherwise is the bundle spawned.
+- `ActivatePin { index }` — an idempotent launch-or-raise of the pin at
+  `index`, using the same rule as the Files button (the shared
+  `activate_bundle`).
+- `Unpin { index }` and `PinEntry { entry }` — edits the pin store and sets
+  the dirty latch; a refused edit is reported on `stderr`.
 - `LibraryLaunch { entry }` — a chosen library entry, resolved through the
   catalog and spawned (see *The program library*).
 - `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
   listing is current.
 - `LibraryDismissed`, `NotificationActivated`, `ClockPressed` — surfaced for
   the embedder; the bar's own state is already up to date.
+
+The bar's **context menu** is presented by the presenter as its own small
+rounded window (a third window beside the bar and popup).
 
 ## Switching the theme
 
@@ -138,21 +197,22 @@ A real input source produces one event stream, so `SessionInputRouter` is the
 glue that fans it to the right router, driven through
 `handle(event, &mut Compositor, &mut Taskbar)`:
 
-- while the **program-library popup is open it is modal**: every press (any
-  button), release, scroll, and key event routes to the taskbar, which
-  drives the popup. Motion is still *tracked* by the window manager so its
-  pointer stays in step for the moment the popup closes, but its outcome is
-  discarded — nothing is delivered to the windows beneath a modal popup;
-- otherwise a **primary press** goes to the taskbar when the pointer is over
-  the bar, and to the window manager elsewhere — the two never both act on
-  one press, so a click on the bar never also activates a window beneath it;
+- while the bar's **context menu** OR the **program-library popup** is open it
+  is modal: every press (any button), release, scroll, and key event routes
+  to the taskbar. Motion is still *tracked* by the window manager so its
+  pointer stays in step for the moment the surface closes, but its outcome is
+  discarded — nothing is delivered to the windows beneath a modal surface;
+- otherwise a **primary OR secondary press** goes to the taskbar iff the
+  pointer is over the bar (a secondary press there opens a pin's context
+  menu), and to the window manager elsewhere — the two never both act on
+  one press;
 - **pointer motion** is fanned to both so their tracked pointer positions stay
   in step; the window manager acts on it (dragging a grabbed window) and the
-  taskbar refreshes its launcher hover feedback;
-- a **primary release** goes to the window manager, ending an in-flight
+  taskbar refreshes its hover feedback;
+- a **primary release** still goes to the window manager, ending an in-flight
   move-grab (the taskbar ignores releases while the popup is closed);
 - **key events** go to the window manager — which delivers them to the
-  focused window — except while the popup is open (above);
+  focused window — except while a modal surface is open (above);
 - a non-primary button, or a press/motion neither router acted on, is
   `SessionInputResponse::Ignored`.
 
@@ -314,56 +374,43 @@ empty library and a closed popup; `set_theme` relaying the new metrics to the
 taskbar (observed through a custom theme with a distinctive corner radius);
 the fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar
 untouched; and `TaskbarPresenter` placing and rounding the bar, reusing its
-window across presents, showing the popup while it is open and removing it
-when it closes, re-creating a window an embedder removed, relaying a switched
-theme's corner radius onto the presented bar, and `teardown` clearing every
-window. It also covers `SessionInputRouter`: presses on the Files and Library
-buttons routing to the taskbar (even over a window beneath the bar) while a
-press over a window or the empty desktop routes to the window manager, the
-modal popup claiming an off-panel press (dismissing without activating the
-window beneath), keys driving the popup's cursor and Escape dismissing it, a
-scroll while open never reaching the window manager, motion keeping the
-pointer in step, a window drag continuing while the pointer is over the bar,
-a release ending the grab, and a non-primary press being ignored. It covers
-the library loader (`load_library`): absent stores silent and empty, a
-parsed machine store, the user overlay's per-field override winning, a
-patch with no declaring store discarding, and the malformed / oversized /
-non-UTF-8 stores each yielding an empty catalog plus one warning line. It
-covers `DesktopShell`: `pump` opening the popup from a press on the Library
-button and presenting it, `set_library` handing the catalog over and
-refreshing an open popup in place, the full launch flow (open the popup,
-click an entry, receive `LibraryLaunch` with the right identifier),
-`raise_window` restoring and focusing a minimised task (and refusing an
-untracked window), hover latching a present of the bar while pure desktop
-motion presents nothing, a faulting `InputSource` returning its `Errno`
-while the event drained before it stays applied, `begin_move` arming a grab
-on the focused window, `set_icons` installing a loaded set while the bar
-still presents, and `teardown` clearing the presented windows. The `launch`
-module's own tests cover the reserved-status reporting table, the
-run-path-keyed `LaunchTable`, and the shared reap flow (drain, report only
-refusals, tear down every reaped child, fallback label). It covers
-`TaskBridge` end to end through the shell:
+window across presents, showing the popup and menu while they are open,
+re-creating a window an embedder removed, and `teardown` clearing every window.
+It also covers `SessionInputRouter`: presses on the bar's buttons and slots
+routing to the taskbar while a press over a window or the empty desktop routes
+to the window manager; modal surface modality (claiming off-panel presses and
+keys); motion keeping the pointer in step; a window drag continuing while the
+pointer is over the bar; and a release ending the grab.
+
+It covers the library loader (`load_library`) and pin loader (`SessionPins`):
+absent stores silent and empty, parsed stores, the user overlay's per-field
+override winning, and malformed / oversized / non-UTF-8 stores each yielding an
+empty catalog/list plus one warning line. It covers `SessionPins` persistence
+and the refusing writer (memory and disk stay in step). It covers pin
+resolution (catalog, manifest, and unresolvable fallback) and `IconCache`
+(rasterised artwork, refusals cached, verified pixel shape).
+
+It covers `DesktopShell`: `pump` opening the popup from a press on the Library
+button and presenting it, `set_library`/`set_pins` handing catalog/pins over
+and refreshing open views, the full launch flow, `raise_window` restoring and
+focusing a minimised task, hover latching a present of the bar, fault
+propagation, `begin_move` arming a grab, `set_icons` installing a loaded set,
+and `teardown`. It covers `PinService` decisions, drag management, the
+`resolve_pin_drop` policy, and `TaskBridge` end to end through the shell:
 `open_window` listing, focusing, and presenting a new task; `close_window`
-removing the task and dropping focus (and a second close being a no-op);
-clicking a task slot minimising the window and dropping focus, then a second
-click restoring and re-focusing it; clicking a window directly moving both the
-window-manager focus and the bar highlight; pressing the desktop clearing the
-highlight while the task stays listed; the window↔task mapping both ways;
-activating an unknown task changing nothing; and syncing focus to an untracked
-window leaving the highlight in place while clearing it on a desktop press. It
-also covers `DeviceInputSource`: accumulating `MovedBy` displacements into
-absolute, screen-clamped `PointerMoved` positions (including `i32`-extreme
-displacements saturating to the screen edge and an empty screen refused at
-construction), each pointer button for press and release, a malformed
-(all-zero) record surfacing `BadMagic` rather than being misinterpreted, a
-channel fault propagating while a queued record still decodes afterwards, and
-`into_channel` returning the wrapped channel. It covers `KeyboardInputSource`
-likewise: decoding a character press with its modifiers, a named release that
-folds a function key into `NamedKey::Function`, a malformed record surfacing
-`BadMagic`, a channel fault propagating while a queued record still decodes,
-and `into_channel`. Finally it covers `SeatInputChannel`: draining a pointer
-move, a pointer press, and a key press from the in-memory seat reader; a
-drained channel yielding `None`; a one-shot reader fault (`SeatNotOwner`)
-propagating then recovering; and the fail-closed paths — a partial record
-refused as `LengthOutOfRange` and a whole-length but structurally invalid
-record surfacing the decoder's `BadMagic`.
+removing the task and dropping focus; clicking a task slot minimising/restoring
+the window; and syncing focus to an untracked window.
+
+The `launch` module's own tests cover the reserved-status reporting table, the
+run-path-keyed `LaunchTable`, and the shared reap flow. It also covers
+`DeviceInputSource`: accumulating `MovedBy` displacements into absolute,
+screen-clamped `PointerMoved` positions, each pointer button for press and
+release, a malformed record surfacing `BadMagic`, a channel fault propagating,
+and `into_channel`. It covers `KeyboardInputSource` likewise: decoding a
+character press with its modifiers, a named release, a malformed record
+surfacing `BadMagic`, a channel fault propagating, and `into_channel`. Finally
+it covers `SeatInputChannel`: draining a pointer move, a pointer press, and a
+key press from the in-memory seat reader; a drained channel yielding `None`;
+a one-shot reader fault propagating then recovering; and the fail-closed
+paths — a partial record refused as `LengthOutOfRange` and a whole-length but
+structurally invalid record surfacing `BadMagic`.

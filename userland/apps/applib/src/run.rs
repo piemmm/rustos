@@ -40,10 +40,9 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntries, FileKind, OpenFlags};
-    use tairix_abi::{BundleEntry, Errno};
+    use tairix_abi::{BundleEntry, Errno, APPINFO_WIRE_MAX};
     use tairix_applib::{
-        parse, run, AppLibError, Bundles, DirEntryInfo, Output, Store, Stores, APPINFO_READ_MAX,
-        OWN_WORD, USAGE,
+        parse, run, AppLibError, Bundles, DirEntryInfo, Output, Store, Stores, OWN_WORD, USAGE,
     };
     use tairix_help::BundleHelp;
     use tairix_proglib::{user_library_path, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN};
@@ -194,13 +193,13 @@ mod program {
         }
     }
 
-    /// Read a manifest of at most [`APPINFO_READ_MAX`] bytes from `fd`; a
+    /// Read a manifest of at most [`APPINFO_WIRE_MAX`] bytes from `fd`; a
     /// longer file cannot be a valid manifest and is refused rather than
     /// half-read.
     fn read_bounded(fd: u32) -> Result<Vec<u8>, Errno> {
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 512];
-        while bytes.len() <= APPINFO_READ_MAX {
+        while bytes.len() <= APPINFO_WIRE_MAX {
             let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
                 .map_err(Errno::from_syscall)?;
             if read == 0 {
@@ -208,7 +207,7 @@ mod program {
             }
             bytes.extend_from_slice(&chunk[..read]);
         }
-        if bytes.len() > APPINFO_READ_MAX {
+        if bytes.len() > APPINFO_WIRE_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         Ok(bytes)

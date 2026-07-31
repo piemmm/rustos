@@ -167,6 +167,46 @@ fn fill_sets_every_pixel() {
     assert!(s.pixels().iter().all(|p| *p == BLUE.premultiply()));
 }
 
+// ---- from_rgba8 --------------------------------------------------------
+
+#[test]
+fn from_rgba8_rejects_a_length_mismatch() {
+    // One pixel short of the 2x2x4 = 16 bytes a 2x2 image needs.
+    let rgba = [0u8; 15];
+    assert_eq!(Surface::from_rgba8(2, 2, &rgba), None);
+}
+
+#[test]
+fn from_rgba8_premultiplies_each_pixel() {
+    // Straight-alpha half-red at alpha 128 premultiplies to (128, 0, 0, 128)
+    // through the crate's one `Color::premultiply` path.
+    let rgba = [255u8, 0, 0, 128];
+    let s = Surface::from_rgba8(1, 1, &rgba).expect("length matches");
+    assert_eq!(s.width(), 1);
+    assert_eq!(s.height(), 1);
+    assert_eq!(s.get(0, 0), Some(Color::rgba(255, 0, 0, 128).premultiply()));
+}
+
+#[test]
+fn from_rgba8_reproduces_several_known_pixels() {
+    let rgba = [
+        255, 0, 0, 255, // opaque red
+        0, 255, 0, 0, // fully transparent green (premultiplies to black)
+        0, 0, 255, 255, // opaque blue
+        10, 20, 30, 40, // an arbitrary translucent pixel
+    ];
+    let s = Surface::from_rgba8(2, 2, &rgba).expect("length matches");
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(0, 1), Some(BLUE.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Color::rgba(10, 20, 30, 40).premultiply()));
+}
+
+#[test]
+fn from_rgba8_zero_size_matches_surface_new() {
+    assert_eq!(Surface::from_rgba8(0, 0, &[]), Surface::new(0, 0));
+}
+
 // ---- anti-aliased polygon fill --------------------------------------
 
 #[test]

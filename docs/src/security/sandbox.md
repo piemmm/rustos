@@ -131,6 +131,22 @@ sandboxes a parse imports it:
   re-spawns itself as the worker (`CAP_PROC_SPAWN` in its manifest), and
   withholds the page — never falling back to an in-process parse — when
   the renderer fails.
+- **Icon rasterisation** (`iconraster`): an application bundle's icon —
+  SVG or PNG bytes shipped inside the bundle, not from the system — is
+  sniffed, decoded, and rasterised to the caller's requested square side
+  inside the worker (`tairix_svg`/`tairix_image`/`tairix_icon`/
+  `tairix_raster`), and the parent-side `rasterise_icon` trusts nothing
+  about the reply beyond its length and echoed side before handing the
+  bytes to the compositor. A PNG source decodes through its own,
+  tighter decode-time bounds (independent of the requested output side,
+  so a small request cannot smuggle a huge source image past a small
+  reply), is fitted inside the square preserving its aspect ratio, and is
+  scaled through a small alpha-weighted box filter — never
+  nearest-neighbour, so a downscale blends instead of aliasing; an SVG
+  source rasterises directly through the shared vector-icon polygon-fill
+  path. Either a typed refusal (unsupported format, a decode failure, or
+  an unrenderable result) or a sandbox failure simply means the desktop
+  session falls back to its own built-in glyph — never a crash.
 
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
@@ -167,10 +183,15 @@ under plain `cargo test`.
   logged events, frozen event ids); fail-closed decode of hostile
   replies; the `helpdoc` render-op whitelist (forbidden escapes, OSC
   strings, colour SGRs, and truncated trailing escapes all refuse the
-  whole reply) and typed `HelpError` round-trips; and the `fuzz_sandbox`
-  harness (hostile input files through the decode and helpdoc services,
-  hostile worker replies into the client decoders) in
-  `cargo xtask fuzz`.
+  whole reply) and typed `HelpError` round-trips; the `iconraster`
+  service (an SVG icon rasterises to an exact uniform colour, a PNG icon
+  downscales through the box filter to a hand-checked known average,
+  aspect-fit letterboxing centres with transparent padding, every
+  refusal shape, and a hostile reply's wrong tag/echoed side/pixel
+  length/trailing bytes each refuse fail-closed); and the `fuzz_sandbox`
+  harness (hostile input files through the decode, helpdoc, and
+  iconraster services, hostile worker replies into the client decoders)
+  in `cargo xtask fuzz`.
 - `userland/apps/man`: the loopback-driven suite runs the real
   `HelpService` end to end, and hostile-renderer tests prove a
   disbelieved reply withholds the page (typed `ManError::Render`, no

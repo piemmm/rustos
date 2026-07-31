@@ -41,7 +41,7 @@ use tairix_abi::Errno;
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
 use tairix_proglib::Catalog;
-use tairix_taskbar::{ActivateOutcome, TaskbarConfig, TaskbarRenderer, TaskbarResponse};
+use tairix_taskbar::{ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse};
 use tairix_wm::{
     Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
     WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
@@ -447,6 +447,14 @@ impl DesktopShell {
             .taskbar_mut()
             .library_mut()
             .set_catalog(catalog);
+        self.present(compositor);
+    }
+
+    /// Hand the taskbar's pin strip the session's freshly resolved pin views
+    /// and re-present, so the strip reflects an edit or a changed
+    /// running-window match in the same frame.
+    pub fn set_pins(&mut self, compositor: &mut Compositor, pins: Vec<PinView>) {
+        self.session.taskbar_mut().set_pins(pins);
         self.present(compositor);
     }
 

@@ -786,15 +786,44 @@ Notifications use cards with semantic beads. They should remain compact and acti
 
 ### 11.26 TaskbarItem
 
-Taskbar items combine application identity, activity, attention, and window-visibility state.
+Taskbar items combine application identity (icon and label), activity,
+attention, and window-visibility state on one Alloy Plate.
 
-- Running: plate visible.
-- Focused: lower accent seam.
-- Minimized: distinct non-color mark or inset treatment while remaining restorable.
-- Background work: Heat Seam.
-- Attention requested: Signal Bead.
-- Recovery state: sharper recovery bead.
-- Denied optional action: lock or authority mark, not a generic error color.
+#### Presentation
+
+A taskbar item supports two presentations ([`TaskbarPresentation`]):
+
+- **IconAndLabel** — leading icon beside a truncated label. Used for wide
+  running-task buttons.
+- **Icon** — a centred icon filling the plate. Used for compact pinned-shortcut
+  slots. The label stays part of the model for context surfaces (tooltips,
+  menus) to read.
+
+#### Visibility states
+
+A taskbar item's window-visibility state ([`TaskVisibility`]):
+
+- **Running** — visible but not the active window. Plate visible.
+- **Active** — the focused window. Shown with a lower accent seam.
+- **Minimized** — recessed plate and a distinct non-color mark (short muted
+  tick on the leading edge).
+- **Closed** — a pinned shortcut whose application is not running. The plate
+  stays quiet (bar-coloured, no rim) until hovered or focused, so a
+  launcher-only slot never masquerades as a running task.
+
+#### Anatomy and artwork
+
+The item draws its identity from a built-in class glyph tinted for the
+resolved frame, or from **owner-supplied artwork** (pre-rasterised pixels).
+The control never parses image bytes; [`icon_side`] exposes the exact pixel
+geometry (sized off the text line for labelled items, or the plate for
+icon-only items) so owners rasterise at exactly the drawn size.
+
+#### Statusfurniture
+
+Background work shows a Heat Seam on the lower edge (just above the active
+seam if present). An attention request or recovery/denied state shows a
+shape-coded Signal Bead on the top-trailing corner.
 
 ### 11.27 TraySignal
 

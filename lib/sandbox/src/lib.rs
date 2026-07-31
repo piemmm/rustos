@@ -18,6 +18,11 @@
 //!   with a stable id ([`host::EVENT_WORKER_CRASHED`],
 //!   [`host::EVENT_WORKER_UNAVAILABLE`]). A parser crash never takes down
 //!   the calling program.
+//! * [`helpdoc`] — a foreign bundle's help document is parsed and rendered
+//!   inside the worker (`tairix-help`), and the caller-side
+//!   [`helpdoc::render_help`] re-parses the reply through the `tairix-vt`
+//!   streaming parser, admitting only the closed render-op set a help
+//!   render can legitimately contain.
 //! * [`loopback`] — the public in-process fake, so a consumer's host tests
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
 //!   pattern).
@@ -25,6 +30,11 @@
 //!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
 //!   parsed a byte).
+//! * [`iconraster`] — an application bundle's icon (SVG or PNG bytes) is
+//!   sniffed, decoded, and rasterised inside the worker
+//!   (`tairix-svg`/`tairix-image`/`tairix-icon`/`tairix-raster`), and the
+//!   caller-side [`iconraster::rasterise_icon`] validates the reply's echoed
+//!   side and pixel length before trusting the returned RGBA8 buffer.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -38,6 +48,7 @@ extern crate alloc;
 pub mod decode;
 pub mod helpdoc;
 pub mod host;
+pub mod iconraster;
 pub mod loopback;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
