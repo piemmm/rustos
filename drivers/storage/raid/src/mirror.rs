@@ -618,9 +618,11 @@ impl<'a, B: Block> MirrorArray<'a, B> {
             let this_usize = usize::try_from(this).map_err(|_| DriverError::LengthOutOfRange)?;
             let bytes = this_usize * bs;
             let read_result = match self.members[src].device.as_mut() {
-                Some(device) => {
-                    device.read_blocks_with_class(cursor, &mut scratch[..bytes], BufferClass::Sensitive)
-                }
+                Some(device) => device.read_blocks_with_class(
+                    cursor,
+                    &mut scratch[..bytes],
+                    BufferClass::Sensitive,
+                ),
                 // An in-sync source must hold a device; fail closed if not.
                 None => Err(DriverError::DeviceOffline),
             };
@@ -808,7 +810,11 @@ impl<'a, B: Block> MirrorArray<'a, B> {
                 Ok(()) => {
                     let write_failed = match self.members[target].device.as_mut() {
                         Some(device) => device
-                            .write_blocks_with_class(cursor, &scratch[..bytes], BufferClass::Sensitive)
+                            .write_blocks_with_class(
+                                cursor,
+                                &scratch[..bytes],
+                                BufferClass::Sensitive,
+                            )
                             .is_err(),
                         // The repair target holds no device: nothing to write
                         // back to, but the data is safe on the source, so this
@@ -1082,7 +1088,11 @@ impl<B: Block> Block for MirrorArray<'_, B> {
 /// Whether a member that returned `err` on an I/O should be dropped from the
 /// array (a whole-device fault or a misbehaving member), as opposed to a
 /// per-block or transient error the array can recover around.
-fn member_faulting(err: DriverError) -> bool {
+///
+/// Shared with the striped composition ([`crate::StripeArray`]) so both RAID
+/// levels classify "is this a dead device or a recoverable per-block error?"
+/// through one definition (`AGENTS.md` §2.2).
+pub(crate) fn member_faulting(err: DriverError) -> bool {
     match BlkStatus::for_driver_health(err) {
         // A per-block bad sector, or a transient/reset the child already
         // exhausted its own reissue for: recover around it and keep the copy

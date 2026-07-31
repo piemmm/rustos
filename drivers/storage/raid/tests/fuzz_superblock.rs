@@ -72,6 +72,7 @@ fn bit_flipped_well_formed_records_never_panic() {
         },
         generation: 0x0102_0304_0506_0708,
         updated_at: Time64::new(1_800_000_000, 123_456_789).expect("canonical"),
+        chunk_blocks: 0,
     }
     .encode();
     for byte in 0..base.len() {

@@ -25,6 +25,28 @@ fn sb(array: [u8; 16], count: u16, slot: u16, generation: u64) -> ArraySuperbloc
         geometry: GEO,
         generation,
         updated_at: Time64::from_secs(1_700_000_000),
+        chunk_blocks: 0,
+    }
+}
+
+/// A striped (RAID0) superblock for `array`, `slot` of `count`, at
+/// `generation`, with stripe unit `chunk_blocks`.
+fn stripe_sb(
+    array: [u8; 16],
+    count: u16,
+    slot: u16,
+    generation: u64,
+    chunk_blocks: u32,
+) -> ArraySuperblock {
+    ArraySuperblock {
+        array_uuid: array,
+        raid_level: RaidLevel::Stripe,
+        member_count: count,
+        member_slot: slot,
+        geometry: GEO,
+        generation,
+        updated_at: Time64::from_secs(1_700_000_000),
+        chunk_blocks,
     }
 }
 
@@ -45,10 +67,41 @@ fn encode_decode_round_trips_every_field() {
         },
         generation: 0xDEAD_BEEF_0000_0007,
         updated_at: Time64::new(1_800_000_000, 123_456_789).unwrap(),
+        chunk_blocks: 0,
     };
     let bytes = original.encode();
     assert_eq!(bytes.len(), WIRE_LEN);
     assert_eq!(ArraySuperblock::decode(&bytes).unwrap(), original);
+}
+
+#[test]
+fn a_striped_superblock_round_trips_with_its_stripe_unit() {
+    let original = stripe_sb(UUID_A, 3, 1, 42, 64);
+    let bytes = original.encode();
+    let decoded = ArraySuperblock::decode(&bytes).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.raid_level, RaidLevel::Stripe);
+    assert_eq!(decoded.chunk_blocks, 64);
+}
+
+#[test]
+fn decode_rejects_a_level_stripe_unit_mismatch() {
+    // A striped level with a zero stripe unit, and a mirror with a non-zero
+    // one, each contradict themselves: both fail closed rather than being
+    // trusted (`AGENTS.md` §5.4).
+    let mut striped_zero = stripe_sb(UUID_A, 2, 0, 1, 0);
+    striped_zero.chunk_blocks = 0;
+    assert_eq!(
+        ArraySuperblock::decode(&striped_zero.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
+
+    let mut mirror_with_chunk = sb(UUID_A, 2, 0, 1);
+    mirror_with_chunk.chunk_blocks = 16;
+    assert_eq!(
+        ArraySuperblock::decode(&mirror_with_chunk.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
 }
 
 #[test]
@@ -187,7 +240,13 @@ fn raid_level_round_trips_and_fails_closed() {
         RaidLevel::from_u8(RaidLevel::Mirror.as_u8()),
         Ok(RaidLevel::Mirror)
     );
-    for raw in [0u8, 2, 3, 255] {
+    assert_eq!(
+        RaidLevel::from_u8(RaidLevel::Stripe.as_u8()),
+        Ok(RaidLevel::Stripe)
+    );
+    assert!(!RaidLevel::Mirror.is_striped());
+    assert!(RaidLevel::Stripe.is_striped());
+    for raw in [0u8, 3, 4, 255] {
         assert_eq!(
             RaidLevel::from_u8(raw),
             Err(SuperblockError::UnknownRaidLevel)

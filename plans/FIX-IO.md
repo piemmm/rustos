@@ -926,8 +926,32 @@ Remaining:
   work; the engine and its metadata are the single shared definition both reuse
   (§2.2), proven host-side first exactly as the other FIX-IO primitives landed
   their shared logic before their live wiring.
-- RAID levels beyond the mirror (striping, parity) are sibling compositions
-  over the same seam (§2.2 parallel implementations), added when needed.
+- **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
+  (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
+  as one logical device of their *summed* capacity, round-robining fixed-size
+  chunks (`ArraySuperblock::chunk_blocks`, a persisted per-array stripe unit —
+  policy, not a global const, §24.1) across the members. It is a sibling of the
+  mirror over the same seam (§2.2 parallel implementations), sharing the
+  mirror's whole-device-fault classification (`member_faulting`) and
+  `ArrayHealth` vocabulary rather than re-inventing them. A stripe has **no
+  redundancy** and the engine is honest about it (§5.4, §26.5): `assemble`
+  requires every member present and evenly striped (no coming up degraded over
+  a gap it cannot serve — it fails closed on an unavailable/mismatched/unaligned
+  member), a whole-device fault fails the array closed for good
+  (`ArrayHealth::Failed`, sticky — nothing to rebuild from), and a per-block
+  media error fails only that request while the still-reachable device keeps
+  serving its other stripes; it therefore reports only `Optimal` or `Failed`.
+  The on-disk `ArraySuperblock` grew a `RaidLevel::Stripe` + `chunk_blocks`
+  (evolved in place, §2.13; level and stripe unit must agree or the record is
+  refused `BadStripeChunk`), threaded through `ArrayIdentity`'s shape match and
+  reassembly. Allocation-free (borrows a caller-owned member slice, §24.1),
+  `forbid(unsafe_code)`, proven host-side over a fault-injecting `Block` double
+  (striping-map white-box, cross-stripe gather, every assemble refusal, the
+  whole-device-fail-closed and per-block-media-only journeys, all-member flush,
+  range validation, buffer-class forwarding). Design: `docs/src/drivers/raid.md`.
+- RAID levels beyond the mirror and the stripe (parity: RAID5/6) are further
+  sibling compositions over the same seam (§2.2 parallel implementations),
+  added when needed.
 
 Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
 over a fault-injecting `Block` double — two healthy copies assemble optimal; a

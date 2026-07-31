@@ -123,14 +123,80 @@ vocabulary (`MountAvailability::Available`/`Degraded`/`Recovering`/
 mount surface a leaf volume uses (`plans/FIX-IO.md` IO2/IO5), never a second
 vocabulary.
 
+## RAID0 stripe (`StripeArray`)
+
+The second composition is a RAID0 stripe. It is a **sibling** of the mirror
+over the same block seam (`AGENTS.md` §2.2 parallel implementations), not a
+variant of it: the logical block space is cut into fixed-size *chunks*
+(`chunk_blocks` logical blocks each) and round-robined across the members, so
+the array's capacity is the **sum** of the members' and a large transfer is
+spread over every member. Like the mirror it borrows a caller-owned member
+slice, so it holds no allocation and imposes no fixed member ceiling
+(`AGENTS.md` §24.1). It shares the mirror's whole-device-fault classification
+(`member_faulting`) and the `ArrayHealth` vocabulary rather than re-inventing
+them (`AGENTS.md` §2.2).
+
+### No redundancy — fail closed, never degrade
+
+A stripe holds exactly one copy of each block, so it has **no redundancy**:
+losing any one member loses a fraction of every stored object. The engine is
+honest about this rather than pretending otherwise (`AGENTS.md` §5.4, §26.5),
+and that shapes every behaviour:
+
+- **Assembly requires every member present and evenly striped.** Unlike a
+  mirror, a stripe cannot come up "degraded" over a missing or unwell member —
+  there is no other copy to serve the blocks that member holds.
+  `StripeArray::assemble` probes every member and fails closed if any cannot
+  report geometry (`StripeError::MemberUnavailable`), if the members disagree
+  on geometry (`GeometryMismatch`), if a member reports a degenerate geometry
+  (`ZeroGeometry`), if a member's size is not a whole number of stripe chunks
+  (`UnalignedGeometry`, which would leave a ragged tail), if the stripe unit is
+  zero (`ZeroChunk`), if there are no members (`NoMembers`), or if the summed
+  block count overflows `u64` (`TooLarge`). The composed array presents the
+  members' shared block size and the sum of their block counts.
+- **A whole-device fault fails the array closed for good.** When a member
+  returns a whole-device fault (gone/removed/unrecoverable), the stripe is
+  marked `ArrayHealth::Failed` and *every* subsequent read, write, and flush
+  fails closed (`DriverError::DeviceOffline`) — the array can no longer present
+  a complete logical block space, and it never pretends it can. This is sticky:
+  a stripe has no way to rebuild a lost member.
+- **A per-block media error fails only that request.** A bad sector on a
+  member (`DriverError::MediumError`) means that one logical block is
+  unrecoverable (no second copy to heal from), so the affected request fails
+  closed — but the device is still reachable, so the array stays
+  `ArrayHealth::Optimal` and unrelated stripes keep serving.
+
+A stripe therefore only ever reports `ArrayHealth::Optimal` or
+`ArrayHealth::Failed`; it has no `Degraded`/`Recovering` state of its own,
+because it has nothing to degrade *to* and nothing to rebuild *from*. It maps
+onto the shared mount-availability vocabulary through the same
+`ArrayHealth::to_mount_availability` a leaf volume and the mirror use.
+
+### Striping layout
+
+Logical block `b` sits on member `(b / chunk_blocks) % member_count` at that
+member's local block `((b / chunk_blocks) / member_count) * chunk_blocks + b %
+chunk_blocks`. A read or write is split at chunk boundaries and each contiguous
+run dispatched to the member that holds it, so one logical transfer scatters or
+gathers across the members. All index arithmetic is bounds-checked and the
+narrowing to a slot index fails closed rather than panicking (`AGENTS.md`
+§2.9). A flush commits **every** member, because each holds a disjoint slice of
+the block space and durability requires all of them; a member that cannot
+flush fails the whole flush closed (`AGENTS.md` §5.4).
+
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 An array is **discovered, not configured**: there is no hand-maintained list
 of which devices form an array (`AGENTS.md` §18, §16.5). Each member carries a
 fixed-size, little-endian `ArraySuperblock` naming the array (a 128-bit
 `ArrayUuid`), the RAID level, the total member count, this member's slot, the
-array geometry, a monotonic **generation** counter, and a `Time64` last-write
-stamp. The record is sealed with a trailing CRC-32C (`lib/crc32c`, the one
+array geometry, a monotonic **generation** counter, a `Time64` last-write
+stamp, and the stripe unit (`chunk_blocks`) for a striped level. The level and
+the stripe unit must agree: a striped level (RAID0) records a non-zero
+`chunk_blocks`, a full-copy level (the mirror) records zero, and a record whose
+level and stripe unit contradict is refused (`SuperblockError::BadStripeChunk`)
+so a corrupt or foreign record is never mistaken for a valid array. The record
+is sealed with a trailing CRC-32C (`lib/crc32c`, the one
 first-party checksum) — a media/transport integrity check, not a security
 control: an array's authenticity rests on the signed driver bundle and the
 members' own capability-gated block endpoints, not on this value.
@@ -139,7 +205,9 @@ members' own capability-gated block endpoints, not on this value.
 (`AGENTS.md` §5.4, §26.5) — a bad magic, an unknown version, a checksum
 mismatch, an unknown RAID level, a zero member count, a slot outside the
 array, a degenerate geometry, or a non-canonical timestamp is a typed
-`SuperblockError`, never a silently-trusted record. The decoder is total and
+`SuperblockError`, never a silently-trusted record. (`chunk_blocks` is part of
+the array shape `resolve`/`verdict_of` compare, so a member disagreeing on the
+stripe unit is refused like any other shape mismatch.) The decoder is total and
 `forbid(unsafe_code)`, and a fuzz harness (`tests/fuzz_superblock.rs`,
 `AGENTS.md` §19.6) proves it never panics on arbitrary input and that every
 accepted record round-trips.

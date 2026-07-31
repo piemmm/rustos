@@ -82,8 +82,16 @@ pub type ArrayUuid = [u8; 16];
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum RaidLevel {
-    /// RAID1 mirror ([`crate::MirrorArray`]): every member is a full copy.
+    /// RAID1 mirror ([`crate::MirrorArray`]): every member is a full copy, so
+    /// the array survives any subset of member faults while one copy remains.
+    /// Carries no stripe unit ([`ArraySuperblock::chunk_blocks`] is `0`).
     Mirror = 1,
+    /// RAID0 stripe ([`crate::StripeArray`]): the logical block space is cut
+    /// into fixed-size chunks round-robined across the members, so the array
+    /// has the *sum* of the members' capacity and no redundancy — any one
+    /// member fault loses the array. Carries a non-zero stripe unit
+    /// ([`ArraySuperblock::chunk_blocks`]).
+    Stripe = 2,
 }
 
 impl RaidLevel {
@@ -91,6 +99,14 @@ impl RaidLevel {
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
+    }
+
+    /// Whether this level round-robins a fixed stripe unit across its members
+    /// (and so requires a non-zero [`ArraySuperblock::chunk_blocks`]); a level
+    /// that stores a full copy per member (the mirror) does not.
+    #[must_use]
+    pub const fn is_striped(self) -> bool {
+        matches!(self, Self::Stripe)
     }
 
     /// Decode an on-disk level byte, failing closed on an unknown value.
@@ -101,6 +117,7 @@ impl RaidLevel {
     pub const fn from_u8(raw: u8) -> Result<Self, SuperblockError> {
         match raw {
             1 => Ok(Self::Mirror),
+            2 => Ok(Self::Stripe),
             _ => Err(SuperblockError::UnknownRaidLevel),
         }
     }
@@ -131,6 +148,11 @@ pub enum SuperblockError {
     ZeroGeometry,
     /// The stored timestamp was not a canonical [`Time64`].
     BadTimestamp,
+    /// The stripe unit was inconsistent with the RAID level: a striped level
+    /// (RAID0) recorded a zero stripe unit, or a non-striped level (the
+    /// mirror) recorded a non-zero one. The two must agree, so a record whose
+    /// level and stripe unit contradict each other is never trusted.
+    BadStripeChunk,
 }
 
 /// The 8-byte magic that opens every array superblock (`"TXRAIDSB"`).
@@ -154,7 +176,8 @@ const OFF_BLOCK_SIZE: usize = 31; // u32
 const OFF_BLOCK_COUNT: usize = 35; // u64
 const OFF_GENERATION: usize = 43; // u64
 const OFF_UPDATED_AT: usize = 51; // Time64 (WIRE_LEN = 12)
-const OFF_CHECKSUM: usize = OFF_UPDATED_AT + Time64::WIRE_LEN; // u32
+const OFF_CHUNK_BLOCKS: usize = OFF_UPDATED_AT + Time64::WIRE_LEN; // u32
+const OFF_CHECKSUM: usize = OFF_CHUNK_BLOCKS + 4; // u32
 
 /// The encoded size of an [`ArraySuperblock`] in bytes. The CRC-32C covers the
 /// first `WIRE_LEN - 4` bytes; the trailing four bytes are the checksum.
@@ -185,6 +208,16 @@ pub struct ArraySuperblock {
     /// Wall-clock instant this superblock was last written (`AGENTS.md` §21 —
     /// stored as a full [`Time64`], never a 32-bit second).
     pub updated_at: Time64,
+    /// The stripe unit in logical blocks for a striped level: the number of
+    /// consecutive logical blocks placed on one member before the stripe moves
+    /// to the next. It is `0` for a level that stores a full copy per member
+    /// (the mirror) and non-zero for a striped level (RAID0); [`decode`] fails
+    /// closed if the level and this field disagree. It is array policy, not a
+    /// fixed constant (`AGENTS.md` §24.1), so different arrays can be tuned to
+    /// their workload.
+    ///
+    /// [`decode`]: ArraySuperblock::decode
+    pub chunk_blocks: u32,
 }
 
 impl ArraySuperblock {
@@ -207,6 +240,8 @@ impl ArraySuperblock {
         out[OFF_GENERATION..OFF_GENERATION + 8].copy_from_slice(&self.generation.to_le_bytes());
         out[OFF_UPDATED_AT..OFF_UPDATED_AT + Time64::WIRE_LEN]
             .copy_from_slice(&self.updated_at.to_le_bytes());
+        out[OFF_CHUNK_BLOCKS..OFF_CHUNK_BLOCKS + 4]
+            .copy_from_slice(&self.chunk_blocks.to_le_bytes());
         let crc = tairix_crc32c::checksum(&out[..OFF_CHECKSUM]);
         out[OFF_CHECKSUM..OFF_CHECKSUM + 4].copy_from_slice(&crc.to_le_bytes());
         out
@@ -285,6 +320,18 @@ impl ArraySuperblock {
         let updated_at =
             Time64::from_bytes(&bytes[OFF_UPDATED_AT..OFF_UPDATED_AT + Time64::WIRE_LEN])
                 .map_err(|_| SuperblockError::BadTimestamp)?;
+        let chunk_blocks = u32::from_le_bytes([
+            bytes[OFF_CHUNK_BLOCKS],
+            bytes[OFF_CHUNK_BLOCKS + 1],
+            bytes[OFF_CHUNK_BLOCKS + 2],
+            bytes[OFF_CHUNK_BLOCKS + 3],
+        ]);
+        // The stripe unit and the level must agree: a striped level needs a
+        // non-zero unit, a full-copy level must not carry one. A record whose
+        // level and stripe unit contradict is corrupt or foreign — fail closed.
+        if raid_level.is_striped() == (chunk_blocks == 0) {
+            return Err(SuperblockError::BadStripeChunk);
+        }
         Ok(Self {
             array_uuid,
             raid_level,
@@ -296,6 +343,7 @@ impl ArraySuperblock {
             },
             generation,
             updated_at,
+            chunk_blocks,
         })
     }
 }
@@ -381,6 +429,10 @@ pub struct ArrayIdentity {
     /// The freshest generation present among the candidates: the authoritative
     /// "current" generation. A candidate below it is a stale rebuild target.
     pub generation: u64,
+    /// The stripe unit in logical blocks (`0` for a full-copy level, non-zero
+    /// for a striped one). Part of the array shape: a member disagreeing on it
+    /// is refused, so every admitted member stripes identically.
+    pub chunk_blocks: u32,
 }
 
 /// A reason an array could not be resolved from a candidate set.
@@ -431,15 +483,17 @@ impl ArrayIdentity {
             member_count: authoritative.member_count,
             geometry: authoritative.geometry,
             generation: authoritative.generation,
+            chunk_blocks: authoritative.chunk_blocks,
         })
     }
 
     /// Whether `sb` reports the same array shape (level, member count,
-    /// geometry) as this identity.
+    /// geometry, and stripe unit) as this identity.
     fn shape_matches(&self, sb: &ArraySuperblock) -> bool {
         sb.raid_level == self.raid_level
             && sb.member_count == self.member_count
             && sb.geometry == self.geometry
+            && sb.chunk_blocks == self.chunk_blocks
     }
 
     /// The verdict on `candidates[index]` against this identity: which slot it
@@ -597,6 +651,7 @@ impl ArrayIdentity {
             geometry: self.geometry,
             generation: self.generation,
             updated_at,
+            chunk_blocks: self.chunk_blocks,
         })
     }
 }

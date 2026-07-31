@@ -10,6 +10,11 @@
 //! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
 //! re-invent it.
 //!
+//! Two compositions are provided as siblings over that one seam (`AGENTS.md`
+//! §2.2 parallel implementations): the redundant RAID1 mirror
+//! ([`MirrorArray`]) and the capacity-aggregating RAID0 stripe
+//! ([`StripeArray`]).
+//!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
 //! The first composition is a RAID1 mirror. Every member holds a full copy
@@ -54,6 +59,20 @@
 //!   member is resyncing it receives new writes to its already-synced region
 //!   so it never falls behind, and it becomes a read source only once fully
 //!   in sync. The array reports [`ArrayHealth::Recovering`] meanwhile.
+//!
+//! # RAID0 stripe ([`StripeArray`])
+//!
+//! The second composition is a RAID0 stripe: the logical block space is cut
+//! into fixed-size chunks round-robined across the members, so the array's
+//! capacity is the *sum* of the members' and a large transfer is spread over
+//! all of them. A stripe has **no redundancy**, and the engine is honest
+//! about it (`AGENTS.md` §5.4, §26.5): [`StripeArray::assemble`] requires
+//! every member present and evenly striped (no coming up "degraded" over a
+//! gap it cannot serve), a whole-device fault fails the array closed for good
+//! ([`ArrayHealth::Failed`]), and a per-block media error fails only that one
+//! request while the still-reachable device keeps serving its other stripes.
+//! It shares the mirror's whole-device-fault classification and the
+//! [`ArrayHealth`] vocabulary rather than re-inventing them.
 //!
 //! # Fail closed (`AGENTS.md` §5.4)
 //!
@@ -100,9 +119,11 @@
 #![deny(missing_docs)]
 
 mod mirror;
+mod stripe;
 mod superblock;
 
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use stripe::{StripeArray, StripeError, StripeMember};
 pub use superblock::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,
     CandidateVerdict, DistinctArrays, RaidLevel, RejectReason, SlotDisposition, SuperblockError,
