@@ -12,7 +12,8 @@ two independent consumers so they can never disagree about what a RAID member
 is (`AGENTS.md` §2.2) without a `drivers/*`->`drivers/*` edge (§17.4):
 
 - the **RAID composition driver** (`drivers/storage/raid`), which assembles the
-  mirror / stripe / parity / double-parity engines from decoded members, and
+  mirror / stripe / parity / double-parity / triple-parity engines from decoded
+  members, and
 - the **storage-discovery probe** (`lib/fsprobe`, used by `drivers/storage/volmgr`),
   which recognises a member so a bare, un-assembled array member is never
   mounted as a standalone filesystem (the stale-read / divergent-copy hazard,
@@ -29,9 +30,9 @@ is (`AGENTS.md` §2.2) without a `drivers/*`->`drivers/*` edge (§17.4):
 - `RaidLevel` — the composition a superblock describes, with the shared
   `min_members` / `max_members` / `data_members` / `logical_block_count`
   structural rules the composition engines also read.
-- `MAX_DUAL_PARITY_DATA_MEMBERS` — the single structural ceiling on RAID6 data
-  members dictated by the GF(2^8) Q syndrome; the RAID6 engine's field derives
-  from it.
+- `MAX_PARITY_DATA_MEMBERS` — the single structural ceiling on the GF(2^8)
+  parity levels' (RAID6 / RAID-TP) data-member count dictated by their
+  Reed-Solomon syndromes; the parity engines' fields derive from it.
 - `ArrayIdentity` / `Candidate` / `distinct_arrays` — the pure reassembly: the
   freshest member (highest generation) fixes the authoritative array shape, and
   each member is placed as in-sync, a **stale** rebuild target, missing, or

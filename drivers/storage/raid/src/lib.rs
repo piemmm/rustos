@@ -10,13 +10,14 @@
 //! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
 //! re-invent it.
 //!
-//! Four compositions are provided as siblings over that one seam (`AGENTS.md`
+//! Five compositions are provided as siblings over that one seam (`AGENTS.md`
 //! §2.2 parallel implementations): the redundant RAID1 mirror
 //! ([`MirrorArray`]), the capacity-aggregating RAID0 stripe
 //! ([`StripeArray`]), the RAID5 distributed-parity array ([`ParityArray`])
-//! that combines capacity aggregation with single-fault redundancy, and the
+//! that combines capacity aggregation with single-fault redundancy, the
 //! RAID6 double distributed-parity array ([`DualParityArray`]) that survives
-//! *two* member losses.
+//! *two* member losses, and the RAID-TP triple distributed-parity array
+//! ([`TripleParityArray`]) that survives *three*.
 //!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
@@ -148,6 +149,40 @@
 //!   buffer of at least [`SCRATCH_BLOCKS`] logical blocks, so the engine stays
 //!   allocation-free.
 //!
+//! # RAID-TP triple distributed parity ([`TripleParityArray`])
+//!
+//! The fifth composition is a RAID-TP triple distributed-parity array. It
+//! stripes like RAID6 but reserves *three* chunks per stripe — a P (XOR)
+//! syndrome, a Q (`Σ gᵏ·Dₖ`) syndrome, and an R (`Σ g²ᵏ·Dₖ`) syndrome over
+//! GF(2^8) — all three rotating across the members, so the array has the
+//! capacity of `member_count - 3` members and survives **any three** members
+//! being lost:
+//!
+//! - **Reads** in the healthy case go straight to the data member; up to three
+//!   lost chunks are reconstructed by solving the P, Q, and R syndromes'
+//!   Vandermonde system, and a per-block media error is reconstructed and
+//!   repaired in place, complemented by the proactive scrub.
+//! - **Writes** update the affected stripe's P, Q, and R, by read-modify-write
+//!   when the old data and syndromes are readable and by recomputing all three
+//!   from the surviving data members otherwise (a degraded write), so a lost
+//!   member's data stays reconstructable.
+//! - **Scrub** ([`TripleParityArray::begin_scrub`]/[`TripleParityArray::scrub_step`])
+//!   heals latent media errors from the survivors like the other parity
+//!   levels (`AGENTS.md` §26.5).
+//! - A first, second, or third lost member (or an [`MemberState::Absent`]
+//!   slot) **degrades the array, never the system** ([`ArrayHealth::Degraded`]);
+//!   a *fourth* loss makes a stripe unreconstructable and the array fails
+//!   closed ([`ArrayHealth::Failed`]).
+//! - A returning or replaced member is **rebuilt** by a bounded, interruptible
+//!   resync ([`TripleParityArray::resync_step`]); the same
+//!   [`remove_member`](TripleParityArray::remove_member) /
+//!   [`add_member`](TripleParityArray::add_member) /
+//!   [`replace_member`](TripleParityArray::replace_member) disk-replacement
+//!   workflow restores redundancy without a reboot (`AGENTS.md` §18.4). The
+//!   three syndromes and the three-erasure solver borrow a caller-owned
+//!   **scratch** buffer of at least [`TRIPLE_SCRATCH_BLOCKS`] logical blocks,
+//!   so the engine stays allocation-free.
+//!
 //! # Fail closed (`AGENTS.md` §5.4)
 //!
 //! At the boundary of what the array can vouch for it returns a typed error
@@ -161,7 +196,7 @@
 //! Because every composition is itself a
 //! [`Block`](tairix_abi::driver::block::Block), a consumer that schedules a
 //! scrub from a device's `SMART` / `NVMe` telemetry queries the *array*, so all
-//! four arrays override
+//! the compositions override
 //! [`device_health`](tairix_abi::driver::block::Block::device_health) to
 //! aggregate their live members' telemetry through one shared definition
 //! (`health::aggregate_device_health`) rather than inherit the trait default
@@ -229,6 +264,7 @@ mod mirror;
 mod parity;
 mod stripe;
 mod superblock;
+mod triple;
 
 pub use array::{RaidArray, RaidError};
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
@@ -239,4 +275,8 @@ pub use superblock::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,
     CandidateVerdict, DistinctArrays, RaidLevel, RejectReason, SlotDisposition, SuperblockError,
     FORMAT_VERSION, MAGIC, WIRE_LEN,
+};
+pub use triple::{
+    TripleParityArray, TripleParityError, TripleParityMember,
+    SCRATCH_BLOCKS as TRIPLE_SCRATCH_BLOCKS,
 };

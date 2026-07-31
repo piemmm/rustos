@@ -1,4 +1,5 @@
-//! GF(2^8) arithmetic for the RAID6 double-parity Q syndrome.
+//! GF(2^8) arithmetic for the RAID6 double-parity Q syndrome and the RAID-TP
+//! triple-parity R syndrome.
 //!
 //! RAID6 protects a stripe with two independent syndromes over the finite
 //! field GF(2^8): the P syndrome is the bytewise XOR of the data chunks (the
@@ -57,6 +58,19 @@ pub(crate) const fn gpow(exp: u64) -> u8 {
         i += 1;
     }
     result
+}
+
+/// The `2·exp`-th power of the field generator, `g²ᵉˣᵖ`, the R-syndrome
+/// coefficient of data position `exp` (the triple-parity third syndrome
+/// `R = Σ g²ᵏ·Dₖ`). Defined in terms of [`gpow`] so the two syndrome
+/// coefficient families share one definition of the generator's powers and
+/// cannot drift. The doubling `2·exp` is taken over the exponent before the
+/// generator's period-255 reduction that [`gpow`] applies, so it is exact for
+/// every `exp` a caller supplies (a triple-parity array admits at most 255
+/// data members, `exp < 255`).
+#[must_use]
+pub(crate) const fn gpow2(exp: u64) -> u8 {
+    gpow(2 * exp)
 }
 
 /// The multiplicative inverse of `x` in GF(2^8). `x` must be non-zero (zero has
@@ -118,6 +132,25 @@ mod tests {
                     assert_eq!(mul(a, b ^ c), mul(a, b) ^ mul(a, c));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn gpow2_is_the_square_of_gpow_and_distinct_for_data_positions() {
+        // The R-syndrome coefficient of position k is g^(2k) = (g^k)^2, so it
+        // must equal the Q coefficient squared for every position.
+        for k in 0u64..255 {
+            let gk = gpow(k);
+            assert_eq!(gpow2(k), mul(gk, gk), "g^(2k) != (g^k)^2 at k={k}");
+        }
+        // Squaring is the Frobenius map on GF(2^8): a bijection, so the R
+        // coefficients stay distinct across the 255 admissible data positions,
+        // which is what lets the third syndrome resolve a third erasure.
+        let mut seen = [false; 256];
+        for k in 0u64..255 {
+            let c = gpow2(k) as usize;
+            assert!(!seen[c], "g^(2k) repeated within 255 positions at k={k}");
+            seen[c] = true;
         }
     }
 

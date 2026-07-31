@@ -329,6 +329,70 @@ survivors a caller-sized budget at a time, and the same `remove_member` /
 without a reboot (`AGENTS.md` §18.4). Faulted members are
 sticky-but-recoverable, so a flapping disk never masquerades as a healthy copy.
 
+## RAID-TP triple distributed parity (`TripleParityArray`)
+
+`TripleParityArray` composes `member_count - 3` members' worth of capacity as
+one logical device with **triple-fault** redundancy — the sibling of the
+mirror, the stripe, and the single- and double-parity arrays over the same
+block seam (`AGENTS.md` §2.2 parallel implementations), reusing their
+`MemberState`/`MemberRole`/`ArrayHealth` vocabulary and `member_faulting`
+classification. It needs at least five members (two data + P + Q + R).
+
+### Layout — left-symmetric triple parity over GF(2^8)
+
+Each stripe reserves *three* chunks: a **P** syndrome (bytewise XOR of the data
+chunks), a **Q** syndrome (`Q = Σ gᵏ·Dₖ`), and an **R** syndrome
+(`R = Σ g²ᵏ·Dₖ`), all over the finite field GF(2^8) (`lib/*` `gf256`, generator
+`{02}`, reducing polynomial `0x11d` — the same field the Linux RAID6/RAID-Z
+implementations use). For a stripe `s` the P member is `p = (n - 1) - (s mod n)`,
+the Q member is `q = (p + 1) mod n`, and the R member is `r = (q + 1) mod n`;
+the `n - 3` data chunks fill the remaining members in ascending order after `r`,
+with data position `k` carrying Q coefficient `gᵏ` and R coefficient `g²ᵏ`. All
+three syndrome slots rotate one member per stripe so none is a bottleneck. As
+for double parity the generator's powers stay distinct for at most 255 data
+members; `assemble` fails closed (`TripleParityError::TooManyMembers`) above
+that (over 258 slots).
+
+### Read — direct, reconstruct (up to three losses), and repair
+
+A healthy read goes straight to the data member. When members are lost, the
+stripe row's *unknowns* (every not-in-sync member, plus a data member that hit a
+media error) are solved from the survivors: the unknown *data* chunks are the
+solution of the surviving syndromes' **Vandermonde system** (the coefficient
+rows `(1, gᵏ, g²ᵏ)` over the distinct nodes `gᵏ` are always invertible for up to
+three unknowns), and any unknown *syndrome* is then recomputed from the
+now-known data. The per-byte matrix inverse is computed once per stripe row and
+applied byte-wise, so reconstruction is `O(bytes)` after a fixed setup. A
+per-block media error is reconstructed and repaired in place (forcing sector
+reallocation). A row with a *fourth* unknown is unsolvable and fails closed
+(`AGENTS.md` §5.4). All reconstruction borrows a caller-owned scratch buffer of
+at least `SCRATCH_BLOCKS` logical blocks, so the engine allocates nothing.
+
+### Write — read-modify-write and degraded recompute
+
+A single-block write updates all three syndromes. When the data member and all
+three syndromes are readable, a read-modify-write applies the data delta:
+`new_P = old_P ⊕ Δ`, `new_Q = old_Q ⊕ gˣ·Δ`, `new_R = old_R ⊕ g²ˣ·Δ`.
+Otherwise all three are recomputed from every data member's current content —
+reconstructing any lost data member — with the written position substituted.
+Each stripe role that is a live source is written; a write that fails faults
+that member, and the new data stays durable while the array keeps its
+three-fault redundancy. As with the other parity levels the caller's
+`BufferClass` is forwarded to the caller's own data block, while the P, Q, and R
+syndrome writes and every staging buffer stay `BufferClass::Sensitive`.
+
+### Scrub, degrade, rebuild, and replace
+
+`begin_scrub` / `scrub_step` heal latent media errors from the survivors,
+chunked so a 100 TB+ array never scrubs in one sweep (`AGENTS.md` §26.5, §26.6).
+One, two, or three faulted/absent members degrade the array
+(`ArrayHealth::Degraded`); a *fourth* loss fails it closed
+(`ArrayHealth::Failed`). A returning or replaced member is rebuilt by
+`resync_step` from the survivors a caller-sized budget at a time, and the same
+`remove_member` / `add_member` / `replace_member` disk-replacement workflow
+restores redundancy without a reboot (`AGENTS.md` §18.4). Faulted members are
+sticky-but-recoverable, so a flapping disk never masquerades as a healthy copy.
+
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 The on-disk metadata format and the reassembly logic live in the shared
@@ -357,13 +421,15 @@ so a corrupt or foreign record is never mistaken for a valid array. The member
 count must likewise be one its level can actually be composed from
 (`RaidLevel::min_members`/`RaidLevel::max_members`, the single shared
 definition the composition engines also read): a RAID5 claiming two members, a
-RAID6 claiming three, or a RAID6 claiming more data members than its GF(2^8) Q
-syndrome can distinguish (more than 255, i.e. over 257 slots) describes an
-array that cannot exist and is refused (`SuperblockError::MemberCountOutOfRange`)
-rather than half-trusted. Each level's *usable capacity* lives beside those
-bounds as the same single definition — `RaidLevel::data_members` (a stripe
-concatenates every member, a mirror presents one copy, single parity reserves
-one member and double parity two) and the `RaidLevel::logical_block_count` that
+RAID6 claiming three, a RAID-TP claiming four, or a GF(2^8) parity level
+claiming more data members than its syndromes can distinguish (more than 255,
+i.e. over 257 slots for RAID6 or 258 for RAID-TP) describes an array that
+cannot exist and is refused (`SuperblockError::MemberCountOutOfRange`) rather
+than half-trusted. Each level's *usable capacity* lives beside those bounds as
+the same single definition — `RaidLevel::data_members` (a stripe concatenates
+every member, a mirror presents one copy, single parity reserves one member,
+double parity two, and triple parity three) and the
+`RaidLevel::logical_block_count` that
 sizes the composed geometry as `per_member_blocks × data_members`, failing
 closed on an overflow that would truncate addresses. The concatenating engines'
 `assemble` derive the array block count from that one rule, so the capacity a
@@ -489,7 +555,7 @@ schedules a scrub from a device's `SMART` / `NVMe` telemetry
 `Block::device_health` and must still see the health of the disks underneath
 it. Rather than inherit the trait default (`Unavailable`) — which would hide
 every member's telemetry and make a failing disk in an array look like a
-device with no health data at all (`AGENTS.md` §26.5) — all four arrays
+device with no health data at all (`AGENTS.md` §26.5) — all the compositions
 aggregate their live members' snapshots through one shared definition
 (`aggregate_device_health`, `AGENTS.md` §2.2), so they cannot fold health
 differently.
@@ -520,13 +586,13 @@ absence of data is never mistaken for a perfectly-healthy array.
 
 ## Composed-device dispatch (`RaidArray`)
 
-The four compositions above are siblings over the same block seam (`AGENTS.md`
+The five compositions above are siblings over the same block seam (`AGENTS.md`
 §2.2), but a serving process must present exactly **one** logical
 [`tairix_abi::driver::block::Block`](./block.md) device to the filesystem
 layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
 composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
-per-personality dispatch: it is an enum over the four engines that forwards
+per-personality dispatch: it is an enum over the five engines that forwards
 both the `Block` I/O path (`geometry`/`read`/`write`/`flush`/the class-aware
 and discard/health surface) and the level-agnostic observation, maintenance,
 and reconfiguration operations, so neither the autoloaded serve process nor the

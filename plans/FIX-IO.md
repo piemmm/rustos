@@ -1100,9 +1100,40 @@ Remaining:
   shape match. `assemble` needs ≥ 4 members and fails closed above 255 data
   members (`TooManyMembers`), where the GF(2^8) Q coefficients would collide.
   Design: `docs/src/drivers/raid.md`.
-- RAID levels beyond double parity (e.g. triple-parity) are further sibling
-  compositions over the same seam (§2.2 parallel implementations), added when
-  needed.
+- **Landed (the RAID-TP triple-parity sibling):** `raid::TripleParityArray`
+  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 3`
+  members' worth of capacity as one logical device with **triple-fault**
+  redundancy — the sibling of the mirror, the stripe, and single/double parity
+  over the same seam (§2.2 parallel implementations), reusing their
+  `MemberState`/`MemberRole`/`ArrayHealth` vocabulary and `member_faulting`
+  classification. Each stripe reserves *three* rotating chunks — a P (XOR)
+  syndrome, a Q (`Σ gᵏ·Dₖ`) syndrome, and an R (`Σ g²ᵏ·Dₖ`) syndrome over the
+  first-party `raid::gf256` field (`g²ᵏ` via the shared `gf256::gpow2`, one
+  definition with the Q coefficients, §2.2). Its complete behaviour is proven
+  host-side over a fault-injecting `Block` double: **any** one, two, or three
+  lost chunks in a stripe are solved from the three syndromes by a per-stripe
+  GF(2^8) Vandermonde matrix inverse (the coefficient rows `(1, gᵏ, g²ᵏ)` over
+  distinct nodes, always invertible for ≤3 unknowns) applied byte-wise; a
+  per-block media error is reconstructed **and repaired**; writes update P/Q/R
+  by read-modify-write or recompute all three from the survivors on a degraded
+  write; a proactive `begin_scrub`/`scrub_step` pass heals latent media errors
+  chunked so a 100 TB+ array never scrubs in one sweep (§26.6, §2.23); one, two,
+  or three losses degrade the array while a *fourth* fails it closed (§5.4,
+  §26.5, never fabricating unreconstructable data); a returning/replaced member
+  rebuilds by a bounded, interruptible `resync_step`, and the
+  `remove_member`/`add_member`/`replace_member` disk-replacement cycle restores
+  redundancy without a reboot (§18.4). It is `no_std`, `forbid(unsafe_code)`,
+  and allocation-free — it borrows a caller-owned member slice (no fixed member
+  ceiling, §24.1) plus a caller-owned scratch buffer of at least
+  `SCRATCH_BLOCKS` logical blocks. The on-disk `ArraySuperblock` grew a
+  `RaidLevel::TripleParity` (evolved in place, §2.13; a striped level, so it
+  must carry a non-zero stripe unit or the record is refused `BadStripeChunk`),
+  threaded through `ArrayIdentity`'s shape match, with the shared 255-data-member
+  GF(2^8) ceiling generalised to `MAX_PARITY_DATA_MEMBERS` (one definition for
+  RAID6 and RAID-TP, §2.2). `RaidArray` dispatch gained the `TripleParity` arm.
+  Design: `docs/src/drivers/raid.md`.
+- RAID levels beyond triple parity are further sibling compositions over the
+  same seam (§2.2 parallel implementations), added when needed.
 
 Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
 over a fault-injecting `Block` double — two healthy copies assemble optimal; a

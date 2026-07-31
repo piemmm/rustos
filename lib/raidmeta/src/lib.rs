@@ -74,17 +74,18 @@
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::time::Time64;
 
-/// The largest data-member count a RAID6 double-parity array can have.
+/// The largest data-member count a GF(2^8) parity array (RAID6 double parity
+/// or RAID-TP triple parity) can have.
 ///
-/// RAID6's Q syndrome is a Reed-Solomon syndrome over GF(2^8), whose per-data
-/// coefficients `g⁰ … g²⁵⁴` are the 255 distinct non-zero field elements
-/// (`g = {02}`, polynomial `0x11d` — the Linux-md field). Beyond 255 data
-/// members the coefficients would repeat and two erasures could no longer be
-/// solved, so double parity admits at most this many data members. This is the
-/// single definition of that structural ceiling: [`RaidLevel::max_members`]
-/// and the RAID6 composition engine's field both derive from it (`AGENTS.md`
-/// §2.2).
-pub const MAX_DUAL_PARITY_DATA_MEMBERS: u16 = 255;
+/// A GF(2^8) parity syndrome weights data member `k` by `gᵏ` (and the higher
+/// syndrome by `g²ᵏ`), whose exponents `g⁰ … g²⁵⁴` are the 255 distinct
+/// non-zero field elements (`g = {02}`, polynomial `0x11d` — the Linux-md
+/// field). Beyond 255 data members those coefficients would repeat and the
+/// erasures could no longer be solved, so a GF-parity array admits at most
+/// this many data members. This is the single definition of that structural
+/// ceiling: [`RaidLevel::max_members`] and the parity composition engines'
+/// fields all derive from it (`AGENTS.md` §2.2).
+pub const MAX_PARITY_DATA_MEMBERS: u16 = 255;
 
 /// A 128-bit array identifier, minted once when the array is created and
 /// identical on every member. Two members belong to the same array iff their
@@ -125,6 +126,16 @@ pub enum RaidLevel {
     /// members being lost by solving the two syndromes for the two unknowns.
     /// Carries a non-zero stripe unit ([`ArraySuperblock::chunk_blocks`]).
     DualParity = 4,
+    /// RAID-TP triple distributed parity (`TripleParityArray`): the logical
+    /// block space is striped in fixed-size chunks across the members like
+    /// RAID6, but each stripe reserves *three* members' chunks — a P (bytewise
+    /// XOR) syndrome, a Q (Reed-Solomon `Σ gᵏ·Dₖ`) syndrome, and an R
+    /// (`Σ g²ᵏ·Dₖ`) syndrome over GF(2^8) — for the data of the others, all
+    /// three slots rotating across stripes. The array has the capacity of
+    /// `member_count - 3` members and survives **any three** members being
+    /// lost by solving the three syndromes for the three unknowns. Carries a
+    /// non-zero stripe unit ([`ArraySuperblock::chunk_blocks`]).
+    TripleParity = 5,
 }
 
 impl RaidLevel {
@@ -139,15 +150,19 @@ impl RaidLevel {
     /// that stores a full copy per member (the mirror) does not.
     #[must_use]
     pub const fn is_striped(self) -> bool {
-        matches!(self, Self::Stripe | Self::Parity | Self::DualParity)
+        matches!(
+            self,
+            Self::Stripe | Self::Parity | Self::DualParity | Self::TripleParity
+        )
     }
 
     /// The fewest member slots this level's structure can be composed from.
     /// Below it the record does not describe the level it claims to be: a
     /// mirror or a stripe needs at least one member, single parity needs three
-    /// (two data plus the parity chunk), and double parity needs four (two
-    /// data plus the P and Q chunks). A RAID5 record claiming two members, or
-    /// a RAID6 record claiming three, describes an array that cannot exist and
+    /// (two data plus the parity chunk), double parity needs four (two data
+    /// plus the P and Q chunks), and triple parity needs five (two data plus
+    /// the P, Q, and R chunks). A RAID5 record claiming two members, or a
+    /// RAID6 record claiming three, describes an array that cannot exist and
     /// is as malformed as a zero member count.
     ///
     /// This is the *single* definition of each level's minimum, consumed both
@@ -160,22 +175,25 @@ impl RaidLevel {
             Self::Mirror | Self::Stripe => 1,
             Self::Parity => 3,
             Self::DualParity => 4,
+            Self::TripleParity => 5,
         }
     }
 
     /// The most member slots this level can be composed from.
     ///
-    /// Only double parity has a real ceiling: its Q syndrome is a
-    /// Reed-Solomon syndrome over GF(2^8) whose coefficients stay distinct for
-    /// at most 255 data members, so a RAID6 array holds at most those 255 data
-    /// members plus its two syndrome chunks (257 slots). Every other level is
-    /// bounded only by the on-disk `u16` member-count field. The 255 figure is
-    /// the one [`MAX_DUAL_PARITY_DATA_MEMBERS`] names, so the ceiling is defined
-    /// once and shared with the RAID6 composition engine (`AGENTS.md` §2.2).
+    /// Only the GF(2^8) parity levels have a real ceiling: their syndromes'
+    /// coefficients stay distinct for at most 255 data members, so a RAID6
+    /// array holds at most those 255 data members plus its two syndrome chunks
+    /// (257 slots) and a RAID-TP array at most 255 plus its three (258 slots).
+    /// Every other level is bounded only by the on-disk `u16` member-count
+    /// field. The 255 figure is the one [`MAX_PARITY_DATA_MEMBERS`] names, so
+    /// the ceiling is defined once and shared with the parity composition
+    /// engines (`AGENTS.md` §2.2).
     #[must_use]
     pub const fn max_members(self) -> u16 {
         match self {
-            Self::DualParity => MAX_DUAL_PARITY_DATA_MEMBERS + 2,
+            Self::DualParity => MAX_PARITY_DATA_MEMBERS + 2,
+            Self::TripleParity => MAX_PARITY_DATA_MEMBERS + 3,
             _ => u16::MAX,
         }
     }
@@ -187,7 +205,9 @@ impl RaidLevel {
     /// single copy (`1`, independent of how many mirrored copies exist); single
     /// parity reserves one member's chunk for its parity and presents the rest
     /// (`member_count - 1`); double parity reserves two members' chunks for its
-    /// P and Q syndromes and presents the rest (`member_count - 2`).
+    /// P and Q syndromes and presents the rest (`member_count - 2`); triple
+    /// parity reserves three members' chunks for its P, Q, and R syndromes and
+    /// presents the rest (`member_count - 3`).
     ///
     /// This is the *single* definition of each level's usable width, so the
     /// composition engines' `assemble` and any capacity a serving process
@@ -221,6 +241,13 @@ impl RaidLevel {
             Self::DualParity => {
                 if member_count >= 3 {
                     Some(member_count - 2)
+                } else {
+                    None
+                }
+            }
+            Self::TripleParity => {
+                if member_count >= 4 {
+                    Some(member_count - 3)
                 } else {
                     None
                 }
@@ -260,6 +287,7 @@ impl RaidLevel {
             2 => Ok(Self::Stripe),
             3 => Ok(Self::Parity),
             4 => Ok(Self::DualParity),
+            5 => Ok(Self::TripleParity),
             _ => Err(SuperblockError::UnknownRaidLevel),
         }
     }

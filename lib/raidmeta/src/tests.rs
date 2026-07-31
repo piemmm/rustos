@@ -252,11 +252,16 @@ fn raid_level_round_trips_and_fails_closed() {
         RaidLevel::from_u8(RaidLevel::DualParity.as_u8()),
         Ok(RaidLevel::DualParity)
     );
+    assert_eq!(
+        RaidLevel::from_u8(RaidLevel::TripleParity.as_u8()),
+        Ok(RaidLevel::TripleParity)
+    );
     assert!(!RaidLevel::Mirror.is_striped());
     assert!(RaidLevel::Stripe.is_striped());
     assert!(RaidLevel::Parity.is_striped());
     assert!(RaidLevel::DualParity.is_striped());
-    for raw in [0u8, 5, 6, 255] {
+    assert!(RaidLevel::TripleParity.is_striped());
+    for raw in [0u8, 6, 7, 255] {
         assert_eq!(
             RaidLevel::from_u8(raw),
             Err(SuperblockError::UnknownRaidLevel)
@@ -318,6 +323,44 @@ fn a_dual_parity_superblock_round_trips_and_rejects_a_zero_stripe_unit() {
     assert_eq!(
         ArraySuperblock::decode(&zero.encode()),
         Err(SuperblockError::BadStripeChunk)
+    );
+}
+
+#[test]
+fn a_triple_parity_superblock_round_trips_and_rejects_a_zero_stripe_unit() {
+    let mut original = parity_sb(UUID_A, 6, 4, 11, 64);
+    original.raid_level = RaidLevel::TripleParity;
+    let decoded = ArraySuperblock::decode(&original.encode()).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.raid_level, RaidLevel::TripleParity);
+    assert_eq!(decoded.chunk_blocks, 64);
+
+    // A triple-parity level with a zero stripe unit contradicts itself.
+    let mut zero = parity_sb(UUID_A, 5, 0, 1, 0);
+    zero.raid_level = RaidLevel::TripleParity;
+    zero.chunk_blocks = 0;
+    assert_eq!(
+        ArraySuperblock::decode(&zero.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
+}
+
+#[test]
+fn decode_rejects_too_few_and_too_many_members_for_triple_parity() {
+    // RAID-TP needs five (two data + P + Q + R); four is too few.
+    let mut triple_four = parity_sb(UUID_A, 4, 0, 1, 64);
+    triple_four.raid_level = RaidLevel::TripleParity;
+    assert_eq!(
+        ArraySuperblock::decode(&triple_four.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+    // 259 slots is 256 data members, one more than the syndromes can keep
+    // distinct coefficients for.
+    let mut triple_many = parity_sb(UUID_A, 259, 0, 1, 64);
+    triple_many.raid_level = RaidLevel::TripleParity;
+    assert_eq!(
+        ArraySuperblock::decode(&triple_many.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
     );
 }
 
@@ -726,13 +769,15 @@ fn raid_level_member_bounds_are_the_shared_source() {
     assert_eq!(RaidLevel::Stripe.min_members(), 1);
     assert_eq!(RaidLevel::Parity.min_members(), 3);
     assert_eq!(RaidLevel::DualParity.min_members(), 4);
-    // Only double parity has a real ceiling: 255 data members + the P and Q
-    // syndrome chunks = 257 slots. Every other level is bounded only by the
-    // on-disk `u16` member-count field.
+    assert_eq!(RaidLevel::TripleParity.min_members(), 5);
+    // Only the GF(2^8) parity levels have a real ceiling: 255 data members
+    // plus their syndrome chunks (RAID6 = 257 slots, RAID-TP = 258). Every
+    // other level is bounded only by the on-disk `u16` member-count field.
     assert_eq!(RaidLevel::Mirror.max_members(), u16::MAX);
     assert_eq!(RaidLevel::Stripe.max_members(), u16::MAX);
     assert_eq!(RaidLevel::Parity.max_members(), u16::MAX);
     assert_eq!(RaidLevel::DualParity.max_members(), 257);
+    assert_eq!(RaidLevel::TripleParity.max_members(), 258);
 }
 
 #[test]
@@ -778,6 +823,14 @@ fn decode_admits_the_minimum_and_boundary_member_counts_per_level() {
     let mut dual_max = parity_sb(UUID_A, 257, 0, 1, 64);
     dual_max.raid_level = RaidLevel::DualParity;
     assert!(ArraySuperblock::decode(&dual_max.encode()).is_ok());
+    // RAID-TP's minimum (five: two data + P + Q + R) and upper boundary (258
+    // slots = 255 data + P + Q + R) both decode.
+    let mut triple_min = parity_sb(UUID_A, 5, 0, 1, 64);
+    triple_min.raid_level = RaidLevel::TripleParity;
+    assert!(ArraySuperblock::decode(&triple_min.encode()).is_ok());
+    let mut triple_max = parity_sb(UUID_A, 258, 0, 1, 64);
+    triple_max.raid_level = RaidLevel::TripleParity;
+    assert!(ArraySuperblock::decode(&triple_max.encode()).is_ok());
 }
 
 #[test]
@@ -794,6 +847,9 @@ fn data_members_is_the_shared_usable_width_per_level() {
     // Double parity reserves two (P and Q).
     assert_eq!(RaidLevel::DualParity.data_members(4), Some(2));
     assert_eq!(RaidLevel::DualParity.data_members(10), Some(8));
+    // Triple parity reserves three (P, Q, and R).
+    assert_eq!(RaidLevel::TripleParity.data_members(5), Some(2));
+    assert_eq!(RaidLevel::TripleParity.data_members(10), Some(7));
 }
 
 #[test]
@@ -805,6 +861,8 @@ fn data_members_fails_closed_below_the_structural_floor() {
     assert_eq!(RaidLevel::Parity.data_members(0), None);
     assert_eq!(RaidLevel::DualParity.data_members(2), None);
     assert_eq!(RaidLevel::DualParity.data_members(0), None);
+    assert_eq!(RaidLevel::TripleParity.data_members(3), None);
+    assert_eq!(RaidLevel::TripleParity.data_members(0), None);
     // The mirror is the identity case: always one copy's worth, even at zero
     // (an empty mirror is rejected earlier by `assemble`, not here).
     assert_eq!(RaidLevel::Mirror.data_members(0), Some(1));
