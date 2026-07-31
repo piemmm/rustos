@@ -33,6 +33,9 @@ struct Inner {
     /// on read — a latent bad sector, not a dead device.
     medium_block: Option<u64>,
     flush_fault: bool,
+    /// The [`BufferClass`] of the most recent `write_blocks_with_class` this
+    /// member observed, so a test can prove the caller's class is forwarded.
+    last_write_class: Option<BufferClass>,
 }
 
 impl MemBlock {
@@ -45,6 +48,7 @@ impl MemBlock {
                 write_fault: None,
                 medium_block: None,
                 flush_fault: false,
+                last_write_class: None,
             }),
         }
     }
@@ -63,6 +67,12 @@ impl MemBlock {
 
     fn set_flush_fault(&self, f: bool) {
         self.inner.borrow_mut().flush_fault = f;
+    }
+
+    /// The [`BufferClass`] of the most recent `write_blocks_with_class` this
+    /// member observed (`None` if it was never written through that path).
+    fn last_write_class(&self) -> Option<BufferClass> {
+        self.inner.borrow().last_write_class
     }
 
     /// The first byte of member-local block `lba` in this member's store.
@@ -141,6 +151,16 @@ impl Block for MemBlock {
         } else {
             Ok(())
         }
+    }
+
+    fn write_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &[u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        self.inner.borrow_mut().last_write_class = Some(class);
+        self.write_blocks(lba, buf)
     }
 }
 
@@ -246,6 +266,71 @@ fn a_multi_block_cross_stripe_transfer_round_trips() {
     array.read_blocks(1, &mut back).unwrap();
     assert_eq!(src, back);
     assert_parity_consistent(&array);
+}
+
+/// The caller's [`BufferClass`] reaches the data member's write, exactly as it
+/// does for the mirror and stripe, while the parity write stays
+/// [`BufferClass::Sensitive`] because it carries opaque cross-stripe bytes.
+/// Before the fix every RAID5 member write was forced `Sensitive`, so a
+/// `NonSensitive` bulk write was needlessly zeroed on free and the class was
+/// silently dropped — this asserts it is honoured.
+#[test]
+fn a_data_member_write_honours_the_caller_class_while_parity_stays_sensitive() {
+    let mut m = members();
+    let mut s = scratch();
+    let mut array = ParityArray::assemble(&mut m, &mut s, CHUNK).unwrap();
+
+    // One NonSensitive single-block write: exactly the data member records the
+    // caller's NonSensitive class; exactly the parity member records Sensitive;
+    // the third member is untouched. This holds whatever the parity rotation
+    // places where, so the assertion needs no layout arithmetic.
+    let buf = [val(0); BS as usize];
+    array
+        .write_blocks_with_class(0, &buf, BufferClass::NonSensitive)
+        .unwrap();
+    let classes: [Option<BufferClass>; MEMBERS] = core::array::from_fn(|i| {
+        array
+            .member(i)
+            .unwrap()
+            .device()
+            .unwrap()
+            .last_write_class()
+    });
+    let nonsensitive = classes
+        .iter()
+        .filter(|c| **c == Some(BufferClass::NonSensitive))
+        .count();
+    let sensitive = classes
+        .iter()
+        .filter(|c| **c == Some(BufferClass::Sensitive))
+        .count();
+    assert_eq!(
+        nonsensitive, 1,
+        "the data member must honour the caller's NonSensitive class"
+    );
+    assert_eq!(
+        sensitive, 1,
+        "the parity member must stay Sensitive (opaque cross-stripe bytes)"
+    );
+
+    // A Sensitive caller write never leaves any member NonSensitive: a
+    // Sensitive request is upheld end to end.
+    let buf = [val(1); BS as usize];
+    array
+        .write_blocks_with_class(1, &buf, BufferClass::Sensitive)
+        .unwrap();
+    for i in 0..MEMBERS {
+        assert_ne!(
+            array
+                .member(i)
+                .unwrap()
+                .device()
+                .unwrap()
+                .last_write_class(),
+            Some(BufferClass::NonSensitive),
+            "a Sensitive write must never be downgraded to NonSensitive"
+        );
+    }
 }
 
 #[test]

@@ -231,6 +231,13 @@ member's data stays reconstructable. If the parity member itself is lost the
 data is written directly and the parity is rebuilt later. A resyncing member's
 already-rebuilt region is kept current so it never falls behind mid-rebuild.
 
+The caller's `BufferClass` is forwarded to the write of the caller's own data
+block, exactly as the mirror and stripe do, so a `Sensitive` write is zeroed on
+free and a `NonSensitive` bulk write is not needlessly slowed. The parity write
+and every read-modify-write / reconstruction staging buffer stay
+`BufferClass::Sensitive` regardless, because they mix other stripes' opaque
+on-disk bytes; only the caller's own data write carries the caller's class.
+
 ### Scrub — proactive verify and repair
 
 `ParityArray::begin_scrub` / `scrub_step` drive a bounded, interruptible pass
@@ -305,6 +312,10 @@ current content — reconstructing any lost data member — with the written
 position substituted. Each stripe role that is a live source is written with its
 new value; a write that fails faults that member (excluding its stale block),
 and the new data stays durable while the array keeps its two-fault redundancy.
+As with RAID5, the caller's `BufferClass` is forwarded to the write of the
+caller's own data block, while both P and Q syndrome writes and every staging
+buffer stay `BufferClass::Sensitive` because they carry opaque cross-stripe
+bytes.
 
 ### Scrub, degrade, rebuild, and replace
 

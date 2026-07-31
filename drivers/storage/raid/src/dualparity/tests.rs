@@ -5,7 +5,7 @@ use super::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 use crate::mirror::{ArrayHealth, MemberState};
 use core::cell::RefCell;
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::DriverError;
+use tairix_abi::driver::{BufferClass, DriverError};
 
 // A small block size keeps the fault-injecting device doubles off the stack's
 // large-array lint while the array's byte-wise GF math is size-agnostic.
@@ -36,6 +36,9 @@ struct Inner {
     /// A single member-local block that returns [`DriverError::MediumError`]
     /// on read — a latent bad sector, not a dead device.
     medium_block: Option<u64>,
+    /// The [`BufferClass`] of the most recent `write_blocks_with_class` this
+    /// member observed, so a test can prove the caller's class is forwarded.
+    last_write_class: Option<BufferClass>,
 }
 
 impl MemBlock {
@@ -47,6 +50,7 @@ impl MemBlock {
                 read_fault: None,
                 write_fault: None,
                 medium_block: None,
+                last_write_class: None,
             }),
         }
     }
@@ -61,6 +65,12 @@ impl MemBlock {
 
     fn set_medium_block(&self, b: Option<u64>) {
         self.inner.borrow_mut().medium_block = b;
+    }
+
+    /// The [`BufferClass`] of the most recent `write_blocks_with_class` this
+    /// member observed (`None` if it was never written through that path).
+    fn last_write_class(&self) -> Option<BufferClass> {
+        self.inner.borrow().last_write_class
     }
 
     fn span(lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
@@ -130,6 +140,16 @@ impl Block for MemBlock {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    fn write_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &[u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        self.inner.borrow_mut().last_write_class = Some(class);
+        self.write_blocks(lba, buf)
     }
 }
 
@@ -204,6 +224,69 @@ fn fault_member(array: &mut DualParityArray<'_, MemBlock>, idx: usize) {
         .device()
         .unwrap()
         .set_read_fault(None);
+}
+
+/// The caller's [`BufferClass`] reaches the data member's write, exactly as it
+/// does for the mirror and stripe, while both syndrome (P and Q) writes stay
+/// [`BufferClass::Sensitive`] because they carry opaque cross-stripe bytes.
+/// Before the fix every RAID6 member write was forced `Sensitive`, so a
+/// `NonSensitive` bulk write was needlessly zeroed on free and the class was
+/// silently dropped — this asserts it is honoured.
+#[test]
+fn a_data_member_write_honours_the_caller_class_while_syndromes_stay_sensitive() {
+    let mut m = members();
+    let mut s = scratch();
+    let mut array = DualParityArray::assemble(&mut m, &mut s, CHUNK).unwrap();
+
+    // One NonSensitive single-block write touches its data member (caller's
+    // class) plus the P and Q members (Sensitive); the other data member is
+    // untouched. Layout-agnostic: whatever the P/Q rotation places where.
+    let buf = [val(0); BS as usize];
+    array
+        .write_blocks_with_class(0, &buf, BufferClass::NonSensitive)
+        .unwrap();
+    let classes: [Option<BufferClass>; MEMBERS] = core::array::from_fn(|i| {
+        array
+            .member(i)
+            .unwrap()
+            .device()
+            .unwrap()
+            .last_write_class()
+    });
+    let nonsensitive = classes
+        .iter()
+        .filter(|c| **c == Some(BufferClass::NonSensitive))
+        .count();
+    let sensitive = classes
+        .iter()
+        .filter(|c| **c == Some(BufferClass::Sensitive))
+        .count();
+    assert_eq!(
+        nonsensitive, 1,
+        "the data member must honour the caller's NonSensitive class"
+    );
+    assert_eq!(
+        sensitive, 2,
+        "both P and Q writes must stay Sensitive (opaque cross-stripe bytes)"
+    );
+
+    // A Sensitive caller write never leaves any member NonSensitive.
+    let buf = [val(1); BS as usize];
+    array
+        .write_blocks_with_class(1, &buf, BufferClass::Sensitive)
+        .unwrap();
+    for i in 0..MEMBERS {
+        assert_ne!(
+            array
+                .member(i)
+                .unwrap()
+                .device()
+                .unwrap()
+                .last_write_class(),
+            Some(BufferClass::NonSensitive),
+            "a Sensitive write must never be downgraded to NonSensitive"
+        );
+    }
 }
 
 #[test]

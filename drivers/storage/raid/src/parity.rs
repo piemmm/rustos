@@ -697,11 +697,24 @@ impl<B: Block> ParityArray<'_, B> {
         }
     }
 
-    /// Write `src` (one block) to member-local `member_lba` of member `idx`,
-    /// faulting it on a whole-device error. Returns whether the write landed.
-    fn write_member_block(&mut self, idx: usize, member_lba: u64, src: &[u8]) -> bool {
+    /// Write `src` (one block, the caller's own data) to member-local
+    /// `member_lba` of member `idx`, faulting it on a whole-device error.
+    /// Returns whether the write landed. `class` is the caller's own
+    /// buffer-sensitivity marking, forwarded verbatim so a `Sensitive` write is
+    /// zeroed on free and a `NonSensitive` bulk write is not needlessly slowed
+    /// (matching the mirror and stripe). Parity and reconstruction staging use
+    /// [`BufferClass::Sensitive`] regardless, because they mix other stripes'
+    /// opaque on-disk bytes; only this write of the caller's own block honours
+    /// the caller's class.
+    fn write_member_block(
+        &mut self,
+        idx: usize,
+        member_lba: u64,
+        src: &[u8],
+        class: BufferClass,
+    ) -> bool {
         let outcome = if let Some(device) = self.members[idx].device.as_mut() {
-            device.write_blocks_with_class(member_lba, src, BufferClass::Sensitive)
+            device.write_blocks_with_class(member_lba, src, class)
         } else {
             self.fault(idx);
             return false;
@@ -764,6 +777,7 @@ impl<B: Block> ParityArray<'_, B> {
         parity_member: usize,
         member_lba: u64,
         new_data: &[u8],
+        class: BufferClass,
     ) -> bool {
         let bs = self.geometry.block_size as usize;
         let data_source = self.is_source(data_member);
@@ -793,7 +807,7 @@ impl<B: Block> ParityArray<'_, B> {
         }
         // Write the data to its own member when it is a usable source.
         let data_ok = if data_source && self.is_source(data_member) {
-            self.write_member_block(data_member, member_lba, new_data)
+            self.write_member_block(data_member, member_lba, new_data, class)
         } else {
             false
         };
@@ -803,7 +817,7 @@ impl<B: Block> ParityArray<'_, B> {
         if self.members[data_member].state == MemberState::Resyncing
             && member_lba < self.members[data_member].resync_next_lba
         {
-            self.write_member_block(data_member, member_lba, new_data);
+            self.write_member_block(data_member, member_lba, new_data, class);
         }
         if self.members[parity_member].state == MemberState::Resyncing
             && member_lba < self.members[parity_member].resync_next_lba
@@ -845,7 +859,7 @@ impl<B: Block> ParityArray<'_, B> {
 impl<B: Block> ParityArray<'_, B> {
     /// Write `buf.len() / block_size` blocks at logical `lba`, splitting at
     /// chunk boundaries and updating each affected stripe's parity.
-    fn write_impl(&mut self, lba: u64, buf: &[u8], _class: BufferClass) -> Result<(), DriverError> {
+    fn write_impl(&mut self, lba: u64, buf: &[u8], class: BufferClass) -> Result<(), DriverError> {
         let total = self.validate_io(lba, buf.len())?;
         if !self.can_serve() {
             return Err(DriverError::DeviceOffline);
@@ -866,8 +880,13 @@ impl<B: Block> ParityArray<'_, B> {
                 let off =
                     usize::try_from((done + b) * bs).map_err(|_| DriverError::LengthOutOfRange)?;
                 let block = &buf[off..off + bs_usize];
-                let accepted =
-                    self.write_block(data_member, parity_member, place.member_lba + b, block);
+                let accepted = self.write_block(
+                    data_member,
+                    parity_member,
+                    place.member_lba + b,
+                    block,
+                    class,
+                );
                 if !accepted {
                     // A block could not be stored on data *or* in parity: a
                     // second member was lost mid-write. Fail closed.

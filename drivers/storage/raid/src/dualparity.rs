@@ -648,9 +648,23 @@ impl<B: Block> DualParityArray<'_, B> {
 
     /// Write `src` (one block) to member-local `member_lba` of member `idx`,
     /// faulting it on a whole-device error. Returns whether the write landed.
-    fn write_member_block(&mut self, idx: usize, member_lba: u64, src: &[u8]) -> bool {
+    /// `class` is the caller's own buffer-sensitivity marking, forwarded
+    /// verbatim so a `Sensitive` write is zeroed on free and a `NonSensitive`
+    /// bulk write is not needlessly slowed (matching the mirror and stripe).
+    /// The P/Q syndrome and reconstruction staging use
+    /// [`BufferClass::Sensitive`] regardless (they mix other stripes' opaque
+    /// on-disk bytes); only a write of the caller's own block honours its
+    /// class, and the read-repair write-back of reconstructed data stays
+    /// `Sensitive` for the same opaque-bytes reason.
+    fn write_member_block(
+        &mut self,
+        idx: usize,
+        member_lba: u64,
+        src: &[u8],
+        class: BufferClass,
+    ) -> bool {
         let outcome = if let Some(device) = self.members[idx].device.as_mut() {
-            device.write_blocks_with_class(member_lba, src, BufferClass::Sensitive)
+            device.write_blocks_with_class(member_lba, src, class)
         } else {
             self.fault(idx);
             return false;
@@ -889,7 +903,9 @@ impl<B: Block> DualParityArray<'_, B> {
         // per-block media error, not a whole-device fault: repair it by writing
         // the reconstructed data back (forcing sector reallocation). A repair
         // that fails drops the member.
-        if self.is_source(data_member) && !self.write_member_block(data_member, member_lba, dst) {
+        if self.is_source(data_member)
+            && !self.write_member_block(data_member, member_lba, dst, BufferClass::Sensitive)
+        {
             self.fault(data_member);
         }
         Ok(())
@@ -930,6 +946,19 @@ impl<B: Block> DualParityArray<'_, B> {
         }
         Ok(())
     }
+}
+
+/// The resolved stripe roles for a single-block write: the array indices of
+/// the data member and its stripe's P and Q syndrome members, plus the data
+/// member's Q coefficient exponent `x`. Grouping them keeps the per-block
+/// write path a small, self-documenting call rather than a long positional
+/// argument list.
+#[derive(Copy, Clone)]
+struct WriteRoles {
+    data_member: usize,
+    p_member: usize,
+    q_member: usize,
+    x: u64,
 }
 
 impl<B: Block> DualParityArray<'_, B> {
@@ -1035,13 +1064,17 @@ impl<B: Block> DualParityArray<'_, B> {
     /// whole-device error drops that member.
     fn write_block(
         &mut self,
-        data_member: usize,
-        p_member: usize,
-        q_member: usize,
-        x: u64,
+        roles: WriteRoles,
         member_lba: u64,
         new_data: &[u8],
+        class: BufferClass,
     ) -> bool {
+        let WriteRoles {
+            data_member,
+            p_member,
+            q_member,
+            x,
+        } = roles;
         // Compute the stripe's new P and Q (fast RMW, else full recompute).
         if !self.try_rmw(data_member, p_member, q_member, x, member_lba, new_data)
             && !self.recompute_syndromes(data_member, x, member_lba, new_data)
@@ -1051,7 +1084,7 @@ impl<B: Block> DualParityArray<'_, B> {
         // Write each stripe role that is a live source with its new value; a
         // failed write faults that member (its stale block is then excluded).
         if self.is_source(data_member) {
-            self.write_member_block(data_member, member_lba, new_data);
+            self.write_member_block(data_member, member_lba, new_data, class);
         }
         if self.is_source(p_member) {
             self.write_slot_block(p_member, member_lba, S_PACC);
@@ -1062,7 +1095,7 @@ impl<B: Block> DualParityArray<'_, B> {
         // Keep a resyncing member's already-synced region current so it never
         // falls behind the array mid-rebuild.
         if self.in_synced_region(data_member, member_lba) {
-            self.write_member_block(data_member, member_lba, new_data);
+            self.write_member_block(data_member, member_lba, new_data, class);
         }
         if self.in_synced_region(p_member, member_lba) {
             self.write_slot_block(p_member, member_lba, S_PACC);
@@ -1085,7 +1118,7 @@ impl<B: Block> DualParityArray<'_, B> {
 
     /// Write `buf.len() / block_size` blocks at logical `lba`, splitting at
     /// chunk boundaries and updating each affected stripe's P and Q syndromes.
-    fn write_impl(&mut self, lba: u64, buf: &[u8], _class: BufferClass) -> Result<(), DriverError> {
+    fn write_impl(&mut self, lba: u64, buf: &[u8], class: BufferClass) -> Result<(), DriverError> {
         let total = self.validate_io(lba, buf.len())?;
         if !self.can_serve() {
             return Err(DriverError::DeviceOffline);
@@ -1113,18 +1146,17 @@ impl<B: Block> DualParityArray<'_, B> {
                 // would be a layout bug. Fail closed rather than mis-encode.
                 return Err(DriverError::DeviceFault);
             };
+            let roles = WriteRoles {
+                data_member,
+                p_member,
+                q_member,
+                x,
+            };
             for b in 0..place.run {
                 let off =
                     usize::try_from((done + b) * bs).map_err(|_| DriverError::LengthOutOfRange)?;
                 let block = &buf[off..off + bs_usize];
-                if !self.write_block(
-                    data_member,
-                    p_member,
-                    q_member,
-                    x,
-                    place.member_lba + b,
-                    block,
-                ) {
+                if !self.write_block(roles, place.member_lba + b, block, class) {
                     // A block could not be stored on data nor encoded into the
                     // syndromes: a third member was lost mid-write. Fail closed.
                     return Err(DriverError::DeviceOffline);
