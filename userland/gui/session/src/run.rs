@@ -70,6 +70,8 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::input::KeyInput;
+    use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
+    use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use tairix_abi::{
@@ -146,6 +148,13 @@ mod program {
     /// fail-loud, never serve a desktop apps cannot reach.
     const EXIT_NO_WINDOW_ENDPOINT: i32 = 98;
 
+    /// Exit code when the reserved `NOTIFY_ENDPOINT` could not be bound. It
+    /// is the other seat-scoped reserved id, authorised by the same live
+    /// seat lease as the window endpoint, so a refusal here is the same
+    /// lease/rendezvous anomaly — exit fail-loud rather than run a desktop
+    /// whose services cannot post notifications.
+    const EXIT_NO_NOTIFY_ENDPOINT: i32 = 99;
+
     /// Frames in the shared region: a double buffer, so the session renders
     /// into one frame while the service scans out the other.
     const FRAME_COUNT: u32 = 2;
@@ -160,10 +169,19 @@ mod program {
     /// wakes the loop so its windows are torn down promptly.
     const CHILD_TOKEN: u64 = 3;
 
+    /// The wait-set token of the served `NOTIFY_ENDPOINT` member: a producer
+    /// posting or clearing a notification wakes the loop to relay it.
+    const NOTIFY_TOKEN: u64 = 4;
+
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
     /// covers several concurrent clients.
     const WINDOW_CAPACITY: usize = 8;
+
+    /// Outstanding-call capacity of the notification endpoint: notifications
+    /// are infrequent and synchronous, so a small queue covers several
+    /// producers posting at once (a fail-closed memory bound).
+    const NOTIFY_CAPACITY: usize = 8;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -327,6 +345,30 @@ mod program {
         }
     }
 
+    /// Attest the producer of a pending notification call, decode the request
+    /// fail-closed, and relay it to the taskbar model, returning the status
+    /// the producer receives.
+    ///
+    /// The producer's identity is the kernel-attested `call_peer_origin` on
+    /// the notification endpoint, never a wire claim, so a notification is
+    /// always keyed to the service that actually posted it. An unattestable
+    /// caller or a malformed request is a typed refusal (fail closed) and
+    /// never mutates the model.
+    fn serve_notify(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        ticket: u64,
+        request: &[u8],
+    ) -> Result<(), Errno> {
+        let mut buf = [0u8; ORIGIN_WIRE_LEN];
+        let len =
+            tairix_rt::call_peer_origin(NOTIFY_ENDPOINT, ticket, &mut buf).map_err(errno_from)?;
+        let origin = Origin::from_bytes(&buf[..len])?;
+        let request = NotifyRequest::from_bytes(request)?;
+        shell.apply_notify(compositor, origin.pid(), request);
+        Ok(())
+    }
+
     /// Bring the desktop up and run it until the seat is lost or a fault
     /// ends it. Split from `main` so every exit path after the acquire
     /// flows back through the one owner-checked `display_release`.
@@ -446,6 +488,27 @@ mod program {
             return fail(EXIT_NO_WINDOW_ENDPOINT, "window endpoint bind refused");
         }
 
+        // Bind the notification rendezvous the same way: the same live seat
+        // lease authorises it (it is the other seat-scoped reserved id), and
+        // it is unrestricted-sender — a producer's identity is attested per
+        // request and each notification keyed to it, so an unentitled sender
+        // only ever reaches a typed refusal. A refusal here is the same
+        // lease/rendezvous anomaly the window bind would hit; fail loud.
+        if tairix_rt::call_create(
+            NOTIFY_ENDPOINT,
+            &empty,
+            &empty,
+            NOTIFY_MAX_REQUEST,
+            STATUS_REPLY_LEN,
+            NOTIFY_CAPACITY,
+        ) != 0
+        {
+            return fail(
+                EXIT_NO_NOTIFY_ENDPOINT,
+                "notification endpoint bind refused",
+            );
+        }
+
         // Park on the wait-set: the seat member wakes on input delivery
         // and on lease loss, the endpoint member on a posted window
         // request, and the any-child member when a spawned app exits (so
@@ -477,6 +540,16 @@ mod program {
         ) != 0
         {
             return fail(EXIT_WAIT_FAILED, "window endpoint wait refused");
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            NOTIFY_ENDPOINT,
+            NOTIFY_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "notification endpoint wait refused");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -576,6 +649,19 @@ mod program {
                     };
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
                 }
+            } else if token == NOTIFY_TOKEN {
+                // Serve a pending notification request: attest the producer
+                // from the kernel (never the wire), decode fail-closed, relay
+                // the raise/clear to the taskbar model, and answer with the
+                // shared status reply. A malformed request or an unattestable
+                // caller is a typed refusal, so no producer is left parked.
+                let mut request = [0u8; NOTIFY_MAX_REQUEST];
+                let mut ticket = 0u64;
+                if let Ok(len) = tairix_rt::call_recv(NOTIFY_ENDPOINT, &mut request, &mut ticket) {
+                    let result = serve_notify(&mut shell, &mut compositor, ticket, &request[..len]);
+                    let reply = encode_status_reply(result);
+                    let _ = tairix_rt::call_reply(NOTIFY_ENDPOINT, ticket, &reply);
+                }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
                 // whose asynchronous load was refused exits with a reserved
@@ -619,6 +705,12 @@ mod program {
                                 focused = None;
                             }
                         }
+                        // A launched app that raised notifications and then
+                        // exited can no longer clear them; drop them here so a
+                        // dead producer leaves no stuck notification — the
+                        // notification counterpart of the window teardown
+                        // above, run for every reaped child, windowed or not.
+                        shell.clear_producer_notifications(&mut compositor, pid);
                     },
                 );
             } else if token == SEAT_TOKEN {

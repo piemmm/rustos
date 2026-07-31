@@ -3,8 +3,9 @@
 //! The desktop has two independent input routers — the window manager's
 //! [`InputRouter`] (focus, click-to-activate, interactive move-grabs) and the
 //! taskbar's [`TaskbarInput`] (the launcher buttons, the program-library
-//! popup, task activate/minimise, notification/clock presses) — and both
-//! consume the **same** shared `tairix_input` (`lib/input`) event vocabulary.
+//! popup, task activate/minimise, the notification popover, and the clock) —
+//! and both consume the **same** shared `tairix_input` (`lib/input`) event
+//! vocabulary.
 //! A real input source produces one stream of events, so something must
 //! decide which router each event belongs to. Neither GUI crate may depend
 //! on the other, so that decision is session glue, and
@@ -17,10 +18,12 @@
 //!   which drives the popup — selecting rows, editing the search, working
 //!   the scrollbar, or dismissing on a click-away. Nothing leaks to the
 //!   windows beneath a modal popup.
-//! * **Otherwise the taskbar claims a primary press** when the pointer lands
-//!   on the bar; every other press goes to the window manager. The two never
-//!   both act on one press, so a click on the bar never also activates a
-//!   window behind it.
+//! * **Otherwise the taskbar claims a press** when the pointer lands on the
+//!   bar *or* on the open (non-modal) notification popover; every other press
+//!   goes to the window manager. The two never both act on one press, so a
+//!   click on the bar or a notification card never also activates a window
+//!   behind it. The popover opens outward from the bar and never overlaps it,
+//!   so the two taskbar surfaces never contend for a press.
 //! * **Pointer motion is fanned to both routers** so their tracked pointer
 //!   positions stay in step (a press is hit-tested at the last motion's
 //!   position). The window manager acts on motion to drag a grabbed window;
@@ -149,11 +152,11 @@ impl SessionInputRouter {
     /// While the taskbar's context menu or the program-library popup is open
     /// every event routes to the taskbar (both surfaces are modal).
     /// Otherwise a primary or secondary press goes to whichever router
-    /// claims the pointer (the taskbar when the pointer is over the bar, the
-    /// window manager otherwise); motion is fanned to both so their pointers
-    /// stay in step and the window manager can drag a grabbed window; a
-    /// release goes to the window manager to end a grab. See the
-    /// [module docs](self) for the full policy.
+    /// claims the pointer (the taskbar when the pointer is over the bar or the
+    /// open notification popover, the window manager otherwise); motion is
+    /// fanned to both so their pointers stay in step and the window manager
+    /// can drag a grabbed window; a release goes to the window manager to end
+    /// a grab. See the [module docs](self) for the full policy.
     pub fn handle(
         &mut self,
         event: InputEvent,
@@ -190,8 +193,16 @@ impl SessionInputRouter {
                 // A press belongs to whichever surface owns the pixel under
                 // the pointer: the bar claims presses over itself (a
                 // secondary press there opens a pin's context menu), the
-                // window manager everything else.
-                if taskbar.hit_test(self.taskbar.pointer(), scale).is_some() {
+                // non-modal notification popover claims presses over it (a
+                // press on a card dismisses it), and the window manager takes
+                // everything else. The popover opens outward and never
+                // overlaps the bar, so the two taskbar surfaces never contend.
+                let pointer = self.taskbar.pointer();
+                let on_taskbar = taskbar.hit_test(pointer, scale).is_some()
+                    || taskbar
+                        .notifications_layout(scale)
+                        .is_some_and(|popover| popover.contains(pointer));
+                if on_taskbar {
                     taskbar_response(self.taskbar.handle(event, taskbar, scale))
                 } else {
                     wm_response(self.wm.handle(event, compositor))

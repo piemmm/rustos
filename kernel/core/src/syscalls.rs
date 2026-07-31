@@ -6316,22 +6316,25 @@ where
         // creator must hold every `recv` capability it requires, and must
         // hold `CAP_IPC_BIND_PRIVILEGED` to bind a restricted-sender endpoint.
         //
-        // The window rendezvous is the one seat-scoped reserved id: the
-        // desktop session that holds a seat's live lease serves it, and a
-        // session is an ordinary user process whose account ceiling never
-        // carries the service-class privileged-bind capability. Binding
-        // `WINDOW_ENDPOINT` is therefore alternatively authorised by the
-        // kernel-attested seat-lease fact — resolved here from the seat
-        // registry against the kernel-trusted caller id, never a claim —
-        // and refused as usual for everyone else (fail closed): a squatter
-        // without the lease cannot claim app windows, and losing the seat
-        // ends the session, whose exit reclaims the endpoint.
+        // The window and notification rendezvous are the seat-scoped
+        // reserved ids: the desktop session that holds a seat's live lease
+        // serves them, and a session is an ordinary user process whose
+        // account ceiling never carries the service-class privileged-bind
+        // capability. Binding either is therefore alternatively authorised
+        // by the kernel-attested seat-lease fact — resolved here from the
+        // seat registry against the kernel-trusted caller id, never a claim
+        // — and refused as usual for everyone else (fail closed): a squatter
+        // without the lease cannot claim app windows or feed the desktop
+        // spoofed notifications, and losing the seat ends the session, whose
+        // exit reclaims the endpoints. The seat-scoped set has one shared
+        // definition in `tairix_abi::ipc`, so this check cannot drift from
+        // it.
         let limits = CallEndpointLimits {
             max_request,
             max_reply,
             capacity,
         };
-        let seat_attested = endpoint_id == tairix_abi::window_ipc::WINDOW_ENDPOINT
+        let seat_attested = tairix_abi::ipc::is_seat_scoped_endpoint(endpoint_id)
             && !caller
                 .caps
                 .has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
@@ -25026,14 +25029,15 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
-    /// Binding the seat-scoped window rendezvous (`WINDOW_ENDPOINT`) is
-    /// authorised by the kernel-attested live seat lease and nothing else
-    /// for an unprivileged caller: refused before the lease exists, allowed
-    /// while the caller holds it, and refused again once the lease is
-    /// released (fail closed on loss). The attestation is resolved from the
-    /// seat registry against the kernel-trusted caller id, never a claim.
+    /// Binding a seat-scoped rendezvous (`WINDOW_ENDPOINT`,
+    /// `NOTIFY_ENDPOINT`) is authorised by the kernel-attested live seat
+    /// lease and nothing else for an unprivileged caller: refused before the
+    /// lease exists, allowed while the caller holds it, and refused again
+    /// once the lease is released (fail closed on loss). The attestation is
+    /// resolved from the seat registry against the kernel-trusted caller id,
+    /// never a claim.
     #[test]
-    fn call_create_window_endpoint_binds_only_for_the_live_seat_lease_holder() {
+    fn call_create_seat_scoped_endpoints_bind_only_for_the_live_seat_lease_holder() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -25064,28 +25068,40 @@ mod tests {
         )
         .with_seat_registry(seat);
 
-        let id = tairix_abi::window_ipc::WINDOW_ENDPOINT;
-        // No lease yet: the reserved id stays privileged and the bind is
-        // refused with nothing registered.
-        assert_eq!(
-            h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
-            Err(Errno::PermissionDenied)
-        );
-        assert!(!crate::callreg::contains(EndpointId(id)));
+        // Both seat-scoped rendezvous behave identically; assert each at
+        // every lease phase rather than duplicating the test body.
+        let seat_scoped = [
+            tairix_abi::window_ipc::WINDOW_ENDPOINT,
+            tairix_abi::notify_ipc::NOTIFY_ENDPOINT,
+        ];
 
-        // Holding the boot seat's live lease authorises the bind.
+        // No lease yet: each stays privileged and the bind is refused with
+        // nothing registered.
+        for id in seat_scoped {
+            assert_eq!(
+                h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
+                Err(Errno::PermissionDenied)
+            );
+            assert!(!crate::callreg::contains(EndpointId(id)));
+        }
+
+        // Holding the boot seat's live lease authorises the bind of each.
         assert!(h.display_acquire(&ctx, SEAT_PRIMARY).is_ok());
-        assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
-        assert!(crate::callreg::contains(EndpointId(id)));
-        crate::callreg::unregister(EndpointId(id));
+        for id in seat_scoped {
+            assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
+            assert!(crate::callreg::contains(EndpointId(id)));
+            crate::callreg::unregister(EndpointId(id));
+        }
 
         // A released lease withdraws the authority (fail closed on loss).
         assert!(h.display_release(&ctx, SEAT_PRIMARY).is_ok());
-        assert_eq!(
-            h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
-            Err(Errno::PermissionDenied)
-        );
-        assert!(!crate::callreg::contains(EndpointId(id)));
+        for id in seat_scoped {
+            assert_eq!(
+                h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
+                Err(Errno::PermissionDenied)
+            );
+            assert!(!crate::callreg::contains(EndpointId(id)));
+        }
     }
 
     /// Wire image of a one-capability send set, for seeding a `call_create`

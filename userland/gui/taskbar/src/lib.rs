@@ -18,7 +18,10 @@
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
 //! - **Trailing end** — a clock anchored to the very end, with a
-//!   [`NotificationArea`] of status icons immediately before it.
+//!   [`NotificationArea`] immediately before it: the persistent status
+//!   signals (network, volume, battery) drawn as calm glyphs, plus a card
+//!   popover for the transient notifications a producer service raises over
+//!   the notification IPC.
 //!
 //! The taskbar holds no authority and performs no I/O: pressing Files or
 //! choosing a library entry only *reports* a typed [`TaskbarResponse`]
@@ -76,10 +79,12 @@ mod tests;
 pub use clock::Clock;
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
-pub use layout::{BarLayout, Hit};
+pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout};
 pub use library::{folder_label, LibraryFocus, LibraryLayout, LibraryPopup, LibraryRow};
 pub use menu::{BarMenu, MenuLayout, MenuSubject};
-pub use notifications::{IconId, NotificationArea, NotificationIcon};
+pub use notifications::{
+    IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
+};
 pub use pins::{PinStrip, PinView};
 pub use render::TaskbarRenderer;
 pub use taskbar::{Taskbar, TaskbarConfig};

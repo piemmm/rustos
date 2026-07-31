@@ -37,7 +37,7 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T7 done**; T8 (notification area) is next. The
+`in progress` — **T1–T8 done**; T9 (the Switchboard taskbar icon) is next. The
 library **data** layer is landed end to end: `lib/proglib` (T1 — taxonomy,
 entry model, store grammar, fail-closed parse, canonical render, `merge`,
 `reconcile`, fuzzed by `tests/fuzz_proglib.rs`), the `applib` admin command
@@ -50,8 +50,16 @@ done-state sections below): the `lib/taskpins` store, the bar's pin strip +
 context menu, the session's pin ownership with the sandboxed per-app icon
 pipeline (`lib/image` PNG + `lib/compress` inflate/zlib + the
 `lib/sandbox` icon-rasterisation service), and both pin-creation gestures
-(right-click *Pin to taskbar* and drag-to-taskbar). The rest of the
-starting point is Stage 7 as it stands: `tairix-taskbar` models the
+(right-click *Pin to taskbar* and drag-to-taskbar). The **notification
+area** is first-class too (T8 — see its done-state section below): the
+versioned, fuzzed `notify_ipc` channel (`lib/abi`) over a seat-scoped
+`NOTIFY_ENDPOINT` the kernel binds only for the desktop's live seat lease,
+the taskbar's typed status signals + severity-ranked transient-notification
+cards (shared `lib/controls`), and the session serving the endpoint —
+attesting each producer, relaying raise/clear, presenting the
+click-to-dismiss popover, and dropping a dead producer's notifications on
+exit. The rest of the starting point is Stage 7 as it stands:
+`tairix-taskbar` models the
 launchers / popup / pins / task list / notification area / clock and emits
 typed `TaskbarResponse`s; `tairix-session` presents the bar, popup, and
 menu through the compositor, owns the theme, loads/merges the catalog
@@ -285,9 +293,8 @@ the authority at the right granularity and, if so, uses it.
 Each stage is independently reviewable, ends green on the whole-project gate
 (§7), and lands its surface fully (§27). Stages are ordered by dependency;
 T1–T3 (library data), T4–T5 (library UI), T6–T7 (pins), T8–T9 (tray + icon),
-T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate) — but T8 (notification
-area) and the file-manager button in T4 have no dependency on the library
-data and may proceed in parallel.
+T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate). T9 needs the T10
+tray-signal feed for its live states, so the two land together.
 
 ## T1 — `lib/proglib`: the program-library catalog engine — **done**
 
@@ -638,27 +645,57 @@ session suite (request validation decisions, drag management, and the
 drop-policy matrix: unarmed / unserved window / landing drop persists at
 the index / stray release ends the gesture).
 
-## T8 — Notification area upgrade
+## T8 — Notification area upgrade — **done**
 
-Bring the right-side notification area to first-class Reactive Alloy, left of
-the reserved Switchboard slot.
+The right-side notification area is first-class Reactive Alloy, left of the
+reserved Switchboard slot. What now stands:
 
-**Deliverables**
-- `userland/gui/taskbar`: render the notification area's status icons through
-  `lib/controls` (the existing `NotificationArea` model feeding `IconButton`/
-  `TraySignal` presentation) — network, volume, battery, and the clock — plus
-  transient notifications drawn as the `lib/controls::shell` `Notification`
-  card when raised. Icons resolve artwork from `/System/Graphics` (the
-  session loads assets; the taskbar draws them).
-- A versioned, fuzzed notification IPC (`lib/abi`) a producer service uses to
-  raise/clear a notification; the session relays to the taskbar model.
-- Positioned immediately left of the Switchboard slot; reflows fail-closed.
+- **The channel (`lib/abi::notify_ipc`)** — a versioned, fixed-frame,
+  fail-closed IPC a producer service posts a transient notification through:
+  `NotifyRequest::{Raise { key, severity, title, body }, Clear { key }}`,
+  answered with the shared status reply. Title/body are bounded validated
+  UTF-8 with no control characters (`NotifyText<MIN, MAX>` — one validator for
+  both), severity is the closed `NotifySeverity`
+  (Info/Success/Warning/Critical), and every decode refuses a bad magic,
+  version, op, severity, over-long/empty title, non-UTF-8/control-char text,
+  or dirty reserved tail. It is **not** `#[repr(C)]`/a syscall, so it stays
+  out of the generated C header (like `window_ipc`). Fuzzed by
+  `tests/fuzz_decode.rs`.
+- **The kernel bind** — `NOTIFY_ENDPOINT` joins `WINDOW_ENDPOINT` as the
+  seat-scoped reserved set, defined once as
+  `tairix_abi::ipc::is_seat_scoped_endpoint` and consumed by the `call_create`
+  authority check: an unprivileged desktop session binds it via its live seat
+  lease, everyone else fails closed. A squatter cannot claim the rendezvous,
+  and losing the seat ends the session (its exit reclaims the endpoint). It is
+  unrestricted-sender — a producer's identity is attested per request, not at
+  bind.
+- **The taskbar (`userland/gui/taskbar`)** — `NotificationArea` holds typed
+  `StatusSignal`s (network/volume/battery `StatusKind` → `lib/icon` glyph,
+  drawn as calm shared `IconButton`s resolving the loaded `/System/Graphics`
+  artwork) and severity-then-recency ordered `TransientNotification`s (`raise`
+  upserts by `(producer, key)`, `clear`, `clear_producer`).
+  `NotificationsLayout` opens a popover of shared
+  `lib/controls::shell::Notification` cards outward from the notification/clock
+  region — reusing the library popup's `panel_origin`/`probe_chrome` (§2.2) —
+  and fails closed to no cards on a degenerate screen. A status-signal press
+  is inert (a live readout, not an action target); a card is click-to-dismiss
+  → `TaskbarResponse::DismissNotification`.
+- **The session (`userland/gui/session`)** — binds and serves `NOTIFY_ENDPOINT`
+  in the desktop run loop, attests each producer via kernel `call_peer_origin`
+  (never the wire), relays raise/clear through `DesktopShell::apply_notify`,
+  presents/removes the popover window like the other bar popovers, resolves a
+  user dismiss, routes a press over the non-modal popover to the taskbar, and
+  drops a dead producer's notifications on child-reap.
 
-**Tests**: icon layout/hit-test; a raised notification renders as a card and
-clears; severity ordering; both themes + high-contrast + reduced-motion.
-
-**Done when**: the notification area shows live status + notifications through
-shared controls; gate green.
+Status signals carry **no fabricated hardware** — empty by default; their live
+tray-signal feed is T9/T10, and the render/`set_status_signals` path is the
+complete §27 primitive ahead of that caller. Tested in the abi suite
+(round-trip + refusal matrix + fuzz), the kernel suite (the seat-lease bind of
+both seat-scoped endpoints, refused without the lease), the taskbar suite
+(model ordering/upsert/clear/`clear_producer`, popover layout + degenerate
+fail-closed, click-to-dismiss, inert status press, and card render across
+dark/light/high-contrast/reduced-motion), and the session suite (the
+producer→attest→relay→dismiss path with producer isolation).
 
 ## T9 — The Switchboard taskbar icon (always right-most, immovable)
 

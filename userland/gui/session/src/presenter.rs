@@ -41,6 +41,7 @@ pub struct TaskbarPresenter {
     bar: Option<WindowId>,
     popup: Option<WindowId>,
     menu: Option<WindowId>,
+    notifications: Option<WindowId>,
 }
 
 impl TaskbarPresenter {
@@ -51,6 +52,7 @@ impl TaskbarPresenter {
             bar: None,
             popup: None,
             menu: None,
+            notifications: None,
         }
     }
 
@@ -73,6 +75,14 @@ impl TaskbarPresenter {
     #[must_use]
     pub const fn menu_window(&self) -> Option<WindowId> {
         self.menu
+    }
+
+    /// The compositor window currently showing the notification popover, or
+    /// `None` when no notification is raised (or before its first
+    /// presentation).
+    #[must_use]
+    pub const fn notifications_window(&self) -> Option<WindowId> {
+        self.notifications
     }
 
     /// Bring the compositor up to date with the taskbar's current model and
@@ -106,12 +116,16 @@ impl TaskbarPresenter {
         self.present_bar(compositor, renderer, taskbar, scale);
         self.present_popup(compositor, renderer, taskbar, scale);
         self.present_menu(compositor, renderer, taskbar, scale);
+        self.present_notifications(compositor, renderer, taskbar, scale);
     }
 
     /// Remove the bar, popup, and menu windows from `compositor` and forget
     /// them, so a later [`present`](Self::present) starts fresh. Tearing the
     /// desktop session down leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
+        if let Some(id) = self.notifications.take() {
+            compositor.remove(id);
+        }
         if let Some(id) = self.menu.take() {
             compositor.remove(id);
         }
@@ -198,6 +212,43 @@ impl TaskbarPresenter {
         self.menu = Some(place(
             compositor,
             self.menu,
+            layout.panel.origin,
+            surface,
+            corners,
+        ));
+    }
+
+    /// Present the notification popover while any notification is raised, or
+    /// remove it once none remain.
+    ///
+    /// The popover opens outward from the notification/clock region at
+    /// [`NotificationsLayout::panel`]'s origin, rounded with
+    /// [`NotificationsLayout::corner_radius`]; when no notification is raised
+    /// the popover window is removed. Fails closed like the others: a render
+    /// whose surface cannot be allocated leaves the existing window untouched.
+    ///
+    /// [`NotificationsLayout::panel`]: tairix_taskbar::NotificationsLayout::panel
+    /// [`NotificationsLayout::corner_radius`]: tairix_taskbar::NotificationsLayout::corner_radius
+    fn present_notifications(
+        &mut self,
+        compositor: &mut Compositor,
+        renderer: &mut TaskbarRenderer,
+        taskbar: &Taskbar,
+        scale: Scale,
+    ) {
+        let Some(layout) = taskbar.notifications_layout(scale) else {
+            if let Some(id) = self.notifications.take() {
+                compositor.remove(id);
+            }
+            return;
+        };
+        let Some(surface) = renderer.render_notifications(taskbar, scale) else {
+            return;
+        };
+        let corners = Corners::from_radius(layout.corner_radius);
+        self.notifications = Some(place(
+            compositor,
+            self.notifications,
             layout.panel.origin,
             surface,
             corners,

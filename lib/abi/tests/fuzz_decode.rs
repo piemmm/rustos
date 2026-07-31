@@ -38,6 +38,7 @@ use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketRequest,
     SocketStreamEvent,
 };
+use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
@@ -394,6 +395,17 @@ fn exercise_window_ipc(bytes: &[u8]) {
     let _ = decode_create_reply(bytes);
 }
 
+/// Drive the notification-channel decoder on `bytes` (one arm of
+/// [`exercise`]): an accepted notify request must round-trip through its
+/// encoder; a corrupt frame must refuse cleanly, never panic.
+fn exercise_notify_ipc(bytes: &[u8]) {
+    if let Ok(request) = NotifyRequest::from_bytes(bytes) {
+        let redecoded = NotifyRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted notify request must succeed");
+        assert_eq!(request, redecoded);
+    }
+}
+
 /// Drive every ABI decoder on `bytes`.
 ///
 /// Returns silently. The contract is "must not panic for any input"; a
@@ -430,6 +442,7 @@ fn exercise(bytes: &[u8]) {
     exercise_display_ipc(bytes);
     exercise_font_ipc(bytes);
     exercise_window_ipc(bytes);
+    exercise_notify_ipc(bytes);
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
     exercise_elevate(bytes);
@@ -859,6 +872,31 @@ fn structured_window_pin_and_drag_inputs_with_corrupted_fields_never_panic() {
         WindowRequest::DragWithdraw { window: 5 }.to_le_bytes(),
     ];
     for mut base in frames {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+#[test]
+fn structured_notify_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the notification requests
+    // from well-formed frames: a bit-flip of any byte — magic, version,
+    // op, key, severity, a length prefix, or a title/body byte — must
+    // fail closed, never panic.
+    let raise = NotifyRequest::Raise {
+        key: 0x1234_5678,
+        severity: NotifySeverity::Warning,
+        title: NotifyTitle::new("Battery low").expect("a valid title"),
+        body: NotifyBody::new("12% remaining.").expect("a valid body"),
+    }
+    .to_le_bytes();
+    let clear = NotifyRequest::Clear { key: 9 }.to_le_bytes();
+    for mut base in [raise, clear] {
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

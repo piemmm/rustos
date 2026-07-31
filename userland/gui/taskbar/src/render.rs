@@ -29,16 +29,24 @@
 //! ([`Taskbar::theme`]), so the geometry the input router hit-tests and the
 //! pixels painted here can never come from two different themes.
 //!
+//! [`TaskbarRenderer::render_notifications`] paints the notification popover:
+//! the shared `lib/controls` [`Panel`](tairix_controls::Panel) chrome anchored
+//! back at the notification region, and one shared [`Notification`] card per
+//! raised notification (severity mapped to the card's composed state),
+//! presented by the window manager as its own small window above the bar.
+//!
 //! Region rectangles are in screen space; each is translated into the
 //! surface's local space by subtracting the surface's origin. The translation
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
 //! nothing rather than panicking. A label is truncated to
 //! the characters that fit its region so text never spills into a neighbour.
-//! Each notification slot draws a scalable, themeable [`tairix_icon`] vector
-//! glyph resolved from the icon's asset id, rasterised to the slot size and
+//! Each status-signal slot draws a scalable, themeable [`tairix_icon`] vector
+//! glyph resolved from the signal's kind, rasterised to the slot size and
 //! composited through `lib/raster`'s single blit path.
 
-use tairix_controls::{ControlState, PointerState, TaskVisibility, TaskbarItem};
+use tairix_controls::shell::Notification;
+use tairix_controls::state::{ActivityState, ValidationState};
+use tairix_controls::{ControlRole, ControlState, PointerState, TaskVisibility, TaskbarItem};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconSet};
@@ -47,7 +55,7 @@ use tairix_theme::{Palette, TextRole, Theme};
 
 use crate::layout::BarLayout;
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
-use crate::notifications::NotificationArea;
+use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
 use crate::pins::PinView;
 use crate::taskbar::Taskbar;
 
@@ -323,6 +331,50 @@ impl TaskbarRenderer {
         }
         Some(surface)
     }
+
+    /// Paint the notification popover into a [`Surface`] using the taskbar's
+    /// own theme.
+    ///
+    /// Returns `None` when no notification is raised (there is nothing to
+    /// draw) or when the surface cannot be allocated, so the caller fails
+    /// closed rather than panicking. The window manager places the returned
+    /// surface above the bar and rounds it with
+    /// [`NotificationsLayout::corner_radius`](crate::NotificationsLayout::corner_radius),
+    /// exactly as it rounds the bar and the library popup. Each card is the
+    /// shared [`Notification`] control, so the popover restates no chrome and
+    /// no colour algebra of its own.
+    #[must_use]
+    pub fn render_notifications(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let layout = taskbar.notifications_layout(scale)?;
+        let theme = taskbar.theme();
+        let fonts = PanelFonts::resolve(theme, scale);
+        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
+        let origin = layout.panel.origin;
+        let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+
+        crate::layout::notif_panel(local_point(layout.anchor, origin)).render(
+            &mut surface,
+            local_bounds,
+            scale,
+            theme,
+            fonts.text,
+        );
+
+        let notifications = taskbar.notifications();
+        for placed in &layout.cards {
+            let Some(note) = notifications.notification(placed.index) else {
+                continue;
+            };
+            card_control(note).render(
+                &mut surface,
+                local_rect(placed.card, origin),
+                scale,
+                theme,
+                fonts.text,
+            );
+        }
+        Some(surface)
+    }
 }
 
 /// The two fonts the panel draws with, each resolved from the text role whose
@@ -351,6 +403,38 @@ impl PanelFonts {
     }
 }
 
+/// The shared notification card for `note`, its role and composed state
+/// mapping the notification's severity to the Reactive Alloy semantics: an
+/// informational notice stays calm, a success shows the completion accent, a
+/// warning shows the caution rail, and a critical notification reads as a
+/// destructive, invalid state. Built once here so the popover render (and any
+/// later hit-test) compose the identical control (§2.2).
+fn card_control(note: &TransientNotification) -> Notification {
+    let (role, state) = match note.severity {
+        NotifySeverity::Info => (ControlRole::Neutral, ControlState::idle()),
+        NotifySeverity::Success => (
+            ControlRole::Recommended,
+            ControlState::idle().with_activity(ActivityState::Complete),
+        ),
+        NotifySeverity::Warning => (
+            ControlRole::Neutral,
+            ControlState::idle().with_validation(ValidationState::Warning),
+        ),
+        NotifySeverity::Critical => (
+            ControlRole::Destructive,
+            ControlState::idle().with_validation(ValidationState::Invalid),
+        ),
+    };
+    let card = Notification::new(note.title.clone())
+        .with_role(role)
+        .with_state(state);
+    if note.body.is_empty() {
+        card
+    } else {
+        card.with_message(note.body.clone())
+    }
+}
+
 /// Fill the notification and clock regions of an already-created bar
 /// surface.
 fn paint_trailing(
@@ -363,12 +447,12 @@ fn paint_trailing(
     icons: &mut IconContext<'_>,
 ) {
     let origin = layout.bar.origin;
-    for (slot, icon) in layout.notifications.iter().zip(notifications.icons()) {
+    for (slot, signal) in layout.notifications.iter().zip(notifications.signals()) {
         draw_icon(
             surface,
             origin,
             *slot,
-            &icon.asset,
+            signal.kind.icon(),
             palette.on_surface_muted.into(),
             icons,
         );
@@ -416,19 +500,20 @@ fn draw_label(
     font.draw_text(surface, x, y, fitted, color);
 }
 
-/// Draw a notification icon's glyph centred in its screen-space `rect`,
-/// tinted with `color`. The glyph is a scalable [`tairix_icon`] vector icon
-/// resolved from the asset id and rasterised to the slot size at this scale,
-/// then composited onto the bar-local surface through the shared blit path. The rasterised glyph is taken from `icons`, which keeps
-/// it across frames so it is converted only once per tint and size and
-/// re-rendered only on a theme or scale change. An empty
-/// slot, a slot too small to hold a glyph, or an unrenderable size paints
-/// nothing rather than panicking.
+/// Draw a status signal's glyph centred in its screen-space `rect`, tinted
+/// with `color`. The glyph is the scalable [`tairix_icon`] vector icon for
+/// `kind`, rasterised to the slot size at this scale from the loaded
+/// `/System/Graphics` icon set (with the built-in fallback), then composited
+/// onto the bar-local surface through the shared blit path. The rasterised
+/// glyph is taken from `icons`, which keeps it across frames so it is
+/// converted only once per tint and size and re-rendered only on a theme or
+/// scale change. An empty slot, a slot too small to hold a glyph, or an
+/// unrenderable size paints nothing rather than panicking.
 fn draw_icon(
     surface: &mut Surface,
     origin: Point,
     rect: Rect,
-    asset: &str,
+    kind: IconKind,
     color: Color,
     icons: &mut IconContext<'_>,
 ) {
@@ -439,7 +524,6 @@ fn draw_icon(
         .width
         .min(rect.height)
         .saturating_sub(ICON_PADDING.saturating_mul(2));
-    let kind = IconKind::for_asset(asset_key(asset));
     let set = icons.set;
     let Some(image) = icons
         .cache
@@ -454,13 +538,6 @@ fn draw_icon(
     let x = to_i32(local(rect.left(), origin.x).saturating_add(x_offset));
     let y = to_i32(local(rect.top(), origin.y).saturating_add(y_offset));
     surface.blit(x, y, image);
-}
-
-/// The glyph key for an asset id: the segment after the last `.`, so the
-/// taskbar's namespaced ids (`icon.network`) resolve to the bare glyph name
-/// (`network`) the icon library knows. A dotless id maps to itself.
-fn asset_key(asset: &str) -> &str {
-    asset.rsplit('.').next().unwrap_or(asset)
 }
 
 /// Translate a screen-space rectangle into surface-local space.

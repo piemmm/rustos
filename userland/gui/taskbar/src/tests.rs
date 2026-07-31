@@ -17,7 +17,9 @@ use crate::input::{TaskbarInput, TaskbarResponse};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
 use crate::menu::MenuSubject;
-use crate::notifications::IconId;
+use crate::notifications::{
+    IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
+};
 use crate::pins::PinView;
 use crate::render::TaskbarRenderer;
 use crate::taskbar::{Taskbar, TaskbarConfig};
@@ -205,13 +207,129 @@ fn set_focused_mirrors_and_fails_closed() {
 // ---- notifications --------------------------------------------------
 
 #[test]
-fn notifications_add_remove_and_dedup() {
+fn status_signals_set_and_dedup() {
     let mut bar = bottom_bar();
-    assert!(bar.notifications_mut().add(IconId(1), "icon.network"));
-    assert!(!bar.notifications_mut().add(IconId(1), "icon.volume"));
-    assert_eq!(bar.notifications().len(), 1);
-    assert!(bar.notifications_mut().remove(IconId(1)));
-    assert!(bar.notifications().is_empty());
+    bar.set_status_signals(alloc::vec![
+        StatusSignal::new(IconId(1), StatusKind::Network),
+        StatusSignal::new(IconId(1), StatusKind::Volume), // later duplicate id dropped
+        StatusSignal::new(IconId(2), StatusKind::Battery),
+    ]);
+    let signals = bar.notifications().signals();
+    assert_eq!(signals.len(), 2, "the later duplicate id is dropped");
+    assert_eq!(signals[0].kind, StatusKind::Network);
+    assert_eq!(signals[1].kind, StatusKind::Battery);
+    assert_eq!(bar.notifications().signal_count(), 2);
+}
+
+#[test]
+fn notifications_raise_upsert_and_clear() {
+    let mut bar = bottom_bar();
+    assert!(bar.raise_notification(TransientNotification::new(
+        7,
+        1,
+        NotifySeverity::Info,
+        "Sync",
+        "Started",
+    )));
+    assert_eq!(bar.notifications().notification_count(), 1);
+    // Re-raising the same (producer, key) with new content updates in place.
+    assert!(bar.raise_notification(TransientNotification::new(
+        7,
+        1,
+        NotifySeverity::Info,
+        "Sync",
+        "Halfway",
+    )));
+    assert_eq!(bar.notifications().notification_count(), 1);
+    assert_eq!(
+        bar.notifications().notification(0).expect("present").body,
+        "Halfway"
+    );
+    // Re-raising byte-identical content reports no change.
+    assert!(!bar.raise_notification(TransientNotification::new(
+        7,
+        1,
+        NotifySeverity::Info,
+        "Sync",
+        "Halfway",
+    )));
+    // Clearing is idempotent.
+    assert!(bar.clear_notification(7, 1));
+    assert!(!bar.clear_notification(7, 1));
+    assert!(!bar.notifications().has_notifications());
+}
+
+#[test]
+fn notifications_order_by_severity_then_recency() {
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        1,
+        NotifySeverity::Info,
+        "a",
+        "",
+    ));
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        2,
+        NotifySeverity::Critical,
+        "b",
+        "",
+    ));
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        3,
+        NotifySeverity::Info,
+        "c",
+        "",
+    ));
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        4,
+        NotifySeverity::Warning,
+        "d",
+        "",
+    ));
+    let titles: Vec<&str> = bar
+        .notifications()
+        .notifications()
+        .map(|note| note.title.as_str())
+        .collect();
+    // Critical first, then Warning, then the two Info newest-first (c before a).
+    assert_eq!(titles, ["b", "d", "c", "a"]);
+}
+
+#[test]
+fn clear_producer_drops_only_that_producers_notifications() {
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        1,
+        NotifySeverity::Info,
+        "p1a",
+        "",
+    ));
+    let _ = bar.raise_notification(TransientNotification::new(
+        2,
+        1,
+        NotifySeverity::Info,
+        "p2a",
+        "",
+    ));
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        2,
+        NotifySeverity::Info,
+        "p1b",
+        "",
+    ));
+    assert!(bar.clear_producer_notifications(1));
+    assert_eq!(bar.notifications().notification_count(), 1);
+    assert_eq!(
+        bar.notifications().notification(0).expect("present").title,
+        "p2a"
+    );
+    assert!(!bar.clear_producer_notifications(9), "absent producer");
 }
 
 // ---- bar layout -----------------------------------------------------
@@ -230,7 +348,10 @@ fn leading_launchers_partition_the_leading_end() {
 fn hit_testing_resolves_every_region() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
-    bar.notifications_mut().add(IconId(7), "icon.network");
+    bar.set_status_signals(alloc::vec![StatusSignal::new(
+        IconId(7),
+        StatusKind::Network
+    )]);
     let layout = bar.layout(Scale::ONE);
 
     assert_eq!(
@@ -679,15 +800,19 @@ fn task_press_applies_the_activate_rule() {
 }
 
 #[test]
-fn notification_and_clock_presses_report() {
+fn status_icon_press_is_inert_and_clock_reports() {
     let mut bar = bottom_bar();
-    bar.notifications_mut().add(IconId(3), "icon.volume");
+    bar.set_status_signals(alloc::vec![StatusSignal::new(
+        IconId(3),
+        StatusKind::Volume
+    )]);
     let mut input = TaskbarInput::new();
     let layout = bar.layout(Scale::ONE);
+    // A status signal is a live readout, not an action target this stage.
     let icon = centre_of(layout.notifications[0]);
     assert_eq!(
         press_at(&mut input, &mut bar, icon.x, icon.y),
-        TaskbarResponse::NotificationActivated { id: IconId(3) }
+        TaskbarResponse::Ignored
     );
     let clock = centre_of(layout.clock);
     assert_eq!(
@@ -1636,6 +1761,31 @@ fn role(color: tairix_theme::Rgba) -> Pixel {
     Color::from(color).premultiply()
 }
 
+/// A dark theme with reduced motion, for the reduced-motion render check.
+fn dark_reduced_motion() -> Theme {
+    let base = Theme::dark();
+    Theme::new(
+        ThemeId(96),
+        String::from("dark-reduced"),
+        Appearance::Dark,
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        Contrast::Normal,
+    )
+}
+
+/// Whether `region` shows more than one distinct pixel — proof something was
+/// painted there rather than left a flat fill.
+fn region_is_varied(surface: &Surface, frame: Rect, region: Rect) -> bool {
+    let first = pixel_at(surface, frame, region.left(), region.top());
+    (region.top()..region.bottom())
+        .any(|y| (region.left()..region.right()).any(|x| pixel_at(surface, frame, x, y) != first))
+}
+
 /// The painted pixel at screen point `(x, y)`, translated into the
 /// surface's local space via its screen-space `frame`.
 fn pixel_at(surface: &Surface, frame: Rect, x: i32, y: i32) -> Pixel {
@@ -1809,10 +1959,13 @@ fn minimised_task_recedes_into_the_bar() {
 }
 
 #[test]
-fn notification_glyph_draws_in_the_muted_role() {
+fn status_signal_glyph_draws_in_the_muted_role() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    bar.notifications_mut().add(IconId(1), "icon.network");
+    bar.set_status_signals(alloc::vec![StatusSignal::new(
+        IconId(1),
+        StatusKind::Network
+    )]);
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
         .render(&bar, Scale::ONE)
@@ -1824,27 +1977,6 @@ fn notification_glyph_draws_in_the_muted_role() {
         theme.palette().on_surface_muted,
         role(theme.palette().surface_raised),
     ));
-}
-
-#[test]
-fn unknown_notification_asset_falls_back_to_a_glyph() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    bar.notifications_mut().add(IconId(1), "no-such-asset");
-    let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
-        .render(&bar, Scale::ONE)
-        .expect("bar renders");
-    assert!(
-        region_has_role_ink(
-            &surface,
-            layout.bar,
-            layout.notifications[0],
-            theme.palette().on_surface_muted,
-            role(theme.palette().surface_raised),
-        ),
-        "an unknown asset still draws the placeholder glyph"
-    );
 }
 
 #[test]
@@ -2280,4 +2412,169 @@ fn popup_repaints_after_a_theme_switch() {
         pixel_at(&dark, layout.panel, inside.x, inside.y),
         pixel_at(&light, layout.panel, inside.x, inside.y)
     );
+}
+
+// ---- notification popover -------------------------------------------
+
+#[test]
+fn no_popover_until_a_notification_is_raised() {
+    let bar = bottom_bar();
+    assert!(bar.notifications_layout(Scale::ONE).is_none());
+    assert!(TaskbarRenderer::new()
+        .render_notifications(&bar, Scale::ONE)
+        .is_none());
+}
+
+#[test]
+fn popover_lays_out_one_card_per_shown_notification() {
+    let mut bar = bottom_bar();
+    for key in 0..3 {
+        let _ = bar.raise_notification(TransientNotification::new(
+            1,
+            key,
+            NotifySeverity::Info,
+            "n",
+            "",
+        ));
+    }
+    let layout = bar
+        .notifications_layout(Scale::ONE)
+        .expect("popover laid out");
+    assert_eq!(layout.cards.len(), 3);
+    // Opens outward above a bottom bar, and clamps within the screen.
+    assert!(layout.panel.bottom() <= bar.layout(Scale::ONE).bar.top());
+    assert!(layout.panel.left() >= 0 && layout.panel.right() <= 1000);
+    // Cards are placed top-to-bottom in display order.
+    assert!(layout.cards[0].card.top() < layout.cards[1].card.top());
+    assert_eq!(layout.cards[0].index, 0);
+}
+
+#[test]
+fn popover_caps_the_shown_cards() {
+    let mut bar = bottom_bar();
+    for key in 0..8 {
+        let _ = bar.raise_notification(TransientNotification::new(
+            1,
+            key,
+            NotifySeverity::Info,
+            "n",
+            "",
+        ));
+    }
+    let layout = bar
+        .notifications_layout(Scale::ONE)
+        .expect("popover laid out");
+    assert_eq!(layout.cards.len(), 4, "at most NOTIF_MAX_CARDS are shown");
+}
+
+#[test]
+fn popover_fails_closed_on_a_degenerate_screen() {
+    // A bar that fills the whole screen leaves no room above it for a card.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(200, 40), &Theme::dark());
+    let _ = bar.raise_notification(TransientNotification::new(
+        1,
+        1,
+        NotifySeverity::Info,
+        "n",
+        "",
+    ));
+    let layout = bar
+        .notifications_layout(Scale::ONE)
+        .expect("still lays out");
+    assert!(layout.cards.is_empty(), "no card fits, so none is placed");
+    // Rendering a card-less popover still fails closed (no panic).
+    let _ = TaskbarRenderer::new().render_notifications(&bar, Scale::ONE);
+}
+
+#[test]
+fn card_at_maps_a_point_to_its_notification() {
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        4,
+        9,
+        NotifySeverity::Warning,
+        "hi",
+        "",
+    ));
+    let layout = bar.notifications_layout(Scale::ONE).expect("popover");
+    let card = layout.cards[0].card;
+    assert_eq!(layout.card_at(centre_of(card)), Some(0));
+    assert!(layout.contains(centre_of(card)));
+    assert_eq!(layout.card_at(Point::new(-1, -1)), None);
+    assert!(!layout.contains(Point::new(-1, -1)));
+}
+
+#[test]
+fn pressing_a_card_dismisses_it() {
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        4,
+        9,
+        NotifySeverity::Warning,
+        "hi",
+        "there",
+    ));
+    let mut input = TaskbarInput::new();
+    let card = centre_of(bar.notifications_layout(Scale::ONE).expect("popover").cards[0].card);
+    assert_eq!(
+        press_at(&mut input, &mut bar, card.x, card.y),
+        TaskbarResponse::DismissNotification {
+            producer: 4,
+            key: 9,
+        }
+    );
+}
+
+#[test]
+fn pressing_popover_chrome_is_claimed_not_routed_to_the_bar() {
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        4,
+        9,
+        NotifySeverity::Warning,
+        "hi",
+        "there",
+    ));
+    let layout = bar.notifications_layout(Scale::ONE).expect("popover");
+    // The header band at the panel's top edge is chrome, above the first card.
+    let chrome = Point::new(layout.panel.left() + 2, layout.panel.top() + 1);
+    assert!(layout.card_at(chrome).is_none());
+    assert!(layout.contains(chrome));
+    let mut input = TaskbarInput::new();
+    assert_eq!(
+        press_at(&mut input, &mut bar, chrome.x, chrome.y),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn render_notifications_paints_a_card_in_every_theme() {
+    for theme in [
+        Theme::dark(),
+        Theme::light(),
+        dark_with_contrast(Contrast::High),
+        dark_reduced_motion(),
+    ] {
+        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+        let _ = bar.raise_notification(TransientNotification::new(
+            2,
+            5,
+            NotifySeverity::Critical,
+            "Disk failing",
+            "Backup now",
+        ));
+        let layout = bar.notifications_layout(Scale::ONE).expect("popover");
+        let surface = TaskbarRenderer::new()
+            .render_notifications(&bar, Scale::ONE)
+            .expect("popover renders");
+        assert_eq!(surface.width(), layout.panel.width);
+        assert_eq!(surface.height(), layout.panel.height);
+        // The card region is not a flat fill: the shared card drew its plate,
+        // rim, and text there (true across dark/light/high-contrast/reduced).
+        assert!(
+            region_is_varied(&surface, layout.panel, layout.cards[0].card),
+            "the notification card painted content ({})",
+            theme.name(),
+        );
+    }
 }

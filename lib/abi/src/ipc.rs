@@ -26,8 +26,9 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the seat
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
 /// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
-/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), the sandboxed
-/// font service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
+/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]) and
+/// notification service ([`crate::notify_ipc::NOTIFY_ENDPOINT`]), the
+/// sandboxed font service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
 /// manager's control surface
 /// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the per-NIC
 /// driver device channels
@@ -53,6 +54,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::seat::SEATMGR_ENDPOINT
         || id == crate::display_ipc::DISPLAY_ENDPOINT
         || id == crate::window_ipc::WINDOW_ENDPOINT
+        || id == crate::notify_ipc::NOTIFY_ENDPOINT
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
         || id == crate::font_ipc::FONT_ENDPOINT
@@ -65,6 +67,30 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
     }
     let elevate_base = crate::elevate::ELEVATE_ENDPOINT_BASE;
     id >= elevate_base && id <= elevate_base + crate::process::CONSOLE_INDEX_MAX as u64
+}
+
+/// Whether `id` is a **seat-scoped** reserved endpoint — one whose bind the
+/// kernel authorises by the caller's kernel-attested **live seat lease** as
+/// an alternative to `CAP_IPC_BIND_PRIVILEGED`.
+///
+/// These are the rendezvous the desktop session serves on behalf of the
+/// seat it owns: the window channel ([`crate::window_ipc::WINDOW_ENDPOINT`])
+/// and the notification channel ([`crate::notify_ipc::NOTIFY_ENDPOINT`]). A
+/// session is an ordinary user process whose account ceiling never carries
+/// the service-class privileged-bind capability, so without this alternative
+/// it could not serve the seat's windows or notifications at all; scoping the
+/// exception to the lease keeps the session minimally privileged and fails
+/// closed for everyone else (a squatter without the lease is refused, and
+/// losing the seat ends the session, whose exit reclaims the endpoints).
+///
+/// Every seat-scoped endpoint is by definition also
+/// [reserved](is_reserved_endpoint): the seat lease substitutes only for the
+/// reserved-id half of the bind gate, never for the restricted-sender gate.
+/// This is the single shared definition of the seat-scoped set, so the
+/// kernel's `call_create` authority check cannot drift from it.
+#[must_use]
+pub const fn is_seat_scoped_endpoint(id: u64) -> bool {
+    id == crate::window_ipc::WINDOW_ENDPOINT || id == crate::notify_ipc::NOTIFY_ENDPOINT
 }
 
 /// Flags accepted by the server-side `call_recv` syscall.
@@ -412,8 +438,8 @@ impl core::fmt::Debug for PortName {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_reserved_endpoint, IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC,
-        IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
+        is_reserved_endpoint, is_seat_scoped_endpoint, IpcMessageHeader, PortName,
+        IPC_MESSAGE_HEADER_MAGIC, IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
 
@@ -430,6 +456,7 @@ mod tests {
         assert!(is_reserved_endpoint(crate::seat::SEATMGR_ENDPOINT));
         assert!(is_reserved_endpoint(crate::display_ipc::DISPLAY_ENDPOINT));
         assert!(is_reserved_endpoint(crate::window_ipc::WINDOW_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::notify_ipc::NOTIFY_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net_ipc::NETSTACK_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
         assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
@@ -446,6 +473,27 @@ mod tests {
         assert!(!is_reserved_endpoint(0));
         assert!(!is_reserved_endpoint(1));
         assert!(!is_reserved_endpoint(u64::MAX));
+    }
+
+    #[test]
+    fn seat_scoped_endpoints_are_the_desktop_pair_and_all_reserved() {
+        // Exactly the window and notification rendezvous are seat-scoped,
+        // and both are reserved (the lease substitutes only for the
+        // reserved-id half of the bind gate).
+        for id in [
+            crate::window_ipc::WINDOW_ENDPOINT,
+            crate::notify_ipc::NOTIFY_ENDPOINT,
+        ] {
+            assert!(is_seat_scoped_endpoint(id));
+            assert!(is_reserved_endpoint(id));
+        }
+        // A reserved id that is *not* seat-scoped still requires the
+        // privileged-bind capability; the lease never opens it.
+        assert!(is_reserved_endpoint(crate::sysinfo::SYSINFO_ENDPOINT));
+        assert!(!is_seat_scoped_endpoint(crate::sysinfo::SYSINFO_ENDPOINT));
+        // Ordinary ids are neither.
+        assert!(!is_seat_scoped_endpoint(0));
+        assert!(!is_seat_scoped_endpoint(u64::MAX));
     }
 
     fn sample() -> IpcMessageHeader {

@@ -37,11 +37,15 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::Errno;
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
 use tairix_proglib::Catalog;
-use tairix_taskbar::{ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse};
+use tairix_taskbar::{
+    ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    TransientNotification,
+};
 use tairix_wm::{
     Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
     WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
@@ -458,6 +462,61 @@ impl DesktopShell {
         self.present(compositor);
     }
 
+    /// Relay a decoded notification request from an attested `producer` to the
+    /// taskbar model, re-presenting when it changed the shown set.
+    ///
+    /// A [`Raise`](NotifyRequest::Raise) adds or updates the producer's
+    /// notification in place; a [`Clear`](NotifyRequest::Clear) removes it.
+    /// `producer` is the kernel-attested identity of the calling service — the
+    /// embedder resolves it from the endpoint, never from the wire — so one
+    /// producer can neither replace nor clear another's notification, and the
+    /// title/body were validated by the notification-IPC decoder before this
+    /// call. This holds no authority: the model only renders the message.
+    pub fn apply_notify(
+        &mut self,
+        compositor: &mut Compositor,
+        producer: u64,
+        request: NotifyRequest,
+    ) {
+        let changed = match request {
+            NotifyRequest::Raise {
+                key,
+                severity,
+                title,
+                body,
+            } => self
+                .session
+                .taskbar_mut()
+                .raise_notification(TransientNotification::new(
+                    producer,
+                    key,
+                    severity,
+                    title.as_str(),
+                    body.as_str(),
+                )),
+            NotifyRequest::Clear { key } => {
+                self.session.taskbar_mut().clear_notification(producer, key)
+            }
+        };
+        if changed {
+            self.present(compositor);
+        }
+    }
+
+    /// Clear every notification a `producer` raised, re-presenting when any
+    /// were removed — how the embedder drops a launched application's
+    /// notifications when that child exits and can no longer clear them
+    /// itself (the notification counterpart of a window client teardown).
+    pub fn clear_producer_notifications(&mut self, compositor: &mut Compositor, producer: u64) {
+        if self
+            .session
+            .taskbar_mut()
+            .clear_producer_notifications(producer)
+        {
+            self.present(compositor);
+        }
+    }
+
     /// Show, raise, and focus the running task shown as `window`, restoring
     /// it if it was minimised — how the embedder brings an already-open
     /// window forward instead of launching a second copy (the Files button's
@@ -514,9 +573,19 @@ impl DesktopShell {
                 ShellOutcome::WindowManager(response)
             }
             SessionInputResponse::Taskbar(response) => {
-                if let TaskbarResponse::TaskActivated { id, outcome } = response {
-                    self.tasks
-                        .activate(compositor, &mut self.router, id, outcome);
+                match response {
+                    TaskbarResponse::TaskActivated { id, outcome } => {
+                        self.tasks
+                            .activate(compositor, &mut self.router, id, outcome);
+                    }
+                    // A user dismiss clears the notification from the model
+                    // the session owns; the repaint latch it sets drives the
+                    // one present below, closing the popover when the last one
+                    // goes.
+                    TaskbarResponse::DismissNotification { producer, key } => {
+                        self.session.taskbar_mut().clear_notification(producer, key);
+                    }
+                    _ => {}
                 }
                 ShellOutcome::Taskbar(response)
             }

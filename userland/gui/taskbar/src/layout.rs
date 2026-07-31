@@ -17,9 +17,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_controls::{ControlRole, Panel};
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_theme::Theme;
 
-use crate::edge::Orientation;
+use crate::edge::{Edge, Orientation};
+use crate::library::{panel_origin, probe_chrome};
 use crate::taskbar::TaskbarConfig;
 
 /// The element of the taskbar under a pointer, returned by
@@ -232,6 +235,188 @@ impl BarLayout {
             .take_while(|slot| !slot.is_empty() && !before_midpoint(slot, point, horizontal))
             .count();
         Some(index)
+    }
+}
+
+/// Width of the notification popover panel, in *logical* pixels at the
+/// reference density.
+const NOTIF_POPUP_WIDTH: u32 = 300;
+
+/// Height of one notification card, in *logical* pixels at the reference
+/// density.
+const NOTIF_CARD_HEIGHT: u32 = 64;
+
+/// The most notification cards shown at once. Extra notifications are simply
+/// not drawn — the model orders by severity then recency, so the ones that
+/// matter most are the ones shown (this is a *display* cap on a transient
+/// surface, not a stored-capacity ceiling, so §24 does not apply).
+const NOTIF_MAX_CARDS: usize = 4;
+
+/// The notification popover's window title.
+const NOTIF_TITLE: &str = "Notifications";
+
+/// The notification popover's chrome: the shared [`Panel`], anchored back at
+/// the notification region. Built with the same role as the library popup so
+/// the two popovers share one chrome recipe (§2.2).
+pub(crate) fn notif_panel(anchor: Point) -> Panel {
+    Panel::new(NOTIF_TITLE)
+        .with_role(ControlRole::Navigation)
+        .with_anchor(anchor)
+}
+
+/// The placed geometry of one notification card in the popover.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NotificationCard {
+    /// The card's index into the notification area's display order
+    /// ([`NotificationArea::notification`](crate::NotificationArea::notification)).
+    pub index: usize,
+    /// The card's screen rectangle.
+    pub card: Rect,
+}
+
+/// The computed geometry of the notification popover: the whole panel, the
+/// radius the window manager rounds it with, the anchor its notch points back
+/// at, and one placed card per shown notification (top to bottom, highest
+/// severity first).
+///
+/// Like [`BarLayout`], all arithmetic saturates: a degenerate screen or a bar
+/// pressed against the opposite edge yields a small panel with no room for
+/// cards rather than wrapping, and the window manager rounds and places the
+/// panel exactly as it does the bar and the library popup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationsLayout {
+    /// The whole popover panel.
+    pub panel: Rect,
+    /// The corner radius the window manager applies to the popover — the same
+    /// radius the panel chrome is drawn with, so the two never disagree.
+    pub corner_radius: u32,
+    /// The screen point the panel's anchor notch points back at (the centre
+    /// of the notification/clock region).
+    pub anchor: Point,
+    /// One placed card per shown notification, in display order.
+    pub cards: Vec<NotificationCard>,
+}
+
+impl NotificationsLayout {
+    /// Compute the popover for `count` raised notifications, opened outward
+    /// from the notification/clock region of `bar` (pinned to `edge`) at the
+    /// desktop `scale` under `theme`.
+    ///
+    /// The panel opens on the popover's side of the bar (above a bottom bar,
+    /// below a top bar, to the inner side of a side bar), aligned to the
+    /// notification/clock region and clamped to the screen. It sizes to the
+    /// cards it shows (capped by [`NOTIF_MAX_CARDS`] and the space between the
+    /// bar and the opposite screen edge), failing closed to no cards when
+    /// there is no room.
+    #[must_use]
+    pub(crate) fn compute(
+        edge: Edge,
+        bar: &BarLayout,
+        screen_width: u32,
+        screen_height: u32,
+        scale: Scale,
+        theme: &Theme,
+        count: usize,
+    ) -> Self {
+        let metrics = theme.metrics();
+        let corner_radius = scale.scale_length(metrics.window_corner_radius);
+        let pad = scale.scale_length(metrics.control_gap);
+        let card_height = scale.scale_length(NOTIF_CARD_HEIGHT).max(1);
+        let width = scale
+            .scale_length(NOTIF_POPUP_WIDTH)
+            .min(screen_width)
+            .max(1);
+
+        let chrome = probe_chrome(&notif_panel(Point::ORIGIN), width, scale, theme);
+
+        // Space available for the panel on the popover's side of the bar.
+        let available = match edge {
+            Edge::Bottom => u32::try_from(bar.bar.top()).unwrap_or(0),
+            Edge::Top => screen_height.saturating_sub(u32::try_from(bar.bar.bottom()).unwrap_or(0)),
+            Edge::Left | Edge::Right => screen_height,
+        };
+
+        // How many cards fit: the model count, capped by the display maximum
+        // and by the vertical room (chrome overhead + a pad above the first
+        // card, then one card-plus-pad each).
+        let per_card = card_height.saturating_add(pad).max(1);
+        let fixed = chrome.overhead.saturating_add(pad);
+        let room = available.saturating_sub(fixed) / per_card;
+        let shown = count.min(NOTIF_MAX_CARDS).min(room as usize);
+
+        let content_height = if shown == 0 {
+            0
+        } else {
+            to_u32(shown)
+                .saturating_mul(card_height)
+                .saturating_add(to_u32(shown + 1).saturating_mul(pad))
+        };
+        let panel_height = chrome.overhead.saturating_add(content_height);
+
+        let anchor_rect = bar.notification_area.union(&bar.clock);
+        let origin = panel_origin(
+            edge,
+            bar.bar,
+            anchor_rect,
+            width,
+            panel_height,
+            screen_width,
+            screen_height,
+        );
+        let panel = Rect::new(origin.x, origin.y, width, panel_height);
+        let anchor = Point::new(
+            anchor_rect
+                .left()
+                .saturating_add(to_i32(anchor_rect.width / 2)),
+            anchor_rect
+                .top()
+                .saturating_add(to_i32(anchor_rect.height / 2)),
+        );
+
+        let inner_x = panel
+            .left()
+            .saturating_add(chrome.content_left)
+            .saturating_add(to_i32(pad));
+        let inner_width = chrome
+            .content_width
+            .saturating_sub(pad.saturating_mul(2))
+            .max(1);
+        let mut cards = Vec::with_capacity(shown);
+        let mut y = panel
+            .top()
+            .saturating_add(chrome.content_top)
+            .saturating_add(to_i32(pad));
+        for index in 0..shown {
+            cards.push(NotificationCard {
+                index,
+                card: Rect::new(inner_x, y, inner_width, card_height),
+            });
+            y = y
+                .saturating_add(to_i32(card_height))
+                .saturating_add(to_i32(pad));
+        }
+
+        Self {
+            panel,
+            corner_radius,
+            anchor,
+            cards,
+        }
+    }
+
+    /// Whether `point` lies within the popover panel.
+    #[must_use]
+    pub fn contains(&self, point: Point) -> bool {
+        self.panel.contains(point)
+    }
+
+    /// The display index of the notification card `point` lies on, if any.
+    #[must_use]
+    pub fn card_at(&self, point: Point) -> Option<usize> {
+        self.cards
+            .iter()
+            .find(|placed| placed.card.contains(point))
+            .map(|placed| placed.index)
     }
 }
 

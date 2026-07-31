@@ -5,7 +5,9 @@
 //! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
 //! and drives the model — opening the program-library popup, reporting the
 //! Files button, applying the click-to-activate / minimise rule to a task,
-//! or reporting a press on a notification icon or the clock.
+//! or reporting a press on the clock. A press on a status signal is claimed
+//! but inert (a live readout, not an action target this stage), and a press
+//! on an open notification popover dismisses the card it lands on.
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
 //! consumes the **same** shared [`tairix_input`] event vocabulary, so the
@@ -39,7 +41,6 @@ use tairix_proglib::EntryId;
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
-use crate::notifications::IconId;
 use crate::pins::PinView;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
@@ -74,10 +75,14 @@ pub enum TaskbarResponse {
         /// What the click did, so the caller can drive the window manager.
         outcome: ActivateOutcome,
     },
-    /// A notification icon was pressed.
-    NotificationActivated {
-        /// The icon that was pressed.
-        id: IconId,
+    /// A raised notification's card was clicked to dismiss it. The embedder
+    /// clears the notification identified by `(producer, key)` from the
+    /// model — and from the session, which owns the live feed.
+    DismissNotification {
+        /// The dismissed notification's attested producer.
+        producer: u64,
+        /// The producer-chosen key naming the dismissed notification.
+        key: u32,
     },
     /// The clock was pressed.
     ClockPressed,
@@ -152,6 +157,21 @@ impl TaskbarInput {
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale);
         }
+        // The notification popover is non-modal: unlike the menu and library
+        // popup it does not swallow the whole stream. A primary press that
+        // lands on it dismisses the card it hits (or is claimed harmlessly on
+        // the panel's chrome), so it neither acts on the bar beneath it nor
+        // reaches the windows below; every other event routes on as usual.
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            }
+        ) {
+            if let Some(response) = self.press_notification(taskbar, scale) {
+                return response;
+            }
+        }
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
@@ -188,19 +208,36 @@ impl TaskbarInput {
                 let outcome = taskbar.tasks_mut().activate(id);
                 TaskbarResponse::TaskActivated { id, outcome }
             }
-            Hit::Notification(index) => {
-                let Some(id) = taskbar
-                    .notifications()
-                    .icons()
-                    .get(index)
-                    .map(|icon| icon.id)
-                else {
-                    return TaskbarResponse::Ignored;
-                };
-                TaskbarResponse::NotificationActivated { id }
-            }
+            // A status signal is a live readout, not an action target this
+            // stage: a press is claimed but does nothing (its interactive
+            // treatment arrives with the live tray-signal feed).
+            Hit::Notification(_) => TaskbarResponse::Ignored,
             Hit::Clock => TaskbarResponse::ClockPressed,
         }
+    }
+
+    /// Route a primary press against the open notification popover, if the
+    /// press lands within it. Returns `Some` when the popover claims the
+    /// press — a [`DismissNotification`](TaskbarResponse::DismissNotification)
+    /// for the card it hit, or [`Ignored`](TaskbarResponse::Ignored) for a
+    /// press on the panel chrome between cards — and `None` when the press
+    /// falls outside the popover and should route to the bar. The popover is
+    /// presented above the bar and never overlaps it, so this position test
+    /// is unambiguous.
+    fn press_notification(&self, taskbar: &Taskbar, scale: Scale) -> Option<TaskbarResponse> {
+        let layout = taskbar.notifications_layout(scale)?;
+        if !layout.contains(self.pointer) {
+            return None;
+        }
+        if let Some(index) = layout.card_at(self.pointer) {
+            if let Some(note) = taskbar.notifications().notification(index) {
+                return Some(TaskbarResponse::DismissNotification {
+                    producer: note.producer,
+                    key: note.key,
+                });
+            }
+        }
+        Some(TaskbarResponse::Ignored)
     }
 
     /// Handle a secondary-button press at the current pointer position with

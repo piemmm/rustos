@@ -347,7 +347,7 @@ impl LibraryPopup {
         let width = scale.scale_length(POPUP_WIDTH).min(screen_width).max(1);
         let indent = scale.scale_length(ENTRY_INDENT);
 
-        let chrome = probe_chrome(width, scale, theme);
+        let chrome = probe_chrome(&chrome_panel(Point::ORIGIN), width, scale, theme);
 
         // Space available for the panel on the popup's side of the bar.
         let available = match edge {
@@ -933,29 +933,31 @@ pub(crate) fn chrome_panel(anchor: Point) -> Panel {
 
 /// The panel chrome's measured overhead for one popup width: what the
 /// header band and frame consume, and where the content region sits.
-struct ChromeProbe {
+///
+/// Shared by the program-library popup and the notification popover so both
+/// measure the same shared [`Panel`] chrome rather than each re-deriving it
+/// (§2.2).
+pub(crate) struct ChromeProbe {
     /// Total vertical pixels the chrome consumes (header plus frame).
-    overhead: u32,
+    pub(crate) overhead: u32,
     /// The content region's offset from the panel's top edge.
-    content_top: i32,
+    pub(crate) content_top: i32,
     /// The content region's offset from the panel's left edge.
-    content_left: i32,
+    pub(crate) content_left: i32,
     /// The content region's width.
-    content_width: u32,
+    pub(crate) content_width: u32,
 }
 
-/// Measure the panel chrome's overhead for a popup `width` px wide.
+/// Measure `panel`'s chrome overhead for a popup `width` px wide.
 ///
-/// The overhead is measured by probing the shared Panel geometry rather
-/// than re-deriving its arithmetic, so a metrics change can never drift
-/// this layout from what the panel actually draws.
-fn probe_chrome(width: u32, scale: Scale, theme: &Theme) -> ChromeProbe {
+/// The overhead is measured by probing the shared [`Panel`] geometry rather
+/// than re-deriving its arithmetic, so a metrics change can never drift a
+/// popover layout from what the panel actually draws. Taking the panel as a
+/// parameter lets the program-library popup and the notification popover
+/// share this one measurement (§2.2).
+pub(crate) fn probe_chrome(panel: &Panel, width: u32, scale: Scale, theme: &Theme) -> ChromeProbe {
     let probe_height = 4096;
-    let probe = chrome_panel(Point::ORIGIN).content_rect(
-        Rect::new(0, 0, width, probe_height),
-        scale,
-        theme,
-    );
+    let probe = panel.content_rect(Rect::new(0, 0, width, probe_height), scale, theme);
     match probe {
         Some(content) => ChromeProbe {
             overhead: probe_height.saturating_sub(content.height),
@@ -1013,12 +1015,15 @@ pub(crate) fn list_row(row: &LibraryRow, current: bool, hovered: bool, row_focus
     listed
 }
 
-/// The panel origin for a popup of `width` × `height` opened from
-/// `library` on the bar `bar` pinned to `edge`, clamped to the screen.
-fn panel_origin(
+/// The panel origin for a popover of `width` × `height` opened outward from
+/// `bar` (pinned to `edge`) and aligned to the `anchor` rectangle it invokes
+/// from, clamped to the screen. Shared by the program-library popup (anchored
+/// at the Library button) and the notification popover (anchored at the
+/// notification/clock region) so the opening geometry is defined once (§2.2).
+pub(crate) fn panel_origin(
     edge: Edge,
     bar: Rect,
-    library: Rect,
+    anchor: Rect,
     width: u32,
     height: u32,
     screen_width: u32,
@@ -1030,14 +1035,14 @@ fn panel_origin(
     };
     match edge {
         Edge::Bottom => Point::new(
-            clamp(library.left(), width, screen_width),
+            clamp(anchor.left(), width, screen_width),
             bar.top().saturating_sub(to_i32(height)).max(0),
         ),
-        Edge::Top => Point::new(clamp(library.left(), width, screen_width), bar.bottom()),
-        Edge::Left => Point::new(bar.right(), clamp(library.top(), height, screen_height)),
+        Edge::Top => Point::new(clamp(anchor.left(), width, screen_width), bar.bottom()),
+        Edge::Left => Point::new(bar.right(), clamp(anchor.top(), height, screen_height)),
         Edge::Right => Point::new(
             bar.left().saturating_sub(to_i32(width)).max(0),
-            clamp(library.top(), height, screen_height),
+            clamp(anchor.top(), height, screen_height),
         ),
     }
 }

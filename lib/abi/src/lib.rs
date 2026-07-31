@@ -40,6 +40,7 @@ pub mod manifest;
 pub mod memory;
 pub mod net;
 pub mod net_ipc;
+pub mod notify_ipc;
 pub mod origin;
 pub mod process;
 pub mod random;

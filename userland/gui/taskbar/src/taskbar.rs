@@ -25,10 +25,10 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::clock::Clock;
 use crate::edge::Edge;
-use crate::layout::{BarLayout, Hit};
+use crate::layout::{BarLayout, Hit, NotificationsLayout};
 use crate::library::{LibraryLayout, LibraryPopup};
 use crate::menu::{BarMenu, MenuLayout, MenuSubject};
-use crate::notifications::NotificationArea;
+use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::pins::{PinStrip, PinView};
 use crate::tasks::TaskList;
 
@@ -244,9 +244,40 @@ impl Taskbar {
         &self.notifications
     }
 
-    /// The notification area, mutably.
-    pub fn notifications_mut(&mut self) -> &mut NotificationArea {
-        &mut self.notifications
+    /// Replace the notification area's status signals — how the session hands
+    /// the bar its tray signals (network, volume, battery). Latches a repaint.
+    pub fn set_status_signals(&mut self, signals: Vec<StatusSignal>) {
+        self.notifications.set_signals(signals);
+        self.repaint = true;
+    }
+
+    /// Raise (or update in place) a transient notification, latching a repaint
+    /// when it changed the shown set — how the session relays a producer's
+    /// raise over the notification IPC. Returns whether anything changed.
+    pub fn raise_notification(&mut self, note: TransientNotification) -> bool {
+        let changed = self.notifications.raise(note);
+        self.repaint |= changed;
+        changed
+    }
+
+    /// Clear the transient notification identified by `(producer, key)`,
+    /// latching a repaint when one was removed — how the session relays a
+    /// producer's clear and resolves a user dismiss. Returns whether one was
+    /// removed.
+    pub fn clear_notification(&mut self, producer: u64, key: u32) -> bool {
+        let changed = self.notifications.clear(producer, key);
+        self.repaint |= changed;
+        changed
+    }
+
+    /// Clear every transient notification raised by `producer`, latching a
+    /// repaint when any were removed — how the session drops a dead
+    /// producer's notifications when it exits. Returns whether any were
+    /// removed.
+    pub fn clear_producer_notifications(&mut self, producer: u64) -> bool {
+        let changed = self.notifications.clear_producer(producer);
+        self.repaint |= changed;
+        changed
     }
 
     /// The clock.
@@ -294,7 +325,7 @@ impl Taskbar {
             scale,
             self.pins.len(),
             self.tasks.len(),
-            self.notifications.len(),
+            self.notifications.signal_count(),
         )
     }
 
@@ -322,6 +353,30 @@ impl Taskbar {
             scale,
             &self.theme,
         )
+    }
+
+    /// Compute the notification popover's geometry for the current
+    /// notifications, or `None` when none are raised (nothing to present).
+    ///
+    /// The popover opens outward from the notification/clock region on the
+    /// bar's edge; the window manager places and rounds it exactly as it does
+    /// the bar and the library popup. Meaningful only while
+    /// [`NotificationArea::has_notifications`] holds, which this checks.
+    #[must_use]
+    pub fn notifications_layout(&self, scale: Scale) -> Option<NotificationsLayout> {
+        if !self.notifications.has_notifications() {
+            return None;
+        }
+        let bar = self.layout(scale);
+        Some(NotificationsLayout::compute(
+            self.config.edge,
+            &bar,
+            self.config.screen_width,
+            self.config.screen_height,
+            scale,
+            &self.theme,
+            self.notifications.notification_count(),
+        ))
     }
 
     /// Compute the context menu's geometry, or `None` while it is closed.

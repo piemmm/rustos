@@ -46,6 +46,11 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # folder taxonomy — and reports launches by `EntryId`; the taskbar itself
 # never reads the stores.
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
+# The stable user/kernel ABI (`lib/abi`): the notification-channel severity
+# (`notify_ipc::NotifySeverity`) is the one vocabulary the producer wire, the
+# session relay, and this model share, so a transient notification's severity
+# is never re-spelled per layer (§2.2).
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 # The bar renderer's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).

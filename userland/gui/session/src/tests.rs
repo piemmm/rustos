@@ -7,6 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::{
     AppInfoHeader, Errno, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
@@ -2654,4 +2655,102 @@ fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
         h.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
     }
     h.to_le_bytes().to_vec()
+}
+
+// ---- notification relay ---------------------------------------------
+
+/// The full producer→desktop notification path on the host: a producer's
+/// raise lands keyed to its attested identity; another producer cannot clear
+/// it; the click-to-dismiss gesture routes through the session router to the
+/// bar and clears the model; and a producer clearing its own is idempotent.
+#[test]
+fn notifications_relay_raise_dismiss_and_isolate_producers() {
+    const W: u32 = 1024;
+    const H: u32 = 768;
+    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(W, H));
+    let mode = DisplayMode {
+        width_px: W,
+        height_px: H,
+        stride_bytes: W * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let mut comp = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor");
+
+    // Producer 42 raises a notification: it lands keyed to producer 42.
+    shell.apply_notify(
+        &mut comp,
+        42,
+        NotifyRequest::Raise {
+            key: 1,
+            severity: NotifySeverity::Warning,
+            title: NotifyTitle::new("Battery low").expect("title"),
+            body: NotifyBody::new("12% remaining").expect("body"),
+        },
+    );
+    assert_eq!(
+        shell
+            .session()
+            .taskbar()
+            .notifications()
+            .notification_count(),
+        1
+    );
+    let note = shell
+        .session()
+        .taskbar()
+        .notifications()
+        .notification(0)
+        .expect("present");
+    assert_eq!(note.producer, 42);
+    assert_eq!(note.title.as_str(), "Battery low");
+
+    // A different producer cannot clear producer 42's notification.
+    shell.apply_notify(&mut comp, 99, NotifyRequest::Clear { key: 1 });
+    assert_eq!(
+        shell
+            .session()
+            .taskbar()
+            .notifications()
+            .notification_count(),
+        1
+    );
+
+    // Clicking the card routes through the session router to the bar and
+    // clears the model — proving the router forwards a press on the popover
+    // (which sits above the bar, not on it) to the taskbar.
+    let card = {
+        let layout = shell
+            .session()
+            .taskbar()
+            .notifications_layout(Scale::ONE)
+            .expect("popover");
+        let rect = layout.cards[0].card;
+        #[allow(clippy::cast_possible_wrap)]
+        Point::new(
+            rect.left() + (rect.width / 2) as i32,
+            rect.top() + (rect.height / 2) as i32,
+        )
+    };
+    let _ = shell.handle(moved(card.x, card.y), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::DismissNotification {
+            producer: 42,
+            key: 1,
+        })
+    );
+    assert!(!shell
+        .session()
+        .taskbar()
+        .notifications()
+        .has_notifications());
+
+    // Producer 42 clearing its own now-gone notification is a harmless no-op.
+    shell.apply_notify(&mut comp, 42, NotifyRequest::Clear { key: 1 });
+    assert!(!shell
+        .session()
+        .taskbar()
+        .notifications()
+        .has_notifications());
 }
