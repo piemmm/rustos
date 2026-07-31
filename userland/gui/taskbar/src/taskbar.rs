@@ -17,10 +17,13 @@
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
-use tairix_controls::{ControlRole, IconButton, PointerState, TaskbarItem, TaskbarPresentation};
+use tairix_controls::{
+    ControlRole, IconButton, PointerState, TaskbarItem, TaskbarPresentation, TraySignalAction,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
+use tairix_input::InputEvent;
 use tairix_proglib::EntryId;
 use tairix_theme::{TextRole, Theme};
 
@@ -323,15 +326,24 @@ impl Taskbar {
         self.repaint |= self.tray.set_unresponsive(count);
     }
 
-    /// Release the capsule's pinned readout, latching a repaint when it was
-    /// pinned. The embedder calls this when a press lands away from the bar
-    /// entirely — releasing the pin is presentation state, so the press
-    /// still performs its own one action wherever it landed.
-    pub fn release_tray_pin(&mut self) {
-        if self.tray.is_pinned() {
-            self.tray.set_pinned(false);
-            self.repaint = true;
-        }
+    /// Feed a primary press or release `event` to the Switchboard readout's
+    /// "Open Switchboard" safe action, latching a repaint when the
+    /// capsule's visual state changed. Returns the action the readout's
+    /// control reports, if the click completed on it.
+    pub(crate) fn tray_pointer(
+        &mut self,
+        event: &InputEvent,
+        scale: Scale,
+    ) -> Option<TraySignalAction> {
+        let capsule = self.layout(scale).switchboard;
+        let readout = self
+            .tray_readout_layout(scale)
+            .map_or(Rect::EMPTY, |readout| readout.panel);
+        let (changed, action) = self
+            .tray
+            .on_pointer(event, capsule, readout, scale, &self.theme);
+        self.repaint |= changed;
+        action
     }
 
     /// Adopt a new theme. The rest of the taskbar's state is unchanged, so a

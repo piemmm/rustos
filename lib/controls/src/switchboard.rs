@@ -4,7 +4,7 @@
 //! background-job, recovery, and system-overview state. It is assembled here
 //! **purely from the shared Reactive Alloy controls** — the window-manager
 //! [`WindowFrame`]/[`TitleBar`](crate::TitleBar)/[`ResizeGrabber`] furniture, a
-//! [`Tabs`] strip,
+//! header resource band of [`Meter`]s, a [`Tabs`] strip,
 //! the collection controls ([`ListRow`], [`Card`], [`Panel`]), action
 //! [`Button`]s, and one shared [`ScrollBar`] — with no application-painted
 //! chrome and no second copy of any control's behaviour. It is the proof that
@@ -17,8 +17,18 @@
 //!   the four window commands; the only application region is the client
 //!   viewport, so the client can never receive furniture input (the frame's
 //!   hit map enforces this).
+//! - Immediately below the title bar sits an always-visible header resource
+//!   band: one [`Meter`] per [`ResourceSummary`] in the model, spaced evenly
+//!   across the band's width. It is a read-only instrument, not a control —
+//!   it takes no pointer or keyboard input and never produces a
+//!   [`SwitchboardAction`] — so a press over it can never be mistaken for a
+//!   press on the tab strip, the section content, or the scrollbar below it.
+//!   An empty resource list collapses the band to zero height rather than
+//!   drawing an empty strip.
 //! - A [`Tabs`] strip selects one of the four [`Section`]s (Tasks, Jobs,
-//!   Recovery, Overview).
+//!   Recovery, Overview). The host chooses which one the panel opens on —
+//!   Recovery when the user reached for a flagged capsule, Tasks otherwise —
+//!   with [`Switchboard::select_section`], never by feeding synthetic input.
 //! - Each section's content is a vertical list drawn from the shared
 //!   collection controls; when it exceeds the viewport the standard vertical
 //!   [`ScrollBar`] governs it (mouse wheel, thumb drag, end buttons, track
@@ -34,6 +44,18 @@
 //! It performs no privileged work: every interaction emits a typed
 //! [`SwitchboardAction`] the hosting service authorises and applies (a denied
 //! action renders distinctly and fails closed, never activating).
+//!
+//! # Refreshing live data
+//!
+//! The model is a sample of a system that keeps moving, so a host publishes a
+//! fresh one — around once a second — with
+//! [`Switchboard::set_model`](Switchboard::set_model) rather than building the
+//! composition again. The rows, cards, and meters are re-derived from the new
+//! model; the selected section, every section's scroll offset, and the
+//! keyboard focus are the user's and survive, so a scrolled or
+//! keyboard-navigated list is never snatched back to the top by the next
+//! sample. Row selection, hover, and a half-finished press name a row that may
+//! now be a different object, so they are dropped rather than re-asserted.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -46,7 +68,8 @@ use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::collection::{Card, CardAction, ListRow, Panel, PanelAction, RowAction};
-use crate::paint::to_i32;
+use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
+use crate::paint::{clamp_permille, to_i32};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{
@@ -176,8 +199,14 @@ pub struct RecoveryItem {
 
 /// One system resource reading (spec §17).
 ///
-/// Rendered as a resource [`Card`] with a semantic Pressure Rail
-/// and numeric content.
+/// One fact drives two renderings that must never disagree: the Overview
+/// section's resource [`Card`] (identity, numeric reading, and a semantic
+/// Pressure Rail) and the always-visible header band's [`Meter`] (the same
+/// identity and reading, the same rail tint, and — when the caller supplies
+/// one — a bounded history sparkline). [`ResourceSummary::new`] alone leaves
+/// the meter honestly quiet: an unmeasured value at no pressure, never a
+/// fabricated reading; a host that can measure the resource adds
+/// [`with_meter`](Self::with_meter).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceSummary {
     /// The resource's display name (e.g. "CPU", "Memory").
@@ -186,8 +215,68 @@ pub struct ResourceSummary {
     pub reading: String,
     /// Which resource this is, mapping to its semantic rail colour.
     pub kind: PressureKind,
-    /// The resource's load, drawn as the card's Heat Seam.
+    /// The resource's load, drawn as the Overview card's Heat Seam.
     pub activity: ActivityState,
+    meter: MeterValue,
+    meter_pressure: PressureState,
+    history: [u16; MAX_HISTORY_SAMPLES],
+    history_len: usize,
+}
+
+impl ResourceSummary {
+    /// A resource reading named `name`, showing `reading` for `kind`, with
+    /// the Overview card's Heat Seam driven by `activity`.
+    ///
+    /// The header band's meter starts honestly unmeasured, at no pressure,
+    /// with no history — a host with no wired query or a denied capability
+    /// for this resource stops here rather than fabricating a reading; add
+    /// a real measurement with [`with_meter`](Self::with_meter).
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        reading: impl Into<String>,
+        kind: PressureKind,
+        activity: ActivityState,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            reading: reading.into(),
+            kind,
+            activity,
+            meter: MeterValue::Unmeasured,
+            meter_pressure: PressureState::None,
+            history: [0; MAX_HISTORY_SAMPLES],
+            history_len: 0,
+        }
+    }
+
+    /// This resource with the header band meter's measured `value`,
+    /// `pressure` emphasis, and an oldest-to-newest sparkline `samples`.
+    ///
+    /// Each sample is a permille fraction, clamped fail closed; the series
+    /// is capped to the most recent [`MAX_HISTORY_SAMPLES`], dropping the
+    /// oldest first, and held inline in this struct — never on the heap — so
+    /// building the model never allocates on the meter's account.
+    #[must_use]
+    pub fn with_meter(
+        mut self,
+        value: MeterValue,
+        pressure: PressureState,
+        samples: impl IntoIterator<Item = u16>,
+    ) -> Self {
+        self.meter = value;
+        self.meter_pressure = pressure;
+        self.history_len = 0;
+        for sample in samples {
+            if self.history_len == MAX_HISTORY_SAMPLES {
+                self.history.copy_within(1.., 0);
+                self.history_len -= 1;
+            }
+            self.history[self.history_len] = clamp_permille(sample);
+            self.history_len += 1;
+        }
+        self
+    }
 }
 
 /// One system service row (spec §17).
@@ -221,6 +310,13 @@ pub struct SystemAction {
 }
 
 /// The complete typed model Switchboard renders (spec §17).
+///
+/// It is one sample of a moving system, not a lasting handle: the caller hands
+/// it to [`Switchboard::new`] to build the surface and hands each later sample
+/// to [`Switchboard::set_model`], which re-derives the controls while leaving
+/// the user's place in the surface alone. It carries no interaction state — no
+/// selected section, scroll position, or focus — because those belong to the
+/// live composition and would be stale here from the first user interaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwitchboardModel {
     /// The window title.
@@ -233,7 +329,8 @@ pub struct SwitchboardModel {
     pub jobs: Vec<JobSummary>,
     /// The hung/recoverable objects.
     pub recovery: Vec<RecoveryItem>,
-    /// The system resources.
+    /// The system resources. Drives both the always-visible header meter
+    /// band and the Overview section's resource cards from the one model.
     pub resources: Vec<ResourceSummary>,
     /// The system services.
     pub services: Vec<ServiceSummary>,
@@ -286,7 +383,7 @@ pub enum RecoveryControl {
 ///
 /// Switchboard never performs an operation itself: it reports the intent and
 /// the hosting service authorises, validates, and applies it, then feeds the
-/// updated model back (`AGENTS.md` §5.4).
+/// updated model back (a refusal fails closed rather than acting).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwitchboardAction {
     /// A window command (close/minimize/put-to-back/size toggle) was invoked.
@@ -356,6 +453,10 @@ pub enum SwitchboardAction {
 
 // --- Internal control state ------------------------------------------------
 
+/// The title of the Overview section's system-action panel, named once so the
+/// resting composition and every refresh of it cannot drift apart.
+const SYSTEM_PANEL_TITLE: &str = "System";
+
 /// The composed [`ControlState`] for an action whose availability is `allowed`.
 ///
 /// A permitted action is interactive; a refused one is
@@ -383,6 +484,15 @@ struct RecoveryEntry {
     row: ListRow,
     restart: Button,
     force: Button,
+}
+
+/// One resource rendered as an Overview [`Card`] and the header band's
+/// [`Meter`], both built once from the same [`ResourceSummary`] rather than
+/// re-derived per frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResourceEntry {
+    card: Card,
+    meter: Meter,
 }
 
 /// One service rendered as a [`ListRow`] plus its action [`Button`].
@@ -428,10 +538,17 @@ impl FocusRegion {
 ///
 /// A stateful composed surface built entirely from the shared Reactive Alloy
 /// controls. Build it from a [`SwitchboardModel`] with [`Switchboard::new`],
-/// paint it with [`render`](Switchboard::render), and feed it input with
+/// choose the section it opens on with
+/// [`select_section`](Switchboard::select_section), paint it with
+/// [`render`](Switchboard::render), and feed it input with
 /// [`on_pointer`](Switchboard::on_pointer) and [`on_key`](Switchboard::on_key);
 /// each interaction returns a typed [`SwitchboardAction`] for the hosting
 /// service to authorise and apply.
+///
+/// It outlives any one sample of the data: publish each fresh reading with
+/// [`set_model`](Switchboard::set_model), which re-derives every row, card, and
+/// meter but keeps the section, scroll offsets, and keyboard focus the user
+/// chose.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Switchboard {
     frame: WindowFrame,
@@ -442,7 +559,7 @@ pub struct Switchboard {
     tasks: Vec<TaskEntry>,
     jobs: Vec<Card>,
     recovery: Vec<RecoveryEntry>,
-    resources: Vec<Card>,
+    resources: Vec<ResourceEntry>,
     services: Vec<ServiceEntry>,
     panel: Panel,
     section: Section,
@@ -455,54 +572,123 @@ pub struct Switchboard {
 impl Switchboard {
     /// Build a Switchboard from a typed model, turning each view model into
     /// its shared control.
+    ///
+    /// It opens on [`Section::Tasks`] at the top of the list; a host that
+    /// wants another section calls
+    /// [`select_section`](Switchboard::select_section), and one that samples
+    /// live state feeds each new reading to
+    /// [`set_model`](Switchboard::set_model) rather than building again.
     #[must_use]
     pub fn new(model: SwitchboardModel) -> Self {
+        let mut switchboard = Self {
+            frame: WindowFrame::new(model.furniture),
+            tabs: Tabs::new(
+                Section::ALL
+                    .iter()
+                    .map(|s| Tab::new(s.title()))
+                    .collect::<Vec<_>>(),
+            ),
+            grabber: ResizeGrabber::new(),
+            corner: ScrollCorner::new(),
+            scroll: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::new(ScrollRange::EMPTY, 1, 1),
+            ),
+            tasks: Vec::new(),
+            jobs: Vec::new(),
+            recovery: Vec::new(),
+            resources: Vec::new(),
+            services: Vec::new(),
+            panel: Panel::new(SYSTEM_PANEL_TITLE),
+            section: Section::Tasks,
+            offsets: [0; 4],
+            focus: FocusRegion::Content,
+            content_focus: 0,
+            pointer: Point::ORIGIN,
+        };
+        switchboard
+            .frame
+            .title_bar_mut()
+            .set_app_name("Switchboard");
+        switchboard.tabs.set_selected(Section::Tasks.index());
+        switchboard.adopt(model);
+        switchboard
+    }
+
+    /// Show `model` in place of the one currently drawn, keeping the parts of
+    /// the surface the *user* owns.
+    ///
+    /// A host samples live system state continuously — roughly once a second —
+    /// and this is how it publishes each new reading. Rebuilding the whole
+    /// composition instead would throw away the user's place in the list every
+    /// sample, snapping a scrolled or keyboard-navigated list back to the top.
+    ///
+    /// **Kept, because the user set it:** the selected [`Section`] and its tab
+    /// mark, every section's scroll offset, the keyboard focus region and its
+    /// position in the list, the last pointer position, and any window move,
+    /// resize, or scroll-thumb drag in flight.
+    ///
+    /// **Dropped, because it names a row that may now be a different object:**
+    /// row selection, pointer hover, and any half-finished press. A row index
+    /// survives a refresh only as a *position* in the list, never as an
+    /// identity: the rows are rebuilt from `model`, so a press begun on one
+    /// task can never complete against whatever task now occupies that slot,
+    /// and a highlight is never re-asserted onto a row the pointer is not
+    /// really over. Hover returns with the next pointer movement.
+    ///
+    /// The list position the keyboard focus names is clamped into the new
+    /// content, and the active section's scroll offset is re-ranged through
+    /// the same clamp a section switch uses, so a list that shrank leaves
+    /// neither past its end. An emptied section leaves a valid, renderable
+    /// state with nothing to activate.
+    pub fn set_model(&mut self, model: SwitchboardModel) {
+        self.adopt(model);
+        self.set_scroll_range(
+            self.active_count(),
+            self.scroll.model().range().viewport_extent(),
+        );
+    }
+
+    /// Derive every model-shaped part of the composition from `model` — the
+    /// window furniture and title, each section's rows, cards, and meters, and
+    /// the Overview panel's system actions — then re-assert the keyboard focus
+    /// onto the controls that replaced the old ones.
+    ///
+    /// This is the one model-to-controls derivation. Both
+    /// [`new`](Switchboard::new) and [`set_model`](Switchboard::set_model) run
+    /// it, so a refreshed Switchboard holds exactly the controls a freshly
+    /// built one would, marked exactly the same way. The focused list position
+    /// is clamped into the new content first, so it can never address a row
+    /// the new model does not have.
+    fn adopt(&mut self, model: SwitchboardModel) {
         let furniture = model.furniture;
-        let mut frame = WindowFrame::new(furniture);
-        frame.title_bar_mut().set_app_name("Switchboard");
-        frame.title_bar_mut().set_title(&model.title);
+        self.frame.set_furniture(furniture);
+        self.frame.title_bar_mut().set_title(&model.title);
 
         let active = furniture.activation != WindowActivationState::Inactive;
+        self.grabber
+            .set_enabled(furniture.resizable && furniture.size == WindowSizeState::Restored);
+        self.grabber.set_active_frame(active);
+        self.corner.set_active_frame(active);
 
-        let mut tabs = Tabs::new(
-            Section::ALL
-                .iter()
-                .map(|s| Tab::new(s.title()))
-                .collect::<Vec<_>>(),
-        );
-        tabs.set_selected(Section::Tasks.index());
-
-        let mut grabber = ResizeGrabber::new();
-        grabber.set_enabled(furniture.resizable && furniture.size == WindowSizeState::Restored);
-        grabber.set_active_frame(active);
-
-        let mut corner = ScrollCorner::new();
-        corner.set_active_frame(active);
-
-        let scroll = ScrollBar::new(
-            ScrollOrientation::Vertical,
-            ScrollModel::new(ScrollRange::EMPTY, 1, 1),
-        );
-
-        let tasks = model.tasks.into_iter().map(Self::build_task).collect();
-        let jobs = model.jobs.into_iter().map(Self::build_job).collect();
-        let recovery = model
+        self.tasks = model.tasks.into_iter().map(Self::build_task).collect();
+        self.jobs = model.jobs.into_iter().map(Self::build_job).collect();
+        self.recovery = model
             .recovery
             .into_iter()
             .map(Self::build_recovery)
             .collect();
-        let resources = model
+        self.resources = model
             .resources
             .into_iter()
             .map(Self::build_resource)
             .collect();
-        let services = model
+        self.services = model
             .services
             .into_iter()
             .map(Self::build_service)
             .collect();
-
-        let panel = Panel::new("System").with_actions(
+        self.panel = Panel::new(SYSTEM_PANEL_TITLE).with_actions(
             model
                 .system_actions
                 .into_iter()
@@ -510,24 +696,10 @@ impl Switchboard {
                 .collect(),
         );
 
-        Self {
-            frame,
-            tabs,
-            grabber,
-            corner,
-            scroll,
-            tasks,
-            jobs,
-            recovery,
-            resources,
-            services,
-            panel,
-            section: Section::Tasks,
-            offsets: [0; 4],
-            focus: FocusRegion::Content,
-            content_focus: 0,
-            pointer: Point::ORIGIN,
-        }
+        self.content_focus = self
+            .content_focus
+            .min(self.active_count().saturating_sub(1));
+        self.apply_focus_marks();
     }
 
     /// Build a task's row + action button.
@@ -588,13 +760,20 @@ impl Switchboard {
         }
     }
 
-    /// Build an Overview resource card.
-    fn build_resource(res: ResourceSummary) -> Card {
-        Card::new(res.name).with_body(res.reading).with_state(
-            ControlState::idle()
-                .with_pressure(PressureState::Under(res.kind))
-                .with_activity(res.activity),
-        )
+    /// Build an Overview resource card and the header band's meter for the
+    /// same resource, from the one summary.
+    fn build_resource(res: ResourceSummary) -> ResourceEntry {
+        let card = Card::new(res.name.clone())
+            .with_body(res.reading.clone())
+            .with_state(
+                ControlState::idle()
+                    .with_pressure(PressureState::Under(res.kind))
+                    .with_activity(res.activity),
+            );
+        let meter = Meter::new(res.name, res.reading, res.kind, res.meter)
+            .with_pressure(res.meter_pressure)
+            .with_samples(res.history[..res.history_len].iter().copied());
+        ResourceEntry { card, meter }
     }
 
     /// Build an Overview service row + action button.
@@ -626,6 +805,40 @@ impl Switchboard {
         self.offsets[self.section.index()]
     }
 
+    /// Show `section`, as if its tab had been pressed, and report the change.
+    ///
+    /// This is how a host opens Switchboard already showing the section the
+    /// user asked for — Recovery for a long-press on a flagged tray capsule,
+    /// Tasks for an ordinary press — instead of steering the selection with
+    /// synthetic input. Call it after [`new`](Switchboard::new) and before the
+    /// first [`render`](Switchboard::render), or at any later point.
+    ///
+    /// The selected section is the composition's own live state, not the
+    /// caller's: the tab strip's selected index, the keyboard focus position,
+    /// and the per-section scroll offsets all hang off it and move with every
+    /// tab press. So it lives here and not on [`SwitchboardModel`], which is
+    /// the data the caller hands in once and [`new`](Switchboard::new)
+    /// consumes; a section field there would be a second owner of the same
+    /// fact, stale from the first user interaction. Read it back with
+    /// [`section`](Switchboard::section).
+    ///
+    /// This runs the one transition the tab strip and the keyboard run, so all
+    /// three agree by construction: afterwards the strip marks the new tab, the
+    /// content area draws that section, and [`scroll_offset`] reports the new
+    /// section's own offset, re-ranged and re-clamped against its content by
+    /// the next [`render`](Switchboard::render) or
+    /// [`on_pointer`](Switchboard::on_pointer).
+    ///
+    /// Selecting the section already shown changes nothing — no scroll reset,
+    /// no focus reset — and returns `None`. [`Section`] is a closed enum, so
+    /// there is no invalid section to reject and no error to report; the only
+    /// outcomes are "changed" and "already there".
+    ///
+    /// [`scroll_offset`]: Switchboard::scroll_offset
+    pub fn select_section(&mut self, section: Section) -> Option<SwitchboardAction> {
+        self.select_section_index(section.index())
+    }
+
     /// The physical height of one list-row item (a control plus a gap).
     fn row_item_height(scale: Scale, theme: &Theme) -> u32 {
         let m = theme.metrics();
@@ -648,6 +861,40 @@ impl Switchboard {
             .scale_length(theme.metrics().control_height.saturating_mul(4))
             .max(1)
     }
+
+    /// The header resource band's measured height: zero when there is
+    /// nothing to show — an empty resource list means no band at all —
+    /// otherwise the one row height every meter in the band shares
+    /// ([`Meter::measured_height`]).
+    fn band_height(scale: Scale, theme: &Theme, font: BitmapFont, has_resources: bool) -> u32 {
+        if has_resources {
+            Meter::measured_height(scale, theme, font)
+        } else {
+            0
+        }
+    }
+
+    /// The rectangle for the meter at `index` of `count`, evenly spaced
+    /// across `band`'s width with the theme's control gap between neighbours.
+    fn band_meter_rect(
+        band: Rect,
+        index: usize,
+        count: usize,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Rect {
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let count = u32::try_from(count).unwrap_or(1).max(1);
+        let total_gap = gap.saturating_mul(count.saturating_sub(1));
+        let each_w = band
+            .width
+            .saturating_sub(total_gap)
+            .checked_div(count)
+            .unwrap_or(0);
+        let idx = u32::try_from(index).unwrap_or(0);
+        let left = band.left() + to_i32(idx.saturating_mul(each_w.saturating_add(gap)));
+        Rect::new(left, band.top(), each_w, band.height)
+    }
 }
 
 /// The laid-out regions of a Switchboard for one outer bounds.
@@ -655,7 +902,10 @@ impl Switchboard {
 struct SbLayout {
     /// The window frame's laid-out rectangles.
     frame: FrameLayout,
-    /// The tab strip along the top of the client.
+    /// The always-visible header resource band, above the tab strip. Zero
+    /// height when the model has no resources.
+    band: Rect,
+    /// The tab strip along the top of the client, below the band.
     tabs: Rect,
     /// The section content area (excludes the scrollbar gutter).
     content: Rect,
@@ -696,17 +946,36 @@ impl ListInfo {
 
 impl Switchboard {
     /// Lay the composition out within `bounds` for the active theme.
-    fn compute_layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> SbLayout {
+    ///
+    /// The header resource band claims its measured height (zero with no
+    /// resources) immediately below the title bar, and the tab strip and
+    /// every region below it shift down by exactly that height, clipped so a
+    /// window too short for the full anatomy still lays out in bounds
+    /// (fail closed, never negative or overlapping).
+    fn compute_layout(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> SbLayout {
         let frame = self.frame.layout(bounds, scale, theme);
         let client = frame.client;
+
+        let band_h =
+            Self::band_height(scale, theme, font, !self.resources.is_empty()).min(client.height);
+        let band = Rect::new(client.left(), client.top(), client.width, band_h);
+
+        let below_band_top = client.top() + to_i32(band_h);
+        let below_band_h = client.height.saturating_sub(band_h);
         let tab_h = scale
             .scale_length(theme.metrics().control_height)
             .max(1)
-            .min(client.height);
-        let tabs = Rect::new(client.left(), client.top(), client.width, tab_h);
+            .min(below_band_h);
+        let tabs = Rect::new(client.left(), below_band_top, client.width, tab_h);
 
-        let below_top = client.top() + to_i32(tab_h);
-        let below_h = client.height.saturating_sub(tab_h);
+        let below_top = below_band_top + to_i32(tab_h);
+        let below_h = below_band_h.saturating_sub(tab_h);
         let gutter = scale
             .scale_length(theme.metrics().scrollbar_breadth)
             .max(1)
@@ -721,6 +990,7 @@ impl Switchboard {
 
         SbLayout {
             frame,
+            band,
             tabs,
             content,
             scroll,
@@ -815,6 +1085,21 @@ impl Switchboard {
         }
     }
 
+    /// Re-range the scrollbar over `count` items in a `viewport` of whole
+    /// visible items, keeping the active section's stored offset and writing
+    /// back whatever the range clamped it to.
+    ///
+    /// This is the one place an offset is clamped: a section switch, a resize,
+    /// and a model refresh all re-range through here, so a list that shrank can
+    /// never leave the offset past its end.
+    fn set_scroll_range(&mut self, count: usize, viewport: u64) {
+        let content = u64::try_from(count).unwrap_or(u64::MAX);
+        let range = ScrollRange::new(content, viewport, self.offsets[self.section.index()]);
+        self.scroll
+            .set_model(ScrollModel::new(range, 1, viewport.max(1)));
+        self.offsets[self.section.index()] = self.scroll.model().offset();
+    }
+
     /// Rebuild the scrollbar's model from the active section's list metrics and
     /// the stored per-section offset, and persist the (re-clamped) offset.
     ///
@@ -822,15 +1107,10 @@ impl Switchboard {
     /// and its viewport extent is the number of whole items that fit, so a
     /// range change (a section switch or a resize) re-clamps the offset rather
     /// than leaving it out of bounds.
-    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) {
-        let layout = self.compute_layout(bounds, scale, theme);
+    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) {
+        let layout = self.compute_layout(bounds, scale, theme, font);
         let info = self.list_info(&layout, scale, theme);
-        let content = u64::try_from(info.count).unwrap_or(u64::MAX);
-        let viewport = u64::from(info.visible());
-        let range = ScrollRange::new(content, viewport, self.offsets[self.section.index()]);
-        self.scroll
-            .set_model(ScrollModel::new(range, 1, viewport.max(1)));
-        self.offsets[self.section.index()] = self.scroll.model().offset();
+        self.set_scroll_range(info.count, u64::from(info.visible()));
     }
 }
 
@@ -848,10 +1128,11 @@ impl Switchboard {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        self.sync_scroll(bounds, scale, theme);
-        let layout = self.compute_layout(bounds, scale, theme);
+        self.sync_scroll(bounds, scale, theme, font);
+        let layout = self.compute_layout(bounds, scale, theme, font);
 
         self.frame.render(surface, bounds, scale, theme, font);
+        self.render_band(surface, layout.band, scale, theme, font);
         self.tabs.render(surface, layout.tabs, scale, theme, font);
         self.render_section(surface, &layout, scale, theme, font);
 
@@ -860,6 +1141,25 @@ impl Switchboard {
         self.scroll.render(surface, layout.scroll, scale, theme);
         self.corner.render(surface, layout.corner, scale, theme);
         self.grabber.render(surface, layout.corner, scale, theme);
+    }
+
+    /// Paint the always-visible header resource band: every resource's
+    /// meter, evenly spaced across the band's width through
+    /// [`Switchboard::band_meter_rect`]. A zero-height `band` (no resources)
+    /// draws nothing.
+    fn render_band(
+        &self,
+        surface: &mut Surface,
+        band: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let count = self.resources.len();
+        for (i, entry) in self.resources.iter().enumerate() {
+            let rect = Self::band_meter_rect(band, i, count, scale, theme);
+            entry.meter.render(surface, rect, scale, theme, font);
+        }
     }
 
     /// Paint the active section's content.
@@ -971,13 +1271,13 @@ impl Switchboard {
         };
         let gap = scale.scale_length(theme.metrics().control_gap);
         let card_h = Self::card_item_height(scale, theme);
-        for (i, card) in self.resources.iter().enumerate() {
+        for (i, entry) in self.resources.iter().enumerate() {
             let top = pc.top() + to_i32(u32::try_from(i).unwrap_or(0).saturating_mul(card_h));
             if top + to_i32(card_h) > pc.bottom() {
                 break;
             }
             let rect = Rect::new(pc.left(), top, pc.width, card_h.saturating_sub(gap));
-            card.render(surface, rect, scale, theme, font);
+            entry.card.render(surface, rect, scale, theme, font);
         }
 
         let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);
@@ -1020,12 +1320,21 @@ impl Switchboard {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        font: BitmapFont,
     ) -> Option<SwitchboardAction> {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
-        self.sync_scroll(bounds, scale, theme);
-        let layout = self.compute_layout(bounds, scale, theme);
+        self.sync_scroll(bounds, scale, theme, font);
+        let layout = self.compute_layout(bounds, scale, theme, font);
+
+        // The header resource band is an instrument, not a control: it takes
+        // no pointer input, so a press over it must fall through to nothing
+        // rather than reaching the tab strip, the content, or the scrollbar
+        // it happens to sit above (no fabricated SwitchboardAction).
+        if layout.band.contains(self.pointer) {
+            return None;
+        }
 
         // The mouse wheel scrolls the active section (spec §17 / no deferral).
         if let InputEvent::PointerScrolled { dx, dy } = event {
@@ -1320,10 +1629,21 @@ impl Switchboard {
         }
     }
 
-    /// Select the section for `index`, resetting its keyboard focus and
-    /// reporting the change; an out-of-range index changes nothing (fail closed).
+    /// The one section transition: every path that changes the shown section —
+    /// a tab press, the keyboard, and [`select_section`](Switchboard::select_section)
+    /// — runs this, so the tab strip, the content, and the per-section scroll
+    /// offset can never disagree.
+    ///
+    /// It marks the tab, shows the section, and puts keyboard focus back on its
+    /// first item; the offset stays each section's own and is re-clamped
+    /// against the new content by the next scroll sync. Re-selecting the shown
+    /// section is a no-op, and an out-of-range index changes nothing (fail
+    /// closed); both report no change.
     fn select_section_index(&mut self, index: usize) -> Option<SwitchboardAction> {
         let section = Section::from_index(index)?;
+        if section == self.section {
+            return None;
+        }
         self.section = section;
         self.tabs.set_selected(index);
         self.content_focus = 0;

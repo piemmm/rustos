@@ -943,23 +943,44 @@ stale report never follows a resume, and an exit supersedes one). With the
 bit clear a stopped child is invisible to `wait`, exactly as before. The
 simple wrapper for a parent with no job control is `tairix_rt::wait_exit`.
 
-`signal` (no. 64) delivers a control signal to a child of the calling
-process (`plans/SPAWN.md` SP7) — the job-control primitive the shell's
-`fg`/`bg`/kill drive. Like `wait` it is **ungated**: a process may signal
-only its *own* children, so the parent/child relationship is the authority
-and no capability is required (the §16.6 own-process baseline). It **is**
-audited — delivering a signal is a process-lifecycle decision, exactly as
-`spawn`/`wait`/`exit` are audited (`AGENTS.md` §5.4.4). `pid` names a child
-the caller spawned; `signal` is a closed `tairix_abi::Signal` discriminant
+`signal` (no. 64) delivers a control signal to another process
+(`plans/SPAWN.md` SP7, `plans/NEW-TASKBAR.md` T11) — the job-control
+primitive the shell's `fg`/`bg`/kill drive and the process control a task
+manager needs. Its target rule is a precedence the handler decides in one
+place, before any delivery:
+
+1. **The caller's own live child** — the parent/child relationship is the
+   authority and **no capability is required** (the §16.6 own-process
+   baseline). This is the shell's path and is unchanged.
+2. Otherwise, a process whose **kernel-attested owner uid equals the
+   caller's** — a principal already controls its own processes, so this
+   needs no capability either.
+3. Otherwise, only a caller holding **`CAP_PROC_CONTROL`** may signal a
+   process belonging to a *different* principal. Without it the call is
+   refused with `PermissionDenied`.
+
+Every call is audited — delivering a signal is a process-lifecycle
+decision, exactly as `spawn`/`wait`/`exit` are audited (`AGENTS.md`
+§5.4.4) — and a cross-principal decision (steps 2 and 3, allowed or
+denied alike) additionally emits the `PROCESS_SIGNAL_CROSS_PRINCIPAL`
+record (audit id 4036, [kernel audit events](kernel.md)) naming the
+caller task id, the target's pid and task id, the requested signal, and
+the rule that decided it. `signal` is a closed `tairix_abi::Signal`
+discriminant
 (`Continue` = 1, `Terminate` = 2, `Kill` = 3, `Interrupt` = 4, `Stop` = 5),
 and the reserved `0` or any
 other value fails closed with `OutOfRange` before dispatch (validate every
 input). The handler reaches the scheduler-side deliverer through the
 `kernel/core::procsignal::ProcessSignal` seam, installed at boot like the
-`wait` producer; a `pid` that is not a live child of the caller fails closed
-with `NotFound`, and a `signal` issued before the producer is installed fails
-closed with `NotImplemented` through the default `NULL_PROCESS_SIGNAL`,
-never pretending a signal was delivered (`AGENTS.md` §2.9). The concrete
+`wait` producer, whose two halves keep authority and mechanism apart:
+`resolve_child` answers "is this pid a live child of that sender?" and
+`signal_task` delivers to an **already-authorised** target. A `pid` that
+is not a child takes the cross-principal path above, where a non-positive
+`pid` or one with no live capability record fails closed with `NotFound`
+— never a guess — and a `signal` issued before the producer is installed
+fails closed with `NotImplemented` through the default
+`NULL_PROCESS_SIGNAL`, never pretending a signal was delivered
+(`AGENTS.md` §2.9). The concrete
 deliverer is `kernel/core::procsignal::KernelProcessSignal` (`plans/SPAWN.md`
 SP7b): it composes over the `KernelProcessWait` producer — the one owner of
 the parent/child + exit-status bookkeeping, so authorisation and the reaped

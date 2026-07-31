@@ -599,8 +599,12 @@ impl TitleBar {
     }
 
     /// Propagate the furniture state to the controls: the size toggle shows
-    /// the next action and is disabled on a non-resizable window; the frame
+    /// the next action and is enabled only on a resizable window; the frame
     /// activation lowers idle contrast on an inactive frame.
+    ///
+    /// The size toggle's enablement is set from `resizable` both ways, so a
+    /// window that becomes resizable again gets its toggle back; only the
+    /// enabled flag moves, leaving the control's hover and focus alone.
     fn apply_furniture(&mut self) {
         let active = self.furniture.activation != WindowActivationState::Inactive;
         let next = self.furniture.size_action();
@@ -608,9 +612,7 @@ impl TitleBar {
             control.set_active_frame(active);
             if control.kind() == WindowControlKind::SizeToggle {
                 control.set_size_action(next);
-                if !self.furniture.resizable {
-                    control.set_state(ControlState::disabled());
-                }
+                control.set_state(control.state().with_enabled(self.furniture.resizable));
             }
         }
     }

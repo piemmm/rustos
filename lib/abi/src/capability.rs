@@ -524,6 +524,24 @@ impl CapabilityId {
     /// (fail closed; capability checks before state touches).
     pub const FS_CHOWN: Self = Self(39);
 
+    /// Signal a process belonging to **another** user principal — the
+    /// cross-principal path of the `signal` syscall (`abi-v1` number 64).
+    ///
+    /// `signal` already lets a process control its own live children, and a
+    /// process may always signal another process **it itself owns** (the
+    /// same kernel-attested uid) without any capability at all — neither
+    /// case needs this grant. This capability gates only what remains:
+    /// delivering a control signal to a task owned by a different
+    /// principal, which is otherwise refused (fail closed). It guards a
+    /// whole class of authority — every other principal's processes, not
+    /// one target — and no existing capability expresses it at that
+    /// granularity: `CAP_PROC_SPAWN` only creates a process, and
+    /// `CAP_USER_ADMIN` administers the account database, never a running
+    /// task. The `signal` handler checks it only after the caller's own
+    /// children and the caller's own uid have both been ruled out
+    /// (capability checks before state touches), and audits the decision.
+    pub const PROC_CONTROL: Self = Self(40);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -573,6 +591,7 @@ impl CapabilityId {
         (Self::SCHED_REALTIME, "CAP_SCHED_REALTIME"),
         (Self::NET_BIND_PRIVILEGED, "CAP_NET_BIND_PRIVILEGED"),
         (Self::FS_CHOWN, "CAP_FS_CHOWN"),
+        (Self::PROC_CONTROL, "CAP_PROC_CONTROL"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -706,6 +725,7 @@ mod tests {
         assert_eq!(CapabilityId::SCHED_REALTIME.as_u16(), 37);
         assert_eq!(CapabilityId::NET_BIND_PRIVILEGED.as_u16(), 38);
         assert_eq!(CapabilityId::FS_CHOWN.as_u16(), 39);
+        assert_eq!(CapabilityId::PROC_CONTROL.as_u16(), 40);
     }
 
     #[test]
@@ -729,6 +749,7 @@ mod tests {
         assert_eq!(CapabilityId::INPUT_READ.name(), Some("CAP_INPUT_READ"));
         assert_eq!(CapabilityId::SEAT_ADMIN.name(), Some("CAP_SEAT_ADMIN"));
         assert_eq!(CapabilityId::MEM_PIN.name(), Some("CAP_MEM_PIN"));
+        assert_eq!(CapabilityId::PROC_CONTROL.name(), Some("CAP_PROC_CONTROL"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -739,9 +760,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=39 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=40 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=39 {
+        for raw in 1..=40 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

@@ -39,7 +39,7 @@ Switchboard is the flagship example because it exposes live task, job, recovery,
 
 Every control and every piece of window furniture named in this specification —
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
-Radio), value controls (Slider, Progress), text entry (TextField, SearchField),
+Radio), value controls (Slider, Progress, Meter), text entry (TextField, SearchField),
 choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel),
 decision surfaces (Dialog, Tooltip, HelpTip), shell surfaces (Notification,
@@ -197,6 +197,7 @@ pub enum ControlKind {
     Radio,
     Slider,
     Progress,
+    Meter,
     TextField,
     SearchField,
     ComboBox,
@@ -904,6 +905,34 @@ Tooltips explain immediate affordance. HelpTips explain why an action is unavail
 - HelpTips may include one reason and one safe next step.
 - Security-sensitive denial text must avoid secrets and capability tokens.
 
+### 11.33 Meter
+
+A meter is a value/measured control alongside Slider (§11.6) and Progress
+(§11.7): a read-only instrument with no pointer or keyboard handling. It
+renders one resource reading — a small upper-case label, a bold reading
+value, and beneath them a thin rounded track — for the header resource band
+(CPU, memory, disk, network) a taskbar or system-overview panel shows.
+
+- The track is always tinted by the resource's own semantic rail colour
+  (CPU, memory, disk, network, power, or thermal), never the plain accent:
+  unlike Slider or Progress, a meter's colour is the resource's fixed
+  identity, not a transient severity, so a CPU meter reads as the compute
+  colour whether it is showing 5% or 95%.
+- The Pressure Rail's severity state still drives emphasis exactly as it
+  does for Card (§12.3): at rest the meter shows the plain tinted track, and
+  under genuine pressure it gains the same rail emphasis outline a card's
+  leading edge would show. This is not a second severity vocabulary — it is
+  the one Pressure Rail state, read by one more control.
+- Unmeasured state: a resource with no wired query or a denied capability
+  renders the quiet unmeasured track and whatever reading text its owner
+  supplies (e.g. an em dash), never a fabricated `0%`.
+- Optional history: a bounded, oldest-to-newest sparkline of prior readings
+  draws inside the same track band in place of the plain proportional fill,
+  for resources whose recent trend matters (e.g. CPU, network).
+- A meter narrower or shorter than its own label, reading, and track
+  degrades by omitting whichever line does not fit, never by drawing past
+  its own bounds.
+
 ---
 
 ## 12. Reactive State Patterns
@@ -931,6 +960,8 @@ Resource pressure is directional and semantic.
 - Thermal or power pressure: system rail.
 
 The rail appears on the object causing or experiencing the pressure and on the recommended action.
+
+A resource Meter (§11.33) is the one exception to "appears only while under pressure": its track is tinted by its rail colour at all times, because the tint is that instrument's fixed resource identity rather than a transient state. The Pressure Rail's severity still reaches it exactly as it reaches a Card — an emphasis outline when the resource is genuinely under load — it is simply drawn over a track that was already coloured.
 
 ### 12.4 Signal Bead
 
@@ -1107,6 +1138,28 @@ Switchboard should use the same general controls as every other TAIRiX surface.
 - A resizable window exposes the standard ResizeGrabber at the frame corner or scrollbar junction.
 - Minimize keeps background jobs active and visible through the taskbar item; close remains a cooperative application request.
 
+### Header resource band
+
+- Immediately below the title bar sits an always-visible band of resource `Meter` (§11.33) controls, one per resource in the model, spaced evenly across the band's width; the tab strip and every section below it shift down by exactly the band's measured height.
+- The band is an instrument, not a control: it takes no pointer or keyboard input and never emits a `SwitchboardAction`, so a press over it can never reach the tab strip, the section content, or the scrollbar it sits above.
+- Each resource's identity, reading, and Pressure Rail state are the same fact the Overview resource card below shows; there is no second copy of that data, only the meter's own measured value, pressure emphasis, and optional history sparkline layered on top.
+- A resource with no wired measurement renders an honestly quiet meter (the unmeasured track, no fabricated fill), never a fabricated reading.
+- A model with no resources collapses the band to zero height; nothing below it moves.
+
+### Section selection
+
+- One `Tabs` strip below the header resource band selects the four sections (Tasks, Jobs, Recovery, Overview); the marked tab, the drawn content, and the active scroll offset are always the same fact.
+- The host chooses which section the panel opens on — Recovery for a long-press on a flagged tray capsule, Tasks for an ordinary press — by asking for it directly (`Switchboard::select_section`), never by feeding synthetic tab or key events.
+- A tab press, the keyboard, and the direct request run the one transition and leave identical state. Each section keeps its own scroll offset, re-ranged and re-clamped against that section's content on the next render.
+- Asking for the section already shown changes nothing: no scroll reset, no focus reset. The sections are a closed set, so there is no invalid request to refuse and no error to report.
+
+### Live data refresh
+
+- The model is one sample of a moving system. A host publishes each new reading in place (`Switchboard::set_model`), running the one model-to-controls derivation `Switchboard::new` runs; it never rebuilds the composition, which would discard the user's place in it every sample.
+- What survives a refresh is what the user chose: the selected section and its tab mark, every section's scroll offset, the keyboard focus region and its list position, the last pointer position, and any window move, resize, or scroll-thumb drag in flight.
+- What is dropped is what names a row that may now be a different object: row selection, pointer hover, and any half-finished press. A press begun on one row can never complete against the row that replaced it; hover returns with the next pointer movement.
+- The focused list position is clamped into the new content and the active section's offset is re-ranged through the same clamp a section switch uses, so a shortened list leaves neither past its end. An emptied section stays valid and renderable with nothing to activate.
+
 ### Task list
 
 - `ListRow` for each task.
@@ -1131,7 +1184,7 @@ Switchboard should use the same general controls as every other TAIRiX surface.
 
 ### System overview
 
-- Resource cards use semantic rails and numeric content.
+- Resource cards use semantic rails and numeric content, built from the same per-resource model the header resource band's meters render.
 - Service rows use `ListRow` with state bead and capability-aware actions.
 - System actions use `Button`, `IconButton`, and `MenuItem` roles.
 - Shutdown or lock actions use destructive or system roles, not custom artwork.

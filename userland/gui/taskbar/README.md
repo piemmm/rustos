@@ -31,9 +31,9 @@ owns:
   latch the embedder drains with `take_repaint`, so one present follows each
   visual change — never a per-frame busy repaint (`AGENTS.md` §2.16).
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
-  under it (the Library button, the Files button, a task, a notification
-  icon, or the clock) for input routing. A region slot that does not fit is
-  `Rect::EMPTY` and is never hit.
+  under it (the Library button, the Files button, a pin, a task, a
+  notification icon, the clock, or the Switchboard capsule) for input
+  routing. A region slot that does not fit is `Rect::EMPTY` and is never hit.
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
@@ -80,6 +80,28 @@ owns:
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).
+- **Switchboard capsule** — `SwitchboardTray`, the immovable trailing-most
+  slot (`plans/NEW-TASKBAR.md` T9/T11). One pure derive turns the summary
+  the Switchboard service publishes, plus the session's count of
+  unresponsive applications, into the shared `tairix-controls` `TraySignal`
+  capsule: the dominant state with its badge, label, and value, and the
+  orthogonal heat seam, pressure rail, and recovery posture composed
+  beneath it. Hover expands the instrument readout, a scroll over the
+  capsule or the readout cycles the running tasks, and a middle press
+  switches to the previous task.
+- **The capsule's tap-or-hold gesture** — a primary press and quick release
+  reports `OpenSwitchboard { section: Section::Tasks }`; a press held past
+  `LONG_PRESS_AFTER_NS` (half a second) reports
+  `OpenSwitchboard { section: Section::Recovery }`; and the readout's one
+  safe action, "Open Switchboard", reports the same response as the quick
+  press. The session asks the Switchboard service to open — or revive and
+  open — its window at that section. The threshold is resolved against the
+  monotonic time the caller passes to `TaskbarInput::handle`, on whichever
+  event the router next handles (a motion sample taken while the press is
+  held, or the release), so the gesture never polls or sleeps
+  (`AGENTS.md` §2.23). A hold that has already fired never also fires on
+  release, and a press dragged off the capsule opens nothing (fail closed,
+  `AGENTS.md` §5.4).
 - **Rendering** — `TaskbarRenderer::render` paints the bar into a
   `tairix-raster` `Surface` using the taskbar's own theme: the leading
   `IconButton`s draw with their live hover state, then each **pin** and **task
@@ -131,6 +153,5 @@ in production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
-The upgraded notification area (T8/T9), the always-rightmost Switchboard icon
-(T9), and selecting a font face from the theme's `FontSpec` roles once
-installed fonts exist.
+Selecting a font face from the theme's `FontSpec` roles once installed fonts
+exist.

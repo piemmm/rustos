@@ -55,6 +55,17 @@ code itself does not?* If no → delete. If yes → keep.
   defect: if it flags real missing work, fix it in scope or raise it (§15.7,
   §2.18); a waffle pass must not bury a known defect.
 - Redundant section-banner / decorative comments that add no information.
+- **Charter section citations** — `AGENTS.md §5.4`, `§2.9`, `sec.5.4`,
+  "Section 5.4", or a bare trailing `(§5.4)`. `AGENTS.md` §2.11 / §15.17 forbid
+  them outright: the rule lives in the charter, so citing its number restates
+  *what* the rule is and never *why* the code does what it does. Keep the
+  reason in plain prose and drop the number ("fail closed", "zeroed on drop");
+  where the charter itself is the subject, name it in prose ("the charter
+  forbids this duplication"). Two things are **not** comments and stay: the
+  provenance a *generator* stamps onto a generated artefact (the `include/`
+  C-header banners), and a runtime diagnostic that tells a developer which rule
+  they broke (a CI-check error message, an assertion message) — that is program
+  output.
 
 ### Keep — always (these are *why*, not *what*)
 
@@ -66,8 +77,11 @@ code itself does not?* If no → delete. If yes → keep.
 - Rationale: *why* this algorithm/ordering/lock discipline/memory layout; the
   reasoning behind a security (§2.7) or performance (§2.16) choice; non-obvious
   invariants.
-- References: spec/erratum/RFC/ticket citations and `AGENTS.md` section
-  references that justify a decision.
+- References the reader cannot derive from the code: an external spec, erratum,
+  hardware manual, algorithm paper, RFC, or ticket, and pointers to another
+  file in this tree (`plans/PI.md`, a `docs/.../*-spec.md`, a sibling module).
+  A charter section number is **not** such a reference and is deleted (see
+  above).
 - All **rustdoc** (`///`, `//!`) on public items (§2.8).
 
 ## 2. Method (per file / per crate)

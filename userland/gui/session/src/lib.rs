@@ -168,6 +168,7 @@ pub mod presenter;
 pub mod seat;
 pub mod session;
 pub mod shell;
+pub mod switchboard;
 pub mod tasks;
 pub mod vigil;
 pub mod windows;
@@ -196,6 +197,11 @@ pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
+pub use switchboard::{
+    command_section, deliver_pending_open, maybe_send_seat_report, open_tray,
+    serve_switchboard_request, OwnerWindow, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe,
+};
 pub use tasks::TaskBridge;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use windows::{window_control_event, SessionWindows, ShellWindowHost};

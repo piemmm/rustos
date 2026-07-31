@@ -134,21 +134,40 @@ The desktop has two input routers — the window manager's `InputRouter` and the
 taskbar's `TaskbarInput` — and both consume the **same** shared `tairix_input`
 event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
 stream, so `SessionInputRouter` fans it to the right router through
-`handle(event, &mut Compositor, &mut Taskbar)`:
+`handle(event, &mut Compositor, &mut Taskbar, now_ns)`. The monotonic `now_ns`
+is threaded down because one taskbar gesture is decided by *time*: the
+Switchboard capsule tells a tap from a hold by how long its press has been
+down when the next event arrives, so the bar is handed the embedder's clock
+reading rather than reading a clock of its own — the same instant every router
+sees, and the one an in-memory test controls:
 
 - while the **bar's context menu** OR **program-library popup** is open it is
   modal: every press, release, scroll, and key event routes to the taskbar;
   motion is still tracked by the window manager but its outcome is discarded;
-- otherwise a **primary OR secondary press** goes to the taskbar iff the
-  pointer is over the bar (a secondary press there opens a pin's context
-  menu), and to the window manager elsewhere — never both;
+- otherwise a **press** goes to the taskbar iff the pointer is over the bar (a
+  secondary press there opens a pin's context menu; a middle press over the
+  Switchboard capsule switches to the previous task) or over one of its open
+  non-modal popovers, and to the window manager elsewhere — never both;
+- a **scroll** over the Switchboard capsule or its open readout routes to the
+  taskbar (it cycles the running tasks); every other scroll goes to the window
+  manager;
 - **pointer motion** is fanned to both so their pointers stay in step; the
   window manager acts on it (dragging a grabbed window) and the taskbar
-  refreshes its launcher hover feedback;
-- a **primary release** ends a window move-grab in the window manager;
+  refreshes its launcher hover feedback. Motion is also where a capsule press
+  held past the bar's long-press threshold resolves, and that is a real
+  action: it takes the outcome while the drag still applied;
+- a **primary release** goes to the taskbar *first* — a quick press on the
+  Switchboard capsule resolves on its release — and one the bar does not claim
+  ends an in-flight window move-grab in the window manager instead;
 - a **key event** goes to the window manager — which delivers them to the focused
   window — except while a modal surface is open (above);
-- anything else is `SessionInputResponse::Ignored`.
+- anything else, including a non-primary release, is
+  `SessionInputResponse::Ignored`.
+
+The capsule's two gestures are the bar's own decision, not the session's: a
+quick press asks for the running-task list and a press held past the
+long-press threshold asks for the recovery list, each emitted as one
+`TaskbarResponse::OpenSwitchboard { section }` the session only relays.
 
 Decorations arm a title-bar drag through `begin_move`; the embedder reads the
 keyboard owner through `focused`. The router holds no pixels and grants itself
@@ -162,10 +181,13 @@ no authority; every routed sub-call is total and fails closed (`AGENTS.md`
 one event-driven frontend, the long-open "feed the router and presenter from
 live device events" thread:
 
-- It `pump`s the pending events from an injected `InputSource` seam (a real
-  pointer/keyboard channel on a running system, an in-memory queue in tests,
-  `AGENTS.md` §7), routing each through the `SessionInputRouter` and returning
-  a `ShellOutcome` per event.
+- `pump(source, &mut Compositor, now_ns)` drains the pending events from an
+  injected `InputSource` seam (a real pointer/keyboard channel on a running
+  system, an in-memory queue in tests, `AGENTS.md` §7), routing each through
+  the `SessionInputRouter` and returning a `ShellOutcome` per event. One drain
+  is one instant: the embedder reads the monotonic clock once when the source
+  wakes it, and every event of that batch resolves the capsule's
+  tap-versus-hold gesture against the same `now_ns`.
 - A taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and surfaced as
   `ShellOutcome::Taskbar` for the embedder; the bar is re-presented exactly
@@ -271,6 +293,81 @@ window manager's `InputRouter::focus` / `unfocus`. The bridge holds no pixels
 and grants itself no authority — the compositor, router, and taskbar are the
 embedder's, passed in per call.
 
+## The Switchboard channel and hang detection
+
+The taskbar's right-most Switchboard capsule renders live state from two
+independent, honest feeds, and the session talks back to the monitor service
+over its own mailbox (`plans/NEW-TASKBAR.md` T9–T11).
+
+**The published summary.** The `Run` binary binds the seat-scoped
+`SWITCHBOARD_ENDPOINT` beside the window and notification rendezvous. Every
+request on it is attested first: the caller's kernel-provided
+`call_peer_origin` pid must match the launch table's live entry for
+`SWITCHBOARD_RUN_PATH` — a foreign process, an orphan of an earlier session,
+or a hand-launched copy is a typed refusal stated on `stderr`, never rendered
+(`AGENTS.md` §5.4). An accepted `PublishSummary` reaches the capsule through
+`DesktopShell::set_tray_summary`; when the service exits, the reap path clears
+the feed so the capsule falls back to calm rather than freezing a dead
+service's last summary. The reply to a successful publish is
+`encode_publish_reply` carrying **this session's own `ProcId`** — the identity
+the kernel attests to the process itself (`tairix_rt::self_origin`), read once
+at bring-up and reused, never re-derived a second way, and the very reading
+the window server is constructed with. That reply is how the service learns
+the one identity whose commands it will accept, so the reverse direction is
+authenticated too. A **refusal** stays the plain status frame: an unattested
+caller learns nothing about the session it failed to reach.
+
+**The two owner-directed requests.** The monitor's panel acts on *other*
+processes' windows, and the session is the only component that may. Both are
+attested exactly like a publish and then validated against what this session
+can actually see:
+
+- `ActivateOwner { owner }` is authorised against the **live window
+  registry** — the owner must hold a served window on this seat *now*,
+  resolved through the window engine's attested ownership records — and
+  raises that owner's front window through the session's one focus/raise path.
+- `RestartOwner { owner }` is authorised against the **launch table** — the
+  owner must be a child this session itself spawned, so its bundle is the
+  attested one it was launched from — and re-launches it through the session's
+  one attested spawn-and-record path.
+
+An owner this session cannot act on is `Errno::NotFound`, stated on `stderr`
+and never guessed at. No refusal mutates the model, and neither request adds a
+second raise or launch route (`AGENTS.md` §2.2). The serving decision itself is
+pure and host-testable: `serve_switchboard_request` takes a borrowed
+`SwitchboardServe` — the shell, the compositor, the launch table, the
+`OwnerWindow` seam, the relaunch closure, and the session's `ProcId` — and
+returns a `SwitchboardOutcome` or a `SwitchboardRefusal`.
+
+**The command mailbox the session sends on.** The session sends to the
+instance's own mailbox, `command_endpoint_for(<the service pid the launch
+table holds>)`, as a **non-blocking** send: the desktop loop never blocks or
+spins on a panel that is slow to drain, so a send refused for a full or absent
+mailbox is reported on `stderr` and dropped, never retried (`AGENTS.md`
+§2.23). Two commands travel it:
+
+- `OpenPanel { section }` — the capsule gesture. The bar decides the section
+  (a quick press its running-task list, a hold its recovery list) and emits
+  `TaskbarResponse::OpenSwitchboard { section }`; the session only maps that
+  choice onto the wire vocabulary. With **no instance live** the press is
+  itself the demand for one: the session revives the service through the same
+  bring-up path and holds the section as *one* pending open — replaced, never
+  queued — delivered on that instance's first publish (the proof it is up and
+  listening) and cleared, so it is never re-sent on a later publish.
+- `SeatReport { report }` — the unresponsive-owner view of this seat, from the
+  session's own delivery evidence. Every app-ward window event is a
+  non-blocking mailbox send, so the production event sink folds each outcome
+  into the `vigil::HangTracker`: an owner whose sends come back refused as
+  mailbox-full backpressure continuously for `UNRESPONSIVE_AFTER_NS` is
+  flagged *not responding*, one accepted delivery clears it, and a reap
+  forgets it. No heartbeat is fabricated and no kernel query pretends to know.
+  The report is sent **only when the tracked set actually changes** (the
+  tracker's change latch, drained once per wake), never per frame and never
+  polled, and it carries the truthful `total` even when more owners are hung
+  than one frame can name — the id list is bounded by
+  `SEAT_REPORT_OWNERS_MAX`, so the monitor sees an honest count alongside the
+  ids it can act on rather than a silently truncated one.
+
 ## The `Run` binary — the live desktop session (`plans/DISPLAY.md` D7c)
 
 The crate also ships the desktop session's `Run` entry-point binary
@@ -297,6 +394,13 @@ the real seams end to end:
   never a poll loop — woken by input delivery *and* by lease loss. Losing
   the seat (the typed `SeatRevoked` / `SeatNotOwner` on any drain or
   present) tears the session down fail-loud.
+- It spawns the Switchboard monitor service
+  (`/System/Services/switchboard.app`) as the logged-in user, serves its
+  `SWITCHBOARD_ENDPOINT` requests through `serve_switchboard_request` behind
+  the `call_peer_origin` attestation, and sends `OpenPanel` / `SeatReport` on
+  the instance's `command_endpoint_for` mailbox — the same one bring-up path
+  revives a dead service on demand, and a refused send is reported and
+  dropped rather than retried.
 - The binary branches into the **worker-role** at the very start of `main`:
   if re-entered with the reserved role argument it serves as the parser-sandbox
   icon-rasterisation service and nothing else, using its own image as the
@@ -329,8 +433,9 @@ block (`AGENTS.md` §2.10).
 
 ## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
-The notification-area and Switchboard-icon upgrades (T8/T9), relaying the
-active theme to apps over live IPC, and the VFS-backed asset reads for
-`/System/Graphics` in the `Run` binary (the in-memory-tested loaders and their
-fallbacks exist; the `Run` binary installs the built-in artwork until then — its
-`SessionFileReader` today serves the program-library and pin stores).
+The interactive light/dark switch in the Switchboard's System menu (T13),
+relaying the active theme to apps over live IPC, and the VFS-backed asset reads
+for `/System/Graphics` in the `Run` binary (the in-memory-tested loaders and
+their fallbacks exist; the `Run` binary installs the built-in artwork until
+then — its `SessionFileReader` today serves the program-library and pin
+stores).

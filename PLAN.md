@@ -3117,7 +3117,7 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T10 done) —
+Full **icon-bar** build-out (staged, `in progress` — T1–T11 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
 entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
@@ -3151,18 +3151,40 @@ status** (T8–T10): the notification area (the fuzzed `notify_ipc` channel
 over the seat-scoped `NOTIFY_ENDPOINT`, producer-attested relay,
 click-to-dismiss popover), and the always-rightmost **Switchboard tray**:
 the immovable capsule (shared `TraySignal` + count/alert badge; scroll
-task-cycling, middle-click previous, hover/pinned readout), the seat-scoped
+task-cycling, middle-click previous, hover readout), the seat-scoped
 `SWITCHBOARD_ENDPOINT` + `switchboard_ipc` summary vocabulary, the
 session's attested relay + `HangTracker` delivery-evidence hang detection,
 and the `userland/gui/switchboard` monitor service (tickless
 `lib/procinfo` sampler, change-only publisher, capability-sized manifest
 intersected with the seat user's ceiling, spawned by the session and calm
-on death). Next (T11+): the Switchboard overview window hosting the
-existing `lib/controls::switchboard` composition with genuinely working
-task actions (the owner-approved `signal` widening + `CAP_PROC_CONTROL`),
-implementing `plans/desktop1.png` / `plans/desktop2a.png` — where the
-session controls, the light/dark toggle, and System Settings are reached,
-deliberately not the library.
+on death) — and **as a live panel** (T11): the monitor now hosts the
+`lib/controls::switchboard` composition as a real window with genuinely
+working actions, implementing `plans/desktop1.png`'s Open Panel. The
+composition gained the shared `Meter` control (rail-tinted rounded track,
+bounded sparkline, an honest `Unmeasured` state that never fabricates a
+zero), the always-visible header resource band it tiles, `select_section`
+(the host chooses the opening section) and `set_model` (an in-place data
+refresh preserving section, per-section scroll, focus and any in-flight
+drag; row-indexed selection/hover/armed presses are dropped so a press can
+never complete against a replacing row). `switchboard_ipc` gained the two
+owner-directed requests (`ActivateOwner`/`RestartOwner` — the session owns
+the window stack, so the panel asks it), a publish reply attesting the
+session's `ProcId`, and the per-instance `command_endpoint_for` command
+mailbox (`OpenPanel`, and the `SeatReport` naming the owners the session's
+delivery evidence proves unresponsive), every frame fuzzed and fail-closed.
+The capsule's tap opens the task list and a 500 ms hold opens recovery (the
+interim pin-on-press API is gone). Task/job/recovery actions are real:
+`signal`'s target rule widened in place to **own child → same principal →
+`CAP_PROC_CONTROL`** (id 40, administrative ceiling only), with
+`ProcessSignal` split into `resolve_child` + `signal_task` over one delivery
+engine and every cross-principal decision audited (event 4036, `Warn` on
+refusal); an action whose authority the service lacks renders with the
+Authority Mark and is never attempted. Next (T12+): the panel's services
+list and the T13 System menu (session controls, light/dark toggle, System
+Settings) — both blocked on interfaces that do not exist yet, a System
+Information API service-enumeration query and a session power/lock
+interface, so the panel leaves both lists honestly empty rather than
+fabricating rows.
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending
@@ -3208,8 +3230,14 @@ Shipped (headless-testable, model + renderer over injected seams):
   `userland/gui/session` glue (theme registry, taskbar model, catalog
   loading/merging, pin-store ownership + sandboxed icon pipeline, launch
   table, `DesktopShell` event loop / `TaskBridge`, the attested
-  tray-summary relay + `HangTracker` hang detection), plus the
-  `userland/gui/switchboard` monitor service feeding the capsule.
+  tray-summary relay + `HangTracker` hang detection, the owner-directed
+  activate/restart requests served against the live window registry and
+  launch table, and the command mailbox carrying `OpenPanel` + the change-only
+  `SeatReport`), plus the `userland/gui/switchboard` monitor service feeding
+  the capsule and hosting the overview window (one wait over its sample
+  deadline, its command mailbox and — while open — its window events;
+  capability-gated actions that fail closed and report a refusal without
+  ending the session).
 - Two default apps (filesystem browser, terminal emulator) — each a
   host-tested model + renderer plus a live store bundle served over the
   window channel (`plans/APPWIN.md` AW3/AW4; the AW4 `Stream` wait source).
@@ -3829,8 +3857,19 @@ per-app recipes (§2.2).
   denied action fails closed and renders `DeniedByAuthority`, a force action
   carries the destructive-confirmation posture, and the mouse wheel, thumb,
   end buttons, track paging, and keyboard all scroll the active section (offsets
-  are per-section, re-clamped on section switch/resize). 18 host tests. The
-  Reactive Alloy control set is now complete (Stages A–F).
+  are per-section, re-clamped on section switch/resize). An always-visible
+  header band tiles one `Meter` per resource above the tab strip and takes no
+  input; a host opens the panel on a chosen section (`select_section`) and
+  refreshes live data in place (`set_model`, preserving section, per-section
+  scroll, focus and any in-flight drag). 38 host tests. The Reactive Alloy
+  control set is now complete (Stages A–F).
+- **Instruments: `Meter` — DONE.** `lib/controls::meter` draws one resource
+  reading (label, reading text, rounded track tinted by the resource's
+  semantic rail, optional bounded sparkline) over the shared paint core and
+  the shared rail-colour lookup `Card` uses. `MeterValue::Unmeasured` makes an
+  unmeasurable resource unrepresentable as a real zero, so a denied or absent
+  query renders a quiet groove rather than a fabricated `0%`. Read-only: no
+  input, no action. 21 host tests.
 
 ---
 

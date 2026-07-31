@@ -1,17 +1,26 @@
 # Signed-AppInfo manifest source for the Switchboard monitor service
-# (plans/NEW-TASKBAR.md T10). Discovered by the build's app-bundle composer
-# and planted under /System/Services/. The capability list is the bundle's
-# request, intersected with the launching user's ceiling at spawn:
-# CAP_CONSOLE_WRITE (the fail-loud stderr reason on every abnormal exit),
-# CAP_SYSINFO_GLOBAL (the system-wide process list — an ordinary user's
-# ceiling yields none of it, so the sampler degrades to self-scope), and
-# CAP_SYSINFO_KERNEL (the audited memory-pressure query — degrades to no
-# memory-pressure signal without it). The service requests no filesystem,
-# spawn, or network authority: it only samples through the ungated/gated
-# sysinfo queries and posts to the seat-scoped SWITCHBOARD_ENDPOINT the
-# desktop session itself binds.
+# (plans/NEW-TASKBAR.md T10/T11). Discovered by the build's app-bundle
+# composer and planted under /System/Services/. The capability list is the
+# bundle's request, intersected with the launching user's ceiling at spawn:
+# CAP_CONSOLE_WRITE (the fail-loud stderr reason on every abnormal exit and
+# every refused action), CAP_SYSINFO_GLOBAL (the system-wide process list —
+# an ordinary user's ceiling yields none of it, so the sampler degrades to
+# self-scope), CAP_SYSINFO_KERNEL (the audited memory-pressure query —
+# degrades to no memory-pressure signal without it), CAP_SHM (create and
+# grant the zero-copy frame region the desktop session maps for the live
+# overview window, exactly as any other windowed app), and CAP_PROC_CONTROL
+# (deliver a control signal to a task this service did not spawn — the
+# overview's Force action on an unresponsive owner; the kernel still rules
+# out own-child and same-uid first and audits the decision). Without
+# CAP_PROC_CONTROL the Force control simply renders refused and is never
+# attempted.
+#
+# The service requests no filesystem, spawn, or network authority: it samples
+# through the ungated/gated sysinfo queries, posts to the seat-scoped
+# SWITCHBOARD_ENDPOINT the desktop session itself binds, and asks that
+# session — never the kernel directly — to raise or re-launch an owner.
 id = "os.tairix.switchboard"
 name = "switchboard"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SHM", "CAP_PROC_CONTROL"]

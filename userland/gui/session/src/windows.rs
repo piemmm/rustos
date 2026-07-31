@@ -755,18 +755,20 @@ mod tests {
                      compositor: &mut Compositor,
                      at: Point|
          -> crate::ShellOutcome {
-            shell.handle(InputEvent::PointerMoved { to: at }, compositor);
+            shell.handle(InputEvent::PointerMoved { to: at }, compositor, 0);
             shell.handle(
                 InputEvent::PointerPressed {
                     button: PointerButton::Primary,
                 },
                 compositor,
+                0,
             );
             shell.handle(
                 InputEvent::PointerReleased {
                     button: PointerButton::Primary,
                 },
                 compositor,
+                0,
             )
         };
 

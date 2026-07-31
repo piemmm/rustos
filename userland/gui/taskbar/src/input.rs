@@ -6,8 +6,8 @@
 //! and drives the model — opening the program-library popup, reporting the
 //! Files button, applying the click-to-activate / minimise rule to a task,
 //! or reporting a press on the clock. A press on a status signal is claimed
-//! but inert (a live readout, not an action target this stage), and a press
-//! on an open notification popover dismisses the card it lands on.
+//! but inert (it is a live readout, not an action target), and a press on an
+//! open notification popover dismisses the card it lands on.
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
 //! consumes the **same** shared [`tairix_input`] event vocabulary, so the
@@ -35,14 +35,20 @@
 //! click.
 //!
 //! The Switchboard capsule at the trailing end has its own quiet
-//! microinteractions: a primary press pins its readout open (and a primary
-//! press anywhere else releases the pin before acting as usual — collapsing
-//! an informational readout is never the click's action), a press inside
-//! the open readout is claimed inert exactly like the notification
-//! popover's chrome, scrolling over the capsule or its readout cycles the
-//! task list, and a middle press over the capsule switches back to the
+//! microinteractions: a primary press and quick release opens Switchboard's
+//! running-task section, while a press held past [`LONG_PRESS_AFTER_NS`]
+//! opens its Recovery section instead — resolved at whichever event the
+//! router next handles once the threshold has elapsed (ordinarily a motion
+//! sample taken while the press is still held, or the release itself when
+//! none arrives sooner), never by polling or sleeping. A press that drags
+//! off the capsule before release fires nothing (fail closed), and a long
+//! press that already fired never also fires the quick-click response on
+//! release. The open readout's "Open Switchboard" safe action reaches the
+//! same task destination. Scrolling over the capsule or its readout cycles
+//! the task list, and a middle press over the capsule switches back to the
 //! previous task.
 
+use tairix_controls::{Section, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
@@ -53,6 +59,17 @@ use crate::menu::{MenuChoice, MenuOutcome};
 use crate::pins::PinView;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
+
+/// How long a primary press on the Switchboard capsule must be held before
+/// it resolves as a long press (opening Recovery) rather than a quick click
+/// (opening the ordinary running-task section), in monotonic nanoseconds.
+///
+/// Half a second is long enough that an ordinary click never crosses it by
+/// accident, short enough that a deliberate hold reads as immediate. The
+/// router never sleeps or polls to detect the crossing: it compares the
+/// caller-supplied monotonic time against the press's own start time on
+/// whichever event next arrives (a motion, or the eventual release).
+pub const LONG_PRESS_AFTER_NS: u64 = 500_000_000;
 
 /// What a [`TaskbarInput`] event did to the taskbar.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,16 +132,38 @@ pub enum TaskbarResponse {
         /// The catalog identifier of the entry to pin.
         entry: EntryId,
     },
+    /// A gesture on the Switchboard capsule (or the readout's "Open
+    /// Switchboard" safe action) asked to open the Switchboard window at a
+    /// section. The embedder asks the Switchboard service to open — or, on
+    /// a dead service, revive and open — its window there.
+    OpenSwitchboard {
+        /// Which section the window should open showing.
+        section: Section,
+    },
 }
 
 /// Routes device input into [`Taskbar`] actions.
 ///
 /// The router's only state is the current pointer position, updated by
-/// [`InputEvent::PointerMoved`]; presses act at that position, exactly as a
-/// real pointing device reports motion separately from clicks.
+/// [`InputEvent::PointerMoved`], and an in-progress Switchboard capsule
+/// press; presses act at that position, exactly as a real pointing device
+/// reports motion separately from clicks.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarInput {
     pointer: Point,
+    capsule_press: Option<CapsulePress>,
+}
+
+/// An in-progress primary press on the Switchboard capsule, tracked so a
+/// hold past [`LONG_PRESS_AFTER_NS`] opens Recovery exactly once, while a
+/// quick release opens the ordinary Overview section instead.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct CapsulePress {
+    /// The monotonic time the press began, in nanoseconds.
+    started_ns: u64,
+    /// Whether the long-press response already fired for this press, so
+    /// the matching release cannot also fire the quick-click response.
+    long_fired: bool,
 }
 
 impl TaskbarInput {
@@ -141,8 +180,9 @@ impl TaskbarInput {
     }
 
     /// Process one input `event` against `taskbar`, hit-testing at the
-    /// desktop `scale` (the compositor's output density), returning what
-    /// changed.
+    /// desktop `scale` (the compositor's output density) and resolving any
+    /// time-driven Switchboard capsule gesture against the monotonic time
+    /// `now_ns`, returning what changed.
     ///
     /// With the popup and menu closed only a primary or secondary press
     /// acts; pointer motion updates the tracked position (and the bar's
@@ -155,10 +195,14 @@ impl TaskbarInput {
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
+        now_ns: u64,
     ) -> TaskbarResponse {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = to;
             taskbar.track_hover(to, scale);
+            if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
+                return response;
+            }
         }
         if taskbar.menu().is_open() {
             return self.route_to_menu(event, taskbar, scale);
@@ -168,28 +212,45 @@ impl TaskbarInput {
         }
         // The notification popover and the Switchboard readout are
         // non-modal: unlike the menu and library popup they do not swallow
-        // the whole stream. A primary press that lands on the popover
-        // dismisses the card it hits (or is claimed harmlessly on the
-        // panel's chrome); one that lands inside the open readout is claimed
-        // inert. Either way the press neither acts on the bar beneath nor
-        // reaches the windows below; every other event routes on as usual.
+        // the whole stream. A primary press or release that lands on the
+        // popover dismisses the card it hits (or is claimed harmlessly on
+        // the panel's chrome); one that lands inside the open readout
+        // drives its "Open Switchboard" safe action. Either way the click
+        // neither acts on the bar beneath nor reaches the windows below;
+        // every other event routes on as usual.
         if matches!(
             event,
             InputEvent::PointerPressed {
                 button: PointerButton::Primary
+            } | InputEvent::PointerReleased {
+                button: PointerButton::Primary
             }
         ) {
-            if let Some(response) = self.press_notification(taskbar, scale) {
-                return response;
+            if let InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            } = event
+            {
+                if let Some(response) = self.press_notification(taskbar, scale) {
+                    return response;
+                }
             }
             if self.over_tray_readout(taskbar, scale) {
-                return TaskbarResponse::Ignored;
+                // The readout claims this click, so a capsule press the bar
+                // re-laid out from under is abandoned here rather than left
+                // armed to resolve on some later release.
+                self.capsule_press = None;
+                return match taskbar.tray_pointer(&event, scale) {
+                    Some(TraySignalAction::Activated) => TaskbarResponse::OpenSwitchboard {
+                        section: Section::Tasks,
+                    },
+                    None => TaskbarResponse::Ignored,
+                };
             }
         }
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
-            } => self.press_primary(taskbar, scale),
+            } => self.press_primary(taskbar, scale, now_ns),
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             } => self.press_secondary(taskbar, scale),
@@ -197,6 +258,9 @@ impl TaskbarInput {
                 button: PointerButton::Middle,
             } => self.press_middle(taskbar, scale),
             InputEvent::PointerScrolled { dx, dy } => self.scroll_tasks(taskbar, scale, dx, dy),
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => self.release_primary(now_ns),
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerReleased { .. }
             | InputEvent::KeyPressed { .. }
@@ -204,20 +268,55 @@ impl TaskbarInput {
         }
     }
 
+    /// While a primary press on the Switchboard capsule is in progress,
+    /// check the pointer's latest motion against it. Dragging off the
+    /// capsule cancels the gesture (fail closed — it fires nothing, on this
+    /// event or the eventual release); motion sampled once
+    /// [`LONG_PRESS_AFTER_NS`] has elapsed resolves it to Recovery
+    /// immediately, without waiting for release. A press already resolved
+    /// this way is left alone until release clears it.
+    fn continue_capsule_press(
+        &mut self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        now_ns: u64,
+    ) -> Option<TaskbarResponse> {
+        let press = self.capsule_press?;
+        if press.long_fired {
+            return None;
+        }
+        if taskbar.hit_test(self.pointer, scale) != Some(Hit::Switchboard) {
+            self.capsule_press = None;
+            return None;
+        }
+        if now_ns.saturating_sub(press.started_ns) < LONG_PRESS_AFTER_NS {
+            return None;
+        }
+        self.capsule_press = Some(CapsulePress {
+            long_fired: true,
+            ..press
+        });
+        Some(TaskbarResponse::OpenSwitchboard {
+            section: Section::Recovery,
+        })
+    }
+
     /// Handle a primary-button press at the current pointer position with
     /// the popup closed, hit-tested at the desktop `scale`.
     ///
-    /// A press that is not on the Switchboard capsule first releases a
-    /// pinned readout — collapsing an informational readout is not an
-    /// action, so the press still acts on whatever it landed on (one click
-    /// does one thing).
-    fn press_primary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
-        let hit = taskbar.hit_test(self.pointer, scale);
-        if hit != Some(Hit::Switchboard) && taskbar.tray().is_pinned() {
-            taskbar.tray_mut().set_pinned(false);
-            taskbar.request_repaint();
-        }
-        let Some(hit) = hit else {
+    /// A press on the Switchboard capsule begins tracking a tap-or-hold
+    /// gesture rather than acting immediately — [`release_primary`] and
+    /// [`continue_capsule_press`] resolve it; every other hit acts as usual.
+    ///
+    /// [`release_primary`]: Self::release_primary
+    /// [`continue_capsule_press`]: Self::continue_capsule_press
+    fn press_primary(
+        &mut self,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+        now_ns: u64,
+    ) -> TaskbarResponse {
+        let Some(hit) = taskbar.hit_test(self.pointer, scale) else {
             return TaskbarResponse::Ignored;
         };
         match hit {
@@ -234,20 +333,48 @@ impl TaskbarInput {
                 let outcome = taskbar.tasks_mut().activate(id);
                 TaskbarResponse::TaskActivated { id, outcome }
             }
-            // A status signal is a live readout, not an action target this
-            // stage: a press is claimed but does nothing (its interactive
-            // treatment arrives with the live tray-signal feed).
+            // A status signal is a live readout, not an action target: the
+            // press is claimed so it never falls through to the window
+            // beneath, but it does nothing.
             Hit::Notification(_) => TaskbarResponse::Ignored,
             Hit::Clock => TaskbarResponse::ClockPressed,
-            // Pressing the capsule toggles the readout pin and nothing
-            // else: the readout is presentation, and the Switchboard
-            // overview window this press will eventually raise arrives
-            // with a later stage (`plans/NEW-TASKBAR.md`).
             Hit::Switchboard => {
-                taskbar.tray_mut().toggle_pinned();
-                taskbar.request_repaint();
+                self.capsule_press = Some(CapsulePress {
+                    started_ns: now_ns,
+                    long_fired: false,
+                });
                 TaskbarResponse::Ignored
             }
+        }
+    }
+
+    /// Resolve a primary release against any in-progress Switchboard
+    /// capsule press, at the monotonic time `now_ns`.
+    ///
+    /// A press that already resolved to Recovery (or that dragged off the
+    /// capsule and was cancelled by [`continue_capsule_press`]) fires
+    /// nothing on release — one gesture reports exactly one response. A
+    /// press still in progress opens the running-task section, unless the
+    /// hold has itself crossed the long-press threshold with no intervening
+    /// motion to have caught it, in which case release is the first event to
+    /// resolve it and it opens Recovery instead. A release with no
+    /// in-progress capsule press changes nothing.
+    ///
+    /// [`continue_capsule_press`]: Self::continue_capsule_press
+    fn release_primary(&mut self, now_ns: u64) -> TaskbarResponse {
+        let Some(press) = self.capsule_press.take() else {
+            return TaskbarResponse::Ignored;
+        };
+        if press.long_fired {
+            return TaskbarResponse::Ignored;
+        }
+        if now_ns.saturating_sub(press.started_ns) >= LONG_PRESS_AFTER_NS {
+            return TaskbarResponse::OpenSwitchboard {
+                section: Section::Recovery,
+            };
+        }
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Tasks,
         }
     }
 

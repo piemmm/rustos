@@ -3,16 +3,19 @@
 //!
 //! [`ProcessSignal`] is the one object-safe boundary between the
 //! arch-neutral syscall handler in `kernel/core` and the scheduler-side
-//! producer that delivers a control signal to one of the sender's children.
-//! Like the [`ProcessWait`],
-//! [`ArchImageBuilder`](crate::spawn::ArchImageBuilder), and
+//! producer that delivers a control signal. It carries the two halves
+//! separately — resolving a pid against the sender's own children, and
+//! delivering to an already-authorised target — because who may signal whom
+//! is decided by the syscall handler alone (own child, else the target's own
+//! principal, else `CAP_PROC_CONTROL`, `plans/NEW-TASKBAR.md` T11). Like the
+//! [`ProcessWait`], [`ArchImageBuilder`](crate::spawn::ArchImageBuilder), and
 //! [`MemMap`](crate::memmap::MemMap) seams, the concrete producer is
 //! installed at boot through the `with_process_signal` builder and the
 //! handler reaches it through this trait.
 //!
 //! Until a producer is installed the handler holds [`NULL_PROCESS_SIGNAL`],
-//! which fails closed: every `signal` returns [`Errno::NotImplemented`],
-//! never pretending a signal was delivered — exactly as
+//! which fails closed: both halves return [`Errno::NotImplemented`], never
+//! pretending a signal was delivered — exactly as
 //! [`NULL_PROCESS_WAIT`](crate::procwait::NULL_PROCESS_WAIT) does for
 //! `wait`. The scheduler-side producer that actually delivers the signal is
 //! [`KernelProcessSignal`] (`plans/SPAWN.md` `SP7b`), installed at boot in
@@ -555,27 +558,46 @@ pub fn drain_pending_foreground() -> bool {
 
 /// The kernel-side producer of the `signal` syscall.
 ///
-/// Implemented by the scheduler-side producer that authorises the target
-/// against the sender's own children (a process may signal only children it
-/// spawned) and delivers the control signal. Implementations must be [`Sync`]:
-/// the single installed producer is shared by the per-CPU syscall handlers,
-/// exactly like the process-wait producer, the spawn producer, and the
-/// console device.
+/// Authority and mechanism are separate halves of this contract: the
+/// producer answers *which live task a pid names among the sender's own
+/// children* ([`Self::resolve_child`]) and *how a signal reaches a target*
+/// ([`Self::signal_task`]), and the syscall handler decides between the
+/// widening rules (own child, same principal, `CAP_PROC_CONTROL`) in one
+/// place. A producer therefore carries no policy of its own and can never
+/// widen the target rule behind the handler's back.
+///
+/// Implementations must be [`Sync`]: the single installed producer is shared
+/// by the per-CPU syscall handlers, exactly like the process-wait producer,
+/// the spawn producer, and the console device.
 pub trait ProcessSignal: Sync {
-    /// Deliver `signal` to the child selected by `pid` on behalf of `sender`.
+    /// Resolve `pid` to the **live** child of `sender` it names.
     ///
-    /// `sender` is the kernel-attested identity of the calling task (supplied
-    /// by the dispatcher, never by the caller), and `pid` names a child the
-    /// sender spawned. The implementation validates the parent/child
-    /// relationship — a process may signal only its **own** children — and
-    /// fails closed.
+    /// `sender` is the kernel-attested identity of the calling task
+    /// (supplied by the dispatcher, never by the caller). Only a child the
+    /// sender spawned and that is still running resolves; a zombie awaiting
+    /// reap, another parent's child, and an unknown `pid` all do not.
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::NotFound`] when `pid` does not name a child of
-    /// `sender`. The default producer ([`NullProcessSignal`]) returns
-    /// [`Errno::NotImplemented`] to mark an inert interface.
-    fn signal(&self, sender: TaskId, pid: i32, signal: Signal) -> Result<(), Errno>;
+    /// [`Errno::NotFound`] when `pid` does not name a live child of
+    /// `sender` — the answer that sends the handler on to its
+    /// cross-principal rule. The default producer ([`NullProcessSignal`])
+    /// returns [`Errno::NotImplemented`] to mark an inert interface.
+    fn resolve_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno>;
+
+    /// Deliver `signal` to an **already-authorised** `target`.
+    ///
+    /// Mechanism only: this performs no ownership or capability check, so
+    /// the caller must have established the sender's authority over
+    /// `target` first.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when the scheduler no longer knows `target` (it
+    /// exited between authorisation and delivery). The default producer
+    /// ([`NullProcessSignal`]) returns [`Errno::NotImplemented`] to mark an
+    /// inert interface.
+    fn signal_task(&self, target: TaskId, signal: Signal) -> Result<(), Errno>;
 }
 
 /// The process-signal producer installed before any real one exists.
@@ -588,7 +610,11 @@ pub trait ProcessSignal: Sync {
 pub struct NullProcessSignal;
 
 impl ProcessSignal for NullProcessSignal {
-    fn signal(&self, _sender: TaskId, _pid: i32, _signal: Signal) -> Result<(), Errno> {
+    fn resolve_child(&self, _sender: TaskId, _pid: i32) -> Result<TaskId, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn signal_task(&self, _target: TaskId, _signal: Signal) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -604,8 +630,8 @@ pub static NULL_PROCESS_SIGNAL: NullProcessSignal = NullProcessSignal;
 /// The scheduler-side `signal` producer the boot path installs
 /// (`plans/SPAWN.md` `SP7b`).
 ///
-/// It carries **no bookkeeping of its own**: it authorises the target and
-/// records a signalled termination through the one
+/// It carries **no bookkeeping of its own**: it resolves the sender's own
+/// children and records a signalled termination through the one
 /// [`KernelProcessWait`] that already
 /// owns the parent/child + exit-status table (the `wait` producer), so the
 /// two syscalls share a single source of truth for who parents whom and how
@@ -634,7 +660,7 @@ where
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
     /// The `wait` producer that owns the parent/child bookkeeping this
-    /// producer authorises and records against — never a second copy.
+    /// producer resolves and records against — never a second copy.
     wait: &'static KernelProcessWait<A>,
     /// The live scheduler this producer drives to deliver a signal
     /// (unpark / exit the target task).
@@ -653,8 +679,8 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    /// Build a producer that authorises and records against `wait` and
-    /// delivers through `scheduler`.
+    /// Build a producer that resolves children and records against `wait`
+    /// and delivers through `scheduler`.
     #[must_use]
     pub const fn new(wait: &'static KernelProcessWait<A>, scheduler: &'static P) -> Self {
         Self {
@@ -823,6 +849,37 @@ where
             hook.reclaim(child.0);
         }
     }
+
+    /// The one delivery engine: apply `signal` to an already-authorised
+    /// `target`.
+    ///
+    /// Both entry points into this producer end here — the `signal`
+    /// syscall's [`ProcessSignal::signal_task`] and the console line
+    /// discipline's [`ForegroundSignal::deliver`] — so a `^C` and a
+    /// parent's `Terminate` take exactly the same path and can never
+    /// diverge. Authority is decided by each caller before it arrives:
+    /// nothing here consults the parent/child table or a capability.
+    fn deliver_signal(&self, target: TaskId, signal: Signal) -> Result<(), Errno> {
+        match signal {
+            Signal::Continue => self.resume(target),
+            // A termination *request* is observable: an opted-in target with
+            // a free pending slot records it instead of dying (the recorded
+            // delivery is complete — the target's waiter is woken to drain
+            // it). A target that never opted in, or whose slot is already
+            // occupied (the escalation rule), terminates by default.
+            Signal::Terminate | Signal::Interrupt => {
+                if try_intake(target.0, signal) {
+                    Ok(())
+                } else {
+                    self.terminate(target, signal)
+                }
+            }
+            // `Kill` is unconditionally fatal and unmaskable: it is never
+            // offered to the intake.
+            Signal::Kill => self.terminate(target, signal),
+            Signal::Stop => self.stop(target),
+        }
+    }
 }
 
 impl<A, P> DeferredKillLander for KernelProcessSignal<A, P>
@@ -854,30 +911,15 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn signal(&self, sender: TaskId, pid: i32, signal: Signal) -> Result<(), Errno> {
-        // Authorise before touching any scheduler state: a process may signal
-        // only a live child it spawned. This shares the `wait`
-        // producer's bookkeeping, so authority is decided in one place.
-        let child = self.wait.authorise_child(sender, pid)?;
-        match signal {
-            Signal::Continue => self.resume(child),
-            // A termination *request* is observable: an opted-in child with
-            // a free pending slot records it instead of dying (the recorded
-            // delivery is complete — the child's waiter is woken to drain
-            // it). A child that never opted in, or whose slot is already
-            // occupied (the escalation rule), terminates by default.
-            Signal::Terminate | Signal::Interrupt => {
-                if try_intake(child.0, signal) {
-                    Ok(())
-                } else {
-                    self.terminate(child, signal)
-                }
-            }
-            // `Kill` is unconditionally fatal and unmaskable: it is never
-            // offered to the intake.
-            Signal::Kill => self.terminate(child, signal),
-            Signal::Stop => self.stop(child),
-        }
+    fn resolve_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno> {
+        // The `wait` producer already owns the parent/child bookkeeping, so
+        // who-parents-whom is answered in one place for both syscalls. A
+        // live child of `sender` resolves; anything else is `NotFound`.
+        self.wait.authorise_child(sender, pid)
+    }
+
+    fn signal_task(&self, target: TaskId, signal: Signal) -> Result<(), Errno> {
+        self.deliver_signal(target, signal)
     }
 }
 
@@ -890,24 +932,16 @@ where
         // No parent/child authorisation here: the authority was checked when
         // the parent marked the target foreground on its own console, and
         // the console line discipline is the kernel acting on the terminal
-        // owner's standing instruction. The delivery itself still fails
+        // owner's standing instruction.
+        //
+        // The line discipline maps only `^C`/`^Z`; any other signal on this
+        // path is a programming error refused outright. What it does map
+        // goes through the one shared delivery engine, so a `^C` and a
+        // parent's `Interrupt` behave identically (including the observable
+        // intake and its escalation rule) and the delivery still fails
         // closed on a target the scheduler no longer knows.
         match signal {
-            // The foreground `^C` is a termination *request* like a
-            // parent's `Terminate`: an opted-in target with a free pending
-            // slot observes it; otherwise (never opted in, or a second `^C`
-            // while one is pending undrained — the escalation rule) the
-            // default terminate runs.
-            Signal::Interrupt => {
-                if try_intake(target.0, Signal::Interrupt) {
-                    Ok(())
-                } else {
-                    self.terminate(target, Signal::Interrupt)
-                }
-            }
-            Signal::Stop => self.stop(target),
-            // The line discipline maps only `^C`/`^Z`; any other signal on
-            // this path is a programming error refused outright.
+            Signal::Interrupt | Signal::Stop => self.deliver_signal(target, signal),
             Signal::Continue | Signal::Terminate | Signal::Kill => Err(Errno::OutOfRange),
         }
     }
@@ -1021,10 +1055,32 @@ mod tests {
         (id, i32::try_from(id).expect("host task id fits i32"))
     }
 
+    /// Drive the two halves of the producer in the order the syscall
+    /// handler drives them for a signal aimed at the sender's own child:
+    /// resolve the pid against the sender's children, then deliver.
+    ///
+    /// Every cross-principal rule is the handler's, so it is exercised
+    /// against the handler; these producer-level tests cover the own-child
+    /// path and the delivery mechanics.
+    fn signal_child(
+        signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>>,
+        sender: TaskId,
+        pid: i32,
+        signal: Signal,
+    ) -> Result<(), Errno> {
+        let target = signaller.resolve_child(sender, pid)?;
+        signaller.signal_task(target, signal)
+    }
+
     #[test]
     fn null_process_signal_fails_closed() {
-        // Every variant of the closed signal set fails closed on the inert
-        // default rather than pretending it was delivered.
+        // Neither half of the inert default answers: it resolves no target
+        // and delivers to none, rather than pretending either succeeded.
+        assert_eq!(
+            NULL_PROCESS_SIGNAL.resolve_child(TaskId(1), 2),
+            Err(Errno::NotImplemented)
+        );
+        // Every variant of the closed signal set fails closed on delivery.
         for signal in [
             Signal::Continue,
             Signal::Terminate,
@@ -1033,7 +1089,7 @@ mod tests {
             Signal::Stop,
         ] {
             assert_eq!(
-                NULL_PROCESS_SIGNAL.signal(TaskId(1), 2, signal),
+                NULL_PROCESS_SIGNAL.signal_task(TaskId(2), signal),
                 Err(Errno::NotImplemented)
             );
         }
@@ -1043,20 +1099,20 @@ mod tests {
     fn signalling_a_non_child_fails_closed() {
         let (wait, scheduler) = scaffold();
         let signaller = KernelProcessSignal::new(wait, scheduler);
-        // A caller with no children signals nothing.
+        // A caller with no children resolves nothing to signal.
         assert_eq!(
-            signaller.signal(TaskId(1), 2, Signal::Terminate),
+            signal_child(&signaller, TaskId(1), 2, Signal::Terminate),
             Err(Errno::NotFound)
         );
         // A live task that is not *this* caller's child is off-limits: task 9
-        // may not signal task 7's child.
+        // may not reach task 7's child through the child rule.
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
         assert_eq!(
-            signaller.signal(TaskId(9), child_pid, Signal::Kill),
+            signal_child(&signaller, TaskId(9), child_pid, Signal::Kill),
             Err(Errno::NotFound)
         );
-        // The child was untouched by the denied signal.
+        // The child was untouched by the unresolved signal.
         assert_eq!(scheduler.live_task_count(), 1);
     }
 
@@ -1069,7 +1125,7 @@ mod tests {
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // The child was terminated on the scheduler.
@@ -1112,7 +1168,10 @@ mod tests {
         // regression this pins down is a killed writer leaving its volume's
         // lock held forever, deadlocking every later filesystem call.
         syscall_enter(child);
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         // The child was not destroyed mid-handler: it is still live on the
         // scheduler, the kill is pending against it, and the parent cannot
         // reap it yet.
@@ -1137,14 +1196,17 @@ mod tests {
 
         syscall_enter(child);
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // A follow-up `Kill` against the already-doomed child changes
         // nothing: it dies at the same boundary, with the first request's
         // status — matching the immediate path, where a second signal finds
         // the child already gone.
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         assert_eq!(syscall_exit_take_kill(child), Some(Signal::Terminate));
         assert_eq!(scheduler.live_task_count(), 1);
     }
@@ -1179,7 +1241,10 @@ mod tests {
             .install_task_reclaim(&RecordingReclaim)
             .expect("first install on this producer");
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         assert!(RECLAIMED.lock().contains(&child));
     }
 
@@ -1436,7 +1501,10 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         let pid = u32::try_from(child).expect("host task id fits u32");
         // Kill surfaces as SIGKILL's familiar 137, distinct from Terminate.
         assert_eq!(
@@ -1457,7 +1525,7 @@ mod tests {
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
@@ -1480,7 +1548,10 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Stop), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            Ok(())
+        );
         // The stop overlay holds the child, so no broadcast wake can run it.
         assert!(task_is_stopped(child));
         // The child is still live (stopped, not terminated) …
@@ -1500,7 +1571,7 @@ mod tests {
         );
         // Continue lifts the overlay and resumes the child.
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
             Ok(())
         );
         assert!(!task_is_stopped(child));
@@ -1515,9 +1586,12 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Stop), Ok(()));
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            Ok(())
+        );
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
             Ok(())
         );
         // The unobserved stop was cleared by the resume: nothing to report.
@@ -1540,9 +1614,15 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Stop), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            Ok(())
+        );
         assert!(task_is_stopped(child));
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         // The dead child leaves no stale overlay entry behind.
         assert!(!task_is_stopped(child));
         // The terminal exit superseded the unobserved stop.
@@ -1627,7 +1707,7 @@ mod tests {
         // The child is runnable, not stopped, so Continue succeeds as a no-op
         // (it neither terminates the child nor records an exit).
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1722,7 +1802,7 @@ mod tests {
         // The interrupt is recorded, not delivered as a termination: the
         // child stays live and nothing becomes reapable.
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1733,7 +1813,10 @@ mod tests {
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         // `Kill` is unconditionally fatal regardless of the opt-in and
         // reaps with SIGKILL's familiar 137.
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            Ok(())
+        );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
             wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
@@ -1757,7 +1840,7 @@ mod tests {
 
         intake_enable(child);
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1765,7 +1848,7 @@ mod tests {
         // child with the `^C` 130 — an unresponsive opted-in program stays
         // killable with plain `^C ^C`.
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
@@ -1814,13 +1897,13 @@ mod tests {
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // Once terminated the child is a zombie awaiting reap, not a live
         // process: a second signal fails closed rather than re-terminating it.
         assert_eq!(
-            signaller.signal(TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
             Err(Errno::NotFound)
         );
     }

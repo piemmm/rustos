@@ -34,6 +34,30 @@ pub(crate) const fn pressure_role(kind: PressureKind) -> SignalRole {
     }
 }
 
+/// The theme's signal colour for a resource `kind` — the Pressure Rail hue
+/// every family shares, whether the rail is conditional (a row or card shows
+/// it only while genuinely under pressure, see [`resolve_rail`]) or a
+/// control's own fixed identity (a resource meter, which always reads as
+/// that resource regardless of how loaded it is).
+#[must_use]
+pub(crate) fn signal_color(theme: &Theme, kind: PressureKind) -> Color {
+    Color::from(theme.palette().signal(pressure_role(kind)))
+}
+
+/// The full-scale value of a measured control, in permille.
+pub(crate) const FULL: u16 = 1000;
+
+/// Clamp a permille value into `0..=1000` (fail closed on an out-of-range
+/// request).
+#[must_use]
+pub(crate) const fn clamp_permille(v: u16) -> u16 {
+    if v > FULL {
+        FULL
+    } else {
+        v
+    }
+}
+
 /// Whether the theme asks for the heavier-contrast treatment (thicker rim,
 /// stronger marks) — high-contrast or monochrome-safe.
 #[must_use]
@@ -349,9 +373,7 @@ pub(crate) fn resolve_mark(theme: &Theme, role: ControlRole, state: ControlState
 #[must_use]
 pub(crate) fn resolve_rail(theme: &Theme, state: ControlState) -> Option<Color> {
     match state.pressure {
-        PressureState::Under(kind) => {
-            Some(Color::from(theme.palette().signal(pressure_role(kind))))
-        }
+        PressureState::Under(kind) => Some(signal_color(theme, kind)),
         PressureState::None => None,
     }
 }

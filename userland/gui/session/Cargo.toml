@@ -64,9 +64,13 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # its listing at the theme's font size, so it resolves the `BitmapFont` it
 # hands to `tairix_browse::render` (§2.2).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared control vocabulary (plans/NEW-TASKBAR.md T11): the Switchboard
+# command-channel glue relays the `Section` the taskbar's own capsule
+# gesture already chose onto the wire, rather than re-deciding which panel
+# section a press opens on a second time.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 
 [dev-dependencies]
-tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The shared help engine's required-locale registry: the `cli` module's
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).

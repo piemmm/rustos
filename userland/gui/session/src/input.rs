@@ -24,10 +24,7 @@
 //!   press goes to the window manager. The two never both act on one press,
 //!   so a click on the bar or a notification card never also activates a
 //!   window behind it. The popovers open outward from the bar and never
-//!   overlap it, so the taskbar surfaces never contend for a press. A press
-//!   away from the bar additionally *releases* a pinned readout — pure
-//!   presentation state, like hover, so the press still performs its one
-//!   window-manager action.
+//!   overlap it, so the taskbar surfaces never contend for a press.
 //! * **A middle press routes to the taskbar over the bar or a popover**
 //!   (over the Switchboard capsule it switches to the previous task) and is
 //!   ignored elsewhere — the window manager has no middle-button action.
@@ -37,10 +34,15 @@
 //! * **Pointer motion is fanned to both routers** so their tracked pointer
 //!   positions stay in step (a press is hit-tested at the last motion's
 //!   position). The window manager acts on motion to drag a grabbed window;
-//!   the taskbar only refreshes its hover feedback.
-//! * **A primary release goes to the window manager**, which ends an
-//!   in-flight move-grab; the taskbar ignores releases while its popup is
-//!   closed.
+//!   the taskbar refreshes its hover feedback and resolves a Switchboard
+//!   capsule press already held past its long-press threshold, which is a
+//!   real action and so outranks the drag when it fires.
+//! * **A primary release is offered to the taskbar first**, because a quick
+//!   press on the Switchboard capsule resolves on release; only a release
+//!   the taskbar does not claim goes to the window manager, which ends an
+//!   in-flight move-grab. The two can never contend: a grab exists only
+//!   when the press went to the window manager, and the taskbar has no
+//!   gesture in flight then.
 //! * **Key events go to the window manager**, which delivers them to the
 //!   focused window; the taskbar takes keyboard input only while its popup
 //!   is open.
@@ -156,25 +158,26 @@ impl SessionInputRouter {
         self.wm.begin_move(compositor)
     }
 
-    /// Route one input `event` to the taskbar or the window manager, returning
-    /// what changed.
+    /// Route one input `event` to the taskbar or the window manager,
+    /// resolving any time-driven taskbar gesture against the monotonic
+    /// `now_ns`, and return what changed.
     ///
     /// While the taskbar's context menu or the program-library popup is open
     /// every event routes to the taskbar (both surfaces are modal).
     /// Otherwise a press goes to whichever router claims the pointer (the
     /// taskbar when the pointer is over the bar or one of its open popovers,
-    /// the window manager otherwise — releasing a pinned readout on the
-    /// way); a scroll over the Switchboard capsule or its readout cycles
-    /// tasks in the taskbar while any other scroll goes to the window
-    /// manager; motion is fanned to both so their pointers stay in step and
-    /// the window manager can drag a grabbed window; a release goes to the
-    /// window manager to end a grab. See the [module docs](self) for the
-    /// full policy.
+    /// the window manager otherwise); a scroll over the Switchboard capsule
+    /// or its readout cycles tasks in the taskbar while any other scroll
+    /// goes to the window manager; motion is fanned to both so their
+    /// pointers stay in step and the window manager can drag a grabbed
+    /// window; a primary release is the taskbar's to claim before it ends a
+    /// window-manager grab. See the [module docs](self) for the full policy.
     pub fn handle(
         &mut self,
         event: InputEvent,
         compositor: &mut Compositor,
         taskbar: &mut Taskbar,
+        now_ns: u64,
     ) -> SessionInputResponse {
         // The taskbar hit-tests at the output's density, which the compositor
         // owns; the session reads it here rather than
@@ -190,15 +193,23 @@ impl SessionInputRouter {
             if matches!(event, InputEvent::PointerMoved { .. }) {
                 let _ = self.wm.handle(event, compositor);
             }
-            return taskbar_response(self.taskbar.handle(event, taskbar, scale));
+            return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
         }
         match event {
             InputEvent::PointerMoved { .. } => {
                 // Keep both routers' tracked pointer in step; the window
                 // manager acts on motion (dragging a grabbed window) and the
-                // taskbar refreshes its hover feedback.
-                self.taskbar.handle(event, taskbar, scale);
-                wm_response(self.wm.handle(event, compositor))
+                // taskbar refreshes its hover feedback. Motion is also when
+                // a capsule press held past its threshold resolves, and that
+                // is a real action: it takes the outcome, while the drag
+                // still applied.
+                let acted = self.taskbar.handle(event, taskbar, scale, now_ns);
+                let dragged = self.wm.handle(event, compositor);
+                if matches!(acted, TaskbarResponse::Ignored) {
+                    wm_response(dragged)
+                } else {
+                    taskbar_response(acted)
+                }
             }
             InputEvent::PointerPressed { button } => {
                 // A press belongs to whichever surface owns the pixel under
@@ -209,9 +220,7 @@ impl SessionInputRouter {
                 // capsule's readout — claims presses over it, and the window
                 // manager takes every remaining primary or secondary press.
                 // The popovers open outward and never overlap the bar, so
-                // the taskbar surfaces never contend. A press away from the
-                // bar also releases a pinned readout — presentation state,
-                // like hover, never the press's one action.
+                // the taskbar surfaces never contend.
                 let pointer = self.taskbar.pointer();
                 let on_taskbar = taskbar.hit_test(pointer, scale).is_some()
                     || taskbar
@@ -221,9 +230,8 @@ impl SessionInputRouter {
                         .tray_readout_layout(scale)
                         .is_some_and(|readout| readout.contains(pointer));
                 if on_taskbar {
-                    return taskbar_response(self.taskbar.handle(event, taskbar, scale));
+                    return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
                 }
-                taskbar.release_tray_pin();
                 if matches!(button, PointerButton::Primary | PointerButton::Secondary) {
                     wm_response(self.wm.handle(event, compositor))
                 } else {
@@ -241,19 +249,26 @@ impl SessionInputRouter {
                         .tray_readout_layout(scale)
                         .is_some_and(|readout| readout.contains(pointer));
                 if on_capsule {
-                    taskbar_response(self.taskbar.handle(event, taskbar, scale))
+                    taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns))
                 } else {
                     wm_response(self.wm.handle(event, compositor))
                 }
             }
-            // The window manager takes the rest and the taskbar none of them:
-            // a primary release ends a move-grab and keys go to the focused
-            // window.
+            // A primary release is the taskbar's first: a quick press on the
+            // Switchboard capsule resolves here. One it does not claim ends
+            // an in-flight move-grab in the window manager instead.
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
+            } => match self.taskbar.handle(event, taskbar, scale, now_ns) {
+                TaskbarResponse::Ignored => wm_response(self.wm.handle(event, compositor)),
+                acted => SessionInputResponse::Taskbar(acted),
+            },
+            // Keys go to the window manager, which delivers them to the
+            // focused window; the taskbar takes keyboard input only while one
+            // of its modal surfaces is open, handled above.
+            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. } => {
+                wm_response(self.wm.handle(event, compositor))
             }
-            | InputEvent::KeyPressed { .. }
-            | InputEvent::KeyReleased { .. } => wm_response(self.wm.handle(event, compositor)),
             InputEvent::PointerReleased { .. } => SessionInputResponse::Ignored,
         }
     }

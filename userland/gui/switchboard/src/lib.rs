@@ -31,16 +31,55 @@
 //!   so the service's run loop issues exactly one wait per iteration with a
 //!   timeout equal to "time until the next thing that must happen" —
 //!   tickless, never a busy poll.
+//! * [`command`] — [`command::authenticate_command`], which drops any
+//!   command not attested to the desktop session's identity before it is
+//!   ever decoded, let alone applied.
+//! * [`model`] — [`model::build_model`], the pure function that turns a
+//!   [`sample::Sample`], the rolling [`model::LiveMeters`] state, and the
+//!   session's [`tairix_abi::switchboard_ipc::SeatReport`] into the live
+//!   overview panel's [`tairix_controls::SwitchboardModel`], and
+//!   [`model::apply_action`], which maps the panel's reported
+//!   [`tairix_controls::SwitchboardAction`] back onto the outbound
+//!   [`model::Effect`] it implies.
+//! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
+//!   raise, refresh, close) and effect application.
+//! * [`service`] — [`service::ServiceHost`], the single seam through which
+//!   everything outside this process is reached, and [`service::Service`],
+//!   the run loop's body: sample, derive, record, refresh the panel, and
+//!   publish — every cycle, whether or not a window is open.
+//! * [`wait`] — the wait-set token vocabulary the run loop's single
+//!   multiplexed park covers: its own termination signal, the session's
+//!   command mailbox, and — only while a window is open — that window's
+//!   event mailbox.
 //!
 //! # Honest-data rules
 //!
 //! Every field this crate produces is either a real measurement or an
-//! explicit absence (`None`, or a documented honest zero such as `jobs`,
-//! for which no background-job registry exists in the OS today); nothing
-//! here ever synthesises a plausible-looking value to fill a gap. A denied
-//! or failed query degrades the one field it backs, is noted once (never
-//! spammed) at the layer that has a stream to write to, and the sampler
-//! keeps producing every other field truthfully.
+//! explicit absence (`None`, a [`tairix_controls::MeterValue::Unmeasured`]
+//! meter, or a documented honest zero such as `jobs`); nothing here ever
+//! synthesises a plausible-looking value to fill a gap. A denied or failed
+//! query degrades the one field it backs, is noted once (never spammed) at
+//! the layer that has a stream to write to, and the sampler keeps producing
+//! every other field truthfully.
+//!
+//! Three parts of the overview panel are therefore always empty, because
+//! the interfaces that would fill them do not exist:
+//!
+//! * **Background jobs.** There is no background-job registry anywhere in
+//!   the OS to enumerate, so the tray summary's `jobs` count is an honest
+//!   zero and the panel's Jobs section has no rows.
+//! * **Services.** The System Information API
+//!   ([`tairix_abi::sysinfo`]) has no service-enumeration query — its
+//!   queries cover processes, CPU time, and memory pressure — so the
+//!   Overview section's service list stays empty rather than listing
+//!   guesses drawn from process names.
+//! * **System actions.** There is no power or session-lock interface this
+//!   service may drive, so it offers no shut-down, restart, or lock
+//!   button. Offering one it could not perform would be an action that
+//!   fails at the point of use rather than being honestly absent.
+//!
+//! Disk and network resource rows are absent for the same reason: the
+//! System Information API exposes no throughput query for either.
 //!
 //! # Layering & safety
 //!
@@ -56,14 +95,30 @@
 
 extern crate alloc;
 
+pub mod command;
 pub mod derive;
+pub mod model;
+pub mod panel;
 pub mod publish;
 pub mod sample;
 pub mod schedule;
+pub mod service;
+pub mod wait;
 
-pub use derive::{derive_summary, Hysteresis};
+#[cfg(test)]
+mod test_host;
+
+pub use command::{authenticate_command, is_from_session};
+pub use derive::{derive_summary, memory_pressured, Hysteresis};
+pub use model::{
+    apply_action, build_model, map_section, signal_pid, Effect, LiveMeters, PanelModel,
+};
+pub use panel::{refusal_notice, CommandOutcome, Panel, PANEL_TITLE};
 pub use publish::Publisher;
 pub use sample::{
-    probe_scopes, DegradedField, MemoryPressureSample, Sample, Sampler, ScopeVerdicts, TopTask,
+    probe_scopes, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,
+    ScopeVerdicts, TopTask,
 };
 pub use schedule::{advance_deadline, wait_timeout_ns, MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
+pub use service::{CycleOutcome, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES};
+pub use wait::{required_members, WaitToken};

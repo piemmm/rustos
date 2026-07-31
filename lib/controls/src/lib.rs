@@ -81,6 +81,15 @@
 //! failed work, driven only by the state its owner sets — it runs no idle loop
 //! and renders an indeterminate trace statically under reduced motion.
 //!
+//! The [`meter`] module is the resource-instrument family — [`Meter`]. Like
+//! [`Progress`], it is a read-only measured control with no pointer or
+//! keyboard handling; unlike [`Progress`], its track is always tinted by the
+//! resource it represents ([`PressureKind`]) rather than the plain accent, and
+//! it may carry a bounded oldest-to-newest sparkline of prior readings. The
+//! owner's [`PressureState`] still drives the shared Pressure Rail emphasis
+//! exactly as it does for [`Card`] — the resource tint is the meter's fixed
+//! identity, the pressure state is its transient severity.
+//!
 //! The [`text`] module is the text-entry family — [`TextField`] and
 //! [`SearchField`]. Both are single-line entries on a quiet Alloy Plate with a
 //! caret, selection, and horizontally-scrolled clipped text; a [`SearchField`]
@@ -165,6 +174,7 @@ pub mod collection;
 pub mod combo;
 pub mod decision;
 pub mod menu;
+pub mod meter;
 mod paint;
 pub mod scroll;
 pub mod scrollbar;
@@ -186,6 +196,7 @@ pub use collection::{
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use menu::{Menu, MenuAction, MenuItem};
+pub use meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
@@ -225,6 +236,8 @@ mod combo_tests;
 mod decision_tests;
 #[cfg(test)]
 mod menu_tests;
+#[cfg(test)]
+mod meter_tests;
 #[cfg(test)]
 mod paint_tests;
 #[cfg(test)]

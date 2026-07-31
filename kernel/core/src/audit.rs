@@ -28,6 +28,7 @@
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
 //! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (fail closed). |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
+//! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
@@ -175,6 +176,18 @@ pub enum AuditEvent {
     /// loud). The record carries the task id and the exit code; both are
     /// program state, never secrets. A clean (`0`) exit stays quiet.
     TaskExitedNonzero,
+    /// The `signal` syscall's cross-principal authority decision.
+    ///
+    /// `signal` first tries the caller's own live children
+    /// (`crate::procsignal::ProcessSignal::resolve_child`), which needs no
+    /// capability. Only once that lookup reports the target is not a child
+    /// does the handler decide whether the target belongs to the caller's
+    /// own principal (allowed) or requires `CAP_PROC_CONTROL` (allowed if
+    /// held, refused otherwise). Emitted exactly once per such decision,
+    /// `Info` on either allow and `Warn` on a refusal, carrying the
+    /// caller's task id, the target's pid and task id, the requested
+    /// signal, and which rule decided it — never a capability token.
+    ProcessSignalCrossPrincipal,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -499,6 +512,7 @@ impl AuditEvent {
             Self::DriverUnloaded => 4033,
             Self::TaskFaultKilled => 4034,
             Self::TaskExitedNonzero => 4035,
+            Self::ProcessSignalCrossPrincipal => 4036,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -557,6 +571,7 @@ impl AuditEvent {
             Self::DriverUnloaded => "driver unloaded",
             Self::TaskFaultKilled => "task killed by unresolvable user fault",
             Self::TaskExitedNonzero => "task exited with nonzero status",
+            Self::ProcessSignalCrossPrincipal => "process signal cross-principal decision",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",
@@ -630,6 +645,7 @@ mod tests {
             AuditEvent::DriverUnloaded,
             AuditEvent::TaskFaultKilled,
             AuditEvent::TaskExitedNonzero,
+            AuditEvent::ProcessSignalCrossPrincipal,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
             AuditEvent::GroupsDbLoaded,
@@ -691,6 +707,7 @@ mod tests {
             AuditEvent::DriverUnloaded.id().0,
             AuditEvent::TaskFaultKilled.id().0,
             AuditEvent::TaskExitedNonzero.id().0,
+            AuditEvent::ProcessSignalCrossPrincipal.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
             AuditEvent::GroupsDbLoaded.id().0,

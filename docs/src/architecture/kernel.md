@@ -200,6 +200,7 @@ record under the `log` phase and halts.
 | 4033 | Info  | `DRIVER_UNLOADED`            | audit  |
 | 4034 | Warn  | `TASK_FAULT_KILLED`          | audit  |
 | 4035 | Warn  | `TASK_EXITED_NONZERO`        | audit  |
+| 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit |
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
 | 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |
@@ -230,6 +231,18 @@ record under the `log` phase and halts.
 | 4130 | Warn  | `VOLUME_DEGRADED`           | audit  |
 | 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
 | 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
+
+`PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
+authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the
+caller's own live children at no capability cost; only once that lookup
+comes back "not a child" does the handler consult this rule for a target
+owned by another principal — allowed when the target shares the caller's
+kernel-attested uid, else only with `CAP_PROC_CONTROL`, else refused. Every
+outcome of that consultation emits exactly one record: `Info` when allowed
+(`rule` names `same_uid` or `capability`), `Warn` when denied. Each record
+carries the caller's task id (`caller`), the target's pid and task id
+(`pid`/`target`), the requested `signal`, and the deciding `rule` — never a
+capability token or other secret.
 
 `VOLUME_DEGRADED` / `VOLUME_RECOVERING` / `VOLUME_RECOVERED` are the
 storage-health audit trail (`plans/FIX-IO.md` IO5). The kernel block client

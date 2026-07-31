@@ -135,4 +135,18 @@ impl HangTracker {
             .count();
         u16::try_from(flagged).unwrap_or(u16::MAX)
     }
+
+    /// The currently-flagged owners' ids, in ascending order — an
+    /// allocation-free walk of the live set, so a caller that must bound
+    /// how many it keeps (the seat report's own cap) can `take` from it
+    /// rather than this tracker growing an unbounded collection itself.
+    ///
+    /// Pairs with [`unresponsive_count`](Self::unresponsive_count): that is
+    /// the truthful total, this the (possibly partial) named few.
+    pub fn unresponsive_owners(&self) -> impl Iterator<Item = u64> + '_ {
+        self.suspects
+            .iter()
+            .filter(|(_, suspect)| suspect.flagged)
+            .map(|(&owner, _)| owner)
+    }
 }

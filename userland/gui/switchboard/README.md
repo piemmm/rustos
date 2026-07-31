@@ -1,11 +1,13 @@
 # tairix-switchboard
 
-The TAIRiX **Switchboard monitor service** (`plans/NEW-TASKBAR.md` T10): the
-dedicated, capability-sized process behind the taskbar's always-right-most
-Switchboard icon. It samples the live system through the System Information
-API and publishes a compact `TraySummary` to the desktop session over the
-seat-scoped `SWITCHBOARD_ENDPOINT` (`lib/abi/src/switchboard_ipc.rs`), which
-the session binds and the taskbar renders as the tray signals.
+The TAIRiX **Switchboard monitor service** (`plans/NEW-TASKBAR.md`
+T10/T11): the dedicated, capability-sized process behind the taskbar's
+always-right-most Switchboard icon. It samples the live system through the
+System Information API, publishes a compact `TraySummary` to the desktop
+session over the seat-scoped `SWITCHBOARD_ENDPOINT`
+(`lib/abi/src/switchboard_ipc.rs`) which the session binds and the taskbar
+renders as the tray signals, and hosts the live overview window that icon
+opens.
 
 It is deliberately **not** part of the desktop session's own binary: the
 tray overview wants system-wide authority (`CAP_SYSINFO_GLOBAL`,
@@ -50,14 +52,93 @@ absence. A denied or failed query degrades exactly the field it backs
 plausible-looking value, and a top-task name that fails wire validation
 yields no top task rather than a mangled one.
 
+## The live overview window
+
+The session's `OpenPanel` command shows the shared `Switchboard`
+composition (`lib/controls/src/switchboard.rs`) on a requested section,
+selected through its own `Switchboard::select_section`. `src/panel.rs` owns
+the lifecycle and `src/model.rs` builds what it shows.
+
+There is at most **one** window. A second `OpenPanel` asks the session to
+raise the one already open — naming this service's own pid, since the
+session alone owns the window stack — and switches to the requested
+section rather than stacking a second window. The window's close control
+destroys it and the service returns to headless sampling; **sampling and
+publishing continue unchanged whether or not a window is open**, because
+the window is a view onto a monitor that never stops monitoring. The model
+is rebuilt on the same sample cadence and re-rendered only when it actually
+changed.
+
+| Section | Source |
+|---|---|
+| Tasks | the sampled process list; the row action raises that owner's window |
+| Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
+| Overview | the CPU and memory readings, the CPU meter's sparkline fed from a bounded rolling history, each meter carrying the pressure `derive_summary` itself latched |
+| Jobs | always empty — see below |
+
+The seat report carries owner **ids only**; the names beside them are the
+ones this service attested itself, so display text is never taken from the
+wire and an owner this sample never saw contributes no row rather than a
+fabricated one. A resource that could not be measured this cycle reads
+`unknown` with a `MeterValue::Unmeasured` meter, never a fabricated `0%`.
+
+### Deliberately empty, and why
+
+These are empty because the interfaces that would fill them **do not
+exist**, not because they are unfinished:
+
+- **Jobs** — no background-job registry exists anywhere in the OS to
+  enumerate.
+- **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
+  no service-enumeration query; its queries cover processes, CPU time, and
+  memory pressure.
+- **System actions** — there is no power or session-lock interface this
+  service may drive, so it offers no shut-down, restart, or lock button.
+- **Disk and network resource rows** — the System Information API exposes
+  no throughput query for either.
+
+A control that would fail at the point of use is worse than an honest
+absence.
+
+### Commands, and who may send them
+
+Commands arrive on the per-instance mailbox `command_endpoint_for(<own
+pid>)` this service binds: `OpenPanel { section }` and `SeatReport`. The
+session's identity is learned from the reply to this instance's first
+accepted publish (`decode_publish_reply`), and every command is
+authenticated against the **kernel-attested sender of that very message**,
+never a claim on the wire. Dropped with a stated reason, before the frame
+is even decoded: a command from any other sender, a command arriving before
+any session has been attested, and a frame that does not decode.
+
+### Actions
+
+| Control | Effect |
+|---|---|
+| Task row | `SwitchboardRequest::ActivateOwner { owner }` to the session |
+| Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
+| Recovery *Force* | `signal(pid, Kill)` — needs `CAP_PROC_CONTROL` |
+| Window *Close* | destroy the window, return to headless sampling |
+
+Each row's `action_allowed` reflects what this service can *genuinely* do:
+it reads its own effective capability set through `cap_query`, so a control
+whose authority is absent renders with the Authority Mark and is never
+attempted. A sampled task id that does not fit the `signal` syscall's
+signed width is refused, never truncated into a different, arbitrary
+process. A refusal from the kernel or the session is stated on `stderr`,
+leaves the model untouched, and never ends the service — a refused optional
+action is an answer, not a fatal error.
+
 ## Capability sizing
 
 `AppInfo.toml` requests exactly `CAP_CONSOLE_WRITE`, `CAP_SYSINFO_GLOBAL`,
-and `CAP_SYSINFO_KERNEL`. The kernel grants the intersection with the
-launching user's ceiling, and the service probes the two optional scopes
-**once** at startup (`probe_scopes`) — capability sets are fixed at spawn,
-so re-probing per sample could only rediscover the same answer while
-spamming the audit log with denied audited queries:
+`CAP_SYSINFO_KERNEL`, `CAP_SHM` (the zero-copy window frame region the
+session maps, as for any windowed app) and `CAP_PROC_CONTROL` (signalling a
+task this service did not spawn). The kernel grants the intersection with
+the launching user's ceiling, and the service probes the two optional
+sampling scopes **once** at startup (`probe_scopes`) — capability sets are
+fixed at spawn, so re-probing per sample could only rediscover the same
+answer while spamming the audit log with denied audited queries:
 
 - an **administrator's** Switchboard sees the system-wide process list and
   the memory-pressure gauge;
@@ -69,9 +150,13 @@ see; a refused scope is an answer, not a fatal error.
 
 ## Cadence and keepalive
 
-The run loop is tickless: one `waitset_wait` per iteration, parked with a
-timeout equal to the time until the next thing that must happen
-(`src/schedule.rs`), and woken early only by a termination signal.
+The run loop is tickless: **one** `waitset_wait` per iteration, parked with
+a timeout equal to the time until the next thing that must happen
+(`src/schedule.rs`). That single wait covers every source (`src/wait.rs`):
+the termination signal, the command mailbox, and — only while a window is
+open — that window's event mailbox, which joins the set when the window
+opens and leaves it when the window closes so a closed window's channel is
+never left armed. There is no poll loop and no sleep anywhere.
 
 - **Sample period: 2 s** (`SAMPLE_PERIOD_NS`) — frequent enough that the
   tray reads as live, sparse enough that the ungated per-sample queries
@@ -98,10 +183,12 @@ re-poll loop anywhere.
 ## Lifecycle
 
 Spawned by the desktop session after login (never by PID 1). Startup order
-in `src/run.rs`: enable signal intake and build the one-member wait-set
-(the termination signal is both the graceful-exit path and the parking
-source — failure here is a stated fatal exit), probe the scopes once, then
-loop sample → derive → offer → publish → park.
+in `src/run.rs`: enable signal intake, learn this process's own
+kernel-attested identity (`self_origin`), bind the command and window-event
+mailboxes under it, build and arm the wait-set (the termination signal is
+both the graceful-exit path and a parking source — failure at any of these
+is a stated fatal exit), probe the scopes once, then loop sample → derive →
+refresh the panel → offer → publish → park.
 
 Exit rules — every abnormal exit states its reason on `stderr` first:
 
@@ -115,19 +202,28 @@ Exit rules — every abnormal exit states its reason on `stderr` first:
   a stated reason rather than retrying forever.
 - **Wait-set failure** → stated exit: continuing without a real park would
   busy-loop.
+- **Command mailbox bind refused** → stated exit: a monitor that can never
+  be asked to show its overview should say so rather than run on deaf.
 
 ## Dependencies and layering
 
 The library is `no_std` (with `alloc`) and consumes only `tairix-abi` (the
-wire vocabulary and `Errno`) and `tairix-procinfo` (the shared sysinfo
-client helpers) — no kernel or driver crate, no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9, §17.4).
-The `Run` binary additionally links `tairix-rt` (the pure-Rust userland
-runtime) for the bare-metal targets only; on the host it is an inert stub
-so workspace-wide builds, clippy, and fmt still cover the file. Nothing
-outside `userland/gui/*` depends on this crate (`AGENTS.md` §17.3), so a
-headless image omits it cleanly.
+wire vocabulary and `Errno`), `tairix-procinfo` (the shared sysinfo client
+helpers), and `tairix-controls` (the already-built `Switchboard`
+composition it hosts — it is not its author) — no kernel or driver crate,
+no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
+(`AGENTS.md` §2.9, §17.4). The `Run` binary additionally links `tairix-rt`
+(the pure-Rust userland runtime), the window-channel client, and the
+input/geometry/theme/font/raster crates, for the bare-metal targets only;
+on the host it is an inert stub so workspace-wide builds, clippy, and fmt
+still cover the file. Nothing outside `userland/gui/*` depends on this
+crate (`AGENTS.md` §17.3), so a headless image omits it cleanly.
 
-The sampler/derive/publish/schedule core is host-tested against a scripted
-in-memory `Transport` fixture; the modules and their tests live side by
-side under `src/`.
+Everything with behaviour worth testing is host-tested, with the modules
+and their tests side by side under `src/`: the sampler against a scripted
+in-memory `Transport` fixture, and the whole run-loop body plus the window
+lifecycle against a recording `ServiceHost` (`src/test_host.rs`) whose
+wait-set bookkeeping mirrors the production host's, so the membership
+assertions are real. The `Run` binary is left holding only the wiring the
+host cannot run: syscalls, mailboxes, painting, and wire-event
+translation.

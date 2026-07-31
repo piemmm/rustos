@@ -193,6 +193,67 @@ Both shell feeds re-present only when the capsule actually changed (the
 bar's drained repaint latch), so an unchanged keepalive republish costs no
 frame.
 
+### Attesting the session to its monitor
+
+A successful publish is answered with `encode_publish_reply`, carrying this
+session's own `ProcId` — the identity the kernel attests to the process
+itself (`tairix_rt::self_origin`), read once at bring-up and reused, never
+re-derived a second way. It is the very reading the window server is
+constructed with, so the identity a client learns from its `Create` reply
+and the one the monitor learns here are the same one. That reply is how the
+service learns the one identity whose commands it will accept, so the
+reverse direction is authenticated too rather than trusted. A **refusal**
+stays the plain status frame: an unattested caller learns nothing about the
+session it failed to reach.
+
+### The two owner-directed requests
+
+Beyond publishing, the monitor's panel acts on *other* processes' windows,
+and the session is the only component that may. Both requests are attested
+exactly like a publish (the kernel-attested `call_peer_origin` pid against
+the launch table's live entry) and then validated against what this session
+can actually see (`AGENTS.md` §5.4):
+
+| Request | Authorised against | Effect |
+|---|---|---|
+| `ActivateOwner { owner }` | the live window registry — the owner must hold a served window on this seat *now*, resolved through the window engine's attested ownership records | raises that owner's front window through the session's one focus/raise path |
+| `RestartOwner { owner }` | the launch table — the owner must be a child this session itself spawned, so its bundle is the *attested* one it was launched from | re-launches that bundle through the session's one attested spawn-and-record path |
+
+An owner this session cannot act on — an unknown or stale task id, a window
+it does not serve, a process it did not launch — is `Errno::NotFound`,
+stated on `stderr` and never guessed at. No refusal mutates the model, and
+neither request adds a second raise or launch route: both re-enter the ones
+the taskbar and launcher already use (`AGENTS.md` §2.2).
+
+### The command mailbox the session sends on
+
+The session sends to the instance's own mailbox,
+`command_endpoint_for(<the service pid the launch table holds>)`, as a
+**non-blocking** send — the desktop loop never blocks or spins on a panel
+that is slow to drain, so a send refused for a full or absent mailbox is
+reported on `stderr` and dropped, never retried (`AGENTS.md` §2.23). Two
+commands travel it:
+
+- **`OpenPanel { section }`** — the capsule gesture. The bar decides the
+  section (a quick press its running-task list, a press held past the bar's
+  long-press threshold its recovery list) and emits it as
+  `TaskbarResponse::OpenSwitchboard { section }`; the session only maps that
+  choice onto the wire vocabulary, so the section a user asked for is never
+  re-decided a second time. With **no instance live** the press is
+  itself the demand for one: the session revives the service through the
+  same bring-up path and holds the section as *one* pending open —
+  replaced, never queued — which is delivered on that instance's first
+  publish (the proof it is up and listening) and cleared, so it is never
+  re-sent on a later publish.
+- **`SeatReport { report }`** — the unresponsive-owner view of this seat,
+  from the session's own delivery evidence above. It is sent **only when
+  the tracked set actually changes** (the vigil's change latch, drained
+  once per wake), never per frame and never polled. The report carries the
+  truthful `total` count even when more owners are hung than a frame can
+  name: the id list is bounded by `SEAT_REPORT_OWNERS_MAX`, so the monitor
+  sees an honest count alongside the ids it can act on rather than a
+  silently truncated one.
+
 ## Presenting the taskbar through the window manager
 
 The taskbar paints a *rectangular* `tairix_raster::Surface` and the window
@@ -232,7 +293,12 @@ popup, task activate/minimise, notification/clock presses) — and both consume
 the **same** shared `tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2).
 A real input source produces one event stream, so `SessionInputRouter` is the
 glue that fans it to the right router, driven through
-`handle(event, &mut Compositor, &mut Taskbar)`:
+`handle(event, &mut Compositor, &mut Taskbar, now_ns)`. The monotonic
+`now_ns` is threaded down because one taskbar gesture is decided by *time*:
+the Switchboard capsule distinguishes a tap from a hold by how long its
+press has been down when the next event arrives, so the bar is given the
+embedder's clock reading rather than reading a clock of its own — the same
+instant every router sees, and the one an in-memory test controls:
 
 - while the bar's **context menu** OR the **program-library popup** is open it
   is modal: every press (any button), release, scroll, and key event routes
@@ -244,21 +310,22 @@ glue that fans it to the right router, driven through
   the Switchboard capsule switches to the previous task) or over one of its
   open non-modal popovers — the notification popover and the capsule's
   instrument readout — and a remaining primary or secondary press goes to
-  the window manager: the two never both act on one press. A press away
-  from the bar additionally *releases* a pinned readout (presentation
-  state, like hover, never the press's one action);
+  the window manager: the two never both act on one press;
 - a **scroll** over the Switchboard capsule or its open readout routes to
   the taskbar (it cycles the running tasks); every other scroll goes to the
   window manager's viewport under the pointer;
 - **pointer motion** is fanned to both so their tracked pointer positions stay
   in step; the window manager acts on it (dragging a grabbed window) and the
-  taskbar refreshes its hover feedback;
-- a **primary release** still goes to the window manager, ending an in-flight
-  move-grab (the taskbar ignores releases while the popup is closed);
+  taskbar refreshes its hover feedback. Motion is also where a capsule press
+  held past its long-press threshold resolves, and that is a real action: it
+  takes the outcome while the drag still applied;
+- a **primary release** goes to the taskbar *first* — a quick press on the
+  Switchboard capsule resolves on its release — and one the bar does not
+  claim ends an in-flight move-grab in the window manager instead;
 - **key events** go to the window manager — which delivers them to the
   focused window — except while a modal surface is open (above);
-- a middle press away from the bar, or a press/motion neither router acted
-  on, is `SessionInputResponse::Ignored`.
+- a middle press away from the bar, a non-primary release, or a press/motion
+  neither router acted on, is `SessionInputResponse::Ignored`.
 
 Decorations start a title-bar drag through `begin_move`, and the embedder reads
 the keyboard owner through `focused`. The router holds no pixels and grants
@@ -308,10 +375,13 @@ action, and bring the on-screen bar back in step. `DesktopShell` runs exactly
 that loop over an injected `InputSource` seam (a real pointer/keyboard channel
 on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
-- `pump(source, &mut Compositor)` drains every pending event, routing each
-  through the `SessionInputRouter` and returning a `ShellOutcome` per event —
-  `Ignored`, a `WindowManager` action the embedder may observe, or a
-  `Taskbar` response;
+- `pump(source, &mut Compositor, now_ns)` drains every pending event, routing
+  each through `handle(event, &mut Compositor, now_ns)` and returning a
+  `ShellOutcome` per event — `Ignored`, a `WindowManager` action the embedder
+  may observe, or a `Taskbar` response. One drain is one instant: the
+  embedder reads the monotonic clock once when the source wakes it and every
+  event of that batch resolves its tap-versus-hold gesture against the same
+  `now_ns`;
 - a taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and the bar is
   re-presented — **exactly once per event, at one site**: an acted response
@@ -424,7 +494,9 @@ It also covers `SessionInputRouter`: presses on the bar's buttons and slots
 routing to the taskbar while a press over a window or the empty desktop routes
 to the window manager; modal surface modality (claiming off-panel presses and
 keys); motion keeping the pointer in step; a window drag continuing while the
-pointer is over the bar; and a release ending the grab.
+pointer is over the bar; a capsule tap and hold each asking the session to
+open the Switchboard at their own section; and a release the bar does not
+claim ending the grab.
 
 It covers the library loader (`load_library`) and pin loader (`SessionPins`):
 absent stores silent and empty, parsed stores, the user overlay's per-field
@@ -444,6 +516,20 @@ and `teardown`. It covers `PinService` decisions, drag management, the
 `open_window` listing, focusing, and presenting a new task; `close_window`
 removing the task and dropping focus; clicking a task slot minimising/restoring
 the window; and syncing focus to an untracked window.
+
+It covers the Switchboard channel through `serve_switchboard_request` and its
+fake seams: a successful publish answering with the session's own `ProcId`
+while every refusal stays the plain status frame; an unattested caller refused
+on all three requests with the model untouched; `ActivateOwner` raising the
+right window and an unknown owner refused `NotFound`; `RestartOwner`
+re-launching the recorded bundle and an unknown owner refused `NotFound`; a
+malformed frame refused; a capsule gesture sending exactly one `OpenPanel` at
+the section the bar chose; a pending open delivered on the next successful
+publish and never re-sent; a seat report sent only when the unresponsive set
+changes, carrying the truthful total when more owners are hung than the frame
+can name; and a refused mailbox send dropped without a retry. The `vigil`
+tests cover the flagging threshold, the clearing delivery, reap forgetting,
+and the bounded `unresponsive_owners` enumeration.
 
 The `launch` module's own tests cover the reserved-status reporting table, the
 run-path-keyed `LaunchTable`, and the shared reap flow. It also covers

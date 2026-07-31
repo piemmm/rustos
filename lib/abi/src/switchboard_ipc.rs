@@ -25,16 +25,46 @@
 //! never sanitised): it names a process for a hover readout and carries no
 //! authority, exactly like a notification title or a window title.
 //!
-//! The single operation is the fixed-width [`SwitchboardRequest`], answered
-//! with the shared status frame ([`crate::reply::encode_status_reply`] /
+//! Every operation is a fixed-width [`SwitchboardRequest`]. A
+//! [`SwitchboardRequest::PublishSummary`] is answered with the longer
+//! publish frame ([`encode_publish_reply`] / [`decode_publish_reply`]),
+//! which carries the serving session's own kernel-attested [`ProcId`]; the
+//! remaining operations are answered with the shared status frame
+//! ([`crate::reply::encode_status_reply`] /
 //! [`crate::reply::decode_status_reply`]) — success, or a typed refusal.
 //! Every decode fails closed: an unknown magic, version, or operation, an
 //! out-of-range pressure kind, pressured-resource count, or permille
-//! fraction, an over-long or malformed top-task name, or a dirty reserved
-//! field refuses rather than guessing.
+//! fraction, an over-long or malformed top-task name, a zero owner id, or a
+//! dirty reserved field refuses rather than guessing.
+//!
+//! # The two directions (`plans/NEW-TASKBAR.md` T11)
+//!
+//! The monitor renders the desktop's window stack but owns none of it, so
+//! the actions its panel offers over *other* processes' windows —
+//! switch-to-window and restart-a-hung-app — are requested of the session
+//! rather than performed by the service:
+//! [`SwitchboardRequest::ActivateOwner`] raises an owner's front window and
+//! [`SwitchboardRequest::RestartOwner`] re-launches it through the
+//! session's own attested launch path. The session honours either only from
+//! the attested origin of the Switchboard instance it launched, and
+//! validates the named owner against its own live window registry, so a
+//! stale or invented owner id fails closed instead of reaching a stranger's
+//! process.
+//!
+//! The reverse direction is a per-instance command mailbox
+//! ([`command_endpoint_for`]) the service binds under its own task id: the
+//! session sends [`SwitchboardCommand::OpenPanel`] when the user opens the
+//! tray icon, and [`SwitchboardCommand::SeatReport`] to hand over the one
+//! fact only the session holds — which window owners have stopped draining
+//! their event mailbox and are therefore unresponsive. The service
+//! authenticates every command against the session [`ProcId`] the publish
+//! reply attested, never a wire claim, and joins the reported owner ids
+//! against the process list it already samples rather than trusting names
+//! from the wire.
 
 use crate::bounded_text::BoundedText;
-use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the desktop session's
@@ -286,8 +316,8 @@ pub struct TraySummary {
     pub top_task: Option<TrayTask>,
 }
 
-/// One Switchboard tray-summary channel operation
-/// (`plans/NEW-TASKBAR.md` T9/T10).
+/// One Switchboard channel operation the desktop session serves
+/// (`plans/NEW-TASKBAR.md` T9–T11).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwitchboardRequest {
     /// Publish (replacing any prior) the caller's tray-signal summary.
@@ -295,10 +325,35 @@ pub enum SwitchboardRequest {
         /// The compact summary to show on the tray icon.
         summary: TraySummary,
     },
+    /// Raise and focus the front window of the window owner named by its
+    /// kernel task id — the panel's switch-to-window action, applied by the
+    /// session because it alone owns the window stack.
+    ActivateOwner {
+        /// The owning app's kernel task id.
+        owner: u64,
+    },
+    /// Re-launch the window owner named by its kernel task id through the
+    /// session's attested launch path — the panel's restart action for an
+    /// unresponsive app, applied by the session because it alone holds the
+    /// bundle each window was launched from.
+    RestartOwner {
+        /// The owning app's kernel task id.
+        owner: u64,
+    },
 }
 
 /// Wire operation discriminant of [`SwitchboardRequest::PublishSummary`].
 const OP_PUBLISH_SUMMARY: u16 = 1;
+/// Wire operation discriminant of [`SwitchboardRequest::ActivateOwner`].
+const OP_ACTIVATE_OWNER: u16 = 2;
+/// Wire operation discriminant of [`SwitchboardRequest::RestartOwner`].
+const OP_RESTART_OWNER: u16 = 3;
+
+/// Byte offset of an owner-directed operation's kernel task id.
+const OWNER_OFFSET: usize = 8;
+/// First byte after an owner-directed operation's payload; everything from
+/// here to the end of the frame is reserved and must be zero.
+const OWNER_TAIL_OFFSET: usize = OWNER_OFFSET + 8;
 
 /// Byte offset of `jobs`.
 const JOBS_OFFSET: usize = 8;
@@ -358,6 +413,14 @@ impl SwitchboardRequest {
                     );
                 }
             }
+            Self::ActivateOwner { owner } => {
+                put_u16(&mut out, 6, OP_ACTIVATE_OWNER);
+                put_u64(&mut out, OWNER_OFFSET, owner);
+            }
+            Self::RestartOwner { owner } => {
+                put_u16(&mut out, 6, OP_RESTART_OWNER);
+                put_u64(&mut out, OWNER_OFFSET, owner);
+            }
         }
         out
     }
@@ -369,13 +432,15 @@ impl SwitchboardRequest {
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
     /// * [`Errno::BadMagic`] — wrong magic, or a dirty reserved field (a
     ///   non-zero pressured-resource count or pressure level while the
-    ///   pressure kind is "none", or a non-zero top-task name tail or CPU
-    ///   fraction while the name length is "none").
+    ///   pressure kind is "none", a non-zero top-task name tail or CPU
+    ///   fraction while the name length is "none", or a non-zero summary
+    ///   payload on an owner-directed operation).
     /// * [`Errno::AbiVersionUnsupported`] — not `switchboard-v1`.
     /// * [`Errno::OutOfRange`] — an unknown operation, a pressure kind
     ///   outside the closed set, a pressured-resource count of zero or
-    ///   above [`TRAY_PRESSURE_KIND_COUNT`] beside a named pressure, or a
-    ///   permille fraction above `1000`.
+    ///   above [`TRAY_PRESSURE_KIND_COUNT`] beside a named pressure, a
+    ///   permille fraction above `1000`, or the reserved zero owner id on
+    ///   an owner-directed operation.
     /// * [`Errno::LengthOutOfRange`] — a top-task name length outside
     ///   `1..=TRAY_TASK_NAME_MAX`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -406,9 +471,33 @@ impl SwitchboardRequest {
                     },
                 })
             }
+            OP_ACTIVATE_OWNER => Ok(Self::ActivateOwner {
+                owner: decode_owner(bytes)?,
+            }),
+            OP_RESTART_OWNER => Ok(Self::RestartOwner {
+                owner: decode_owner(bytes)?,
+            }),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode an owner-directed operation's target: the whole summary payload
+/// beyond the task id is reserved on these operations, so a dirty tail
+/// refuses rather than being ignored, and the reserved zero task id never
+/// names a process.
+fn decode_owner(bytes: &[u8]) -> Result<u64, Errno> {
+    if bytes[OWNER_TAIL_OFFSET..SwitchboardRequest::WIRE_LEN]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let owner = read_u64(bytes, OWNER_OFFSET);
+    if owner == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(owner)
 }
 
 /// Decode the pressure block: the reserved "no pressure" kind requires its
@@ -449,6 +538,340 @@ fn decode_top_task(bytes: &[u8]) -> Result<Option<TrayTask>, Errno> {
     let name = TrayTaskName::from_wire(name_len, &name_bytes)?;
     let cpu_permille = TrayPermille::new(cpu_raw)?;
     Ok(Some(TrayTask { name, cpu_permille }))
+}
+
+// --- The publish reply -----------------------------------------------------
+
+/// Reply length, in bytes, of a [`SwitchboardRequest::PublishSummary`]: the
+/// shared status word followed by the serving session's [`ProcId`].
+pub const SWITCHBOARD_PUBLISH_REPLY_LEN: usize = 4 + PROC_ID_LEN;
+
+/// Encode a successful publish reply, attesting the serving session's own
+/// [`ProcId`] to the publisher.
+///
+/// The service needs the session's identity to authenticate the commands it
+/// will later receive on its own mailbox, and the reply is the one place it
+/// can learn it without trusting a claim: only the process the kernel let
+/// bind the seat-scoped rendezvous can answer a call to it, so the identity
+/// in the reply is as good as attested. A refusal is the plain status frame
+/// ([`crate::reply::encode_status_reply`]) and carries no identity.
+#[must_use]
+pub fn encode_publish_reply(session: ProcId) -> [u8; SWITCHBOARD_PUBLISH_REPLY_LEN] {
+    let mut out = [0u8; SWITCHBOARD_PUBLISH_REPLY_LEN];
+    out[..4].copy_from_slice(&crate::reply::encode_status_reply(Ok(())));
+    out[4..].copy_from_slice(&session.to_le_bytes());
+    out
+}
+
+/// Decode a publish reply into the serving session's [`ProcId`].
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * the session's refusal, decoded from the leading status word.
+/// * [`Errno::OutOfRange`] — a successful reply naming the kernel sentinel
+///   rather than a real process instance (fail closed: an identity that can
+///   never authenticate a command is refused at the source rather than
+///   stored and silently mismatched later).
+/// * [`Errno::LengthOutOfRange`] — a malformed identity.
+pub fn decode_publish_reply(bytes: &[u8]) -> Result<ProcId, Errno> {
+    if bytes.len() < SWITCHBOARD_PUBLISH_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    let session = ProcId::from_bytes(&bytes[4..SWITCHBOARD_PUBLISH_REPLY_LEN])?;
+    if session.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(session)
+}
+
+// --- The session -> service command mailbox --------------------------------
+
+/// High tag of a Switchboard instance's command-mailbox endpoint id (see
+/// [`command_endpoint_for`]).
+const COMMAND_ENDPOINT_TAG: u64 = 0x5747_0000_0000_0000;
+
+/// The command-mailbox endpoint id a Switchboard instance binds for the
+/// session's commands: the service's own kernel task id (never reused)
+/// under a fixed high tag, so every instance binds a distinct, collision-
+/// free, unreserved id — the same naming rule the window channel's event
+/// mailboxes follow, so the two id spaces can never disagree.
+///
+/// The mailbox is owner-only to receive and every message carries its
+/// sender's kernel-attested origin, so the id needs no secrecy: the session
+/// derives it from the attested origin of the publish call it just answered,
+/// never from a wire claim, and the service ignores any message whose
+/// attested sender is not the session that answered its publish.
+#[must_use]
+pub const fn command_endpoint_for(pid: u64) -> u64 {
+    COMMAND_ENDPOINT_TAG | pid
+}
+
+/// Which panel section a [`SwitchboardCommand::OpenPanel`] opens on.
+///
+/// Defined here rather than shared with the control library's own section
+/// vocabulary because the ABI cannot depend on a userland library; the two
+/// are mapped at the service's edge, exactly as the tray pressure kinds are.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum CommandSection {
+    /// The live-tasks section (the resting section of an ordinary open).
+    Tasks = 1,
+    /// The background-jobs section.
+    Jobs = 2,
+    /// The recovery section (what a long-press on a flagged icon opens).
+    Recovery = 3,
+    /// The system-overview section.
+    Overview = 4,
+}
+
+impl CommandSection {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any byte outside the closed set, including
+    /// the reserved `0` (fail closed on a corrupt or hostile frame).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Tasks),
+            2 => Ok(Self::Jobs),
+            3 => Ok(Self::Recovery),
+            4 => Ok(Self::Overview),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// How many unresponsive owners a single [`SeatReport`] names.
+///
+/// A validation bound on an untrusted frame, not a capacity: the report is
+/// fixed-width, and the honest
+/// [`total`](SeatReport::total) tells the panel how many exist beyond the
+/// named few, so a machine with more hung apps than this reports truthfully
+/// rather than growing the frame.
+pub const SEAT_REPORT_OWNERS_MAX: usize = 8;
+
+/// The session's report of which window owners have stopped draining their
+/// event mailbox and are therefore unresponsive.
+///
+/// Only the session can observe this (it is the party whose deliveries are
+/// being refused), so it is the one fact the service cannot sample for
+/// itself. Owners are named by kernel task id alone: the service already
+/// samples the process list, so it joins the ids against names it attested
+/// itself rather than trusting display text from the wire.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SeatReport {
+    /// How many owners are unresponsive in total, named or not.
+    total: u16,
+    /// How many entries of `owners` are live.
+    count: u8,
+    /// The named owners' kernel task ids, `count` of them live.
+    owners: [u64; SEAT_REPORT_OWNERS_MAX],
+}
+
+impl SeatReport {
+    /// Nothing is unresponsive — the resting state of a healthy seat.
+    pub const HEALTHY: Self = Self {
+        total: 0,
+        count: 0,
+        owners: [0; SEAT_REPORT_OWNERS_MAX],
+    };
+
+    /// Build a report naming `owners` out of `total` unresponsive owners.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] — more names than
+    ///   [`SEAT_REPORT_OWNERS_MAX`].
+    /// * [`Errno::OutOfRange`] — a `total` below the number of names (a
+    ///   report cannot name more owners than it counts), the reserved zero
+    ///   task id, or the same owner named twice; the type's guarantee is a
+    ///   set of live ids, so a contradictory report is refused rather than
+    ///   de-duplicated behind the caller's back.
+    pub fn new(total: u16, owners: &[u64]) -> Result<Self, Errno> {
+        if owners.len() > SEAT_REPORT_OWNERS_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let count = u8::try_from(owners.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        if usize::from(total) < owners.len() {
+            return Err(Errno::OutOfRange);
+        }
+        let mut slots = [0u64; SEAT_REPORT_OWNERS_MAX];
+        for (slot, &owner) in slots.iter_mut().zip(owners) {
+            if owner == 0 {
+                return Err(Errno::OutOfRange);
+            }
+            *slot = owner;
+        }
+        if slots[..owners.len()]
+            .iter()
+            .enumerate()
+            .any(|(index, owner)| slots[..index].contains(owner))
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            total,
+            count,
+            owners: slots,
+        })
+    }
+
+    /// How many owners are unresponsive in total, named or not.
+    #[must_use]
+    pub const fn total(&self) -> u16 {
+        self.total
+    }
+
+    /// The named owners' kernel task ids.
+    #[must_use]
+    pub fn owners(&self) -> &[u64] {
+        &self.owners[..usize::from(self.count)]
+    }
+}
+
+/// Wire magic of a [`SwitchboardCommand`] frame (`"SWC1"`).
+const SWITCHBOARD_COMMAND_MAGIC: u32 = 0x3143_5753;
+
+/// Wire operation discriminant of [`SwitchboardCommand::OpenPanel`].
+const OP_OPEN_PANEL: u16 = 1;
+/// Wire operation discriminant of [`SwitchboardCommand::SeatReport`].
+const OP_SEAT_REPORT: u16 = 2;
+
+/// Byte offset of an [`SwitchboardCommand::OpenPanel`] section.
+const SECTION_OFFSET: usize = 8;
+/// Byte offset of a report's total unresponsive count.
+const REPORT_TOTAL_OFFSET: usize = 10;
+/// Byte offset of a report's named-owner count.
+const REPORT_COUNT_OFFSET: usize = 12;
+/// Byte offset of a report's named-owner ids, aligned so each id sits on
+/// its natural boundary within the frame.
+const REPORT_OWNERS_OFFSET: usize = 16;
+
+/// One command the desktop session sends a Switchboard instance on its
+/// per-instance mailbox ([`command_endpoint_for`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SwitchboardCommand {
+    /// Show the overview panel, opened on `section`.
+    OpenPanel {
+        /// Which section to rest on.
+        section: CommandSection,
+    },
+    /// Hand over the seat's current unresponsive-owner report.
+    SeatReport {
+        /// The report.
+        report: SeatReport,
+    },
+}
+
+impl SwitchboardCommand {
+    /// Encoded size on the wire: magic (4), version (2), op (2), and the
+    /// widest operation's fixed payload (the seat report).
+    pub const WIRE_LEN: usize = REPORT_OWNERS_OFFSET + 8 * SEAT_REPORT_OWNERS_MAX;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, SWITCHBOARD_COMMAND_MAGIC);
+        put_u16(&mut out, 4, SWITCHBOARD_VERSION_V1);
+        match *self {
+            Self::OpenPanel { section } => {
+                put_u16(&mut out, 6, OP_OPEN_PANEL);
+                out[SECTION_OFFSET] = section.as_u8();
+            }
+            Self::SeatReport { report } => {
+                put_u16(&mut out, 6, OP_SEAT_REPORT);
+                put_u16(&mut out, REPORT_TOTAL_OFFSET, report.total());
+                out[REPORT_COUNT_OFFSET] = report.count;
+                for (index, &owner) in report.owners().iter().enumerate() {
+                    put_u64(&mut out, REPORT_OWNERS_OFFSET + index * 8, owner);
+                }
+            }
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed input.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole command.
+    /// * [`Errno::BadMagic`] — wrong magic, or a dirty reserved field (any
+    ///   non-zero byte outside the decoded operation's own payload,
+    ///   including an owner slot beyond the named count).
+    /// * [`Errno::AbiVersionUnsupported`] — not `switchboard-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown operation, a section outside
+    ///   the closed set, a total below the named count, the reserved zero
+    ///   task id, or a repeated owner.
+    /// * [`Errno::LengthOutOfRange`] — a named-owner count above
+    ///   [`SEAT_REPORT_OWNERS_MAX`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != SWITCHBOARD_COMMAND_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != SWITCHBOARD_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        match read_u16(bytes, 6) {
+            OP_OPEN_PANEL => {
+                if bytes[SECTION_OFFSET + 1..Self::WIRE_LEN]
+                    .iter()
+                    .any(|&byte| byte != 0)
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::OpenPanel {
+                    section: CommandSection::from_u8(bytes[SECTION_OFFSET])?,
+                })
+            }
+            OP_SEAT_REPORT => Ok(Self::SeatReport {
+                report: decode_seat_report(bytes)?,
+            }),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Decode a seat report, refusing a dirty reserved byte, an over-long
+/// named-owner count, and any owner set the report type itself would
+/// refuse — the constructor is the single validation, so the wire can never
+/// admit a report a caller could not have built.
+fn decode_seat_report(bytes: &[u8]) -> Result<SeatReport, Errno> {
+    if bytes[SECTION_OFFSET] != 0
+        || bytes[SECTION_OFFSET + 1] != 0
+        || bytes[REPORT_COUNT_OFFSET + 1..REPORT_OWNERS_OFFSET]
+            .iter()
+            .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let count = usize::from(bytes[REPORT_COUNT_OFFSET]);
+    if count > SEAT_REPORT_OWNERS_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if bytes[REPORT_OWNERS_OFFSET + count * 8..SwitchboardCommand::WIRE_LEN]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let mut owners = [0u64; SEAT_REPORT_OWNERS_MAX];
+    for (index, owner) in owners[..count].iter_mut().enumerate() {
+        *owner = read_u64(bytes, REPORT_OWNERS_OFFSET + index * 8);
+    }
+    SeatReport::new(read_u16(bytes, REPORT_TOTAL_OFFSET), &owners[..count])
 }
 
 #[cfg(test)]

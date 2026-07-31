@@ -27,26 +27,13 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    inset, measured_thickness, paint_bead, paint_plate, plate_border, progress_thickness,
-    resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
+    clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
+    progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect,
+    to_i32, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
 };
-
-/// The full-scale value of a measured control, in permille.
-const FULL: u16 = 1000;
-
-/// Clamp a permille value into `0..=1000` (fail closed on an out-of-range
-/// request, `AGENTS.md` §2.9).
-#[must_use]
-const fn clamp_permille(v: u16) -> u16 {
-    if v > FULL {
-        FULL
-    } else {
-        v
-    }
-}
 
 /// The outcome of interacting with a [`Slider`].
 ///

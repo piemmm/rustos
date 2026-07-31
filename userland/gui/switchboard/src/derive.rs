@@ -49,6 +49,30 @@ impl Hysteresis {
             cpu_pressure_active: false,
         }
     }
+
+    /// Whether CPU pressure is currently latched active, as of the last
+    /// [`derive_summary`] call.
+    ///
+    /// The live overview panel's CPU meter reads the same latch the tray
+    /// icon's rail does, so the two can never disagree about whether the
+    /// CPU is pressured.
+    #[must_use]
+    pub const fn cpu_pressured(self) -> bool {
+        self.cpu_pressure_active
+    }
+}
+
+/// Whether this sample's memory reading is at or beyond the band depth
+/// that counts as pressure.
+///
+/// A sample with no reading at all (the query was never granted, or no
+/// attempt has yet succeeded) is not pressured: an absent measurement is
+/// never read as a pressure signal.
+#[must_use]
+pub fn memory_pressured(sample: &Sample) -> bool {
+    sample
+        .memory_pressure
+        .is_some_and(|memory| memory.band >= MEMORY_PRESSURE_BAND_THRESHOLD)
 }
 
 /// Derive a [`TraySummary`] from `sample`, threading `hysteresis` across
@@ -84,11 +108,11 @@ pub fn derive_summary(sample: &Sample, hysteresis: &mut Hysteresis) -> TraySumma
         .cpu_pressure_active
         .then(|| (TrayPressureKind::Cpu, permille(cpu_busy_raw)));
 
-    let memory_pressure = sample.memory_pressure.and_then(|memory| {
-        if memory.band < MEMORY_PRESSURE_BAND_THRESHOLD {
-            return None;
-        }
-        Some((TrayPressureKind::Memory, permille(memory.used_permille)))
+    let memory_pressure = memory_pressured(sample).then(|| {
+        let used = sample
+            .memory_pressure
+            .map_or(0, |memory| memory.used_permille);
+        (TrayPressureKind::Memory, permille(used))
     });
 
     let pressure = dominant_pressure(cpu_pressure, memory_pressure);

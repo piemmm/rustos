@@ -34,6 +34,33 @@ pub struct TopTask {
     pub cpu_permille: u16,
 }
 
+/// One process observed in a sample, carrying enough of its state for the
+/// live panel's task and recovery rows ([`crate::model`]).
+///
+/// `pid` is [`ProcessRecord::pid`] — the scheduler task id — which is the
+/// same numeric identity the desktop session's [`SeatReport`] and the
+/// window/command mailbox rendezvous address a process by
+/// ([`tairix_abi::switchboard_ipc`]); it is display/convenience only and is
+/// reused across process lifetimes, so it is never used as a map key across
+/// samples (that is [`proc_id`](Self::proc_id)'s job).
+///
+/// [`SeatReport`]: tairix_abi::switchboard_ipc::SeatReport
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessSummary {
+    /// The scheduler task id.
+    pub pid: u64,
+    /// The stable, never-reused process-instance identity.
+    pub proc_id: ProcId,
+    /// The process's raw name bytes, exactly as `sysinfod` reported them.
+    pub name: Vec<u8>,
+    /// Lifecycle state.
+    pub state: ProcessState,
+    /// Its CPU share over the sample interval, in permille. `None` on the
+    /// very first sample or an unmeasurable interval, exactly like
+    /// [`TopTask::cpu_permille`] for the busiest task.
+    pub cpu_permille: Option<u16>,
+}
+
 /// A memory-pressure reading, carried forward between samples since the
 /// audited query is issued only every [`MEMORY_SAMPLE_DIVIDER`]th sample.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -78,6 +105,11 @@ pub struct Sample {
     /// between the sparser memory-pressure queries. `None` when the
     /// capability was never granted or no attempt has yet succeeded.
     pub memory_pressure: Option<MemoryPressureSample>,
+    /// The whole process list observed this sample, in the order the
+    /// System Information API reported it. Empty when the process list
+    /// could not be read this sample (the same honest-empty rule as
+    /// [`Self::stopped_count`] and [`Self::top_task`]).
+    pub processes: Vec<ProcessSummary>,
     /// Field kinds that degraded to their honest empty value *for the
     /// first time* this sample (for a one-time stderr notice).
     pub degradations: Vec<DegradedField>,
@@ -198,7 +230,7 @@ impl Sampler {
         let elapsed_ns = self.prev_sample_ns.map(|prev| now_ns.saturating_sub(prev));
         let mut degradations = Vec::new();
 
-        let (stopped_count, top_task) =
+        let (stopped_count, top_task, processes) =
             self.sample_processes(transport, elapsed_ns, &mut degradations);
         let cpu_busy_permille = self.sample_cpu_totals(transport, &mut degradations);
         self.sample_memory_pressure(transport, &mut degradations);
@@ -211,18 +243,20 @@ impl Sampler {
             cpu_busy_permille,
             top_task,
             memory_pressure: self.last_memory,
+            processes,
             degradations,
         }
     }
 
-    /// Walk the process list, counting stopped processes and picking the
-    /// task with the highest CPU-time delta since the previous sample.
+    /// Walk the process list, counting stopped processes, picking the task
+    /// with the highest CPU-time delta since the previous sample, and
+    /// building each process's [`ProcessSummary`] for the live panel.
     fn sample_processes(
         &mut self,
         transport: &dyn Transport,
         elapsed_ns: Option<u64>,
         degradations: &mut Vec<DegradedField>,
-    ) -> (u16, Option<TopTask>) {
+    ) -> (u16, Option<TopTask>, Vec<ProcessSummary>) {
         let mut stopped_count: u16 = 0;
         let mut records: Vec<ProcessRecord> = Vec::new();
         let outcome = for_each_process(transport, self.scopes.global_process_scope, |record| {
@@ -241,7 +275,7 @@ impl Sampler {
             // Prior-sample state is left untouched: a transient failure
             // must not erase history a later successful sample could still
             // use to compute an honest delta.
-            return (0, None);
+            return (0, None, Vec::new());
         }
         self.warned_process_list = false;
 
@@ -252,10 +286,12 @@ impl Sampler {
         // a fabricated rate over an interval it was never observed across.
         let mut current = BTreeMap::new();
         let mut top: Option<(usize, u64)> = None;
+        let mut deltas: Vec<u64> = Vec::with_capacity(records.len());
         for (index, record) in records.iter().enumerate() {
             let prev_time = self.prev_proc_times.get(&record.proc_id).copied();
             current.insert(record.proc_id, record.cpu_time_ns);
             let delta = prev_time.map_or(0, |prev| record.cpu_time_ns.saturating_sub(prev));
+            deltas.push(delta);
             let is_new_best = match top {
                 Some((_, best_delta)) => delta > best_delta,
                 None => true,
@@ -280,7 +316,19 @@ impl Sampler {
             }),
         };
 
-        (stopped_count, top_task)
+        let processes = records
+            .iter()
+            .zip(deltas)
+            .map(|(record, delta)| ProcessSummary {
+                pid: record.pid,
+                proc_id: record.proc_id,
+                name: record.name_bytes().to_vec(),
+                state: record.state,
+                cpu_permille: elapsed_ns.and_then(|interval| permille_of(delta, interval)),
+            })
+            .collect();
+
+        (stopped_count, top_task, processes)
     }
 
     /// Fetch the aggregate CPU-time totals and derive the busy-fraction

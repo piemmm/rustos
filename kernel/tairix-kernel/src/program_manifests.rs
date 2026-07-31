@@ -958,18 +958,26 @@ mod tests {
     const WIDGETS_GALLERY_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
-    // The Switchboard monitor service (plans/NEW-TASKBAR.md T10): console
+    // The Switchboard monitor service (plans/NEW-TASKBAR.md T10/T11): console
     // write for its fail-loud stderr diagnostics, and the two sysinfo reads
     // its sampler has code paths for — `CAP_SYSINFO_GLOBAL` (the system-wide
     // process list) and `CAP_SYSINFO_KERNEL` (the memory-pressure bands),
     // both optional features that degrade to the self-scoped view when the
-    // launching user's ceiling strips them. It publishes over the ungated
-    // `ipc_call` and holds no filesystem, spawn, or window authority. Not an
-    // embedded spawn-floor program, so the list lives only in this pin.
+    // launching user's ceiling strips them. `CAP_SHM` creates and grants the
+    // zero-copy frame region the desktop session maps for its overview
+    // window, exactly as any other windowed program; `CAP_PROC_CONTROL`
+    // carries the overview's force-quit of an owner it did not spawn, and
+    // without it that control simply renders refused. It publishes over the
+    // ungated `ipc_call` and holds no filesystem or spawn authority — a
+    // window is raised or re-launched by asking the session, never the
+    // kernel. Not an embedded spawn-floor program, so the list lives only in
+    // this pin.
     const SWITCHBOARD_MONITOR_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::SYSINFO_GLOBAL,
         CapabilityId::SYSINFO_KERNEL,
+        CapabilityId::SHM,
+        CapabilityId::PROC_CONTROL,
     ];
 
     /// Every program crate's on-disk `AppInfo.toml` manifest source

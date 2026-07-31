@@ -75,9 +75,10 @@ From the leading end to the trailing end:
   an absent service deriving the calm capsule (fail closed). Its slot is
   computed **first** among the trailing regions, so the clock, icons, pins,
   and tasks can never displace it — only the permanent leading launchers
-  outrank it on a degenerate screen. Hover (or a pinning primary press)
-  expands the capsule's instrument readout, presented like the other
-  popovers (`Taskbar::tray_readout_layout`).
+  outrank it on a degenerate screen. Hover expands the capsule's instrument
+  readout, presented like the other popovers
+  (`Taskbar::tray_readout_layout`), and a press resolves as a tap or a hold
+  (see *The Switchboard capsule's tap-or-hold gesture*).
 
 `BarLayout::compute` turns the config plus the current pin, task, and icon
 counts into the screen `Rect` of every region. All arithmetic saturates, so a
@@ -338,15 +339,14 @@ secondary press, hit-tested against the current
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
 - a primary press on the **clock** reports `ClockPressed`;
-- a primary press on the **Switchboard capsule** pins its readout open (a
-  second press — or one anywhere else — releases the pin; the press that
-  opens the overview window lands with that window,
-  `plans/NEW-TASKBAR.md` T11), a press inside the open readout is claimed
-  inert like the notification popover's chrome, **scrolling** over the
-  capsule or its readout cycles the running tasks (wrapping both ways), and
-  a **middle** press over the capsule switches to the previous task (the
-  task list's MRU-of-two) — each failing closed when there is nothing to
-  cycle or return to.
+- a primary press on the **Switchboard capsule** resolves as a tap or a
+  hold (see *The Switchboard capsule's tap-or-hold gesture*), a press
+  inside the open readout drives its one safe action or is claimed inert
+  like the notification popover's chrome, **scrolling** over the capsule or
+  its readout cycles the running tasks (wrapping both ways), and a
+  **middle** press over the capsule switches to the previous task (the task
+  list's MRU-of-two) — each failing closed when there is nothing to cycle
+  or return to.
 
 Any other button, a release, a key, or a press that misses every region
 changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
@@ -374,6 +374,36 @@ popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
 Popup-internal changes (a hover, a scroll, an edit, a fold) are reported as
 `Ignored` with the repaint latch set, so the embedder re-presents without
 mistaking them for actions.
+
+## The Switchboard capsule's tap-or-hold gesture
+
+The capsule is the desktop's way into the Switchboard overview window
+(`plans/NEW-TASKBAR.md` T11), and one primary press resolves into exactly
+one of two destinations, reported as
+`OpenSwitchboard { section }`:
+
+- **tap** — a press and quick release opens the running-task section
+  (`Section::Tasks`), the panel's NOW column;
+- **hold** — a press held past `LONG_PRESS_AFTER_NS` (half a second) opens
+  the **Recovery** section instead, where a hung application's recovery
+  actions live;
+- the open readout's one safe action, **"Open Switchboard"**, reports the
+  same response as a tap, so the pointer and the readout reach one
+  destination through one route (`AGENTS.md` §2.2).
+
+The session performs it: it asks the Switchboard service to open — or,
+when the service has died, revive and open — its window at that section.
+The press *is* the demand, so there is no respawn loop
+(`plans/NEW-TASKBAR.md` T10).
+
+The threshold is resolved against the monotonic time the caller passes to
+`TaskbarInput::handle`, on whichever event the router next handles once it
+has elapsed — ordinarily a motion sample taken while the press is still
+held, or the release when none arrives sooner. Nothing polls and nothing
+sleeps (`AGENTS.md` §2.23). One gesture reports exactly one response: a
+hold that has already opened Recovery never also opens Tasks on release,
+and a press dragged off the capsule before release opens nothing at all
+(fail closed, `AGENTS.md` §5.4).
 
 ## Theming
 
@@ -421,7 +451,12 @@ scrollbar, and dark / light / high-contrast rendering.
 The Switchboard tray tests cover the slot's trailing-most placement on every
 edge (and its survival order on degenerate screens), the summary→state derive
 matrix (absent service, calm top-task preview, jobs, every pressure kind,
-recovery, hung, and compositions), repaint latching, hover/pin readout
-geometry on every edge, the readout's inert press claim, scroll cycling and
-the middle-click previous-task switch with their fail-closed cases, and
-pixel probes of the capsule, rail, seam, and badge tones across themes.
+recovery, hung, and compositions), repaint latching, hover readout geometry
+on every edge and its survival across a live update, the tap-or-hold gesture
+(tap → Tasks, hold → Recovery on the first sample past the threshold and on a
+still-fingered release, never twice for one press, nothing at all once the
+press drags off, and no gesture armed by a press elsewhere on the bar), the
+readout's "Open Switchboard" action and its inert press claim away from it,
+scroll cycling and the middle-click previous-task switch with their
+fail-closed cases, and pixel probes of the capsule, rail, seam, and badge
+tones across themes.

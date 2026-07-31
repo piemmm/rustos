@@ -84,7 +84,9 @@ mod program {
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::switchboard_ipc::{
-        SwitchboardRequest, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
+        command_endpoint_for, encode_publish_reply, CommandSection, SwitchboardCommand,
+        SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
+        SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use tairix_abi::{
@@ -94,12 +96,14 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        build_pin_views, load_library, parse, reap_launched, window_control_event, CliError,
-        Command, ConcludedPick, DesktopShell, DeviceInputSource, HangTracker, IconCache,
-        IconRasteriser, KeyboardInputSource, LaunchTable, PickConclusion, PinBridge, PinService,
-        ResolvedPin, SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter,
-        SessionPicker, SessionPins, SessionWindows, ShellWindowHost, FILES_LABEL, FILES_RUN_PATH,
-        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        build_pin_views, command_section, deliver_pending_open, load_library,
+        maybe_send_seat_report, open_tray, parse, reap_launched, serve_switchboard_request,
+        window_control_event, CliError, Command, ConcludedPick, DesktopShell, DeviceInputSource,
+        HangTracker, IconCache, IconRasteriser, KeyboardInputSource, LaunchTable, OwnerWindow,
+        PickConclusion, PinBridge, PinService, ResolvedPin, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, FILES_LABEL,
+        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -364,6 +368,12 @@ mod program {
             self.vigil.unresponsive_count()
         }
 
+        /// The flagged owners' event-mailbox endpoints, walked without
+        /// allocating so the seat report can name a bounded few of them.
+        fn unresponsive_endpoints(&self) -> impl Iterator<Item = u64> + '_ {
+            self.vigil.unresponsive_owners()
+        }
+
         /// Drop every verdict held against a reaped child's event mailbox
         /// — a dead app is not a hung app, and a recycled task id must
         /// start clean.
@@ -446,37 +456,119 @@ mod program {
         Ok(())
     }
 
-    /// Attest the publisher of a pending tray-summary call, decode the
-    /// request fail-closed, and relay the summary to the taskbar capsule,
-    /// returning the status the publisher receives.
+    /// Attest the caller of a pending Switchboard call from the kernel and
+    /// serve it through the shared, host-tested policy, returning what the
+    /// caller is answered with.
     ///
-    /// Only the Switchboard child this session spawned may publish: the
+    /// Only the Switchboard child this session spawned may call: the
     /// caller's kernel-attested `call_peer_origin` pid must match the
     /// launch table's live entry for the service's bundle path. Anything
     /// else — a foreign process, an orphan of an earlier session, a copy
     /// launched by hand — is a typed refusal, stated on `stderr`, and
-    /// never mutates the model (fail closed). A malformed frame refuses
-    /// the same way.
+    /// never mutates the model (fail closed). A malformed frame, and an
+    /// owner-directed operation naming an owner this session cannot act
+    /// on, refuse the same way.
     fn serve_switchboard(
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        launched: &LaunchTable,
+        serve: SwitchboardServe<'_>,
         ticket: u64,
         request: &[u8],
-    ) -> Result<(), Errno> {
+    ) -> Result<SwitchboardOutcome, Errno> {
         let mut buf = [0u8; ORIGIN_WIRE_LEN];
         let len = tairix_rt::call_peer_origin(SWITCHBOARD_ENDPOINT, ticket, &mut buf)
             .map_err(errno_from)?;
         let origin = Origin::from_bytes(&buf[..len])?;
-        if launched.running_from(SWITCHBOARD_RUN_PATH) != Some(origin.pid()) {
-            let _ =
-                tairix_rt::stderr(b"desktop: tray summary from an unattested publisher refused\n");
-            return Err(Errno::PermissionDenied);
+        serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
+            let _ = tairix_rt::stderr(alloc::format!("desktop: {}\n", refusal.reason()).as_bytes());
+            refusal.errno()
+        })
+    }
+
+    /// The live window ownership an `ActivateOwner` is validated against:
+    /// the window engine's own attested owner records, resolved through the
+    /// one `window_of_pid` every other owner lookup in this session uses.
+    struct SessionOwnerWindows<'a> {
+        server: &'a WindowServer<RtShmMapper>,
+        windows: &'a SessionWindows,
+        identity: &'a RtWindowIdentity,
+    }
+
+    impl OwnerWindow for SessionOwnerWindows<'_> {
+        fn window_of(&self, owner: u64) -> Option<tairix_wm::WindowId> {
+            window_of_pid(owner, self.server, self.windows, self.identity)
         }
-        let SwitchboardRequest::PublishSummary { summary } =
-            SwitchboardRequest::from_bytes(request)?;
-        shell.set_tray_summary(compositor, Some(summary));
-        Ok(())
+    }
+
+    /// The production [`SwitchboardMailbox`]: one non-blocking `ipc_send`
+    /// to the live monitor's own per-instance command mailbox.
+    ///
+    /// The send never parks the desktop. A refusal — the monitor's mailbox
+    /// full because it has not drained it, or gone because the instance
+    /// exited — is stated on `stderr` and the command dropped: the panel
+    /// missing an advisory open or seat report is not worth stalling the
+    /// session for, and a retry loop here would be the busy-wait the
+    /// desktop must never run.
+    struct RtSwitchboardMailbox;
+
+    impl SwitchboardMailbox for RtSwitchboardMailbox {
+        fn send(&mut self, pid: u64, command: SwitchboardCommand) {
+            if tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes()) != 0 {
+                let _ = tairix_rt::stderr(b"desktop: switchboard command dropped: mailbox full\n");
+            }
+        }
+    }
+
+    /// Start the desktop's Switchboard monitor as this logged-in user and
+    /// record it in the launch table like any other desktop child,
+    /// answering with the pid of the instance now live.
+    ///
+    /// The kernel intersects the monitor's manifest with the user's
+    /// ceiling, so its view follows the seat user's authority. A refused
+    /// spawn answers `None` and leaves the capsule calm: the desktop runs
+    /// without its monitor rather than failing over it.
+    fn spawn_switchboard(launched: &mut LaunchTable) -> Option<u64> {
+        record_launch(
+            launched,
+            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes()),
+            SWITCHBOARD_LABEL,
+            SWITCHBOARD_RUN_PATH,
+        );
+        launched.running_from(SWITCHBOARD_RUN_PATH)
+    }
+
+    /// Name up to [`SEAT_REPORT_OWNERS_MAX`] of the currently-unresponsive
+    /// window owners into `owners`, answering how many were named.
+    ///
+    /// The tracker keys its verdicts by each owner's event-mailbox
+    /// endpoint, so an owner is named by matching that endpoint forward
+    /// against `event_endpoint_for` of every live window owner — the same
+    /// attested ownership records the rest of the session resolves owners
+    /// through, never a claimed id or an inverse guessed from the endpoint
+    /// number. A flagged owner whose windows have since gone simply goes
+    /// unnamed; the report's total still counts it, so the monitor is told
+    /// the truth either way.
+    fn seat_report_owners(
+        sink: &RtEventSink,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        owners: &mut [u64; SEAT_REPORT_OWNERS_MAX],
+    ) -> usize {
+        let mut named = 0;
+        for endpoint in sink.unresponsive_endpoints() {
+            if named == owners.len() {
+                break;
+            }
+            let owner = windows.served().find_map(|(ipc, _)| {
+                let client = server.owner_of(ipc)?;
+                let pid = identity.pid_of(client)?;
+                (event_endpoint_for(pid) == endpoint).then_some(pid)
+            });
+            if let Some(pid) = owner {
+                owners[named] = pid;
+                named += 1;
+            }
+        }
+        named
     }
 
     /// Bring the desktop up and run it until the seat is lost or a fault
@@ -630,7 +722,7 @@ mod program {
             &empty,
             &empty,
             SWITCHBOARD_MAX_REQUEST,
-            STATUS_REPLY_LEN,
+            SWITCHBOARD_PUBLISH_REPLY_LEN,
             SWITCHBOARD_CAPACITY,
         ) != 0
         {
@@ -728,20 +820,18 @@ mod program {
         // entry is removed when its child is reaped, so it never grows
         // beyond the apps currently alive.
         let mut launched = LaunchTable::new();
-        // Start the desktop's Switchboard monitor as this logged-in user
-        // (the kernel intersects its manifest with the user's ceiling, so
-        // the view follows the seat user's authority). It is recorded in
-        // the launch table like any desktop child — the reap arm names a
-        // load refusal, and the serve arm attests its publishes against
-        // this entry. A refused spawn leaves the capsule calm: the desktop
-        // runs without its monitor rather than failing over it.
-        record_launch(
-            &mut launched,
-            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes()),
-            SWITCHBOARD_LABEL,
-            SWITCHBOARD_RUN_PATH,
-        );
-        let mut switchboard_pid = launched.running_from(SWITCHBOARD_RUN_PATH);
+        // Start the desktop's Switchboard monitor. It is recorded in the
+        // launch table like any desktop child — the reap arm names a load
+        // refusal, and the serve arm attests its calls against this entry
+        // — and the very same bring-up serves a later tray press that
+        // finds no instance live.
+        let mut switchboard_pid = spawn_switchboard(&mut launched);
+        // A tray press with no live monitor to receive it: the section the
+        // bar asked to open on, held until that instance's first publish
+        // proves it is up. One pending open, replaced by a later press
+        // rather than queued, so a user pressing repeatedly opens the
+        // section they last asked for and no more.
+        let mut pending_open: Option<CommandSection> = None;
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -818,26 +908,66 @@ mod program {
                     let _ = tairix_rt::call_reply(NOTIFY_ENDPOINT, ticket, &reply);
                 }
             } else if token == SWITCHBOARD_TOKEN {
-                // Serve a pending tray-summary publish: attest that the
-                // caller is the Switchboard child this session spawned
-                // (never the wire), decode fail-closed, relay the summary
-                // to the capsule, and answer with the shared status reply.
-                // A foreign publisher or a malformed frame is a typed
-                // refusal, so no caller is left parked.
+                // Serve a pending monitor call: attest that the caller is
+                // the Switchboard child this session spawned (never the
+                // wire), decode fail-closed, apply it, and answer. A
+                // foreign caller, a malformed frame, or an owner this
+                // session cannot act on is a typed refusal, so no caller
+                // is left parked.
                 let mut request = [0u8; SWITCHBOARD_MAX_REQUEST];
                 let mut ticket = 0u64;
                 if let Ok(len) =
                     tairix_rt::call_recv(SWITCHBOARD_ENDPOINT, &mut request, &mut ticket)
                 {
                     let result = serve_switchboard(
-                        &mut shell,
-                        &mut compositor,
-                        &launched,
+                        SwitchboardServe {
+                            shell: &mut shell,
+                            compositor: &mut compositor,
+                            launched: &mut launched,
+                            owner_windows: &SessionOwnerWindows {
+                                server: &server,
+                                windows: &windows,
+                                identity: &identity,
+                            },
+                            relaunch:
+                                &mut |launched: &mut LaunchTable, run_path: &str, label: &str| {
+                                    record_launch(
+                                        launched,
+                                        spawn_app(run_path.as_bytes()),
+                                        label,
+                                        run_path,
+                                    );
+                                },
+                            self_proc_id: self_origin.proc_id(),
+                        },
                         ticket,
                         &request[..len],
                     );
-                    let reply = encode_status_reply(result);
-                    let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply);
+                    // A publish is the proof an instance is up and
+                    // draining: a press that arrived before it was has an
+                    // instance to open on now.
+                    if matches!(result, Ok(SwitchboardOutcome::Published(_))) {
+                        switchboard_pid = launched.running_from(SWITCHBOARD_RUN_PATH);
+                        if let Some(pid) = switchboard_pid {
+                            deliver_pending_open(&mut pending_open, pid, &mut RtSwitchboardMailbox);
+                        }
+                    }
+                    // A successful publish answers with this session's own
+                    // kernel-attested identity, so the monitor can
+                    // authenticate the commands the session later sends
+                    // it; every other outcome, refusals included, answers
+                    // with the shared status frame.
+                    let mut reply = [0u8; SWITCHBOARD_PUBLISH_REPLY_LEN];
+                    let len = if let Ok(SwitchboardOutcome::Published(session)) = result {
+                        let frame = encode_publish_reply(session);
+                        reply[..frame.len()].copy_from_slice(&frame);
+                        frame.len()
+                    } else {
+                        let frame = encode_status_reply(result.map(|_| ()));
+                        reply[..frame.len()].copy_from_slice(&frame);
+                        frame.len()
+                    };
+                    let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply[..len]);
                 }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
@@ -907,7 +1037,11 @@ mod program {
                 // applied, and a faulting drain ends the session. The
                 // drains are genuinely non-blocking (`pointer_read` /
                 // `keyboard_read` return 0 when empty).
-                let outcomes = match shell.pump(&mut pointer, &mut compositor) {
+                // One wake is one instant: the whole drained batch resolves
+                // its time-driven gestures (a held capsule press) against
+                // the clock read here, and an idle desktop reads none.
+                let now_ns = tairix_rt::clock_get();
+                let outcomes = match shell.pump(&mut pointer, &mut compositor, now_ns) {
                     Ok(outcomes) => outcomes,
                     Err(err) => return drain_fault(err),
                 };
@@ -925,13 +1059,15 @@ mod program {
                         &mut picker,
                         &mut launched,
                         &mut pins,
+                        &mut switchboard_pid,
+                        &mut pending_open,
                     );
                 }
                 loop {
                     match keyboard.poll_record() {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
-                            let outcome = shell.handle(event, &mut compositor);
+                            let outcome = shell.handle(event, &mut compositor, now_ns);
                             route_outcome(
                                 outcome,
                                 Some(record),
@@ -945,18 +1081,35 @@ mod program {
                                 &mut picker,
                                 &mut launched,
                                 &mut pins,
+                                &mut switchboard_pid,
+                                &mut pending_open,
                             );
                         }
                         Err(err) => return drain_fault(err),
                     }
                 }
             }
-            // Fold this wake's delivery evidence into the capsule exactly
-            // once: the sink latched whether any window owner crossed into
-            // or out of the unresponsive set while events were delivered.
-            if sink.take_changed() {
-                shell.set_tray_unresponsive(&mut compositor, sink.unresponsive_count());
+            // Fold this wake's delivery evidence into the capsule and the
+            // monitor's seat view exactly once: the sink latched whether
+            // any window owner crossed into or out of the unresponsive set
+            // while events were delivered, so both move on a real change
+            // and neither is recomputed on a quiet wake.
+            let vigil_changed = sink.take_changed();
+            let mut unresponsive = 0;
+            let mut owners = [0u64; SEAT_REPORT_OWNERS_MAX];
+            let mut named = 0;
+            if vigil_changed {
+                unresponsive = sink.unresponsive_count();
+                shell.set_tray_unresponsive(&mut compositor, unresponsive);
+                named = seat_report_owners(&sink, &server, &windows, &identity, &mut owners);
             }
+            maybe_send_seat_report(
+                vigil_changed,
+                switchboard_pid,
+                unresponsive,
+                &owners[..named],
+                &mut RtSwitchboardMailbox,
+            );
             // Bring the pin strip up to date before presenting: an edit
             // (pin, unpin, an accepted drop or app request) re-resolves the
             // store; otherwise only the cheap running-window matches are
@@ -1139,6 +1292,8 @@ mod program {
         picker: &mut SessionPicker<S, F>,
         launched: &mut LaunchTable,
         pins: &mut PinPanel,
+        switchboard: &mut Option<u64>,
+        pending_open: &mut Option<CommandSection>,
     ) {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -1528,6 +1683,23 @@ mod program {
                     let _ = tairix_rt::stderr(
                         alloc::format!("desktop: pin refused: {err}\n").as_bytes(),
                     );
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard { section }) => {
+                // The bar already decided which section the gesture asks
+                // for (a quick press its overview, a hold its recovery
+                // list); the session only relays it to the live monitor.
+                // With none live the press is itself the demand for one:
+                // bring an instance up and hold the section until its
+                // first publish proves it is listening.
+                if let Some(revived) = open_tray(
+                    pending_open,
+                    command_section(section),
+                    *switchboard,
+                    &mut RtSwitchboardMailbox,
+                    || spawn_switchboard(launched),
+                ) {
+                    *switchboard = Some(revived);
                 }
             }
             _ => {}

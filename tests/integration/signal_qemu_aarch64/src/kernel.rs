@@ -255,9 +255,13 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// The syscall-dispatch callback both EL0 programs' `svc` traps reach.
 ///
 /// `signal` is routed through the installed [`SIGNAL_PRODUCER`] exactly as the
-/// production handler does: the producer authorises the target against the
-/// parent's own children and terminates it on the scheduler, recording the
-/// signal's `128 + n` status. `wait` is routed through the [`WAIT_PRODUCER`],
+/// production handler does: the pid is resolved against the parent's own
+/// children and the signal is then delivered to that target, terminating it on
+/// the scheduler and recording the signal's `128 + n` status. This fixture
+/// runs a single principal and keeps no capability table, so a pid that is not
+/// the caller's child has no owner to compare against and fails closed here;
+/// the cross-principal rule the production handler adds on top is covered by
+/// its own host tests. `wait` is routed through the [`WAIT_PRODUCER`],
 /// which reaps the now-terminated child; the callback copies the recorded
 /// status out to the parent's `status` pointer. `yield` reschedules the caller
 /// (the child's steady state). `exit` records the caller's code and reaps it; a
@@ -283,7 +287,12 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(signal) => signal,
             Err(err) => return encode(Err(err)),
         };
-        encode(signaller.signal(TaskId(cur), pid, signal).map(|()| 0))
+        encode(
+            signaller
+                .resolve_child(TaskId(cur), pid)
+                .and_then(|target| signaller.signal_task(target, signal))
+                .map(|()| 0),
+        )
     } else if raw == SyscallNumber::WAIT.as_u16() {
         let producer = match *WAIT_PRODUCER.lock() {
             Some(p) => p,

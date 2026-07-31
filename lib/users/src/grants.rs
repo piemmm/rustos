@@ -132,6 +132,12 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   `CAP_NET`. It is the network stack service's defining capability
 ///   among the *service* ceilings; carrying it here widens only what an
 ///   *administrator account* may be granted, never any service's identity.
+/// * `CAP_PROC_CONTROL` — signal a process owned by a *different*
+///   principal (`signal`'s cross-principal path,
+///   `plans/NEW-TASKBAR.md` T11). A process may always signal its own
+///   live children, or any other process it itself owns, without this
+///   capability; controlling a process that belongs to someone else is an
+///   administrative act, not an ordinary session's.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -147,6 +153,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::NET_ADMIN,
     CapabilityId::NET_BIND_PRIVILEGED,
     CapabilityId::NET_RAW,
+    CapabilityId::PROC_CONTROL,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -294,7 +301,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 22);
+        assert_eq!(set.len(), 23);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -313,6 +320,7 @@ mod tests {
             CapabilityId::NET_ADMIN,
             CapabilityId::NET_BIND_PRIVILEGED,
             CapabilityId::NET_RAW,
+            CapabilityId::PROC_CONTROL,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
@@ -379,5 +387,14 @@ mod tests {
         ] {
             assert!(!set.contains(cap), "{cap:?} must not be in a ceiling");
         }
+    }
+
+    /// `CAP_PROC_CONTROL` widens only what an administrator account may be
+    /// granted; an ordinary session's ceiling must never carry it, since a
+    /// process may already signal its own children and its own other
+    /// processes without any capability.
+    #[test]
+    fn session_baseline_excludes_proc_control() {
+        assert!(!session_baseline().contains(CapabilityId::PROC_CONTROL));
     }
 }

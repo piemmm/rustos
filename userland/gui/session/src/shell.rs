@@ -574,7 +574,9 @@ impl DesktopShell {
         raised
     }
 
-    /// Route one input `event` to the desktop and return what it did.
+    /// Route one input `event` to the desktop, resolving any time-driven
+    /// taskbar gesture against the monotonic `now_ns`, and return what it
+    /// did.
     ///
     /// The event is fanned to the window manager or taskbar by the
     /// [`SessionInputRouter`]'s policy; a taskbar action is applied where the
@@ -591,34 +593,40 @@ impl DesktopShell {
     /// ([`refresh_cursor`](Self::refresh_cursor)): its hotspot follows pointer
     /// motion and its shape follows what is under it (or the move cursor
     /// during a drag), so the desktop always shows a live pointer.
-    pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> ShellOutcome {
-        let outcome = match self
-            .router
-            .handle(event, compositor, self.session.taskbar_mut())
-        {
-            SessionInputResponse::Ignored => ShellOutcome::Ignored,
-            SessionInputResponse::WindowManager(response) => {
-                self.mirror_focus(&response, compositor);
-                ShellOutcome::WindowManager(response)
-            }
-            SessionInputResponse::Taskbar(response) => {
-                match response {
-                    TaskbarResponse::TaskActivated { id, outcome } => {
-                        self.tasks
-                            .activate(compositor, &mut self.router, id, outcome);
-                    }
-                    // A user dismiss clears the notification from the model
-                    // the session owns; the repaint latch it sets drives the
-                    // one present below, closing the popover when the last one
-                    // goes.
-                    TaskbarResponse::DismissNotification { producer, key } => {
-                        self.session.taskbar_mut().clear_notification(producer, key);
-                    }
-                    _ => {}
+    pub fn handle(
+        &mut self,
+        event: InputEvent,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> ShellOutcome {
+        let outcome =
+            match self
+                .router
+                .handle(event, compositor, self.session.taskbar_mut(), now_ns)
+            {
+                SessionInputResponse::Ignored => ShellOutcome::Ignored,
+                SessionInputResponse::WindowManager(response) => {
+                    self.mirror_focus(&response, compositor);
+                    ShellOutcome::WindowManager(response)
                 }
-                ShellOutcome::Taskbar(response)
-            }
-        };
+                SessionInputResponse::Taskbar(response) => {
+                    match response {
+                        TaskbarResponse::TaskActivated { id, outcome } => {
+                            self.tasks
+                                .activate(compositor, &mut self.router, id, outcome);
+                        }
+                        // A user dismiss clears the notification from the model
+                        // the session owns; the repaint latch it sets drives the
+                        // one present below, closing the popover when the last one
+                        // goes.
+                        TaskbarResponse::DismissNotification { producer, key } => {
+                            self.session.taskbar_mut().clear_notification(producer, key);
+                        }
+                        _ => {}
+                    }
+                    ShellOutcome::Taskbar(response)
+                }
+            };
         // One present per event, at one site: an acted taskbar response
         // changed the bar (a highlight, the popup opening or closing), and a
         // pixel-only change (a hover, a popup scroll or edit) latched the
@@ -677,7 +685,11 @@ impl DesktopShell {
     }
 
     /// Drain every pending event from `source`, routing each through
-    /// [`handle`](Self::handle), and return their outcomes in order.
+    /// [`handle`](Self::handle) against the monotonic `now_ns`, and return
+    /// their outcomes in order.
+    ///
+    /// One drain is one instant: every event of this batch resolves against
+    /// the same `now_ns`, which the embedder read when the source woke it.
     ///
     /// # Errors
     ///
@@ -689,13 +701,14 @@ impl DesktopShell {
         &mut self,
         source: &mut S,
         compositor: &mut Compositor,
+        now_ns: u64,
     ) -> Result<Vec<ShellOutcome>, Errno>
     where
         S: InputSource + ?Sized,
     {
         let mut outcomes = Vec::new();
         while let Some(event) = source.poll()? {
-            outcomes.push(self.handle(event, compositor));
+            outcomes.push(self.handle(event, compositor, now_ns));
         }
         Ok(outcomes)
     }

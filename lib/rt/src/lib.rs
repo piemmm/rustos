@@ -59,9 +59,9 @@ extern crate alloc;
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    BootFacts, BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin,
-    RandomFlags, ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
-    WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    BootFacts, BootId, CapabilityId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags,
+    Origin, RandomFlags, ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize,
+    Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
     ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
@@ -118,6 +118,8 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 /// `signal_intake` syscall number (as above).
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
+/// `cap_query` syscall number (as above).
+const NUM_CAP_QUERY: u64 = SyscallNumber::CAP_QUERY.as_u16() as u64;
 /// `sched_set_realtime` syscall number (as above).
 const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
 
@@ -1616,6 +1618,23 @@ pub fn signal_intake(op: SignalIntakeOp) -> i64 {
     ret as i64
 }
 
+/// Query whether the calling process's own effective capability set holds
+/// `cap` (`SyscallNumber::CAP_QUERY`).
+///
+/// A pure, unaudited observer, like [`clock_get`]: the kernel consults only
+/// the caller's own already-established set (never another principal's) and
+/// grants nothing by being asked. Returns `true` when held, `false`
+/// otherwise; the wrapper hides no error because the syscall itself has none
+/// to report.
+#[must_use]
+pub fn cap_query(cap: CapabilityId) -> bool {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the capability id and reads only the caller's own effective set on the
+    // far side of the trap. No user pointer is passed.
+    let ret = unsafe { raw_syscall(NUM_CAP_QUERY, [u64::from(cap.as_u16()), 0, 0, 0, 0, 0]) };
+    ret == 1
+}
+
 /// Set the calling task's scheduling class — enter (`realtime` true) or
 /// leave (false) the strict-priority real-time band
 /// (`SyscallNumber::SCHED_SET_REALTIME`, `plans/USB.md`).
@@ -1983,27 +2002,31 @@ pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
     ret
 }
 
-/// Deliver control signal `signal` to a child process `pid`
-/// (`SyscallNumber::SIGNAL`, `plans/SPAWN.md` SP7).
+/// Deliver control signal `signal` to process `pid`
+/// (`SyscallNumber::SIGNAL`, `plans/SPAWN.md` SP7, `plans/NEW-TASKBAR.md`
+/// T11).
 ///
-/// A process may signal only its **own** children; the kernel identifies the
-/// sender from its own current-task slot (never a caller-supplied identity),
-/// validates the parent/child relationship, and fails closed. No capability
-/// is required — signalling a child grants no authority over any other
-/// principal.
+/// The kernel identifies the sender from its own current-task slot (never a
+/// caller-supplied identity) and settles the target in precedence order: a
+/// live **child** of the caller needs no capability, a target owned by the
+/// caller's **own principal** needs none either, and only a caller holding
+/// `CAP_PROC_CONTROL` may signal a process belonging to a *different*
+/// principal. Everything else fails closed, and the cross-principal decision
+/// is audited whichever way it goes.
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: `0` on success, and a negative value is `-errno`
 /// (recover the [`tairix_abi::Errno`] discriminant as `-ret`) —
-/// `Errno::NotFound` when `pid` is not a child of the caller, and
+/// `Errno::NotFound` when `pid` names no live task, `Errno::PermissionDenied`
+/// when the caller holds no authority over another principal's process, and
 /// `Errno::NotImplemented` until the kernel's signal producer is installed.
 /// The wrapper surfaces that raw signed value; it adds no authority and hides
 /// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn signal(pid: i32, signal: Signal) -> i64 {
-    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the target child and the signal value on the far side of the trap.
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel authorises
+    // the target and validates the signal value on the far side of the trap.
     // `signal` dereferences no user pointer.
     let ret = unsafe {
         raw_syscall(

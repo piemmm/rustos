@@ -8,11 +8,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
-use tairix_abi::{
-    AppInfoHeader, Errno, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+use tairix_abi::switchboard_ipc::{
+    CommandSection, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
-use tairix_controls::PointerState;
+use tairix_abi::{
+    AppInfoHeader, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX,
+    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+};
+use tairix_controls::{PointerState, Section};
 use tairix_cursor::CursorTheme;
 use tairix_icon::{IconKind, IconSet};
 use tairix_proglib::{
@@ -29,10 +32,12 @@ use tairix_wm::{
 };
 
 use crate::{
-    load_icon_set, load_library, DesktopSession, DesktopShell, InputSource, PinBridge,
-    PinEditError, PinIconSource, PinService, SessionFileReader, SessionFileWriter,
-    SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome, TaskBridge,
-    TaskbarPresenter,
+    command_section, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
+    open_tray, serve_switchboard_request, DesktopSession, DesktopShell, InputSource, LaunchTable,
+    OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService, SessionFileReader,
+    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome,
+    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
+    TaskbarPresenter, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -244,6 +249,7 @@ fn press_at(
         },
         comp,
         taskbar,
+        0,
     );
     router.handle(
         InputEvent::PointerPressed {
@@ -251,6 +257,7 @@ fn press_at(
         },
         comp,
         taskbar,
+        0,
     )
 }
 
@@ -628,6 +635,7 @@ fn secondary_press_over_a_window_routes_to_the_window_manager() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     let response = router.handle(
         InputEvent::PointerPressed {
@@ -635,6 +643,7 @@ fn secondary_press_over_a_window_routes_to_the_window_manager() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     assert_eq!(
@@ -699,6 +708,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     assert_eq!(response, SessionInputResponse::Ignored);
     assert_eq!(session.taskbar().library().current(), Some(0));
@@ -711,6 +721,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     assert_eq!(
         response,
@@ -724,6 +735,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         InputEvent::PointerScrolled { dx: 0, dy: 10 },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     assert_eq!(response, SessionInputResponse::Ignored);
 }
@@ -740,6 +752,7 @@ fn motion_updates_the_pointer_and_is_otherwise_ignored() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     assert_eq!(response, SessionInputResponse::Ignored);
@@ -759,6 +772,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     router.handle(
         InputEvent::PointerPressed {
@@ -766,6 +780,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     assert!(
         router.begin_move(&comp),
@@ -780,6 +795,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     assert_eq!(
@@ -805,6 +821,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     router.handle(
         InputEvent::PointerPressed {
@@ -812,6 +829,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     assert!(router.begin_move(&comp));
 
@@ -821,6 +839,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     assert_eq!(
@@ -842,6 +861,7 @@ fn a_non_primary_press_is_ignored() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     let response = router.handle(
         InputEvent::PointerPressed {
@@ -849,6 +869,7 @@ fn a_non_primary_press_is_ignored() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     assert_eq!(response, SessionInputResponse::Ignored);
@@ -877,6 +898,7 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
         InputEvent::PointerMoved { to: at },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
     let response = router.handle(
         InputEvent::PointerPressed {
@@ -884,6 +906,7 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
         },
         &mut comp,
         session.taskbar_mut(),
+        0,
     );
 
     let SessionInputResponse::Taskbar(TaskbarResponse::TaskActivated { outcome, .. }) = response
@@ -952,6 +975,19 @@ const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Secondary,
 };
 
+const PRIMARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+    button: PointerButton::Primary,
+};
+
+/// A press released well inside the bar's long-press threshold, in
+/// monotonic nanoseconds since the press.
+const QUICK_PRESS_NS: u64 = 50_000_000;
+
+/// A press held far past the bar's long-press threshold, in monotonic
+/// nanoseconds since the press. The bar owns the threshold itself; the
+/// session only needs a hold no reasonable threshold could call quick.
+const LONG_PRESS_NS: u64 = 5_000_000_000;
+
 #[test]
 fn pump_opens_the_popup_and_presents_it() {
     let mut shell = shell();
@@ -966,6 +1002,7 @@ fn pump_opens_the_popup_and_presents_it() {
         .pump(
             &mut MemoryInput::new(&[moved(24, 1060), PRIMARY_PRESS]),
             &mut comp,
+            0,
         )
         .expect("an in-memory source does not fault");
 
@@ -990,8 +1027,8 @@ fn handle_routes_a_window_press_to_the_window_manager() {
     let mut comp = compositor();
     let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
 
-    shell.handle(moved(250, 250), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
     assert_eq!(
         outcome,
@@ -1043,6 +1080,7 @@ fn pump_propagates_a_source_fault_after_applying_prior_events() {
     let result = shell.pump(
         &mut MemoryInput::faulting(&[moved(24, 1060), PRIMARY_PRESS], Errno::NotFound),
         &mut comp,
+        0,
     );
 
     assert_eq!(result, Err(Errno::NotFound));
@@ -1059,7 +1097,7 @@ fn motion_is_ignored_and_does_not_present_the_bar() {
 
     // Motion over the empty desktop (far from the bar).
     let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(900, 500)]), &mut comp)
+        .pump(&mut MemoryInput::new(&[moved(900, 500)]), &mut comp, 0)
         .expect("source does not fault");
 
     assert_eq!(outcomes, [ShellOutcome::Ignored]);
@@ -1070,7 +1108,7 @@ fn motion_is_ignored_and_does_not_present_the_bar() {
 
     // Motion onto the library button.
     let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp)
+        .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp, 0)
         .expect("source does not fault");
     assert_eq!(outcomes, [ShellOutcome::Ignored]);
 
@@ -1088,8 +1126,8 @@ fn begin_move_through_the_shell_arms_a_grab_on_the_focused_window() {
     let mut comp = compositor();
     opaque_window(&mut comp, Point::new(200, 200), 300, 300);
 
-    shell.handle(moved(250, 250), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(shell.begin_move(&comp));
     assert!(shell.router().is_moving());
 }
@@ -1139,7 +1177,7 @@ fn the_pointer_tracks_motion() {
     shell.refresh_cursor(&mut comp);
     let before = comp.cursor_bounds().expect("the pointer is shown");
 
-    shell.handle(moved(300, 400), &mut comp);
+    shell.handle(moved(300, 400), &mut comp, 0);
 
     let after = comp.cursor_bounds().expect("the pointer is still shown");
     assert_eq!(shell.router().pointer(), Point::new(300, 400));
@@ -1157,14 +1195,14 @@ fn the_pointer_shape_follows_the_window_under_it() {
     let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
     assert!(comp.set_window_cursor(window, CursorKind::Text));
 
-    shell.handle(moved(250, 250), &mut comp);
+    shell.handle(moved(250, 250), &mut comp, 0);
     assert_eq!(
         shell.cursor().kind(),
         CursorKind::Text,
         "over the window the pointer takes the window's cursor hint"
     );
 
-    shell.handle(moved(900, 500), &mut comp);
+    shell.handle(moved(900, 500), &mut comp, 0);
     assert_eq!(
         shell.cursor().kind(),
         CursorKind::Arrow,
@@ -1237,8 +1275,8 @@ fn teardown_removes_the_presented_windows() {
         .library_mut()
         .set_catalog(office_and_games());
     // Move onto the library button and press.
-    shell.handle(moved(24, 1060), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     shell.present(&mut comp);
     assert_eq!(comp.window_count(), 2, "bar and popup present");
 
@@ -1386,8 +1424,8 @@ fn the_active_frame_follows_the_focused_window() {
 
     // A direct click on the first window's content moves focus, and the active
     // frame follows it.
-    shell.handle(moved(150, 150), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(150, 150), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(shell.router().focused(), Some(first));
     assert_eq!(activation(&comp, first), WindowActivationState::Active);
     assert_eq!(activation(&comp, second), WindowActivationState::Inactive);
@@ -1408,8 +1446,8 @@ fn minimizing_or_closing_the_focused_window_leaves_no_active_frame() {
     assert_eq!(activation(&comp, a), WindowActivationState::Inactive);
 
     // Focusing then closing a window likewise leaves no active frame.
-    shell.handle(moved(150, 150), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(150, 150), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(activation(&comp, a), WindowActivationState::Active);
     assert!(shell.close_window(&mut comp, a));
     assert_eq!(shell.router().focused(), None);
@@ -1428,8 +1466,8 @@ fn clicking_a_task_minimises_then_restores_its_window() {
 
     // First click on the focused, non-minimised task minimises it: the window
     // is hidden and focus is dropped.
-    shell.handle(moved(at.x, at.y), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
@@ -1441,7 +1479,7 @@ fn clicking_a_task_minimises_then_restores_its_window() {
     assert_eq!(shell.router().focused(), None);
 
     // A second click restores and re-focuses it.
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
@@ -1467,8 +1505,8 @@ fn clicking_a_window_directly_moves_the_bar_highlight() {
 
     // The second window is focused; clicking the first window directly moves
     // both the window manager's focus and the bar's highlight to it.
-    shell.handle(moved(150, 150), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(150, 150), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(matches!(
         outcome,
         ShellOutcome::WindowManager(InputResponse::Activated { window, .. }) if window == first
@@ -1493,8 +1531,8 @@ fn pressing_the_desktop_clears_the_bar_highlight() {
 
     // A press on empty desktop drops window-manager focus and clears the
     // highlight, leaving the task listed.
-    shell.handle(moved(700, 400), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(700, 400), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::WindowManager(InputResponse::DesktopPressed)
@@ -1633,13 +1671,14 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
     let click = |shell: &mut DesktopShell, comp: &mut Compositor, at: Point| -> Vec<ShellOutcome> {
         vec![
-            shell.handle(moved(at.x, at.y), comp),
-            shell.handle(PRIMARY_PRESS, comp),
+            shell.handle(moved(at.x, at.y), comp, 0),
+            shell.handle(PRIMARY_PRESS, comp, 0),
             shell.handle(
                 InputEvent::PointerReleased {
                     button: PointerButton::Primary,
                 },
                 comp,
+                0,
             ),
         ]
     };
@@ -2095,8 +2134,8 @@ fn shell_set_library_hands_catalog_to_popup_and_refreshes_open_one() {
     assert_eq!(shell.session().taskbar().library().catalog().len(), 1);
 
     // Open popup.
-    shell.handle(moved(24, 1060), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(shell.session().taskbar().library().is_open());
     assert_eq!(shell.session().taskbar().library().rows().len(), 2); // 1 folder + 1 entry
 
@@ -2123,8 +2162,8 @@ fn shell_raise_window_shows_and_focuses_tracked_tasks() {
 
     // Minimise.
     let at = task_slot_point(&shell, 0);
-    shell.handle(moved(at.x, at.y), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(!comp.window(id).unwrap().is_visible());
 
     // Raise.
@@ -2144,8 +2183,8 @@ fn full_launch_flow() {
         .set_catalog(catalog(&[("calc", "Calc", LibraryCategory::Office)]));
 
     // Open popup.
-    shell.handle(moved(24, 1060), &mut comp);
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
     let row_at = |shell: &DesktopShell, label: &str| -> Point {
         let layout = shell.session().taskbar().library_layout(Scale::ONE);
@@ -2169,9 +2208,9 @@ fn full_launch_flow() {
     };
 
     let at = row_at(&shell, "Calc");
-    let outcome = shell.handle(moved(at.x, at.y), &mut comp);
+    let outcome = shell.handle(moved(at.x, at.y), &mut comp, 0);
     assert_eq!(outcome, ShellOutcome::Ignored);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
     let ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) = outcome else {
         panic!("expected launch, got {outcome:?}");
@@ -2537,8 +2576,8 @@ fn secondary_press_over_pin_opens_taskbar_menu() {
 
     // Secondary press over the pin slot.
     let at = pin_slot_point(&shell, 0);
-    shell.handle(moved(at.x, at.y), &mut comp);
-    let outcome = shell.handle(SECONDARY_PRESS, &mut comp);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    let outcome = shell.handle(SECONDARY_PRESS, &mut comp, 0);
 
     assert_eq!(outcome, ShellOutcome::Ignored);
     assert!(shell.session().taskbar().menu().is_open());
@@ -2554,14 +2593,15 @@ fn secondary_press_over_pin_opens_taskbar_menu() {
         .panel;
     let first_row = Point::new(menu_rect.left() + 10, menu_rect.top() + 10);
 
-    shell.handle(moved(first_row.x, first_row.y), &mut comp);
+    shell.handle(moved(first_row.x, first_row.y), &mut comp, 0);
     // Many controls activate on release.
-    shell.handle(PRIMARY_PRESS, &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     let outcome = shell.handle(
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
         },
         &mut comp,
+        0,
     );
 
     // For a not-running pin, first row should be ActivatePin (which means launch).
@@ -2582,8 +2622,8 @@ fn secondary_press_over_window_reaches_window_manager() {
     let mut comp = compositor();
 
     let _win = opaque_window(&mut comp, Point::new(100, 100), 200, 200);
-    shell.handle(moved(150, 150), &mut comp);
-    let outcome = shell.handle(SECONDARY_PRESS, &mut comp);
+    shell.handle(moved(150, 150), &mut comp, 0);
+    let outcome = shell.handle(SECONDARY_PRESS, &mut comp, 0);
 
     // Existing behaviour: secondary press over window is handled by WM (e.g. for context menu).
     if let ShellOutcome::WindowManager(InputResponse::SecondaryActivated { .. }) = outcome {
@@ -2731,8 +2771,8 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
             rect.top() + (rect.height / 2) as i32,
         )
     };
-    let _ = shell.handle(moved(card.x, card.y), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    let _ = shell.handle(moved(card.x, card.y), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::DismissNotification {
@@ -2889,6 +2929,45 @@ fn hang_tracker_counts_every_flagged_owner_and_saturates() {
     assert_eq!(tracker.unresponsive_count(), u16::MAX);
 }
 
+/// `unresponsive_owners` walks exactly the flagged set, in ascending
+/// order, naming neither a merely-suspect owner nor one that has since
+/// recovered or been forgotten.
+#[test]
+fn hang_tracker_unresponsive_owners_names_exactly_the_flagged_set() {
+    let mut tracker = crate::HangTracker::new();
+    assert_eq!(
+        tracker.unresponsive_owners().collect::<Vec<_>>(),
+        Vec::<u64>::new()
+    );
+
+    // A merely-suspect owner (below the threshold) is not named.
+    assert!(!tracker.note_refused(9, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(tracker.unresponsive_owners().next().is_none());
+
+    // Two owners cross the threshold and are both named, ascending.
+    assert!(tracker.note_refused(
+        9,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(!tracker.note_refused(3, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(tracker.note_refused(
+        3,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert_eq!(
+        tracker.unresponsive_owners().collect::<Vec<_>>(),
+        vec![3, 9]
+    );
+
+    // A recovered owner drops out; a forgotten one too.
+    assert!(tracker.note_delivered(3));
+    assert_eq!(tracker.unresponsive_owners().collect::<Vec<_>>(), vec![9]);
+    assert!(tracker.forget(9));
+    assert!(tracker.unresponsive_owners().next().is_none());
+}
+
 // ---- switchboard tray relay -------------------------------------------
 
 /// A well-formed summary fixture: `jobs` background jobs, nothing else
@@ -2954,56 +3033,64 @@ fn tray_relay_flags_and_releases_the_hung_posture() {
     assert_eq!(state.recovery, tairix_controls::RecoveryState::None);
 }
 
-/// A primary press on the capsule pins the instrument readout open (it
-/// survives the pointer leaving), a press inside the open readout is claimed
-/// inert, and a press away from the bar releases the pin while the desktop
-/// acts on the press as usual.
+/// The capsule's gestures reach the session as the bar's own open request:
+/// a quick press and release asks for the live task list, and a press held
+/// past the bar's long-press threshold asks for recovery instead. The press
+/// itself acts on nothing — the gesture resolves on release.
 #[test]
-fn capsule_press_pins_the_readout_and_a_press_away_releases_it() {
+fn capsule_gestures_ask_the_session_to_open_switchboard() {
     let mut shell = shell();
     let mut comp = compositor();
     shell.present(&mut comp);
 
-    // Press the capsule: the readout pins open and is presented as a
-    // popover window.
+    // Hovering the capsule expands its instrument readout as a popover
+    // window; that is presentation, and the press only begins the gesture.
     let capsule = capsule_point(&shell);
-    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
-    assert_eq!(outcome, ShellOutcome::Ignored, "pinning is presentation");
-    assert!(shell.session().taskbar().tray().is_pinned());
-    assert!(shell.presenter().readout_window().is_some());
-
-    // The pin holds without hover: move the pointer to the open desktop.
-    let _ = shell.handle(moved(600, 300), &mut comp);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
     assert!(shell.session().taskbar().tray().is_expanded());
     assert!(shell.presenter().readout_window().is_some());
-
-    // A press inside the readout is claimed inert: nothing happens, the pin
-    // holds.
-    let readout = shell
-        .session()
-        .taskbar()
-        .tray_readout_layout(Scale::ONE)
-        .expect("the pinned readout has a panel");
-    #[allow(clippy::cast_possible_wrap)]
-    let inside = Point::new(
-        readout.panel.left() + (readout.panel.width / 2) as i32,
-        readout.panel.top() + (readout.panel.height / 2) as i32,
-    );
-    let _ = shell.handle(moved(inside.x, inside.y), &mut comp);
     assert_eq!(
-        shell.handle(PRIMARY_PRESS, &mut comp),
-        ShellOutcome::Ignored
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Ignored,
+        "the press begins the gesture and acts on nothing yet"
     );
-    assert!(shell.session().taskbar().tray().is_pinned());
 
-    // A press away from the bar releases the pin; the readout window is
-    // withdrawn on the same wake.
-    let _ = shell.handle(moved(600, 300), &mut comp);
-    let _ = shell.handle(PRIMARY_PRESS, &mut comp);
-    assert!(!shell.session().taskbar().tray().is_pinned());
-    assert!(!shell.session().taskbar().tray().is_expanded());
-    assert!(shell.presenter().readout_window().is_none());
+    // Released promptly, it asks for the running-task section.
+    assert_eq!(
+        shell.handle(PRIMARY_RELEASE, &mut comp, QUICK_PRESS_NS),
+        ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard {
+            section: Section::Tasks,
+        })
+    );
+
+    // Held past the threshold, the same gesture asks for recovery.
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_RELEASE, &mut comp, LONG_PRESS_NS),
+        ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard {
+            section: Section::Recovery,
+        })
+    );
+}
+
+/// A primary release the taskbar does not claim still ends the window
+/// manager's in-flight move-grab: offering releases to the bar first must
+/// not swallow them.
+#[test]
+fn a_release_off_the_capsule_still_ends_a_window_grab() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    let _ = shell.handle(moved(250, 250), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert!(shell.begin_move(&comp), "the focused window is grabbable");
+    let _ = shell.handle(moved(280, 280), &mut comp, 0);
+
+    assert_eq!(
+        shell.handle(PRIMARY_RELEASE, &mut comp, 0),
+        ShellOutcome::WindowManager(InputResponse::MoveEnded { window })
+    );
 }
 
 /// A scroll over the capsule cycles the running tasks through the session
@@ -3020,8 +3107,8 @@ fn scroll_over_the_capsule_cycles_tasks_through_the_router() {
     // The second window holds focus; scrolling forward over the capsule
     // wraps to the first task and activates it.
     let capsule = capsule_point(&shell);
-    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
-    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
@@ -3035,8 +3122,8 @@ fn scroll_over_the_capsule_cycles_tasks_through_the_router() {
     );
 
     // A scroll away from the capsule leaves the task list alone.
-    let _ = shell.handle(moved(600, 300), &mut comp);
-    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp);
+    let _ = shell.handle(moved(600, 300), &mut comp, 0);
+    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp, 0);
     assert!(!matches!(outcome, ShellOutcome::Taskbar(_)));
     assert_eq!(
         shell.session().taskbar().tasks().focused(),
@@ -3060,8 +3147,8 @@ fn middle_press_over_the_capsule_switches_to_the_previous_task() {
 
     // Opening `second` after `first` made `first` the previous task.
     let capsule = capsule_point(&shell);
-    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
-    let outcome = shell.handle(MIDDLE_PRESS, &mut comp);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    let outcome = shell.handle(MIDDLE_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
@@ -3072,7 +3159,7 @@ fn middle_press_over_the_capsule_switches_to_the_previous_task() {
 
     // The handover made the second task the previous one: middle-click
     // toggles back.
-    let outcome = shell.handle(MIDDLE_PRESS, &mut comp);
+    let outcome = shell.handle(MIDDLE_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
@@ -3082,6 +3169,496 @@ fn middle_press_over_the_capsule_switches_to_the_previous_task() {
     );
 
     // A middle press on the open desktop is inert.
-    let _ = shell.handle(moved(600, 300), &mut comp);
-    assert_eq!(shell.handle(MIDDLE_PRESS, &mut comp), ShellOutcome::Ignored);
+    let _ = shell.handle(moved(600, 300), &mut comp, 0);
+    assert_eq!(
+        shell.handle(MIDDLE_PRESS, &mut comp, 0),
+        ShellOutcome::Ignored
+    );
+}
+
+// ---- switchboard command channel --------------------------------------
+
+/// The pid the launch table records the desktop's own monitor instance
+/// under, launched from the session's one `SWITCHBOARD_RUN_PATH`.
+const MONITOR_PID: u64 = 40;
+
+/// This session's own kernel-attested identity, as the window channel's
+/// create reply already carries it.
+fn session_proc_id() -> ProcId {
+    ProcId::from_raw([7u8; tairix_abi::PROC_ID_LEN])
+}
+
+/// A launch table holding a live monitor instance, exactly as bring-up
+/// records it.
+fn monitor_launched() -> LaunchTable {
+    let mut launched = LaunchTable::new();
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched
+}
+
+/// A fixed owner→window map standing in for the session's live window
+/// registry: an owner not in it currently owns no window on this seat.
+struct FakeOwnerWindows {
+    windows: Vec<(u64, WindowId)>,
+}
+
+impl FakeOwnerWindows {
+    fn none() -> Self {
+        Self {
+            windows: Vec::new(),
+        }
+    }
+
+    fn of(owner: u64, window: WindowId) -> Self {
+        Self {
+            windows: vec![(owner, window)],
+        }
+    }
+}
+
+impl OwnerWindow for FakeOwnerWindows {
+    fn window_of(&self, owner: u64) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|(id, _)| *id == owner)
+            .map(|(_, window)| *window)
+    }
+}
+
+/// A recording [`SwitchboardMailbox`]: every command the session sent, in
+/// order, addressed to the instance it named. The live seam's send either
+/// lands or is dropped, never retried, so counting sends here is exactly
+/// the guarantee under test.
+#[derive(Default)]
+struct RecordingMailbox {
+    sent: Vec<(u64, SwitchboardCommand)>,
+}
+
+impl SwitchboardMailbox for RecordingMailbox {
+    fn send(&mut self, pid: u64, command: SwitchboardCommand) {
+        self.sent.push((pid, command));
+    }
+}
+
+/// A relaunch seam recording what it was asked to launch, standing in for
+/// the session's one attested spawn-and-record path.
+#[derive(Default)]
+struct Relaunches {
+    launched: Vec<(String, String)>,
+}
+
+/// Serve one request as the attested monitor would send it.
+fn serve_as_monitor(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    launched: &mut LaunchTable,
+    owners: &dyn OwnerWindow,
+    relaunches: &mut Relaunches,
+    request: &SwitchboardRequest,
+) -> Result<SwitchboardOutcome, SwitchboardRefusal> {
+    serve_switchboard_request(
+        SwitchboardServe {
+            shell,
+            compositor: comp,
+            launched,
+            owner_windows: owners,
+            relaunch: &mut |_: &mut LaunchTable, run_path: &str, label: &str| {
+                relaunches
+                    .launched
+                    .push((String::from(run_path), String::from(label)));
+            },
+            self_proc_id: session_proc_id(),
+        },
+        MONITOR_PID,
+        &request.to_le_bytes(),
+    )
+}
+
+/// A successful publish answers with this session's own attested identity,
+/// which the monitor needs to authenticate the commands the session later
+/// sends it; the summary reaches the capsule on the same call.
+#[test]
+fn a_publish_relays_the_summary_and_answers_with_the_session_identity() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut relaunches = Relaunches::default();
+
+    let outcome = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::PublishSummary {
+            summary: tray_summary(2),
+        },
+    );
+
+    assert_eq!(
+        outcome,
+        Ok(SwitchboardOutcome::Published(session_proc_id()))
+    );
+    assert_eq!(
+        shell.session().taskbar().tray().signal().state().activity,
+        tairix_controls::ActivityState::Working,
+        "the published summary drove the capsule"
+    );
+}
+
+/// Only the monitor this session launched may call: every operation from an
+/// unattested caller is refused as a permission denial and leaves the model
+/// untouched.
+#[test]
+fn an_unattested_caller_is_refused_for_every_operation() {
+    let window = {
+        let mut shell = shell();
+        let mut comp = compositor();
+        open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor")
+    };
+    let requests = [
+        SwitchboardRequest::PublishSummary {
+            summary: tray_summary(2),
+        },
+        SwitchboardRequest::ActivateOwner { owner: 41 },
+        SwitchboardRequest::RestartOwner { owner: 41 },
+    ];
+
+    for request in &requests {
+        let mut shell = shell();
+        let mut comp = compositor();
+        let mut launched = monitor_launched();
+        launched.record(41, "Editor", "/Apps/Editor.app/Run");
+        let mut relaunches = Relaunches::default();
+
+        let refusal = serve_switchboard_request(
+            SwitchboardServe {
+                shell: &mut shell,
+                compositor: &mut comp,
+                launched: &mut launched,
+                owner_windows: &FakeOwnerWindows::of(41, window),
+                relaunch: &mut |_: &mut LaunchTable, run_path: &str, label: &str| {
+                    relaunches
+                        .launched
+                        .push((String::from(run_path), String::from(label)));
+                },
+                self_proc_id: session_proc_id(),
+            },
+            // Not the launch table's live monitor: an orphan, a foreign
+            // process, or a copy launched by hand.
+            MONITOR_PID + 1,
+            &request.to_le_bytes(),
+        );
+
+        assert_eq!(refusal, Err(SwitchboardRefusal::Unattested));
+        assert_eq!(
+            refusal.unwrap_err().errno(),
+            Errno::PermissionDenied,
+            "an unattested caller is a permission denial"
+        );
+        assert_eq!(
+            shell.session().taskbar().tray().signal().state().activity,
+            tairix_controls::ActivityState::Idle,
+            "a refused call publishes nothing"
+        );
+        assert!(
+            relaunches.launched.is_empty(),
+            "a refused call launches nothing"
+        );
+    }
+}
+
+/// A malformed frame from the attested monitor is refused fail-closed and
+/// changes nothing.
+#[test]
+fn a_malformed_switchboard_frame_is_refused() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut relaunches = Relaunches::default();
+
+    let refusal = serve_switchboard_request(
+        SwitchboardServe {
+            shell: &mut shell,
+            compositor: &mut comp,
+            launched: &mut launched,
+            owner_windows: &FakeOwnerWindows::none(),
+            relaunch: &mut |_: &mut LaunchTable, run_path: &str, label: &str| {
+                relaunches
+                    .launched
+                    .push((String::from(run_path), String::from(label)));
+            },
+            self_proc_id: session_proc_id(),
+        },
+        MONITOR_PID,
+        b"not a switchboard frame",
+    )
+    .expect_err("a malformed frame is refused");
+
+    assert!(matches!(refusal, SwitchboardRefusal::Malformed(_)));
+    assert_eq!(
+        shell.session().taskbar().tray().signal().state().activity,
+        tairix_controls::ActivityState::Idle
+    );
+}
+
+/// An `ActivateOwner` naming an owner with no live window on this seat is
+/// `NotFound`: the session never guesses which window was meant.
+#[test]
+fn activate_owner_refuses_an_owner_with_no_live_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut relaunches = Relaunches::default();
+
+    let refusal = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::ActivateOwner { owner: 41 },
+    )
+    .expect_err("an unknown owner is refused");
+
+    assert_eq!(refusal, SwitchboardRefusal::UnknownOwner);
+    assert_eq!(refusal.errno(), Errno::NotFound);
+}
+
+/// An `ActivateOwner` for a live owner raises exactly that owner's window,
+/// through the same focus path a taskbar press drives.
+#[test]
+fn activate_owner_raises_the_named_owners_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let wanted = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let other = open_app(&mut shell, &mut comp, Point::new(360, 240), "Files");
+    let wanted_task = shell.tasks().task_for(wanted).expect("tracked");
+    assert_eq!(shell.router().focused(), Some(other), "the later window");
+    let mut launched = monitor_launched();
+    let mut relaunches = Relaunches::default();
+
+    let outcome = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::of(41, wanted),
+        &mut relaunches,
+        &SwitchboardRequest::ActivateOwner { owner: 41 },
+    );
+
+    assert_eq!(outcome, Ok(SwitchboardOutcome::Plain));
+    assert_eq!(shell.router().focused(), Some(wanted));
+    assert_eq!(
+        shell.session().taskbar().tasks().focused(),
+        Some(wanted_task)
+    );
+}
+
+/// A `RestartOwner` naming an owner the desktop never launched is
+/// `NotFound`, and nothing is spawned on a guess.
+#[test]
+fn restart_owner_refuses_an_owner_with_no_recorded_launch() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut relaunches = Relaunches::default();
+
+    let refusal = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::RestartOwner { owner: 41 },
+    )
+    .expect_err("an unrecorded owner is refused");
+
+    assert_eq!(refusal, SwitchboardRefusal::UnknownOwner);
+    assert_eq!(refusal.errno(), Errno::NotFound);
+    assert!(relaunches.launched.is_empty());
+}
+
+/// A `RestartOwner` re-launches exactly the bundle the launch table
+/// recorded that owner from — its attested bundle identity, never a name
+/// the caller supplied.
+#[test]
+fn restart_owner_relaunches_the_recorded_bundle() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    launched.record(41, "Editor", "/Apps/Editor.app/Run");
+    let mut relaunches = Relaunches::default();
+
+    let outcome = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::RestartOwner { owner: 41 },
+    );
+
+    assert_eq!(outcome, Ok(SwitchboardOutcome::Plain));
+    assert_eq!(
+        relaunches.launched,
+        vec![(String::from("/Apps/Editor.app/Run"), String::from("Editor"))]
+    );
+}
+
+/// The bar's own gesture decides the section; the session relays it
+/// unchanged onto the wire.
+#[test]
+fn every_bar_section_maps_onto_its_wire_section() {
+    assert_eq!(command_section(Section::Tasks), CommandSection::Tasks);
+    assert_eq!(command_section(Section::Jobs), CommandSection::Jobs);
+    assert_eq!(command_section(Section::Recovery), CommandSection::Recovery);
+    assert_eq!(command_section(Section::Overview), CommandSection::Overview);
+}
+
+/// With an instance live, the press sends exactly one `OpenPanel` on the
+/// section the bar asked for, and nothing is left pending.
+#[test]
+fn the_tray_press_sends_one_open_panel_on_the_asked_section() {
+    let mut pending = None;
+    let mut mailbox = RecordingMailbox::default();
+    let mut revived = false;
+
+    let spawned = open_tray(
+        &mut pending,
+        CommandSection::Recovery,
+        Some(MONITOR_PID),
+        &mut mailbox,
+        || {
+            revived = true;
+            None
+        },
+    );
+
+    assert_eq!(spawned, None, "a live instance is not respawned");
+    assert!(!revived, "a live instance is not revived");
+    assert_eq!(
+        mailbox.sent,
+        vec![(
+            MONITOR_PID,
+            SwitchboardCommand::OpenPanel {
+                section: CommandSection::Recovery,
+            }
+        )]
+    );
+    assert_eq!(pending, None, "a delivered open is not also pending");
+}
+
+/// With no instance live the press is the demand for one: the session
+/// revives it and holds the section until that instance's first publish
+/// proves it is listening. A second press replaces the pending open rather
+/// than queueing behind it, and the delivered open is never re-sent.
+#[test]
+fn a_pending_open_is_delivered_on_the_next_publish_and_not_re_sent() {
+    let mut pending = None;
+    let mut mailbox = RecordingMailbox::default();
+
+    let spawned = open_tray(
+        &mut pending,
+        CommandSection::Tasks,
+        None,
+        &mut mailbox,
+        || Some(MONITOR_PID),
+    );
+    assert_eq!(spawned, Some(MONITOR_PID), "the press revived an instance");
+    assert_eq!(pending, Some(CommandSection::Tasks));
+    assert!(
+        mailbox.sent.is_empty(),
+        "nothing is sent to a dead instance"
+    );
+
+    // Pressing again before it comes up replaces the pending section.
+    let _ = open_tray(
+        &mut pending,
+        CommandSection::Recovery,
+        None,
+        &mut mailbox,
+        || Some(MONITOR_PID),
+    );
+    assert_eq!(pending, Some(CommandSection::Recovery));
+    assert!(mailbox.sent.is_empty());
+
+    // The instance's first publish delivers it, exactly once.
+    deliver_pending_open(&mut pending, MONITOR_PID, &mut mailbox);
+    assert_eq!(
+        mailbox.sent,
+        vec![(
+            MONITOR_PID,
+            SwitchboardCommand::OpenPanel {
+                section: CommandSection::Recovery,
+            }
+        )]
+    );
+    assert_eq!(pending, None);
+
+    deliver_pending_open(&mut pending, MONITOR_PID, &mut mailbox);
+    assert_eq!(mailbox.sent.len(), 1, "a delivered open is never re-sent");
+}
+
+/// The seat report is sent only when the unresponsive set changed and only
+/// to a live instance, and it always carries the truthful total even when
+/// more owners are hung than one frame can name.
+#[test]
+fn the_seat_report_is_sent_only_on_change_and_tells_the_whole_truth() {
+    let mut mailbox = RecordingMailbox::default();
+
+    maybe_send_seat_report(false, Some(MONITOR_PID), 3, &[11, 12, 13], &mut mailbox);
+    assert!(mailbox.sent.is_empty(), "an unchanged set sends nothing");
+
+    maybe_send_seat_report(true, None, 3, &[11, 12, 13], &mut mailbox);
+    assert!(mailbox.sent.is_empty(), "nothing is sent with none live");
+
+    // More owners hung than the frame can name: the named few are bounded,
+    // the total stays truthful.
+    let hung: Vec<u64> = (1..=u64::try_from(SEAT_REPORT_OWNERS_MAX).unwrap() + 4).collect();
+    maybe_send_seat_report(true, Some(MONITOR_PID), 12, &hung, &mut mailbox);
+
+    let (pid, command) = mailbox.sent.first().copied().expect("one report");
+    assert_eq!(pid, MONITOR_PID);
+    let SwitchboardCommand::SeatReport { report } = command else {
+        panic!("the change sent a seat report");
+    };
+    assert_eq!(report.total(), 12, "the total counts every hung owner");
+    assert_eq!(report.owners(), &hung[..SEAT_REPORT_OWNERS_MAX]);
+    assert_eq!(mailbox.sent.len(), 1);
+}
+
+/// A send the instance's mailbox refuses is dropped, never retried: the
+/// seam is one attempt per event, so a wedged monitor cannot spin the
+/// desktop.
+#[test]
+fn a_refused_mailbox_send_is_dropped_rather_than_retried() {
+    /// A mailbox whose every send is refused (full or gone), counting the
+    /// attempts the session made.
+    #[derive(Default)]
+    struct RefusingMailbox {
+        attempts: usize,
+    }
+
+    impl SwitchboardMailbox for RefusingMailbox {
+        fn send(&mut self, _pid: u64, _command: SwitchboardCommand) {
+            self.attempts += 1;
+        }
+    }
+
+    let mut mailbox = RefusingMailbox::default();
+    let mut pending = None;
+
+    let _ = open_tray(
+        &mut pending,
+        CommandSection::Tasks,
+        Some(MONITOR_PID),
+        &mut mailbox,
+        || None,
+    );
+    assert_eq!(mailbox.attempts, 1, "one press is one attempt");
+
+    maybe_send_seat_report(true, Some(MONITOR_PID), 1, &[11], &mut mailbox);
+    assert_eq!(mailbox.attempts, 2, "one change is one attempt");
+    assert_eq!(pending, None, "a live instance leaves nothing pending");
 }

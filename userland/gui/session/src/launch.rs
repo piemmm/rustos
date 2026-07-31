@@ -90,6 +90,14 @@ impl LaunchTable {
             .map(|(&pid, _)| pid)
     }
 
+    /// The recorded launch of running child `pid`, if this table launched
+    /// it — how the Switchboard panel's restart action resolves an owner's
+    /// kernel task id back to the bundle it was launched from.
+    #[must_use]
+    pub fn get(&self, pid: u64) -> Option<&LaunchedApp> {
+        self.children.get(&pid)
+    }
+
     /// The number of children still recorded.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -233,6 +241,27 @@ mod tests {
         assert_eq!(reaped.label, "Files");
         assert_eq!(launched.running_from("/System/Apps/files.app/Run"), None);
         assert_eq!(launched.remove(10), None, "a reaped pid is forgotten");
+    }
+
+    /// `get` resolves a running child's own recorded launch by its kernel
+    /// task id — the restart action's bundle lookup — and reports `None`
+    /// for a pid this table never launched or has already reaped.
+    #[test]
+    fn get_resolves_a_running_child_by_its_pid() {
+        let mut launched = LaunchTable::new();
+        launched.record(11, "Chess", "/Apps/chess.app/Run");
+
+        let app = launched.get(11).expect("recorded");
+        assert_eq!(app.label, "Chess");
+        assert_eq!(app.run_path, "/Apps/chess.app/Run");
+        assert_eq!(
+            launched.get(99),
+            None,
+            "an unrecorded pid resolves to nothing"
+        );
+
+        launched.remove(11);
+        assert_eq!(launched.get(11), None, "a reaped pid is forgotten");
     }
 
     /// A scripted drain: two children exit in one wake — a `Files` launch

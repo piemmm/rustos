@@ -48,8 +48,9 @@ use tairix_abi::service_control::{
     REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
 };
 use tairix_abi::switchboard_ipc::{
-    SwitchboardRequest, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind,
-    TraySummary, TrayTask, TrayTaskName,
+    decode_publish_reply, CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest,
+    TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
+    TrayTaskName,
 };
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
@@ -411,8 +412,8 @@ fn exercise_notify_ipc(bytes: &[u8]) {
     }
 }
 
-/// Drive the Switchboard tray-summary decoder on `bytes` (one arm of
-/// [`exercise`]): an accepted publish request must round-trip through its
+/// Drive both directions of the Switchboard channel on `bytes` (one arm of
+/// [`exercise`]): an accepted request or command must round-trip through its
 /// encoder; a corrupt frame must refuse cleanly, never panic.
 fn exercise_switchboard_ipc(bytes: &[u8]) {
     if let Ok(request) = SwitchboardRequest::from_bytes(bytes) {
@@ -420,6 +421,18 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
             .expect("round-trip of an accepted switchboard request must succeed");
         assert_eq!(request, redecoded);
     }
+    // The reverse direction is attacker-reachable too: any process may send
+    // a Switchboard instance's mailbox a frame, and the monitor decodes it
+    // before it can check who sent it.
+    if let Ok(command) = SwitchboardCommand::from_bytes(bytes) {
+        let redecoded = SwitchboardCommand::from_bytes(&command.to_le_bytes())
+            .expect("round-trip of an accepted switchboard command must succeed");
+        assert_eq!(command, redecoded);
+    }
+    // The publish reply carries the session identity the monitor authenticates
+    // every later command against, so a malformed reply must refuse rather
+    // than yield an identity.
+    let _ = decode_publish_reply(bytes);
 }
 
 /// Drive every ABI decoder on `bytes`.
@@ -953,6 +966,47 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
             base[byte] ^= 1 << bit;
             exercise(&base);
             base[byte] ^= 1 << bit;
+        }
+    }
+
+    // The owner-directed operations reach a stranger's window, so walk their
+    // boundary too: a flipped op, a flipped owner id, or a dirtied reserved
+    // byte must refuse rather than resolve some other owner.
+    for mut base in [
+        SwitchboardRequest::ActivateOwner { owner: 0x0102_0304 }.to_le_bytes(),
+        SwitchboardRequest::RestartOwner { owner: 7 }.to_le_bytes(),
+    ] {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+#[test]
+fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
+    // The session -> monitor direction is decoded from an unreserved
+    // mailbox any process can send to, so walk the accepted/rejected
+    // boundary of both commands: a flipped section, count, total, or owner
+    // slot must fail closed, never panic.
+    let open = SwitchboardCommand::OpenPanel {
+        section: CommandSection::Recovery,
+    }
+    .to_le_bytes();
+    let report = SwitchboardCommand::SeatReport {
+        report: SeatReport::new(5, &[3, 9, 0x0102_0304]).expect("a truthful report"),
+    }
+    .to_le_bytes();
+    for mut base in [open, report] {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

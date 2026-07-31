@@ -133,16 +133,26 @@ window-manager furniture (`window` — `WindowFrame`/`TitleBar`/`WindowControl`/
 ## Switchboard reference composition
 
 The `switchboard` module assembles **Switchboard** (design spec §17) purely
-from the shared controls above — the window furniture, a `Tabs` strip,
-`ListRow`/`Card`/`Panel`/`Button` content, and one vertical `ScrollBar` over the
-`scroll` engine — with no application-painted chrome and no second copy of any
-control's behaviour. `Switchboard::new` turns a typed `SwitchboardModel`
+from the shared controls above — the window furniture, a header band of `Meter`
+instruments, a `Tabs` strip, `ListRow`/`Card`/`Panel`/`Button` content, and one
+vertical `ScrollBar` over the `scroll` engine — with no application-painted
+chrome and no second copy of any control's behaviour. `Switchboard::new` turns
+a typed `SwitchboardModel`
 (`TaskSummary`/`JobSummary`/`RecoveryItem`/`ResourceSummary`/`ServiceSummary`/
-`SystemAction`) into controls; every interaction returns a typed
-`SwitchboardAction` for the hosting service to authorise, and the frame hit map
-(`furniture_at`) keeps the client viewport strictly separate from the
-furniture. A denied action fails closed and renders distinctly from a disabled
-one. It is the proof that no TAIRiX surface needs custom chrome.
+`SystemAction`) into controls, and `select_section` opens the panel on whichever
+section the host's caller asked for rather than steering it with synthetic
+input. A host sampling live state publishes each new reading with `set_model`,
+which runs that same one derivation over the new model while keeping the
+section, scroll offsets, and keyboard focus the user chose — a scrolled list is
+never snatched back to the top by the next sample — and drops the row
+selection, hover, and any half-finished press that named a row the refresh may
+have replaced. The always-visible resource band draws one meter per
+`ResourceSummary` — the same fact the Overview resource cards show — and takes
+no input, so a press over it reaches nothing beneath it. Every interaction
+returns a typed `SwitchboardAction` for the hosting service to authorise, and
+the frame hit map (`furniture_at`) keeps the client viewport strictly separate
+from the furniture. A denied action fails closed and renders distinctly from a
+disabled one. It is the proof that no TAIRiX surface needs custom chrome.
 
 ## Staged work
 

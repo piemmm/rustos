@@ -37,12 +37,12 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T10 done**; T11 (the Switchboard window) is next. The
-**Switchboard tray** is landed whole (T9/T10 — see their done-state
-sections below): the immovable trailing-most capsule slot with the
+`in progress` — **T1–T11 done**; each stage's done-state section below
+records what it now guarantees. The **Switchboard tray** is landed whole
+(T9/T10): the immovable trailing-most capsule slot with the
 `SwitchboardTray` model (one pure derive, hung > pressure > jobs >
 recovery > calm, orthogonal furniture composed, count/alert badge), the
-hover/pinned instrument readout, scroll task-cycling and the middle-click
+hover instrument readout, scroll task-cycling and the middle-click
 previous-task switch, the seat-scoped `SWITCHBOARD_ENDPOINT` +
 `switchboard_ipc` summary vocabulary (`lib/abi`, fuzzed), the session's
 attested relay + `HangTracker` delivery-evidence hang detection, and the
@@ -725,18 +725,22 @@ What now stands:
   Switchboard capsule. It is computed **first** among the trailing regions,
   so pins, tasks, notifications, and the clock can never displace it (only
   the permanent leading launchers outrank it on a degenerate screen);
-  `hit_test` → `Hit::Switchboard`. The mockup microinteractions with a
-  live target landed (desktop1 panel 6): scroll over the capsule cycles the
-  running tasks (wrapping, honest no-op on an empty list), middle-click
-  switches to the previous task (an MRU-of-two the task list keeps), and
-  hover previews via the capsule's instrument readout — a primary press on
-  the capsule pins the readout open (it survives hover-away), a second
-  press there or a press anywhere else releases it. The two gestures whose
-  target is the overview window — primary press →
-  `TaskbarResponse::OpenSwitchboard` and long-press → open Recovery — land
-  in **T11 with that window** (owner-approved staging): a press that opens
-  nothing would be the "for now" stub the charter forbids, so until T11 the
-  press pins the readout, a complete behaviour in its own right.
+  `hit_test` → `Hit::Switchboard`. The mockup microinteractions landed
+  (desktop1 panel 6): scroll over the capsule cycles the running tasks
+  (wrapping, honest no-op on an empty list), middle-click switches to the
+  previous task (an MRU-of-two the task list keeps), hover previews via the
+  capsule's instrument readout, and a primary press resolves as a **tap or
+  a hold** — a quick release reports
+  `TaskbarResponse::OpenSwitchboard { section: Section::Tasks }` (the
+  panel's NOW column), a press held past `input::LONG_PRESS_AFTER_NS`
+  (500 ms) reports it with `Section::Recovery`, and the readout's one safe
+  action, "Open Switchboard", reports the tap's response. One press reports
+  exactly one response: the threshold is measured against the monotonic
+  time the caller passes to `TaskbarInput::handle`, resolved on the next
+  event the router handles (a motion sample taken while the press is held,
+  or the release), never by polling or sleeping; a hold that has fired
+  never also fires on release; and a press dragged off the capsule opens
+  nothing (fail closed).
 - The capsule is the `lib/controls::shell` `TraySignal` driven by a compact
   **tray-signal summary** (the T10 feed): its state renders Normal / Job
   Active (badge count) / Resource Pressure / Hung App (danger) / Recovery
@@ -770,13 +774,15 @@ the derive matrix maps every summary shape (absent service, calm + top task,
 jobs, each pressure kind + count, recovery, hung, and compositions) to the
 right state/badge/label/value; scroll cycling wraps both ways and fails
 closed on empty; middle-click follows the MRU and fails closed when the
-previous task vanished; the readout pins/unpins, holds without hover, and
-its popover claims are inert (taskbar and session routers both); pixels
-prove the capsule, rail, seam, and badge tones across
-dark/light/high-contrast; the hang tracker's evidence rules (backpressure
-only, threshold, recovery-by-drain, reap, count saturation) are covered
-exhaustively; the session suite drives the relay, the pin lifecycle, and
-both task-switch gestures end to end through `DesktopShell::handle`.
+previous task vanished; the tap-or-hold gesture resolves to Tasks, to
+Recovery (on the first sample past the threshold and on a still-fingered
+release), never twice for one press, and to nothing once the press drags
+off; the readout's safe action opens Switchboard while a press elsewhere on
+its panel stays inert; pixels prove the capsule, rail, seam, and badge tones
+across dark/light/high-contrast; the hang tracker's evidence rules
+(backpressure only, threshold, recovery-by-drain, reap, count saturation)
+are covered exhaustively; the session suite drives the relay and both
+task-switch gestures end to end through `DesktopShell::handle`.
 
 ## T10 — The Switchboard component: monitor service + tray-signal feed — **done**
 
@@ -847,11 +853,14 @@ tests it rides on. Docs: `userland/gui/switchboard/README.md`,
   the service authorises + applies (pause/resume, switch-to, reveal window,
   quit, force-quit) through capability-checked syscalls; "lower priority"
   stays in T12 with the scheduler surface it needs (§4).
-- The T9 gestures whose target now exists: primary press →
-  `TaskbarResponse::OpenSwitchboard` (the session asks the service to
-  open/raise its window, reviving a dead service on demand — the press is
-  the demand), long-press on the capsule → open the Recovery section, and
-  the readout's safe action gains "Open Switchboard".
+- The T9 gestures now have a target. The **taskbar side stands**: the
+  capsule's tap reports
+  `TaskbarResponse::OpenSwitchboard { section: Section::Tasks }`, a hold
+  past `LONG_PRESS_AFTER_NS` reports `Section::Recovery`, and the readout's
+  "Open Switchboard" safe action reports the tap's response. The session
+  consumes that response by asking the service to open/raise its window at
+  the named section, reviving a dead service on demand — the press is the
+  demand.
 - The process-control authority lands here whole (§4): the `signal` target
   rule widens in place to "own child, else same-uid, else
   `CAP_PROC_CONTROL`", the capability is minted with this change (holder:
@@ -883,6 +892,98 @@ per section; both themes + high-contrast + reduced-motion.
 
 **Done when**: the Open Panel matches the mockup, driven by live data, actions
 authorised server-side; gate green.
+
+**Status — the Switchboard service side (`userland/gui/switchboard`): done.**
+The service binds its per-pid command mailbox, learns the session identity
+from the publish reply, and authenticates every command against that
+message's kernel-attested `Origin`. One `waitset_wait` covers the sample
+deadline, the command mailbox and — only while open — the window's event
+mailbox. `OpenPanel` opens the composition on the mapped section via
+`Switchboard::select_section`; a second one raises (`ActivateOwner` naming
+its own pid) and switches section; close returns to headless sampling, which
+never stopped. Each new sample is shown through `Switchboard::set_model`, so
+a live refresh keeps the section, every section's scroll offset, and the
+keyboard focus the user set. Live model: tasks and recovery from the sampled
+process list, the seat report's owner ids joined against those sampled
+names, CPU/memory `ResourceSummary` meters carrying the measured value, a
+bounded rolling CPU sparkline and the pressure the T10 derivation latched.
+Actions: task→`ActivateOwner`, restart→`RestartOwner`, force→`signal(Kill)`
+gated on `CAP_PROC_CONTROL` read through `cap_query`, close→destroy; an absent
+authority renders refused and is never attempted, a task id beyond the
+syscall's signed width is refused not truncated, and every refusal is stated
+on `stderr` without ending the service. Manifest adds `CAP_SHM` and
+`CAP_PROC_CONTROL`.
+
+`jobs`, `services`, and `system_actions` are **empty by necessity, not
+omission**: no background-job registry exists, the System Information API has
+no service-enumeration query, and no power/lock interface exists for this
+service to drive. Disk and network resource rows are absent for the same
+reason — no throughput query. Filling them needs those interfaces to exist
+first.
+
+**Status — the desktop-session side (`userland/gui/session`): done.** A
+successful publish is answered with `encode_publish_reply` carrying the
+session's own kernel-attested `ProcId` (`tairix_rt::self_origin`, read once
+at bring-up), so the service can authenticate the commands the session
+sends; a refusal stays the plain status frame. `ActivateOwner` is validated
+against the live window registry (the owner must hold a served window on
+this seat now) and raises through the session's one focus/raise path;
+`RestartOwner` resolves the owner through the `LaunchTable` and re-enters
+the one attested spawn-and-record path; either naming an owner the session
+cannot act on is `Errno::NotFound`, stated on `stderr`, model untouched.
+The capsule's `TaskbarResponse::OpenSwitchboard { section }` is relayed as
+`OpenPanel` on `command_endpoint_for(<service pid>)` as a non-blocking
+send; with no instance live the press revives the service and holds *one*
+pending open, delivered on that instance's first publish and cleared. The
+seat report is sent only when the vigil's unresponsive set changes,
+carrying the truthful total beyond `SEAT_REPORT_OWNERS_MAX`. A refused send
+is reported on `stderr` and dropped, never retried.
+
+**Status — the shared controls (`lib/controls`): done.** `meter.rs` adds the
+`Meter` instrument: one resource reading (label, reading text, rounded track
+tinted by the resource's semantic rail through the same `signal_color` lookup
+`Card`'s Pressure Rail uses, optional bounded sparkline), read-only with no
+input or action. `MeterValue::Unmeasured` makes an unmeasurable resource
+unrepresentable as a real zero, so a denied or absent query draws a quiet
+groove instead of a fabricated `0%`. The `switchboard` composition tiles one
+per resource in an always-visible header band above the Tabs strip (every
+region below shifts by its measured height; an empty resource list collapses
+it to nothing) and the band routes no pointer or key input. `ResourceSummary`
+carries the measured value, pressure and inline bounded history once, feeding
+both the band's `Meter` and the Overview `Card`. `select_section` lets a host
+open on a chosen section and `set_model` refreshes live data in place —
+both through the one internal transition, so the tab strip, content and
+per-section scroll can never disagree; a refresh keeps section, offsets,
+focus, pointer and any in-flight drag, and deliberately drops row-indexed
+selection, hover and any armed press so a press begun on one row can never
+complete against its replacement.
+
+**Status — the taskbar side (`userland/gui/taskbar`): done.** The capsule's
+primary press resolves as a **tap or a hold** into
+`TaskbarResponse::OpenSwitchboard { section }` — tap → `Section::Tasks`, hold
+past `LONG_PRESS_AFTER_NS` (500 ms) → `Section::Recovery` — and the readout's
+new "Open Switchboard" safe action reports the tap through that same one
+route. The hold is resolved from the `now_ns` the embedder passes in (the
+next motion sample or the release), never a spin or sleep; a fired hold never
+also fires on release, and a press dragged off the capsule is cancelled
+outright rather than re-armed. T10's interim pin-on-press API
+(`set_pinned`/`is_pinned`/`toggle_pinned`/`release_tray_pin`) is deleted, not
+aliased.
+
+**Status — the kernel authority: done.** `signal`'s target rule is widened in
+place to **own child → same principal → `CAP_PROC_CONTROL`** (id 40, granted
+in the administrative ceiling only, so an ordinary user's panel renders the
+force control refused). `ProcessSignal` is split into `resolve_child` (the
+unchanged own-child lookup) and `signal_task` (delivery to an already
+authorised target) over one shared delivery engine the console foreground
+path reuses; the combined method is deleted. The decision lives in the
+syscall handler beside every other capability check: the narrowest rule first
+so job control keeps working on the standing grant of having spawned the
+child, a non-positive pid refused before any table is consulted, the target's
+owner read from the kernel's own capability record, and every cross-principal
+outcome audited once (event **4036**, `Warn` on refusal, carrying caller,
+pid, target, signal and the deciding rule as one value so the record and the
+verdict cannot diverge).
 
 ## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3)
 

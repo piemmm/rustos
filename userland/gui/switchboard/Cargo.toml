@@ -1,6 +1,6 @@
 [package]
 name = "tairix-switchboard"
-description = "TAIRiX Switchboard monitor service: samples the live system ticklessly through the System Information API and publishes a compact tray-signal summary to the desktop session over SWITCHBOARD_ENDPOINT (plans/NEW-TASKBAR.md T10)."
+description = "TAIRiX Switchboard monitor service: samples the live system ticklessly through the System Information API, publishes a compact tray-signal summary to the desktop session over SWITCHBOARD_ENDPOINT, and hosts the live overview panel the session opens from the tray icon (plans/NEW-TASKBAR.md T10/T11)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -40,16 +40,42 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # the process-list and CPU-time paging walks, and the memory-pressure fetch.
 # The sampler consumes these rather than duplicating them.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The already-built `Switchboard` composition and its typed view model
+# (`SwitchboardModel`, `TaskSummary`, `RecoveryItem`, `ResourceSummary`, …)
+# the live-data builder assembles and the panel's window lifecycle drives
+# through `Switchboard::select_section` / `render` / `on_pointer` / `on_key`.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, `ipc_call`,
-# `signal_intake`, the wait-set syscalls, `clock_get`, `stderr`) and the
-# production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`),
-# enabled through `tairix-procinfo`'s own `program` feature. Both are pulled
-# in only for the bare-metal targets the program is actually built for; on
-# the host neither is linked.
+# `ipc_recv`, `port_bind`, the shared-memory and wait-set syscalls,
+# `clock_get`, `cap_query`, `signal`, `signal_intake`, `stderr`), the
+# production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`), the
+# window-channel client, the shared desktop input vocabulary the wire events
+# are translated into, and the geometry/theme/font/raster crates the
+# composition renders through. All are pulled in only for the bare-metal
+# targets the program is actually built for; on the host none of these
+# bare-metal-only crates are linked.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+
+# The panel's own tests drive the composition's interaction path the way the
+# compositor does — a wheel event resolved against real window geometry,
+# theme metrics, and font metrics — so a scroll offset a test observes is the
+# one a user would really have, not a stand-in. Only the tests need these:
+# the service library measures and draws nothing itself, and the freestanding
+# program takes the same crates from the bare-metal block above.
+[dev-dependencies]
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }

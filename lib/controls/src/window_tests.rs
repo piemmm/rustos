@@ -461,6 +461,27 @@ fn size_toggle_disabled_when_not_resizable() {
 }
 
 #[test]
+fn size_toggle_returns_when_the_window_becomes_resizable_again() {
+    let mut furn = furniture();
+    furn.resizable = false;
+    let mut bar = TitleBar::new(furn);
+    assert!(!bar
+        .control(WindowControlKind::SizeToggle)
+        .state()
+        .is_actionable());
+
+    furn.resizable = true;
+    bar.set_furniture(furn);
+
+    assert!(
+        bar.control(WindowControlKind::SizeToggle)
+            .state()
+            .is_actionable(),
+        "a resizable window must get its size toggle back"
+    );
+}
+
+#[test]
 fn size_toggle_shows_restore_when_maximized() {
     let mut furn = furniture();
     furn.size = WindowSizeState::Maximized;

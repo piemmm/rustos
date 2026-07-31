@@ -1148,24 +1148,34 @@ impl SyscallNumber {
     /// fabricates a size. An `fd` that is not an open stream, or a buffer
     /// shorter than the wire length, also fails closed.
     pub const TERMINAL_SIZE: Self = Self(63);
-    /// Deliver a control signal to a child of the calling process
-    /// (`plans/SPAWN.md` SP7).
+    /// Deliver a control signal to another process (`plans/SPAWN.md` SP7,
+    /// `plans/NEW-TASKBAR.md` T11).
     ///
-    /// Arguments: `pid: i32` (a child the caller spawned) and `signal: u32`
-    /// (a [`crate::Signal`] discriminant). Returns `0`, or `-errno`. The
-    /// kernel identifies the sender from its own per-CPU current-task slot
-    /// (never a caller-supplied identity), validates the parent/child
-    /// relationship — a process may signal only its **own** children — and
-    /// delivers the signal. A `pid` that is not a child of the caller fails
-    /// closed with [`Errno::NotFound`]; a `signal` value that is not a
-    /// defined [`crate::Signal`] fails closed with [`Errno::OutOfRange`]; a
-    /// build with no process-signal service wired fails closed with
+    /// Arguments: `pid: i32` (the target) and `signal: u32` (a
+    /// [`crate::Signal`] discriminant). Returns `0`, or `-errno`. The kernel
+    /// identifies the sender from its own per-CPU current-task slot (never a
+    /// caller-supplied identity) and settles the target rule in precedence
+    /// order before anything is delivered:
+    ///
+    /// 1. a live **child** of the caller — the parent/child relationship is
+    ///    the authority, so no capability is required, like [`Self::WAIT`];
+    /// 2. else a target whose kernel-attested owner is the caller's own
+    ///    principal — a principal already controls its own processes, so
+    ///    again no capability is required;
+    /// 3. else [`crate::CapabilityId::PROC_CONTROL`], because the target
+    ///    belongs to a *different* principal. A caller without it is refused
+    ///    with [`Errno::PermissionDenied`].
+    ///
+    /// A non-positive `pid`, or one naming no live task, fails closed with
+    /// [`Errno::NotFound`]; a `signal` value that is not a defined
+    /// [`crate::Signal`] fails closed with [`Errno::OutOfRange`]; a build
+    /// with no process-signal service wired fails closed with
     /// [`Errno::NotImplemented`] rather than pretending the signal landed.
     ///
-    /// Unprivileged: signalling a child the caller created grants no
-    /// authority over any other principal, so — like [`Self::WAIT`] — no
-    /// capability is required. It is audited per call: delivering a signal is
-    /// a security-relevant process-lifecycle decision.
+    /// Audited per call — delivering a signal is a security-relevant
+    /// process-lifecycle decision — and a cross-principal decision (rules 2
+    /// and 3, allowed or denied alike) additionally records the caller, the
+    /// target, the signal, and which rule decided it.
     pub const SIGNAL: Self = Self(64);
     /// Change the calling process's working directory to `path`
     /// (`.junie/PREREQUISITES2.md` P2).

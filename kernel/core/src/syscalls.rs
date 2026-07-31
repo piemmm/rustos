@@ -3050,6 +3050,159 @@ where
             Some(ceiling),
         ))
     }
+
+    /// Decide whether `caller` may signal the process `pid` names when that
+    /// process is **not** one of the caller's own children, and record the
+    /// decision (`plans/NEW-TASKBAR.md` T11).
+    ///
+    /// Reached only after [`ProcessSignal::resolve_child`] has reported the
+    /// target is no live child of the caller, so the own-child path stays
+    /// capability-free. The target's owner is read from the kernel's own
+    /// capability record — the same kernel-attested identity the dispatcher
+    /// builds a `CallerContext` from — never from anything the caller
+    /// supplies:
+    ///
+    /// * the target belongs to the caller's own principal — allowed, a user
+    ///   controls their own processes;
+    /// * otherwise the caller must hold `CAP_PROC_CONTROL` — controlling
+    ///   another principal's process is an administrative act;
+    /// * otherwise refused.
+    ///
+    /// Each of those three outcomes emits exactly one
+    /// [`AuditEvent::ProcessSignalCrossPrincipal`] record. A `pid` that
+    /// names no task at all never reaches the decision and so is never
+    /// audited here: it is a lookup miss the dispatcher's own per-call
+    /// record already carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when `pid` is not a positive task id or the
+    /// capability table knows no such task (the kernel never guesses an
+    /// owner); [`Errno::PermissionDenied`] when the caller holds no
+    /// authority over another principal's process.
+    fn authorise_cross_principal(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i32,
+        signal: Signal,
+    ) -> Result<SecTaskId, Errno> {
+        // `signal` names exactly one process — it has no wildcard selector —
+        // so a non-positive `pid` is not a task id and is refused before any
+        // table is consulted.
+        let target = match u32::try_from(pid) {
+            Ok(raw) if raw != 0 => SecTaskId(u64::from(raw)),
+            _ => return Err(Errno::NotFound),
+        };
+
+        // Read the target's owner under a briefly held read lock and release
+        // it before deciding, so neither the audit emit nor the delivery
+        // runs with the capability table borrowed.
+        let owner = {
+            let guard = self.caps.read();
+            match guard.caps_for(target) {
+                Some(record) => record.owner(),
+                None => return Err(Errno::NotFound),
+            }
+        };
+
+        let rule = if owner == caller.caps.owner() {
+            CrossPrincipalRule::SameUid
+        } else if caller.caps.has(CapabilityId::PROC_CONTROL) {
+            CrossPrincipalRule::Capability
+        } else {
+            CrossPrincipalRule::Denied
+        };
+        self.audit_cross_principal_signal(caller.task_id, pid, target, signal, rule);
+        if rule.allows() {
+            Ok(target)
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
+    /// Emit the one [`AuditEvent::ProcessSignalCrossPrincipal`] record for a
+    /// cross-principal `signal` decision.
+    ///
+    /// An allowed signal is routine (`Info`); a refusal is the anomaly a
+    /// reviewer looks for (`Warn`). The record carries the attested caller,
+    /// the requested pid and the task it resolved to, the signal's wire
+    /// discriminant, and which rule decided — all program state, never a
+    /// capability token.
+    fn audit_cross_principal_signal(
+        &self,
+        caller: SecTaskId,
+        pid: i32,
+        target: SecTaskId,
+        signal: Signal,
+        rule: CrossPrincipalRule,
+    ) {
+        crate::audit::emit(
+            self.audit,
+            if rule.allows() {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            AuditEvent::ProcessSignalCrossPrincipal,
+            &[
+                Field {
+                    key: "caller",
+                    value: tairix_log::FieldValue::UnsignedInt(caller.0),
+                },
+                Field {
+                    key: "pid",
+                    value: tairix_log::FieldValue::SignedInt(i64::from(pid)),
+                },
+                Field {
+                    key: "target",
+                    value: tairix_log::FieldValue::UnsignedInt(target.0),
+                },
+                Field {
+                    key: "signal",
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(signal.as_u32())),
+                },
+                Field {
+                    key: "rule",
+                    value: tairix_log::FieldValue::Str(rule.as_str()),
+                },
+            ],
+        );
+    }
+}
+
+/// Which rule decided a cross-principal `signal` — the target is not the
+/// caller's child, so one of these three answers applies.
+///
+/// Carrying the outcome as a value keeps the audited `rule` field and the
+/// allow/deny answer from ever disagreeing: both are read off the same
+/// decision.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum CrossPrincipalRule {
+    /// The target belongs to the caller's own principal, which controls its
+    /// own processes without any capability.
+    SameUid,
+    /// The target belongs to another principal and the caller holds
+    /// `CAP_PROC_CONTROL`.
+    Capability,
+    /// The target belongs to another principal and the caller holds no
+    /// authority over it.
+    Denied,
+}
+
+impl CrossPrincipalRule {
+    /// Whether this rule permits the delivery.
+    const fn allows(self) -> bool {
+        matches!(self, Self::SameUid | Self::Capability)
+    }
+
+    /// The stable `rule` spelling carried on the audit record.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SameUid => "same_uid",
+            Self::Capability => "capability",
+            Self::Denied => "denied",
+        }
+    }
 }
 
 /// The operation-specific detail a filesystem-mutation audit record carries
@@ -5458,15 +5611,27 @@ where
 
     fn signal(&self, caller: &CallerContext<'_>, pid: i32, signal: Signal) -> SyscallResult {
         // The dispatcher already validated that `pid` is a sign-extended
-        // `i32` and that `signal` is a defined `Signal`. Hand the request to
-        // the installed scheduler-side producer, which authorises the target
-        // against the sender's own children (a process may signal only
-        // children it spawned, identified by the kernel-trusted
-        // `caller.task_id`, never a caller-supplied id) and delivers the
-        // signal. Until one is installed the default `NULL_PROCESS_SIGNAL`
-        // fails closed with `NotImplemented`, never pretending a signal was
-        // delivered — the process-signal analogue of `NULL_PROCESS_WAIT`.
-        self.process_signal.signal(caller.task_id, pid, signal)?;
+        // `i32` and that `signal` is a defined `Signal`. Who may signal whom
+        // is decided *here*, before any delivery, from the kernel-trusted
+        // `caller.task_id` / `caller.caps` — never a caller-supplied
+        // identity — and the installed producer only carries out the
+        // decision. Until one is installed the default `NULL_PROCESS_SIGNAL`
+        // fails closed with `NotImplemented` from both halves, never
+        // pretending a signal was delivered — the process-signal analogue of
+        // `NULL_PROCESS_WAIT`.
+        //
+        // The narrowest rule first: a live child the caller spawned needs no
+        // capability, so job control keeps working on the standing grant of
+        // having spawned the child. Only a target that is *not* the caller's
+        // child reaches the cross-principal rule, whose every outcome is
+        // audited. Any other producer error (an inert interface) propagates
+        // verbatim rather than being reinterpreted as a target question.
+        let target = match self.process_signal.resolve_child(caller.task_id, pid) {
+            Ok(child) => child,
+            Err(Errno::NotFound) => self.authorise_cross_principal(caller, pid, signal)?,
+            Err(err) => return Err(err),
+        };
+        self.process_signal.signal_task(target, signal)?;
         Ok(0)
     }
 
@@ -10381,8 +10546,23 @@ mod tests {
         items: &[CapabilityId],
         sink: &(dyn Sink + Sync),
     ) -> TaskCapabilities {
+        make_owned_caps_record(task, 1000, items, sink)
+    }
+
+    /// A capability record for `task` owned by `uid` — the kernel-attested
+    /// identity a handler reads back out of the `CapTable`.
+    ///
+    /// Tests that turn on *whose* process a task is (the cross-principal
+    /// `signal` rule) name the owner explicitly; `make_caps_record` is the
+    /// same builder pinned to the default test user.
+    fn make_owned_caps_record(
+        task: u64,
+        uid: u32,
+        items: &[CapabilityId],
+        sink: &(dyn Sink + Sync),
+    ) -> TaskCapabilities {
         let set = caps_with(items);
-        TaskCapabilities::derive(SecTaskId(task), UserId(1000), set, set, sink)
+        TaskCapabilities::derive(SecTaskId(task), UserId(uid), set, set, sink)
     }
 
     fn make_sched(arch: Arc<TestArch>) -> Scheduler<TestArch> {
@@ -21641,113 +21821,347 @@ mod tests {
         );
     }
 
-    /// A `ProcessSignal` producer that records the last `(sender, pid,
-    /// signal)` it was handed and returns a configured result, so the
-    /// handler tests can assert the arguments reached it without a real
-    /// scheduler-side delivery path.
+    /// A `ProcessSignal` producer for the handler tests: it resolves the
+    /// one configured `(sender, pid)` pair as a live child and records the
+    /// `(target, signal)` every delivery carried, so a test can assert
+    /// *which* task the handler authorised without a real scheduler-side
+    /// delivery path.
     struct RecordingProcessSignal {
-        last: tairix_sync::SpinLock<Option<(u64, i32, Signal)>>,
+        child: Option<(u64, i32)>,
+        last: tairix_sync::SpinLock<Option<(u64, Signal)>>,
         result: Result<(), Errno>,
     }
     impl RecordingProcessSignal {
-        fn new(result: Result<(), Errno>) -> Self {
+        /// A producer that parents nothing: every pid takes the handler's
+        /// cross-principal path.
+        fn childless(result: Result<(), Errno>) -> Self {
             Self {
+                child: None,
+                last: tairix_sync::SpinLock::new(None),
+                result,
+            }
+        }
+
+        /// A producer for which `pid` is `sender`'s live child.
+        fn with_child(sender: u64, pid: i32, result: Result<(), Errno>) -> Self {
+            Self {
+                child: Some((sender, pid)),
                 last: tairix_sync::SpinLock::new(None),
                 result,
             }
         }
     }
     impl crate::procsignal::ProcessSignal for RecordingProcessSignal {
-        fn signal(&self, sender: SecTaskId, pid: i32, signal: Signal) -> Result<(), Errno> {
-            *self.last.lock() = Some((sender.0, pid, signal));
+        fn resolve_child(&self, sender: SecTaskId, pid: i32) -> Result<SecTaskId, Errno> {
+            match self.child {
+                Some((s, p)) if s == sender.0 && p == pid => {
+                    Ok(SecTaskId(u64::try_from(pid).unwrap_or_default()))
+                }
+                _ => Err(Errno::NotFound),
+            }
+        }
+
+        fn signal_task(&self, target: SecTaskId, signal: Signal) -> Result<(), Errno> {
+            *self.last.lock() = Some((target.0, signal));
             self.result
         }
     }
 
-    /// `signal` needs no capability (a process signals its own children): it
-    /// forwards the decoded `(sender, pid, signal)` to the installed producer
-    /// and returns `Ok(0)` on success.
-    #[test]
-    fn signal_forwards_to_producer() {
+    /// Build the handler fixture every `signal` test shares: an empty
+    /// capability table plus the surrounding registries.
+    ///
+    /// Each test owns the returned parts and assembles its own handler, so
+    /// one fixture serves the whole set without any test's table, sink, or
+    /// producer leaking into another's.
+    fn signal_fixture() -> (
+        Arc<TestArch>,
+        RwLock<CapTable>,
+        RwLock<PortRegistry>,
+        RwLock<AddressSpaceRegistry>,
+        IrqTable,
+        UnsupportedController,
+    ) {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
+        (
+            Arc::new(TestArch::with_cpus(1)),
+            RwLock::new(CapTable::new()),
+            RwLock::new(PortRegistry::new()),
+            RwLock::new(AddressSpaceRegistry::new()),
+            IrqTable::new(31),
+            UnsupportedController,
+        )
+    }
+
+    /// Every cross-principal `signal` decision the sink captured, in
+    /// arrival order.
+    fn cross_principal_records(sink: &TestSink) -> Vec<crate::test_sink::CapturedEvent> {
+        sink.snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::ProcessSignalCrossPrincipal.id())
+            .collect()
+    }
+
+    /// The value of `key` on `event`, or `""` when the record omits it.
+    fn field_of<'a>(event: &'a crate::test_sink::CapturedEvent, key: &str) -> &'a str {
+        event
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, v)| v.as_str())
+    }
+
+    /// A caller's own live child needs **no** capability: the handler
+    /// delivers to the task the producer resolved and returns `Ok(0)`,
+    /// without an owner or capability question ever being asked.
+    #[test]
+    fn signal_of_own_child_needs_no_capability() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
         let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
+        let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
         };
+        sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::new(Ok(()))));
+            Box::leak(Box::new(RecordingProcessSignal::with_child(2, 9, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_process_signal(producer);
 
         assert_eq!(h.signal(&ctx, 9, Signal::Terminate), Ok(0));
-        // The producer saw the caller's kernel-attested task id as `sender`
-        // and the requested `(pid, signal)` verbatim.
-        assert_eq!(*producer.last.lock(), Some((2, 9, Signal::Terminate)));
+        // The producer delivered to the child the caller's own task id
+        // resolved, carrying the requested signal verbatim.
+        assert_eq!(*producer.last.lock(), Some((9, Signal::Terminate)));
+        // The own-child path is not cross-principal, so it adds no record
+        // of its own on top of the dispatcher's per-call audit.
+        assert!(cross_principal_records(sink).is_empty());
     }
 
-    /// A producer error (e.g. `pid` is not a child of the caller) propagates
-    /// verbatim from the `signal` handler (fail closed).
+    /// A delivery error (the target exited between authorisation and
+    /// delivery) propagates verbatim from the `signal` handler.
     #[test]
     fn signal_propagates_producer_error() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
         let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
+        let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::new(Err(Errno::NotFound))));
+        let producer: &'static RecordingProcessSignal = Box::leak(Box::new(
+            RecordingProcessSignal::with_child(2, 9, Err(Errno::NotFound)),
+        ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_process_signal(producer);
 
         assert_eq!(h.signal(&ctx, 9, Signal::Kill), Err(Errno::NotFound));
-        assert_eq!(*producer.last.lock(), Some((2, 9, Signal::Kill)));
+        assert_eq!(*producer.last.lock(), Some((9, Signal::Kill)));
     }
 
-    /// With no producer installed the handler holds `NULL_PROCESS_SIGNAL` and
-    /// fails closed with `NotImplemented`, never pretending a signal landed.
+    /// A process may signal another process of its **own** principal
+    /// without any capability: the same user controls its own processes.
     #[test]
-    fn signal_without_producer_is_not_implemented() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
+    fn signal_of_a_same_uid_non_child_is_allowed() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
         let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
+        let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
         };
+        // The target is another task of the same user — not a child.
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1000, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.signal(&ctx, 9, Signal::Terminate), Ok(0));
+        assert_eq!(*producer.last.lock(), Some((9, Signal::Terminate)));
+        let records = cross_principal_records(sink);
+        assert_eq!(records.len(), 1, "one record per cross-principal decision");
+        assert_eq!(field_of(&records[0], "rule"), "same_uid");
+    }
+
+    /// Another principal's process is off-limits without
+    /// `CAP_PROC_CONTROL`: the handler refuses before any delivery and the
+    /// refusal reaches the audit log.
+    #[test]
+    fn signal_of_another_principal_is_denied_without_the_capability() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The target belongs to a different user.
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1001, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(
+            h.signal(&ctx, 9, Signal::Kill),
+            Err(Errno::PermissionDenied)
+        );
+        // Nothing was delivered: the refusal precedes the mechanism.
+        assert_eq!(*producer.last.lock(), None);
+        let records = cross_principal_records(sink);
+        assert_eq!(records.len(), 1, "the refusal is on the audit log");
+        assert_eq!(records[0].level, Level::Warn);
+        assert_eq!(field_of(&records[0], "rule"), "denied");
+        assert_eq!(field_of(&records[0], "caller"), "2");
+        assert_eq!(field_of(&records[0], "pid"), "9");
+        assert_eq!(field_of(&records[0], "target"), "9");
+    }
+
+    /// `CAP_PROC_CONTROL` is what admits a signal to another principal's
+    /// process, and the allowed decision is audited as such.
+    #[test]
+    fn signal_of_another_principal_is_allowed_with_proc_control() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1001, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.signal(&ctx, 9, Signal::Stop), Ok(0));
+        assert_eq!(*producer.last.lock(), Some((9, Signal::Stop)));
+        let records = cross_principal_records(sink);
+        assert_eq!(records.len(), 1, "the grant is on the audit log");
+        assert_eq!(records[0].level, Level::Info);
+        assert_eq!(field_of(&records[0], "rule"), "capability");
+        assert_eq!(field_of(&records[0], "signal"), "5");
+    }
+
+    /// A pid that names no task at all is `NotFound` — the kernel never
+    /// guesses an owner for an unknown task, so not even
+    /// `CAP_PROC_CONTROL` turns it into a delivery.
+    #[test]
+    fn signal_of_an_unknown_pid_is_not_found() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.signal(&ctx, 4242, Signal::Kill), Err(Errno::NotFound));
+        assert_eq!(*producer.last.lock(), None);
+        // No decision was reached, so no cross-principal record is written.
+        assert!(cross_principal_records(sink).is_empty());
+    }
+
+    /// `signal` names exactly one process, so a zero or negative pid is no
+    /// task id: it fails closed before the capability table is consulted,
+    /// rather than being read as a process-group or broadcast selector.
+    #[test]
+    fn signal_of_a_non_positive_pid_fails_closed() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // A record exists for the task id a negative pid would name if the
+        // sign were ever discarded, so the test would catch that mistake.
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1000, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        for pid in [0, -1, -9, i32::MIN] {
+            assert_eq!(h.signal(&ctx, pid, Signal::Kill), Err(Errno::NotFound));
+        }
+        assert_eq!(*producer.last.lock(), None);
+        assert!(cross_principal_records(sink).is_empty());
+    }
+
+    /// With no producer installed the handler holds `NULL_PROCESS_SIGNAL`
+    /// and fails closed with `NotImplemented`, never pretending a signal
+    /// landed and never reinterpreting an inert interface as a target
+    /// question.
+    #[test]
+    fn signal_without_producer_is_not_implemented() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // Even a target of the caller's own principal cannot be reached
+        // through an interface that is not there.
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1000, &[], sink));
+        sink.clear();
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -21756,6 +22170,7 @@ mod tests {
             h.signal(&ctx, 9, Signal::Continue),
             Err(Errno::NotImplemented)
         );
+        assert!(cross_principal_records(sink).is_empty());
     }
 
     /// A producer error (e.g. `pid` is not a child of the caller) propagates

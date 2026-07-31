@@ -16,25 +16,29 @@
 //! regardless of which dominates: the working Heat Seam whenever jobs run,
 //! the leading pressure rail whenever a pressure is named, and the recovery
 //! posture (hung outranking recoverable) whenever either holds. The
-//! hover/pin readout previews the busiest task only in the *calm* state; in
+//! hover readout previews the busiest task only in the *calm* state; in
 //! every other state the value line keeps the dominant state's own figure —
 //! the more urgent information — rather than the preview. With no summary at
 //! all (the service absent or not yet published) the capsule derives calm
 //! idle with no value: it never fabricates a reading it was not fed (fail
 //! closed).
 //!
-//! Pressing the capsule pins the readout open
-//! ([`set_pinned`](SwitchboardTray::set_pinned)); the readout is
-//! presentation only at this stage — the full Switchboard overview window
-//! arrives with a later stage (`plans/NEW-TASKBAR.md`).
+//! The readout always carries one safe action, "Open Switchboard": a click
+//! that completes on it reports [`TraySignalAction::Activated`], which the
+//! taskbar's input router (`crate::input`) turns into the response that
+//! opens the Switchboard window. The router reaches the same destination
+//! from the capsule itself: a primary press opens the running-task section,
+//! and a press held past the long-press threshold opens Recovery instead —
+//! the session asks the Switchboard service to open, or revive and open,
+//! its window at that section.
 
 use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{TrayPermille, TrayPressureKind, TraySummary};
 use tairix_controls::{
-    ActivityState, ControlState, FocusState, PointerState, PressureKind, PressureState,
-    RecoveryState, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal,
+    ActivityState, Button, ControlState, FocusState, PointerState, PressureKind, PressureState,
+    RecoveryState, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
@@ -97,38 +101,41 @@ impl SwitchboardTray {
         &self.signal
     }
 
-    /// Whether the readout is expanded — pointer hover or the pinned focus.
+    /// Whether the readout is expanded — the pointer is over the capsule or
+    /// over the open readout itself.
     #[must_use]
     pub fn is_expanded(&self) -> bool {
         self.signal.is_expanded()
     }
 
-    /// Pin the readout open (the capsule takes keyboard focus, which keeps
-    /// the readout expanded without hover) or release the pin.
-    pub fn set_pinned(&mut self, pinned: bool) {
-        self.signal.set_focused(pinned);
-    }
-
-    /// Whether the readout is pinned open.
-    #[must_use]
-    pub fn is_pinned(&self) -> bool {
-        self.signal.state().focus.focused
-    }
-
-    /// Toggle the readout pin — a primary press on the capsule.
-    pub(crate) fn toggle_pinned(&mut self) {
-        let pinned = self.is_pinned();
-        self.set_pinned(!pinned);
+    /// Feed a pointer `event` (motion, press, or release) to the capsule and
+    /// its open readout — hover tracking plus the readout's "Open
+    /// Switchboard" safe action — reporting whether the capsule's visual
+    /// state changed and the action it reports, if the click completed on
+    /// it. `capsule` and `readout` are the slot and open-readout rectangles
+    /// at the current scale ([`Rect::EMPTY`] while the readout is
+    /// collapsed).
+    pub(crate) fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        capsule: Rect,
+        readout: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> (bool, Option<TraySignalAction>) {
+        let before = self.signal.state();
+        let action = self
+            .signal
+            .on_pointer(event, capsule, readout, scale, theme);
+        (self.signal.state() != before, action)
     }
 
     /// Track the pointer over the capsule and its readout, reporting whether
     /// the capsule's visual state changed.
     ///
     /// The shared control owns the hover/expansion rule, so this synthesises
-    /// the motion event it consumes; `capsule` and `readout` are the slot
-    /// and open-readout rectangles at the current scale ([`Rect::EMPTY`]
-    /// while the readout is collapsed). The readout carries no action at
-    /// this stage, so the control can never report one here.
+    /// the motion event it consumes; motion alone never completes the
+    /// readout's action, so the action this reports is always discarded.
     pub(crate) fn track(
         &mut self,
         point: Point,
@@ -137,20 +144,19 @@ impl SwitchboardTray {
         scale: Scale,
         theme: &Theme,
     ) -> bool {
-        let before = self.signal.state();
-        self.signal.on_pointer(
+        self.on_pointer(
             &InputEvent::PointerMoved { to: point },
             capsule,
             readout,
             scale,
             theme,
-        );
-        self.signal.state() != before
+        )
+        .0
     }
 
     /// Re-derive the capsule from the current facts, carrying over the
     /// pointer and focus interaction state so a live update never drops an
-    /// open hover or pinned readout.
+    /// open hover readout.
     fn rebuild(&mut self) {
         let previous = self.signal.state();
         self.signal = derive_signal(self.summary.as_ref(), self.unresponsive)
@@ -175,11 +181,17 @@ pub(crate) struct DerivedSignal {
 impl DerivedSignal {
     /// The [`TraySignal`] this derive describes, with the session-owned
     /// `pointer` and `focus` interaction state carried in.
+    ///
+    /// Every derive carries the same "Open Switchboard" safe action
+    /// ([`OPEN_SWITCHBOARD_ACTION`]) — the readout's one routed action,
+    /// regardless of which state dominates.
     fn into_signal(self, pointer: PointerState, focus: FocusState) -> TraySignal {
         let mut state = self.state;
         state.pointer = pointer;
         state.focus = focus;
-        let mut signal = TraySignal::new(IconKind::Switchboard, self.label).with_state(state);
+        let mut signal = TraySignal::new(IconKind::Switchboard, self.label)
+            .with_state(state)
+            .with_action(Button::labelled(OPEN_SWITCHBOARD_ACTION));
         if let Some(value) = self.value {
             signal = signal.with_value(value);
         }
@@ -189,6 +201,10 @@ impl DerivedSignal {
         signal
     }
 }
+
+/// The readout's safe-action label — named once so the derive and its tests
+/// never risk spelling it two different ways.
+pub(crate) const OPEN_SWITCHBOARD_ACTION: &str = "Open Switchboard";
 
 /// Derive the capsule from the latest `summary` and the session's count of
 /// `unresponsive` applications.

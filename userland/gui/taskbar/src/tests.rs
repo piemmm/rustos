@@ -9,8 +9,8 @@ use tairix_abi::switchboard_ipc::{
     TrayTaskName,
 };
 use tairix_controls::{
-    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, TaskVisibility,
-    TrayBadgeContent, TrayBadgeTone,
+    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, Section,
+    TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
@@ -20,7 +20,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Appearance, Contrast, SignalRole, Theme, ThemeId};
 
 use crate::edge::{Edge, Orientation};
-use crate::input::{TaskbarInput, TaskbarResponse};
+use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
 use crate::menu::MenuSubject;
@@ -32,6 +32,13 @@ use crate::render::TaskbarRenderer;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
 use crate::tray::derive_signal;
+
+/// A fixed monotonic time for tests that do not care about the Switchboard
+/// capsule's tap-or-hold timing — every ordinary press-then-release in this
+/// module happens "instantly" at this one instant, well under
+/// [`crate::input::LONG_PRESS_AFTER_NS`], so it always resolves as a quick
+/// click. The long-press tests advance past it explicitly.
+const NOW_NS: u64 = 1_000_000_000;
 
 // ---- fixtures --------------------------------------------------------
 
@@ -81,6 +88,7 @@ fn press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, x: i32, y: i32) -> 
         },
         taskbar,
         Scale::ONE,
+        NOW_NS,
     );
     input.handle(
         InputEvent::PointerPressed {
@@ -88,6 +96,7 @@ fn press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, x: i32, y: i32) -> 
         },
         taskbar,
         Scale::ONE,
+        NOW_NS,
     )
 }
 
@@ -100,6 +109,7 @@ fn press_key(input: &mut TaskbarInput, taskbar: &mut Taskbar, key: Key) -> Taskb
         },
         taskbar,
         Scale::ONE,
+        NOW_NS,
     )
 }
 
@@ -924,7 +934,12 @@ fn secondary_press_on_pin_opens_menu() {
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: slot },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
 
     assert_eq!(
         input.handle(
@@ -933,6 +948,7 @@ fn secondary_press_on_pin_opens_menu() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored,
         "secondary press is Ignored but opens the menu"
@@ -953,13 +969,19 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: slot },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
     input.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Secondary,
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(bar.menu().is_open());
 
@@ -971,6 +993,7 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
         InputEvent::PointerMoved { to: menu_item_0 },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(bar.take_repaint());
     assert_eq!(bar.menu().control().current(), Some(0));
@@ -980,7 +1003,8 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
         input.handle(
             InputEvent::PointerScrolled { dx: 0, dy: 1 },
             &mut bar,
-            Scale::ONE
+            Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored
     );
@@ -996,7 +1020,12 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
     assert!(!bar.menu().is_open());
 
     // Move pointer back to pin before reopening.
-    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: slot },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
 
     // Reopen and test Escape.
     input.handle(
@@ -1005,6 +1034,7 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(bar.menu().is_open());
     assert_eq!(
@@ -1020,13 +1050,19 @@ fn menu_keyboard_navigation_chooses_rows() {
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(InputEvent::PointerMoved { to: slot }, &mut bar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: slot },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
     input.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Secondary,
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
 
     // Down/Down/Enter chooses row 1 ("Unpin").
@@ -1058,6 +1094,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         InputEvent::PointerMoved { to: inside },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     input.handle(
         InputEvent::PointerPressed {
@@ -1065,6 +1102,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(bar.menu().is_open());
     assert!(matches!(
@@ -1079,6 +1117,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         InputEvent::PointerMoved { to: menu_item_0 },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
 
     // Press and release to activate.
@@ -1088,6 +1127,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     // Choose row 0 ("Open") -> LibraryLaunch and closes popup.
     assert_eq!(
@@ -1097,6 +1137,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::LibraryLaunch {
             entry: entry_id.clone()
@@ -1114,6 +1155,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         InputEvent::PointerMoved { to: inside },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     input.handle(
         InputEvent::PointerPressed {
@@ -1121,6 +1163,7 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(matches!(
         bar.menu().subject(),
@@ -1175,6 +1218,7 @@ fn a_miss_and_non_primary_input_change_nothing() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored
     );
@@ -1185,6 +1229,7 @@ fn a_miss_and_non_primary_input_change_nothing() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored
     );
@@ -1209,6 +1254,7 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert_eq!(input.pointer(), Point::new(10, 780));
     assert!(bar.take_repaint(), "hover enter repaints");
@@ -1220,6 +1266,7 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(!bar.take_repaint(), "no visual change, no repaint");
 
@@ -1230,6 +1277,7 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(bar.take_repaint(), "hover exit repaints");
 }
@@ -1270,6 +1318,7 @@ fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
         InputEvent::PointerMoved { to: inside },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert_eq!(
         input.handle(
@@ -1278,6 +1327,7 @@ fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored
     );
@@ -1291,6 +1341,7 @@ fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert_eq!(
         input.handle(
@@ -1299,6 +1350,7 @@ fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
             },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::LibraryDismissed
     );
@@ -1405,6 +1457,7 @@ fn wheel_scrolls_the_overflowing_popup() {
             InputEvent::PointerScrolled { dx: 0, dy: 1 },
             &mut bar,
             Scale::ONE,
+            NOW_NS,
         ),
         TaskbarResponse::Ignored
     );
@@ -2332,6 +2385,7 @@ fn hovered_and_current_rows_show_their_states() {
         InputEvent::PointerMoved { to: hover_centre },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert_eq!(bar.library().hover(), Some(1));
 
@@ -2663,7 +2717,12 @@ fn tray_task(name: &str, cpu_permille: u16) -> TrayTask {
 /// Move the pointer to the Switchboard capsule's centre, returning it.
 fn hover_switchboard(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> Point {
     let centre = centre_of(taskbar.layout(Scale::ONE).switchboard);
-    input.handle(InputEvent::PointerMoved { to: centre }, taskbar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: centre },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
     centre
 }
 
@@ -2675,20 +2734,79 @@ fn scroll_at(
     dx: i32,
     dy: i32,
 ) -> TaskbarResponse {
-    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE);
-    input.handle(InputEvent::PointerScrolled { dx, dy }, taskbar, Scale::ONE)
+    input.handle(
+        InputEvent::PointerMoved { to: at },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerScrolled { dx, dy },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    )
 }
 
 /// Move the pointer to `at` and press the middle button there.
 fn middle_press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, at: Point) -> TaskbarResponse {
-    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerMoved { to: at },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
     input.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Middle,
         },
         taskbar,
         Scale::ONE,
+        NOW_NS,
     )
+}
+
+/// Report the pointer at `to` at monotonic time `at_ns` — the motion sample
+/// a real pointing device keeps sending while a button is still held down.
+fn moved_at(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    to: Point,
+    at_ns: u64,
+) -> TaskbarResponse {
+    input.handle(InputEvent::PointerMoved { to }, taskbar, Scale::ONE, at_ns)
+}
+
+/// Release the primary button where the pointer already is, at monotonic
+/// time `at_ns`.
+fn release_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, at_ns: u64) -> TaskbarResponse {
+    input.handle(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        taskbar,
+        Scale::ONE,
+        at_ns,
+    )
+}
+
+/// A logical length in surface pixels at the tests' scale.
+fn scaled(logical: u32) -> i32 {
+    i32::try_from(Scale::ONE.scale_length(logical).max(1)).expect("fits")
+}
+
+/// The centre of the open readout's "Open Switchboard" action, placed by the
+/// same public control metrics the shared readout lays it out with: the
+/// bottom control-height band of the panel's padded interior.
+fn readout_action_centre(taskbar: &Taskbar) -> Point {
+    let panel = taskbar
+        .tray_readout_layout(Scale::ONE)
+        .expect("readout expanded")
+        .panel;
+    let theme = Theme::dark();
+    let pad = scaled(theme.metrics().control_inset);
+    let height = scaled(theme.metrics().control_height);
+    Point::new(centre_of(panel).x, panel.bottom() - pad - height / 2)
 }
 
 // ---- switchboard tray layout ------------------------------------------
@@ -2922,18 +3040,16 @@ fn tray_feeds_latch_repaint_only_on_change() {
 }
 
 #[test]
-fn tray_update_keeps_hover_and_pin() {
+fn tray_update_keeps_the_hovered_readout_open() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
     assert!(bar.tray().is_expanded(), "hover expands the readout");
-    bar.tray_mut().set_pinned(true);
     bar.set_tray_summary(Some(tray_summary(4, 0, 100)));
     assert!(
         bar.tray().is_expanded(),
         "a live update never collapses the readout"
     );
-    assert!(bar.tray().is_pinned());
 }
 
 // ---- switchboard tray interactions ------------------------------------
@@ -3097,76 +3213,178 @@ fn middle_press_fails_closed_without_a_previous_task() {
 }
 
 #[test]
-fn primary_press_pins_and_a_press_elsewhere_unpins() {
+fn a_quick_press_on_the_capsule_opens_the_task_section() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     let capsule = hover_switchboard(&mut input, &mut bar);
-    assert!(bar.tray().is_expanded(), "hover expands the readout");
-    assert!(!bar.tray().is_pinned());
 
-    // Pressing the capsule pins the readout open. The pin is presentation
-    // only — the Switchboard overview window arrives in a later stage — so
-    // the press reports nothing to act on.
+    // The press only arms the tap-or-hold gesture; the release resolves it,
+    // so exactly one response is reported for the one click.
     assert_eq!(
         press_at(&mut input, &mut bar, capsule.x, capsule.y),
         TaskbarResponse::Ignored
     );
-    assert!(bar.tray().is_pinned());
-
-    // Pinned: the readout stays open with the pointer far away.
-    input.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(500, 400),
-        },
-        &mut bar,
-        Scale::ONE,
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Tasks
+        }
     );
-    assert!(bar.tray().is_expanded());
-    assert!(bar.tray_readout_layout(Scale::ONE).is_some());
+    // The gesture is spent: a stray second release opens nothing.
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+}
 
-    // A press elsewhere releases the pin and still does its own one thing.
+#[test]
+fn a_long_press_on_the_capsule_opens_recovery_exactly_once() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    assert_eq!(
+        press_at(&mut input, &mut bar, capsule.x, capsule.y),
+        TaskbarResponse::Ignored
+    );
+
+    // A sample taken while the press is held, but a nanosecond short of the
+    // threshold, resolves nothing.
+    assert_eq!(
+        moved_at(
+            &mut input,
+            &mut bar,
+            capsule,
+            NOW_NS + LONG_PRESS_AFTER_NS - 1
+        ),
+        TaskbarResponse::Ignored
+    );
+    // The first sample past it opens Recovery, without waiting for the lift.
+    assert_eq!(
+        moved_at(&mut input, &mut bar, capsule, NOW_NS + LONG_PRESS_AFTER_NS),
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Recovery
+        }
+    );
+    // Already fired: neither a further sample nor the release fires again.
+    assert_eq!(
+        moved_at(
+            &mut input,
+            &mut bar,
+            capsule,
+            NOW_NS + LONG_PRESS_AFTER_NS * 2
+        ),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS + LONG_PRESS_AFTER_NS * 2),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn a_hold_released_with_no_intervening_sample_still_opens_recovery() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
+    // A perfectly still finger sends no motion, so the release is the first
+    // event that can resolve the hold — and it resolves it as a hold.
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS + LONG_PRESS_AFTER_NS),
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Recovery
+        }
+    );
+}
+
+#[test]
+fn a_press_dragged_off_the_capsule_opens_nothing() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
+
+    let away = Point::new(500, 400);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, away, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    // Cancelled: neither holding past the threshold nor releasing revives
+    // it, and neither does dragging back onto the capsule (fail closed).
+    assert_eq!(
+        moved_at(&mut input, &mut bar, away, NOW_NS + LONG_PRESS_AFTER_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        moved_at(&mut input, &mut bar, capsule, NOW_NS + LONG_PRESS_AFTER_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS + LONG_PRESS_AFTER_NS),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn the_readout_safe_action_opens_switchboard() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    let action = readout_action_centre(&bar);
+
+    assert_eq!(
+        press_at(&mut input, &mut bar, action.x, action.y),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Tasks
+        }
+    );
+    assert!(
+        bar.tray().is_expanded(),
+        "the readout stays open under the pointer"
+    );
+}
+
+#[test]
+fn a_press_inside_the_readout_away_from_its_action_is_claimed_inert() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    let panel = bar.tray_readout_layout(Scale::ONE).expect("hover").panel;
+    let pad = scaled(Theme::dark().metrics().control_inset);
+    let label = Point::new(panel.left() + pad, panel.top() + pad);
+
+    assert_eq!(
+        press_at(&mut input, &mut bar, label.x, label.y),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert!(
+        bar.tray().is_expanded(),
+        "the inert claim never collapses the readout"
+    );
+}
+
+#[test]
+fn a_press_elsewhere_on_the_bar_arms_no_capsule_gesture() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
     let clock = centre_of(bar.layout(Scale::ONE).clock);
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::ClockPressed
     );
-    assert!(!bar.tray().is_pinned());
-    assert!(
-        !bar.tray().is_expanded(),
-        "unpinned with the pointer elsewhere"
-    );
-}
-
-#[test]
-fn second_press_on_the_capsule_unpins() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let capsule = hover_switchboard(&mut input, &mut bar);
-    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
-    assert!(bar.tray().is_pinned());
+    // Only the capsule arms the tap-or-hold gesture: this click's release
+    // opens nothing, however long it was held.
     assert_eq!(
-        press_at(&mut input, &mut bar, capsule.x, capsule.y),
+        release_at(&mut input, &mut bar, NOW_NS + LONG_PRESS_AFTER_NS),
         TaskbarResponse::Ignored
-    );
-    assert!(!bar.tray().is_pinned());
-    assert!(bar.tray().is_expanded(), "still expanded by hover");
-}
-
-#[test]
-fn press_inside_the_open_readout_is_claimed_inert() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let capsule = hover_switchboard(&mut input, &mut bar);
-    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
-    let readout = bar.tray_readout_layout(Scale::ONE).expect("pinned open");
-    let inside = centre_of(readout.panel);
-    assert_eq!(
-        press_at(&mut input, &mut bar, inside.x, inside.y),
-        TaskbarResponse::Ignored
-    );
-    assert!(
-        bar.tray().is_pinned(),
-        "the inert claim never collapses the readout"
     );
 }
 
@@ -3191,6 +3409,7 @@ fn readout_expands_on_hover_and_collapses_off() {
         },
         &mut bar,
         Scale::ONE,
+        NOW_NS,
     );
     assert!(
         bar.tray_readout_layout(Scale::ONE).is_none(),
