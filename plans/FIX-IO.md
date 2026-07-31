@@ -868,8 +868,10 @@ member count, this member's slot, the array geometry, a monotonic
 trailing CRC-32C (`lib/crc32c`, the one first-party checksum, an integrity
 check not a security control). `ArraySuperblock::decode` fails closed on every
 malformed byte (bad magic, unknown version, checksum mismatch, unknown level,
-zero members, out-of-range slot, degenerate geometry, non-canonical timestamp,
-§5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
+zero members, a member count its level cannot be composed from — RAID5 < 3,
+RAID6 < 4 or > 257 slots, the shared `RaidLevel::min_members`/`max_members` the
+composition engines also read — out-of-range slot, degenerate geometry,
+non-canonical timestamp, §5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
 (`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
 reassembly verdict is carried into the composition through one shared mapping
 `raid::MemberRole::for_slot(SlotDisposition)` (§2.2): a `Present{in_sync:false}`

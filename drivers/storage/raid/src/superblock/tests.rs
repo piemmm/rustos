@@ -719,3 +719,63 @@ fn distinct_arrays_composes_with_resolve_for_every_array() {
     }
     assert_eq!(resolved, 2);
 }
+
+#[test]
+fn raid_level_member_bounds_are_the_shared_source() {
+    assert_eq!(RaidLevel::Mirror.min_members(), 1);
+    assert_eq!(RaidLevel::Stripe.min_members(), 1);
+    assert_eq!(RaidLevel::Parity.min_members(), 3);
+    assert_eq!(RaidLevel::DualParity.min_members(), 4);
+    // Only double parity has a real ceiling: 255 data members + the P and Q
+    // syndrome chunks = 257 slots. Every other level is bounded only by the
+    // on-disk `u16` member-count field.
+    assert_eq!(RaidLevel::Mirror.max_members(), u16::MAX);
+    assert_eq!(RaidLevel::Stripe.max_members(), u16::MAX);
+    assert_eq!(RaidLevel::Parity.max_members(), u16::MAX);
+    assert_eq!(RaidLevel::DualParity.max_members(), 257);
+}
+
+#[test]
+fn decode_rejects_too_few_members_for_the_level() {
+    // RAID5 needs three members (two data + a parity chunk); two describes an
+    // array that cannot exist and is refused at the decode boundary.
+    let parity_two = parity_sb(UUID_A, 2, 0, 1, 64);
+    assert_eq!(
+        ArraySuperblock::decode(&parity_two.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+    // RAID6 needs four (two data + P + Q); three is too few.
+    let mut dual_three = parity_sb(UUID_A, 3, 0, 1, 64);
+    dual_three.raid_level = RaidLevel::DualParity;
+    assert_eq!(
+        ArraySuperblock::decode(&dual_three.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+}
+
+#[test]
+fn decode_rejects_too_many_members_for_double_parity() {
+    // 258 slots is 256 data members, one more than the Q syndrome can keep
+    // distinct coefficients for — an unbuildable array, refused up front.
+    let mut too_many = parity_sb(UUID_A, 258, 0, 1, 64);
+    too_many.raid_level = RaidLevel::DualParity;
+    assert_eq!(
+        ArraySuperblock::decode(&too_many.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+}
+
+#[test]
+fn decode_admits_the_minimum_and_boundary_member_counts_per_level() {
+    // Each level's smallest valid array decodes cleanly.
+    assert!(ArraySuperblock::decode(&sb(UUID_A, 1, 0, 1).encode()).is_ok());
+    assert!(ArraySuperblock::decode(&stripe_sb(UUID_A, 1, 0, 1, 32).encode()).is_ok());
+    assert!(ArraySuperblock::decode(&parity_sb(UUID_A, 3, 0, 1, 64).encode()).is_ok());
+    let mut dual_min = parity_sb(UUID_A, 4, 0, 1, 64);
+    dual_min.raid_level = RaidLevel::DualParity;
+    assert!(ArraySuperblock::decode(&dual_min.encode()).is_ok());
+    // The RAID6 upper boundary (257 slots = 255 data + P + Q) is admitted.
+    let mut dual_max = parity_sb(UUID_A, 257, 0, 1, 64);
+    dual_max.raid_level = RaidLevel::DualParity;
+    assert!(ArraySuperblock::decode(&dual_max.encode()).is_ok());
+}

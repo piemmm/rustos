@@ -48,6 +48,7 @@
 
 use crate::gf256;
 use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
+use crate::superblock::RaidLevel;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -252,12 +253,13 @@ impl<'a, B: Block> DualParityArray<'a, B> {
         scratch: &'a mut [u8],
         chunk_blocks: u32,
     ) -> Result<Self, DualParityError> {
-        if members.len() < 4 {
+        if members.len() < RaidLevel::DualParity.min_members() as usize {
             return Err(DualParityError::TooFewMembers);
         }
         // Data members are member_count - 2; the Q syndrome keeps distinct
-        // non-zero coefficients only up to MAX_DATA_MEMBERS positions.
-        if members.len() as u64 - 2 > gf256::MAX_DATA_MEMBERS {
+        // non-zero coefficients only up to `gf256::MAX_DATA_MEMBERS` positions,
+        // which the level's shared ceiling expresses as its full slot count.
+        if members.len() > RaidLevel::DualParity.max_members() as usize {
             return Err(DualParityError::TooManyMembers);
         }
         if chunk_blocks == 0 {

@@ -53,6 +53,7 @@
 //! tier and the scratch sizing live in the assembling serve process.
 
 use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
+use crate::superblock::RaidLevel;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -237,7 +238,7 @@ impl<'a, B: Block> ParityArray<'a, B> {
         scratch: &'a mut [u8],
         chunk_blocks: u32,
     ) -> Result<Self, ParityError> {
-        if members.len() < 3 {
+        if members.len() < RaidLevel::Parity.min_members() as usize {
             return Err(ParityError::TooFewMembers);
         }
         if chunk_blocks == 0 {

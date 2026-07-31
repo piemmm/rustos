@@ -340,7 +340,14 @@ stamp, and the stripe unit (`chunk_blocks`) for a striped level. The level and
 the stripe unit must agree: a striped level (RAID0) records a non-zero
 `chunk_blocks`, a full-copy level (the mirror) records zero, and a record whose
 level and stripe unit contradict is refused (`SuperblockError::BadStripeChunk`)
-so a corrupt or foreign record is never mistaken for a valid array. The record
+so a corrupt or foreign record is never mistaken for a valid array. The member
+count must likewise be one its level can actually be composed from
+(`RaidLevel::min_members`/`RaidLevel::max_members`, the single shared
+definition the composition engines also read): a RAID5 claiming two members, a
+RAID6 claiming three, or a RAID6 claiming more data members than its GF(2^8) Q
+syndrome can distinguish (more than 255, i.e. over 257 slots) describes an
+array that cannot exist and is refused (`SuperblockError::MemberCountOutOfRange`)
+rather than half-trusted. The record
 is sealed with a trailing CRC-32C (`lib/crc32c`, the one
 first-party checksum) — a media/transport integrity check, not a security
 control: an array's authenticity rests on the signed driver bundle and the
@@ -348,9 +355,10 @@ members' own capability-gated block endpoints, not on this value.
 
 `ArraySuperblock::decode` **fails closed** on any malformed on-disk byte
 (`AGENTS.md` §5.4, §26.5) — a bad magic, an unknown version, a checksum
-mismatch, an unknown RAID level, a zero member count, a slot outside the
-array, a degenerate geometry, or a non-canonical timestamp is a typed
-`SuperblockError`, never a silently-trusted record. (`chunk_blocks` is part of
+mismatch, an unknown RAID level, a zero member count, a member count the level
+cannot be composed from, a slot outside the array, a degenerate geometry, or a
+non-canonical timestamp is a typed `SuperblockError`, never a silently-trusted
+record. (`chunk_blocks` is part of
 the array shape `resolve`/`verdict_of` compare, so a member disagreeing on the
 stripe unit is refused like any other shape mismatch.) The decoder is total and
 `forbid(unsafe_code)`, and a fuzz harness (`tests/fuzz_superblock.rs`,

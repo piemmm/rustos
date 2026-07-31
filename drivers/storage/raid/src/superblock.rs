@@ -126,6 +126,46 @@ impl RaidLevel {
         matches!(self, Self::Stripe | Self::Parity | Self::DualParity)
     }
 
+    /// The fewest member slots this level's structure can be composed from.
+    /// Below it the record does not describe the level it claims to be: a
+    /// mirror or a stripe needs at least one member, single parity needs three
+    /// (two data plus the parity chunk), and double parity needs four (two
+    /// data plus the P and Q chunks). A RAID5 record claiming two members, or
+    /// a RAID6 record claiming three, describes an array that cannot exist and
+    /// is as malformed as a zero member count.
+    ///
+    /// This is the *single* definition of each level's minimum, consumed both
+    /// by the on-disk [`decode`](ArraySuperblock::decode) boundary and by the
+    /// composition engines' `assemble`, so the metadata layer and the
+    /// composition layer cannot disagree on how small an array may be.
+    #[must_use]
+    pub const fn min_members(self) -> u16 {
+        match self {
+            Self::Mirror | Self::Stripe => 1,
+            Self::Parity => 3,
+            Self::DualParity => 4,
+        }
+    }
+
+    /// The most member slots this level can be composed from.
+    ///
+    /// Only double parity has a real ceiling: its Q syndrome is a
+    /// Reed-Solomon syndrome over GF(2^8) whose coefficients stay distinct for
+    /// at most 255 data members, so a RAID6 array holds at most those 255 data
+    /// members plus its two syndrome chunks (257 slots). Every other level is
+    /// bounded only by the on-disk `u16` member-count field. The 255 figure is
+    /// the one `gf256::MAX_DATA_MEMBERS` names, so the ceiling is defined once
+    /// and shared with the [`DualParityArray`] engine (`AGENTS.md` §2.2).
+    ///
+    /// [`DualParityArray`]: crate::DualParityArray
+    #[must_use]
+    pub const fn max_members(self) -> u16 {
+        match self {
+            Self::DualParity => crate::gf256::MAX_DATA_MEMBERS + 2,
+            _ => u16::MAX,
+        }
+    }
+
     /// Decode an on-disk level byte, failing closed on an unknown value.
     ///
     /// # Errors
@@ -172,6 +212,13 @@ pub enum SuperblockError {
     /// mirror) recorded a non-zero one. The two must agree, so a record whose
     /// level and stripe unit contradict each other is never trusted.
     BadStripeChunk,
+    /// The member count was non-zero but outside the range its RAID level can
+    /// be composed from ([`RaidLevel::min_members`]/[`RaidLevel::max_members`]):
+    /// too few members for the level's structure (e.g. a RAID5 claiming two
+    /// members or a RAID6 claiming three), or — for RAID6 — more data members
+    /// than its Q syndrome can distinguish. Such a record describes an array
+    /// that cannot exist and is refused rather than half-trusted.
+    MemberCountOutOfRange,
 }
 
 /// The 8-byte magic that opens every array superblock (`"TXRAIDSB"`).
@@ -273,8 +320,9 @@ impl ArraySuperblock {
     ///
     /// A [`SuperblockError`] for any of: a short input, a bad magic, an
     /// unknown version, a checksum mismatch, an unknown RAID level, a zero
-    /// member count, a slot outside the array, a degenerate geometry, or a
-    /// non-canonical timestamp.
+    /// member count, a member count the level cannot be composed from, a slot
+    /// outside the array, a degenerate geometry, a non-canonical timestamp, or
+    /// a stripe unit inconsistent with the level.
     pub fn decode(bytes: &[u8]) -> Result<Self, SuperblockError> {
         if bytes.len() < WIRE_LEN {
             return Err(SuperblockError::TooSmall);
@@ -300,6 +348,15 @@ impl ArraySuperblock {
             u16::from_le_bytes([bytes[OFF_MEMBER_COUNT], bytes[OFF_MEMBER_COUNT + 1]]);
         if member_count == 0 {
             return Err(SuperblockError::ZeroMembers);
+        }
+        // The member count must be one the claimed level can actually be
+        // composed from: a RAID5 with two members or a RAID6 with three
+        // describes an array that cannot exist, and a RAID6 with more data
+        // members than its Q syndrome distinguishes is equally unbuildable.
+        // Reject it at the boundary rather than let it reach an engine that
+        // would fail closed later (fail closed on malformed metadata).
+        if member_count < raid_level.min_members() || member_count > raid_level.max_members() {
+            return Err(SuperblockError::MemberCountOutOfRange);
         }
         let member_slot = u16::from_le_bytes([bytes[OFF_MEMBER_SLOT], bytes[OFF_MEMBER_SLOT + 1]]);
         if member_slot >= member_count {
