@@ -74,6 +74,9 @@ pub enum IconKind {
     /// An open, tipped-out waste bin, for the file manager's Empty Trash
     /// command (the permanent removal of the Trash's contents).
     EmptyTrash,
+    /// A three-by-three grid of application tiles, for the taskbar's
+    /// program-library launcher.
+    Library,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -106,6 +109,7 @@ impl IconKind {
             "new-folder" => Self::NewFolder,
             "trash" => Self::Trash,
             "empty-trash" => Self::EmptyTrash,
+            "library" => Self::Library,
             _ => Self::Generic,
         }
     }
@@ -142,6 +146,7 @@ impl IconKind {
             Self::Generic => 19,
             Self::Trash => 20,
             Self::EmptyTrash => 21,
+            Self::Library => 22,
         }
     }
 
@@ -177,6 +182,7 @@ impl IconKind {
             Self::Generic => "generic",
             Self::Trash => "trash",
             Self::EmptyTrash => "empty-trash",
+            Self::Library => "library",
         }
     }
 }
@@ -209,6 +215,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::NewFolder => new_folder(color),
         IconKind::Trash => trash(color),
         IconKind::EmptyTrash => empty_trash(color),
+        IconKind::Library => library(color),
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -470,6 +477,29 @@ fn empty_trash(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, LID),
         IconLayer::from_points(color, BODY),
     ]
+}
+
+/// A three-by-three grid of small application tiles — the app-drawer cue for
+/// the program-library launcher, denser than the two-by-two [`view_toggle`]
+/// grid so the two never read alike.
+fn library(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const SIDE: i32 = 4;
+    const STARTS: [i32; 3] = [4, 10, 16];
+    let mut layers = alloc::vec::Vec::with_capacity(9);
+    for top in STARTS {
+        for left in STARTS {
+            layers.push(IconLayer::from_points(
+                color,
+                &[
+                    (left, top),
+                    (left + SIDE, top),
+                    (left + SIDE, top + SIDE),
+                    (left, top + SIDE),
+                ],
+            ));
+        }
+    }
+    layers
 }
 
 /// The fallback placeholder: a filled diamond.

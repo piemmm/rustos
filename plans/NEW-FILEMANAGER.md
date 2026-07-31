@@ -174,7 +174,8 @@ fail-closed) plus a "named folder" screendump. **FM9-b is now landed too**
 picker now opens at the user's home (`Browser::open_at` over the session's
 `HOME`, falling back to `/`), the fixture plants a readable document in
 `/Users/root`, and the aarch64 `autoload_input` vertical launches the Viewer
-from the start menu, lets the auto-opened picker read the home, clicks the
+from the desktop's launcher (today the program-library popup,
+`plans/NEW-TASKBAR.md`), lets the auto-opened picker read the home, clicks the
 document row, and latches two new guest PASS witnesses — `SyscallInvoked
 sc=fd_grant` then `sc=fd_redeem` (after the FM9-a rename, so no earlier
 delegation can satisfy them). The pick-click is gated on a test-kernel
@@ -1302,8 +1303,8 @@ the click-through that keys on them is written.
     the session's `HOME`, parsed with the shared
     `vfs::components_from_absolute_path`, falling back to `/`), and the shared
     users-root fixture plants a readable document (`HOME_DOC_NAME`) in
-    `/Users/root`. After FM9-a, the vertical opens the start menu and clicks
-    the **Viewer** launcher (session-internal taskbar clicks, gated on the
+    `/Users/root`. After FM9-a, the vertical launches the **Viewer** from the
+    desktop's launcher (session-internal taskbar clicks, gated on the
     FM9-a folder-dump delivery count and held behind that dump); the Viewer,
     handed no document, asks the picker, which opens the home. A single
     pointer click on the document row (reconstructed through the same

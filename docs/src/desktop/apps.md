@@ -445,8 +445,9 @@ crumb climbs to that ancestor through the same transactional
 it (`Browser::select`) — the GUI is a spelling of the user's
 intent, never an escalation, so a refused re-listing leaves the browser exactly
 where it was. A `CloseRequested` from the desktop ends it cleanly, and every
-bring-up refusal exits fail-loud with its reason on `stderr`. The desktop
-session's start menu carries a `Files` entry that spawns the bundle.
+bring-up refusal exits fail-loud with its reason on `stderr`. The taskbar's
+permanent Files button spawns the bundle — or raises its window when one is
+already open (`plans/NEW-TASKBAR.md` T4).
 
 ### In-place rename
 
@@ -492,7 +493,7 @@ directory, `AGENTS.md` §2.2).
 
 Opening a file into a viewer through this picker is proven end to end on the
 aarch64 desktop QEMU vertical (`plans/NEW-FILEMANAGER.md` FM9-b): the session
-launches the Viewer from the start menu, the Viewer (handed no document) asks
+launches the Viewer, the Viewer (handed no document) asks
 the picker, the picker opens at `/Users/root`, a scripted click on the planted
 document row concludes the pick, and the session delegates the chosen file to
 the Viewer through the CU6 one-shot `fd_grant` / `fd_redeem` — the Viewer then
@@ -1243,8 +1244,9 @@ presses are encoded through the one shared `lib/keymap` rule and written to
 the shell (releases send nothing); shell output is pumped into the grid and
 the repainted frame presented. The shell exiting, or a `CloseRequested` from
 the desktop, ends the session cleanly; every bring-up refusal exits
-fail-loud with a reserved code and its reason on `stderr`. The desktop
-session's start menu carries a `Terminal` entry that spawns the bundle, and
+fail-loud with a reserved code and its reason on `stderr`. The desktop's
+program-library popup lists the terminal's catalog entry, which spawns the
+bundle (`plans/NEW-TASKBAR.md` T5), and
 the autoload QEMU vertical types a real command into the served window at
 the seat keyboard, PASSing only on the kernel-attested keyboard → session →
 terminal → pipe → shell → spawn round trip.
@@ -1275,5 +1277,6 @@ anything reaches the renderer, so a hostile picked file can neither pin
 unbounded memory nor smuggle control sequences; `render_status` /
 `render_lines` paint through the active theme and the shared monospace
 face. `Enter` asks for another pick; a cancelled pick leaves the viewer
-open with a notice; a `CloseRequested` ends it cleanly. The start menu
-carries a `Viewer` entry that spawns the bundle.
+open with a notice; a `CloseRequested` ends it cleanly. The program
+library's catalog carries the viewer's entry, so the desktop's popup
+spawns the bundle.

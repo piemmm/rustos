@@ -24,9 +24,10 @@ Steuerelement behält den Tastaturfokus, sodass die Pfeiltasten, `Enter`,
 `Space` und getippte Zeichen es dann steuern; `Tab` und `Shift+Tab` bewegen den
 Fokus zwischen der Reiterleiste und den Steuerelementen.
 
-Die Galerie wird über das Startmenü des Desktops oder namentlich aus einer
-Shell gestartet. Sie erfordert eine laufende grafische Sitzung: ohne sie ist
-der Fensterkanal nicht erreichbar, und die Galerie meldet die Ablehnung auf dem
+Die Galerie wird aus der Programmbibliothek des Desktops (Schaltfläche
+`Library` in der Taskleiste) oder namentlich aus einer Shell gestartet.
+Sie erfordert eine laufende grafische Sitzung: ohne sie ist der
+Fensterkanal nicht erreichbar, und die Galerie meldet die Ablehnung auf dem
 Standardfehlerstrom und beendet sich.
 
 ## EXIT STATUS

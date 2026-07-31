@@ -21,7 +21,8 @@ keeps the keyboard focus, so the arrow keys, `Enter`, `Space`, and typed
 characters then drive it; `Tab` and `Shift+Tab` move focus between the tab
 strip and the widgets.
 
-The gallery is launched from the desktop start menu or by name from a shell. It
+The gallery is launched from the desktop's Program Library (the taskbar's
+Library button) or by name from a shell. It
 requires a running graphical session: without one the window channel is
 unreachable and the gallery reports the refusal on the standard error stream
 and exits.

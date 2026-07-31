@@ -1,7 +1,7 @@
 # Signed-AppInfo manifest source for the `viewer` windowed file viewer
 # (plans/APPWIN.md AW5). Discovered by the build's app-bundle composer,
 # which cross-compiles Run, signs the manifest, and plants the bundle on
-# the read-only /System/Apps store; the desktop session's start menu
+# the read-only /System/Apps store; the desktop's program-library popup
 # spawns it (and the shell resolves it by name like any command app).
 # The capability list is the bundle's request — deliberately WITHOUT any
 # filesystem capability: the viewer's only reach into the filesystem is

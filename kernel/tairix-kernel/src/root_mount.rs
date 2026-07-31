@@ -1856,7 +1856,8 @@ mod tests {
         // volume mounts, and the served text is the exact, usable
         // `users-v1` database that authenticates the planted account.
         let (descriptor_bytes, key) = provision();
-        let bytes = image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let bytes =
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
@@ -1900,7 +1901,8 @@ mod tests {
         // never unwraps the master key, so the mount is refused with
         // PermissionDenied and no database is served.
         let (descriptor_bytes, key) = provision();
-        let bytes = image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let bytes =
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
@@ -1935,7 +1937,8 @@ mod tests {
         // the passphrase is never even consulted and no mount is attempted.
         let (mut descriptor_bytes, key) = provision();
         descriptor_bytes[0] ^= 0xFF; // corrupt the magic
-        let bytes = image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let bytes =
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
@@ -2131,7 +2134,7 @@ mod tests {
         let read = read_root_unlock_descriptor(boot).expect("descriptor reads back");
 
         let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
         let source = unlock_root_and_load_users(&read, PASSPHRASE, root, &sink)
@@ -2199,7 +2202,7 @@ mod tests {
         let (descriptor_bytes, key) = provision();
         let boot = author_boot_partition(&descriptor_bytes);
         let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
 
@@ -2226,7 +2229,7 @@ mod tests {
         let (_descriptor_bytes, key) = provision();
         let boot = empty_boot_partition();
         let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
 
@@ -2247,7 +2250,7 @@ mod tests {
         let (descriptor_bytes, key) = provision();
         let boot = author_boot_partition(&descriptor_bytes);
         let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
 

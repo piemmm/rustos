@@ -7,7 +7,7 @@
 //! the [`CursorAssetSource`] / [`IconAssetSource`] seams. Reading those bytes
 //! needs a filesystem capability, so it is the desktop session's job. This module is that job.
 //!
-//! A caller supplies a [`GraphicsAssetReader`] — VFS-backed on a running
+//! A caller supplies a [`SessionFileReader`] — VFS-backed on a running
 //! system, an in-memory table in tests — and [`load_cursor_theme`] /
 //! [`load_icon_set`] read one asset per kind, decode it, and assemble a
 //! complete [`CursorTheme`] / [`IconSet`]. Both are **total and fail-closed
@@ -28,22 +28,25 @@ use tairix_theme::{CursorKind, CursorSet};
 /// The directory the desktop's SVG graphics assets live under.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
 
-/// A reader for the desktop's on-disk SVG graphics assets.
+/// The desktop session's file-reading seam.
 ///
-/// Reading a file under [`GRAPHICS_DIR`] needs a filesystem capability, so it
-/// is the desktop session's job rather than the `no_std` `lib/cursor` /
-/// `lib/icon` crates'. On a running system this is
-/// backed by the VFS; tests back it with an in-memory table.
-pub trait GraphicsAssetReader {
-    /// Read the bytes of the asset at absolute `path` (under [`GRAPHICS_DIR`]).
+/// Reading a file — an SVG asset under [`GRAPHICS_DIR`], a program-library
+/// store (the [`library`](crate::library) loader) — needs a filesystem
+/// capability, so it is the desktop session's job rather than a `no_std`
+/// library crate's. On a running system this is backed by the VFS under the
+/// session's own kernel-attested identity; tests back it with an in-memory
+/// table. There is one seam, not one per consumer, so every session read
+/// shares a single production implementation.
+pub trait SessionFileReader {
+    /// Read the bytes of the file at absolute `path`.
     ///
     /// # Errors
     ///
-    /// Returns the kernel boundary's [`Errno`] when the asset cannot be read —
+    /// Returns the kernel boundary's [`Errno`] when the file cannot be read —
     /// for example [`Errno::NotFound`] when it is absent or
     /// [`Errno::PermissionDenied`] when the caller lacks the capability to read
-    /// it. A read failure is not fatal: the loader falls
-    /// back to the built-in artwork for that kind.
+    /// it. A read failure is never fatal to the desktop: each loader falls
+    /// back per file (built-in artwork, an empty catalog) and reports.
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
 }
 
@@ -105,7 +108,7 @@ fn icon_path(asset_id: &str) -> String {
 /// `CursorRegistry`.
 pub fn load_cursor_theme<R>(reader: &mut R, cursors: &CursorSet) -> CursorTheme
 where
-    R: GraphicsAssetReader + ?Sized,
+    R: SessionFileReader + ?Sized,
 {
     let mut assets = Vec::new();
     for kind in CURSOR_KINDS {
@@ -125,7 +128,7 @@ where
 /// taskbar installs through `TaskbarRenderer::set_icons`.
 pub fn load_icon_set<R>(reader: &mut R) -> IconSet
 where
-    R: GraphicsAssetReader + ?Sized,
+    R: SessionFileReader + ?Sized,
 {
     let mut assets = Vec::new();
     for kind in ICON_KINDS {

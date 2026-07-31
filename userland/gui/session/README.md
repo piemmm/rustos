@@ -10,11 +10,13 @@ authentication — one bundle, one spelling. The command's grammar is closed
 (`src/cli.rs`): bare `desktop` starts the session, the reserved `-h`/`-?`
 switches serve its own `Help/` documents, anything else is a usage error.
 
-The taskbar deliberately owns no theme registry and no spawn capability:
-activating a start-menu entry only *reports* an abstract `MenuAction` (a
-session control, an application launcher, or the light/dark
-`ToggleAppearance`). Resolving that action is the session glue's job. This
-crate is that glue's first increment — the runtime **light/dark switch**.
+The taskbar deliberately owns no theme registry, no filesystem reach, and no
+spawn capability: its buttons and its program-library popup only *report*
+typed `TaskbarResponse`s (open the library, open the file manager, launch
+this catalog entry). Acting on those is the session glue's job — this crate
+owns the theme registry, loads and merges the program-library catalog, and
+resolves the responses the shell's own state suffices for, surfacing the
+rest to the capability-holding `Run` binary.
 
 ## What this crate owns
 
@@ -22,33 +24,40 @@ crate is that glue's first increment — the runtime **light/dark switch**.
   whole desktop reads its theme from (`AGENTS.md` §6, §10).
 - **The `tairix-taskbar` `Taskbar` model** — so a theme switch is a single
   in-place operation: the registry's active theme changes and the taskbar is
-  re-themed to match.
+  re-themed to match (`DesktopSession::set_theme`; the interactive light/dark
+  switch arrives with the Switchboard's System menu, `plans/NEW-TASKBAR.md`
+  T13). `set_theme` fails closed on an unknown id and `register_theme` on a
+  duplicate id, leaving the active theme and the taskbar untouched
+  (`AGENTS.md` §5.4 / §2.9).
 
-## What it does
+## The program library
 
-`DesktopSession::resolve` turns a `TaskbarResponse` into a `SessionEvent`:
+The taskbar's popup lists the **resolved** program library
+(`plans/NEW-TASKBAR.md` T5): the machine store
+(`/System/Settings/ProgramLibrary/library.conf`) merged with the logged-in
+user's overlay through the one `tairix_proglib::merge`. Reading those
+documents needs a filesystem capability, so the `library` module's
+`load_library` does it here, through the same `SessionFileReader` seam the
+asset loaders use: an absent store is the ordinary empty state (silent), and
+an unreadable, oversized, non-UTF-8, or malformed store contributes an empty
+catalog **plus a ready-to-print warning line** — the desktop degrades to a
+calm empty library and says why on `stderr`, never guessing at a half-parsed
+store (`AGENTS.md` §2.24, §5.4). The merged catalog is handed to the popup
+with `DesktopShell::set_library`; a `LibraryLaunch { entry }` response is
+resolved back through that catalog to the entry's bundle `Run` path.
 
-- A selection of the start menu's appearance-toggle entry is the one response
-  the session acts on itself. It switches the built-in light/dark theme on the
-  registry (driven by the *active* theme's appearance, so a custom dark theme
-  toggles to the built-in light theme and vice versa), re-themes the taskbar,
-  and returns `SessionEvent::AppearanceChanged(ThemeId)`. The embedder relays
-  the now-active theme — `DesktopSession::active_theme` — to the window manager
-  and apps.
-- Everything else is `SessionEvent::Forward`ed unchanged: a launcher or
-  session-control selection, a task activation, a notification or clock press.
-  Those need capabilities the session does not hold (a window-manager handle,
-  the power/spawn capabilities), so the embedder performs them (`AGENTS.md`
-  §10, §16.5). (`DesktopShell` applies a task activation's window effect to the
-  compositor itself — see *Running-task list ↔ window stack* — before
-  forwarding it.)
+## Launch bookkeeping
 
-`toggle_appearance`, `set_theme`, and `register_theme` expose the same theme
-control directly. `toggle_appearance` and `set_theme` re-theme the taskbar
-through one private apply path, so the relay logic is never duplicated
-(`AGENTS.md` §2.2). `set_theme` fails closed on an unknown id and
-`register_theme` on a duplicate id, leaving the active theme and the taskbar
-untouched (`AGENTS.md` §5.4 / §2.9).
+The `launch` module tracks the desktop's launched children. `LaunchTable`
+remembers each running child's PID, display label, and spawn path (its
+**attested bundle identity** — the desktop spawned it, so no app-controlled
+data is trusted); `running_from` resolves the Files button's idempotent open
+(raise the running file manager instead of spawning a second copy).
+Asynchronous launch surfaces a load refusal as the child's reserved `LOAD_*`
+exit status, so the shared `reap_launched` drains every exited child in one
+wake, reports each refusal loudly on `stderr` named by its label
+(`launch_failure_report` — never fatal, `AGENTS.md` §2.24), tears the
+child's windows down, and forgets the entry.
 
 ## Loading the on-disk graphics assets
 
@@ -59,8 +68,9 @@ The desktop's cursors and notification icons are authored as SVG under
 capability, so it is the session's job (`AGENTS.md` §17.4 / §19.5). The
 `assets` module is that job:
 
-- A caller supplies a `GraphicsAssetReader` (VFS-backed on a running system,
-  an in-memory table in tests).
+- A caller supplies a `SessionFileReader` (the session's one file-reading
+  seam, shared with the catalog loader; VFS-backed on a running system, an
+  in-memory table in tests).
 - `DesktopSession::load_cursors` reads one asset per cursor kind named by the
   active theme's `CursorSet`, from
   `/System/Graphics/Cursors/<asset-id>.svg`, and returns a `CursorTheme` the
@@ -86,9 +96,9 @@ is session glue. Given a `&mut tairix_wm::Compositor` and the taskbar's own
   `Corners::from_radius(BarLayout::corner_radius)` — the compositor's single
   anti-aliased rounded-corner path, the same one it uses for application
   windows, never a second one (`AGENTS.md` §2.2);
-- while the start menu is open, paints its popup, places it above the bar at
-  `MenuLayout::panel`'s origin, and rounds it the same way; closing the menu
-  removes the popup window.
+- while the program-library popup is open, paints its panel, places it above
+  the bar at `LibraryLayout::panel`'s origin, and rounds it the same way;
+  closing the popup removes the popup window.
 
 The presenter owns only the two compositor `WindowId` tokens it minted, so the
 session composes the GUI crates without holding the window-manager handle. It
@@ -104,14 +114,19 @@ event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
 stream, so `SessionInputRouter` fans it to the right router through
 `handle(event, &mut Compositor, &mut Taskbar)`:
 
-- a **primary press** goes to the taskbar when its menu is open (modal) or the
-  pointer is over the bar, and to the window manager otherwise — never both, so
-  a click on the bar never also activates a window beneath it;
-- **pointer motion** is fanned to both so their pointers stay in step; only the
-  window manager acts on it, dragging a grabbed window;
+- while the **program-library popup is open it is modal**: every press (any
+  button), release, scroll, and key event routes to the taskbar; motion is
+  still tracked by the window manager (so its pointer stays in step) but its
+  outcome is discarded — nothing is delivered to the windows beneath;
+- otherwise a **primary press** goes to the taskbar when the pointer is over
+  the bar, and to the window manager elsewhere — never both, so a click on
+  the bar never also activates a window beneath it;
+- **pointer motion** is fanned to both so their pointers stay in step; the
+  window manager acts on it (dragging a grabbed window) and the taskbar
+  refreshes its launcher hover feedback;
 - a **primary release** ends a window move-grab in the window manager;
 - a **key event** goes to the window manager, which delivers it to the focused
-  window; the taskbar takes no keyboard input;
+  window — except while the popup is open (above);
 - anything else is `SessionInputResponse::Ignored`.
 
 Decorations arm a title-bar drag through `begin_move`; the embedder reads the
@@ -130,10 +145,16 @@ live device events" thread:
   pointer/keyboard channel on a running system, an in-memory queue in tests,
   `AGENTS.md` §7), routing each through the `SessionInputRouter` and returning
   a `ShellOutcome` per event.
-- A taskbar action is `resolve`d (the light/dark toggle is applied here, every
-  other response forwarded) and the bar is re-presented, so an opened/closed
-  menu or a re-themed bar reaches the screen; a window-manager action needs no
+- A taskbar response is applied where the shell's own state suffices (a task
+  activate/minimise outcome drives the compositor) and surfaced as
+  `ShellOutcome::Taskbar` for the embedder; the bar is re-presented exactly
+  once per event at one site (an acted response and the drained repaint
+  latch share the decision), so an opened/closed popup or a hover reaches
+  the screen without double-painting; a window-manager action needs no
   re-present, so motion and drags stay cheap.
+- `set_library` hands the popup the merged catalog (refreshing an open popup
+  in place) and `raise_window` shows, raises, and focuses a tracked task's
+  window — the Files button's idempotent open.
 - A faulting `InputSource` ends the `pump` with its `Errno`; the events drained
   before the fault stay applied and the embedder replaces or re-polls the
   source (`AGENTS.md` §2.9 / §19.5).
@@ -284,14 +305,12 @@ binary holds the one justified `unsafe` — the slice view of its own
 kernel-mapped frame region, with its invariants stated in a `// SAFETY:`
 block (`AGENTS.md` §2.10).
 
-## Still to come (Stage 7)
+## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
-The D7d end-to-end QEMU vertical (the autoload world grows the display node,
-the framebuffer service bundle, and this session, started by typing
-`desktop` at the shell the text login drops to), relaying the active
-theme to the window manager and apps over live IPC, resolving launcher /
-session-control actions once the process and window-manager capabilities are
-wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
-reads `/System/Graphics` on a running system (the in-memory-tested loader and
-its fallbacks now exist; the `Run` binary installs the built-in artwork until
-then).
+The pin strip's session side (T6/T7 — the per-user pin store read/written
+under the user's identity), the notification-area and Switchboard-icon
+upgrades (T8/T9), relaying the active theme to apps over live IPC, and the
+VFS-backed asset reads for `/System/Graphics` in the `Run` binary (the
+in-memory-tested loaders and their fallbacks exist; the `Run` binary
+installs the built-in artwork until then — its `SessionFileReader` today
+serves the program-library stores).

@@ -16,7 +16,7 @@ weithredol. Mae pob darlleniad cyfeiriadur yn rhestriad cyffredin wedi'i
 wirio gan ganiatâd o dan hunaniaeth y defnyddiwr a'i lansiodd: gwrthodir
 cyfeiriadur annarllenadwy, ni ddyfelir byth.
 
-Lansir y porwr o ddewislen gychwyn y bwrdd gwaith (y cofnod `Files`)
+Lansir y porwr o fotwm parhaol `Files` y bar tasgau
 neu wrth ei enw o gragen. Mae angen sesiwn graffigol weithredol arno:
 hebddi, mae'r sianel ffenestr yn anghyraeddadwy ac mae'r porwr yn nodi'r
 gwrthodiad ar y ffrwd gwall safonol ac yn gorffen.

@@ -16,11 +16,10 @@ acento del tema activo. Cada lectura de directorio es un listado
 ordinario con comprobación de permisos bajo la identidad del usuario
 que lo lanzó: un directorio ilegible se rechaza, nunca se adivina.
 
-El navegador se lanza desde el menú de inicio del escritorio (la
-entrada `Files`) o por su nombre desde un shell. Requiere una sesión
-gráfica en ejecución: sin ella, el canal de ventana es inalcanzable y
-el navegador informa del rechazo por el flujo de error estándar y
-termina.
+El navegador se lanza desde el botón permanente `Files` de la barra de
+tareas o por su nombre desde un shell. Requiere una sesión gráfica en
+ejecución: sin ella, el canal de ventana es inalcanzable y el navegador
+informa del rechazo por el flujo de error estándar y termina.
 
 La ventana se maneja con el teclado: `Abajo` y `Arriba` mueven la
 selección, `Intro` abre el directorio seleccionado y `Retroceso` sube

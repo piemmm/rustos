@@ -16,8 +16,8 @@ ANSI/VT a rennir a'i dynnu â phalet y thema weithredol. Nid yw'r
 derfynell ei hun byth yn adleisio: mae adlais a golygu llinell yn
 perthyn i'r gragen, yn union fel ar gonsol.
 
-Lansir y derfynell o ddewislen cychwyn y bwrdd gwaith (y cofnod
-`Terminal`) neu wrth ei henw o gragen. Mae angen sesiwn graffigol
+Lansir y derfynell o Lyfrgell Raglenni'r bwrdd gwaith (botwm `Library` y
+bar tasgau) neu wrth ei henw o gragen. Mae angen sesiwn graffigol
 weithredol arni: hebddi, mae sianel y ffenestr yn anghyraeddadwy ac
 mae'r derfynell yn adrodd y gwrthodiad ar y ffrwd gwall safonol ac yn
 gorffen.

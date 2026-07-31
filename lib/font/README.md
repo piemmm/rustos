@@ -92,7 +92,7 @@ with no resampling, so console rendering is byte-for-byte unchanged.
 `BitmapFont::with_pixel_height(px)` asks for any other cell: the desktop
 resolves a comfortable physical size from the theme's logical font size and
 the DPI scale (`tairix_geometry::Scale`), so window titles, the taskbar, the
-start menu, and the file browser render at that size. Every derived metric
+program-library popup, and the file browser render at that size. Every derived metric
 (advance, cell width, baseline, line height) scales with the cell height,
 keeping the font monospaced and its aspect ratio fixed.
 

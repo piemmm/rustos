@@ -22,10 +22,10 @@ cyfun yn agor. Mae rheolydd a gliciwyd yn cadw ffocws y bysellfwrdd, felly mae'r
 saethau, `Enter`, `Space` a'r nodau a deipir yn ei yrru; mae `Tab` a `Shift+Tab`
 yn symud y ffocws rhwng y bar tabiau a'r rheolyddion.
 
-Caiff yr oriel ei lansio o ddewislen gychwyn y bwrdd gwaith neu wrth ei henw o
-gragen. Mae angen sesiwn graffigol sy'n rhedeg: hebddi mae sianel y ffenestr yn
-anghyraeddadwy, ac mae'r oriel yn adrodd y gwrthodiad ar y ffrwd gwall safonol ac
-yn gorffen.
+Caiff yr oriel ei lansio o Lyfrgell Raglenni'r bwrdd gwaith (botwm `Library` y
+bar tasgau) neu wrth ei henw o gragen. Mae angen sesiwn graffigol sy'n
+rhedeg: hebddi mae sianel y ffenestr yn anghyraeddadwy, ac mae'r oriel yn
+adrodd y gwrthodiad ar y ffrwd gwall safonol ac yn gorffen.
 
 ## EXIT STATUS
 

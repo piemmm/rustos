@@ -21,30 +21,31 @@
 //! image, so each `MessageDelivered` is exactly one delivered
 //! `WindowEvent`:
 //!
-//! 1. Clicking the served files window delivers `Focus { focused: true }`
-//!    (the window was unfocused) …
+//! 1. Clicking the served files window (spawned by the taskbar's permanent
+//!    Files button) delivers `Focus { focused: true }` (the window was
+//!    unfocused) …
 //! 2. … then the activating `Pressed` — the served window demonstrably
 //!    exists on the composited desktop, keying the second screendump.
-//! 3. The start menu's appearance-toggle row is clicked, then the (still
-//!    focused) window is clicked once more (delivery 3) …
-//! 4. … and a handshake click (delivery 4) — injected only after delivery 3
-//!    appeared on serial — is the gate the terminal stage waits on (the
-//!    runner holds its menu clicks behind it). The toggle exercises the
-//!    taskbar menu + appearance-row hit-test; the theme-toggle *pixels* are
-//!    not asserted here (that WM behaviour is host-tested).
-//! 5. The terminal stage (`plans/APPWIN.md` AW4): the start menu's
-//!    `Terminal` row spawns the terminal bundle, and clicking its served
-//!    window delivers `Focus { focused: false }` to the files window
-//!    (delivery 5), `Focus { focused: true }` to the terminal (6), and
-//!    the activating `Pressed` (7) — the gate after which the runner
-//!    types the shell command.
-//! 6. Once the terminal is focused, the runner types [`TERMINAL_COMMAND`]
+//! 3. A handshake click on the still-focused window (delivery 3) —
+//!    injected only after delivery 2 appeared on serial and held while the
+//!    second dump is pending — is the gate the terminal stage waits on
+//!    (the runner holds its library-popup clicks behind it).
+//! 4. The terminal stage (`plans/APPWIN.md` AW4): the taskbar's Library
+//!    button opens the program-library popup (a session-owned surface —
+//!    no app-ward delivery), its `Terminal` entry spawns the terminal
+//!    bundle through the catalog the session merged from the planted
+//!    machine store (`plans/NEW-TASKBAR.md` T5), and clicking the
+//!    terminal's served window delivers `Focus { focused: false }` to the
+//!    files window (delivery 4), `Focus { focused: true }` to the
+//!    terminal (5), and the activating `Pressed` (6) — the gate after
+//!    which the runner types the shell command.
+//! 5. Once the terminal is focused, the runner types [`TERMINAL_COMMAND`]
 //!    (`sleep 3600` + Enter); the terminal writes the line to the shell,
 //!    which resolves and loads the store bundle
 //!    [`TERMINAL_ROUND_TRIP_BUNDLE`] (`sleep.app`). That load — attributed
 //!    by the bundle's own name — is the AW4 round-trip witness; on it the
 //!    guest emits [`CTRL_C_ARM_MARKER`].
-//! 7. The pty job-control (`Ctrl-C`) witness (`plans/PTY.md`): the
+//! 6. The pty job-control (`Ctrl-C`) witness (`plans/PTY.md`): the
 //!    [`CTRL_C_ARM_MARKER`] gates the runner's [`TERMINAL_CTRL_C_RECOVERY`]
 //!    step — a `Ctrl-C` (which the terminal encodes as the `0x03` interrupt
 //!    byte) whose cooked-mode line discipline signals the foreground `sleep`
@@ -65,13 +66,13 @@
 /// `Pressed`): the second screendump's marker-occurrence key.
 pub const WINDOW_DUMP_DELIVERIES: u32 = 2;
 
-/// The window-event delivery count reached once the appearance-toggle burst
-/// has run: the post-toggle in-window click (delivery 3) then the handshake
-/// click (delivery 4). The terminal-stage menu clicks gate on this count, so
-/// they fire only after the appearance toggle was exercised. (The former
-/// light-theme screendump keyed on the same count was dropped — the
-/// theme-toggle pixels are host-tested, not asserted in this vertical.)
-pub const APPEARANCE_DUMP_DELIVERIES: u32 = 4;
+/// The window-event delivery count reached once the handshake click has
+/// run: deliveries 1 and 2 are the first in-window click's `Focus` +
+/// `Pressed`, and delivery 3 is the handshake click's `Pressed` on the
+/// still-focused window. The terminal stage's library-popup clicks gate on
+/// this count, so they fire in a wake strictly after the verified second
+/// dump's frame.
+pub const TERMINAL_STAGE_DELIVERIES: u32 = 3;
 
 /// Shared-frame **map** operations (`sc=shm_map`) that have occurred by
 /// the time the terminal window exists and can be clicked — the robust,

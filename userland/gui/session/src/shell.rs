@@ -4,7 +4,7 @@
 //! [`DesktopSession`] (the theme registry + taskbar model), the
 //! [`SessionInputRouter`] (which fans one pointer-event stream to the window
 //! manager and taskbar routers), the [`TaskbarPresenter`] (which paints the
-//! bar and its start-menu popup into compositor windows), and the
+//! bar and its program-library popup into compositor windows), and the
 //! [`TaskbarRenderer`] (which holds the across-frame glyph cache). Composing
 //! them into one event-driven frontend was the long-open "feed the router and
 //! presenter from live device events" thread; [`DesktopShell`] is that
@@ -40,7 +40,8 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
-use tairix_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
+use tairix_proglib::Catalog;
+use tairix_taskbar::{ActivateOutcome, TaskbarConfig, TaskbarRenderer, TaskbarResponse};
 use tairix_wm::{
     Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
     WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
@@ -48,7 +49,7 @@ use tairix_wm::{
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::presenter::TaskbarPresenter;
-use crate::session::{DesktopSession, SessionEvent};
+use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
 
 /// A source of live pointer/keyboard events for the desktop.
@@ -74,8 +75,8 @@ pub trait InputSource {
 ///
 /// Each event is routed to exactly one part of the desktop, so its outcome is
 /// either nothing, a window-manager action the embedder may observe (focus
-/// change, a window move), or a session-level [`SessionEvent`] the embedder
-/// must act on (relay the switched theme, perform a forwarded control).
+/// change, a window move), or a taskbar response the embedder holds the
+/// capabilities to act on (launch a library entry, open the file manager).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShellOutcome {
     /// The event changed no desktop state (a non-primary button, or a press or
@@ -84,12 +85,12 @@ pub enum ShellOutcome {
     /// The event drove the window manager (focus, click-to-activate, a window
     /// move). The embedder may observe it; the compositor is already updated.
     WindowManager(InputResponse),
-    /// The event drove the taskbar and produced a session-level event for the
-    /// embedder: an [`AppearanceChanged`](SessionEvent::AppearanceChanged) the
-    /// shell already applied (relay the new theme to the window manager and
-    /// apps), or a [`Forward`](SessionEvent::Forward)ed control the embedder
-    /// holds the capability to perform.
-    Session(SessionEvent),
+    /// The event drove the taskbar. The shell has already applied what it
+    /// can with its own state (a task activate/minimise, the popup's own
+    /// state changes, the re-present); a response needing a capability the
+    /// shell does not hold — launching an application, opening the file
+    /// manager — is the embedder's to perform.
+    Taskbar(TaskbarResponse),
 }
 
 /// The desktop session frontend: the session state, the input router, the
@@ -102,7 +103,7 @@ pub enum ShellOutcome {
 /// a title-bar drag is armed with [`begin_move`](Self::begin_move);
 /// a loaded notification-icon set is installed with [`set_icons`](Self::set_icons);
 /// tearing the desktop down is [`teardown`](Self::teardown).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DesktopShell {
     session: DesktopSession,
     router: SessionInputRouter,
@@ -119,17 +120,17 @@ pub struct DesktopShell {
 
 impl DesktopShell {
     /// Build a desktop shell for a taskbar placed by `config`, starting from
-    /// the built-in themes with the default dark theme active and the start
-    /// menu's light/dark entry labelled `appearance_label`.
+    /// the built-in themes with the default dark theme active.
     ///
     /// The router starts with the pointer at the screen origin and no focus,
-    /// the presenter has placed no window yet, and the renderer draws the
+    /// the presenter has placed no window yet, the renderer draws the
     /// built-in icon set until [`set_icons`](Self::set_icons) installs a loaded
-    /// one.
+    /// one, and the program library is empty until
+    /// [`set_library`](Self::set_library) hands it the resolved catalog.
     #[must_use]
-    pub fn new(config: TaskbarConfig, appearance_label: &str) -> Self {
+    pub fn new(config: TaskbarConfig) -> Self {
         Self {
-            session: DesktopSession::new(config, appearance_label),
+            session: DesktopSession::new(config),
             router: SessionInputRouter::new(),
             presenter: TaskbarPresenter::new(),
             renderer: TaskbarRenderer::new(),
@@ -419,42 +420,76 @@ impl DesktopShell {
     /// Bring the compositor's desktop background in step with the active
     /// theme, returning whether it changed.
     ///
-    /// [`handle`](Self::handle) calls this itself when the start menu's
-    /// appearance toggle switches the theme, so the desktop behind the
-    /// windows re-paints in the same frame as the re-themed bar; an embedder
-    /// that switches the theme programmatically (through
-    /// [`session_mut`](Self::session_mut)) calls it, then
+    /// An embedder that switches the theme programmatically (through
+    /// [`session_mut`](Self::session_mut) and
+    /// [`set_theme`](DesktopSession::set_theme)) calls it, then
     /// [`present`](Self::present), to relay the switch itself.
     pub fn sync_background(&mut self, compositor: &mut Compositor) -> bool {
         compositor.set_background(self.desktop_background())
     }
 
-    /// Bring the compositor up to date with the taskbar's current model and the
-    /// active theme: repaint and place the bar and, while the start menu is
-    /// open, its popup.
+    /// Bring the compositor up to date with the taskbar's current model and
+    /// its owned theme: repaint and place the bar and, while the
+    /// program-library popup is open, its panel.
     ///
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     pub fn present(&mut self, compositor: &mut Compositor) {
-        self.presenter.present(
+        self.presenter
+            .present(compositor, &mut self.renderer, self.session.taskbar());
+    }
+
+    /// Hand the taskbar's program-library popup the resolved `catalog` (the
+    /// machine store merged with the user's overlay) and re-present, so an
+    /// open popup refreshes in the same frame it is re-catalogued.
+    pub fn set_library(&mut self, compositor: &mut Compositor, catalog: Catalog) {
+        self.session
+            .taskbar_mut()
+            .library_mut()
+            .set_catalog(catalog);
+        self.present(compositor);
+    }
+
+    /// Show, raise, and focus the running task shown as `window`, restoring
+    /// it if it was minimised — how the embedder brings an already-open
+    /// window forward instead of launching a second copy (the Files button's
+    /// idempotent open). Returns `false`, changing nothing, when `window` is
+    /// not a tracked task.
+    pub fn raise_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        let Some(task) = self.tasks.task_for(window) else {
+            return false;
+        };
+        // Restore the model first (a minimised task is shown again), then
+        // apply the activation to the compositor and highlight the task.
+        self.session
+            .taskbar_mut()
+            .tasks_mut()
+            .set_focused(Some(task));
+        let raised = self.tasks.activate(
             compositor,
-            &mut self.renderer,
-            self.session.taskbar(),
-            self.session.active_theme(),
+            &mut self.router,
+            task,
+            ActivateOutcome::Activated,
         );
+        if raised {
+            self.sync_active_frame(compositor);
+            self.present(compositor);
+        }
+        raised
     }
 
     /// Route one input `event` to the desktop and return what it did.
     ///
     /// The event is fanned to the window manager or taskbar by the
-    /// [`SessionInputRouter`]'s policy; a taskbar action is then
-    /// [`resolve`](DesktopSession::resolve)d (the light/dark toggle is applied
-    /// here, the task activate/minimise outcome is applied to the compositor,
-    /// everything else is forwarded) and the bar is re-presented so the screen
-    /// reflects the change (an opened/closed menu, a re-themed bar, a changed
-    /// task highlight). A window-manager action re-presents only when it moved
-    /// focus (a press), keeping the highlight in step; motion and drags change
-    /// no highlight and stay cheap.
+    /// [`SessionInputRouter`]'s policy; a taskbar action is applied where the
+    /// shell's own state suffices (the task activate/minimise outcome drives
+    /// the compositor) and the bar is re-presented so the screen reflects
+    /// the change (an opened/closed popup, a changed task highlight, a
+    /// hover). A window-manager action re-presents only when it moved focus
+    /// (a press), keeping the highlight in step; motion and drags change no
+    /// highlight and stay cheap. Pixel-only taskbar changes (hover, popup
+    /// scroll or edit) latch the taskbar's repaint flag, drained here so
+    /// exactly one present follows each visual change.
     ///
     /// Whatever the event did, the pointer cursor is then brought up to date
     /// ([`refresh_cursor`](Self::refresh_cursor)): its hotspot follows pointer
@@ -475,14 +510,18 @@ impl DesktopShell {
                     self.tasks
                         .activate(compositor, &mut self.router, id, outcome);
                 }
-                let event = self.session.resolve(response);
-                if let SessionEvent::AppearanceChanged(_) = event {
-                    self.sync_background(compositor);
-                }
-                self.present(compositor);
-                ShellOutcome::Session(event)
+                ShellOutcome::Taskbar(response)
             }
         };
+        // One present per event, at one site: an acted taskbar response
+        // changed the bar (a highlight, the popup opening or closing), and a
+        // pixel-only change (a hover, a popup scroll or edit) latched the
+        // taskbar's repaint flag instead of producing a response. The latch
+        // is always drained, so nothing is presented twice.
+        let latched = self.session.taskbar_mut().take_repaint();
+        if latched || matches!(outcome, ShellOutcome::Taskbar(_)) {
+            self.present(compositor);
+        }
         // Whatever the event did to focus — a click-to-activate, a taskbar
         // activate/minimise, a desktop press — keep the decorated active frame
         // in step, so exactly the focused window shows its active title bar.

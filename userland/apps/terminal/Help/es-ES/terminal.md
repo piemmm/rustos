@@ -16,11 +16,11 @@ vocabulario ANSI/VT compartido y se dibuja con la paleta del tema
 activo. El terminal en sí nunca hace eco: el eco y la edición de línea
 pertenecen al shell, exactamente como en una consola.
 
-El terminal se inicia desde el menú de inicio del escritorio (la
-entrada `Terminal`) o por su nombre desde un shell. Requiere una
-sesión gráfica en ejecución: sin ella, el canal de ventana es
-inalcanzable y el terminal informa del rechazo en el flujo de error
-estándar y termina.
+El terminal se inicia desde la Biblioteca de programas del escritorio
+(el botón `Library` de la barra de tareas) o por su nombre desde un
+shell. Requiere una sesión gráfica en ejecución: sin ella, el canal de
+ventana es inalcanzable y el terminal informa del rechazo en el flujo de
+error estándar y termina.
 
 La sesión termina cuando el shell sale (por ejemplo con `exit`) o
 cuando la ventana se cierra desde el escritorio; cerrar la ventana

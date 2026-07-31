@@ -6,11 +6,15 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::Errno;
+use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
 use tairix_icon::{IconKind, IconSet};
+use tairix_proglib::{
+    user_library_path, BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry,
+    MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
+};
 use tairix_taskbar::{
-    ActivateOutcome, MenuAction, MenuEntryId, SessionControl, TaskId, TaskbarConfig,
-    TaskbarRenderer, TaskbarResponse,
+    ActivateOutcome, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
@@ -19,11 +23,9 @@ use tairix_wm::{
 };
 
 use crate::{
-    load_icon_set, DesktopSession, DesktopShell, GraphicsAssetReader, InputSource, SessionEvent,
+    load_icon_set, load_library, DesktopSession, DesktopShell, InputSource, SessionFileReader,
     SessionInputResponse, SessionInputRouter, ShellOutcome, TaskBridge, TaskbarPresenter,
 };
-
-const LABEL: &str = "Toggle Light/Dark";
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
 /// to a non-empty vector form, so loading it is observably different from the
@@ -36,7 +38,7 @@ const VALID_SVG: &[u8] = br##"<svg viewBox="0 0 24 24">
 /// returns an error and the loader falls back to the built-in artwork.
 const MALFORMED_SVG: &[u8] = b"this is not an SVG document";
 
-/// An in-memory [`GraphicsAssetReader`]: a path→bytes table standing in for
+/// An in-memory [`SessionFileReader`]: a path→bytes table standing in for
 /// the VFS, returning [`Errno::NotFound`] for any path it does not hold.
 #[derive(Default)]
 struct MemoryAssets {
@@ -50,7 +52,7 @@ impl MemoryAssets {
     }
 }
 
-impl GraphicsAssetReader for MemoryAssets {
+impl SessionFileReader for MemoryAssets {
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
         self.files
             .iter()
@@ -142,7 +144,78 @@ fn malformed_cursor_asset_falls_back_to_builtin() {
 }
 
 fn session() -> DesktopSession {
-    DesktopSession::new(TaskbarConfig::bottom_bar(1920, 1080), LABEL)
+    DesktopSession::new(TaskbarConfig::bottom_bar(1920, 1080))
+}
+
+// ---- fixtures --------------------------------------------------------
+
+/// A validated catalog entry for `/Apps/<stem>.app`.
+fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
+    LibraryEntry::new(
+        EntryId::new(&alloc::format!("os.tairix.{stem}")).expect("id"),
+        DisplayName::new(name).expect("name"),
+        BundlePath::new(&alloc::format!("/Apps/{stem}.app")).expect("bundle"),
+        category,
+        None,
+    )
+}
+
+/// A catalog declaring one entry per `(stem, name, category)` triple.
+fn catalog(entries: &[(&str, &str, LibraryCategory)]) -> Catalog {
+    let mut catalog = Catalog::new();
+    for &(stem, name, category) in entries {
+        catalog.insert(entry(stem, name, category)).expect("fits");
+    }
+    catalog
+}
+
+/// The standard fixture: two Office entries and one Games entry, so the
+/// popup shows two folders (taxonomy order: Office before Games) and the
+/// Office names sort as Calc before Write.
+fn office_and_games() -> Catalog {
+    catalog(&[
+        ("write", "Write", LibraryCategory::Office),
+        ("calc", "Calc", LibraryCategory::Office),
+        ("chess", "Chess", LibraryCategory::Games),
+    ])
+}
+
+/// Move the pointer to `(x, y)` and press the primary button there.
+fn press_at(
+    router: &mut SessionInputRouter,
+    comp: &mut Compositor,
+    taskbar: &mut tairix_taskbar::Taskbar,
+    x: i32,
+    y: i32,
+) -> SessionInputResponse {
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(x, y),
+        },
+        comp,
+        taskbar,
+    );
+    router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        comp,
+        taskbar,
+    )
+}
+
+/// Open the popup by pressing the Library button, asserting it opened.
+fn open_library(
+    router: &mut SessionInputRouter,
+    comp: &mut Compositor,
+    taskbar: &mut tairix_taskbar::Taskbar,
+) {
+    let centre = Point::new(24, 1060); // library slot centre for 1920x1080 bottom bar
+    assert_eq!(
+        press_at(router, comp, taskbar, centre.x, centre.y),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+    assert!(taskbar.library().is_open());
 }
 
 /// A headless 1920×1080 RGBA compositor over an opaque black background.
@@ -172,12 +245,7 @@ fn present_adds_a_bar_window_placed_and_rounded() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
 
     let id = presenter.bar_window().expect("the bar was presented");
     assert_eq!(comp.window_count(), 1);
@@ -198,19 +266,9 @@ fn presenting_twice_reuses_the_bar_window() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     let first = presenter.bar_window().expect("first present");
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     let second = presenter.bar_window().expect("second present");
 
     assert_eq!(first, second, "the same window is reused");
@@ -218,52 +276,58 @@ fn presenting_twice_reuses_the_bar_window() {
 }
 
 #[test]
-fn opening_the_menu_presents_a_popup_window() {
+fn opening_the_popup_presents_a_popup_window() {
     let mut session = session();
-    session.taskbar_mut().start_menu_mut().toggle();
+    session
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
     let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
 
     let popup = presenter.popup_window().expect("the popup was presented");
     assert_eq!(comp.window_count(), 2, "bar and popup are both present");
 
-    let layout = session.taskbar().menu_layout(Scale::ONE);
+    let layout = session.taskbar().library_layout(Scale::ONE);
     let window = comp.window(popup).expect("the popup window exists");
     assert_eq!(window.origin(), layout.panel.origin);
     assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
 }
 
 #[test]
-fn closing_the_menu_removes_the_popup_window() {
+fn closing_the_popup_removes_the_popup_window() {
     let mut session = session();
-    session.taskbar_mut().start_menu_mut().toggle();
+    session
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
     let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     let popup = presenter.popup_window().expect("the popup is open");
 
-    session.taskbar_mut().start_menu_mut().toggle();
-    presenter.present(
+    let centre = Point::new(24, 1060); // library slot centre
+    press_at(
+        &mut router,
         &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
+        session.taskbar_mut(),
+        centre.x,
+        centre.y,
     );
+    assert!(!session.taskbar().library().is_open());
+
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
 
     assert!(
         presenter.popup_window().is_none(),
@@ -277,17 +341,18 @@ fn closing_the_menu_removes_the_popup_window() {
 #[test]
 fn teardown_removes_every_window() {
     let mut session = session();
-    session.taskbar_mut().start_menu_mut().toggle();
     let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    session
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     assert_eq!(comp.window_count(), 2);
 
     presenter.teardown(&mut comp);
@@ -303,21 +368,11 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     let first = presenter.bar_window().expect("first present");
 
     assert!(comp.remove(first), "an embedder removed the bar window");
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
 
     let second = presenter.bar_window().expect("the bar was re-created");
     assert_ne!(first, second, "a fresh window id is minted");
@@ -330,39 +385,31 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
     let mut session = session();
     session
         .register_theme(custom_dark(ThemeId(100), 99))
-        .expect("a fresh id registers");
+        .unwrap();
     let mut comp = compositor();
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
     let id = presenter.bar_window().expect("the bar was presented");
-    let dark_corners = Corners::from_radius(session.taskbar().layout(Scale::ONE).corner_radius);
+    let dark_radius = session.taskbar().layout(Scale::ONE).corner_radius;
     assert_eq!(
         comp.window(id).expect("the bar window").corners(),
-        dark_corners
+        Corners::Rounded {
+            radius: dark_radius
+        }
     );
 
-    session
-        .set_theme(ThemeId(100))
-        .expect("the id is registered");
-    presenter.present(
-        &mut comp,
-        &mut renderer,
-        session.taskbar(),
-        session.active_theme(),
-    );
+    session.set_theme(ThemeId(100)).unwrap();
+    presenter.present(&mut comp, &mut renderer, session.taskbar());
 
-    let switched_corners = Corners::from_radius(session.taskbar().layout(Scale::ONE).corner_radius);
-    assert_eq!(switched_corners, Corners::from_radius(99));
+    let light_radius = session.taskbar().layout(Scale::ONE).corner_radius;
+    assert_ne!(dark_radius, light_radius);
     assert_eq!(
         comp.window(id).expect("the same bar window").corners(),
-        switched_corners,
+        Corners::Rounded {
+            radius: light_radius
+        },
         "the switched corner radius reached the presented bar"
     );
     assert_eq!(comp.window_count(), 1);
@@ -389,72 +436,12 @@ fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
     )
 }
 
-fn toggle_entry_id(session: &DesktopSession) -> MenuEntryId {
-    session
-        .taskbar()
-        .start_menu()
-        .entries()
-        .iter()
-        .find(|entry| entry.action == MenuAction::ToggleAppearance)
-        .expect("the session seeds an appearance-toggle entry")
-        .id
-}
-
 #[test]
-fn new_starts_dark_and_seeds_the_appearance_toggle() {
+fn new_starts_dark_with_an_empty_library() {
     let session = session();
     assert_eq!(session.active_theme().id(), ThemeId::DARK);
-    assert_eq!(session.active_theme().appearance(), Appearance::Dark);
-
-    let entry = session
-        .taskbar()
-        .start_menu()
-        .entries()
-        .iter()
-        .find(|entry| entry.action == MenuAction::ToggleAppearance)
-        .expect("the toggle entry is present");
-    assert_eq!(entry.label(), LABEL);
-}
-
-#[test]
-fn resolving_the_toggle_entry_switches_appearance() {
-    let mut session = session();
-    let id = toggle_entry_id(&session);
-
-    let event = session.resolve(TaskbarResponse::MenuEntrySelected {
-        id,
-        action: MenuAction::ToggleAppearance,
-    });
-    assert_eq!(event, SessionEvent::AppearanceChanged(ThemeId::LIGHT));
-    assert_eq!(session.active_theme().appearance(), Appearance::Light);
-
-    let event = session.resolve(TaskbarResponse::MenuEntrySelected {
-        id,
-        action: MenuAction::ToggleAppearance,
-    });
-    assert_eq!(event, SessionEvent::AppearanceChanged(ThemeId::DARK));
-    assert_eq!(session.active_theme().appearance(), Appearance::Dark);
-}
-
-#[test]
-fn non_toggle_responses_are_forwarded_unchanged() {
-    let mut session = session();
-
-    assert_eq!(
-        session.resolve(TaskbarResponse::ClockPressed),
-        SessionEvent::Forward(TaskbarResponse::ClockPressed)
-    );
-
-    // A session control is forwarded: the session holds no capability to power
-    // the machine off, so the embedder performs it.
-    let control = TaskbarResponse::MenuEntrySelected {
-        id: MenuEntryId(3),
-        action: MenuAction::Session(SessionControl::ShutDown),
-    };
-    assert_eq!(session.resolve(control), SessionEvent::Forward(control));
-
-    // Forwarding never touched the theme.
-    assert_eq!(session.active_theme().appearance(), Appearance::Dark);
+    assert!(session.taskbar().library().catalog().is_empty());
+    assert!(!session.taskbar().library().is_open());
 }
 
 #[test]
@@ -469,20 +456,17 @@ fn switching_theme_re_themes_the_taskbar() {
         .expect("the id is registered");
     assert_eq!(session.active_theme().id(), ThemeId(100));
     assert_eq!(
-        session.taskbar().corner_radius(),
+        session.taskbar().layout(Scale::ONE).corner_radius,
         99,
         "set_theme relays the new metrics to the taskbar"
     );
 
-    // The custom theme is dark, so toggling switches to the built-in light
-    // theme, whose taskbar corner radius differs.
-    let now = session.toggle_appearance();
-    assert_eq!(now, ThemeId::LIGHT);
-    assert_eq!(session.active_theme().appearance(), Appearance::Light);
+    session.set_theme(ThemeId::LIGHT).expect("light theme");
+    assert_eq!(session.active_theme().id(), ThemeId::LIGHT);
     assert_eq!(
-        session.taskbar().corner_radius(),
+        session.taskbar().layout(Scale::ONE).corner_radius,
         Theme::light().metrics().taskbar_corner_radius,
-        "the toggle relays the built-in light metrics to the taskbar"
+        "switching theme relays the light metrics to the taskbar"
     );
 }
 
@@ -520,38 +504,27 @@ fn opaque_window(comp: &mut Compositor, origin: Point, width: u32, height: u32) 
     comp.add_window(origin, surface)
 }
 
-/// A point guaranteed to lie inside the taskbar's start button.
-fn start_button_point(session: &DesktopSession) -> Point {
-    let rect = session.taskbar().layout(Scale::ONE).start_button;
-    assert!(!rect.is_empty(), "the start button has a region");
-    Point::new(rect.left() + 1, rect.top() + 1)
-}
-
 #[test]
 fn primary_press_over_the_bar_routes_to_the_taskbar() {
     let mut session = session();
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
-    let at = start_button_point(&session);
 
-    router.handle(
-        InputEvent::PointerMoved { to: at },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-
+    // The files button centre (pressed first: a press on the library
+    // button opens the modal popup, after which any bar press is the
+    // popup's to dismiss).
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 72, 1060);
     assert_eq!(
         response,
-        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuToggled { open: true })
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenFiles)
     );
-    assert!(session.taskbar().start_menu().is_open());
+
+    // The library button centre.
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
 }
 
 #[test]
@@ -561,24 +534,12 @@ fn the_bar_wins_over_a_window_beneath_it() {
     let mut router = SessionInputRouter::new();
     // A window placed under the bottom bar must not steal a press on the bar.
     opaque_window(&mut comp, Point::new(0, 1000), 400, 80);
-    let at = start_button_point(&session);
 
-    router.handle(
-        InputEvent::PointerMoved { to: at },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
 
     assert_eq!(
         response,
-        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuToggled { open: true })
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
     );
 }
 
@@ -589,20 +550,7 @@ fn primary_press_over_a_window_routes_to_the_window_manager() {
     let mut router = SessionInputRouter::new();
     let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(250, 250),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 250, 250);
 
     assert_eq!(
         response,
@@ -655,20 +603,7 @@ fn primary_press_on_the_empty_desktop_routes_to_the_window_manager() {
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(900, 500),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 900, 500);
 
     assert_eq!(
         response,
@@ -677,48 +612,70 @@ fn primary_press_on_the_empty_desktop_routes_to_the_window_manager() {
 }
 
 #[test]
-fn an_open_menu_is_modal_and_a_press_off_it_dismisses_it() {
+fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
     let mut session = session();
+    session
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
-    let at = start_button_point(&session);
+    // A window beneath the popup's click-away press; it must stay unfocused.
+    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
 
-    router.handle(
-        InputEvent::PointerMoved { to: at },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    assert!(session.taskbar().start_menu().is_open());
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+    assert!(session.taskbar().library().is_open());
 
-    // A press far from the bar and popup is still claimed by the modal menu
-    // and dismisses it, rather than reaching the window manager.
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(900, 500),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-    );
-
+    // A press over a window beneath is claimed by the modal popup and
+    // dismisses it, rather than reaching the window manager.
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 250, 250);
     assert_eq!(
         response,
-        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuDismissed)
+        SessionInputResponse::Taskbar(TaskbarResponse::LibraryDismissed)
     );
-    assert!(!session.taskbar().start_menu().is_open());
+    assert!(!session.taskbar().library().is_open());
+    assert_eq!(
+        router.focused(),
+        None,
+        "the window beneath was not activated"
+    );
+
+    // While open, a KeyPressed routes to the popup.
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+    let response = router.handle(
+        InputEvent::KeyPressed {
+            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Down),
+            modifiers: tairix_wm::Modifiers::default(),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert_eq!(response, SessionInputResponse::Ignored);
+    assert_eq!(session.taskbar().library().current(), Some(0));
+
+    // Escape closes the popup.
+    let response = router.handle(
+        InputEvent::KeyPressed {
+            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Escape),
+            modifiers: tairix_wm::Modifiers::default(),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::LibraryDismissed)
+    );
+    assert!(!session.taskbar().library().is_open());
+
+    // A PointerScrolled while open does NOT reach the window manager.
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+    let response = router.handle(
+        InputEvent::PointerScrolled { dx: 0, dy: 10 },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert_eq!(response, SessionInputResponse::Ignored);
 }
 
 #[test]
@@ -828,10 +785,11 @@ fn a_non_primary_press_is_ignored() {
     let mut session = session();
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
-    let at = start_button_point(&session);
 
     router.handle(
-        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerMoved {
+            to: Point::new(24, 1060),
+        },
         &mut comp,
         session.taskbar_mut(),
     );
@@ -845,7 +803,7 @@ fn a_non_primary_press_is_ignored() {
 
     assert_eq!(response, SessionInputResponse::Ignored);
     assert!(
-        !session.taskbar().start_menu().is_open(),
+        !session.taskbar().library().is_open(),
         "a secondary press did nothing"
     );
 }
@@ -927,7 +885,7 @@ impl InputSource for MemoryInput {
 }
 
 fn shell() -> DesktopShell {
-    DesktopShell::new(TaskbarConfig::bottom_bar(1920, 1080), LABEL)
+    DesktopShell::new(TaskbarConfig::bottom_bar(1920, 1080))
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -941,14 +899,18 @@ const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
 };
 
 #[test]
-fn pump_opens_the_menu_and_presents_the_popup() {
+fn pump_opens_the_popup_and_presents_it() {
     let mut shell = shell();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
     let mut comp = compositor();
-    let at = start_button_point(shell.session());
 
     let outcomes = shell
         .pump(
-            &mut MemoryInput::new(&[moved(at.x, at.y), PRIMARY_PRESS]),
+            &mut MemoryInput::new(&[moved(24, 1060), PRIMARY_PRESS]),
             &mut comp,
         )
         .expect("an in-memory source does not fault");
@@ -957,15 +919,13 @@ fn pump_opens_the_menu_and_presents_the_popup() {
         outcomes,
         [
             ShellOutcome::Ignored,
-            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::StartMenuToggled {
-                open: true,
-            })),
+            ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary),
         ]
     );
-    assert!(shell.session().taskbar().start_menu().is_open());
+    assert!(shell.session().taskbar().library().is_open());
     assert!(
         shell.presenter().popup_window().is_some(),
-        "opening the menu re-presents and adds the popup window"
+        "opening the popup re-presents and adds the popup window"
     );
     assert_eq!(comp.window_count(), 2, "the bar and popup are both present");
 }
@@ -994,114 +954,6 @@ fn handle_routes_a_window_press_to_the_window_manager() {
 }
 
 #[test]
-fn selecting_the_appearance_toggle_switches_the_theme() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let start = start_button_point(shell.session());
-
-    // Open the menu, then press the appearance-toggle row (the last entry,
-    // appended after the session controls).
-    shell
-        .pump(
-            &mut MemoryInput::new(&[moved(start.x, start.y), PRIMARY_PRESS]),
-            &mut comp,
-        )
-        .expect("source does not fault");
-    let toggle_row = *shell
-        .session()
-        .taskbar()
-        .menu_layout(Scale::ONE)
-        .entries
-        .last()
-        .expect("the menu has an appearance-toggle row");
-    let at = Point::new(toggle_row.left() + 1, toggle_row.top() + 1);
-
-    let outcomes = shell
-        .pump(
-            &mut MemoryInput::new(&[moved(at.x, at.y), PRIMARY_PRESS]),
-            &mut comp,
-        )
-        .expect("source does not fault");
-
-    assert_eq!(
-        outcomes.last(),
-        Some(&ShellOutcome::Session(SessionEvent::AppearanceChanged(
-            ThemeId::LIGHT
-        )))
-    );
-    assert_eq!(
-        shell.session().active_theme().id(),
-        ThemeId::LIGHT,
-        "the shell applied the light/dark switch itself"
-    );
-    assert!(
-        !shell.session().taskbar().start_menu().is_open(),
-        "selecting the toggle closed the menu"
-    );
-    assert!(
-        shell.presenter().popup_window().is_none(),
-        "the closed menu's popup window was removed on re-present"
-    );
-}
-
-#[test]
-fn selecting_the_appearance_toggle_recolours_the_desktop() {
-    let mut shell = shell();
-    // Build the compositor over the active (dark) theme's desktop colour,
-    // exactly as the live session binary does at bring-up.
-    let mode = DisplayMode {
-        width_px: 1920,
-        height_px: 1080,
-        stride_bytes: 1920 * 4,
-        format: DisplayFormat::Rgba8888,
-    };
-    let mut comp =
-        Compositor::new(mode, shell.desktop_background()).expect("the compositor allocates");
-    let dark = comp.background();
-    let start = start_button_point(shell.session());
-
-    shell
-        .pump(
-            &mut MemoryInput::new(&[moved(start.x, start.y), PRIMARY_PRESS]),
-            &mut comp,
-        )
-        .expect("source does not fault");
-    let toggle_row = *shell
-        .session()
-        .taskbar()
-        .menu_layout(Scale::ONE)
-        .entries
-        .last()
-        .expect("the menu has an appearance-toggle row");
-    shell
-        .pump(
-            &mut MemoryInput::new(&[
-                moved(toggle_row.left() + 1, toggle_row.top() + 1),
-                PRIMARY_PRESS,
-            ]),
-            &mut comp,
-        )
-        .expect("source does not fault");
-
-    assert_ne!(
-        comp.background(),
-        dark,
-        "the toggle recoloured the desktop behind the windows"
-    );
-    assert_eq!(
-        comp.background(),
-        shell.desktop_background(),
-        "the compositor background tracks the active theme's desktop colour"
-    );
-    comp.composite();
-    assert_eq!(
-        comp.back_buffer().get(0, 0),
-        Some(comp.background().premultiply()),
-        "the recomposed desktop pixel shows the new theme"
-    );
-}
-
-#[test]
 fn sync_background_relays_a_programmatic_theme_switch() {
     let mut shell = shell();
     let mode = DisplayMode {
@@ -1110,33 +962,38 @@ fn sync_background_relays_a_programmatic_theme_switch() {
         stride_bytes: 1920 * 4,
         format: DisplayFormat::Rgba8888,
     };
-    let mut comp =
-        Compositor::new(mode, shell.desktop_background()).expect("the compositor allocates");
+    let mut comp = Compositor::new(
+        mode,
+        shell.session().active_theme().palette().desktop.into(),
+    )
+    .expect("the compositor allocates");
 
     assert!(
         !shell.sync_background(&mut comp),
         "a compositor built over the active theme is already in step"
     );
 
-    shell.session_mut().toggle_appearance();
+    shell.session_mut().set_theme(ThemeId::LIGHT).unwrap();
     assert!(shell.sync_background(&mut comp));
-    assert_eq!(comp.background(), shell.desktop_background());
+    assert_eq!(
+        comp.background(),
+        shell.session().active_theme().palette().desktop.into()
+    );
 }
 
 #[test]
 fn pump_propagates_a_source_fault_after_applying_prior_events() {
     let mut shell = shell();
     let mut comp = compositor();
-    let at = start_button_point(shell.session());
 
     let result = shell.pump(
-        &mut MemoryInput::faulting(&[moved(at.x, at.y), PRIMARY_PRESS], Errno::NotFound),
+        &mut MemoryInput::faulting(&[moved(24, 1060), PRIMARY_PRESS], Errno::NotFound),
         &mut comp,
     );
 
     assert_eq!(result, Err(Errno::NotFound));
     assert!(
-        shell.session().taskbar().start_menu().is_open(),
+        shell.session().taskbar().library().is_open(),
         "the event drained before the fault was still applied"
     );
 }
@@ -1146,17 +1003,29 @@ fn motion_is_ignored_and_does_not_present_the_bar() {
     let mut shell = shell();
     let mut comp = compositor();
 
+    // Motion over the empty desktop (far from the bar).
     let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(640, 480)]), &mut comp)
+        .pump(&mut MemoryInput::new(&[moved(900, 500)]), &mut comp)
         .expect("source does not fault");
 
     assert_eq!(outcomes, [ShellOutcome::Ignored]);
-    assert_eq!(shell.router().pointer(), Point::new(640, 480));
     assert!(
         shell.presenter().bar_window().is_none(),
-        "a pure motion event presents nothing"
+        "motion does not present the bar"
     );
-    assert_eq!(comp.window_count(), 0);
+
+    // Motion onto the library button.
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp)
+        .expect("source does not fault");
+    assert_eq!(outcomes, [ShellOutcome::Ignored]);
+
+    // Verify hover feedback happened (the bar was presented).
+    assert!(shell.presenter().bar_window().is_some());
+    assert_eq!(
+        shell.session().taskbar().library_button().state().pointer,
+        PointerState::Hover
+    );
 }
 
 #[test]
@@ -1308,7 +1177,14 @@ fn set_scale_rescales_the_bar_transparently_and_is_idempotent() {
 fn teardown_removes_the_presented_windows() {
     let mut shell = shell();
     let mut comp = compositor();
-    shell.session_mut().taskbar_mut().start_menu_mut().toggle();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
+    // Move onto the library button and press.
+    shell.handle(moved(24, 1060), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
     shell.present(&mut comp);
     assert_eq!(comp.window_count(), 2, "bar and popup present");
 
@@ -1502,10 +1378,10 @@ fn clicking_a_task_minimises_then_restores_its_window() {
     let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
     assert_eq!(
         outcome,
-        ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::TaskActivated {
+        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
             id: task,
             outcome: ActivateOutcome::Minimised,
-        }))
+        })
     );
     assert!(!comp.window(window).expect("still tracked").is_visible());
     assert_eq!(shell.router().focused(), None);
@@ -1514,10 +1390,10 @@ fn clicking_a_task_minimises_then_restores_its_window() {
     let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
     assert_eq!(
         outcome,
-        ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::TaskActivated {
+        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
             id: task,
             outcome: ActivateOutcome::Activated,
-        }))
+        })
     );
     assert!(comp.window(window).expect("tracked").is_visible());
     assert_eq!(shell.router().focused(), Some(window));
@@ -1660,13 +1536,12 @@ fn syncing_focus_to_an_untracked_window_leaves_the_highlight() {
 fn aw3_click_through_produces_the_staged_outcomes() {
     const WIDTH: u32 = 1024;
     const HEIGHT: u32 = 768;
-    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(WIDTH, HEIGHT), LABEL);
-    let files_id = tairix_taskbar::LauncherId(1);
-    let _ = shell
+    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(WIDTH, HEIGHT));
+    shell
         .session_mut()
         .taskbar_mut()
-        .start_menu_mut()
-        .add_launcher(files_id, "Files");
+        .library_mut()
+        .set_catalog(catalog(&[("files", "Files", LibraryCategory::Office)]));
     let mode = DisplayMode {
         width_px: WIDTH,
         height_px: HEIGHT,
@@ -1683,20 +1558,24 @@ fn aw3_click_through_produces_the_staged_outcomes() {
             rect.top() + (rect.height / 2) as i32,
         )
     };
-    let start = centre(shell.session().taskbar().layout(Scale::ONE).start_button);
+    let start = centre(shell.session().taskbar().layout(Scale::ONE).library);
     let row = |shell: &DesktopShell, label: &str| -> Point {
+        let layout = shell.session().taskbar().library_layout(Scale::ONE);
         let index = shell
             .session()
             .taskbar()
-            .start_menu()
-            .entries()
+            .library()
+            .rows()
             .iter()
-            .position(|e| e.label() == label)
+            .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
             .expect("labelled row");
-        centre(shell.session().taskbar().menu_layout(Scale::ONE).entries[index])
+        let (_, rect) = layout
+            .rows
+            .iter()
+            .find(|(i, _)| *i == index)
+            .expect("row rect");
+        centre(*rect)
     };
-    let files_row = row(&shell, "Files");
-    let toggle_row = row(&shell, LABEL);
 
     let click = |shell: &mut DesktopShell, comp: &mut Compositor, at: Point| -> Vec<ShellOutcome> {
         vec![
@@ -1711,28 +1590,24 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         ]
     };
 
-    // Start button: the menu opens.
+    // Library button: the popup opens.
     let outcomes = click(&mut shell, &mut comp, start);
     assert!(
-        outcomes.contains(&ShellOutcome::Session(SessionEvent::Forward(
-            TaskbarResponse::StartMenuToggled { open: true }
-        ))),
-        "start click must open the menu, got {outcomes:?}"
+        outcomes.contains(&ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary)),
+        "library click must open the popup, got {outcomes:?}"
     );
 
-    // The "Files" row: the launcher fires and the menu closes.
+    // The "Files" row: the launcher fires and the popup closes.
+    let files_row = row(&shell, "Files");
     let outcomes = click(&mut shell, &mut comp, files_row);
     assert!(
         outcomes.iter().any(|o| matches!(
             o,
-            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
-                action: MenuAction::Launch(id),
-                ..
-            })) if *id == files_id
+            ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) if entry.as_str() == "os.tairix.files"
         )),
-        "files-row click must select the launcher, got {outcomes:?}"
+        "files-row click must launch, got {outcomes:?}"
     );
-    assert!(!shell.session().taskbar().start_menu().is_open());
+    assert!(!shell.session().taskbar().library().is_open());
 
     // The spawned app's window opens exactly as the production serve
     // path opens it: through the shell (composited window + taskbar
@@ -1768,37 +1643,32 @@ fn aw3_click_through_produces_the_staged_outcomes() {
             o,
             ShellOutcome::WindowManager(InputResponse::Activated { window: w, .. }) if *w == window
         )),
-        "window click must activate the served window, got {outcomes:?}"
+        "window click must activate the window, got {outcomes:?}"
     );
 
-    // Start button again: the menu reopens.
+    // Clicking the library button again reopens the popup.
     let outcomes = click(&mut shell, &mut comp, start);
     assert!(
-        outcomes.contains(&ShellOutcome::Session(SessionEvent::Forward(
-            TaskbarResponse::StartMenuToggled { open: true }
-        ))),
-        "second start click must reopen the menu, got {outcomes:?}"
+        outcomes.contains(&ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary)),
+        "second library click must reopen the popup, got {outcomes:?}"
     );
 
-    // The appearance toggle: the theme switches and the menu closes.
-    let outcomes = click(&mut shell, &mut comp, toggle_row);
+    // A click away (outside the popup) dismisses it.
+    let outcomes = click(&mut shell, &mut comp, in_window);
     assert!(
-        outcomes
-            .iter()
-            .any(|o| matches!(o, ShellOutcome::Session(SessionEvent::AppearanceChanged(_)))),
-        "toggle click must switch the appearance, got {outcomes:?}"
+        outcomes.contains(&ShellOutcome::Taskbar(TaskbarResponse::LibraryDismissed)),
+        "click away must dismiss the popup, got {outcomes:?}"
     );
-    assert!(!shell.session().taskbar().start_menu().is_open());
+    assert!(!shell.session().taskbar().library().is_open());
 
-    // The window once more: activated again (the vertical's final
-    // delivery, keying the light-theme screendump and the guest PASS).
+    // The window once more: activated again.
     let outcomes = click(&mut shell, &mut comp, in_window);
     assert!(
         outcomes.iter().any(|o| matches!(
             o,
             ShellOutcome::WindowManager(InputResponse::Activated { window: w, .. }) if *w == window
         )),
-        "post-toggle window click must activate the window, got {outcomes:?}"
+        "post-dismiss window click must activate the window, got {outcomes:?}"
     );
 }
 
@@ -1846,7 +1716,7 @@ impl DirectorySource for RefusingSource {
 }
 
 fn picker_desktop() -> (DesktopShell, Compositor) {
-    let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480), LABEL);
+    let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480));
     let mode = DisplayMode {
         width_px: 640,
         height_px: 480,
@@ -2081,4 +1951,176 @@ fn picker_abort_is_scoped_to_the_requesting_window() {
     // The requesting window's death takes it down.
     picker.abort_for(7, &mut shell, &mut comp);
     assert_eq!(picker.wm_id(), None);
+}
+
+#[test]
+fn load_library_merges_machine_and_user_stores() {
+    let machine_conf = "os.tairix.editor.name Editor\nos.tairix.editor.bundle /Apps/editor.app\nos.tairix.editor.category Office\n";
+    let user_conf = "os.tairix.editor.name My Editor\nos.tairix.files.name Files\nos.tairix.files.bundle /Apps/files.app\nos.tairix.files.category Office\n";
+
+    let mut reader = MemoryAssets::default()
+        .with(MACHINE_LIBRARY_PATH, machine_conf.as_bytes())
+        .with(
+            &user_library_path("/Users/alice").unwrap(),
+            user_conf.as_bytes(),
+        );
+
+    // (a) absent stores -> empty catalog, no warnings
+    let loaded = load_library(&mut MemoryAssets::default(), None);
+    assert!(loaded.catalog.is_empty());
+    assert!(loaded.warnings.is_empty());
+
+    // (b) machine store parses -> entries listed
+    let loaded = load_library(&mut reader, None);
+    assert_eq!(loaded.catalog.len(), 1);
+    assert!(loaded.warnings.is_empty());
+
+    // (c) user overlay merges (overlay name wins)
+    let loaded = load_library(&mut reader, Some("/Users/alice"));
+    assert_eq!(loaded.catalog.len(), 2);
+    let record = loaded
+        .catalog
+        .get(&EntryId::new("os.tairix.editor").unwrap())
+        .unwrap();
+    let tairix_proglib::Record::Entry(entry) = record else {
+        panic!("expected entry")
+    };
+    assert_eq!(entry.name().as_str(), "My Editor");
+
+    // (d) malformed machine store -> empty catalog + warning
+    let mut reader = MemoryAssets::default().with(MACHINE_LIBRARY_PATH, b"malformed");
+    let loaded = load_library(&mut reader, None);
+    assert!(loaded.catalog.is_empty());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains(MACHINE_LIBRARY_PATH));
+    assert!(loaded.warnings[0].ends_with("; using an empty catalog\n"));
+
+    // (e) oversized store
+    let mut reader =
+        MemoryAssets::default().with(MACHINE_LIBRARY_PATH, &vec![b'a'; MAX_CATALOG_LEN + 1]);
+    let loaded = load_library(&mut reader, None);
+    assert!(loaded.catalog.is_empty());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("oversized"));
+
+    // (f) non-UTF-8
+    let mut reader = MemoryAssets::default().with(MACHINE_LIBRARY_PATH, b"\xff\xfe");
+    let loaded = load_library(&mut reader, None);
+    assert!(loaded.catalog.is_empty());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains("not valid UTF-8"));
+
+    // (g) home None -> overlay never read. With no machine store, the
+    // overlay's own declaration (files) survives alone: its editor line
+    // names no bundle, so it is a patch, and a patch whose identifier no
+    // document declares is discarded by the merge.
+    let mut reader = MemoryAssets::default().with(
+        &user_library_path("/Users/alice").unwrap(),
+        user_conf.as_bytes(),
+    );
+    let loaded = load_library(&mut reader, Some("/Users/alice"));
+    assert_eq!(loaded.catalog.len(), 1);
+    assert!(
+        loaded
+            .catalog
+            .entry(&EntryId::new("os.tairix.files").unwrap())
+            .is_some(),
+        "the overlay's own declaration stands without a machine store"
+    );
+    let loaded = load_library(&mut reader, None);
+    assert!(loaded.catalog.is_empty());
+}
+
+#[test]
+fn shell_set_library_hands_catalog_to_popup_and_refreshes_open_one() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let cat1 = catalog(&[("write", "Write", LibraryCategory::Office)]);
+    shell.set_library(&mut comp, cat1);
+    assert_eq!(shell.session().taskbar().library().catalog().len(), 1);
+
+    // Open popup.
+    shell.handle(moved(24, 1060), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    assert!(shell.session().taskbar().library().is_open());
+    assert_eq!(shell.session().taskbar().library().rows().len(), 2); // 1 folder + 1 entry
+
+    // Refresh in place.
+    let cat2 = office_and_games();
+    shell.set_library(&mut comp, cat2);
+    assert_eq!(shell.session().taskbar().library().catalog().len(), 3);
+    assert!(
+        shell.session().taskbar().library().is_open(),
+        "popup stays open"
+    );
+    // 2 folders + 3 entries = 5 rows
+    assert_eq!(shell.session().taskbar().library().rows().len(), 5);
+}
+
+#[test]
+fn shell_raise_window_shows_and_focuses_tracked_tasks() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let id = shell
+        .open_window(&mut comp, Point::new(200, 200), app_surface(), "Files")
+        .unwrap();
+
+    // Minimise.
+    let at = task_slot_point(&shell, 0);
+    shell.handle(moved(at.x, at.y), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    assert!(!comp.window(id).unwrap().is_visible());
+
+    // Raise.
+    assert!(shell.raise_window(&mut comp, id));
+    assert!(comp.window(id).unwrap().is_visible());
+    assert_eq!(shell.router().focused(), Some(id));
+}
+
+#[test]
+fn full_launch_flow() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(catalog(&[("calc", "Calc", LibraryCategory::Office)]));
+
+    // Open popup.
+    shell.handle(moved(24, 1060), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+
+    let row_at = |shell: &DesktopShell, label: &str| -> Point {
+        let layout = shell.session().taskbar().library_layout(Scale::ONE);
+        let index = shell
+            .session()
+            .taskbar()
+            .library()
+            .rows()
+            .iter()
+            .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
+            .expect("labelled row");
+        let (_, rect) = layout
+            .rows
+            .iter()
+            .find(|(i, _)| *i == index)
+            .expect("row rect");
+        Point::new(
+            rect.left() + i32::try_from(rect.width / 2).expect("fits"),
+            rect.top() + i32::try_from(rect.height / 2).expect("fits"),
+        )
+    };
+
+    let at = row_at(&shell, "Calc");
+    let outcome = shell.handle(moved(at.x, at.y), &mut comp);
+    assert_eq!(outcome, ShellOutcome::Ignored);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+
+    let ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) = outcome else {
+        panic!("expected launch, got {outcome:?}");
+    };
+    assert_eq!(entry.as_str(), "os.tairix.calc");
 }

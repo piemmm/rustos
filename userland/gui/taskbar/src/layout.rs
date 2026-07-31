@@ -2,10 +2,12 @@
 //!
 //! [`BarLayout::compute`] turns a [`TaskbarConfig`] plus the current task and
 //! icon counts into the screen [`Rect`] of every region: the bar itself, the
-//! start button, the task list (and a slot per task), the notification area
-//! (and a slot per icon), and the clock. All arithmetic saturates, so a
-//! pathological screen size or extent fails closed inside the bar rather than
-//! wrapping.
+//! two permanent leading launcher buttons (Library, then Files — never
+//! reordered, never removed), the task list (and a slot per task), the
+//! notification area (and a slot per icon), and the clock. All arithmetic
+//! saturates, so a pathological screen size or extent fails closed inside
+//! the bar rather than wrapping: a leading button that does not fit is
+//! [`Rect::EMPTY`] and can never be hit.
 //!
 //! The layout also carries the taskbar's [`corner_radius`](BarLayout::corner_radius),
 //! sourced from the active theme. The taskbar does not round its own corners:
@@ -16,22 +18,17 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 
-use crate::edge::{Edge, Orientation};
+use crate::edge::Orientation;
 use crate::taskbar::TaskbarConfig;
-
-/// Width of the start-menu popup, in *logical* pixels at the reference
-/// density (scaled to physical pixels by [`Scale`]).
-const MENU_WIDTH: u32 = 200;
-/// Height of one start-menu entry row, in *logical* pixels at the reference
-/// density (scaled to physical pixels by [`Scale`]).
-const MENU_ROW_HEIGHT: u32 = 32;
 
 /// The element of the taskbar under a pointer, returned by
 /// [`BarLayout::hit_test`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Hit {
-    /// The start-menu button.
-    StartButton,
+    /// The Library launcher button (the program-library popup's invoker).
+    Library,
+    /// The Files launcher button (opens the file manager).
+    Files,
     /// The task slot at this index into [`BarLayout::tasks`].
     Task(usize),
     /// The notification icon at this index into [`BarLayout::notifications`].
@@ -47,10 +44,14 @@ pub struct BarLayout {
     pub bar: Rect,
     /// The corner radius the window manager applies to the bar. `0` is square.
     pub corner_radius: u32,
-    /// The start-menu button, at the leading end.
-    pub start_button: Rect,
-    /// The region available to the task list, between the start button and
-    /// the notification area.
+    /// The Library launcher button, at the leading end. [`Rect::EMPTY`] when
+    /// the bar is too short to hold it.
+    pub library: Rect,
+    /// The Files launcher button, immediately after the Library button.
+    /// [`Rect::EMPTY`] when the bar is too short to hold it.
+    pub files: Rect,
+    /// The region available to the task list, between the leading launchers
+    /// and the notification area.
     pub task_list: Rect,
     /// One slot per running task, in task order. A task that does not fit in
     /// the task-list region is [`Rect::EMPTY`].
@@ -104,8 +105,10 @@ impl BarLayout {
 
         let bar = placer.place(0, main_total);
 
-        let start_len = config.start_button_extent.min(main_total);
-        let start_button = placer.place(0, start_len);
+        let launchers = slots(&placer, 0, config.launcher_extent, 2, 0, main_total);
+        let library = launchers[0];
+        let files = launchers[1];
+        let leading_len = config.launcher_extent.saturating_mul(2).min(main_total);
 
         let clock_start = main_total.saturating_sub(config.clock_extent);
         let clock = placer.place(clock_start, main_total.saturating_sub(clock_start));
@@ -122,7 +125,7 @@ impl BarLayout {
             clock_start,
         );
 
-        let task_start = start_len.min(notif_start);
+        let task_start = leading_len.min(notif_start);
         let task_list = placer.place(task_start, notif_start.saturating_sub(task_start));
         let tasks = slots(
             &placer,
@@ -136,7 +139,8 @@ impl BarLayout {
         Self {
             bar,
             corner_radius,
-            start_button,
+            library,
+            files,
             task_list,
             tasks,
             notification_area,
@@ -152,8 +156,11 @@ impl BarLayout {
         if !self.bar.contains(point) {
             return None;
         }
-        if self.start_button.contains(point) {
-            return Some(Hit::StartButton);
+        if self.library.contains(point) {
+            return Some(Hit::Library);
+        }
+        if self.files.contains(point) {
+            return Some(Hit::Files);
         }
         if self.clock.contains(point) {
             return Some(Hit::Clock);
@@ -165,89 +172,6 @@ impl BarLayout {
             return Some(Hit::Task(index));
         }
         None
-    }
-}
-
-/// The computed geometry of the start-menu popup.
-///
-/// The popup is the transient surface the start button opens. Like the bar
-/// itself it is a *rectangular* buffer the window manager places and rounds:
-/// [`MenuLayout::compute`] reports the popup [`panel`](Self::panel), the
-/// [`corner_radius`](Self::corner_radius) the compositor applies through its
-/// single anti-aliased rounded-corner path, and one
-/// [`Rect`] per menu entry stacked along the panel. The popup opens *outward*
-/// from the bar: above a bottom bar, below a top bar, and to the inner side of
-/// a left/right bar, with its leading edge aligned to the start button.
-///
-/// All arithmetic saturates, so a pathological screen or scale fails closed
-/// rather than wrapping.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MenuLayout {
-    /// The whole popup panel.
-    pub panel: Rect,
-    /// The corner radius the window manager applies to the popup. `0` is square.
-    pub corner_radius: u32,
-    /// One row per menu entry, in entry order, stacked from the panel's top.
-    pub entries: Vec<Rect>,
-}
-
-impl MenuLayout {
-    /// Compute the popup geometry for a menu of `entry_count` entries opened
-    /// from `start_button` on the `bar` pinned to `edge`, applying
-    /// `popup_corner_radius` at the desktop `scale`.
-    ///
-    /// `bar` and `start_button` are the already-scaled *physical* rectangles
-    /// from a [`BarLayout`]; the popup's own width, row height, and corner
-    /// radius are *logical* lengths converted through `scale`, so the
-    /// logical→physical conversion is the one in [`Scale::scale_length`],
-    /// never re-derived.
-    #[must_use]
-    pub fn compute(
-        edge: Edge,
-        bar: Rect,
-        start_button: Rect,
-        popup_corner_radius: u32,
-        scale: Scale,
-        entry_count: usize,
-    ) -> Self {
-        let width = scale.scale_length(MENU_WIDTH);
-        let row_height = scale.scale_length(MENU_ROW_HEIGHT);
-        let corner_radius = scale.scale_length(popup_corner_radius);
-        let panel_height = row_height.saturating_mul(to_u32(entry_count));
-
-        let (x, y) = match edge {
-            Edge::Top => (start_button.left(), bar.bottom()),
-            Edge::Bottom => (
-                start_button.left(),
-                bar.top().saturating_sub(to_i32(panel_height)),
-            ),
-            Edge::Left => (bar.right(), start_button.top()),
-            Edge::Right => (bar.left().saturating_sub(to_i32(width)), start_button.top()),
-        };
-        let panel = Rect::new(x, y, width, panel_height);
-
-        let mut entries = Vec::with_capacity(entry_count);
-        for index in 0..entry_count {
-            let offset = row_height.saturating_mul(to_u32(index));
-            let row_top = y.saturating_add(to_i32(offset));
-            entries.push(Rect::new(x, row_top, width, row_height));
-        }
-
-        Self {
-            panel,
-            corner_radius,
-            entries,
-        }
-    }
-
-    /// The index of the entry under `point`, or `None` for a point outside the
-    /// panel or on a gap between rows.
-    #[must_use]
-    pub fn hit_test(&self, point: Point) -> Option<usize> {
-        if !self.panel.contains(point) {
-            return None;
-        }
-        self.entries.iter().position(|row| row.contains(point))
     }
 }
 

@@ -16,10 +16,11 @@ vocabulário ANSI/VT partilhado e desenhado com a paleta do tema ativo.
 O terminal em si nunca faz eco: o eco e a edição de linha pertencem à
 shell, exatamente como numa consola.
 
-O terminal é lançado a partir do menu iniciar do ambiente de trabalho
-(a entrada `Terminal`) ou pelo nome a partir de uma shell. Requer uma
-sessão gráfica em execução: sem ela, o canal de janela é inalcançável
-e o terminal comunica a recusa no fluxo de erro padrão e termina.
+O terminal é lançado a partir da Biblioteca de programas do ambiente de
+trabalho (o botão `Library` da barra de tarefas) ou pelo nome a partir
+de uma shell. Requer uma sessão gráfica em execução: sem ela, o canal de
+janela é inalcançável e o terminal comunica a recusa no fluxo de erro
+padrão e termina.
 
 A sessão termina quando a shell sai (por exemplo com `exit`) ou quando
 a janela é fechada a partir do ambiente de trabalho; fechar a janela

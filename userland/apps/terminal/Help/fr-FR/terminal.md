@@ -16,11 +16,11 @@ vocabulaire ANSI/VT partagé et dessiné avec la palette du thème actif.
 Le terminal lui-même ne fait jamais d'écho : l'écho et l'édition de
 ligne appartiennent au shell, exactement comme sur une console.
 
-Le terminal se lance depuis le menu démarrer du bureau (l'entrée
-`Terminal`) ou par son nom depuis un shell. Il requiert une session
-graphique active : sans elle, le canal de fenêtre est inaccessible et
-le terminal signale le refus sur le flux d'erreur standard puis se
-termine.
+Le terminal se lance depuis la Bibliothèque de programmes du bureau (le
+bouton `Library` de la barre des tâches) ou par son nom depuis un
+shell. Il requiert une session graphique active : sans elle, le canal de
+fenêtre est inaccessible et le terminal signale le refus sur le flux
+d'erreur standard puis se termine.
 
 La session se termine quand le shell quitte (par exemple avec `exit`)
 ou quand la fenêtre est fermée depuis le bureau ; fermer la fenêtre

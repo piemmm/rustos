@@ -1,4 +1,5 @@
-//! Operator-facing diagnosis for a launched child that failed to load.
+//! Bookkeeping for the desktop's launched children and operator-facing
+//! diagnosis for a launch that failed to load.
 //!
 //! Asynchronous process launch (`plans/FIX-DESKTOP.md`) admits a child and
 //! returns its PID to the desktop immediately; the load — the VFS read of the
@@ -9,12 +10,21 @@
 //! code that `lib/abi` places in a high, loader-only band a normal program's
 //! own `exit(code)` never lands in.
 //!
+//! [`LaunchTable`] remembers every launched child still running: its PID, the
+//! display name the desktop reports it by, and the `Run` path it was spawned
+//! from. The name feeds the fail-loud load-refusal diagnosis below; the path
+//! is the child's *bundle identity*, which the Files button's idempotent open
+//! resolves against — a press raises the running file manager's window
+//! instead of spawning a second copy. Identity by recorded spawn path is
+//! attested by construction: the desktop spawned the child itself, so no
+//! window title or other app-controlled data is ever trusted for it.
+//!
 //! The desktop reaps every exited child on its `CHILD_TOKEN` wait-set member.
-//! This module turns a reaped status into the terse line the session prints
-//! on `stderr`, so a refused launch is a loud, non-fatal diagnosis (the
-//! charter's fail-loud rule) instead of a window that silently never appears.
-//! The reason wording is `lib/abi`'s shared mapping, so the desktop and any
-//! other launcher describe the same cause identically.
+//! [`launch_failure_report`] turns a reaped status into the terse line the
+//! session prints on `stderr`, so a refused launch is a loud, non-fatal
+//! diagnosis (the charter's fail-loud rule) instead of a window that silently
+//! never appears. The reason wording is `lib/abi`'s shared mapping, so the
+//! desktop and any other launcher describe the same cause identically.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -25,6 +35,73 @@ use tairix_abi::{load_failure_reason, WaitStatus};
 /// not happen — every desktop child is recorded at launch — but a diagnosis
 /// must never be dropped for want of a name).
 const UNKNOWN_LABEL: &str = "an application";
+
+/// One launched child still running: how the desktop names it and the `Run`
+/// path it was spawned from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchedApp {
+    /// The display name launch diagnostics report the child by.
+    pub label: String,
+    /// The bundle entry-point path the child was spawned from — its
+    /// attested bundle identity.
+    pub run_path: String,
+}
+
+/// Every child the desktop has launched and not yet reaped, keyed by PID.
+///
+/// An entry is recorded when a launch is admitted and removed when the child
+/// is reaped, so the table never grows beyond the children currently alive.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LaunchTable {
+    children: BTreeMap<u64, LaunchedApp>,
+}
+
+impl LaunchTable {
+    /// An empty table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the admitted child `pid`, launched from `run_path` and
+    /// reported as `label`.
+    pub fn record(&mut self, pid: u64, label: &str, run_path: &str) {
+        self.children.insert(
+            pid,
+            LaunchedApp {
+                label: String::from(label),
+                run_path: String::from(run_path),
+            },
+        );
+    }
+
+    /// Forget (and return) the record for a reaped `pid`.
+    pub fn remove(&mut self, pid: u64) -> Option<LaunchedApp> {
+        self.children.remove(&pid)
+    }
+
+    /// The lowest-numbered running child spawned from `run_path`, if any —
+    /// how the Files button finds its already-running file manager.
+    #[must_use]
+    pub fn running_from(&self, run_path: &str) -> Option<u64> {
+        self.children
+            .iter()
+            .find(|(_, app)| app.run_path == run_path)
+            .map(|(&pid, _)| pid)
+    }
+
+    /// The number of children still recorded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.children.len()
+    }
+
+    /// `true` when no launched child is recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+}
 
 /// The `stderr` line for a reaped child `label` that exited with a reserved
 /// loader-failure status, or `None` when the exit is not a load refusal.
@@ -50,7 +127,7 @@ pub fn launch_failure_report(label: &str, status: WaitStatus) -> Option<String> 
 /// This is the whole of the desktop's `CHILD_TOKEN` handling, factored out of
 /// the freestanding `Run` loop so it is exercised on the host by real tests
 /// rather than only in a booted image. The three seams are injected so the
-/// pure control flow — drain until empty, drop the in-flight entry, report a
+/// pure control flow — drain until empty, drop the table entry, report a
 /// reserved-status refusal, forward the PID — is identical in production and
 /// under test:
 ///
@@ -68,7 +145,7 @@ pub fn launch_failure_report(label: &str, status: WaitStatus) -> Option<String> 
 /// drain, so a burst of exits is handled in one wake and nothing is left for
 /// a later poll (`AGENTS.md` §2.23 — no busy-wait, one drain per wake).
 pub fn reap_launched<R, P, T>(
-    in_flight: &mut BTreeMap<u64, &'static str>,
+    launched: &mut LaunchTable,
     mut reap: R,
     mut report: P,
     mut teardown: T,
@@ -78,7 +155,10 @@ pub fn reap_launched<R, P, T>(
     T: FnMut(u64),
 {
     while let Some((pid, status)) = reap() {
-        let label = in_flight.remove(&pid).unwrap_or(UNKNOWN_LABEL);
+        let label = launched.remove(pid);
+        let label = label
+            .as_ref()
+            .map_or(UNKNOWN_LABEL, |app| app.label.as_str());
         if let Some(line) = launch_failure_report(label, status) {
             report(&line);
         }
@@ -88,8 +168,7 @@ pub fn reap_launched<R, P, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_failure_report, reap_launched, UNKNOWN_LABEL};
-    use alloc::collections::BTreeMap;
+    use super::{launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL};
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::{
@@ -136,16 +215,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_table_resolves_a_running_child_by_its_run_path() {
+        let mut launched = LaunchTable::new();
+        assert!(launched.is_empty());
+        launched.record(10, "Files", "/System/Apps/files.app/Run");
+        launched.record(11, "Chess", "/Apps/chess.app/Run");
+        assert_eq!(launched.len(), 2);
+
+        assert_eq!(
+            launched.running_from("/System/Apps/files.app/Run"),
+            Some(10)
+        );
+        assert_eq!(launched.running_from("/Apps/editor.app/Run"), None);
+
+        let reaped = launched.remove(10).expect("recorded");
+        assert_eq!(reaped.label, "Files");
+        assert_eq!(launched.running_from("/System/Apps/files.app/Run"), None);
+        assert_eq!(launched.remove(10), None, "a reaped pid is forgotten");
+    }
+
     /// A scripted drain: two children exit in one wake — a `Files` launch
     /// that was refused (reserved `LOAD_UNVERIFIED`) and a `Terminal` that
     /// ran and exited cleanly. The refusal is reported (named), the clean
-    /// exit is not, both in-flight entries are dropped, and *both* PIDs are
+    /// exit is not, both table entries are dropped, and *both* PIDs are
     /// handed to teardown. The drain stops when the reap yields `None`.
     #[test]
     fn reap_drains_and_reports_only_the_refused_launch() {
-        let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
-        in_flight.insert(10, "Files");
-        in_flight.insert(11, "Terminal");
+        let mut launched = LaunchTable::new();
+        launched.record(10, "Files", "/System/Apps/files.app/Run");
+        launched.record(11, "Terminal", "/System/Apps/terminal.app/Run");
 
         let mut script = alloc::vec![
             (10u64, WaitStatus::Exited(LOAD_UNVERIFIED)),
@@ -156,13 +255,13 @@ mod tests {
         let mut torn_down: Vec<u64> = Vec::new();
 
         reap_launched(
-            &mut in_flight,
+            &mut launched,
             || script.next(),
             |line| reported.push(String::from(line)),
             |pid| torn_down.push(pid),
         );
 
-        assert!(in_flight.is_empty(), "every reaped child is dropped");
+        assert!(launched.is_empty(), "every reaped child is dropped");
         assert_eq!(
             torn_down,
             alloc::vec![10, 11],
@@ -178,13 +277,13 @@ mod tests {
     /// fallback label rather than not at all.
     #[test]
     fn an_unrecorded_refused_child_is_still_reported() {
-        let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
+        let mut launched = LaunchTable::new();
         let mut script = alloc::vec![(7u64, WaitStatus::Exited(LOAD_OOM))].into_iter();
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();
 
         reap_launched(
-            &mut in_flight,
+            &mut launched,
             || script.next(),
             |line| reported.push(String::from(line)),
             |pid| torn_down.push(pid),
@@ -198,19 +297,19 @@ mod tests {
     /// No exited child: nothing is reaped, reported, or torn down.
     #[test]
     fn reap_with_no_zombies_does_nothing() {
-        let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
-        in_flight.insert(3, "Files");
+        let mut launched = LaunchTable::new();
+        launched.record(3, "Files", "/System/Apps/files.app/Run");
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();
 
         reap_launched(
-            &mut in_flight,
+            &mut launched,
             || None,
             |line| reported.push(String::from(line)),
             |pid| torn_down.push(pid),
         );
 
-        assert_eq!(in_flight.len(), 1, "an unexited child stays in flight");
+        assert_eq!(launched.len(), 1, "an unexited child stays in flight");
         assert!(reported.is_empty());
         assert!(torn_down.is_empty());
     }

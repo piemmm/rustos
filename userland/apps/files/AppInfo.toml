@@ -1,7 +1,7 @@
 # Signed-AppInfo manifest source for the `files` desktop file browser
 # (plans/APPWIN.md AW3). Discovered by the build's app-bundle composer,
 # which cross-compiles Run, signs the manifest, and plants the bundle on
-# the read-only /System/Apps store; the desktop session's start menu
+# the read-only /System/Apps store; the taskbar's permanent Files button
 # spawns it (and the shell resolves it by name like any command app).
 # The capability list is the bundle's request: CAP_CONSOLE_WRITE for its
 # fail-loud stderr diagnostics, CAP_FS_ACCESS for the directory listings

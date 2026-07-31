@@ -1,6 +1,6 @@
 [package]
 name = "tairix-desktop-session"
-description = "TAIRiX desktop session glue: owns the shared theme registry and the taskbar model, performs the runtime light/dark switch, and relays the active theme to the window manager, taskbar, and apps (§10 — PLAN.md Stage 7)."
+description = "TAIRiX desktop session glue: owns the shared theme registry and the taskbar model, loads and merges the program-library catalog, and resolves taskbar responses (launch, files, tasks) with the capabilities the bar cannot hold (§10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,15 +15,20 @@ publish.workspace = true
 # window manager, taskbar, and apps all read (§6, §17.4).
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The taskbar model (§10): the session owns it so it can re-theme the bar in
-# place on a runtime switch and resolve the taskbar's abstract menu actions
-# (e.g. the appearance toggle) against the theme registry the taskbar cannot
-# see. Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
+# place on a runtime switch and hand its program-library popup the resolved
+# catalog the bar cannot read itself. Composing two GUI crates is the
+# permitted `userland/gui/*` edge (§17.4).
 tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
 # The compositing window manager (§10): the session presents the taskbar bar
-# and its start-menu popup as compositor windows, placed and rounded through
-# the window manager's single anti-aliased rounded-corner path (§2.2).
+# and its program-library popup as compositor windows, placed and rounded
+# through the window manager's single anti-aliased rounded-corner path (§2.2).
 # Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
 tairix-wm = { path = "../wm", version = "=0.0.0" }
+# The program-library catalog engine (plans/NEW-TASKBAR.md): the session
+# reads the machine store and the user's overlay under its own identity,
+# merges them through the one shared `merge`, and resolves a popup launch's
+# `EntryId` back to its bundle path. The bar itself never touches the VFS.
+tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # The one logical->physical UI scale (§10): the picker resolves the theme's
 # authored text sizes to physical cell heights through `Scale`, the same shared
 # conversion the window manager and taskbar use.
@@ -52,6 +57,7 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 
 [dev-dependencies]
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The shared help engine's required-locale registry: the `cli` module's
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).

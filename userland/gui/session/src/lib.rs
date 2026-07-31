@@ -1,31 +1,36 @@
 //! TAIRiX desktop **session glue** (`userland/gui/session`).
 //!
 //! The taskbar models the desktop's controls but, by design, owns no theme
-//! registry and no spawn capability: activating its start-menu entries only
-//! *reports* an abstract [`MenuAction`](tairix_taskbar::MenuAction) (e.g. the
-//! light/dark [`ToggleAppearance`](tairix_taskbar::MenuAction::ToggleAppearance)),
-//! leaving the actual work to the session glue. This
-//! crate is that glue.
+//! registry, no filesystem reach, and no spawn capability: its buttons and
+//! its program-library popup only *report* typed
+//! [`TaskbarResponse`](tairix_taskbar::TaskbarResponse)s, leaving the actual
+//! work to the session glue. This crate is that glue.
 //!
 //! [`DesktopSession`] owns the one shared [`ThemeRegistry`] and the
-//! [`Taskbar`] model. It [`resolve`](DesktopSession::resolve)s a
-//! [`TaskbarResponse`] into a [`SessionEvent`]: the appearance toggle is the
-//! one action it performs itself — switching the registry and re-theming the
-//! taskbar in place — and it reports the now-active [`ThemeId`] so the
-//! embedder relays the new theme to the window manager and apps. Every other
-//! response is [`SessionEvent::Forward`]ed unchanged for the embedder (which
-//! holds the window-manager and process capabilities) to act on.
+//! [`Taskbar`] model; [`DesktopSession::set_theme`] switches the registry
+//! and re-themes the taskbar in place (its interactive home is the
+//! Switchboard's System menu, `plans/NEW-TASKBAR.md` T13). Taskbar responses
+//! flow to the embedder — which holds the window-manager, filesystem, and
+//! process capabilities — as [`ShellOutcome::Taskbar`] values.
 //!
-//! Switching the theme — whether by [`toggle_appearance`] or by
-//! [`set_theme`] — re-themes the taskbar through one private apply path, so
-//! the relay logic is never duplicated. Setting an
-//! unknown theme fails closed without disturbing the active theme.
+//! # The program library
+//!
+//! The popup lists the resolved program-library catalog
+//! (`plans/NEW-TASKBAR.md`): the [`library`] module's [`load_library`] reads
+//! the machine store and the logged-in user's overlay through the
+//! [`SessionFileReader`] seam, merges them with `tairix_proglib::merge`, and
+//! reports any unusable store as a ready-to-print warning — the desktop
+//! degrades to a calm empty library and says why, never guessing at a
+//! half-parsed store. The embedder hands the merged catalog to the popup
+//! with [`DesktopShell::set_library`] and resolves its
+//! [`LibraryLaunch`](tairix_taskbar::TaskbarResponse::LibraryLaunch)
+//! responses back through the catalog to spawn the chosen bundle.
 //!
 //! # Presenting the taskbar through the window manager
 //!
 //! [`TaskbarPresenter`] (the [`presenter`] module) is the session's glue to
 //! the compositor: it paints the taskbar's bar — and, while open, its
-//! start-menu popup — with the taskbar's own
+//! program-library popup — with the taskbar's own
 //! [`TaskbarRenderer`](tairix_taskbar::TaskbarRenderer) and presents each as a
 //! window in the [`Compositor`](tairix_wm::Compositor), placed at its computed
 //! origin and rounded through the compositor's single anti-aliased
@@ -39,21 +44,24 @@
 //! [`InputRouter`](tairix_wm::InputRouter) and the taskbar's
 //! [`TaskbarInput`](tairix_taskbar::TaskbarInput). [`SessionInputRouter`] (the
 //! [`input`] module) is the glue that fans that one stream to the right one:
-//! the taskbar claims a press over the bar or while its menu is open, the
-//! window manager handles everything else, motion is fanned to both so their
-//! pointers stay in step, and a release ends a window move-grab. Composing the
+//! while the program-library popup is open it is modal and the whole stream
+//! (presses, releases, scroll, keys) routes to the taskbar; otherwise the
+//! taskbar claims a primary press over the bar, the window manager handles
+//! everything else, motion is fanned to both so their pointers stay in step,
+//! and a release ends a window move-grab. Composing the
 //! two GUI crates this way is the permitted `userland/gui/*` edge.
 //!
 //! # On-disk graphics assets
 //!
 //! The session also loads the desktop's SVG graphics assets from
 //! `/System/Graphics`: the [`assets`] module's
-//! [`GraphicsAssetReader`] seam reads the bytes (a filesystem capability the
+//! [`SessionFileReader`] seam reads the bytes (a filesystem capability the
 //! `no_std` `lib/cursor` / `lib/icon` crates must not hold),
 //! and [`DesktopSession::load_cursors`] / [`DesktopSession::load_icons`]
 //! assemble a [`CursorTheme`](tairix_cursor::CursorTheme) /
 //! [`IconSet`](tairix_icon::IconSet), failing closed per kind to the built-in
-//! artwork.
+//! artwork. The same seam feeds the program-library loader above — one
+//! file-reading seam, one production implementation.
 //!
 //! # Where it sits
 //!
@@ -114,12 +122,8 @@
 //! [`pump`](DesktopShell::pump) keeps the bar and the window stack in step as
 //! input arrives.
 //!
-//! [`toggle_appearance`]: DesktopSession::toggle_appearance
-//! [`set_theme`]: DesktopSession::set_theme
 //! [`ThemeRegistry`]: tairix_theme::ThemeRegistry
-//! [`ThemeId`]: tairix_theme::ThemeId
 //! [`Taskbar`]: tairix_taskbar::Taskbar
-//! [`TaskbarResponse`]: tairix_taskbar::TaskbarResponse
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -134,6 +138,7 @@ pub mod device;
 pub mod input;
 pub mod keyboard;
 pub mod launch;
+pub mod library;
 pub mod picker;
 pub mod presenter;
 pub mod seat;
@@ -145,22 +150,20 @@ pub mod windows;
 #[cfg(test)]
 mod tests;
 
-pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, GRAPHICS_DIR};
 pub use cli::{parse, CliError, Command, USAGE};
-pub use config::{
-    APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL,
-    TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
-};
+pub use config::{FILES_LABEL, FILES_RUN_PATH};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
-pub use launch::{launch_failure_report, reap_launched};
+pub use launch::{launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
+pub use library::{load_library, LoadedLibrary};
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
-pub use session::{DesktopSession, SessionEvent};
+pub use session::DesktopSession;
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use tasks::TaskBridge;
 pub use windows::{window_control_event, SessionWindows, ShellWindowHost};

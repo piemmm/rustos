@@ -16,10 +16,11 @@ tramite il vocabolario ANSI/VT condiviso e disegnato con la tavolozza
 del tema attivo. Il terminale in sé non fa mai eco: eco e modifica
 della riga appartengono alla shell, esattamente come su una console.
 
-Il terminale si avvia dal menu start del desktop (la voce `Terminal`)
-o per nome da una shell. Richiede una sessione grafica in esecuzione:
-senza di essa il canale della finestra è irraggiungibile e il
-terminale segnala il rifiuto sul flusso di errore standard e termina.
+Il terminale si avvia dalla Libreria programmi del desktop (il pulsante
+`Library` sulla barra delle applicazioni) o per nome da una shell.
+Richiede una sessione grafica in esecuzione: senza di essa il canale
+della finestra è irraggiungibile e il terminale segnala il rifiuto sul
+flusso di errore standard e termina.
 
 La sessione termina quando la shell esce (per esempio con `exit`) o
 quando la finestra viene chiusa dal desktop; chiudere la finestra

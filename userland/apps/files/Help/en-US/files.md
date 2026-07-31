@@ -15,8 +15,8 @@ active theme's accent colour. Every directory read is an ordinary
 permission-checked listing under the launching user's identity: an
 unreadable directory is refused, never guessed at.
 
-The browser is launched from the desktop's start menu (the `Files`
-entry) or by name from a shell. It requires a running graphical
+The browser is launched from the taskbar's permanent Files button or by
+name from a shell. It requires a running graphical
 session: without one, the window channel is unreachable and the browser
 reports the refusal on the standard error stream and exits.
 

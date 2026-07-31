@@ -293,8 +293,9 @@ is registered and the admit-time bookkeeping is reclaimed.
 Because a load refusal now arrives as the child's *exit status* rather than
 the `spawn` return, a launcher must inspect what it reaps. The desktop
 session is the worked example (`userland/gui/session`): every app started
-from the start menu is admitted immediately and its PID remembered under
-its launcher label, and the session's `CHILD_TOKEN` wait-set member reaps
+from the taskbar's launchers or its program-library popup is admitted
+immediately and its PID remembered under its display label, and the
+session's `CHILD_TOKEN` wait-set member reaps
 every exited child. On each reap it maps the status through the shared
 `launch_failure_report`, which consults `load_failure_reason`: a reserved
 `LOAD_*` code becomes a terse, named line on `stderr` (e.g. `desktop: Files

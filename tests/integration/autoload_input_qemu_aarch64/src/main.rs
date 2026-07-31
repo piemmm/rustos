@@ -92,12 +92,14 @@
 //!    command, attributed by the loaded bundle's own name rather than a
 //!    fragile delivery count: the
 //!    desktop session — logged in at the seat keyboard and driven by
-//!    injected pointer clicks — opened its start menu, spawned the files
-//!    bundle from the on-disk system app store, served its window over
-//!    the reserved window rendezvous, toggled the appearance, routed the
-//!    scripted in-window clicks app-ward (`plans/APPWIN.md` AW3), then
-//!    spawned the terminal bundle, focused its served window, and
-//!    delivered the typed command's every key edge — whereupon the
+//!    injected pointer clicks — spawned the files bundle from the on-disk
+//!    system app store via the taskbar's permanent Files button, served
+//!    its window over the reserved window rendezvous, routed the scripted
+//!    in-window clicks app-ward (`plans/APPWIN.md` AW3), then opened the
+//!    program-library popup from the Library button and spawned the
+//!    terminal bundle through its planted catalog entry
+//!    (`plans/NEW-TASKBAR.md` T5), focused the terminal's served window,
+//!    and delivered the typed command's every key edge — whereupon the
 //!    windowed terminal wrote the line to its hosted shell over its
 //!    pipe, and the shell resolved and **spawned** the typed program:
 //!    the AW4 shell round trip, every hop kernel-attested (the only

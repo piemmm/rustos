@@ -80,6 +80,20 @@ impl SessionWindows {
         self.by_wm.get(&wm).copied()
     }
 
+    /// The compositor window showing the served window `ipc`, if it is live.
+    #[must_use]
+    pub fn wm_id(&self, ipc: u64) -> Option<WindowId> {
+        self.records.get(&ipc).map(|record| record.wm)
+    }
+
+    /// Every live served window, as `(window-channel id, compositor id)`
+    /// pairs in channel-id order — how the embedder walks the served windows
+    /// to find one belonging to a given app (resolving each id's owner
+    /// through the window engine's attested records).
+    pub fn served(&self) -> impl Iterator<Item = (u64, WindowId)> + '_ {
+        self.records.iter().map(|(&ipc, record)| (ipc, record.wm))
+    }
+
     /// Number of live served windows.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -371,7 +385,7 @@ mod tests {
     }
 
     fn desktop() -> (DesktopShell, Compositor) {
-        let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480), "Toggle");
+        let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480));
         let compositor =
             Compositor::new(mode(640, 480, DisplayFormat::Rgba8888), Color::rgb(0, 0, 0))
                 .expect("compositor builds");

@@ -2,60 +2,104 @@
 
 `userland/gui/session` (`tairix-desktop-session`) is the desktop's **session
 glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the component that owns the shared
-theme registry and the taskbar model and resolves the taskbar's abstract menu
-actions against state the taskbar itself cannot see.
+theme registry and the taskbar model, loads and merges the program-library
+catalog the taskbar's popup lists, and applies or surfaces the taskbar's typed
+responses — the work the bar itself deliberately cannot do.
 
 ## Why a separate component
 
-The taskbar deliberately owns no theme registry and no spawn capability. When
-a start-menu entry is activated it only *reports* an abstract `MenuAction` — a
-session control, an application launcher, or the light/dark `ToggleAppearance`.
-Resolving that action belongs to the session, which holds the shared
-`tairix_theme::ThemeRegistry` and (in later increments) the window-manager and
-process capabilities. This crate is that resolver. Its first increment is the
-runtime **light/dark switch**.
+The taskbar deliberately owns no theme registry, no filesystem reach, and no
+spawn capability. Its buttons and its program-library popup only *report*
+typed `TaskbarResponse`s — open the library, open the file manager, launch
+this catalog entry, this task was activated. Acting on those belongs to the
+session layer, which holds the shared `tairix_theme::ThemeRegistry`, reads
+the catalog stores under its own kernel-attested identity, and (in the `Run`
+binary) holds the window-manager and process capabilities.
 
-It composes the other GUI crates and `lib/*` only — `tairix-taskbar` and the
-shared `tairix-theme` definition — which is the permitted `userland/gui/*`
-edge (`AGENTS.md` §17.4). Nothing outside `userland/gui/*` depends on it
-(§17.3), so a headless image omits it cleanly.
+It composes the other GUI crates and `lib/*` only — `tairix-taskbar`,
+`tairix-proglib`, and the shared `tairix-theme` definition — which is the
+permitted `userland/gui/*` edge (`AGENTS.md` §17.4). Nothing outside
+`userland/gui/*` depends on it (§17.3), so a headless image omits it cleanly.
 
-## Resolving a taskbar response
+## The program library
 
-`DesktopSession::resolve` turns a `tairix_taskbar::TaskbarResponse` into a
-`SessionEvent`:
+The popup lists the **resolved** program library (`plans/NEW-TASKBAR.md` T5):
+the machine-wide store (`/System/Settings/ProgramLibrary/library.conf`)
+merged with the logged-in user's overlay
+(`<home>/Settings/ProgramLibrary/library.conf`) through the one
+`tairix_proglib::merge` (see [the program library](../lib/proglib.md)).
+Reading those documents needs a filesystem capability, so it is the
+session's job — the `library` module's `load_library` reads both stores
+through the `SessionFileReader` seam, parses them with the one fail-closed
+catalog engine, and merges them:
 
-- Selecting the start menu's appearance-toggle entry
-  (`MenuAction::ToggleAppearance`) is the one response the session acts on
-  itself. It calls `ThemeRegistry::toggle_appearance`, re-themes the taskbar in
-  place, and returns `SessionEvent::AppearanceChanged(ThemeId)`.
-  `DesktopShell::handle` relays the switch to the window manager itself —
-  `sync_background` brings the compositor's desktop colour in step with the
-  active theme through `Compositor::set_background`, in the same frame as the
-  re-themed bar — and the embedder relays the now-active theme
-  (`DesktopSession::active_theme`) to the apps.
-- Every other response is `SessionEvent::Forward`ed unchanged: a launcher or
-  session-control selection, a task activation, a notification or clock press.
-  Those need capabilities the session does not hold, so the embedder performs
-  them (`AGENTS.md` §10, §16.5). (`DesktopShell` additionally applies a task
-  activation's window effect to the compositor itself — see *Running-task list
-  ↔ window stack* — before forwarding it.)
+- an **absent** store is the ordinary fresh-installation state — an empty
+  catalog, no complaint;
+- an unreadable, oversized, non-UTF-8, or malformed store contributes an
+  **empty catalog plus a ready-to-print warning line** — the desktop
+  degrades to a calm empty library and says why on `stderr`, rather than
+  guessing at a half-parsed store or dying over a settings file
+  (`AGENTS.md` §2.24, §5.4).
 
-The session owns both the registry and the `Taskbar`, so a switch is a single
-in-place operation rather than a rebuild.
+The `Run` binary loads the library at session bring-up and **re-reads the
+stores each time the popup opens**, so an edit made through `applib` shows
+without restarting the session. The merged catalog is handed to the popup
+with `DesktopShell::set_library`, which re-presents an open popup in the
+same frame. A `LibraryLaunch { entry }` response is resolved back through
+that same catalog — the entry's bundle names its `Run` binary — and spawned
+asynchronously under the session's own identity, with a refusal reported
+loudly and non-fatally (see *Launch bookkeeping*).
 
-## Switching the theme directly
+## Resolving taskbar responses
 
-`toggle_appearance`, `set_theme(ThemeId)`, and `register_theme(Theme)` expose
-the same control without going through a menu. `toggle_appearance` and
-`set_theme` re-theme the taskbar through one private apply path, so the relay
-is never duplicated (`AGENTS.md` §2.2). `set_theme` fails closed with
+A `tairix_taskbar::TaskbarResponse` flows out of `DesktopShell::handle` as a
+`ShellOutcome::Taskbar` value. The shell applies what its own state suffices
+for — a `TaskActivated` outcome drives the compositor through the
+`TaskBridge`, popup-internal changes just re-present — and the embedder (the
+`Run` binary) performs what needs capabilities the shell does not hold
+(`AGENTS.md` §10, §16.5):
+
+- `OpenFiles` — the permanent Files button. The embedder opens the file
+  manager **idempotently**: if a desktop-launched file manager is already
+  running and serving a window, that window is raised and focused
+  (`DesktopShell::raise_window`); if its launch is still in flight, the
+  press is already satisfied; only otherwise is the bundle spawned.
+- `LibraryLaunch { entry }` — a chosen library entry, resolved through the
+  catalog and spawned (see *The program library*).
+- `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
+  listing is current.
+- `LibraryDismissed`, `NotificationActivated`, `ClockPressed` — surfaced for
+  the embedder; the bar's own state is already up to date.
+
+## Switching the theme
+
+`set_theme(ThemeId)` and `register_theme(Theme)` are the session's
+programmatic theme controls — the interactive light/dark switch lives in the
+Switchboard's System menu (`plans/NEW-TASKBAR.md` T13). `set_theme` switches
+the registry and re-themes the taskbar in place; it fails closed with
 `ThemeError::UnknownTheme` on an unregistered id, and `register_theme` with
 `ThemeError::DuplicateId`, each leaving the active theme and the taskbar
-untouched (`AGENTS.md` §5.4 / §2.9). An embedder that switches the theme this
-way (through `DesktopShell::session_mut`) then calls
+untouched (`AGENTS.md` §5.4 / §2.9). An embedder that switches the theme
+(through `DesktopShell::session_mut`) then calls
 `DesktopShell::sync_background` and `present` to relay the switch to the
-screen — the same two calls `handle` makes for the menu toggle.
+screen.
+
+## Launch bookkeeping
+
+The `launch` module owns the desktop's launched children. `LaunchTable`
+remembers every child still running — its PID, the display label
+diagnostics report it by, and the `Run` path it was spawned from (its
+**attested bundle identity**: the desktop spawned the child itself, so no
+window title or other app-controlled data is ever trusted for it,
+`AGENTS.md` §23.1). `running_from` resolves the Files button's idempotent
+open; `window_of_pid` (in the `Run` binary) finds the running app's served
+window through the window engine's kernel-attested ownership records.
+Asynchronous launch admits a child and returns its PID before the image
+loads, so a load refusal surfaces as the child's reserved `LOAD_*` exit
+status: the shared `reap_launched` drains every exited child in one wake,
+reports each refusal on `stderr` named by its label (`launch_failure_report`
+— fail loud, never fatal, `AGENTS.md` §2.24), tears down the child's
+windows, and forgets the table entry.
 
 ## Presenting the taskbar through the window manager
 
@@ -64,16 +108,16 @@ manager composites and rounds windows; neither depends on the other
 (`AGENTS.md` §17.4). `TaskbarPresenter` is the session's glue between them.
 Given a `&mut tairix_wm::Compositor` and the taskbar's own
 `tairix_taskbar::TaskbarRenderer` (which holds the across-frame glyph cache),
-`present` paints the bar and, while the start menu is open, its popup, and
-presents each as a compositor window:
+`present` paints the bar and, while the program-library popup is open, its
+panel, and presents each as a compositor window:
 
 - the bar is placed at `BarLayout::bar`'s origin and rounded with
   `Corners::from_radius(BarLayout::corner_radius)` — the compositor's single
   anti-aliased rounded-corner path, the same one it uses for application
   windows, never a second one (`AGENTS.md` §2.2);
-- while the menu is open the popup is placed above the bar at
-  `MenuLayout::panel`'s origin and rounded with its `corner_radius`; closing
-  the menu removes the popup window.
+- while the popup is open its panel is placed above the bar at
+  `LibraryLayout::panel`'s origin and rounded with its `corner_radius`;
+  closing the popup removes the popup window.
 
 The presenter owns only the two compositor `WindowId` tokens it minted — the
 taskbar model, the renderer, and the compositor are the embedder's, so the
@@ -87,21 +131,28 @@ window the compositor no longer knows is re-created on the next present, and
 
 The desktop has two input routers — the window manager's `tairix_wm::InputRouter`
 (focus, click-to-activate, interactive move-grabs) and the taskbar's
-`tairix_taskbar::TaskbarInput` (start-menu toggle, task activate/minimise,
-notification/clock presses) — and both consume the **same** shared
-`tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source
-produces one event stream, so `SessionInputRouter` is the glue that fans it to
-the right router, driven through `handle(event, &mut Compositor, &mut Taskbar)`:
+`tairix_taskbar::TaskbarInput` (the launcher buttons, the program-library
+popup, task activate/minimise, notification/clock presses) — and both consume
+the **same** shared `tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2).
+A real input source produces one event stream, so `SessionInputRouter` is the
+glue that fans it to the right router, driven through
+`handle(event, &mut Compositor, &mut Taskbar)`:
 
-- a **primary press** goes to the taskbar when its menu is open (the menu is
-  modal, so a press anywhere selects an entry or dismisses it) or when the
-  pointer is over the bar, and to the window manager otherwise — the two never
-  both act on one press, so a click on the bar never also activates a window
-  beneath it;
+- while the **program-library popup is open it is modal**: every press (any
+  button), release, scroll, and key event routes to the taskbar, which
+  drives the popup. Motion is still *tracked* by the window manager so its
+  pointer stays in step for the moment the popup closes, but its outcome is
+  discarded — nothing is delivered to the windows beneath a modal popup;
+- otherwise a **primary press** goes to the taskbar when the pointer is over
+  the bar, and to the window manager elsewhere — the two never both act on
+  one press, so a click on the bar never also activates a window beneath it;
 - **pointer motion** is fanned to both so their tracked pointer positions stay
-  in step, and only the window manager acts on it, dragging a grabbed window;
+  in step; the window manager acts on it (dragging a grabbed window) and the
+  taskbar refreshes its launcher hover feedback;
 - a **primary release** goes to the window manager, ending an in-flight
-  move-grab (the taskbar ignores releases);
+  move-grab (the taskbar ignores releases while the popup is closed);
+- **key events** go to the window manager — which delivers them to the
+  focused window — except while the popup is open (above);
 - a non-primary button, or a press/motion neither router acted on, is
   `SessionInputResponse::Ignored`.
 
@@ -156,13 +207,13 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 - `pump(source, &mut Compositor)` drains every pending event, routing each
   through the `SessionInputRouter` and returning a `ShellOutcome` per event —
   `Ignored`, a `WindowManager` action the embedder may observe, or a
-  `Session` event;
-- a taskbar action is `resolve`d (the light/dark toggle is applied here — the
-  compositor's desktop background is re-coloured to the new theme through
-  `sync_background` — a task activate/minimise outcome is applied to the
-  compositor, every other response forwarded) and the bar is re-presented, so
-  an opened/closed menu, a re-themed bar and desktop, or a changed task
-  highlight reaches the screen; a
+  `Taskbar` response;
+- a taskbar response is applied where the shell's own state suffices (a task
+  activate/minimise outcome drives the compositor) and the bar is
+  re-presented — **exactly once per event, at one site**: an acted response
+  and the taskbar's drained repaint latch (a hover, a popup scroll or edit)
+  share a single present decision, so an opened/closed popup, a fold, or a
+  changed task highlight reaches the screen without double-painting; a
   window-manager action re-presents only when it moved focus between tasks,
   so motion and drags stay cheap;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
@@ -171,12 +222,12 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
 The shell holds no framebuffer and grants itself no authority: the `Compositor`
 is the embedder's and is passed in on each call. A loaded notification-icon set
-is installed with `set_icons`, a title-bar drag armed with `begin_move`, and
-the desktop torn down with `teardown`. A session-level effect the shell cannot
-perform with its own state — relaying the switched theme to the apps,
-performing a session control, launching an app — is surfaced as a
-`ShellOutcome` for the embedder, which holds those capabilities (`AGENTS.md`
-§16.5).
+is installed with `set_icons`, the merged catalog handed over with
+`set_library`, a running app's window raised with `raise_window`, a title-bar
+drag armed with `begin_move`, and the desktop torn down with `teardown`. A
+response the shell cannot perform with its own state — launching an app,
+opening the file manager — is surfaced as a `ShellOutcome` for the embedder,
+which holds those capabilities (`AGENTS.md` §16.5).
 
 ## Live device input source
 
@@ -252,37 +303,46 @@ through one shared validation path rather than two (`AGENTS.md` §2.2); which
 records flow is decided by the reader it wraps — a pointer reader wrapped in
 `DeviceInputSource`, a keyboard reader in `KeyboardInputSource`.
 
-Relaying the appearance switch to the WM and apps over IPC remains a later
-increment; the desktop now reads a live pointer **and** keyboard event stream
-end to end, each channel drained from the kernel's owner-gated seat
-channels.
+Relaying a theme switch to the apps over IPC remains a later increment; the
+desktop now reads a live pointer **and** keyboard event stream end to end,
+each channel drained from the kernel's owner-gated seat channels.
 
 ## Tests
 
-`cargo test -p tairix-desktop-session` covers: the default dark start and the
-seeded appearance-toggle entry; resolving the toggle entry flipping dark↔light
-and forwarding every other response unchanged without touching the theme;
-`set_theme`/`toggle_appearance` relaying the new metrics to the taskbar
-(observed through a custom theme with a distinctive corner radius); the
-fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar untouched;
-and `TaskbarPresenter` placing and rounding the bar, reusing its window across
-presents, showing the popup while the menu is open and removing it when it
-closes, re-creating a window an embedder removed, relaying a switched theme's
-corner radius onto the presented bar, and `teardown` clearing every window. It
-also covers `SessionInputRouter`: a press over the bar routing to the taskbar
-(even over a window beneath it) while a press over a window or the empty desktop
-routes to the window manager, the modal start menu claiming and dismissing an
-off-bar press, motion keeping the pointer in step, a window drag continuing
-while the pointer is over the bar, a release ending the grab, and a non-primary
-press being ignored. Finally it covers `DesktopShell`: `pump` opening the menu
-from a press over the start button and presenting the popup, a window press on a
-window that owns no task routing to the window manager without re-presenting the
-bar, selecting the appearance-toggle row switching the active theme to light and
-removing the closed menu's popup, a faulting `InputSource` returning its `Errno`
-while the event drained before it stays applied, a pure motion presenting
-nothing, `begin_move` arming a grab on the focused window, `set_icons`
-installing a loaded set while the bar still presents, and `teardown` clearing
-the presented windows. It covers `TaskBridge` end to end through the shell:
+`cargo test -p tairix-desktop-session` covers: the default dark start with an
+empty library and a closed popup; `set_theme` relaying the new metrics to the
+taskbar (observed through a custom theme with a distinctive corner radius);
+the fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar
+untouched; and `TaskbarPresenter` placing and rounding the bar, reusing its
+window across presents, showing the popup while it is open and removing it
+when it closes, re-creating a window an embedder removed, relaying a switched
+theme's corner radius onto the presented bar, and `teardown` clearing every
+window. It also covers `SessionInputRouter`: presses on the Files and Library
+buttons routing to the taskbar (even over a window beneath the bar) while a
+press over a window or the empty desktop routes to the window manager, the
+modal popup claiming an off-panel press (dismissing without activating the
+window beneath), keys driving the popup's cursor and Escape dismissing it, a
+scroll while open never reaching the window manager, motion keeping the
+pointer in step, a window drag continuing while the pointer is over the bar,
+a release ending the grab, and a non-primary press being ignored. It covers
+the library loader (`load_library`): absent stores silent and empty, a
+parsed machine store, the user overlay's per-field override winning, a
+patch with no declaring store discarding, and the malformed / oversized /
+non-UTF-8 stores each yielding an empty catalog plus one warning line. It
+covers `DesktopShell`: `pump` opening the popup from a press on the Library
+button and presenting it, `set_library` handing the catalog over and
+refreshing an open popup in place, the full launch flow (open the popup,
+click an entry, receive `LibraryLaunch` with the right identifier),
+`raise_window` restoring and focusing a minimised task (and refusing an
+untracked window), hover latching a present of the bar while pure desktop
+motion presents nothing, a faulting `InputSource` returning its `Errno`
+while the event drained before it stays applied, `begin_move` arming a grab
+on the focused window, `set_icons` installing a loaded set while the bar
+still presents, and `teardown` clearing the presented windows. The `launch`
+module's own tests cover the reserved-status reporting table, the
+run-path-keyed `LaunchTable`, and the shared reap flow (drain, report only
+refusals, tear down every reaped child, fallback label). It covers
+`TaskBridge` end to end through the shell:
 `open_window` listing, focusing, and presenting a new task; `close_window`
 removing the task and dropping focus (and a second close being a no-op);
 clicking a task slot minimising the window and dropping focus, then a second

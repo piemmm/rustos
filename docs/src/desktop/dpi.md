@@ -75,7 +75,7 @@ its screen dimensions in physical pixels (the real framebuffer).
 `BarLayout::compute` applies it — scaling the extents and the theme corner
 radius — while leaving the physical screen untouched. The `Taskbar` model
 stores **no** scale of its own: `Taskbar::layout`, `hit_test`, and
-`menu_layout` take the density as a parameter, and the presenter supplies
+`library_layout` take the density as a parameter, and the presenter supplies
 `Compositor::scale` at present time. A runtime DPI change is therefore just a
 re-present at the new density — no taskbar state to update and no restart. At
 200% on a large screen every extent and the corner radius simply double; at

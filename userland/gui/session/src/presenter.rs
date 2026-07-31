@@ -1,11 +1,12 @@
-//! Presenting the taskbar and its start-menu popup through the window manager.
+//! Presenting the taskbar and its program-library popup through the window
+//! manager.
 //!
 //! The taskbar models the desktop's bar and produces a *rectangular* pixel
 //! [`Surface`], and the window manager composites and
 //! rounds windows; neither knows about the other. Joining
 //! them is session glue, and [`TaskbarPresenter`] is that join: it paints the
-//! bar (and, while it is open, the start-menu popup) with the taskbar's own
-//! [`TaskbarRenderer`] and presents each as a window in the
+//! bar (and, while it is open, the program-library popup) with the taskbar's
+//! own [`TaskbarRenderer`] and presents each as a window in the
 //! [`Compositor`], placed at its computed screen origin
 //! and rounded with the theme's corner radius through the compositor's single
 //! anti-aliased rounded-corner path — the same path it uses for application
@@ -19,16 +20,16 @@
 //!
 //! It is **total and fails closed**: a render that cannot
 //! allocate its surface leaves whatever is already on screen untouched rather
-//! than blanking the bar or panicking, and a popup is removed from the
-//! compositor the moment the menu closes. If a presented window has
+//! than blanking the bar or panicking, and the popup window is removed from
+//! the compositor the moment the popup closes. If a presented window has
 //! disappeared from the compositor (an embedder removed it), the next present
 //! re-creates it rather than silently doing nothing.
 
 use tairix_taskbar::{Taskbar, TaskbarRenderer};
-use tairix_theme::Theme;
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
-/// Presents a taskbar and its start-menu popup as window-manager windows.
+/// Presents a taskbar and its program-library popup as window-manager
+/// windows.
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
 /// [`present`](Self::present) whenever the taskbar's model or the active theme
@@ -57,44 +58,43 @@ impl TaskbarPresenter {
         self.bar
     }
 
-    /// The compositor window currently showing the open start-menu popup, or
-    /// `None` when the menu is closed (or before its first presentation).
+    /// The compositor window currently showing the open program-library
+    /// popup, or `None` when it is closed (or before its first presentation).
     #[must_use]
     pub const fn popup_window(&self) -> Option<WindowId> {
         self.popup
     }
 
     /// Bring the compositor up to date with the taskbar's current model and
-    /// the active `theme`.
+    /// its owned theme.
     ///
     /// The bar is repainted and re-placed at [`BarLayout::bar`]'s origin,
-    /// rounded with [`BarLayout::corner_radius`]. If the start menu is open
-    /// its popup is painted and presented above the bar at
-    /// [`MenuLayout::panel`]'s origin, rounded with
-    /// [`MenuLayout::corner_radius`]; when the menu is closed any popup window
-    /// is removed.
+    /// rounded with [`BarLayout::corner_radius`]. If the program-library
+    /// popup is open it is painted and presented above the bar at
+    /// [`LibraryLayout::panel`]'s origin, rounded with
+    /// [`LibraryLayout::corner_radius`]; when the popup is closed any popup
+    /// window is removed.
     ///
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     ///
     /// [`BarLayout::bar`]: tairix_taskbar::BarLayout::bar
     /// [`BarLayout::corner_radius`]: tairix_taskbar::BarLayout::corner_radius
-    /// [`MenuLayout::panel`]: tairix_taskbar::MenuLayout::panel
-    /// [`MenuLayout::corner_radius`]: tairix_taskbar::MenuLayout::corner_radius
+    /// [`LibraryLayout::panel`]: tairix_taskbar::LibraryLayout::panel
+    /// [`LibraryLayout::corner_radius`]: tairix_taskbar::LibraryLayout::corner_radius
     pub fn present(
         &mut self,
         compositor: &mut Compositor,
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
-        theme: &Theme,
     ) {
         // The desktop density belongs to the output the bar is on, so it is
         // read from the compositor here and laid out at present time — a
         // runtime DPI change re-presents the bar at the new scale with no
         // taskbar state to update.
         let scale = compositor.scale();
-        self.present_bar(compositor, renderer, taskbar, theme, scale);
-        self.present_popup(compositor, renderer, taskbar, theme, scale);
+        self.present_bar(compositor, renderer, taskbar, scale);
+        self.present_popup(compositor, renderer, taskbar, scale);
     }
 
     /// Remove the bar and popup windows from `compositor` and forget them, so
@@ -116,10 +116,9 @@ impl TaskbarPresenter {
         compositor: &mut Compositor,
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
-        theme: &Theme,
         scale: Scale,
     ) {
-        let Some(surface) = renderer.render(taskbar, theme, scale) else {
+        let Some(surface) = renderer.render(taskbar, scale) else {
             return;
         };
         let layout = taskbar.layout(scale);
@@ -133,25 +132,25 @@ impl TaskbarPresenter {
         ));
     }
 
-    /// Present the popup while the menu is open, or remove it once closed.
+    /// Present the program-library popup while it is open, or remove it once
+    /// closed.
     fn present_popup(
         &mut self,
         compositor: &mut Compositor,
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
-        theme: &Theme,
         scale: Scale,
     ) {
-        if !taskbar.start_menu().is_open() {
+        if !taskbar.library().is_open() {
             if let Some(id) = self.popup.take() {
                 compositor.remove(id);
             }
             return;
         }
-        let Some(surface) = renderer.render_menu(taskbar, theme, scale) else {
+        let Some(surface) = renderer.render_library(taskbar, scale) else {
             return;
         };
-        let layout = taskbar.menu_layout(scale);
+        let layout = taskbar.library_layout(scale);
         let corners = Corners::from_radius(layout.corner_radius);
         self.popup = Some(place(
             compositor,

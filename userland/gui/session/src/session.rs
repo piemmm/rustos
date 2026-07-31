@@ -1,37 +1,20 @@
-//! The desktop session: the theme registry, the taskbar, and the glue that
-//! resolves taskbar responses into session-level events.
+//! The desktop session: the theme registry and the taskbar model.
 
 use tairix_cursor::CursorTheme;
 use tairix_icon::IconSet;
-use tairix_taskbar::{MenuAction, Taskbar, TaskbarConfig, TaskbarResponse};
+use tairix_taskbar::{Taskbar, TaskbarConfig};
 use tairix_theme::{Theme, ThemeError, ThemeId, ThemeRegistry};
 
-use crate::assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader};
-
-/// What a resolved [`TaskbarResponse`] means to the rest of the desktop.
-///
-/// The session acts on exactly one taskbar response — the appearance toggle —
-/// because that is the one whose effect lives in the session's own state (the
-/// [`ThemeRegistry`]). Everything else needs capabilities the session does not
-/// hold (a window-manager handle, the power/spawn capabilities) and is
-/// [`Forward`](SessionEvent::Forward)ed to the embedder unchanged.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionEvent {
-    /// The session switched the desktop appearance and re-themed the taskbar.
-    /// The embedder relays the now-active theme — read with
-    /// [`DesktopSession::active_theme`] — to the window manager and apps.
-    AppearanceChanged(ThemeId),
-    /// The session did not act on this response; the embedder handles it
-    /// (drive the window manager, perform a session control, launch an app).
-    Forward(TaskbarResponse),
-}
+use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 
 /// The desktop session: the shared theme registry plus the taskbar model.
 ///
 /// It owns both so a runtime theme switch is a single in-place operation: the
-/// registry's active theme changes and the taskbar is re-themed to match,
-/// through one private apply path so the relay is never duplicated.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// registry's active theme changes and the taskbar is re-themed to match.
+/// The taskbar holds no authority — its responses are typed reports the
+/// embedder (which holds the window-manager, filesystem, and spawn
+/// capabilities) acts on.
+#[derive(Clone, Debug)]
 pub struct DesktopSession {
     themes: ThemeRegistry,
     taskbar: Taskbar,
@@ -41,16 +24,14 @@ impl DesktopSession {
     /// Build a session for a taskbar placed by `config`, starting from the
     /// built-in themes with the default dark theme active.
     ///
-    /// The start menu is seeded with its session controls and a light/dark
-    /// appearance-toggle entry labelled `appearance_label`, so the toggle is
-    /// reachable from the menu the moment the desktop comes up.
+    /// The taskbar comes up with its two permanent leading launchers and an
+    /// empty program library; the embedder hands the popup the resolved
+    /// catalog once it has read the stores
+    /// ([`LibraryPopup::set_catalog`](tairix_taskbar::LibraryPopup::set_catalog)).
     #[must_use]
-    pub fn new(config: TaskbarConfig, appearance_label: &str) -> Self {
+    pub fn new(config: TaskbarConfig) -> Self {
         let themes = ThemeRegistry::with_builtins();
-        let mut taskbar = Taskbar::new(config, themes.active());
-        taskbar
-            .start_menu_mut()
-            .add_appearance_toggle(appearance_label);
+        let taskbar = Taskbar::new(config, themes.active());
         Self { themes, taskbar }
     }
 
@@ -77,38 +58,9 @@ impl DesktopSession {
         &mut self.taskbar
     }
 
-    /// Resolve one taskbar response, performing the appearance toggle itself
-    /// and forwarding everything else.
-    ///
-    /// Selecting the start menu's appearance-toggle entry switches the
-    /// built-in light/dark theme on the registry, re-themes the taskbar, and
-    /// returns [`SessionEvent::AppearanceChanged`] with the now-active
-    /// [`ThemeId`]. Any other response — including a launcher or
-    /// session-control selection, which the session has no capability to act
-    /// on — is [`SessionEvent::Forward`]ed unchanged.
-    pub fn resolve(&mut self, response: TaskbarResponse) -> SessionEvent {
-        if let TaskbarResponse::MenuEntrySelected {
-            action: MenuAction::ToggleAppearance,
-            ..
-        } = response
-        {
-            return SessionEvent::AppearanceChanged(self.toggle_appearance());
-        }
-        SessionEvent::Forward(response)
-    }
-
-    /// Switch the desktop between its built-in light and dark themes, returning
-    /// the now-active [`ThemeId`] and re-theming the taskbar.
-    ///
-    /// The switch is driven by the *active* theme's appearance, so a custom
-    /// dark theme toggles to the built-in light theme and vice versa. It cannot fail: the two built-ins are always present.
-    pub fn toggle_appearance(&mut self) -> ThemeId {
-        let id = self.themes.toggle_appearance();
-        self.reapply_theme();
-        id
-    }
-
-    /// Make the theme with `id` active and re-theme the taskbar.
+    /// Make the theme with `id` active and re-theme the taskbar — the
+    /// desktop's programmatic theme switch (its interactive home is the
+    /// Switchboard's System menu, `plans/NEW-TASKBAR.md` T13).
     ///
     /// # Errors
     ///
@@ -116,7 +68,7 @@ impl DesktopSession {
     /// active theme nor the taskbar) if no registered theme has that id.
     pub fn set_theme(&mut self, id: ThemeId) -> Result<(), ThemeError> {
         self.themes.set_active(id)?;
-        self.reapply_theme();
+        self.taskbar.apply_theme(self.themes.active());
         Ok(())
     }
 
@@ -131,7 +83,7 @@ impl DesktopSession {
     /// absent `/System/Graphics` simply yields the built-in cursor set.
     pub fn load_cursors<R>(&self, reader: &mut R) -> CursorTheme
     where
-        R: GraphicsAssetReader + ?Sized,
+        R: SessionFileReader + ?Sized,
     {
         load_cursor_theme(reader, self.themes.active().cursors())
     }
@@ -144,7 +96,7 @@ impl DesktopSession {
     /// falls back to its built-in glyph.
     pub fn load_icons<R>(&self, reader: &mut R) -> IconSet
     where
-        R: GraphicsAssetReader + ?Sized,
+        R: SessionFileReader + ?Sized,
     {
         load_icon_set(reader)
     }
@@ -157,13 +109,5 @@ impl DesktopSession {
     /// already uses the same [`ThemeId`].
     pub fn register_theme(&mut self, theme: Theme) -> Result<(), ThemeError> {
         self.themes.register(theme)
-    }
-
-    /// Re-theme the taskbar from the active theme. The single place a theme
-    /// switch reaches the taskbar, so the relay is not duplicated between
-    /// [`toggle_appearance`](Self::toggle_appearance) and
-    /// [`set_theme`](Self::set_theme).
-    fn reapply_theme(&mut self) {
-        self.taskbar.apply_theme(self.themes.active());
     }
 }

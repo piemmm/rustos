@@ -16,10 +16,10 @@ actif. Chaque lecture de répertoire est un listage ordinaire, contrôlé
 par les permissions, sous l'identité de l'utilisateur qui a lancé le
 programme : un répertoire illisible est refusé, jamais deviné.
 
-Le navigateur se lance depuis le menu démarrer du bureau (l'entrée
-`Files`) ou par son nom depuis un shell. Il exige une session graphique
-en cours : sans elle, le canal de fenêtre est inaccessible et le
-navigateur signale le refus sur le flux d'erreur standard puis se
+Le navigateur se lance depuis le bouton permanent `Files` de la barre
+des tâches ou par son nom depuis un shell. Il exige une session
+graphique en cours : sans elle, le canal de fenêtre est inaccessible et
+le navigateur signale le refus sur le flux d'erreur standard puis se
 termine.
 
 La fenêtre se pilote au clavier : `Bas` et `Haut` déplacent la

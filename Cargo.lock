@@ -838,12 +838,14 @@ dependencies = [
  "tairix-abi",
  "tairix-browse",
  "tairix-caps",
+ "tairix-controls",
  "tairix-cursor",
  "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-help",
  "tairix-icon",
+ "tairix-proglib",
  "tairix-rt",
  "tairix-taskbar",
  "tairix-theme",
@@ -2201,10 +2203,12 @@ dependencies = [
 name = "tairix-taskbar"
 version = "0.0.0"
 dependencies = [
+ "tairix-controls",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-proglib",
  "tairix-raster",
  "tairix-theme",
 ]
@@ -4710,6 +4714,7 @@ dependencies = [
  "tairix-log",
  "tairix-mkimage",
  "tairix-net",
+ "tairix-proglib",
  "tairix-qemu",
  "tairix-syshelp",
  "tairix-taskbar",

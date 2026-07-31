@@ -830,9 +830,10 @@ mod tests {
     // boot seat's revocable lease (CAP_DISPLAY), the owner-gated seat
     // input drains (CAP_INPUT_READ), the zero-copy frame regions it
     // creates for the display service and maps from each served app
-    // window (CAP_SHM), the start menu's app launchers
-    // (CAP_PROC_SPAWN), the trusted file picker (CAP_FS_ACCESS — the
-    // session lists directories and opens the user's chosen file under
+    // window (CAP_SHM), the taskbar's launchers and program-library
+    // popup (CAP_PROC_SPAWN), the trusted file picker and the catalog
+    // stores (CAP_FS_ACCESS — the session lists directories, reads the
+    // program-library documents, and opens the user's chosen file under
     // its own identity, then delegates that one file one-shot over
     // fd_grant; plans/CAPABILITY_USE.md CU6), and the command surface
     // (CAP_CONSOLE_WRITE — the short help on stdout and the fail-loud

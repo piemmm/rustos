@@ -23,9 +23,10 @@ teclado, pelo que as setas, `Enter`, `Space` e os caracteres digitados o
 comandam; `Tab` e `Shift+Tab` movem o foco entre a barra de separadores e os
 controlos.
 
-A galeria é iniciada a partir do menu iniciar do ambiente de trabalho ou pelo
-nome a partir de uma shell. Requer uma sessão gráfica em curso: sem ela o canal
-de janela é inacessível e a galeria comunica a recusa no fluxo de erro padrão e
+A galeria é iniciada a partir da Biblioteca de programas do ambiente de
+trabalho (o botão `Library` da barra de tarefas) ou pelo nome a partir
+de uma shell. Requer uma sessão gráfica em execução: sem ela o canal de
+janela é inacessível e a galeria comunica a recusa no fluxo de erro padrão e
 termina.
 
 ## EXIT STATUS

@@ -357,21 +357,28 @@ fn try_build_system_partition(
 /// panicked so the builder holds to in every path it links
 /// into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], PASSPHRASE)
+    build_image_with_contents(&[], &[], &[], PASSPHRASE)
 }
 
 /// Build the whole-disk encrypted-root image with the signed application
 /// bundles `apps` planted into the read-only `/System` app/service stores
 /// beside their `Help/` trees — each `(path_components, bytes)` a
 /// volume-relative bundle file (e.g. `&[b"Apps", b"ls.app", b"AppInfo"]`),
-/// composed and signed by the caller (`plans/APPS.md` deliverable 8).
+/// composed and signed by the caller (`plans/APPS.md` deliverable 8) —
+/// plus `root_files` planted on the **encrypted root volume** (each
+/// relative to that volume's root, e.g. the seeded program-library catalog
+/// under `System/Settings/…`, which the writable `/System/Settings` child
+/// mount rebases onto — `plans/NEW-TASKBAR.md` T3).
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the underlying whole-disk assembly
 /// (surfaced rather than panicked).
-pub fn build_image_with_apps(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], apps, PASSPHRASE)
+pub fn build_image_with_apps(
+    apps: &[(&[&[u8]], &[u8])],
+    root_files: &[(&[&[u8]], &[u8])],
+) -> Result<Vec<u8>, DriverError> {
+    build_image_with_contents(&[], apps, root_files, PASSPHRASE)
 }
 
 /// Build the whole-disk encrypted-root image whose root is encrypted under
@@ -387,7 +394,7 @@ pub fn build_image_with_apps(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], passphrase)
+    build_image_with_contents(&[], &[], &[], passphrase)
 }
 
 /// Build the whole-disk encrypted-root image, additionally planting a set of
@@ -409,16 +416,19 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(drivers, &[], PASSPHRASE)
+    build_image_with_contents(drivers, &[], &[], PASSPHRASE)
 }
 
 /// Build the whole-disk encrypted-root image, planting `drivers` and the
-/// application-bundle files `apps` into the read-only `/System` stores and
+/// application-bundle files `apps` into the read-only `/System` stores,
+/// `root_files` onto the **encrypted root volume** (volume-relative — the
+/// home of state the writable `/System/Settings` child mount rebases onto,
+/// e.g. the seeded program-library catalog), and
 /// encrypting the root under `passphrase`.
 ///
 /// The single authoring path behind [`build_image`],
 /// [`build_image_with_drivers`], [`build_image_with_apps`], and
-/// [`build_image_with_passphrase`]: they differ only in the planted store
+/// [`build_image_with_passphrase`]: they differ only in the planted
 /// contents and the passphrase the root volume key is derived from.
 ///
 /// # Errors
@@ -428,12 +438,13 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
 pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
+    root_files: &[(&[&[u8]], &[u8])],
     passphrase: &[u8],
 ) -> Result<Vec<u8>, DriverError> {
     let (descriptor, key) = provision(passphrase)?;
     let boot = build_boot_partition(&descriptor)?;
     let system = build_system_partition(drivers, apps)?;
-    let root = root_image::build_users_root_image_with_key(&key)?;
+    let root = root_image::build_users_root_image_with_key(&key, root_files)?;
 
     // The `/System` partition sizes itself to the content it holds
     // (`build_system_partition`), so the root partition's start and the
@@ -520,19 +531,30 @@ mod tests {
     /// A planted application-bundle file (`Apps/<name>.app/AppInfo` /
     /// `Run`) reads back byte-for-byte beside the bundle's discovered
     /// `Help/` tree, so every on-disk bundle the verticals browse is
-    /// complete and self-contained.
+    /// complete and self-contained — and a planted **root-volume** file
+    /// (the seeded program-library catalog's home under
+    /// `System/Settings/…`, which the writable `/System/Settings` child
+    /// mount rebases onto) reads back off the encrypted root.
     #[test]
     fn planted_app_bundle_files_read_back_beside_the_help_tree() {
         const APPINFO: &[u8] = b"a signed AppInfo manifest's bytes (synthetic)";
         const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
+        const CATALOG: &[u8] = b"os.tairix.ls.name ls\nos.tairix.ls.bundle /Apps/ls.app\n";
         let apps: [(&[&[u8]], &[u8]); 4] = [
             (&[b"Apps", b"ls.app", b"AppInfo"], APPINFO),
             (&[b"Apps", b"ls.app", b"Run"], RUN),
             (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
             (&[b"Services", b"login.app", b"Run"], RUN),
         ];
-        let bytes = build_image_with_apps(&apps).expect("the whole-disk image assembles");
-        let mut disk = MemDisk { store: bytes };
+        let root_files: [(&[&[u8]], &[u8]); 1] = [(
+            &[b"System", b"Settings", b"ProgramLibrary", b"library.conf"],
+            CATALOG,
+        )];
+        let bytes =
+            build_image_with_apps(&apps, &root_files).expect("the whole-disk image assembles");
+        let mut disk = MemDisk {
+            store: bytes.clone(),
+        };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
             .first_of_type(PartitionType::ARXFSSystem)
@@ -558,6 +580,30 @@ mod tests {
         }
         sys.lookup(help, b"ls.md")
             .expect("the bundle's default help document is planted beside Run");
+
+        // The root-volume file lands on the encrypted root, under the
+        // passphrase-derived key, with its intermediate directories.
+        let mut disk = MemDisk { store: bytes };
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let root_part = table
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("a ARXFS root partition is present");
+        let (_descriptor, key) = provision(PASSPHRASE).expect("the descriptor provisions");
+        let window = PartitionBlock::new(disk, root_part.start_lba, root_part.block_count)
+            .expect("the root window is in range");
+        let mut rootvol = tairix_drv_fs_arxfs::ARXFS::open(window, &key)
+            .expect("the root mounts under the descriptor-derived key");
+        let mut node = rootvol.root();
+        for component in root_files[0].0 {
+            node = rootvol
+                .lookup(node, component)
+                .expect("root-volume path component");
+        }
+        let mut buf = [0u8; 64];
+        let read = rootvol
+            .read_at(node, 0, &mut buf)
+            .expect("the catalog reads back off the root volume");
+        assert_eq!(&buf[..read], CATALOG);
     }
 
     /// The `/System` partition mounts read-only under the non-secret

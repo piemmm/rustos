@@ -9,10 +9,12 @@
 # channels (the kernel additionally owner-gates every drain against the
 # live lease), CAP_SHM to create and grant the zero-copy frame region the
 # display service maps (and to map each served app window's granted
-# frames), CAP_PROC_SPAWN for the start menu's app launchers
-# (plans/APPWIN.md AW3), CAP_FS_ACCESS for the trusted file picker
+# frames), CAP_PROC_SPAWN for the taskbar's launchers and program-library
+# popup (plans/APPWIN.md AW3, plans/NEW-TASKBAR.md), CAP_FS_ACCESS for the
+# trusted file picker and the program-library catalog stores
 # (plans/APPWIN.md AW5, plans/CAPABILITY_USE.md CU6): the session lists
-# directories and opens the user's chosen file under its own identity
+# directories, reads the catalog documents, and opens the user's chosen
+# file under its own identity
 # (every read still permission-checked per inode), then delegates that
 # one file one-shot to the requesting app over fd_grant — the
 # user-mediated capability model, and also the read seam for the on-disk

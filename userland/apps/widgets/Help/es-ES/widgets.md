@@ -24,10 +24,11 @@ conserva el foco del teclado, de modo que las flechas, `Enter`, `Space` y los
 caracteres escritos lo gobiernan; `Tab` y `Shift+Tab` mueven el foco entre la
 barra de pestañas y los controles.
 
-La galería se inicia desde el menú de inicio del escritorio o por su nombre
-desde un shell. Requiere una sesión gráfica en curso: sin ella el canal de
-ventana es inaccesible y la galería informa del rechazo en el flujo de error
-estándar y termina.
+La galería se inicia desde la Biblioteca de programas del escritorio (el
+botón `Library` de la barra de tareas) o por su nombre desde un shell.
+Requiere una sesión gráfica en curso: sin ella el canal de ventana es
+inaccesible y la galería informa del rechazo en el flujo de error estándar y
+termina.
 
 ## EXIT STATUS
 

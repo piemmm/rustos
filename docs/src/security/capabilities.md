@@ -159,8 +159,9 @@ exactly `administrator_ceiling()` (`plans/CAPABILITY_USE.md` CU3). The
 baseline is a **ceiling**, never a program's manifest: the shell
 requests its own exercised set (`SHELL_MANIFEST` — the console pair,
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`), the desktop session requests the
-graphical class plus `CAP_PROC_SPAWN` (its start-menu launchers) and
-`CAP_FS_ACCESS` (its trusted file picker), and every
+graphical class plus `CAP_PROC_SPAWN` (its taskbar launchers and
+program-library popup) and
+`CAP_FS_ACCESS` (its trusted file picker and the catalog stores), and every
 program's manifest is sized to every gated syscall the program has
 a code path to issue — **including capability-gated optional features
 that degrade gracefully when the intersection strips them** — and to

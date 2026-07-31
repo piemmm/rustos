@@ -186,11 +186,11 @@ tairix-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "
 tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }
 # The desktop-session, taskbar, browser-engine, geometry, and fw_cfg crates:
 # the AW3 desktop vertical's pointer script reconstructs the production
-# shell's taskbar/start-menu layout (the same code the guest runs) to compute
-# its click coordinates, keys its screendumps on the session's witness
-# messages, and measures the browser window and ramfb surface against the one
-# shared definition of each — never a hand-copied literal (plans/APPWIN.md
-# AW3/AW5).
+# shell's taskbar and program-library popup layout (the same code the guest
+# runs) to compute its click coordinates, keys its screendumps on the
+# session's witness messages, and measures the browser window and ramfb
+# surface against the one shared definition of each — never a hand-copied
+# literal (plans/APPWIN.md AW3/AW5, plans/NEW-TASKBAR.md T5).
 tairix-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
 tairix-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
 tairix-browse = { path = "../../lib/browse", version = "=0.0.0" }
@@ -209,6 +209,11 @@ tairix-font = { path = "../../lib/font", version = "=0.0.0" }
 # FM9-a, plans/COMPOSITOR-WORK.md, AGENTS.md §2.2).
 tairix-controls = { path = "../../lib/controls", version = "=0.0.0" }
 tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
+# The program-library catalog engine: the encrypted-root fixture plants the
+# machine store at the engine's own canonical path, and the AW3 pointer
+# script rebuilds the popup's rows over a `Catalog` reconstructed from the
+# same manifests — one engine, no drifting literals (plans/NEW-TASKBAR.md).
+tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
 # The autoload desktop vertical's shared interaction contract (delivery
 # counts), defined once in the test crate's lib target beside the guest
 # PASS gate that also consumes it.

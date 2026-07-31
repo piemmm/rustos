@@ -535,17 +535,12 @@ const AUTOLOAD_WINDOW_EVENT_MARKER: &str =
 const AUTOLOAD_WINDOW_DUMP_OCCURRENCES: u32 =
     tairix_test_autoload_input_qemu_aarch64::WINDOW_DUMP_DELIVERIES;
 
-/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the third
-/// screendump (the light-theme desktop with the window still composited)
-/// — the same shared contract (a wake boundary past the re-theme
-/// present, see the contract crate's rationale).
-const AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::APPEARANCE_DUMP_DELIVERIES;
-
-/// The post-toggle in-window click's own delivery count: the first
-/// handshake click is keyed on it, so it lands in a wake after the
-/// re-themed frame was presented.
-const AUTOLOAD_TOGGLE_CLICK_OCCURRENCES: u32 = 3;
+/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the terminal
+/// stage's library-popup clicks: the handshake click's own delivery — the
+/// same shared contract (a wake boundary strictly past the verified second
+/// dump, see the contract crate's rationale).
+const AUTOLOAD_TERMINAL_STAGE_OCCURRENCES: u32 =
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_STAGE_DELIVERIES;
 
 /// Serial marker of one shared-frame *map* operation: the kernel
 /// syscall-trace record for `shm_map`. A window's frame region is mapped
@@ -5265,34 +5260,35 @@ static TESTS: &[QemuTest] = &[
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
     // click-through: the display service's one-shot `FIRST_PRESENT`
     // witness keys the first screendump (the dark composited desktop) and
-    // the whole start-menu → "Files" click sequence (the guest applies
-    // injected events strictly in device order, so the menu clicks need no
-    // extra gate); the spawned files bundle creates its window over the
+    // the click on the taskbar's permanent Files button (the guest applies
+    // injected events strictly in device order, so the button click needs
+    // no extra gate); the spawned files bundle creates its window over the
     // reserved window rendezvous, and the endpoint's first *reply* on
     // serial gates the in-window click. From there every stage is keyed on
     // the kernel/ipc `MessageDelivered` records the desktop's app-ward
     // event deliveries emit — the shared interaction contract in the test
     // crate's lib target: delivery 2 (Focus + Pressed from the window
     // click) keys the second screendump (the served window on the dark
-    // desktop), the reopen-menu + appearance-toggle + window clicks follow,
-    // and delivery 4 (a handshake click processed in a wake strictly after
-    // the re-themed frame presented) keys the third screendump (the
-    // light-theme desktop, window still composited).
+    // desktop), and a handshake click (delivery 3, injected only after
+    // delivery 2 appeared and held while the second dump is pending) is
+    // the wake boundary the terminal stage gates on.
     //
-    // AW4 then takes the run into the windowed terminal: held behind the
-    // verified light dump, the script reopens the menu and clicks its
-    // "Terminal" row (spawning the terminal bundle, which spawns the
-    // user's shell over one kernel pseudo-terminal — `plans/PTY.md` — and
-    // serves its window at the second cascade slot); the window endpoint's
-    // fourth reply (the terminal's create + first present) gates the
+    // AW4 then takes the run into the windowed terminal: keyed on the
+    // handshake's own delivery, the script clicks the taskbar's Library
+    // button (the program-library popup opens over the catalog the guest
+    // session merged from the planted machine store — `plans/NEW-TASKBAR.md`
+    // T5) and then the popup's "Terminal" entry (spawning the terminal
+    // bundle, which spawns the user's shell over one kernel pseudo-terminal
+    // — `plans/PTY.md` — and serves its window at the second cascade slot);
+    // the third window-frame map (the terminal's create) gates the
     // terminal-window click, after which the runner types `sleep 3600` +
     // Enter at the seat keyboard once the guest's terminal-focus marker
     // appears. The guest PASS gate latches the `appmgr` load of
     // `/System/Apps/sleep.app` — `sleep` is loaded only by the shell running
     // the typed command, so this witness is uniquely attributable (no
     // fragile delivery count), and it proves the whole keyboard → session →
-    // terminal → pty → shell → load round trip. The runner fails any run
-    // whose script or dumps did not complete.
+    // library popup → terminal → pty → shell → load round trip. The runner
+    // fails any run whose script or dumps did not complete.
     //
     // The pty stage then proves the cooked-mode line discipline end to end
     // (`plans/PTY.md`): `sleep 3600` is a *blocking* foreground job, so
@@ -6284,15 +6280,50 @@ fn encrypted_root_disk_bytes(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
 ) -> Result<Vec<u8>, String> {
+    let (library_components, conf) = library_plant(t, apps)?;
+    let components: Vec<&[u8]> = library_components.iter().map(String::as_bytes).collect();
+    let root_files: [(&[&[u8]], &[u8]); 1] = [(&components, conf.as_bytes())];
     super::image_apps::with_plant_refs(apps, |files| {
-        tairix_test_encrypted_root_image::build_image_with_apps(files)
+        tairix_test_encrypted_root_image::build_image_with_apps(files, &root_files).map_err(|e| {
+            format!(
+                "test --qemu ({}): build encrypted-root image: {e:?}",
+                t.package
+            )
+        })
     })
-    .map_err(|e| {
-        format!(
-            "test --qemu ({}): build encrypted-root image: {e:?}",
-            t.package
-        )
-    })
+}
+
+/// The machine-wide program-library catalog to plant on a vertical's
+/// **encrypted root volume** (the home of `/System/Settings`, which the
+/// writable child mount rebases onto): the root-volume-relative path
+/// components of `tairix_proglib::MACHINE_LIBRARY_PATH` plus the document
+/// derived from the planted bundles' own manifests through the production
+/// `tools/mkimage` derivation — the same document a shipped image seeds —
+/// so the guest desktop's Program Library lists the planted graphical
+/// bundles (`plans/NEW-TASKBAR.md` T3/T5). One derivation for every
+/// encrypted-root builder, never a per-builder copy.
+fn library_plant(
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+) -> Result<(Vec<String>, String), String> {
+    let volume_relative = tairix_proglib::MACHINE_LIBRARY_PATH
+        .strip_prefix('/')
+        .ok_or_else(|| {
+            format!(
+                "test --qemu ({}): machine library path is not absolute",
+                t.package
+            )
+        })?;
+    let components = volume_relative.split('/').map(String::from).collect();
+    let conf = super::image_apps::with_plant_refs(apps, |files| {
+        tairix_mkimage::library::library_catalog(files).map_err(|e| {
+            format!(
+                "test --qemu ({}): derive program-library catalog: {e:?}",
+                t.package
+            )
+        })
+    })?;
+    Ok((components, conf))
 }
 
 /// The composed `/System`-store bundle sets one enrolment plants on its
@@ -6676,67 +6707,55 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 }
 
 /// Build the AW3+AW4 desktop click script: pin the pointer to the
-/// top-left corner, click the taskbar's start button (the menu opens),
-/// click the menu's "Files" row (spawning the file manager), click the
-/// served window's body (delivering `Focus` + `Pressed` app-ward — the
-/// kernel-attested `MessageDelivered` witnesses the second screendump
-/// keys on), reopen the menu and click the appearance-toggle row, click
-/// the window once more (the third delivery), and land the handshake
-/// click keying the light-theme screendump; then the AW4 terminal stage:
-/// reopen the menu, click its "Terminal" row (spawning the terminal
-/// bundle), and click the terminal's served window at the second cascade
-/// slot — the deliveries the typed shell command keys on. Every
-/// coordinate is computed by reconstructing the production desktop shell
-/// — the same `TaskbarConfig`, launcher registration, and layout code the
-/// guest session runs over the shared ramfb console geometry — so the
-/// script and the rendered desktop cannot drift.
+/// top-left corner, click the taskbar's permanent Files button (spawning
+/// the file manager), click the served window's body (delivering `Focus`
+/// and `Pressed` app-ward — the kernel-attested `MessageDelivered`
+/// witnesses the second screendump keys on), and land a handshake click
+/// on the still-focused window; then the AW4 terminal stage: click the
+/// Library button (the program-library popup opens over the catalog the
+/// guest merged from the planted machine store), click the popup's
+/// "Terminal" entry (spawning the terminal bundle), and click the
+/// terminal's served window at the second cascade slot — the deliveries
+/// the typed shell command keys on. Every coordinate is computed by
+/// reconstructing the production desktop shell — the same
+/// `TaskbarConfig` and layout code the guest session runs over the
+/// shared ramfb console geometry, with the popup rows derived from the
+/// same `AppInfo.toml` manifest sources the planted store and its seeded
+/// catalog are composed from ([`reconstructed_library`]) — so the script
+/// and the rendered desktop cannot drift.
 ///
 /// Step gating: the guest processes injected events strictly in device
-/// order and the menu model updates synchronously on the press, so the
-/// whole start-menu → Files sequence keys on the display service's
-/// `FIRST_PRESENT` witness alone (the runner already held it back until
-/// the first dump verified). The in-window click waits for the reserved
-/// window endpoint's first *reply* (the create round-trip completed, so
-/// the window exists in the compositor and was presented by that wake).
-/// The reopen/toggle/handshake steps key on the first click's deliveries
-/// (and are additionally held while the second dump is pending), the
-/// terminal-stage menu steps on the handshake's delivery (held behind the
-/// pending light dump), and the terminal-window click on the endpoint's
-/// fourth reply (the terminal's create + first present) — so each dump
-/// captures exactly the staged frame and every stage is provably
-/// established before its step fires.
+/// order and the bar model updates synchronously on the press, so the
+/// Files-button click keys on the display service's `FIRST_PRESENT`
+/// witness alone (the runner already held it back until the first dump
+/// verified). The in-window click waits for the reserved window
+/// endpoint's first *reply* (the create round-trip completed, so the
+/// window exists in the compositor and was presented by that wake). The
+/// handshake click keys on the first click's deliveries (and is
+/// additionally held while the second dump is pending), the
+/// terminal-stage library-popup steps on the handshake's own delivery,
+/// and the terminal-window click on the third window-frame map (the
+/// terminal's create) — so each dump captures exactly the staged frame
+/// and every stage is provably established before its step fires.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_desktop_session::windows::cascade_origin_for;
-    use tairix_desktop_session::{
-        DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, TERMINAL_LABEL,
-        TERMINAL_LAUNCHER, VIEWER_LABEL, VIEWER_LAUNCHER,
-    };
+    use tairix_desktop_session::DesktopShell;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_qemu::{MouseButton, PointerAction, PointerStep};
-    use tairix_taskbar::TaskbarConfig;
+    use tairix_taskbar::{LibraryRow, TaskbarConfig};
 
     let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
     let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
-    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height), APPEARANCE_LABEL);
-    // Registered in the same order the production session registers them
-    // (`userland/gui/session/src/run.rs`), so the reconstructed menu rows
-    // sit exactly where the guest draws them.
-    let _ = shell
+    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height));
+    // The popup lists the same catalog the guest session merges from the
+    // planted machine store, so the reconstructed rows sit exactly where
+    // the guest draws them.
+    shell
         .session_mut()
         .taskbar_mut()
-        .start_menu_mut()
-        .add_launcher(FILES_LAUNCHER, FILES_LABEL);
-    let _ = shell
-        .session_mut()
-        .taskbar_mut()
-        .start_menu_mut()
-        .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
-    let _ = shell
-        .session_mut()
-        .taskbar_mut()
-        .start_menu_mut()
-        .add_launcher(VIEWER_LAUNCHER, VIEWER_LABEL);
+        .library_mut()
+        .set_catalog(reconstructed_library()?);
 
     let centre = |rect: Rect, what: &str| -> Result<Point, String> {
         if rect.is_empty() {
@@ -6749,24 +6768,39 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ))
     };
     let taskbar = shell.session().taskbar();
-    let start = centre(taskbar.layout(Scale::ONE).start_button, "start button")?;
-    let row = |label: &str| -> Result<Point, String> {
-        let index = taskbar
-            .start_menu()
-            .entries()
-            .iter()
-            .position(|entry| entry.label() == label)
-            .ok_or_else(|| format!("desktop pointer script: no menu entry labelled {label:?}"))?;
-        let rect = *taskbar
-            .menu_layout(Scale::ONE)
-            .entries
-            .get(index)
-            .ok_or_else(|| format!("desktop pointer script: no layout row for {label:?}"))?;
-        centre(rect, label)
-    };
-    let files_row = row(FILES_LABEL)?;
-    let terminal_row = row(TERMINAL_LABEL)?;
-    let toggle_row = row(APPEARANCE_LABEL)?;
+    let bar = taskbar.layout(Scale::ONE);
+    let files_button = centre(bar.files, "Files button")?;
+    let library_button = centre(bar.library, "Library button")?;
+    // The popup's terminal entry — keyed by the bundle it launches (the
+    // same on-disk identity the guest PASS witnesses attribute by), never
+    // a display-name literal — in the deterministic freshly-opened state
+    // the guest presents after the Library click (search cleared, every
+    // folder expanded, scroll at the top).
+    let library = taskbar.library();
+    let terminal_bundle = format!("{}/terminal.app", tairix_abi::SYSTEM_APP_STORE);
+    let terminal_index = library
+        .rows()
+        .iter()
+        .position(|row| match row {
+            LibraryRow::Entry { id, .. } => library
+                .catalog()
+                .entry(id)
+                .is_some_and(|entry| entry.bundle().as_str() == terminal_bundle),
+            LibraryRow::Folder { .. } => false,
+        })
+        .ok_or_else(|| {
+            format!("desktop pointer script: no library entry launches {terminal_bundle}")
+        })?;
+    let terminal_entry = taskbar
+        .library_layout(Scale::ONE)
+        .rows
+        .iter()
+        .find(|&&(index, _)| index == terminal_index)
+        .map(|&(_, rect)| rect)
+        .ok_or_else(|| {
+            "desktop pointer script: the terminal entry is not visible in the popup".to_string()
+        })?;
+    let terminal_entry = centre(terminal_entry, "terminal library entry")?;
     // The centre of each served window: the session cascades them in
     // open order through the one shared placement rule, each sized by
     // its app's own constants — the same values the dump assertion
@@ -6837,38 +6871,30 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         action,
     };
     Ok(vec![
-        // Pin, then click the start button (the menu opens) and the
-        // menu's "Files" row (spawns the file manager and closes the
-        // menu). This first motion is also the run's `kind=pointer`
-        // delivery witness; the row click needs no extra gate — the
-        // guest applies the injected events strictly in order and the
-        // menu model updates synchronously on the press.
+        // Pin, then click the taskbar's permanent Files button (spawning
+        // the file manager). This first motion is also the run's
+        // `kind=pointer` delivery witness; the button click needs no
+        // extra gate — the guest applies the injected events strictly in
+        // order and the bar model updates synchronously on the press.
         step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, pin),
         step(
             AUTOLOAD_FIRST_PRESENT_MARKER,
             1,
-            move_by(Point::ORIGIN, start),
+            move_by(Point::ORIGIN, files_button),
         ),
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, move_by(start, files_row)),
         step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
         step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
         // The spawned app's window create has been replied: click the
         // window body — the session delivers `Focus` + `Pressed` app-ward
         // (`MessageDelivered` × 2, the second dump's key).
-        step(&created, 1, move_by(files_row, window)),
+        step(&created, 1, move_by(files_button, window)),
         step(&created, 1, press),
         step(&created, 1, release),
-        // Reopen the menu and click the appearance toggle (the light
-        // theme presents), then click the window once more — the third
-        // delivery, the light dump's key. These steps additionally wait
-        // behind the pending second dump, so it captures the dark frame.
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
-            move_by(window, start),
-        ),
+        // The handshake click on the still-focused window (its `Pressed`
+        // is delivery 3): keyed on the first click's own deliveries and
+        // additionally held while the second dump is pending, so the dump
+        // captures the staged dark frame and the terminal stage below
+        // starts in a strictly later wake.
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
             AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
@@ -6879,87 +6905,40 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
             release,
         ),
+        // --- The AW4 terminal stage, keyed on the handshake click's own
+        // delivery. Click the Library button — the program-library popup
+        // opens (a session-owned surface: no app-ward delivery and no
+        // window-frame map, so neither gate below can fire early) — then
+        // the popup's "Terminal" entry, spawning the terminal bundle from
+        // the on-disk store through the planted catalog.
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
-            move_by(start, toggle_row),
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
+            move_by(window, library_button),
         ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
             press,
         ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
             release,
         ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
-            move_by(toggle_row, window),
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
+            move_by(library_button, terminal_entry),
         ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
             press,
         ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
-            release,
-        ),
-        // The handshake click, keyed on the post-toggle click's own
-        // delivery: it is injected only after that delivery appeared on
-        // serial, so the guest processes it in a later wake — strictly
-        // after the light-theme frame was presented — and its delivery
-        // keys the light dump.
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TOGGLE_CLICK_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TOGGLE_CLICK_OCCURRENCES,
-            release,
-        ),
-        // --- The AW4 terminal stage. Keyed on the handshake click's own
-        // delivery (the light dump's key) and additionally held while
-        // that dump is pending — the runner holds pointer steps behind
-        // unverified dumps — so the terminal never enters the frame the
-        // light dump asserts, and the guest (whose PASS needs the typed
-        // command's spawn, far below) can never exit under a pending
-        // dump. Reopen the menu and click its "Terminal" row, spawning
-        // the terminal bundle from the on-disk store.
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
-            move_by(window, start),
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
-            release,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
-            move_by(start, terminal_row),
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
             release,
         ),
         // The terminal's window frame has been mapped — its window is
@@ -6975,7 +6954,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,
             AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
-            move_by(terminal_row, terminal_window),
+            move_by(terminal_entry, terminal_window),
         ),
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,
@@ -6988,6 +6967,54 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             release,
         ),
     ])
+}
+
+/// The program library the guest desktop lists, reconstructed from the
+/// same on-disk `AppInfo.toml` manifest sources the planted store — and
+/// the catalog document seeded beside it — are composed from
+/// (`discover_app_manifests`), so the popup rows the script clicks sit
+/// exactly where the guest draws them: the app-store bundles that declare
+/// a `library` folder are exactly the seeded catalog's entries.
+fn reconstructed_library() -> Result<tairix_proglib::Catalog, String> {
+    use tairix_itest_harness::app_image::{discover_app_manifests, AppKind};
+    use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryEntry};
+
+    let userland = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| "desktop pointer script: workspace root unreachable".to_string())?
+        .join("userland");
+    let discovered = discover_app_manifests(&userland)
+        .map_err(|e| format!("desktop pointer script: manifest discovery: {e}"))?;
+
+    let mut catalog = Catalog::new();
+    for app in &discovered {
+        let manifest = &app.manifest;
+        if manifest.kind != AppKind::Command {
+            continue;
+        }
+        let Some(folder) = manifest.library else {
+            continue;
+        };
+        let fail =
+            |what: &str, e: &dyn core::fmt::Display| format!("desktop pointer script: {what}: {e}");
+        let id = EntryId::new(&manifest.id).map_err(|e| fail(&manifest.id, &e))?;
+        let name = DisplayName::new(&manifest.name).map_err(|e| fail(&manifest.id, &e))?;
+        let bundle = BundlePath::new(&format!(
+            "{}/{}.app",
+            tairix_abi::SYSTEM_APP_STORE,
+            manifest.name
+        ))
+        .map_err(|e| fail(&manifest.id, &e))?;
+        let icon = match &manifest.library_icon {
+            Some(asset) => Some(IconAsset::new(asset).map_err(|e| fail(&manifest.id, &e))?),
+            None => None,
+        };
+        catalog
+            .insert(LibraryEntry::new(id, name, bundle, folder, icon))
+            .map_err(|e| fail(&manifest.id, &e))?;
+    }
+    Ok(catalog)
 }
 
 /// A filesystem volume to plant on an enrolment's virtio-blk backing image.
@@ -7166,11 +7193,18 @@ fn net_root_image(
     extension: &'static str,
     label: &str,
 ) -> Result<FsImage, String> {
+    // The seeded program-library catalog rides on every driver-store
+    // vertical's encrypted root volume, exactly as on a shipped image
+    // (the autoload vertical's desktop opens the popup over it).
+    let (library_components, conf) = library_plant(t, apps)?;
+    let components: Vec<&[u8]> = library_components.iter().map(String::as_bytes).collect();
+    let root_files: [(&[&[u8]], &[u8]); 1] = [(&components, conf.as_bytes())];
     let bytes = super::image_apps::with_plant_refs(drivers, |driver_files| {
         super::image_apps::with_plant_refs(apps, |app_files| {
             tairix_test_encrypted_root_image::build_image_with_contents(
                 driver_files,
                 app_files,
+                &root_files,
                 tairix_test_encrypted_root_image::PASSPHRASE,
             )
         })

@@ -54,7 +54,7 @@ event loop** inherits the freeze:
 
 | Site | File | What blocks |
 |---|---|---|
-| Desktop launcher | `userland/gui/session/src/run.rs` (`route_outcome`, the `FILES_/TERMINAL_/VIEWER_LAUNCHER` arms — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
+| Desktop launcher | `userland/gui/session/src/run.rs` (the taskbar-launch arms — today the Files button and the program-library popup — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
 | Desktop file picker | `userland/gui/session/src/run.rs` (the `SessionPicker`'s `VfsDirectorySource` calling `tairix_rt::read_dir_all` inside `picker.handle_click` / `handle_key`, on the `SEAT_TOKEN` path) | Compositor loop frozen while a directory is read from disk on every open/navigate. Same class of defect (synchronous I/O on the compositor thread), smaller blast radius. |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
@@ -701,11 +701,12 @@ Each stage is independently reviewable and must leave the whole-project
     Docs: `docs/src/architecture/multitasking.md` documents the asynchronous
     launch and the reserved statuses.
 - **DESK-2 — done.** The desktop launcher no longer freezes and a refused
-  launch is loud, not silent. Each start-menu launch admits its child and
-  returns at once (DESK-1), and the session remembers the child's launcher
-  label in an `in_flight` map. The `CHILD_TOKEN` reap runs the shared,
+  launch is loud, not silent. Each desktop launch (the taskbar's launchers
+  and the program-library popup) admits its child and
+  returns at once (DESK-1), and the session remembers the child's label and
+  spawn path in the `LaunchTable`. The `CHILD_TOKEN` reap runs the shared,
   host-tested `reap_launched` (`userland/gui/session/src/launch.rs`): it
-  drains every zombie in one wake (no busy-wait), drops each `in_flight`
+  drains every zombie in one wake (no busy-wait), drops each table
   entry, tears the child's windows down, and — for a child that exited with
   a reserved `LOAD_*` status — writes a terse `stderr` line named by its
   label (`desktop: <App> failed to launch: <reason>`), the reason being

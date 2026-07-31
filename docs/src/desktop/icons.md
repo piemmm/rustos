@@ -33,13 +33,18 @@ panicking (`AGENTS.md` §2.9).
 
 ## The glyph set
 
-`IconKind` is the closed set of built-in glyphs — `Network` (rising signal
-bars), `Volume` (a speaker), `Battery`, `Bell`, and a `Generic` fallback
-diamond. `IconKind::for_asset` resolves a theme asset identifier to a kind and
+`IconKind` is the closed set of built-in glyphs: the status kinds (`Network`
+— rising signal bars, `Volume`, `Battery`, `Bell`), the file-manager kinds
+(`Folder`/`FolderOpen`, `File`, `AppBundle`, the type badges `Text`/`Image`/
+`Archive`/`Executable`, the toolbar's `NavBack`/`NavForward`/`NavUp`/
+`Refresh`/`ViewToggle`/`Sort`/`NewFolder`, and `Trash`/`EmptyTrash`), the
+taskbar's `Library` (the program-library launcher's three-by-three tile
+grid, `plans/NEW-TASKBAR.md` T4), and a `Generic` fallback diamond.
+`IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).
 `builtin_icon(kind, colour)` turns a kind plus a theme colour into a
-`VectorIcon`.
+`VectorIcon`; `ICON_KINDS` is the closed table a loader iterates.
 
 On-disk icon sets follow the desktop's **SVG-first** asset rule (`AGENTS.md`
 §10), the same as cursors: a set under `/System/Graphics` is authored as SVG

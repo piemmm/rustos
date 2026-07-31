@@ -1,30 +1,36 @@
-//! Fanning one pointer-event stream to the taskbar and the window manager.
+//! Fanning one input-event stream to the taskbar and the window manager.
 //!
 //! The desktop has two independent input routers — the window manager's
 //! [`InputRouter`] (focus, click-to-activate, interactive move-grabs) and the
-//! taskbar's [`TaskbarInput`] (start-menu toggle, task activate/minimise,
-//! notification/clock presses) — and both consume the **same** shared
-//! `tairix_input` (`lib/input`) event vocabulary. A
-//! real input source produces one stream of events, so something must decide
-//! which router each event belongs to. Neither GUI crate may depend on the
-//! other, so that decision is session glue, and [`SessionInputRouter`]
-//! is that glue.
+//! taskbar's [`TaskbarInput`] (the launcher buttons, the program-library
+//! popup, task activate/minimise, notification/clock presses) — and both
+//! consume the **same** shared `tairix_input` (`lib/input`) event vocabulary.
+//! A real input source produces one stream of events, so something must
+//! decide which router each event belongs to. Neither GUI crate may depend
+//! on the other, so that decision is session glue, and
+//! [`SessionInputRouter`] is that glue.
 //!
 //! The policy is deliberately simple — one event does exactly one thing:
 //!
-//! * **The taskbar claims a primary press** when its start menu is open (the
-//!   menu is modal, so a press anywhere selects an entry or dismisses it) or
-//!   when the pointer lands on the bar; otherwise the press goes to the window
-//!   manager. The two never both act on one press, so a click on the bar never
-//!   also activates a window behind it.
+//! * **While the program-library popup is open it is modal**: every press
+//!   (any button), release, scroll, and key event routes to the taskbar,
+//!   which drives the popup — selecting rows, editing the search, working
+//!   the scrollbar, or dismissing on a click-away. Nothing leaks to the
+//!   windows beneath a modal popup.
+//! * **Otherwise the taskbar claims a primary press** when the pointer lands
+//!   on the bar; every other press goes to the window manager. The two never
+//!   both act on one press, so a click on the bar never also activates a
+//!   window behind it.
 //! * **Pointer motion is fanned to both routers** so their tracked pointer
 //!   positions stay in step (a press is hit-tested at the last motion's
-//!   position). Only the window manager acts on motion — to drag a grabbed
-//!   window — so a motion's outcome is the window manager's.
+//!   position). The window manager acts on motion to drag a grabbed window;
+//!   the taskbar only refreshes its hover feedback.
 //! * **A primary release goes to the window manager**, which ends an
-//!   in-flight move-grab; the taskbar ignores releases.
+//!   in-flight move-grab; the taskbar ignores releases while its popup is
+//!   closed.
 //! * **Key events go to the window manager**, which delivers them to the
-//!   focused window; the taskbar takes no keyboard input.
+//!   focused window; the taskbar takes keyboard input only while its popup
+//!   is open.
 //!
 //! The router holds no pixels and grants itself no authority: it owns the two
 //! inner routers and drives them against the embedder's [`Compositor`] and
@@ -36,7 +42,7 @@
 
 use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
-    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, Scale, WindowId,
+    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, WindowId,
 };
 
 /// What the [`SessionInputRouter`] did with one [`InputEvent`].
@@ -47,7 +53,7 @@ use tairix_wm::{
 /// state collapses to [`Ignored`](Self::Ignored), exactly as the underlying
 /// routers report their own no-ops, so the embedder sees one uniform "nothing
 /// happened" outcome.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionInputResponse {
     /// The event changed no desktop state (a non-primary button, or a press
     /// or motion that neither router acted on).
@@ -140,12 +146,13 @@ impl SessionInputRouter {
     /// Route one input `event` to the taskbar or the window manager, returning
     /// what changed.
     ///
-    /// A primary press goes to whichever router claims the pointer (the
-    /// taskbar when its menu is open or the pointer is over the bar, the
-    /// window manager otherwise); motion is fanned to both so their pointers
-    /// stay in step and the window manager can drag a grabbed window; a
-    /// release goes to the window manager to end a grab. See the
-    /// [module docs](self) for the full policy.
+    /// While the program-library popup is open every event routes to the
+    /// taskbar (the popup is modal). Otherwise a primary press goes to
+    /// whichever router claims the pointer (the taskbar when the pointer is
+    /// over the bar, the window manager otherwise); motion is fanned to both
+    /// so their pointers stay in step and the window manager can drag a
+    /// grabbed window; a release goes to the window manager to end a grab.
+    /// See the [module docs](self) for the full policy.
     pub fn handle(
         &mut self,
         event: InputEvent,
@@ -156,17 +163,30 @@ impl SessionInputRouter {
         // owns; the session reads it here rather than
         // keeping its own copy.
         let scale = compositor.scale();
+        // The open popup is modal: the whole stream is the taskbar's. Motion
+        // is still *tracked* by the window manager so its pointer stays in
+        // step for the moment the popup closes, but its outcome is discarded
+        // — nothing may be delivered to the windows beneath a modal popup,
+        // and no grab can be in flight (presses never reached the window
+        // manager while the popup was open).
+        if taskbar.library().is_open() {
+            if matches!(event, InputEvent::PointerMoved { .. }) {
+                let _ = self.wm.handle(event, compositor);
+            }
+            return taskbar_response(self.taskbar.handle(event, taskbar, scale));
+        }
         match event {
             InputEvent::PointerMoved { .. } => {
-                // Keep both routers' tracked pointer in step; only the window
-                // manager acts on motion (dragging a grabbed window).
+                // Keep both routers' tracked pointer in step; the window
+                // manager acts on motion (dragging a grabbed window) and the
+                // taskbar refreshes its hover feedback.
                 self.taskbar.handle(event, taskbar, scale);
                 wm_response(self.wm.handle(event, compositor))
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                if taskbar_claims(taskbar, self.taskbar.pointer(), scale) {
+                if taskbar.hit_test(self.taskbar.pointer(), scale).is_some() {
                     taskbar_response(self.taskbar.handle(event, taskbar, scale))
                 } else {
                     wm_response(self.wm.handle(event, compositor))
@@ -174,11 +194,11 @@ impl SessionInputRouter {
             }
             // The window manager takes the rest and the taskbar none of them:
             // a secondary (right) press opens the client's context menu (the
-            // taskbar has no right-click menu, so it never claims it; over the
-            // desktop or furniture the window manager consumes it and opens
-            // nothing), a primary release ends a move-grab, a scroll wheel
-            // routes to the root viewport under the pointer, and keys go to the
-            // focused window.
+            // closed bar has no right-click menu, so it never claims it; over
+            // the desktop or furniture the window manager consumes it and
+            // opens nothing), a primary release ends a move-grab, a scroll
+            // wheel routes to the root viewport under the pointer, and keys go
+            // to the focused window.
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             }
@@ -193,13 +213,6 @@ impl SessionInputRouter {
             }
         }
     }
-}
-
-/// `true` when the taskbar should receive a primary press at `pointer`: its
-/// start menu is open (modal), or the pointer is over the bar laid out at the
-/// output `scale`.
-fn taskbar_claims(taskbar: &Taskbar, pointer: Point, scale: Scale) -> bool {
-    taskbar.start_menu().is_open() || taskbar.hit_test(pointer, scale).is_some()
 }
 
 /// Wrap a taskbar router outcome, collapsing its no-op to

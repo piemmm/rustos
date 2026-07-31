@@ -138,14 +138,15 @@ Done. What now holds:
   `tairix_rt::read_dir_all`, rendering through the shared theme, window
   create/present over the AW2 client, parked event wait, redraw on
   focus/theme-relevant events, clean exit on `CloseRequested`. The
-  session's start-menu "Files" entry spawns it
+  taskbar's permanent Files button spawns it
   (`tairix_desktop_session::config` — the one production configuration
   the QEMU harness also imports for its click coordinates).
 - The autoload QEMU vertical drives the full click-through with injected
   pointer buttons (`tools/qemu` ordered `PointerStep` script + ordered
-  marker-gated screendumps): start menu → "Files" → served-window clicks →
-  appearance toggle, with three host-verified screendumps (dark desktop;
-  the served window at the cascade origin; the light-theme desktop). All
+  marker-gated screendumps): the Files button → served-window clicks →
+  the Library popup's terminal launch (`plans/NEW-TASKBAR.md` T5), with
+  two host-verified screendumps (dark desktop;
+  the served window at the cascade origin). All
   gates are kernel-attested serial records (the window endpoint's first
   `CallReplied`, `MessageDelivered` counts per the interaction contract in
   the test crate's lib target); the guest PASS rides the AW4 tail below,
@@ -177,15 +178,18 @@ Done. What now holds:
   (window-event `Port`, shell-output `Stream`, shell `Child`), token
   dispatch, `lib/keymap`-encoded key presses, pump-and-present on shell
   output, clean teardown on end-of-stream / child exit / close. The
-  session's start-menu `Terminal` entry spawns it; the app event-mailbox
+  program-library popup's terminal entry spawns it
+  (`plans/NEW-TASKBAR.md` T5); the app event-mailbox
   naming rule is now `tairix_window::event_endpoint_for` (one definition,
   shared with the files app), and the cascade placement is
   `tairix_desktop_session::windows::cascade_origin_for` (shared with the
   vertical's click script).
 - The autoload QEMU vertical drives the AW4 tail after the AW3
-  click-through: menu → `Terminal` row, the terminal-window click gated
-  on the window endpoint's fourth reply (terminal create + first
-  present), `true` + Enter typed at the seat keyboard gated on the
+  click-through: the Library button → the popup's terminal entry
+  (`plans/NEW-TASKBAR.md` T5), the terminal-window click gated on the
+  third window-frame map (the terminal's create — map counts track
+  window creation, never repaints), `true` + Enter typed at the seat
+  keyboard gated on the
   click's deliveries, and guest PASS latching a kernel `ProcessSpawned`
   record observed at/after the Enter press's delivery count — the only
   spawn possible then is the shell executing the typed command, so PASS
@@ -241,8 +245,8 @@ Done (code + host coverage). What now holds:
   a requesting window's death aborts its pick via the
   `ShellWindowHost` bridge. The session's manifest gained
   `CAP_FS_ACCESS` (AppInfo + kernel pin) — the CU6 trusted-UI widening.
-- **The consumer**: `userland/apps/viewer` (`viewer.app`, start-menu
-  `Viewer` entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` and
+- **The consumer**: `userland/apps/viewer` (`viewer.app`, a
+  program-library entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` and
   deliberately **no filesystem capability** — it window-creates, asks
   `pick_file` at startup, redeems the delegated handle, reads at most
   `CONTENT_MAX` bytes through the delegated descriptor, and renders the

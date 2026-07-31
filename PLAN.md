@@ -3056,15 +3056,16 @@ are retained as a security bound (§24.4), not the unbounded
     compositing.
 - `userland/gui/taskbar`: a traditional desktop taskbar (in the style of
   GNOME/Windows), pinned to a configured screen edge. Layout:
-  - **Left**: a "start" menu button opening a menu. The menu is **not** an
-    application launcher; at this stage it is largely unpopulated and holds
-    only session controls (log out, lock, shut down, restart). It is built
-    so launcher entries can be added later without changing its public IPC.
+  - **Leading**: two permanent, fixed-order launcher buttons — **Library**
+    (opens the folder-organised program-library popup fed from the merged
+    `lib/proglib` catalog) and **Files** (opens the file manager,
+    idempotently). Session controls (log out, lock, shut down, restart)
+    belong to the Switchboard's System menu (`plans/NEW-TASKBAR.md` T13).
   - **Middle**: a task list showing currently running tasks (one entry per
     top-level window/application), with focus/activate and minimise/restore
     on click.
-  - **Right**: a clock anchored to the right-hand end, with a **notification
-    icon area** immediately to its left for status/notification icons.
+  - **Trailing**: a clock anchored to the trailing end, with a **notification
+    icon area** immediately before it for status/notification icons.
   - **Rounded edges**: the taskbar itself supports rounded corners, drawn
     through the same compositor rounded-corner path as windows (no duplicate
     implementation, `AGENTS.md` §2.2).
@@ -3094,9 +3095,9 @@ are retained as a security bound (§24.4), not the unbounded
 - Headless compositor tests using a virtual framebuffer, including
   rounded-corner masking and per-region alpha blending (premultiplied-alpha
   correctness, fully-opaque and fully-transparent edge cases).
-- Taskbar layout tests: start-menu button + session-control entries on the
-  left, running-task list in the middle, notification area and clock on the
-  right; rounded-edge rendering.
+- Taskbar layout tests: the two permanent launchers at the leading end and
+  the program-library popup they open, running-task list in the middle,
+  notification area and clock at the trailing end; rounded-edge rendering.
 - Theme-switch tests: dark ↔ light applies consistently across WM, taskbar,
   and default apps.
 - Input routing tests (focus, click-to-activate, drag-and-drop).
@@ -3109,23 +3110,31 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T3 done, the library
-data layer) — `plans/NEW-TASKBAR.md`: a first-class, folder-organised program
-library, **landed end to end as data**: `lib/proglib` (closed folder taxonomy,
-validated entry model, `<id>.<field>` grammar, bounded fail-closed parser,
-canonical render, the machine ∪ user-overlay merge with the overlay's
-visibility verdict last, and the `reconcile` discovery fold), the
+Full **icon-bar** build-out (staged, `in progress` — T1–T5 done) —
+`plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
+landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
+entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
+render, the machine ∪ user-overlay merge with the overlay's visibility
+verdict last, and the `reconcile` discovery fold), the
 `userland/apps/applib` admin command (list/add/remove/hide/show/rescan, GNU
 conventions, fd-3 records), the signed `AppInfo` `library` listing (opt-in
 folder + icon; C header regenerated), and the image-build seeding
 (`tools/mkimage` derives `/System/Settings/ProgramLibrary/library.conf` from
-the planted bundles' own manifests). Next (T4+, the UI): a permanent
-file-manager icon, user-pinned shortcuts (`lib/taskpins`, pin-to-taskbar +
-drag), the notification area, and the always-rightmost Switchboard
-system-overview surface (`userland/gui/switchboard` hosting the existing
+the planted bundles' own manifests) — and **as UI** (T4/T5): the two
+permanent leading launchers (Library — accent `IconButton` with the new
+`lib/icon` `Library` glyph, pressed-in while open; Files — quiet folder
+glyph, resolved idempotently via the session's attested `LaunchTable`) and
+the fully keyboard-navigable, searchable, `lib/controls`-composed
+program-library popup (modal at both routers, fail-closed geometry, calm
+empty states, session-loaded catalog re-read on every open), with the
+generic start menu deleted. Next (T6+): user-pinned shortcuts
+(`lib/taskpins`, pin-to-taskbar + drag — the popup's right-click *Pin*
+lands whole with its store here), the notification area, and the
+always-rightmost Switchboard system-overview surface
+(`userland/gui/switchboard` hosting the existing
 `lib/controls::switchboard`, implementing `plans/desktop1.png` /
-`plans/desktop2a.png` — and where System Settings is reached, deliberately not
-the library).
+`plans/desktop2a.png` — where the session controls, the light/dark toggle,
+and System Settings are reached, deliberately not the library).
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending
@@ -3165,9 +3174,10 @@ Shipped (headless-testable, model + renderer over injected seams):
     the ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`). The independent
     profile fix (`pie_build::cross_compile_pie_elf` reading `ImageProfile`)
     ships `installer` userland/drivers `--release`.
-- `userland/gui/taskbar` (start menu + running-task list + clock/notification
-  area) and `userland/gui/session` glue (theme registry, taskbar model,
-  light/dark switch, `DesktopShell` event loop / `TaskBridge`).
+- `userland/gui/taskbar` (permanent Library/Files launchers + program-library
+  popup + running-task list + clock/notification area) and
+  `userland/gui/session` glue (theme registry, taskbar model, catalog
+  loading/merging, launch table, `DesktopShell` event loop / `TaskBridge`).
 - Two default apps (filesystem browser, terminal emulator) — each a
   host-tested model + renderer plus a live store bundle served over the
   window channel (`plans/APPWIN.md` AW3/AW4; the AW4 `Stream` wait source).
@@ -3401,16 +3411,18 @@ transfer, landed in increments:
   loopback. **AW3 is done:** the session serves `WINDOW_ENDPOINT` (bind
   authorised by its live seat lease) from its token-dispatched wait-set
   loop into `DesktopShell`; the files bundle (`CAP_FS_ACCESS` only) lives
-  in the system app store and is spawned from the start menu; the autoload
-  QEMU vertical click-drives the whole chain (menu → launch → served
-  window → appearance toggle) with three verified screendumps, gated on
+  in the system app store and is spawned from the taskbar's permanent
+  Files button; the autoload
+  QEMU vertical click-drives the whole chain (Files button → launch →
+  served-window clicks) with two verified screendumps, gated on
   kernel-attested serial records and the interaction contract in the test
   crate's lib target. **AW4 is done:** `WaitSourceKind::Stream` (the
   caller's own pipe read end, owner-checked at add, ready on bytes or
   end-of-stream over the pipe layer's existing wakes), the terminal's
   host-tested pipe/spawn `ShellSource` (`tairix_terminal::spawned`), the
   `terminal.app` store bundle (`CAP_CONSOLE_WRITE`+`CAP_PROC_SPAWN`+
-  `CAP_SHM`) spawned from the start menu's `Terminal` entry, and the
+  `CAP_SHM`) spawned from the program-library popup's terminal entry
+  (`plans/NEW-TASKBAR.md` T5), and the
   autoload vertical's typed-command tail (guest PASS latches a
   `ProcessSpawned` at/after the Enter press's delivery — the shell round
   trip, kernel-attested). **AW5 is done (code + host coverage):** the
@@ -3487,7 +3499,7 @@ transfer, landed in increments:
   trusted picker now opens at the user's home (`Browser::open_at` over the
   session's `HOME`, falling back to `/`), the shared users-root fixture plants
   a readable document in `/Users/root`, and the vertical launches the Viewer
-  from the start menu, lets its auto-opened picker read the home, and clicks
+  from the desktop's launcher, lets its auto-opened picker read the home, and clicks
   the document row — the session `fd_grant`s the chosen file to the Viewer and
   the Viewer `fd_redeem`s it (two new guest witnesses `sc=fd_grant`→
   `sc=fd_redeem`, after the FM9-a rename). The pick-click is gated on a

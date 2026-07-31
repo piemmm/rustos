@@ -79,16 +79,15 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        parse, reap_launched, window_control_event, CliError, Command, ConcludedPick, DesktopShell,
-        DeviceInputSource, KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel,
-        SessionPicker, SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL,
-        FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
-        USAGE, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
+        load_library, parse, reap_launched, window_control_event, CliError, Command, ConcludedPick,
+        DesktopShell, DeviceInputSource, KeyboardInputSource, LaunchTable, PickConclusion,
+        SeatEventReader, SeatInputChannel, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, FILES_LABEL, FILES_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
+    use tairix_taskbar::{TaskbarConfig, TaskbarResponse};
     use tairix_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
     use tairix_wm::{Compositor, InputResponse, Rect};
 
@@ -386,10 +385,7 @@ mod program {
         // --- Desktop bring-up: the shell, the compositor over the active
         // theme's desktop colour, and the two live seat input sources with
         // the queried mode as the pointer's screen rectangle.
-        let mut shell = DesktopShell::new(
-            TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
-            APPEARANCE_LABEL,
-        );
+        let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(mode.width_px, mode.height_px));
         let Some(mut compositor) = Compositor::new(mode, shell.desktop_background()) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
@@ -400,24 +396,13 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
-        // The start menu's launcher entries for the file browser and the
-        // terminal: selecting one is forwarded by the shell and spawns
-        // the matching bundle below.
-        let _ = shell
-            .session_mut()
-            .taskbar_mut()
-            .start_menu_mut()
-            .add_launcher(FILES_LAUNCHER, FILES_LABEL);
-        let _ = shell
-            .session_mut()
-            .taskbar_mut()
-            .start_menu_mut()
-            .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
-        let _ = shell
-            .session_mut()
-            .taskbar_mut()
-            .start_menu_mut()
-            .add_launcher(VIEWER_LAUNCHER, VIEWER_LABEL);
+        // The program library: read the machine store and the logged-in
+        // user's overlay under the session's own identity, merge them, and
+        // hand the resolved catalog to the taskbar's popup. A store that
+        // cannot be used is reported loudly and contributes an empty
+        // catalog, so the desktop comes up with a calm empty library rather
+        // than dying over a settings file.
+        refresh_library(&mut shell, &mut compositor);
 
         // First frame: place the bar, install the pointer cursor at the
         // seat's initial pointer position, and push the whole surface once;
@@ -506,14 +491,16 @@ mod program {
         let mut identity = RtWindowIdentity::new();
         let mut sink = RtEventSink;
         let mut focused: Option<u64> = None;
-        // Every app in_flight from the desktop is admitted immediately and
+        // Every app launched from the desktop is admitted immediately and
         // loads on its own task (asynchronous launch); a load refusal now
         // surfaces as the child's reserved-`LOAD_*` exit status, not the
-        // `spawn` return. This table remembers each in_flight child's
-        // start-menu label so the `CHILD_TOKEN` reap below can name the app
-        // in the fail-loud diagnosis. An entry is removed when its child is
-        // reaped, so it never grows beyond the apps currently in flight.
-        let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
+        // `spawn` return. This table remembers each running child's label
+        // (so the `CHILD_TOKEN` reap below can name the app in the
+        // fail-loud diagnosis) and its spawn path (the attested bundle
+        // identity the Files button's idempotent open resolves against). An
+        // entry is removed when its child is reaped, so it never grows
+        // beyond the apps currently alive.
+        let mut launched = LaunchTable::new();
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -588,7 +575,7 @@ mod program {
                 // reap/report/teardown flow is the shared, host-tested
                 // `reap_launched`.
                 reap_launched(
-                    &mut in_flight,
+                    &mut launched,
                     || {
                         // Placeholder the kernel overwrites on a successful
                         // reap; only the pid and status are needed.
@@ -642,7 +629,7 @@ mod program {
                         &mut sink,
                         &mut identity,
                         &mut picker,
-                        &mut in_flight,
+                        &mut launched,
                     );
                 }
                 loop {
@@ -661,7 +648,7 @@ mod program {
                                 &mut sink,
                                 &mut identity,
                                 &mut picker,
-                                &mut in_flight,
+                                &mut launched,
                             );
                         }
                         Err(err) => return drain_fault(err),
@@ -694,9 +681,9 @@ mod program {
         sink: &mut RtEventSink,
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
-        in_flight: &mut alloc::collections::BTreeMap<u64, &'static str>,
+        launched: &mut LaunchTable,
     ) {
-        use tairix_desktop_session::{SessionEvent, ShellOutcome};
+        use tairix_desktop_session::ShellOutcome;
         match outcome {
             ShellOutcome::WindowManager(response) => match response {
                 InputResponse::Activated { window, local } => {
@@ -1002,39 +989,150 @@ mod program {
                 | InputResponse::Resized { .. }
                 | InputResponse::Ignored => {}
             },
-            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
-                action: MenuAction::Launch(launcher),
-                ..
-            })) if launcher == FILES_LAUNCHER => {
-                // Spawn the file browser under the session's own identity
-                // and ceiling; the child is admitted and returns its PID at
-                // once (asynchronous launch), loading on its own task. A
-                // synchronous refusal (stripped spawn capability, malformed
-                // path) is reported here; a load refusal surfaces later as
-                // the child's exit status, reported by the reap. Either way
-                // a denied optional action never ends the session.
-                record_launch(in_flight, spawn_app(FILES_RUN_PATH), FILES_LABEL);
+            ShellOutcome::Taskbar(TaskbarResponse::OpenFiles) => {
+                // The permanent Files button is idempotent: raise the
+                // desktop-launched file manager's window when one is up,
+                // let an in-flight launch finish undisturbed, and only
+                // spawn when no desktop-launched copy is running.
+                open_files(shell, compositor, server, windows, identity, launched);
             }
-            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
-                action: MenuAction::Launch(launcher),
-                ..
-            })) if launcher == TERMINAL_LAUNCHER => {
-                // The terminal, exactly as the file browser above: admitted
+            ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) => {
+                // Resolve the chosen entry's bundle through the catalog the
+                // popup was handed and spawn its `Run` binary: admitted
                 // immediately, loaded on its own task, refusal reported
                 // (synchronously here or by the reap), desktop carries on.
-                record_launch(in_flight, spawn_app(TERMINAL_RUN_PATH), TERMINAL_LABEL);
+                launch_library_entry(shell, &entry, launched);
             }
-            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
-                action: MenuAction::Launch(launcher),
-                ..
-            })) if launcher == VIEWER_LAUNCHER => {
-                // The file viewer, exactly as the apps above: admitted
-                // immediately, loaded on its own task, refusal reported
-                // (synchronously here or by the reap), desktop carries on.
-                record_launch(in_flight, spawn_app(VIEWER_RUN_PATH), VIEWER_LABEL);
+            ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary) => {
+                // Re-read the stores each time the popup opens, so an edit
+                // made through `applib` (or a fresh install) shows without
+                // restarting the session. Two small documents: cheap, and
+                // always current.
+                refresh_library(shell, compositor);
             }
             _ => {}
         }
+    }
+
+    /// The Files button's idempotent open: raise the running file manager's
+    /// window when the desktop launched one and it has a window up; do
+    /// nothing while its launch is still in flight (no window yet — the
+    /// press is already satisfied); spawn it only when no desktop-launched
+    /// copy is alive.
+    fn open_files(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        launched: &mut LaunchTable,
+    ) {
+        if let Some(pid) = launched.running_from(FILES_RUN_PATH) {
+            if let Some(wm) = window_of_pid(pid, server, windows, identity) {
+                let _ = shell.raise_window(compositor, wm);
+            }
+            return;
+        }
+        record_launch(
+            launched,
+            spawn_app(FILES_RUN_PATH.as_bytes()),
+            FILES_LABEL,
+            FILES_RUN_PATH,
+        );
+    }
+
+    /// The compositor window of the first served window owned by `pid`,
+    /// resolved through the window engine's attested ownership records —
+    /// never a window title or any other app-controlled data.
+    fn window_of_pid(
+        pid: u64,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+    ) -> Option<tairix_wm::WindowId> {
+        windows.served().find_map(|(ipc, wm)| {
+            let owner = server.owner_of(ipc)?;
+            (identity.pid_of(owner)? == pid).then_some(wm)
+        })
+    }
+
+    /// Resolve a program-library launch: the chosen entry's bundle names its
+    /// `Run` binary; spawn it and record the launch under the entry's
+    /// display name.
+    fn launch_library_entry(
+        shell: &DesktopShell,
+        entry: &tairix_proglib::EntryId,
+        launched: &mut LaunchTable,
+    ) {
+        let library = shell.session().taskbar().library();
+        let Some(chosen) = library.catalog().entry(entry) else {
+            // The popup only reports entries from the catalog it was
+            // handed, so a miss means the catalog changed underneath the
+            // click; refuse loudly rather than spawning a guessed path.
+            let _ = tairix_rt::stderr(
+                alloc::format!(
+                    "desktop: library entry {} is no longer catalogued\n",
+                    entry.as_str()
+                )
+                .as_bytes(),
+            );
+            return;
+        };
+        let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
+        let label = chosen.name().as_str();
+        record_launch(launched, spawn_app(run_path.as_bytes()), label, &run_path);
+    }
+
+    /// (Re)load the program library from its on-disk stores and hand the
+    /// resolved catalog to the taskbar's popup, reporting each unusable
+    /// store loudly on `stderr`.
+    fn refresh_library(shell: &mut DesktopShell, compositor: &mut Compositor) {
+        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
+        let loaded = load_library(&mut VfsFileReader, home);
+        for warning in &loaded.warnings {
+            let _ = tairix_rt::stderr(warning.as_bytes());
+        }
+        shell.set_library(compositor, loaded.catalog);
+    }
+
+    /// The session's live file-reading seam: whole-file reads through the
+    /// kernel VFS under the session's own kernel-attested identity, bounded
+    /// just past the program-library document cap — the largest document the
+    /// session reads through this seam — so no store can make the desktop
+    /// slurp an arbitrarily large file (the loader then refuses the
+    /// oversize).
+    struct VfsFileReader;
+
+    impl SessionFileReader for VfsFileReader {
+        fn read(&mut self, path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
+            let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // `ret >= 0` checked above; it is a descriptor number.
+            let fd = ret as u32;
+            let outcome = read_to_end(fd);
+            let _ = tairix_rt::fs_close(fd);
+            outcome
+        }
+    }
+
+    /// Read `fd` from the start until end-of-file, stopping one chunk past
+    /// the catalog cap (the caller treats the oversize as the whole-document
+    /// refusal it is).
+    fn read_to_end(fd: u32) -> Result<alloc::vec::Vec<u8>, Errno> {
+        let mut bytes = alloc::vec::Vec::new();
+        let mut chunk = [0u8; 1024];
+        while bytes.len() <= tairix_proglib::MAX_CATALOG_LEN {
+            let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
+                .map_err(Errno::from_syscall)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        Ok(bytes)
     }
 
     /// Spawn a desktop app under the session's own identity and console,
@@ -1063,22 +1161,19 @@ mod program {
     /// Record a just-issued launch. Asynchronous launch admits the child and
     /// returns its PID (`ret > 0`) before the image is loaded, so a
     /// successful admit only *starts* the launch: remember the PID under its
-    /// start-menu label so the `CHILD_TOKEN` reap can name the app if its
-    /// load is later refused (via the child's reserved-`LOAD_*` exit status).
-    /// A synchronous refusal (`ret < 0` — a stripped spawn capability or a
-    /// malformed path, decided before any child exists) is reported fail-loud
-    /// at once. Either way a denied optional launch never ends the session.
-    fn record_launch(
-        in_flight: &mut alloc::collections::BTreeMap<u64, &'static str>,
-        ret: i64,
-        label: &'static str,
-    ) {
+    /// display label (so the `CHILD_TOKEN` reap can name the app if its load
+    /// is later refused via the child's reserved-`LOAD_*` exit status) and
+    /// its spawn path (its attested bundle identity). A synchronous refusal
+    /// (`ret < 0` — a stripped spawn capability or a malformed path, decided
+    /// before any child exists) is reported fail-loud at once. Either way a
+    /// denied optional launch never ends the session.
+    fn record_launch(launched: &mut LaunchTable, ret: i64, label: &str, run_path: &str) {
         if ret < 0 {
             let _ =
                 tairix_rt::stderr(alloc::format!("desktop: {label} launch refused\n").as_bytes());
         } else {
             #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
-            in_flight.insert(ret as u64, label);
+            launched.record(ret as u64, label, run_path);
         }
     }
 

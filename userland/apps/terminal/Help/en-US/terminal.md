@@ -16,9 +16,9 @@ drawn with the active theme's palette. The terminal itself never
 echoes: echo and line editing belong to the shell, exactly as on a
 console.
 
-The terminal is launched from the desktop's start menu (the `Terminal`
-entry) or by name from a shell. It requires a running graphical
-session: without one, the window channel is unreachable and the
+The terminal is launched from the desktop's Program Library (the
+taskbar's Library button) or by name from a shell. It requires a running
+graphical session: without one, the window channel is unreachable and the
 terminal reports the refusal on the standard error stream and exits.
 
 The session ends when the shell exits (for example with `exit`) or

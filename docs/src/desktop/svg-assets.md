@@ -63,9 +63,9 @@ lists a loader iterates.
 The seam above takes asset *bytes*; reading them off disk needs a filesystem
 capability, so it is the desktop session's job, not the `no_std` libraries'
 (`AGENTS.md` §17.4 / §19.5). `userland/gui/session`'s `assets` module supplies
-the userland side: a `GraphicsAssetReader` (VFS-backed on a running system, an
-in-memory table in tests) reads one asset per kind and the module assembles the
-set:
+the userland side: a `SessionFileReader` (the session's one file-reading seam
+— VFS-backed on a running system, an in-memory table in tests) reads one
+asset per kind and the module assembles the set:
 
 - `DesktopSession::load_cursors` reads the asset named by the active theme's
   `CursorSet` for each cursor kind from

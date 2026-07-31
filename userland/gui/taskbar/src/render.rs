@@ -4,13 +4,25 @@
 //! live state into a premultiplied-alpha [`Surface`] sized to the bar, filling
 //! each region with a colour from the active theme's [`Palette`] and drawing
 //! the clock label and task titles on top with the shared [`BitmapFont`]. The
-//! surface is the window manager's to place and round: the taskbar paints a
-//! *rectangular* buffer and the compositor applies [`BarLayout::corner_radius`]
-//! through its
-//! single anti-aliased rounded-corner path, exactly as it rounds windows. There is no rounding — and no colour algebra — here.
+//! two permanent leading launchers are the shared `lib/controls`
+//! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
+//! their live hover/pressed
+//! state. The surface is the window manager's to place and round: the taskbar
+//! paints a *rectangular* buffer and the compositor applies
+//! [`BarLayout::corner_radius`] through its single anti-aliased
+//! rounded-corner path, exactly as it rounds windows. There is no rounding —
+//! and no colour algebra — here.
+//!
+//! [`TaskbarRenderer::render_library`] paints the open program-library popup:
+//! the shared [`Panel`](tairix_controls::Panel) chrome anchored back at the
+//! Library button, the search field, one shared list row per folder or
+//! entry, the scrollbar when the rows overflow, and the calm placeholder when
+//! nothing is listed. The theme is the taskbar's own
+//! ([`Taskbar::theme`]), so the geometry the input router hit-tests and the
+//! pixels painted here can never come from two different themes.
 //!
 //! Region rectangles are in screen space; each is translated into the
-//! surface's local space by subtracting the bar's origin. The translation
+//! surface's local space by subtracting the surface's origin. The translation
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
 //! nothing rather than panicking. A label is truncated to
 //! the characters that fit its region so text never spills into a neighbour.
@@ -24,8 +36,8 @@ use tairix_icon::{IconKind, IconSet};
 use tairix_raster::{Color, RasterCache, Surface};
 use tairix_theme::{Palette, TextRole, Theme};
 
-use crate::layout::{BarLayout, MenuLayout};
-use crate::menu::StartMenu;
+use crate::layout::BarLayout;
+use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::NotificationArea;
 use crate::taskbar::Taskbar;
 use crate::tasks::TaskList;
@@ -105,65 +117,139 @@ impl TaskbarRenderer {
         &self.icon_set
     }
 
-    /// Paint `taskbar` into a [`Surface`] using `theme`'s palette.
+    /// Paint `taskbar` into a [`Surface`] using its own theme's palette.
     ///
     /// Returns `None` only if the bar's pixel dimensions cannot be allocated
     /// (a surface that could never exist), so the caller fails closed rather
     /// than panicking. The window manager presents the
     /// returned surface and rounds it with [`BarLayout::corner_radius`].
     #[must_use]
-    pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
+    pub fn render(&mut self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let theme = taskbar.theme();
         let layout = taskbar.layout(scale);
         let mut icons = IconContext {
             cache: &mut self.icons,
             set: &self.icon_set,
             generation: self.icon_generation,
         };
-        paint(
+        let fonts = PanelFonts::resolve(theme, scale);
+        let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
+        let origin = layout.bar.origin;
+
+        surface.fill(theme.palette().surface_raised.into());
+        for (button, rect) in [
+            (taskbar.library_button(), layout.library),
+            (taskbar.files_button(), layout.files),
+        ] {
+            if rect.is_empty() {
+                continue;
+            }
+            button.render(
+                &mut surface,
+                local_rect(rect, origin),
+                scale,
+                theme,
+                fonts.text,
+            );
+        }
+
+        paint_body(
+            &mut surface,
             &layout,
             taskbar.tasks(),
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
-            PanelFonts::resolve(theme, scale),
+            fonts,
             &mut icons,
-        )
+        );
+        Some(surface)
     }
 
-    /// Paint the open start-menu popup into a [`Surface`] using `theme`'s
-    /// palette.
+    /// Paint the open program-library popup into a [`Surface`] using the
+    /// taskbar's own theme.
     ///
-    /// Returns `None` when the menu is closed (there is nothing to draw) or
-    /// when the popup's pixel dimensions cannot be allocated, so the caller
-    /// fails closed rather than panicking. The window
-    /// manager places the returned surface above the bar and rounds it with
-    /// [`MenuLayout::corner_radius`], exactly as it rounds the bar. The
-    /// popup draws only text, so it needs no glyph cache.
+    /// Returns `None` when the popup is closed (there is nothing to draw) or
+    /// when its pixel dimensions cannot be allocated, so the caller fails
+    /// closed rather than panicking. The window manager places the returned
+    /// surface above the bar and rounds it with
+    /// [`LibraryLayout::corner_radius`](crate::library::LibraryLayout::corner_radius),
+    /// exactly as it rounds the bar.
     #[must_use]
-    pub fn render_menu(&self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
-        if !taskbar.start_menu().is_open() {
+    pub fn render_library(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let popup = taskbar.library();
+        if !popup.is_open() {
             return None;
         }
-        let layout = taskbar.menu_layout(scale);
-        paint_menu(
-            &layout,
-            taskbar.start_menu(),
-            theme.palette(),
-            PanelFonts::resolve(theme, scale).text,
-        )
+        let theme = taskbar.theme();
+        let layout = taskbar.library_layout(scale);
+        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
+        let origin = layout.panel.origin;
+        let font = popup_font(theme, scale);
+        let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+
+        chrome_panel(local_point(layout.anchor, origin)).render(
+            &mut surface,
+            local_bounds,
+            scale,
+            theme,
+            font,
+        );
+        popup.search_field().render(
+            &mut surface,
+            local_rect(layout.search, origin),
+            scale,
+            theme,
+            font,
+        );
+
+        let row_focus = popup.focus() == LibraryFocus::Rows;
+        for &(index, rect) in &layout.rows {
+            let Some(row) = popup.rows().get(index) else {
+                continue;
+            };
+            let current = popup.current() == Some(index);
+            let hovered = popup.hover() == Some(index);
+            list_row(row, current, hovered, row_focus).render(
+                &mut surface,
+                local_rect(rect, origin),
+                scale,
+                theme,
+                font,
+            );
+        }
+
+        if let Some(placeholder) = popup.placeholder() {
+            draw_label(
+                &mut surface,
+                origin,
+                layout.viewport,
+                placeholder,
+                theme.palette().on_surface_muted.into(),
+                font,
+                Align::Centre,
+            );
+        }
+
+        if let Some(scrollbar) = layout.scrollbar {
+            popup
+                .scrollbar()
+                .render(&mut surface, local_rect(scrollbar, origin), scale, theme);
+        }
+        Some(surface)
     }
 }
 
 /// The two fonts the panel draws with, each resolved from the text role whose
 /// job it does.
 ///
-/// A task title and a menu row are ordinary interface text; the clock is a
+/// A task title and a popup row are ordinary interface text; the clock is a
 /// de-emphasised annotation, set a step smaller like every other caption on
 /// the desktop. Resolving both from the theme's roles keeps their relative
 /// size and weight the theme's decision rather than this screen's.
 #[derive(Copy, Clone)]
 struct PanelFonts {
-    /// Task titles and start-menu rows.
+    /// Task titles and the leading buttons' (unused) label font.
     text: BitmapFont,
     /// The clock readout.
     clock: BitmapFont,
@@ -180,10 +266,11 @@ impl PanelFonts {
     }
 }
 
-/// Fill every region, then draw the clock and task titles into a fresh
+/// Fill the task, notification, and clock regions of an already-created bar
 /// surface.
 #[allow(clippy::too_many_arguments)]
-fn paint(
+fn paint_body(
+    surface: &mut Surface,
     layout: &BarLayout,
     tasks: &TaskList,
     notifications: &NotificationArea,
@@ -191,28 +278,18 @@ fn paint(
     palette: &Palette,
     fonts: PanelFonts,
     icons: &mut IconContext<'_>,
-) -> Option<Surface> {
-    let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
+) {
     let origin = layout.bar.origin;
-
-    surface.fill(palette.surface_raised.into());
-    fill_region(
-        &mut surface,
-        origin,
-        layout.start_button,
-        palette.accent.into(),
-    );
-
     for (slot, entry) in layout.tasks.iter().zip(tasks.entries()) {
         let focused = tasks.focused() == Some(entry.id);
         fill_region(
-            &mut surface,
+            surface,
             origin,
             *slot,
             task_fill(palette, focused, entry.minimised),
         );
         draw_label(
-            &mut surface,
+            surface,
             origin,
             *slot,
             &entry.title,
@@ -224,7 +301,7 @@ fn paint(
 
     for (slot, icon) in layout.notifications.iter().zip(notifications.icons()) {
         draw_icon(
-            &mut surface,
+            surface,
             origin,
             *slot,
             &icon.asset,
@@ -234,7 +311,7 @@ fn paint(
     }
 
     draw_label(
-        &mut surface,
+        surface,
         origin,
         layout.clock,
         clock_label,
@@ -242,36 +319,6 @@ fn paint(
         fonts.clock,
         Align::Centre,
     );
-
-    Some(surface)
-}
-
-/// Fill the popup panel, then draw each entry's label into a fresh surface.
-fn paint_menu(
-    layout: &MenuLayout,
-    menu: &StartMenu,
-    palette: &Palette,
-    font: BitmapFont,
-) -> Option<Surface> {
-    if layout.panel.is_empty() {
-        return None;
-    }
-    let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-    let origin = layout.panel.origin;
-
-    surface.fill(palette.surface_raised.into());
-    for (row, entry) in layout.entries.iter().zip(menu.entries()) {
-        draw_label(
-            &mut surface,
-            origin,
-            *row,
-            entry.label(),
-            palette.on_surface.into(),
-            font,
-            Align::Leading,
-        );
-    }
-    Some(surface)
 }
 
 /// Where a label sits along the main axis of its region.
@@ -279,7 +326,8 @@ fn paint_menu(
 enum Align {
     /// Padded in from the leading (left/top) edge — used for task titles.
     Leading,
-    /// Centred within the region — used for the clock.
+    /// Centred within the region — used for the clock and the popup's calm
+    /// placeholder.
     Centre,
 }
 
@@ -409,6 +457,24 @@ fn fill_region(surface: &mut Surface, origin: Point, rect: Rect, color: Color) {
     let x = local(rect.left(), origin.x);
     let y = local(rect.top(), origin.y);
     surface.fill_rect(x, y, rect.width, rect.height, color);
+}
+
+/// Translate a screen-space rectangle into surface-local space.
+fn local_rect(rect: Rect, origin: Point) -> Rect {
+    Rect::new(
+        rect.left().saturating_sub(origin.x),
+        rect.top().saturating_sub(origin.y),
+        rect.width,
+        rect.height,
+    )
+}
+
+/// Translate a screen-space point into surface-local space.
+fn local_point(point: Point, origin: Point) -> Point {
+    Point::new(
+        point.x.saturating_sub(origin.x),
+        point.y.saturating_sub(origin.y),
+    )
 }
 
 /// Translate a screen-space coordinate into bar-local space, clamping a

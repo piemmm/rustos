@@ -37,22 +37,24 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T3 done**; T4 is next. The library **data** layer is
-landed end to end: `lib/proglib` (T1 — taxonomy, entry model, store grammar,
-fail-closed parse, canonical render, `merge`, `reconcile`, fuzzed by
-`tests/fuzz_proglib.rs`), the `applib` admin command (T2 —
+`in progress` — **T1–T5 done**; T6 (pins) is next. The library **data**
+layer is landed end to end: `lib/proglib` (T1 — taxonomy, entry model, store
+grammar, fail-closed parse, canonical render, `merge`, `reconcile`, fuzzed
+by `tests/fuzz_proglib.rs`), the `applib` admin command (T2 —
 `userland/apps/applib`), the manifest `library` listing + `applib rescan`
-discovery, and the image-build catalog seeding (T3 — `tools/mkimage`).
-Everything else below (T4 onward — the UI) is unstarted. The rest of the
-starting point is Stage 7 as it stands:
-`tairix-taskbar` models the start button / task list / notification area /
-clock and emits typed `TaskbarResponse`s; `tairix-session` presents the bar
-through the compositor, owns the theme, and resolves those responses
+discovery, and the image-build catalog seeding (T3 — `tools/mkimage`). The
+library **UI** layer is landed too: the two permanent leading launchers and
+the program-library popup (T4/T5 — see their done-state sections below); the
+generic start menu is gone. The rest of the starting point is Stage 7 as it
+stands: `tairix-taskbar` models the launchers / popup / task list /
+notification area / clock and emits typed `TaskbarResponse`s;
+`tairix-session` presents the bar and popup through the compositor, owns the
+theme, loads/merges the catalog stores, and resolves those responses
 (`plans/FIX-DESKTOP.md` async launch is done); `lib/controls::switchboard`
 already renders a `SwitchboardModel` → `SwitchboardAction` from the shared
 Reactive Alloy controls; the `files` app is a live windowed browser
-(`plans/APPWIN.md` AW3/AW5). This plan wires those together and fills the
-gaps.
+(`plans/APPWIN.md` AW3/AW5). This plan wires the remaining pieces together
+and fills the gaps.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -140,11 +142,11 @@ gaps.
 - Vertical / top / right edges reflow along the cross axis by the existing
   `Edge`/`Orientation` model; "left/right" above is main-axis leading/trailing.
 
-The session controls that live on the start menu today (Log Out, Lock, Shut
-Down, Restart) **move into the Switchboard's system quick-actions menu**
-(desktop1 panel 5, T13). The leading icon is repurposed from a generic "start
-menu" into the **Program Library launcher**; the appearance (light/dark)
-toggle likewise moves under Switchboard → System.
+The generic start menu is retired (T4 — done): the leading icon is the
+**Program Library launcher**, and the session controls (Log Out, Lock, Shut
+Down, Restart) and the appearance (light/dark) toggle arrive in the
+**Switchboard's system quick-actions menu** (desktop1 panel 5, T13) — until
+then theme switching is programmatic (`DesktopSession::set_theme`).
 
 ## 2. Crates and layering (§17.4)
 
@@ -406,65 +408,101 @@ Tested in `lib/proglib` (reconcile semantics), `userland/apps/applib`
 and the shipped-store read-back off a built image), and the composer
 (manifest acceptance/refusal, wire round-trip, signing).
 
-## T4 — Taskbar permanent leading icons: Library + File Manager
+## T4 — Taskbar permanent leading icons: Library + File Manager — **done**
 
-Rework the taskbar's leading region from "one start-menu button" into the two
-permanent, fixed-order icons.
+The bar's leading region is the two permanent, fixed-order launchers.
 
-**Deliverables**
-- `userland/gui/taskbar`: extend `TaskbarConfig`/`BarLayout` with the two
-  leading slots (`Library`, `Files`), each an `IconButton` (`lib/controls`)
-  drawn with a `lib/icon` glyph. `hit_test` returns a `Hit::Library` /
-  `Hit::Files`; `TaskbarInput` turns a primary press into a typed
-  `TaskbarResponse::OpenLibrary` / `TaskbarResponse::OpenFiles`. Neither is
-  reorderable or removable; both survive a degenerate size fail-closed
-  (`Rect::EMPTY`, never hit).
-- The former generic "start menu" is retired: session controls and the
-  appearance toggle move to Switchboard → System (T13). The library popup
-  (T5) replaces the start-menu popup; the `StartMenu`/`MenuLayout` code is
-  either repurposed into the library popup or deleted (§2.14 — no dead code).
-- `userland/gui/session`: resolve `OpenFiles` by async-launching the `files`
-  bundle on its **default view** (`plans/APPWIN.md`/`plans/NEW-FILEMANAGER.md`)
-  — if a files window is already open, raise it instead of spawning a second
-  (idempotent open). Resolve `OpenLibrary` by presenting the library popup
-  (T5).
+What now stands:
 
-**Tests**: layout places Library then Files at the leading end at every scale
-/ edge / orientation; hit-test + input routing produce the right typed
-responses; degenerate size fails closed; session launches/raises files
-idempotently (host test over the async-launch seam).
+- `userland/gui/taskbar`: `TaskbarConfig.launcher_extent` sizes the two
+  leading slots; `BarLayout.library`/`.files` place them (clipped
+  fail-closed to `Rect::EMPTY` on a degenerate screen — never hit);
+  `Hit::Library`/`Hit::Files` and the typed
+  `TaskbarResponse::OpenLibrary`/`OpenFiles` route a primary press. The
+  buttons are `lib/controls` `IconButton`s — Library is the accent-filled
+  `Primary` invoker carrying the new `lib/icon` `Library` glyph (a
+  three-by-three tile grid), pressed-in while its popup is open; Files is a
+  quiet `Neutral` folder glyph — with hover feedback driven through the
+  bar's repaint latch (`Taskbar::take_repaint`), so a hover repaints without
+  a per-frame present. The bar owns a copy of the active `Theme`
+  (layout/hit/paint read one definition) and the renderer signature dropped
+  its separate theme parameter.
+- The generic start menu is **gone** (`StartMenu`/`MenuLayout`/`MenuAction`/
+  `SessionControl` deleted, §2.14): the session-control rows were wired to
+  nothing in the production session (only the taskbar model and tests
+  consumed them), so nothing was lost; their real home arrives with the
+  Switchboard's System menu (T13). The appearance toggle left the UI with
+  the menu — the decision (owner-confirmed) is **no interim seam**: theme
+  switching stays programmatic (`DesktopSession::set_theme`) until T13.
+- `userland/gui/session`: `OpenFiles` is resolved **idempotently** — the
+  `LaunchTable` records every desktop-launched child's PID + label + spawn
+  path (its attested bundle identity; no app-controlled data), so a press
+  raises the running file manager's served window (`window_of_pid` via the
+  window engine's kernel-attested ownership + `DesktopShell::raise_window`),
+  lets an in-flight launch finish undisturbed, and spawns only when no copy
+  is alive. `OpenLibrary` presents the T5 popup and re-reads the stores.
 
-**Done when**: the two permanent icons render, route, and open their targets;
-gate green.
+Tested in the taskbar suite (layout/hit/scale/edges/degenerate + both
+buttons' pixels), the session suite (routing, raise-vs-launch, launch
+table), and the AW3/AW4 QEMU vertical, whose pointer script now clicks the
+Files button directly and reconstructs the same production layout code.
 
-## T5 — Program Library popup (folder-organised launcher)
+## T5 — Program Library popup (folder-organised launcher) — **done**
 
-The clickable, folder-organised launcher the Library icon opens.
+The folder-organised launcher the Library button opens.
 
-**Deliverables**
-- A `lib/controls`-composed popup surface (a `Panel` of `MenuItem`/`ListRow`
-  folders, each expanding to its sorted entries; a `ScrollBar` when it
-  overflows; optional `SearchField` to filter by name). It is presented as a
-  compositor popup window by the session (like today's start-menu popup), NOT
-  a taskbar-private widget. Full keyboard navigation, focus fields, and
-  reduced-motion per `plans/GUI-CONTROLS-DESIGN.md`.
-- The popup is built from a merged `Catalog` (`lib/proglib::merge` of machine
-  + user stores) the **session** reads and hands to the popup as typed view
-  models (the taskbar/popup never touches the VFS). Selecting an entry emits
-  a typed `LibraryLaunch { entry_id }`; the session resolves the bundle path
-  and async-launches it (`appmgr`, `plans/FIX-DESKTOP.md`), reporting a
-  refusal loudly (`userland/gui/session`'s launch-failure path).
-- Right-click on a library entry offers *Pin to taskbar* (T7) as a typed
-  action; no launch happens on that path.
-- Empty folders are hidden; an empty library shows a calm "No applications"
-  state, never an error.
+What now stands:
 
-**Tests**: folder/entry rendering from a fixture catalog; sort + hide-empty;
-keyboard nav; launch emits the right entry id; denied/failed launch is loud;
-search filter; both themes + high-contrast.
+- `userland/gui/taskbar::library` — `LibraryPopup`, a pure model over the
+  **resolved** `Catalog` the session hands it (`set_catalog`; the popup
+  never touches the VFS), composed from `lib/controls`: a `Panel` anchored
+  back at the Library button, a `SearchField` filter, one shared `ListRow`
+  per folder/entry (folders carry open/closed glyphs and a trailing count;
+  entries indent beneath them), and a `ScrollBar` on overflow. Folders
+  follow the closed taxonomy order, entries sort by display name, empty
+  folders are hidden, and an empty library / empty filter shows a calm
+  placeholder ("No programs are catalogued" / "No matching programs").
+  Opening is deterministic (search cleared, all folders expanded, cursor and
+  scroll at top, keyboard on search). Geometry (`Taskbar::library_layout`)
+  opens outward on every edge, clamps to the screen, sizes to the rows
+  capped by the available space, and **probes** the shared `Panel` chrome
+  rather than re-deriving it; the WM rounds the panel with the same radius
+  the chrome draws (§2.2). Controls are static renderers, so reduced motion
+  holds by construction.
+- **Full keyboard model**: `Tab` cycles search↔rows; arrows wrap, Home/End/
+  PageUp/PageDown jump with the view following the cursor; Enter/space
+  activates (folder toggles, entry launches); Left/Right fold/climb/descend;
+  typing anywhere routes into the search (type-to-filter, case-insensitive);
+  Enter in the search launches the first match; Escape clears then
+  dismisses. While open the popup is modal at both routing layers (the
+  taskbar router and the session router): presses, releases, scroll, and
+  keys all route in; click-away (any button) dismisses without acting on
+  what it hit; WM motion outcomes are discarded so nothing is delivered to
+  windows beneath.
+- `userland/gui/session` — `library::load_library` reads the machine store +
+  the user's overlay through the one `SessionFileReader` seam (the renamed
+  graphics-asset seam — one file-read seam, one production impl), parses
+  fail-closed, and merges; an absent store is silently empty, an unusable
+  one contributes an empty catalog plus a ready-to-print `stderr` warning.
+  The `Run` binary loads at bring-up and **re-reads on every popup open**
+  (so `applib` edits show live), hands the catalog over with
+  `DesktopShell::set_library`, and resolves `LibraryLaunch { entry }` back
+  through that catalog to the entry's `Run` path — async-spawned, refusals
+  reported loudly by the shared reap path. One present per event: acted
+  responses and the drained repaint latch share a single present site.
+- **Deliberate deviation, recorded**: the staged text had T5 "offer" the
+  right-click *Pin to taskbar* typed action with its session path arriving
+  in T7. A typed action emitted before any consumer exists is speculative
+  surface (§2.4/§23.3), so the pin affordance — context surface, typed
+  action, and session path — lands **whole in T6/T7** with the pin store.
+  Right-press inside the panel is claimed (modal) and does nothing today.
 
-**Done when**: the library opens, browses by folder, launches apps, and
-offers pin — all from disk data; gate green.
+Tested in the taskbar suite (rows/sort/hide-empty/placeholders, keyboard
+nav, filtering, folds, wheel + scrollbar, dark/light/high-contrast pixel
+probes), the session suite (loader fail-closed matrix, modality, launch
+flow end-to-end, open-popup refresh), and the AW4 QEMU vertical, which now
+opens the popup from the planted machine store and launches the terminal
+through its catalog entry (keyed by bundle identity, not display text).
 
 ## T6 — Pinned shortcuts: model, store, and taskbar region
 

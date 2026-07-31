@@ -1,11 +1,11 @@
-//! Routing pointer input into taskbar actions.
+//! Routing device input into taskbar actions.
 //!
-//! The [`TaskbarInput`] router turns a stream of device-level pointer
+//! The [`TaskbarInput`] router turns a stream of device-level
 //! [`InputEvent`]s into actions against a [`Taskbar`]: a primary-button press
 //! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
-//! and drives the model — toggling the start menu, applying the
-//! click-to-activate / minimise rule to a task, or reporting a press on a
-//! notification icon or the clock.
+//! and drives the model — opening the program-library popup, reporting the
+//! Files button, applying the click-to-activate / minimise rule to a task,
+//! or reporting a press on a notification icon or the clock.
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
 //! consumes the **same** shared [`tairix_input`] event vocabulary, so the
@@ -14,33 +14,48 @@
 //! applies presses at that position, and never panics: a press that misses
 //! every region changes nothing.
 //!
-//! While the start menu is open the router treats it as modal: a primary press
-//! inside the popup ([`Taskbar::menu_layout`]) activates the entry under the
-//! pointer, a press on the start button toggles the menu shut, and a press
-//! anywhere else dismisses the menu (the standard click-away behaviour)
-//! without also acting on what it landed on — one click does one thing.
+//! While the program-library popup is open the router treats it as modal and
+//! consumes the whole event stream — presses, releases, scroll, and keys all
+//! route into the popup ([`LibraryPopup`](crate::LibraryPopup)); a press on
+//! the Library button toggles the popup shut, and a press outside the panel
+//! dismisses it (the standard click-away behaviour) without also acting on
+//! what it landed on — one click does one thing. The popup's key model gives
+//! every action a keyboard path; the desktop routes key events here only
+//! while the popup is open, so the focused window's keys are untouched
+//! otherwise.
 
 use tairix_geometry::{Point, Scale};
 use tairix_input::{InputEvent, PointerButton};
+use tairix_proglib::EntryId;
 
 use crate::layout::Hit;
-use crate::menu::{MenuAction, MenuEntryId};
+use crate::library::PopupOutcome;
 use crate::notifications::IconId;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
 
-/// What a [`TaskbarInput`] press did to the taskbar.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// What a [`TaskbarInput`] event did to the taskbar.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskbarResponse {
-    /// The event changed no taskbar state (a non-primary button, a release,
-    /// pointer motion, a key event, or a press that missed every region).
+    /// The event changed no state the embedder must act on. Pixel-only
+    /// changes (a hover, a popup scroll or edit) latch the taskbar's repaint
+    /// flag instead ([`Taskbar::take_repaint`]).
     Ignored,
-    /// The start button was pressed, toggling the start menu. `open` is the
-    /// menu's new state.
-    StartMenuToggled {
-        /// `true` if the menu is now showing.
-        open: bool,
+    /// The Library button opened the program-library popup.
+    OpenLibrary,
+    /// The program-library popup closed without launching anything — the
+    /// Library button toggled it shut, a press outside dismissed it, or
+    /// `Escape` was pressed.
+    LibraryDismissed,
+    /// An entry in the program-library popup was chosen, closing the popup.
+    /// The embedder resolves the entry's bundle and launches it.
+    LibraryLaunch {
+        /// The catalog identifier of the chosen entry.
+        entry: EntryId,
     },
+    /// The Files button was pressed. The embedder opens the file manager —
+    /// raising an already-open files window rather than launching a second.
+    OpenFiles,
     /// A task slot was pressed, applying the click-to-activate / minimise
     /// rule to that task.
     TaskActivated {
@@ -56,20 +71,9 @@ pub enum TaskbarResponse {
     },
     /// The clock was pressed.
     ClockPressed,
-    /// An entry inside the open start menu was selected, which closed the
-    /// menu. The caller performs the entry's `action`.
-    MenuEntrySelected {
-        /// The entry that was selected.
-        id: MenuEntryId,
-        /// The action the selected entry triggers.
-        action: MenuAction,
-    },
-    /// A press outside the open start menu (but not on the start button)
-    /// dismissed it, changing nothing else.
-    StartMenuDismissed,
 }
 
-/// Routes pointer input into [`Taskbar`] actions.
+/// Routes device input into [`Taskbar`] actions.
 ///
 /// The router's only state is the current pointer position, updated by
 /// [`InputEvent::PointerMoved`]; presses act at that position, exactly as a
@@ -92,27 +96,34 @@ impl TaskbarInput {
         self.pointer
     }
 
-    /// Process one input `event` against `taskbar`, hit-testing presses at the
-    /// desktop `scale` (the compositor's output density),
-    /// returning what changed.
+    /// Process one input `event` against `taskbar`, hit-testing at the
+    /// desktop `scale` (the compositor's output density), returning what
+    /// changed.
     ///
-    /// Only a primary-button press acts; pointer motion updates the tracked
-    /// position, and every other event is [`TaskbarResponse::Ignored`].
+    /// With the popup closed only a primary-button press acts; pointer
+    /// motion updates the tracked position (and the leading buttons' hover
+    /// feedback), and every other event is [`TaskbarResponse::Ignored`].
+    /// With the popup open the whole stream routes into it (see the
+    /// [module docs](self)).
     pub fn handle(
         &mut self,
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
     ) -> TaskbarResponse {
+        if let InputEvent::PointerMoved { to } = event {
+            self.pointer = to;
+            taskbar.track_hover(to, scale);
+        }
+        if taskbar.library().is_open() {
+            return self.route_to_popup(event, taskbar, scale);
+        }
         match event {
-            InputEvent::PointerMoved { to } => {
-                self.pointer = to;
-                TaskbarResponse::Ignored
-            }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => self.press_primary(taskbar, scale),
-            InputEvent::PointerPressed { .. }
+            InputEvent::PointerMoved { .. }
+            | InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. }
             | InputEvent::PointerScrolled { .. }
             | InputEvent::KeyPressed { .. }
@@ -120,26 +131,18 @@ impl TaskbarInput {
         }
     }
 
-    /// Handle a primary-button press at the current pointer position,
-    /// hit-tested at the desktop `scale`.
+    /// Handle a primary-button press at the current pointer position with
+    /// the popup closed, hit-tested at the desktop `scale`.
     fn press_primary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
-        let hit = taskbar.hit_test(self.pointer, scale);
-
-        // While the menu is open it is modal: every press except one on the
-        // start button (which toggles it shut, handled below) routes to the
-        // popup or dismisses the menu.
-        if taskbar.start_menu().is_open() && hit != Some(Hit::StartButton) {
-            return self.press_open_menu(taskbar, scale);
-        }
-
-        let Some(hit) = hit else {
+        let Some(hit) = taskbar.hit_test(self.pointer, scale) else {
             return TaskbarResponse::Ignored;
         };
         match hit {
-            Hit::StartButton => {
-                let open = taskbar.start_menu_mut().toggle();
-                TaskbarResponse::StartMenuToggled { open }
+            Hit::Library => {
+                taskbar.open_library();
+                TaskbarResponse::OpenLibrary
             }
+            Hit::Files => TaskbarResponse::OpenFiles,
             Hit::Task(index) => {
                 let Some(id) = taskbar.tasks().entries().get(index).map(|entry| entry.id) else {
                     return TaskbarResponse::Ignored;
@@ -162,25 +165,57 @@ impl TaskbarInput {
         }
     }
 
-    /// Handle a primary press while the start menu is open: select the entry
-    /// under the pointer, or dismiss the menu if the press misses the popup.
-    fn press_open_menu(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
-        let layout = taskbar.menu_layout(scale);
-        let Some(index) = layout.hit_test(self.pointer) else {
-            taskbar.start_menu_mut().close();
-            return TaskbarResponse::StartMenuDismissed;
+    /// Route one event into the open program-library popup.
+    ///
+    /// A primary press on the Library button toggles the popup shut before
+    /// the popup sees the event — the button is the popup's own invoker, so
+    /// it is the one bar region a modal popup does not swallow.
+    fn route_to_popup(
+        &mut self,
+        event: InputEvent,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+    ) -> TaskbarResponse {
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            }
+        ) && taskbar.hit_test(self.pointer, scale) == Some(Hit::Library)
+        {
+            taskbar.close_library();
+            return TaskbarResponse::LibraryDismissed;
+        }
+
+        let layout = taskbar.library_layout(scale);
+        let theme = taskbar.theme().clone();
+        let outcome = match event {
+            InputEvent::KeyPressed { key, modifiers } => {
+                taskbar.library_mut().route_key(key, modifiers, &layout)
+            }
+            InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
+            ref pointer_event => taskbar.library_mut().route_pointer(
+                pointer_event,
+                self.pointer,
+                &layout,
+                &theme,
+                scale,
+            ),
         };
-        let Some(id) = taskbar
-            .start_menu()
-            .entries()
-            .get(index)
-            .map(|entry| entry.id)
-        else {
-            return TaskbarResponse::Ignored;
-        };
-        match taskbar.start_menu_mut().activate(id) {
-            Some(action) => TaskbarResponse::MenuEntrySelected { id, action },
-            None => TaskbarResponse::Ignored,
+        match outcome {
+            PopupOutcome::Ignored => TaskbarResponse::Ignored,
+            PopupOutcome::Changed => {
+                taskbar.request_repaint();
+                TaskbarResponse::Ignored
+            }
+            PopupOutcome::Launch(entry) => {
+                taskbar.close_library();
+                TaskbarResponse::LibraryLaunch { entry }
+            }
+            PopupOutcome::Dismiss => {
+                taskbar.close_library();
+                TaskbarResponse::LibraryDismissed
+            }
         }
     }
 }

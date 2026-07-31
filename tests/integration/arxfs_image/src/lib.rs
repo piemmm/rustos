@@ -298,7 +298,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked).
 pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
-    build_users_root_image_with_key(&FIXTURE_VOLUME_KEY)
+    build_users_root_image_with_key(&FIXTURE_VOLUME_KEY, &[])
 }
 
 /// Build the users-root volume under an arbitrary `volume_key` — the same
@@ -309,13 +309,24 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// here with [`FIXTURE_VOLUME_KEY`] (one authoring
 /// path).
 ///
+/// `root_files` are extra documents planted on this volume, each
+/// `(path_components, bytes)` relative to the volume root with every
+/// intermediate directory created ([`plant_nested_file`]) — how a vertical
+/// lays root-volume state the writable `/System/Settings` child mount
+/// rebases onto (e.g. the seeded program-library catalog,
+/// `plans/NEW-TASKBAR.md` T3), exactly where `tools/mkimage` writes it on
+/// a shipped image.
+///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the driver; a fixture users
 /// database that violates the `users-v1` bounds surfaces as
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked).
-pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>, DriverError> {
+pub fn build_users_root_image_with_key(
+    volume_key: &VolumeKey,
+    root_files: &[(&[&[u8]], &[u8])],
+) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let groups_text = groups_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
@@ -380,6 +391,9 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
                 return Err(DriverError::DeviceFault);
             }
         }
+    }
+    for (components, bytes) in root_files {
+        plant_nested_file(&mut fs, root, components, bytes)?;
     }
     fs.flush()?;
     Ok(fs.into_block().into_bytes())

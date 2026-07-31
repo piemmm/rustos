@@ -2,15 +2,13 @@
 
 The taskbar (`userland/gui/taskbar`, crate `tairix-taskbar`) is the
 GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
-`PLAN.md` Stage 7). This page describes the **layout, model, and rendering**:
-the geometry of every region, pointer hit-testing for input routing, the
-start-menu / task-list / notification-area state machines, and painting those
-regions — including the clock label and task-title **text** — into a themed
-pixel surface, the **start-menu popup** geometry and rendering, plus
-**routing** pointer presses into taskbar actions (including selecting an entry
-in the open menu), and drawing **notification-icon artwork** (scalable,
-themeable vector glyphs). The live window-manager IPC builds on this model in
-later increments.
+`PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). This page describes the **layout,
+model, and rendering**: the geometry of every region, pointer hit-testing for
+input routing, the program-library popup / task-list / notification-area
+state machines, and painting those regions — including the clock label and
+task-title **text** — into a themed pixel surface, plus **routing** pointer,
+scroll, and key events into taskbar actions and drawing **notification-icon
+artwork** (scalable, themeable vector glyphs).
 
 ## Where it sits
 
@@ -19,12 +17,22 @@ As a `userland/gui/*` crate the taskbar depends only on `lib/*`: the shared
 `tairix-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
 window manager also paints with), the shared `tairix-font` text rasteriser
 (the built-in bitmap face and glyph blitter, `AGENTS.md` §16.4), the shared
-`tairix-input` pointer-event vocabulary (the same `PointerButton`/`InputEvent`
-the window manager routes), and the shared [`tairix-theme`](theming.md)
-definition. It never depends on the window manager or on any sibling userland
-crate, and nothing depends on it in turn (`AGENTS.md` §17.4, §17.3) — the
-desktop is an optional, one-way-dependent frontend, so a headless image simply
-omits it.
+`tairix-input` event vocabulary (the same `PointerButton`/`InputEvent`/`Key`
+the window manager routes), the shared Reactive Alloy control vocabulary
+(`tairix-controls`, `plans/GUI-CONTROLS-DESIGN.md` — the leading launcher
+buttons and the popup's panel, search field, list rows, and scrollbar; the
+[widget gallery](widgets.md) is its worked reference), the
+program-library catalog engine ([`tairix-proglib`](../lib/proglib.md) — the
+typed `Catalog` the popup lists), and the shared
+[`tairix-theme`](theming.md) definition. It never depends on the window
+manager or on any sibling userland crate, and nothing depends on it in turn
+(`AGENTS.md` §17.4, §17.3) — the desktop is an optional, one-way-dependent
+frontend, so a headless image simply omits it.
+
+The taskbar holds no authority and performs no I/O: pressing a launcher or
+choosing a library entry only *reports* a typed `TaskbarResponse`, and the
+[session glue](session.md) — which reads the catalog stores and holds the
+spawn capability — resolves and performs the action.
 
 ## Layout
 
@@ -36,10 +44,13 @@ code is otherwise orientation-agnostic.
 
 From the leading end to the trailing end:
 
-- **Start button** — a fixed-width button at the leading end that opens the
-  start menu.
-- **Task list** — the flexible middle region, between the start button and
-  the notification area, holding one fixed-width slot per running task.
+- **Library button** — the first of the two permanent leading launchers:
+  the accent-filled invoker that opens the program-library popup.
+- **Files button** — the second permanent launcher: a quiet folder-glyph
+  button that opens the file manager. The two leading buttons are fixed —
+  never reordered, never removable (`plans/NEW-TASKBAR.md` T4).
+- **Task list** — the flexible middle region, between the leading launchers
+  and the notification area, holding one fixed-width slot per running task.
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
 - **Clock** — anchored to the trailing end. Its display text is held by a
@@ -50,11 +61,11 @@ From the leading end to the trailing end:
 `BarLayout::compute` turns the config plus the current task and icon counts
 into the screen `Rect` of every region. All arithmetic saturates, so a
 pathological screen size or extent fails closed *inside* the bar rather than
-wrapping (`AGENTS.md` §2.9); a task or icon slot that does not fit its region
-is `Rect::EMPTY` and therefore never hit. `BarLayout::hit_test` maps a
-pointer to the `Hit` element under it (start button, a task index, a
-notification index, or the clock), which is what input routing dispatches
-(see *Input routing*).
+wrapping (`AGENTS.md` §2.9); a launcher, task, or icon slot that does not fit
+its region is `Rect::EMPTY` and therefore never hit. `BarLayout::hit_test`
+maps a pointer to the `Hit` element under it (the Library button, the Files
+button, a task index, a notification index, or the clock), which is what
+input routing dispatches (see *Input routing*).
 
 ## Rounded edges
 
@@ -64,14 +75,29 @@ The taskbar supports rounded corners, but it does **not** draw them itself.
 its single anti-aliased rounded-corner path, exactly as it rounds windows.
 There is no second rounded-corner implementation (`AGENTS.md` §2.2).
 
+## The owned theme
+
+The bar owns a copy of the active `Theme` (`Taskbar::theme`), adopted at
+construction and swapped by `Taskbar::apply_theme`. Layout, hit-testing, and
+painting all read that one copy, so the radius a hit-test assumes and the
+radius the painter draws can never come from two different themes. It also
+carries a **repaint latch**: pixel-only state changes (a launcher hover, a
+popup scroll or edit, a theme switch) set it, and the embedder drains it with
+`Taskbar::take_repaint` to re-present exactly when something changed — one
+present per visual change, no per-frame busy repainting (`AGENTS.md` §2.16).
+
 ## Rendering
 
 `TaskbarRenderer::render` paints the taskbar into a `tairix-raster` `Surface`
-sized to the bar, filling each region with a colour role from the active
-theme's `Palette`:
+sized to the bar using the taskbar's own theme, filling each region with a
+colour role from the `Palette`:
 
 - the bar background is the **raised surface** colour;
-- the start button is the **accent**;
+- the **Library button** is the shared `tairix-controls` `IconButton` in the
+  `Primary` role — the accent-filled plate carrying the nine-tile library
+  glyph — pressed in while its popup is open, hover-lit under the pointer;
+- the **Files button** is a quiet (`Neutral`) `IconButton` carrying the
+  folder glyph;
 - each task slot is the **accent** when it is the focused, non-minimised task,
   the **raised surface** colour (so it recedes into the bar) when minimised,
   and the plain **surface** colour otherwise — which the palette guarantees
@@ -95,20 +121,17 @@ algebra is duplicated here (`AGENTS.md` §2.2).
 The surface is rectangular: the taskbar paints no corners. The window manager
 presents it and applies `BarLayout::corner_radius` through its single
 anti-aliased rounded-corner path, exactly as it rounds windows (`AGENTS.md`
-§2.2). The colour algebra is not duplicated here either — `tairix-raster`
-owns the one premultiplied-alpha implementation and the
-`From<Rgba> for Color` edge. Region rectangles are screen-space; each is
-translated into the bar's local surface space, the translation saturates, and
-`fill_rect` clips, so a degenerate layout paints nothing rather than
-panicking (`AGENTS.md` §2.9). Switching themes simply re-renders with the new
-palette.
+§2.2). Region rectangles are screen-space; each is translated into the bar's
+local surface space, the translation saturates, and `fill_rect` clips, so a
+degenerate layout paints nothing rather than panicking (`AGENTS.md` §2.9).
+Switching themes simply re-renders with the new palette.
 
 `TaskbarRenderer` is a small stateful object — the region fills, clock, and
 task titles are cheap to repaint every frame, but the vector notification
 glyphs are not, so it holds a `tairix-raster` `RasterCache` of rasterised
 glyphs across frames. The renderer is the right home for that state: the
-`Taskbar` model stays pure data. `render_menu` needs no cache (the popup draws
-only text), so it stays a `&self` method.
+`Taskbar` model stays pure data. `render_library` (the popup painter) needs
+no cache of its own, so it stays a `&self` method.
 
 ## Notification icons
 
@@ -127,63 +150,82 @@ rather than panicking (`AGENTS.md` §2.9).
 
 Rasterising a glyph is the expensive step, so the `TaskbarRenderer` does it
 only once per tint and size: its `RasterCache` is keyed by `IconKind` within a
-`(tint, pixel-size)` epoch, so repeated frames reuse the cached glyph and only
-a theme change (new tint) or a scale change (new size) re-rasterises — the
-SVG-first "convert once, re-render only on a scale or theme change" rule
-(`AGENTS.md` §10), sharing the one cache the window manager uses for cursors
-(`AGENTS.md` §2.2). See [SVG asset decoding](svg-assets.md) for the caching
-layer and [Desktop icons](icons.md) for the vector representation and the
-glyph set.
+`(tint, pixel-size, set-generation)` epoch, so repeated frames reuse the
+cached glyph and only a theme change (new tint), a scale change (new size), or
+an installed icon set (new generation) re-rasterises — the SVG-first "convert
+once, re-render only on a scale or theme change" rule (`AGENTS.md` §10),
+sharing the one cache the window manager uses for cursors (`AGENTS.md` §2.2).
+See [SVG asset decoding](svg-assets.md) for the caching layer and
+[Desktop icons](icons.md) for the vector representation and the glyph set.
 
-## Start menu
+## The program-library popup
 
-The start menu is seeded with the session controls — log out, lock, shut
-down, restart — occupying the fixed ids `1..=4`, and may additionally carry
-**application launcher** entries and a **light/dark appearance toggle**
-appended after them. All kinds are ordinary `MenuEntry` values with a stable
-`MenuEntryId` and a `MenuAction` (`Session(SessionControl)`,
-`Launch(LauncherId)`, or `ToggleAppearance`), distinguished only by that
-action; a launcher's human-readable name is the entry's own label, so the
-session controls' static labels are never copied. `StartMenu::activate`
-returns the entry's action and closes the menu; an unknown id changes nothing
-and returns `None` (fail closed, `AGENTS.md` §5.4 / §2.9).
+`LibraryPopup` is the folder-organised application launcher the Library
+button opens (`plans/NEW-TASKBAR.md` T5). It is a pure model over the
+**resolved** program-library `Catalog` the session hands it
+(`LibraryPopup::set_catalog`) — the machine store merged with the user's
+overlay through `tairix_proglib::merge` (see
+[the program library](../lib/proglib.md)). The popup never touches the VFS;
+choosing an entry only reports `LibraryLaunch { entry }` with the entry's
+identifier, and the session resolves the bundle and launches it through the
+ordinary signature-checked load gate.
 
-`StartMenu::add_launcher(launcher, label)` appends a launcher entry, assigning
-it the next id after the current maximum so the session controls keep their
-position and id no matter how many launchers are added — the list/activate
-interface did not change when launchers landed (`AGENTS.md` §2.4 — extend, do
-not creep). The taskbar holds no capability to spawn processes: activating a
-launcher only reports its `LauncherId`, and the session glue (the window
-manager / `appmgr`) resolves it to an application bundle and launches it
-(`AGENTS.md` §16.5).
+The surface is composed from the shared Reactive Alloy vocabulary
+(`plans/GUI-CONTROLS-DESIGN.md`): a `Panel` whose anchor notch points back at
+the Library button, a `SearchField` filter, one shared `ListRow` per folder
+or entry, and a `ScrollBar` when the rows overflow the viewport. Folders are
+the closed ten-folder taxonomy in its canonical order; a folder with no
+entries is never listed; entries sort by display name within their folder. An
+empty library renders a calm "No programs are catalogued" placeholder — and a
+filter matching nothing "No matching programs" — never an error
+(`plans/NEW-TASKBAR.md`).
 
-`StartMenu::add_appearance_toggle(label)` appends the light/dark control the
-same way — next free id, app-supplied label — so it too left the interface
-unchanged (`AGENTS.md` §2.4). The taskbar owns no theme registry: activating
-the entry reports `MenuAction::ToggleAppearance` and the session glue calls
-`tairix_theme::ThemeRegistry::toggle_appearance` and re-applies the new theme
-to the window manager, taskbar, and apps (`AGENTS.md` §10).
+Opening is deterministic: the search comes up cleared, every folder expanded,
+the cursor and scroll at the top, and the keyboard on the search field, so
+the same catalog always presents the same way.
 
-### Popup geometry and rendering
+### Geometry
 
-`MenuLayout::compute` is the start-menu popup's geometry. The popup opens
-*outward* from the start button on the bar's edge — above a bottom bar, below
-a top bar, and to the inner side of a left or right bar — with its leading
-edge aligned to the start button. It carries the popup `panel` rectangle, the
-`corner_radius` taken from the theme's `popup_corner_radius`, and one `Rect`
-per entry stacked down the panel. The popup width, row height, and radius are
-*logical* lengths converted to physical pixels through the one shared
-`Scale::scale_length`, so the menu scales with the desktop DPI exactly as the
-bar does (`AGENTS.md` §10, §2.2), and all arithmetic saturates so a
-pathological screen or scale fails closed (`AGENTS.md` §2.9).
-`MenuLayout::hit_test` maps a pointer to the entry index under it.
+`Taskbar::library_layout` computes the popup's geometry (`LibraryLayout`):
+the panel opens *outward* from the bar — above a bottom bar, below a top bar,
+to the inner side of a left/right bar — aligned to the Library button and
+clamped to the screen. Its height is sized to the rows it has, capped by the
+space between the bar and the opposite screen edge; overflowing rows scroll.
+The panel chrome overhead is *measured* by probing the shared `Panel`
+geometry rather than re-deriving its arithmetic, so a metrics change can
+never drift the layout from what the panel draws (`AGENTS.md` §2.2). Widths,
+row heights, and the corner radius are *logical* lengths converted through
+the one shared `Scale::scale_length`; all arithmetic saturates, and a screen
+too small for even one row yields chrome with an empty viewport rather than a
+panic (`AGENTS.md` §2.9).
 
-Like the bar, the popup is a *rectangular* surface the window manager places
-and rounds: `TaskbarRenderer::render_menu` paints a raised-surface panel with each entry's
-label drawn on top through the same `tairix-font` / `tairix-raster` path the
-bar uses (no second blitter or rounded-corner path, `AGENTS.md` §2.2), and
-returns `None` when the menu is closed. `Taskbar::menu_layout` computes the
-geometry from the current state.
+### Keyboard model
+
+While open the popup is modal and fully keyboard-driven
+(`plans/GUI-CONTROLS-DESIGN.md` §9): `Tab` cycles the two focus fields
+(search ↔ rows); `Up`/`Down` move the row cursor (wrapping), `Home`/`End`
+jump, `PageUp`/`PageDown` move by a viewport, and the view follows the
+cursor; `Enter` (or space) activates the cursor row — a folder toggles its
+expansion, an entry launches; `Left` collapses a folder or climbs from an
+entry to its folder, `Right` expands or steps into the first entry; typing
+anywhere routes into the search field (type-to-filter, case-insensitive,
+flat name-sorted results), `Enter` in the search launches the first match,
+and `Escape` clears a non-empty search, then dismisses. Everything fails
+closed: activating with no cursor, launching with no match, and stepping in
+an empty list all change nothing (`AGENTS.md` §2.9).
+
+### Rendering
+
+`TaskbarRenderer::render_library` paints the open popup: the `Panel` chrome
+(anchored back at the Library button), the search field, the visible rows —
+a folder row carries the open/closed folder glyph, its label, and a trailing
+entry count; an entry row is indented beneath its folder with the app-bundle
+glyph; the hovered row raises its fill, and the keyboard cursor row shows the
+shared selection rail and focus ring — the calm placeholder when nothing is
+listed, and the scrollbar when the rows overflow. Like the bar it is a
+rectangular surface the window manager places and rounds with
+`LibraryLayout::corner_radius`, and it returns `None` while the popup is
+closed (`AGENTS.md` §2.9).
 
 ## Task list
 
@@ -204,72 +246,72 @@ ids, so a clash signals a bug rather than a benign retry.
 `TaskbarInput` is the taskbar's input router, the counterpart of the window
 manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
-the pointer position from motion events and acting only on a primary-button
-press. A press is hit-tested against the current `BarLayout` and dispatched to
-the model, reported as a `TaskbarResponse`:
+the pointer position from motion events (which also drives the leading
+buttons' hover feedback through the repaint latch). With the popup closed it
+acts only on a primary-button press, hit-tested against the current
+`BarLayout` and reported as a `TaskbarResponse`:
 
-- a press on the **start button** toggles the start menu
-  (`StartMenuToggled { open }`);
-- a press on a **task slot** applies the click-to-activate / minimise rule and
-  reports the `ActivateOutcome` (`TaskActivated { id, outcome }`);
+- a press on the **Library button** opens the program-library popup
+  (`OpenLibrary`);
+- a press on the **Files button** reports `OpenFiles` — the session opens
+  the file manager, raising an already-open files window rather than
+  launching a second copy;
+- a press on a **task slot** applies the click-to-activate / minimise rule
+  and reports the `ActivateOutcome` (`TaskActivated { id, outcome }`);
 - a press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
 - a press on the **clock** reports `ClockPressed`.
 
-A non-primary button, a release, or a press that misses every region changes
-nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
+A non-primary button, a release, a key, or a press that misses every region
+changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
 
-While the start menu is **open** the router treats it as modal, so a click
-lands on exactly one thing (`AGENTS.md` §2.1):
+While the popup is **open** the router treats it as modal and consumes the
+whole event stream — presses, releases, scroll, and keys all route into the
+popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
 
-- a press inside the popup selects the entry under the pointer, performing its
-  action and closing the menu (`MenuEntrySelected { id, action }`);
-- a press on the **start button** keeps its toggle behaviour and closes the
-  menu (`StartMenuToggled { open: false }`);
-- a press **anywhere else** dismisses the menu without acting on what it
-  landed on (`StartMenuDismissed`) — the standard click-away behaviour.
+- a primary press on a row activates it (a folder toggles, an entry reports
+  `LibraryLaunch { entry }` and closes the popup);
+- a primary press on the **Library button** toggles the popup shut
+  (`LibraryDismissed`);
+- a press **anywhere else** — any button — dismisses the popup without
+  acting on what it landed on (`LibraryDismissed`), the standard click-away
+  behaviour;
+- scroll wheels the row viewport; keys drive the keyboard model above.
+
+Popup-internal changes (a hover, a scroll, an edit, a fold) are reported as
+`Ignored` with the repaint latch set, so the embedder re-presents without
+mistaking them for actions.
 
 ## Theming
 
-The taskbar reads its corner radius from the active theme and adopts a new one
-with `Taskbar::apply_theme`; the rest of its state is untouched, so a runtime
-dark/light switch needs no model relayout (`AGENTS.md` §10). The region
-**colours** and the text **foreground** roles are wired through the same theme
-by `TaskbarRenderer::render` (see *Rendering*). The text is drawn with the built-in
-`tairix-font` face today; selecting a face from the theme's `FontSpec` roles
-joins this once installed font faces exist. The user *triggers* a runtime
-dark/light switch through the start menu's appearance-toggle entry (see *Start
-menu*): the taskbar reports the request and the session glue performs the
-switch on the shared `ThemeRegistry`, then relays the new theme back here.
+The taskbar owns the active theme (see *The owned theme*) and adopts a new
+one with `Taskbar::apply_theme`; the rest of its state is untouched, so a
+runtime dark/light switch needs no model relayout (`AGENTS.md` §10). The
+region **colours**, the control plates, and the text **foreground** roles are
+wired through that theme by the renderer. The interactive light/dark switch
+lives in the Switchboard's System menu (`plans/NEW-TASKBAR.md` T13); until
+that lands the session switches themes programmatically
+(`DesktopSession::set_theme`).
 
 ## Tests
 
-The crate's headless unit tests cover edge/orientation, the start-menu
-session-control population and fail-closed activation, appending launcher
-entries (next id after the session controls, app-supplied label, `Launch`
-action) and activating one, appending the appearance toggle and activating it
-(reporting `ToggleAppearance`, both directly and routed through
-`TaskbarInput`), the task-list
+The crate's headless unit tests cover edge/orientation, the task-list
 focus/minimise rule, notification add/remove deduplication, the region layout
-and hit-testing for a bottom bar, vertical-bar layout, all four edges,
-overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the
-theme-driven corner radius. The rendering tests assert the painted surface
-matches the bar dimensions and that the background, start button, focused /
-unfocused / minimised task slots, and notification icons take the expected
-theme colour, including that a dark↔light switch repaints the background, and
-that a persistent `TaskbarRenderer` reuses its cached glyphs across identical
-frames and re-tints them on a theme switch. The
-text tests assert that a set clock label paints `on_surface` glyphs inside the
-clock region (and an empty label paints none), that a focused task's title is
-drawn in `on_accent`, and that a title too long for its slot is truncated
-rather than spilling into the next slot. The input-routing tests assert that a
-primary press on the start button toggles the menu, on a task slot applies the
-activate/minimise rule, and on a notification icon and the clock reports them,
-and that a non-primary button, a release, a miss, and pointer motion all leave
-the model unchanged. A further group covers the start-menu popup: that it
-opens outward on each edge and scales with DPI, that its rows hit-test
-correctly, that a press inside the open popup selects the entry and closes the
-menu, that a press outside it dismisses the menu without activating the task
-beneath, that the start button still toggles it shut, that `render_menu`
-paints the panel and entry labels (and is `None` when closed), and that an
-empty menu produces a fail-closed empty popup.
+and hit-testing for a bottom bar (both permanent launchers included),
+vertical-bar layout, all four edges, overflow clipping, degenerate
+(tiny-screen) fail-closed clipping of the launcher buttons, DPI scaling of
+layout and hit-testing, and the theme-driven corner radius and repaint latch.
+The popup model tests cover taxonomy-ordered folders with name-sorted
+entries, hidden empty folders, folder labels, the calm empty and no-match
+placeholders, the deterministic reopen state, case-insensitive filtering with
+Enter-launches-first-match, Escape's clear-then-dismiss, wrap-around cursor
+movement, folder fold/expand from both pointer and keyboard, focus cycling
+with type-to-filter, and cursor-follows-view scrolling. The input tests cover
+both buttons' presses, click-away dismissal that activates nothing beneath,
+secondary-press dismissal, wheel scrolling of an overflowing popup, and hover
+repaint latching. The rendering tests probe painted pixels for the bar
+regions, the accent Library plate and quiet Files glyph, focused / unfocused
+/ minimised task fills, notification glyphs (including the unknown-asset
+fallback and cache retint on theme switch), clock and truncated task-title
+text, and the popup's panel, rows, hover/selection states, placeholder ink,
+scrollbar, and dark / light / high-contrast rendering.

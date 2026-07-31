@@ -16,11 +16,10 @@ tema ativo. Cada leitura de diretório é uma listagem normal, com
 verificação de permissões, sob a identidade do utilizador que a
 lançou: um diretório ilegível é recusado, nunca adivinhado.
 
-O navegador é lançado a partir do menu iniciar do ambiente de trabalho
-(a entrada `Files`) ou pelo nome a partir de uma shell. Requer uma
-sessão gráfica em execução: sem ela, o canal de janela fica
-inalcançável e o navegador comunica a recusa no fluxo de erro padrão e
-termina.
+O navegador é lançado a partir do botão permanente `Files` da barra de
+tarefas ou pelo nome a partir de uma shell. Requer uma sessão gráfica
+em execução: sem ela, o canal de janela fica inalcançável e o navegador
+comunica a recusa no fluxo de erro padrão e termina.
 
 A janela controla-se com o teclado: `Baixo` e `Cima` movem a seleção,
 `Enter` abre o diretório selecionado e `Backspace` sobe para o

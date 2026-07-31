@@ -1,6 +1,6 @@
 [package]
 name = "tairix-taskbar"
-description = "TAIRiX traditional desktop taskbar: edge-pinned layout, start menu with session controls, running-task list, and notification area + clock (§10 — PLAN.md Stage 7)."
+description = "TAIRiX traditional desktop taskbar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, running-task list, and notification area + clock (§10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -36,6 +36,16 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # radius (and, in later increments, colours/fonts) from the active theme so
 # it stays consistent with the window manager and apps.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The shared Reactive Alloy control vocabulary (plans/GUI-CONTROLS-DESIGN.md):
+# the two leading launcher buttons and the program-library popup's panel,
+# search field, list rows, and scrollbar are composed from it rather than
+# hand-painted a second time (§2.2).
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The program-library catalog engine (plans/NEW-TASKBAR.md): the popup lists
+# a resolved `Catalog` the session hands it — typed entries and the closed
+# folder taxonomy — and reports launches by `EntryId`; the taskbar itself
+# never reads the stores.
+tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 
 # The bar renderer's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).

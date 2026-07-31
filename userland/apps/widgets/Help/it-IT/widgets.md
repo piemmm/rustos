@@ -23,10 +23,11 @@ fatto clic mantiene il focus della tastiera, così le frecce, `Enter`, `Space` e
 i caratteri digitati lo comandano; `Tab` e `Shift+Tab` spostano il focus tra la
 barra delle schede e i controlli.
 
-La galleria si avvia dal menu di avvio del desktop o per nome da una shell.
-Richiede una sessione grafica in corso: senza di essa il canale della finestra
-è irraggiungibile e la galleria segnala il rifiuto sul flusso di errore
-standard e termina.
+La galleria si avvia dalla Libreria programmi del desktop (il pulsante
+`Library` sulla barra delle applicazioni) o per nome da una shell.
+Richiede una sessione grafica in corso: senza di essa il canale della
+finestra è irraggiungibile e la galleria segnala il rifiuto sul flusso di
+errore standard e termina.
 
 ## EXIT STATUS
 

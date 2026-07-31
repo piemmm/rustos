@@ -16,10 +16,10 @@ Ogni lettura di directory è un normale elenco con controllo dei
 permessi sotto l'identità dell'utente che ha avviato il programma: una
 directory illeggibile viene rifiutata, mai indovinata.
 
-Il browser si avvia dal menu start del desktop (la voce `Files`) o per
-nome da una shell. Richiede una sessione grafica in esecuzione: senza
-di essa il canale finestra è irraggiungibile e il browser segnala il
-rifiuto sul flusso di errore standard e termina.
+Il browser si avvia dal pulsante permanente `Files` sulla barra delle
+applicazioni o per nome da una shell. Richiede una sessione grafica in
+esecuzione: senza di essa il canale finestra è irraggiungibile e il
+browser segnala il rifiuto sul flusso di errore standard e termina.
 
 La finestra si comanda con la tastiera: `Giù` e `Su` spostano la
 selezione, `Invio` apre la directory selezionata e `Backspace` risale

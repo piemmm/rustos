@@ -147,15 +147,14 @@ the requested appearance active, and `toggle_appearance` flips to the opposite
 built-in based on the *active* theme's `Appearance` (a custom dark theme
 toggles to the light built-in, and vice versa). Both return the now-active
 `ThemeId`. Unlike `set_active` they cannot fail: the two built-ins are always
-present, so there is no unknown-id path to surface. The taskbar's start menu
-surfaces this control as a `MenuAction::ToggleAppearance` entry; the taskbar
-holds no registry, so it only reports the action and the session glue
-(`userland/gui/session`, `tairix-desktop-session`) performs the switch on the
-shared registry and re-applies the new theme: the taskbar is re-themed in
-place, the window manager's desktop background is re-coloured through the
-compositor's runtime `set_background` (full-screen damage, so the next present
-repaints every pixel over the new colour), and the now-active theme is
-surfaced to the apps as `SessionEvent::AppearanceChanged`. See
+present, so there is no unknown-id path to surface. The interactive home of
+this control is the Switchboard's System menu (`plans/NEW-TASKBAR.md` T13);
+until that lands the session glue (`userland/gui/session`,
+`tairix-desktop-session`) switches themes programmatically
+(`DesktopSession::set_theme`) and re-applies the new theme: the taskbar is
+re-themed in place and the window manager's desktop background is re-coloured
+through the compositor's runtime `set_background` (full-screen damage, so the
+next present repaints every pixel over the new colour). See
 [Desktop session glue](./session.md).
 
 ## Tests

@@ -304,8 +304,10 @@ set so widening is a reviewed diff.
 The graphical session changes no rule. The desktop-session service's
 manifest requests the graphical class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
 `CAP_SHM` — seat ownership and the zero-copy frame region per
-`plans/DISPLAY.md`) plus `CAP_PROC_SPAWN` for its start-menu launchers
-and `CAP_FS_ACCESS` for the trusted picker (each sized to an exercised
+`plans/DISPLAY.md`) plus `CAP_PROC_SPAWN` for its taskbar launchers and
+program-library popup (`plans/NEW-TASKBAR.md`)
+and `CAP_FS_ACCESS` for the trusted picker and the catalog stores (each
+sized to an exercised
 code path per §4.5), the session baseline carries the same class so the
 intersection keeps it for every interactive account, and a desktop app is
 spawned like any other process and gets `AppInfo request ∩ user ceiling`;

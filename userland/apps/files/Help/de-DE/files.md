@@ -17,11 +17,11 @@ gewöhnliche, berechtigungsgeprüfte Auflistung unter der Identität des
 startenden Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt,
 niemals erraten.
 
-Der Browser wird aus dem Startmenü des Desktops (Eintrag `Files`) oder
-namentlich aus einer Shell gestartet. Er benötigt eine laufende
-grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und der
-Browser meldet die Ablehnung auf dem Standardfehlerstrom und beendet
-sich.
+Der Browser wird über die permanente Schaltfläche `Files` in der
+Taskleiste oder namentlich aus einer Shell gestartet. Er benötigt eine
+laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar,
+und der Browser meldet die Ablehnung auf dem Standardfehlerstrom und
+beendet sich.
 
 Das Fenster wird mit der Tastatur bedient: `Runter` und `Hoch` bewegen
 die Auswahl, `Eingabe` öffnet das ausgewählte Verzeichnis, und
