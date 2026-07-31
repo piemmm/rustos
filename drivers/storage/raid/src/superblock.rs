@@ -166,6 +166,75 @@ impl RaidLevel {
         }
     }
 
+    /// The number of member slots whose capacity the composed array *presents*
+    /// — its "data members".
+    ///
+    /// A stripe concatenates every member (`member_count`); a mirror presents a
+    /// single copy (`1`, independent of how many mirrored copies exist); single
+    /// parity reserves one member's chunk for its parity and presents the rest
+    /// (`member_count - 1`); double parity reserves two members' chunks for its
+    /// P and Q syndromes and presents the rest (`member_count - 2`).
+    ///
+    /// This is the *single* definition of each level's usable width, so the
+    /// composition engines' `assemble` and any capacity a serving process
+    /// presents derive from one rule that lives beside
+    /// [`min_members`](Self::min_members) / [`max_members`](Self::max_members)
+    /// and cannot drift apart.
+    ///
+    /// Total and fail-closed: returns [`None`] when `member_count` is below the
+    /// count at which the level has any data member at all (a parity level with
+    /// too few members, or an empty stripe), so a caller that has not already
+    /// validated the width via [`min_members`](Self::min_members) can never
+    /// compute a nonsensical capacity or underflow.
+    #[must_use]
+    pub const fn data_members(self, member_count: u64) -> Option<u64> {
+        match self {
+            Self::Mirror => Some(1),
+            Self::Stripe => {
+                if member_count == 0 {
+                    None
+                } else {
+                    Some(member_count)
+                }
+            }
+            Self::Parity => {
+                if member_count >= 2 {
+                    Some(member_count - 1)
+                } else {
+                    None
+                }
+            }
+            Self::DualParity => {
+                if member_count >= 3 {
+                    Some(member_count - 2)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The logical block count the composed array presents, given each
+    /// member's own block count and the array's member count.
+    ///
+    /// This is `per_member_blocks × `[`data_members`](Self::data_members), the
+    /// one place the array's capacity is sized from its geometry (`AGENTS.md`
+    /// §2.2). Fails closed to [`None`] when the width is below the level's
+    /// structural floor (via [`data_members`](Self::data_members)) or when the
+    /// product overflows `u64`, so a composed device can never wrap to a
+    /// smaller array that would truncate addresses (`AGENTS.md` §5.4).
+    #[must_use]
+    pub const fn logical_block_count(
+        self,
+        per_member_blocks: u64,
+        member_count: u64,
+    ) -> Option<u64> {
+        match self.data_members(member_count) {
+            Some(data) => per_member_blocks.checked_mul(data),
+            None => None,
+        }
+    }
+
     /// Decode an on-disk level byte, failing closed on an unknown value.
     ///
     /// # Errors

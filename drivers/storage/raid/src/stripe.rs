@@ -50,6 +50,7 @@
 //! §24.1); the growable member tier lives in the assembling serve process.
 
 use crate::mirror::{member_faulting, ArrayHealth};
+use crate::superblock::RaidLevel;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -194,9 +195,8 @@ impl<'a, B: Block> StripeArray<'a, B> {
         // `members` is non-empty, so `shared` is always populated by now.
         let per_member = shared.ok_or(StripeError::NoMembers)?;
         let member_count = members.len() as u64;
-        let block_count = per_member
-            .block_count
-            .checked_mul(member_count)
+        let block_count = RaidLevel::Stripe
+            .logical_block_count(per_member.block_count, member_count)
             .ok_or(StripeError::TooLarge)?;
         Ok(Self {
             members,

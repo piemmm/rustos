@@ -293,9 +293,8 @@ impl<'a, B: Block> ParityArray<'a, B> {
             return Err(ParityError::InsufficientRedundancy);
         }
         let member_count = members.len() as u64;
-        let block_count = per_member
-            .block_count
-            .checked_mul(member_count - 1)
+        let block_count = RaidLevel::Parity
+            .logical_block_count(per_member.block_count, member_count)
             .ok_or(ParityError::TooLarge)?;
         Ok(Self {
             members,

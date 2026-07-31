@@ -347,7 +347,15 @@ definition the composition engines also read): a RAID5 claiming two members, a
 RAID6 claiming three, or a RAID6 claiming more data members than its GF(2^8) Q
 syndrome can distinguish (more than 255, i.e. over 257 slots) describes an
 array that cannot exist and is refused (`SuperblockError::MemberCountOutOfRange`)
-rather than half-trusted. The record
+rather than half-trusted. Each level's *usable capacity* lives beside those
+bounds as the same single definition — `RaidLevel::data_members` (a stripe
+concatenates every member, a mirror presents one copy, single parity reserves
+one member and double parity two) and the `RaidLevel::logical_block_count` that
+sizes the composed geometry as `per_member_blocks × data_members`, failing
+closed on an overflow that would truncate addresses. The concatenating engines'
+`assemble` derive the array block count from that one rule, so the capacity a
+serving process presents and the geometry each engine composes cannot drift
+(`AGENTS.md` §2.2). The record
 is sealed with a trailing CRC-32C (`lib/crc32c`, the one
 first-party checksum) — a media/transport integrity check, not a security
 control: an array's authenticity rests on the signed driver bundle and the

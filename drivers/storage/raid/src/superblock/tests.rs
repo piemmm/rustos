@@ -779,3 +779,60 @@ fn decode_admits_the_minimum_and_boundary_member_counts_per_level() {
     dual_max.raid_level = RaidLevel::DualParity;
     assert!(ArraySuperblock::decode(&dual_max.encode()).is_ok());
 }
+
+#[test]
+fn data_members_is_the_shared_usable_width_per_level() {
+    // A mirror presents one copy's worth regardless of how many copies exist.
+    assert_eq!(RaidLevel::Mirror.data_members(1), Some(1));
+    assert_eq!(RaidLevel::Mirror.data_members(4), Some(1));
+    // A stripe concatenates every member.
+    assert_eq!(RaidLevel::Stripe.data_members(1), Some(1));
+    assert_eq!(RaidLevel::Stripe.data_members(6), Some(6));
+    // Single parity reserves one member's chunk for parity.
+    assert_eq!(RaidLevel::Parity.data_members(3), Some(2));
+    assert_eq!(RaidLevel::Parity.data_members(8), Some(7));
+    // Double parity reserves two (P and Q).
+    assert_eq!(RaidLevel::DualParity.data_members(4), Some(2));
+    assert_eq!(RaidLevel::DualParity.data_members(10), Some(8));
+}
+
+#[test]
+fn data_members_fails_closed_below_the_structural_floor() {
+    // A width with no data member at all yields `None` rather than underflow:
+    // an empty stripe, and parity levels below the count that leaves any data.
+    assert_eq!(RaidLevel::Stripe.data_members(0), None);
+    assert_eq!(RaidLevel::Parity.data_members(1), None);
+    assert_eq!(RaidLevel::Parity.data_members(0), None);
+    assert_eq!(RaidLevel::DualParity.data_members(2), None);
+    assert_eq!(RaidLevel::DualParity.data_members(0), None);
+    // The mirror is the identity case: always one copy's worth, even at zero
+    // (an empty mirror is rejected earlier by `assemble`, not here).
+    assert_eq!(RaidLevel::Mirror.data_members(0), Some(1));
+}
+
+#[test]
+fn logical_block_count_is_per_member_times_data_members() {
+    // Capacity is each member's block count times the usable width.
+    assert_eq!(RaidLevel::Mirror.logical_block_count(1000, 3), Some(1000));
+    assert_eq!(RaidLevel::Stripe.logical_block_count(1000, 3), Some(3000));
+    assert_eq!(RaidLevel::Parity.logical_block_count(1000, 4), Some(3000));
+    assert_eq!(
+        RaidLevel::DualParity.logical_block_count(1000, 5),
+        Some(3000)
+    );
+}
+
+#[test]
+fn logical_block_count_fails_closed_on_overflow_and_underwidth() {
+    // A product that would overflow `u64` fails closed rather than wrapping to
+    // a smaller array that would truncate addresses.
+    assert_eq!(RaidLevel::Stripe.logical_block_count(u64::MAX, 2), None);
+    assert_eq!(
+        RaidLevel::Parity.logical_block_count(u64::MAX, 3),
+        None,
+        "u64::MAX * 2 overflows"
+    );
+    // Below the structural floor there is no data member to multiply by.
+    assert_eq!(RaidLevel::DualParity.logical_block_count(1000, 2), None);
+    assert_eq!(RaidLevel::Stripe.logical_block_count(1000, 0), None);
+}

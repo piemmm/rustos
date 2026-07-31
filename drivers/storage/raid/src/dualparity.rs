@@ -311,9 +311,8 @@ impl<'a, B: Block> DualParityArray<'a, B> {
             return Err(DualParityError::InsufficientRedundancy);
         }
         let member_count = members.len() as u64;
-        let block_count = per_member
-            .block_count
-            .checked_mul(member_count - 2)
+        let block_count = RaidLevel::DualParity
+            .logical_block_count(per_member.block_count, member_count)
             .ok_or(DualParityError::TooLarge)?;
         Ok(Self {
             members,

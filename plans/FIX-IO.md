@@ -906,7 +906,10 @@ check not a security control). `ArraySuperblock::decode` fails closed on every
 malformed byte (bad magic, unknown version, checksum mismatch, unknown level,
 zero members, a member count its level cannot be composed from — RAID5 < 3,
 RAID6 < 4 or > 257 slots, the shared `RaidLevel::min_members`/`max_members` the
-composition engines also read — out-of-range slot, degenerate geometry,
+composition engines also read (the level's *usable capacity* is the same shared
+source — `RaidLevel::data_members`/`logical_block_count`, from which the
+concatenating engines size the composed geometry so it cannot drift, §2.2) —
+out-of-range slot, degenerate geometry,
 non-canonical timestamp, §5.4/§26.5); it is total, `forbid(unsafe_code)`, and fuzzed for panic-freedom
 (`tests/fuzz_superblock.rs`, registered in `cargo xtask fuzz`, §19.6). The
 reassembly verdict is carried into the composition through one shared mapping
