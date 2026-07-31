@@ -15,7 +15,15 @@ so a composed array nests naturally over the same seam every leaf device uses
 (`AGENTS.md` §2.2 one seam, §27 complete abstraction). It **consumes** the
 block-layer health vocabulary (`tairix_abi::blkio`); it does not re-invent it.
 
-The first composition is the **RAID1 mirror** (`MirrorArray`):
+Four compositions are provided as siblings over that one seam (`AGENTS.md`
+§2.2 parallel implementations): the redundant **RAID1 mirror**
+(`MirrorArray`), the capacity-aggregating **RAID0 stripe** (`StripeArray`), the
+single-fault **RAID5 distributed parity** (`ParityArray`), and the two-fault
+**RAID6 double distributed parity** (`DualParityArray`, P + Q Reed-Solomon
+syndromes over the first-party `gf256` GF(2^8) field). They share one
+`MemberState`/`MemberRole`/`ArrayHealth` vocabulary and fault classification.
+
+The RAID1 mirror (`MirrorArray`):
 
 - **Reads** are served from any in-sync copy; a per-block `MediumError` is
   recovered from a good copy and the bad copy is **repaired** in place
@@ -49,11 +57,14 @@ accepting a write, no copy committing a flush) the array **fails closed**
 
 ## Crate shape
 
-This crate is the host-testable composition **engine** (`src/mirror.rs`),
-proven host-side over a fault-injecting `Block` double (`src/mirror/tests.rs`).
-It is `no_std`, `forbid(unsafe_code)`, and allocation-free: `MirrorArray`
-borrows a caller-owned member slice, so it imposes no fixed member ceiling
-(`AGENTS.md` §24.1) and holds only a borrow. It depends only on `lib/abi`, so
+This crate is the host-testable composition **engine** — one module per level
+(`src/mirror.rs`, `src/stripe.rs`, `src/parity.rs`, `src/dualparity.rs`, over
+the shared `src/superblock.rs` metadata and `src/gf256.rs` field), each proven
+host-side over a fault-injecting `Block` double (its `*/tests.rs`). It is
+`no_std`, `forbid(unsafe_code)`, and allocation-free: every array borrows a
+caller-owned member slice (and, for the parity levels, a scratch buffer), so it
+imposes no fixed member ceiling (`AGENTS.md` §24.1) and holds only a borrow. It
+depends only on `lib/abi`, so
 the layered dependency direction holds (a member is reached through the
 `Block` trait the serve process is handed, never a sibling driver crate,
 `AGENTS.md` §17.4).

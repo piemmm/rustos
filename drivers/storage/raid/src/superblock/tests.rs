@@ -248,10 +248,15 @@ fn raid_level_round_trips_and_fails_closed() {
         RaidLevel::from_u8(RaidLevel::Parity.as_u8()),
         Ok(RaidLevel::Parity)
     );
+    assert_eq!(
+        RaidLevel::from_u8(RaidLevel::DualParity.as_u8()),
+        Ok(RaidLevel::DualParity)
+    );
     assert!(!RaidLevel::Mirror.is_striped());
     assert!(RaidLevel::Stripe.is_striped());
     assert!(RaidLevel::Parity.is_striped());
-    for raw in [0u8, 4, 5, 255] {
+    assert!(RaidLevel::DualParity.is_striped());
+    for raw in [0u8, 5, 6, 255] {
         assert_eq!(
             RaidLevel::from_u8(raw),
             Err(SuperblockError::UnknownRaidLevel)
@@ -293,6 +298,25 @@ fn a_parity_superblock_round_trips_and_rejects_a_zero_stripe_unit() {
     parity_zero.chunk_blocks = 0;
     assert_eq!(
         ArraySuperblock::decode(&parity_zero.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
+}
+
+#[test]
+fn a_dual_parity_superblock_round_trips_and_rejects_a_zero_stripe_unit() {
+    let mut original = parity_sb(UUID_A, 5, 3, 9, 64);
+    original.raid_level = RaidLevel::DualParity;
+    let decoded = ArraySuperblock::decode(&original.encode()).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.raid_level, RaidLevel::DualParity);
+    assert_eq!(decoded.chunk_blocks, 64);
+
+    // A double-parity level with a zero stripe unit contradicts itself.
+    let mut zero = parity_sb(UUID_A, 4, 0, 1, 0);
+    zero.raid_level = RaidLevel::DualParity;
+    zero.chunk_blocks = 0;
+    assert_eq!(
+        ArraySuperblock::decode(&zero.encode()),
         Err(SuperblockError::BadStripeChunk)
     );
 }

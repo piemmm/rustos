@@ -976,9 +976,43 @@ Remaining:
   §2.13; level and stripe unit must agree or the record is refused
   `BadStripeChunk`), threaded through `ArrayIdentity`'s shape match. Design:
   `docs/src/drivers/raid.md`.
-- RAID levels beyond the mirror, the stripe, and single parity (double parity:
-  RAID6) are further sibling compositions over the same seam (§2.2 parallel
-  implementations), added when needed.
+- **Landed (the RAID6 double-parity sibling):** `raid::DualParityArray`
+  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 2`
+  members' worth of capacity as one logical device with **double-fault**
+  redundancy — the sibling of the mirror, the stripe, and single parity over the
+  same seam (§2.2 parallel implementations), reusing their
+  `MemberState`/`MemberRole`/`ArrayHealth` vocabulary and `member_faulting`
+  classification. Each stripe reserves *two* rotating chunks: a P (XOR) syndrome
+  and a Q (Reed-Solomon `Q = Σ gᵏ·Dₖ`) syndrome over GF(2^8) — the first-party
+  `raid::gf256` field (generator `{02}`, polynomial `0x11d`, the Linux-RAID6
+  field), with `mul`/`inv`/`gpow` proven host-side (identity/commutativity/
+  associativity/distributivity, every non-zero inverse, and the generator's
+  full period 255). Its complete behaviour is proven host-side over a
+  fault-injecting `Block` double: a single lost chunk is reconstructed from P and
+  *any two* lost chunks are solved from the two independent syndromes (through Q
+  when P is also lost, through P when Q is also lost, or the 2×2 system for two
+  lost data chunks — every distinct loss pair, incl. a six-member array
+  exercising higher Q coefficients); a per-block media error is reconstructed
+  **and repaired**; writes update P and Q by read-modify-write or recompute both
+  from the survivors on a degraded write; `begin_scrub`/`scrub_step` heals a
+  latent media error on a syndrome the read path never touches (proven by then
+  losing both data members of that stripe); one or two losses degrade the array
+  while a *third* fails it closed (§5.4, §26.5, never fabricating
+  unreconstructable data); a returning/replaced member rebuilds by a bounded
+  `resync_step`, and the `remove_member`/`add_member`/`replace_member` cycle
+  restores redundancy without a reboot (§18.4). It is `no_std`,
+  `forbid(unsafe_code)`, and allocation-free — it borrows a caller-owned member
+  slice (no fixed member ceiling, §24.1) plus a caller-owned scratch buffer of
+  at least `SCRATCH_BLOCKS` logical blocks for the syndromes and the two-erasure
+  solver. The on-disk `ArraySuperblock` grew a `RaidLevel::DualParity` (evolved
+  in place, §2.13; a striped level, so it must carry a non-zero stripe unit or
+  the record is refused `BadStripeChunk`), threaded through `ArrayIdentity`'s
+  shape match. `assemble` needs ≥ 4 members and fails closed above 255 data
+  members (`TooManyMembers`), where the GF(2^8) Q coefficients would collide.
+  Design: `docs/src/drivers/raid.md`.
+- RAID levels beyond double parity (e.g. triple-parity) are further sibling
+  compositions over the same seam (§2.2 parallel implementations), added when
+  needed.
 
 Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
 over a fault-injecting `Block` double — two healthy copies assemble optimal; a

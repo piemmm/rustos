@@ -257,6 +257,67 @@ rebuilding from the survivors and restoring redundancy without a reboot
 (`AGENTS.md` §18.4). A faulted member is sticky-but-recoverable, so a flapping
 disk never masquerades as a healthy copy.
 
+## RAID6 double distributed parity (`DualParityArray`)
+
+`DualParityArray` composes `member_count - 2` members' worth of capacity as one
+logical device with **double-fault** redundancy — the sibling of the mirror,
+the stripe, and the single-parity array over the same block seam (`AGENTS.md`
+§2.2 parallel implementations), reusing their `MemberState`/`MemberRole`/
+`ArrayHealth` vocabulary and `member_faulting` classification. It needs at least
+four members (two data + P + Q).
+
+### Layout — left-symmetric double parity over GF(2^8)
+
+Each stripe reserves *two* chunks: a **P** syndrome (bytewise XOR of the data
+chunks, exactly RAID5's parity) and a **Q** syndrome, the Reed-Solomon sum
+`Q = Σ gᵏ·Dₖ` over the finite field GF(2^8) (`lib/*` `gf256`, generator `{02}`,
+reducing polynomial `0x11d` — the same field the Linux RAID6 implementation
+uses, so the layout is a well-understood one). For a stripe `s` the P member is
+`p = (n - 1) - (s mod n)` and the Q member is `q = (p + 1) mod n`; the `n - 2`
+data chunks fill the remaining members in ascending order after `q`, with data
+position `k` carrying Q coefficient `gᵏ`. Both syndrome slots rotate one member
+per stripe so neither is a bottleneck. Because the generator's powers `g⁰ …
+g²⁵⁴` are the 255 distinct non-zero field elements, an array admits at most 255
+data members; `assemble` fails closed (`DualParityError::TooManyMembers`) above
+that rather than encode an unrecoverable Q.
+
+### Read — direct, reconstruct (one or two losses), and repair
+
+A healthy read goes straight to the data member. When members are lost, the
+stripe row's *unknowns* (every not-in-sync member, plus a data member that hit a
+media error) are solved from the surviving members and syndromes: a single
+unknown data chunk is recovered from P (like RAID5); two unknowns are solved
+from the two independent P and Q equations — through Q when P is also lost,
+through P when Q is also lost, or by the 2×2 syndrome system when two *data*
+chunks are lost. A per-block media error is reconstructed and repaired in place
+by writing the good block back (forcing sector reallocation). A row with a
+*third* unknown is unsolvable and fails closed (`AGENTS.md` §5.4). All
+reconstruction is byte-wise and borrows a caller-owned scratch buffer of at
+least `SCRATCH_BLOCKS` logical blocks, so the engine allocates nothing.
+
+### Write — read-modify-write and degraded recompute
+
+A single-block write updates both syndromes. When the data member and both
+syndromes are readable, a read-modify-write applies the data delta to P
+(`new_P = old_P ⊕ Δ`) and to Q (`new_Q = old_Q ⊕ gˣ·Δ`). Otherwise (a lost or
+media-erroring role) both syndromes are recomputed from every data member's
+current content — reconstructing any lost data member — with the written
+position substituted. Each stripe role that is a live source is written with its
+new value; a write that fails faults that member (excluding its stale block),
+and the new data stays durable while the array keeps its two-fault redundancy.
+
+### Scrub, degrade, rebuild, and replace
+
+`begin_scrub` / `scrub_step` heal latent media errors from the survivors like
+the single-parity array, chunked so a 100 TB+ array never scrubs in one sweep
+(`AGENTS.md` §26.5, §26.6). One or two faulted/absent members degrade the array
+(`ArrayHealth::Degraded`); a *third* loss fails it closed (`ArrayHealth::
+Failed`). A returning or replaced member is rebuilt by `resync_step` from the
+survivors a caller-sized budget at a time, and the same `remove_member` /
+`add_member` / `replace_member` disk-replacement workflow restores redundancy
+without a reboot (`AGENTS.md` §18.4). Faulted members are
+sticky-but-recoverable, so a flapping disk never masquerades as a healthy copy.
+
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 An array is **discovered, not configured**: there is no hand-maintained list

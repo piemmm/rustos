@@ -10,12 +10,13 @@
 //! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
 //! re-invent it.
 //!
-//! Three compositions are provided as siblings over that one seam (`AGENTS.md`
+//! Four compositions are provided as siblings over that one seam (`AGENTS.md`
 //! §2.2 parallel implementations): the redundant RAID1 mirror
 //! ([`MirrorArray`]), the capacity-aggregating RAID0 stripe
-//! ([`StripeArray`]), and the RAID5 distributed-parity array
-//! ([`ParityArray`]) that combines capacity aggregation with single-fault
-//! redundancy.
+//! ([`StripeArray`]), the RAID5 distributed-parity array ([`ParityArray`])
+//! that combines capacity aggregation with single-fault redundancy, and the
+//! RAID6 double distributed-parity array ([`DualParityArray`]) that survives
+//! *two* member losses.
 //!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
@@ -114,6 +115,39 @@
 //!   reconstruction borrow a caller-owned **scratch** buffer (at least two
 //!   logical blocks), so the engine stays allocation-free.
 //!
+//! # RAID6 double distributed parity ([`DualParityArray`])
+//!
+//! The fourth composition is a RAID6 double distributed-parity array. It
+//! stripes like RAID5 but reserves *two* chunks per stripe — a P (XOR)
+//! syndrome and a Q (Reed-Solomon, GF(2^8)) syndrome —
+//! both rotating across the members, so the array has the capacity of
+//! `member_count - 2` members and survives **any two** members being lost:
+//!
+//! - **Reads** in the healthy case go straight to the data member; a lost
+//!   chunk is reconstructed from P (one loss) or by solving the P and Q
+//!   syndromes together (two losses), and a per-block media error is
+//!   reconstructed and repaired in place, complemented by the proactive scrub.
+//! - **Writes** update the affected stripe's P and Q, by read-modify-write
+//!   when the old data and syndromes are readable and by recomputing both from
+//!   the surviving data members otherwise (a degraded write), so a lost
+//!   member's data stays reconstructable.
+//! - **Scrub** ([`DualParityArray::begin_scrub`]/[`DualParityArray::scrub_step`])
+//!   heals latent media errors from the survivors like the single-parity
+//!   array (`AGENTS.md` §26.5).
+//! - A first or second lost member (or an [`MemberState::Absent`] slot)
+//!   **degrades the array, never the system** ([`ArrayHealth::Degraded`]); a
+//!   *third* loss makes a stripe unreconstructable and the array fails closed
+//!   ([`ArrayHealth::Failed`]).
+//! - A returning or replaced member is **rebuilt** by a bounded, interruptible
+//!   resync ([`DualParityArray::resync_step`]); the same
+//!   [`remove_member`](DualParityArray::remove_member) /
+//!   [`add_member`](DualParityArray::add_member) /
+//!   [`replace_member`](DualParityArray::replace_member) disk-replacement
+//!   workflow restores redundancy without a reboot (`AGENTS.md` §18.4). Both
+//!   syndromes and the two-erasure solver borrow a caller-owned **scratch**
+//!   buffer of at least [`SCRATCH_BLOCKS`] logical blocks, so the engine stays
+//!   allocation-free.
+//!
 //! # Fail closed (`AGENTS.md` §5.4)
 //!
 //! At the boundary of what the array can vouch for it returns a typed error
@@ -158,11 +192,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod dualparity;
+mod gf256;
 mod mirror;
 mod parity;
 mod stripe;
 mod superblock;
 
+pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use parity::{ParityArray, ParityError, ParityMember};
 pub use stripe::{StripeArray, StripeError, StripeMember};
