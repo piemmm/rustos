@@ -108,9 +108,17 @@ derivation (`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and
 `emmc2` are currently consumed in-kernel (root-unlock) and expose only their
 `Block` implementation; when either is brought up as a user-space serving
 process it reuses the same engine and the same idle-timer helper rather than
-copying them. Device-level health observability through `lib/log`/`sysinfo`
-beyond the per-volume mount overlay is the staged remainder
-(`plans/FIX-IO.md` IO3–IO6).
+copying them. Even in that in-kernel form each driver's `Block` already maps a
+raw device status to the *honest* per-request health class rather than a blanket
+`DeviceFault`: `virtio_blk` decodes a `virtio_blk_req` status byte through one
+shared `status_to_result` (`VIRTIO_BLK_S_IOERR` → a per-request
+`DriverError::MediumError` the consumer recovers around and repairs, not a
+whole-device fault; `VIRTIO_BLK_S_UNSUPP` → `DriverError::Unsupported`; any
+undefined status → a fail-closed `DriverError::DeviceFault`, never the benign
+`Unsupported`), so the health axis is correct at the source and no consumer
+drops a whole device over a single bad sector. Device-level health
+observability through `lib/log`/`sysinfo` beyond the per-volume mount overlay is
+the staged remainder (`plans/FIX-IO.md` IO3–IO6).
 
 ## The recovery-escalation ladder — what the *driver* does behind a blip
 

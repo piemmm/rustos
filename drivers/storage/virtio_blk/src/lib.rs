@@ -24,6 +24,20 @@
 //! methods honour the sensitive flag by scrubbing the bounce-buffer
 //! staging through [`tairix_virtio::BounceBuffer`]'s drop
 //! impl (`BufferClass::Sensitive` contract).
+//!
+//! # Device status → health class
+//!
+//! A `virtio_blk_req` completes with a one-byte status (virtio 1.1
+//! §5.2.6). Both the data path and the flush path decode it through the
+//! single `status_to_result` so they cannot classify a status
+//! differently, and the mapping carries an honest **health axis** rather
+//! than collapsing every non-`OK` outcome to one fault: `VIRTIO_BLK_S_IOERR`
+//! is a per-request medium error ([`DriverError::MediumError`]) a consumer
+//! can recover around and repair — not a whole-device
+//! [`DriverError::DeviceFault`] that would needlessly drop the device;
+//! `VIRTIO_BLK_S_UNSUPP` is a request-level [`DriverError::Unsupported`];
+//! and any *undefined* status byte fails closed to
+//! [`DriverError::DeviceFault`] rather than being assumed benign.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -121,6 +135,10 @@ mod wire {
     pub const STATUS_LEN: usize = 1;
     pub const STATUS_OK: u8 = 0;
     pub const STATUS_IOERR: u8 = 1;
+    /// `VIRTIO_BLK_S_UNSUPP` (virtio 1.1 §5.2.6): the device does not
+    /// support this request type (e.g. a flush or discard it never
+    /// negotiated). A request-level refusal, not a device fault.
+    pub const STATUS_UNSUPP: u8 = 2;
     /// Most bytes staged into the persistent data buffer for a single
     /// virtio transaction. A `read_blocks`/`write_blocks` call larger
     /// than this is split into block-aligned chunks of at most this
@@ -443,25 +461,20 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             },
         ];
         self.submit_and_wait(&segments)?;
-        // Decode status first, and copy device-written data back to the
-        // caller only on success. The data staging is a persistent
-        // buffer reused across requests, so copying on a faulted or
-        // unsupported request could hand the caller stale bytes left by
-        // an earlier request — fail closed and copy nothing instead.
-        let status_byte = status_bb.full_region_mut()[0];
-        match status_byte {
-            wire::STATUS_OK => {
-                if let Payload::Read(dst) = payload {
-                    // The device wrote `payload_len` bytes into the
-                    // staging through its phys-mapped slice;
-                    // `full_region_mut` gives us a CPU view of them.
-                    dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
-                }
-                Ok(())
-            }
-            wire::STATUS_IOERR => Err(DriverError::DeviceFault),
-            _ => Err(DriverError::Unsupported),
+        // Decode the status, and copy device-written data back to the
+        // caller only on success. The data staging is a persistent buffer
+        // reused across requests, so gating the copy on `status_to_result`
+        // returning `Ok` keeps a faulted or unsupported request from
+        // handing the caller stale bytes left by an earlier request — it
+        // returns early and copies nothing.
+        status_to_result(status_bb.full_region_mut()[0])?;
+        if let Payload::Read(dst) = payload {
+            // The device wrote `payload_len` bytes into the staging
+            // through its phys-mapped slice; `full_region_mut` gives us a
+            // CPU view of them.
+            dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
         }
+        Ok(())
     }
 
     /// Publish `segments` on the requestq, kick the device, and wait for
@@ -553,11 +566,38 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             },
         ];
         self.submit_and_wait(&segments)?;
-        match status_bb.full_region_mut()[0] {
-            wire::STATUS_OK => Ok(()),
-            wire::STATUS_IOERR => Err(DriverError::DeviceFault),
-            _ => Err(DriverError::Unsupported),
-        }
+        status_to_result(status_bb.full_region_mut()[0])
+    }
+}
+
+/// Decode a virtio-blk device status byte (virtio 1.1 §5.2.6) into the
+/// driver-error health class the block seam expects.
+///
+/// This is the single decode both the data path ([`VirtioBlk::exchange`])
+/// and the flush path ([`VirtioBlk::exchange_flush`]) share, so the two
+/// cannot classify a device status differently.
+///
+/// * `VIRTIO_BLK_S_OK` → `Ok(())`.
+/// * `VIRTIO_BLK_S_IOERR` → [`DriverError::MediumError`]: the device
+///   reported it could not complete *this* request — a per-request
+///   medium/I/O error, not a whole-device fault. Surfacing it as a medium
+///   error lets a consumer (a RAID member, the kernel block client)
+///   recover around the bad block and repair it from a good copy rather
+///   than dropping the entire device (which a [`DriverError::DeviceFault`]
+///   would force). Matches Linux's `BLK_STS_IOERR` — a hard I/O error,
+///   not a retryable one.
+/// * `VIRTIO_BLK_S_UNSUPP` → [`DriverError::Unsupported`]: a request-level
+///   refusal (the device does not implement this request type), distinct
+///   from a device fault.
+/// * any other byte → [`DriverError::DeviceFault`]: an undefined status
+///   means the device is not speaking the protocol we trust, so fail
+///   closed rather than assuming the benign `Unsupported`.
+const fn status_to_result(status_byte: u8) -> Result<(), DriverError> {
+    match status_byte {
+        wire::STATUS_OK => Ok(()),
+        wire::STATUS_IOERR => Err(DriverError::MediumError),
+        wire::STATUS_UNSUPP => Err(DriverError::Unsupported),
+        _ => Err(DriverError::DeviceFault),
     }
 }
 

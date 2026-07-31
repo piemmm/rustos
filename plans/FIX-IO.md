@@ -381,7 +381,15 @@ Remaining:
   reuses the shared `blkio::serve_request_recovering` engine (above) rather than
   copying it, so there is nothing to "adopt" separately; the shared engine is
   the single definition (§2.2). Bringing those serve processes up is tracked
-  with their user-space driver-process work, not this stage.
+  with their user-space driver-process work, not this stage. Even in the
+  in-kernel form, each driver's `Block` already reports the honest per-request
+  health class (root cause #3): `virtio_blk` decodes the `virtio_blk_req` status
+  byte through one shared `status_to_result` — `VIRTIO_BLK_S_IOERR` → a
+  per-request `DriverError::MediumError` (recovered/repaired by a consumer, not a
+  whole-device drop), `VIRTIO_BLK_S_UNSUPP` → `Unsupported`, any undefined status
+  → a fail-closed `DeviceFault` — so no consumer (a RAID member, the kernel block
+  client) drops a whole device over a single bad sector, before the serve-loop
+  wrapping even exists.
 - The consumer marking the affected volume degraded landed in IO2 above (the
   kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
   Recovering}`); the remaining observability is the audit-log health trail

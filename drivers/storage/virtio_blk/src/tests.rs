@@ -511,8 +511,9 @@ type FlushLog = Rc<RefCell<usize>>;
 
 /// Build a flush-capable virtio-blk `MockTransport`: it offers
 /// `VIRTIO_BLK_F_FLUSH`, and its shim counts every `VIRTIO_BLK_T_FLUSH`
-/// request into the returned log, answering each `STATUS_OK`.
-fn build_flush_device() -> (MockTransport, FlushLog) {
+/// request into the returned log, answering each with `flush_status`. Any
+/// other request is answered `VIRTIO_BLK_S_UNSUPP`.
+fn build_flush_device_with_status(flush_status: u8) -> (MockTransport, FlushLog) {
     let mut t = MockTransport::new(1, 8, wire::VIRTIO_BLK_F_FLUSH, 64);
     t.set_config(wire::CONFIG_CAPACITY_OFFSET, &SECTORS.to_le_bytes());
     let log: FlushLog = Rc::new(RefCell::new(0));
@@ -528,17 +529,22 @@ fn build_flush_device() -> (MockTransport, FlushLog) {
             if req_type == wire::VIRTIO_BLK_T_FLUSH {
                 *log_for_shim.borrow_mut() += 1;
                 if let Some(last) = chain.device_write.last_mut() {
-                    last[0] = wire::STATUS_OK;
+                    last[0] = flush_status;
                 }
                 return Ok(1);
             }
             if let Some(last) = chain.device_write.last_mut() {
-                last[0] = 2; // VIRTIO_BLK_S_UNSUPP.
+                last[0] = wire::STATUS_UNSUPP;
             }
             Ok(1)
         }),
     );
     (t, log)
+}
+
+/// A flush-capable device that answers every flush `STATUS_OK`.
+fn build_flush_device() -> (MockTransport, FlushLog) {
+    build_flush_device_with_status(wire::STATUS_OK)
 }
 
 #[test]
@@ -586,6 +592,101 @@ fn register_requires_drv_load() {
         Err(DriverError::PermissionDenied)
     );
     assert!(register(&H { grant: true }).is_ok());
+}
+
+/// Build a virtio-blk `MockTransport` whose shim answers every
+/// `VIRTIO_BLK_T_IN` read with the caller-chosen device status byte
+/// (filling the data buffer with a recognisable non-zero pattern first),
+/// so the driver's status decode can be exercised for every outcome.
+fn build_device_returning_read_status(status: u8) -> MockTransport {
+    let mut t = MockTransport::new(1, 8, 0, 8);
+    t.set_config(wire::CONFIG_CAPACITY_OFFSET, &SECTORS.to_le_bytes());
+    t.install_shim(
+        0,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            // Plant a non-zero pattern in the data buffer so a (buggy)
+            // copy-on-error would be visible to the caller; a correct
+            // decode never copies it on a non-OK status.
+            if let Some(data) = chain.device_write.first_mut() {
+                data.fill(0x5A);
+            }
+            if let Some(last) = chain.device_write.last_mut() {
+                last[0] = status;
+            }
+            Ok(1)
+        }),
+    );
+    t
+}
+
+#[test]
+fn status_to_result_maps_every_device_status() {
+    assert_eq!(status_to_result(wire::STATUS_OK), Ok(()));
+    // A device-reported I/O error is a per-request medium error, not a
+    // whole-device fault, so a consumer recovers around it and repairs
+    // the block rather than dropping the device.
+    assert_eq!(
+        status_to_result(wire::STATUS_IOERR),
+        Err(DriverError::MediumError)
+    );
+    // The device does not implement this request type: a request-level
+    // refusal, not a device fault.
+    assert_eq!(
+        status_to_result(wire::STATUS_UNSUPP),
+        Err(DriverError::Unsupported)
+    );
+    // Any undefined status byte fails closed: the device is not speaking
+    // the protocol we trust, so it is a fault, never the benign
+    // `Unsupported`.
+    assert_eq!(status_to_result(3), Err(DriverError::DeviceFault));
+    assert_eq!(status_to_result(0x7F), Err(DriverError::DeviceFault));
+    assert_eq!(status_to_result(0xFF), Err(DriverError::DeviceFault));
+}
+
+#[test]
+fn read_ioerror_surfaces_as_medium_error_not_device_fault() {
+    let t = build_device_returning_read_status(wire::STATUS_IOERR);
+    let mut blk = open_with_autodrain(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    // A single bad-sector I/O error is a per-request `MediumError`: a
+    // consumer (e.g. a RAID member) recovers around it and repairs the
+    // block, rather than dropping the whole device as a `DeviceFault`
+    // would force.
+    assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::MediumError));
+    // Fail closed: no device-written bytes are copied back on an error,
+    // so the caller never sees the shim's `0x5A` pattern.
+    assert!(
+        buf.iter().all(|b| *b == 0),
+        "no data must be copied back on a failed read"
+    );
+}
+
+#[test]
+fn read_unknown_status_fails_closed_as_device_fault() {
+    let t = build_device_returning_read_status(0x7F);
+    let mut blk = open_with_autodrain(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
+    assert!(buf.iter().all(|b| *b == 0));
+}
+
+#[test]
+fn read_unsupported_status_is_request_level_not_a_fault() {
+    let t = build_device_returning_read_status(wire::STATUS_UNSUPP);
+    let mut blk = open_with_autodrain(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::Unsupported));
+    assert!(buf.iter().all(|b| *b == 0));
+}
+
+#[test]
+fn flush_ioerror_fails_closed_as_medium_error() {
+    // A flush the device cannot commit is a genuine I/O failure the
+    // caller must see (data may not be durable), never a silent success.
+    let (t, log) = build_flush_device_with_status(wire::STATUS_IOERR);
+    let mut blk = open_with_autodrain(t);
+    assert_eq!(blk.flush(), Err(DriverError::MediumError));
+    assert_eq!(*log.borrow(), 1, "the flush reached the device");
 }
 
 #[test]
