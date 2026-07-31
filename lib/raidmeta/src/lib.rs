@@ -136,6 +136,16 @@ pub enum RaidLevel {
     /// lost by solving the three syndromes for the three unknowns. Carries a
     /// non-zero stripe unit ([`ArraySuperblock::chunk_blocks`]).
     TripleParity = 5,
+    /// RAID10 stripe of mirrors (`Raid10Array`): the members are paired into
+    /// two-copy mirrors and the logical block space is striped in fixed-size
+    /// chunks across the pairs (a stripe *of* mirrors), so the array has the
+    /// capacity of half its members and survives any member fault — and
+    /// several at once — as long as no mirror pair loses *both* copies. The
+    /// member count is always even (two copies per pair) and at least four
+    /// (two pairs), below which the layout is a plain mirror rather than a
+    /// stripe of mirrors. Carries a non-zero stripe unit
+    /// ([`ArraySuperblock::chunk_blocks`]).
+    Raid10 = 6,
 }
 
 impl RaidLevel {
@@ -152,7 +162,7 @@ impl RaidLevel {
     pub const fn is_striped(self) -> bool {
         matches!(
             self,
-            Self::Stripe | Self::Parity | Self::DualParity | Self::TripleParity
+            Self::Stripe | Self::Parity | Self::DualParity | Self::TripleParity | Self::Raid10
         )
     }
 
@@ -174,7 +184,9 @@ impl RaidLevel {
         match self {
             Self::Mirror | Self::Stripe => 1,
             Self::Parity => 3,
-            Self::DualParity => 4,
+            // RAID6 reserves P and Q; a RAID10 needs two two-copy pairs
+            // (below four it is a plain mirror, not a stripe of mirrors).
+            Self::DualParity | Self::Raid10 => 4,
             Self::TripleParity => 5,
         }
     }
@@ -252,6 +264,16 @@ impl RaidLevel {
                     None
                 }
             }
+            // A stripe of two-copy mirrors presents half its members' worth
+            // of capacity, and only an even member count pairs cleanly; an
+            // odd count describes an array that cannot exist.
+            Self::Raid10 => {
+                if member_count >= 2 && member_count.is_multiple_of(2) {
+                    Some(member_count / 2)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -288,6 +310,7 @@ impl RaidLevel {
             3 => Ok(Self::Parity),
             4 => Ok(Self::DualParity),
             5 => Ok(Self::TripleParity),
+            6 => Ok(Self::Raid10),
             _ => Err(SuperblockError::UnknownRaidLevel),
         }
     }
@@ -467,6 +490,14 @@ impl ArraySuperblock {
         // Reject it at the boundary rather than let it reach an engine that
         // would fail closed later (fail closed on malformed metadata).
         if member_count < raid_level.min_members() || member_count > raid_level.max_members() {
+            return Err(SuperblockError::MemberCountOutOfRange);
+        }
+        // A member count within the level's [min, max] range can still be
+        // structurally impossible — a RAID10 needs an *even* count to pair its
+        // copies. `data_members` is the single oracle of composability, so the
+        // on-disk boundary rejects exactly what an engine's `assemble` would
+        // (fail closed on malformed metadata; no drift, `AGENTS.md` §2.2).
+        if raid_level.data_members(u64::from(member_count)).is_none() {
             return Err(SuperblockError::MemberCountOutOfRange);
         }
         let member_slot = u16::from_le_bytes([bytes[OFF_MEMBER_SLOT], bytes[OFF_MEMBER_SLOT + 1]]);

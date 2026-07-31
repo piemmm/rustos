@@ -256,12 +256,17 @@ fn raid_level_round_trips_and_fails_closed() {
         RaidLevel::from_u8(RaidLevel::TripleParity.as_u8()),
         Ok(RaidLevel::TripleParity)
     );
+    assert_eq!(
+        RaidLevel::from_u8(RaidLevel::Raid10.as_u8()),
+        Ok(RaidLevel::Raid10)
+    );
     assert!(!RaidLevel::Mirror.is_striped());
     assert!(RaidLevel::Stripe.is_striped());
     assert!(RaidLevel::Parity.is_striped());
     assert!(RaidLevel::DualParity.is_striped());
     assert!(RaidLevel::TripleParity.is_striped());
-    for raw in [0u8, 6, 7, 255] {
+    assert!(RaidLevel::Raid10.is_striped());
+    for raw in [0u8, 7, 8, 255] {
         assert_eq!(
             RaidLevel::from_u8(raw),
             Err(SuperblockError::UnknownRaidLevel)
@@ -360,6 +365,43 @@ fn decode_rejects_too_few_and_too_many_members_for_triple_parity() {
     triple_many.raid_level = RaidLevel::TripleParity;
     assert_eq!(
         ArraySuperblock::decode(&triple_many.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+}
+
+#[test]
+fn a_raid10_superblock_round_trips_and_rejects_an_odd_member_count() {
+    let mut original = parity_sb(UUID_A, 4, 2, 9, 128);
+    original.raid_level = RaidLevel::Raid10;
+    let decoded = ArraySuperblock::decode(&original.encode()).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.raid_level, RaidLevel::Raid10);
+    assert_eq!(decoded.chunk_blocks, 128);
+
+    // A RAID10 with a zero stripe unit contradicts its striped nature.
+    let mut zero = parity_sb(UUID_A, 4, 0, 1, 0);
+    zero.raid_level = RaidLevel::Raid10;
+    zero.chunk_blocks = 0;
+    assert_eq!(
+        ArraySuperblock::decode(&zero.encode()),
+        Err(SuperblockError::BadStripeChunk)
+    );
+
+    // An odd member count cannot pair copies: refused at the decode boundary
+    // exactly as the engine's `assemble` would.
+    let mut odd = parity_sb(UUID_A, 5, 0, 1, 64);
+    odd.raid_level = RaidLevel::Raid10;
+    assert_eq!(
+        ArraySuperblock::decode(&odd.encode()),
+        Err(SuperblockError::MemberCountOutOfRange)
+    );
+
+    // A two-member RAID10 is a plain mirror, not a stripe of mirrors: below
+    // the four-member floor it is refused.
+    let mut too_small = parity_sb(UUID_A, 2, 0, 1, 64);
+    too_small.raid_level = RaidLevel::Raid10;
+    assert_eq!(
+        ArraySuperblock::decode(&too_small.encode()),
         Err(SuperblockError::MemberCountOutOfRange)
     );
 }
@@ -770,6 +812,9 @@ fn raid_level_member_bounds_are_the_shared_source() {
     assert_eq!(RaidLevel::Parity.min_members(), 3);
     assert_eq!(RaidLevel::DualParity.min_members(), 4);
     assert_eq!(RaidLevel::TripleParity.min_members(), 5);
+    // RAID10 needs two two-copy pairs (four members) to be a stripe of
+    // mirrors rather than a plain mirror.
+    assert_eq!(RaidLevel::Raid10.min_members(), 4);
     // Only the GF(2^8) parity levels have a real ceiling: 255 data members
     // plus their syndrome chunks (RAID6 = 257 slots, RAID-TP = 258). Every
     // other level is bounded only by the on-disk `u16` member-count field.
@@ -778,6 +823,7 @@ fn raid_level_member_bounds_are_the_shared_source() {
     assert_eq!(RaidLevel::Parity.max_members(), u16::MAX);
     assert_eq!(RaidLevel::DualParity.max_members(), 257);
     assert_eq!(RaidLevel::TripleParity.max_members(), 258);
+    assert_eq!(RaidLevel::Raid10.max_members(), u16::MAX);
 }
 
 #[test]
@@ -850,6 +896,9 @@ fn data_members_is_the_shared_usable_width_per_level() {
     // Triple parity reserves three (P, Q, and R).
     assert_eq!(RaidLevel::TripleParity.data_members(5), Some(2));
     assert_eq!(RaidLevel::TripleParity.data_members(10), Some(7));
+    // A RAID10 stripe of two-copy mirrors presents half its members.
+    assert_eq!(RaidLevel::Raid10.data_members(4), Some(2));
+    assert_eq!(RaidLevel::Raid10.data_members(10), Some(5));
 }
 
 #[test]
@@ -863,6 +912,9 @@ fn data_members_fails_closed_below_the_structural_floor() {
     assert_eq!(RaidLevel::DualParity.data_members(0), None);
     assert_eq!(RaidLevel::TripleParity.data_members(3), None);
     assert_eq!(RaidLevel::TripleParity.data_members(0), None);
+    // A RAID10 with an odd member count cannot pair its copies.
+    assert_eq!(RaidLevel::Raid10.data_members(5), None);
+    assert_eq!(RaidLevel::Raid10.data_members(0), None);
     // The mirror is the identity case: always one copy's worth, even at zero
     // (an empty mirror is rejected earlier by `assemble`, not here).
     assert_eq!(RaidLevel::Mirror.data_members(0), Some(1));

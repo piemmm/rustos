@@ -345,6 +345,31 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         })
     }
 
+    /// Wrap an already-prepared member sub-slice as a mirror view without
+    /// re-probing geometry.
+    ///
+    /// The RAID10 stripe-of-mirrors composition ([`Raid10Array`](crate::Raid10Array))
+    /// drives each of its mirror pairs through this one mirror implementation
+    /// rather than copying the recover/repair/rebuild logic (`AGENTS.md`
+    /// §2.2): it probes the members once at its own `assemble` and then, per
+    /// striped chunk, builds a transient pair view here (an allocation-free
+    /// borrow, `AGENTS.md` §24.1) to serve the read/write/scrub/rebuild for
+    /// that pair. `geometry` is the per-member geometry every pair shares and
+    /// `scrub_next_lba` carries the pair's scrub cursor (the array block count
+    /// when no scrub is in progress); the per-member rebuild cursor lives in
+    /// each [`MirrorMember`], so it persists across transient views.
+    pub(crate) fn from_prepared(
+        members: &'a mut [MirrorMember<B>],
+        geometry: BlockGeometry,
+        scrub_next_lba: u64,
+    ) -> Self {
+        Self {
+            members,
+            geometry,
+            scrub_next_lba,
+        }
+    }
+
     /// The array's logical geometry (shared by every copy).
     #[must_use]
     pub const fn array_geometry(&self) -> BlockGeometry {

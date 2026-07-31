@@ -1132,7 +1132,35 @@ Remaining:
   GF(2^8) ceiling generalised to `MAX_PARITY_DATA_MEMBERS` (one definition for
   RAID6 and RAID-TP, §2.2). `RaidArray` dispatch gained the `TripleParity` arm.
   Design: `docs/src/drivers/raid.md`.
-- RAID levels beyond triple parity are further sibling compositions over the
+- **Landed (the RAID10 stripe-of-mirrors sibling):** `raid::Raid10Array`
+  (`drivers/storage/raid`, host-testable `lib`) composes an even number of
+  members (≥ 4) into two-copy mirror pairs and stripes fixed-size chunks
+  (`ArraySuperblock::chunk_blocks`) across the pairs — the capacity-*and*-
+  redundancy sibling of the mirror and the stripe over the same seam (§2.2
+  parallel implementations). It is a genuine *composition*, not a
+  re-implementation (§2.2): the RAID0 striping map (`StripeArray::locate`,
+  hoisted to a shared `pub(crate)` helper) places each chunk on its pair, and
+  each pair is driven through the one `MirrorArray` engine via an
+  allocation-free transient `MirrorArray::from_prepared` view, so RAID10
+  inherits the mirror's recover/read-repair/write-fan-out/scrub/rebuild
+  behaviour and adds only the pairing and the aggregation of per-pair health
+  into array health. It presents half its members' capacity, survives any
+  member fault — and several at once — while no pair loses both copies
+  (`ArrayHealth::Degraded`/`Recovering`), and fails a lost pair's region closed
+  (`ArrayHealth::Failed`, §5.4) while the other pairs keep serving (head-of-line
+  freedom, §26.1). Proven host-side over a fault-injecting `Block` double
+  (assemble round-trip and every malformed-table/odd/too-few/geometry/unaligned
+  refusal, media-error recover+repair, whole-device degrade, both-copies
+  fail-closed-with-sibling-serving, write fan-out+drop, fully-absent-pair,
+  replace+rebuild-current-data, remove→add replacement cycle, out-of-range
+  member ops, latent-error scrub heal, failed-array scrub fail-closed,
+  device-health aggregation, request validation, buffer-class threading). The
+  on-disk `ArraySuperblock` grew a `RaidLevel::Raid10` (evolved in place, §2.13;
+  a striped level, so a non-zero stripe unit is required, and its member count
+  must be even and ≥ 4 — `data_members` is the single composability oracle the
+  `decode` boundary reuses so an odd count fails closed identically). `RaidArray`
+  dispatch gained the `Raid10` arm. Design: `docs/src/drivers/raid.md`.
+- RAID levels beyond RAID10 are further sibling compositions over the
   same seam (§2.2 parallel implementations), added when needed.
 
 Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`

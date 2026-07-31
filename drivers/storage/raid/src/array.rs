@@ -27,6 +27,7 @@ use tairix_abi::driver::{BufferClass, DriverError};
 use crate::dualparity::{DualParityArray, DualParityError};
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError};
 use crate::parity::{ParityArray, ParityError};
+use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::StripeArray;
 use crate::superblock::RaidLevel;
 use crate::triple::{TripleParityArray, TripleParityError};
@@ -106,6 +107,21 @@ impl From<DualParityError> for RaidError {
     }
 }
 
+impl From<Raid10Error> for RaidError {
+    fn from(err: Raid10Error) -> Self {
+        match err {
+            Raid10Error::UnknownMember => Self::UnknownMember,
+            Raid10Error::NotFaulted => Self::NotFaulted,
+            Raid10Error::ProbeFailed => Self::ProbeFailed,
+            Raid10Error::GeometryMismatch => Self::GeometryMismatch,
+            Raid10Error::SlotOccupied => Self::SlotOccupied,
+            // Assembly-shape failures (empty/odd/too-few members, zero chunk,
+            // unaligned or missing geometry, overflow) are composition policy.
+            _ => Self::Policy,
+        }
+    }
+}
+
 impl From<TripleParityError> for RaidError {
     fn from(err: TripleParityError) -> Self {
         match err {
@@ -145,6 +161,8 @@ pub enum RaidArray<'a, B: Block> {
     DualParity(DualParityArray<'a, B>),
     /// A RAID-TP triple distributed-parity array ([`TripleParityArray`]).
     TripleParity(TripleParityArray<'a, B>),
+    /// A RAID10 stripe of two-copy mirrors ([`Raid10Array`]).
+    Raid10(Raid10Array<'a, B>),
 }
 
 impl<B: Block> RaidArray<'_, B> {
@@ -157,6 +175,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(_) => RaidLevel::Parity,
             Self::DualParity(_) => RaidLevel::DualParity,
             Self::TripleParity(_) => RaidLevel::TripleParity,
+            Self::Raid10(_) => RaidLevel::Raid10,
         }
     }
 
@@ -172,6 +191,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.health(),
             Self::DualParity(a) => a.health(),
             Self::TripleParity(a) => a.health(),
+            Self::Raid10(a) => a.health(),
         }
     }
 
@@ -185,6 +205,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.member_count(),
             Self::DualParity(a) => a.member_count(),
             Self::TripleParity(a) => a.member_count(),
+            Self::Raid10(a) => a.member_count(),
         }
     }
 
@@ -197,6 +218,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.array_geometry(),
             Self::DualParity(a) => a.array_geometry(),
             Self::TripleParity(a) => a.array_geometry(),
+            Self::Raid10(a) => a.array_geometry(),
         }
     }
 
@@ -220,6 +242,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.member_state(index),
             Self::DualParity(a) => a.member_state(index),
             Self::TripleParity(a) => a.member_state(index),
+            Self::Raid10(a) => a.member_state(index),
         }
     }
 
@@ -234,6 +257,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.needs_resync(),
             Self::DualParity(a) => a.needs_resync(),
             Self::TripleParity(a) => a.needs_resync(),
+            Self::Raid10(a) => a.needs_resync(),
         }
     }
 
@@ -247,6 +271,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.scrubbing(),
             Self::DualParity(a) => a.scrubbing(),
             Self::TripleParity(a) => a.scrubbing(),
+            Self::Raid10(a) => a.scrubbing(),
         }
     }
 
@@ -260,6 +285,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.scrub_cursor(),
             Self::DualParity(a) => a.scrub_cursor(),
             Self::TripleParity(a) => a.scrub_cursor(),
+            Self::Raid10(a) => a.scrub_cursor(),
         }
     }
 
@@ -276,6 +302,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.begin_scrub(),
             Self::DualParity(a) => a.begin_scrub(),
             Self::TripleParity(a) => a.begin_scrub(),
+            Self::Raid10(a) => a.begin_scrub(),
         }
         Ok(())
     }
@@ -302,6 +329,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.scrub_step(blocks).map_err(RaidError::Io),
             Self::DualParity(a) => a.scrub_step(blocks).map_err(RaidError::Io),
             Self::TripleParity(a) => a.scrub_step(blocks).map_err(RaidError::Io),
+            Self::Raid10(a) => a.scrub_step(scratch).map_err(RaidError::Io),
             // The stripe arm returned above; the budget is redundant-only.
             Self::Stripe(_) => Err(RaidError::NotRedundant),
         }
@@ -328,6 +356,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.resync_step(blocks).map_err(RaidError::Io),
             Self::DualParity(a) => a.resync_step(blocks).map_err(RaidError::Io),
             Self::TripleParity(a) => a.resync_step(blocks).map_err(RaidError::Io),
+            Self::Raid10(a) => a.resync_step(scratch).map_err(RaidError::Io),
             // The stripe arm returned above; the budget is redundant-only.
             Self::Stripe(_) => Err(RaidError::NotRedundant),
         }
@@ -350,6 +379,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.readd_member(index).map_err(RaidError::from),
             Self::DualParity(a) => a.readd_member(index).map_err(RaidError::from),
             Self::TripleParity(a) => a.readd_member(index).map_err(RaidError::from),
+            Self::Raid10(a) => a.readd_member(index).map_err(RaidError::from),
         }
     }
 
@@ -368,6 +398,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.remove_member(index).map_err(RaidError::from),
             Self::DualParity(a) => a.remove_member(index).map_err(RaidError::from),
             Self::TripleParity(a) => a.remove_member(index).map_err(RaidError::from),
+            Self::Raid10(a) => a.remove_member(index).map_err(RaidError::from),
         }
     }
 
@@ -387,6 +418,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.add_member(index, device).map_err(RaidError::from),
             Self::DualParity(a) => a.add_member(index, device).map_err(RaidError::from),
             Self::TripleParity(a) => a.add_member(index, device).map_err(RaidError::from),
+            Self::Raid10(a) => a.add_member(index, device).map_err(RaidError::from),
         }
     }
 
@@ -406,6 +438,7 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Parity(a) => a.replace_member(index, device).map_err(RaidError::from),
             Self::DualParity(a) => a.replace_member(index, device).map_err(RaidError::from),
             Self::TripleParity(a) => a.replace_member(index, device).map_err(RaidError::from),
+            Self::Raid10(a) => a.replace_member(index, device).map_err(RaidError::from),
         }
     }
 
@@ -428,6 +461,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.geometry(),
             Self::DualParity(a) => a.geometry(),
             Self::TripleParity(a) => a.geometry(),
+            Self::Raid10(a) => a.geometry(),
         }
     }
 
@@ -438,6 +472,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.read_blocks(lba, buf),
             Self::DualParity(a) => a.read_blocks(lba, buf),
             Self::TripleParity(a) => a.read_blocks(lba, buf),
+            Self::Raid10(a) => a.read_blocks(lba, buf),
         }
     }
 
@@ -448,6 +483,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.write_blocks(lba, buf),
             Self::DualParity(a) => a.write_blocks(lba, buf),
             Self::TripleParity(a) => a.write_blocks(lba, buf),
+            Self::Raid10(a) => a.write_blocks(lba, buf),
         }
     }
 
@@ -458,6 +494,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.flush(),
             Self::DualParity(a) => a.flush(),
             Self::TripleParity(a) => a.flush(),
+            Self::Raid10(a) => a.flush(),
         }
     }
 
@@ -473,6 +510,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.read_blocks_with_class(lba, buf, class),
             Self::DualParity(a) => a.read_blocks_with_class(lba, buf, class),
             Self::TripleParity(a) => a.read_blocks_with_class(lba, buf, class),
+            Self::Raid10(a) => a.read_blocks_with_class(lba, buf, class),
         }
     }
 
@@ -488,6 +526,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.write_blocks_with_class(lba, buf, class),
             Self::DualParity(a) => a.write_blocks_with_class(lba, buf, class),
             Self::TripleParity(a) => a.write_blocks_with_class(lba, buf, class),
+            Self::Raid10(a) => a.write_blocks_with_class(lba, buf, class),
         }
     }
 
@@ -498,6 +537,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.discard_capability(),
             Self::DualParity(a) => a.discard_capability(),
             Self::TripleParity(a) => a.discard_capability(),
+            Self::Raid10(a) => a.discard_capability(),
         }
     }
 
@@ -508,6 +548,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.discard(lba, blocks),
             Self::DualParity(a) => a.discard(lba, blocks),
             Self::TripleParity(a) => a.discard(lba, blocks),
+            Self::Raid10(a) => a.discard(lba, blocks),
         }
     }
 
@@ -518,6 +559,7 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::Parity(a) => a.device_health(),
             Self::DualParity(a) => a.device_health(),
             Self::TripleParity(a) => a.device_health(),
+            Self::Raid10(a) => a.device_health(),
         }
     }
 }

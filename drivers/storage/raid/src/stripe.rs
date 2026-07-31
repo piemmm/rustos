@@ -267,7 +267,12 @@ impl<'a, B: Block> StripeArray<'a, B> {
     /// same chunk on that member (so a caller splits an I/O at chunk
     /// boundaries). The member index is a `u64` (the caller narrows it to a
     /// slot index), always less than `member_count`.
-    fn locate(chunk_blocks: u64, member_count: u64, lba: u64, remaining: u64) -> (u64, u64, u64) {
+    pub(crate) fn locate(
+        chunk_blocks: u64,
+        member_count: u64,
+        lba: u64,
+        remaining: u64,
+    ) -> (u64, u64, u64) {
         let chunk = lba / chunk_blocks;
         let offset = lba % chunk_blocks;
         let member = chunk % member_count;

@@ -393,6 +393,54 @@ One, two, or three faulted/absent members degrade the array
 restores redundancy without a reboot (`AGENTS.md` §18.4). Faulted members are
 sticky-but-recoverable, so a flapping disk never masquerades as a healthy copy.
 
+## RAID10 stripe of mirrors (`Raid10Array`)
+
+`Raid10Array` composes an **even** number of members (at least four) into
+two-copy mirror **pairs** and stripes the logical block space in fixed-size
+chunks across the pairs — a stripe *of* mirrors. It combines mirror redundancy
+with stripe capacity and bandwidth: the array presents half its members' worth
+of capacity and survives any member fault — and several at once — as long as no
+mirror pair loses *both* copies. Like its siblings it borrows a caller-owned
+member slice and holds no allocation (`AGENTS.md` §24.1).
+
+### It is a composition, not a re-implementation
+
+A stripe of mirrors *is* a stripe over mirrors, so the engine composes the two
+it is built from rather than copying their logic (`AGENTS.md` §2.2):
+
+- the **striping map** (`StripeArray::locate`, shared `pub(crate)`) places each
+  logical chunk on the pair (column) that holds it, exactly as RAID0 does
+  across members;
+- each **mirror pair** is driven through the one `MirrorArray` implementation —
+  recover-from-a-good-copy, opportunistic read-repair, write fan-out, scrub,
+  and bounded rebuild — by building a transient `MirrorArray::from_prepared`
+  view over the pair's two members per operation (an allocation-free borrow).
+
+So RAID10 adds only the *pairing* and the *aggregation of per-pair health into
+array health*; every fault-recovery behaviour is the mirror's, verified once in
+the mirror's own tests.
+
+### Fault model, scrub, rebuild, and replace
+
+`assemble` probes each pair through `MirrorArray::assemble` (reusing the
+mirror's probing and geometry rules) and requires every present member to agree
+on geometry and to be a whole number of stripe chunks; an odd member count
+(`Raid10Error::OddMembers`) or fewer than four (`TooFewMembers`) is refused.
+A pair with one copy down is `ArrayHealth::Degraded` (or `Recovering` while
+that copy rebuilds) but keeps serving from the survivor through the mirror's
+recover-and-repair path; a pair that loses *both* copies can no longer serve
+its stripes, so the whole array is `ArrayHealth::Failed` and that region fails
+closed (`DeviceOffline`, `AGENTS.md` §5.4) while the *other* pairs keep serving
+(head-of-line freedom, §26.1). The array is `Optimal` only when every pair
+holds two in-sync copies.
+
+`begin_scrub` / `scrub_step` drive one shared member-local cursor across every
+pair, healing latent media errors chunk by chunk (`AGENTS.md` §26.5, §26.6);
+`resync_step` rebuilds each pair's resyncing copy from its survivor; and the
+`readd_member` / `remove_member` / `add_member` / `replace_member` cycle maps a
+global slot to its pair and drives the mirror's own disk-replacement workflow,
+restoring redundancy without a reboot (`AGENTS.md` §18.4).
+
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 The on-disk metadata format and the reassembly logic live in the shared
@@ -421,14 +469,16 @@ so a corrupt or foreign record is never mistaken for a valid array. The member
 count must likewise be one its level can actually be composed from
 (`RaidLevel::min_members`/`RaidLevel::max_members`, the single shared
 definition the composition engines also read): a RAID5 claiming two members, a
-RAID6 claiming three, a RAID-TP claiming four, or a GF(2^8) parity level
+RAID6 claiming three, a RAID-TP claiming four, a RAID10 claiming an *odd*
+count (its copies cannot pair) or fewer than four, or a GF(2^8) parity level
 claiming more data members than its syndromes can distinguish (more than 255,
 i.e. over 257 slots for RAID6 or 258 for RAID-TP) describes an array that
 cannot exist and is refused (`SuperblockError::MemberCountOutOfRange`) rather
 than half-trusted. Each level's *usable capacity* lives beside those bounds as
 the same single definition — `RaidLevel::data_members` (a stripe concatenates
 every member, a mirror presents one copy, single parity reserves one member,
-double parity two, and triple parity three) and the
+double parity two, triple parity three, and RAID10 presents half its members)
+and the
 `RaidLevel::logical_block_count` that
 sizes the composed geometry as `per_member_blocks × data_members`, failing
 closed on an overflow that would truncate addresses. The concatenating engines'
@@ -586,13 +636,13 @@ absence of data is never mistaken for a perfectly-healthy array.
 
 ## Composed-device dispatch (`RaidArray`)
 
-The five compositions above are siblings over the same block seam (`AGENTS.md`
+The six compositions above are siblings over the same block seam (`AGENTS.md`
 §2.2), but a serving process must present exactly **one** logical
 [`tairix_abi::driver::block::Block`](./block.md) device to the filesystem
 layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
 composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
-per-personality dispatch: it is an enum over the five engines that forwards
+per-personality dispatch: it is an enum over the six engines that forwards
 both the `Block` I/O path (`geometry`/`read`/`write`/`flush`/the class-aware
 and discard/health surface) and the level-agnostic observation, maintenance,
 and reconfiguration operations, so neither the autoloaded serve process nor the
@@ -613,8 +663,9 @@ above.
   bounded chunk (its length in whole array blocks, so a 100 TB+ array never
   scrubs or rebuilds in one sweep, `AGENTS.md` §26.6, §2.23) and serves as the
   staging buffer for the mirror; the parity levels use it only to size the
-  budget and stage through their own assemble-time scratch. A scratch that is
-  empty or not a block-size multiple fails closed with `RaidError::BadScratch`.
+  budget and stage through their own assemble-time scratch, while RAID10 (like
+  the mirror) stages through the scratch directly. A scratch that is empty or
+  not a block-size multiple fails closed with `RaidError::BadScratch`.
 - **Reconfiguration** — `readd_member` / `remove_member` / `add_member` /
   `replace_member`, the hot-swap workflow, each mapping the engine's
   composition-policy outcome onto the shared `RaidError`.

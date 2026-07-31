@@ -10,14 +10,33 @@
 //! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
 //! re-invent it.
 //!
-//! Five compositions are provided as siblings over that one seam (`AGENTS.md`
+//! Six compositions are provided as siblings over that one seam (`AGENTS.md`
 //! §2.2 parallel implementations): the redundant RAID1 mirror
 //! ([`MirrorArray`]), the capacity-aggregating RAID0 stripe
 //! ([`StripeArray`]), the RAID5 distributed-parity array ([`ParityArray`])
 //! that combines capacity aggregation with single-fault redundancy, the
 //! RAID6 double distributed-parity array ([`DualParityArray`]) that survives
-//! *two* member losses, and the RAID-TP triple distributed-parity array
-//! ([`TripleParityArray`]) that survives *three*.
+//! *two* member losses, the RAID-TP triple distributed-parity array
+//! ([`TripleParityArray`]) that survives *three*, and the RAID10 stripe of
+//! mirrors ([`Raid10Array`]) that combines mirror redundancy with stripe
+//! capacity and bandwidth.
+//!
+//! # RAID10 stripe of mirrors ([`Raid10Array`])
+//!
+//! The sixth composition is a RAID10 stripe of two-copy mirrors: an even
+//! number of members are paired into mirrors and the logical block space is
+//! striped in fixed-size chunks across the pairs. It is a *composition* of the
+//! two engines above rather than a re-implementation (`AGENTS.md` §2.2): the
+//! RAID0 striping map places each chunk on its pair (column), and each pair is
+//! driven through the one [`MirrorArray`] implementation via an
+//! allocation-free transient view, so RAID10 inherits the mirror's
+//! recover/read-repair/write-fan-out/scrub/rebuild behaviour and adds only the
+//! pairing and the aggregation of per-pair health into array health. The array
+//! has the capacity of half its members, survives any member fault — and
+//! several at once — as long as no pair loses *both* copies
+//! ([`ArrayHealth::Degraded`]/[`ArrayHealth::Recovering`] meanwhile), and fails
+//! closed ([`ArrayHealth::Failed`]) only when a pair loses both copies and can
+//! no longer serve its stripes.
 //!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
@@ -262,6 +281,7 @@ mod gf256;
 mod health;
 mod mirror;
 mod parity;
+mod raid10;
 mod stripe;
 mod superblock;
 mod triple;
@@ -270,6 +290,7 @@ pub use array::{RaidArray, RaidError};
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use parity::{ParityArray, ParityError, ParityMember};
+pub use raid10::{Raid10Array, Raid10Error};
 pub use stripe::{StripeArray, StripeError, StripeMember};
 pub use superblock::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,

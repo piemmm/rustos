@@ -10,16 +10,19 @@
 use super::{RaidArray, RaidError};
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
 use crate::parity::{ParityArray, ParityMember};
+use crate::raid10::Raid10Array;
 use crate::stripe::{StripeArray, StripeMember};
 use crate::superblock::RaidLevel;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::DriverError;
 
-const BS: u32 = 512;
+const BS: u32 = 64;
 /// Logical blocks per backing member device.
 const MB: u64 = 8;
-/// One member's byte capacity (`BS * MB`).
-const CAP: usize = 512 * 8;
+/// One member's byte capacity (`BS * MB`). Kept small so the test doubles'
+/// backing arrays stay well under clippy's large-stack-array threshold even
+/// for the four-member RAID10 dispatch case.
+const CAP: usize = 64 * 8;
 /// The stripe unit for the striped-level arrays, in logical blocks.
 const CHUNK: u32 = 2;
 
@@ -256,6 +259,47 @@ fn parity_arm_reports_level_and_dispatches_block_budget_maintenance() {
     while array.scrubbing() {
         array.scrub_step(&mut budget).expect("scrub step");
     }
+}
+
+// -- RAID10 arm (stripe-of-mirrors, mirror-style scratch dispatch) -------
+
+#[test]
+fn raid10_arm_reports_level_and_dispatches_maintenance() {
+    let mut members = [
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+    ];
+    let mut array =
+        RaidArray::Raid10(Raid10Array::assemble(&mut members, CHUNK).expect("assembles"));
+
+    assert_eq!(array.level(), RaidLevel::Raid10);
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    assert_eq!(array.member_count(), 4);
+    // Two pairs of MB-block members => half the summed capacity.
+    assert_eq!(array.array_geometry().block_count, MB * 2);
+    assert_eq!(array.member_state(0), Some(MemberState::InSync));
+
+    // Block I/O round-trips through the dispatch.
+    let payload = one_block();
+    array
+        .write_blocks(3, &payload)
+        .expect("write through raid10");
+    let mut back = [0u8; BS as usize];
+    array
+        .read_blocks(3, &mut back)
+        .expect("read through raid10");
+    assert_eq!(back, payload);
+
+    // A redundant level forwards maintenance (not `NotRedundant`); RAID10, like
+    // the mirror, takes the scratch byte buffer rather than a block budget.
+    array.begin_scrub().expect("scrub begins");
+    let mut scratch = [0u8; BS as usize];
+    array.scrub_step(&mut scratch).expect("scrub step");
+    array.resync_step(&mut scratch).expect("resync step");
+    // A bad scratch buffer fails closed at the dispatch boundary.
+    assert_eq!(array.scrub_step(&mut []).err(), Some(RaidError::BadScratch));
 }
 
 // -- Block trait object --------------------------------------------------
