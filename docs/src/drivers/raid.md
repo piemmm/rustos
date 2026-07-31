@@ -496,3 +496,49 @@ query — a single member with no telemetry never denies the consumer the health
 of the members that can be read (`AGENTS.md` §26.5). The array reports
 `Unavailable` only when no participating member exposes telemetry, so an
 absence of data is never mistaken for a perfectly-healthy array.
+
+## Composed-device dispatch (`RaidArray`)
+
+The four compositions above are siblings over the same block seam (`AGENTS.md`
+§2.2), but a serving process must present exactly **one** logical
+[`tairix_abi::driver::block::Block`](./block.md) device to the filesystem
+layer once it has *discovered* an array and resolved its `RaidLevel`,
+regardless of which level composes it. `RaidArray` is that single
+composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
+per-personality dispatch: it is an enum over the four engines that forwards
+both the `Block` I/O path (`geometry`/`read`/`write`/`flush`/the class-aware
+and discard/health surface) and the level-agnostic observation, maintenance,
+and reconfiguration operations, so neither the autoloaded serve process nor the
+ARXFS-native composition re-derives the level → engine mapping (`AGENTS.md`
+§2.2).
+
+The wrapper is a thin, allocation-free dispatch layer: it borrows the concrete
+engine (which in turn borrows its caller-owned member slice, so there is no
+fixed member ceiling, `AGENTS.md` §24.1) and adds **no policy of its own** —
+every arm forwards to the engine whose behaviour is proven in the sections
+above.
+
+- **Observation** — `level`, `health` (mapped onto the shared `ArrayHealth`
+  vocabulary), `member_count`, `array_geometry`, `member_state`,
+  `needs_resync`, `scrubbing`, `scrub_cursor`.
+- **Self-maintenance** — `begin_scrub` / `scrub_step` / `resync_step`. The
+  unified maintenance methods take one **scratch** buffer that both sizes the
+  bounded chunk (its length in whole array blocks, so a 100 TB+ array never
+  scrubs or rebuilds in one sweep, `AGENTS.md` §26.6, §2.23) and serves as the
+  staging buffer for the mirror; the parity levels use it only to size the
+  budget and stage through their own assemble-time scratch. A scratch that is
+  empty or not a block-size multiple fails closed with `RaidError::BadScratch`.
+- **Reconfiguration** — `readd_member` / `remove_member` / `add_member` /
+  `replace_member`, the hot-swap workflow, each mapping the engine's
+  composition-policy outcome onto the shared `RaidError`.
+
+### The stripe has no redundancy — the dispatch is honest about it
+
+A RAID0 stripe has nothing to scrub from, rebuild from, or hot-swap, so every
+redundancy-only operation on the stripe arm **fails closed** with
+`RaidError::NotRedundant` rather than pretending to succeed — the same honesty
+the stripe engine shows by reporting only `Optimal` / `Failed`. The level check
+wins over scratch validation, so the caller always learns the informative
+reason. Its `Block` I/O path, `level`, `health`, `member_count`,
+`array_geometry`, and `member_state` (a stripe member maps to `InSync` when
+live and `Faulted` when dropped) forward normally.

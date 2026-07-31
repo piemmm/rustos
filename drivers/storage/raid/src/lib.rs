@@ -191,6 +191,21 @@
 //! target, never an immediate read source — so the array can never serve a
 //! reader data from a copy known to be out of date (`AGENTS.md` §5.4, §26.5).
 //!
+//! # Composed-device dispatch ([`RaidArray`])
+//!
+//! Once a serve process has *discovered* an array and resolved its
+//! [`RaidLevel`], it presents exactly one logical
+//! [`Block`](tairix_abi::driver::block::Block) device regardless
+//! of level. [`RaidArray`] is that single composed-device abstraction
+//! (`AGENTS.md` §27, modelled on Linux md's per-personality dispatch): it
+//! wraps the level-specific engine and forwards the `Block` I/O path
+//! together with the level-agnostic health, self-maintenance
+//! (scrub/resync), and member-reconfiguration surface, so neither the
+//! autoloaded serve process nor the ARXFS-native composition re-derives the
+//! level → engine mapping (`AGENTS.md` §2.2). Operations that are only
+//! meaningful for a *redundant* array fail closed on a RAID0 stripe with
+//! [`RaidError::NotRedundant`].
+//!
 //! # Scope
 //!
 //! This crate is the host-testable composition **engine** plus the on-disk
@@ -206,6 +221,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod array;
 mod dualparity;
 mod gf256;
 mod health;
@@ -214,6 +230,7 @@ mod parity;
 mod stripe;
 mod superblock;
 
+pub use array::{RaidArray, RaidError};
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use parity::{ParityArray, ParityError, ParityMember};

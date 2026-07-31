@@ -955,15 +955,39 @@ single-array dedup, interleaved multi-array first-appearance order, and
 compose-with-`resolve`).
 Design: `docs/src/drivers/raid.md`.
 
+**Landed (the composed-device dispatch — `RaidArray`):** once an array is
+*discovered* and its `RaidLevel` resolved, a serve process presents exactly one
+logical `Block` device regardless of level. That single composed-device
+abstraction is the shared `raid::RaidArray` enum (§27, modelled on Linux md's
+per-personality dispatch): an allocation-free dispatch layer over the four
+engines that forwards the whole `Block` I/O path *and* the level-agnostic
+surface — observation (`level`/`health`/`member_count`/`array_geometry`/
+`member_state`/`needs_resync`/`scrubbing`/`scrub_cursor`), self-maintenance
+(`begin_scrub`/`scrub_step`/`resync_step`, taking one scratch buffer that both
+sizes the bounded chunk, §26.6, and stages the mirror while the parity levels
+size their budget from it), and the hot-swap reconfiguration
+(`readd`/`remove`/`add`/`replace_member`) — mapped onto one shared `RaidError`.
+So neither the autoloaded serve process nor the ARXFS-native composition
+re-derives the level → engine mapping (§2.2). It adds **no** policy of its own;
+the no-redundancy RAID0 stripe fails every redundancy-only op closed with
+`RaidError::NotRedundant` (the level check winning over scratch validation),
+exactly as the stripe engine reports only `Optimal`/`Failed`. Proven host-side
+(per-level I/O round-trip incl. through a `&mut dyn Block`, observation, the
+mirror and block-budget parity maintenance dispatch, the stripe `NotRedundant`
+refusals, `BadScratch`, and the `RaidError` `From` mapping incl. its defensive
+catch). Design: `docs/src/drivers/raid.md`.
+
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
   groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
-  drives `resync_step` off the members' IO3 recovery signals, and publishes the
-  composed device as its own block-service node — plus the ARXFS-native multi-device composition that
-  consumes the same engine. This rides with the multi-device volume-assembly
-  work; the engine and its metadata are the single shared definition both reuse
-  (§2.2), proven host-side first exactly as the other FIX-IO primitives landed
-  their shared logic before their live wiring.
+  wraps it in the shared `RaidArray` dispatch (above), drives `resync_step` off
+  the members' IO3 recovery signals, and publishes the composed device as its
+  own block-service node — plus the ARXFS-native multi-device composition that
+  consumes the same engine and dispatch. This rides with the multi-device
+  volume-assembly work; the engine, its metadata, and the `RaidArray` dispatch
+  are the single shared definition all consumers reuse (§2.2), proven host-side
+  first exactly as the other FIX-IO primitives landed their shared logic before
+  their live wiring.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size
