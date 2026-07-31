@@ -958,6 +958,20 @@ mod tests {
     const WIDGETS_GALLERY_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
+    // The Switchboard monitor service (plans/NEW-TASKBAR.md T10): console
+    // write for its fail-loud stderr diagnostics, and the two sysinfo reads
+    // its sampler has code paths for — `CAP_SYSINFO_GLOBAL` (the system-wide
+    // process list) and `CAP_SYSINFO_KERNEL` (the memory-pressure bands),
+    // both optional features that degrade to the self-scoped view when the
+    // launching user's ceiling strips them. It publishes over the ungated
+    // `ipc_call` and holds no filesystem, spawn, or window authority. Not an
+    // embedded spawn-floor program, so the list lives only in this pin.
+    const SWITCHBOARD_MONITOR_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::SYSINFO_GLOBAL,
+        CapabilityId::SYSINFO_KERNEL,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -1015,6 +1029,7 @@ mod tests {
             ("sleep", AppKind::Command, PURE_TOOL_REQUEST),
             ("ss", AppKind::Command, SS_TOOL_REQUEST),
             ("stress", AppKind::Command, STRESS_MANIFEST),
+            ("switchboard", AppKind::Service, SWITCHBOARD_MONITOR_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("sysmon", AppKind::Command, SYSMON_MANIFEST),

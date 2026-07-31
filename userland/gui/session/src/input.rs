@@ -19,11 +19,21 @@
 //!   the scrollbar, or dismissing on a click-away. Nothing leaks to the
 //!   windows beneath a modal popup.
 //! * **Otherwise the taskbar claims a press** when the pointer lands on the
-//!   bar *or* on the open (non-modal) notification popover; every other press
-//!   goes to the window manager. The two never both act on one press, so a
-//!   click on the bar or a notification card never also activates a window
-//!   behind it. The popover opens outward from the bar and never overlaps it,
-//!   so the two taskbar surfaces never contend for a press.
+//!   bar *or* on one of its open, non-modal popovers (the notification
+//!   popover and the Switchboard capsule's instrument readout); every other
+//!   press goes to the window manager. The two never both act on one press,
+//!   so a click on the bar or a notification card never also activates a
+//!   window behind it. The popovers open outward from the bar and never
+//!   overlap it, so the taskbar surfaces never contend for a press. A press
+//!   away from the bar additionally *releases* a pinned readout — pure
+//!   presentation state, like hover, so the press still performs its one
+//!   window-manager action.
+//! * **A middle press routes to the taskbar over the bar or a popover**
+//!   (over the Switchboard capsule it switches to the previous task) and is
+//!   ignored elsewhere — the window manager has no middle-button action.
+//! * **A scroll over the Switchboard capsule or its open readout routes to
+//!   the taskbar** (it cycles the running tasks); every other scroll goes
+//!   to the window manager's viewport under the pointer.
 //! * **Pointer motion is fanned to both routers** so their tracked pointer
 //!   positions stay in step (a press is hit-tested at the last motion's
 //!   position). The window manager acts on motion to drag a grabbed window;
@@ -43,7 +53,7 @@
 //! this glue. It never panics: every routed sub-call is itself total
 //! and fails closed.
 
-use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
+use tairix_taskbar::{Hit, Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
     Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, WindowId,
 };
@@ -151,12 +161,15 @@ impl SessionInputRouter {
     ///
     /// While the taskbar's context menu or the program-library popup is open
     /// every event routes to the taskbar (both surfaces are modal).
-    /// Otherwise a primary or secondary press goes to whichever router
-    /// claims the pointer (the taskbar when the pointer is over the bar or the
-    /// open notification popover, the window manager otherwise); motion is
-    /// fanned to both so their pointers stay in step and the window manager
-    /// can drag a grabbed window; a release goes to the window manager to end
-    /// a grab. See the [module docs](self) for the full policy.
+    /// Otherwise a press goes to whichever router claims the pointer (the
+    /// taskbar when the pointer is over the bar or one of its open popovers,
+    /// the window manager otherwise — releasing a pinned readout on the
+    /// way); a scroll over the Switchboard capsule or its readout cycles
+    /// tasks in the taskbar while any other scroll goes to the window
+    /// manager; motion is fanned to both so their pointers stay in step and
+    /// the window manager can drag a grabbed window; a release goes to the
+    /// window manager to end a grab. See the [module docs](self) for the
+    /// full policy.
     pub fn handle(
         &mut self,
         event: InputEvent,
@@ -187,40 +200,61 @@ impl SessionInputRouter {
                 self.taskbar.handle(event, taskbar, scale);
                 wm_response(self.wm.handle(event, compositor))
             }
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary | PointerButton::Secondary,
-            } => {
+            InputEvent::PointerPressed { button } => {
                 // A press belongs to whichever surface owns the pixel under
                 // the pointer: the bar claims presses over itself (a
-                // secondary press there opens a pin's context menu), the
-                // non-modal notification popover claims presses over it (a
-                // press on a card dismisses it), and the window manager takes
-                // everything else. The popover opens outward and never
-                // overlaps the bar, so the two taskbar surfaces never contend.
+                // secondary press there opens a pin's context menu; a middle
+                // press over the capsule switches to the previous task), an
+                // open non-modal popover — the notification popover or the
+                // capsule's readout — claims presses over it, and the window
+                // manager takes every remaining primary or secondary press.
+                // The popovers open outward and never overlap the bar, so
+                // the taskbar surfaces never contend. A press away from the
+                // bar also releases a pinned readout — presentation state,
+                // like hover, never the press's one action.
                 let pointer = self.taskbar.pointer();
                 let on_taskbar = taskbar.hit_test(pointer, scale).is_some()
                     || taskbar
                         .notifications_layout(scale)
-                        .is_some_and(|popover| popover.contains(pointer));
+                        .is_some_and(|popover| popover.contains(pointer))
+                    || taskbar
+                        .tray_readout_layout(scale)
+                        .is_some_and(|readout| readout.contains(pointer));
                 if on_taskbar {
+                    return taskbar_response(self.taskbar.handle(event, taskbar, scale));
+                }
+                taskbar.release_tray_pin();
+                if matches!(button, PointerButton::Primary | PointerButton::Secondary) {
+                    wm_response(self.wm.handle(event, compositor))
+                } else {
+                    SessionInputResponse::Ignored
+                }
+            }
+            InputEvent::PointerScrolled { .. } => {
+                // A scroll over the Switchboard capsule (or its open
+                // readout) cycles the running tasks; everywhere else the
+                // wheel belongs to the window manager's viewport under the
+                // pointer.
+                let pointer = self.taskbar.pointer();
+                let on_capsule = matches!(taskbar.hit_test(pointer, scale), Some(Hit::Switchboard))
+                    || taskbar
+                        .tray_readout_layout(scale)
+                        .is_some_and(|readout| readout.contains(pointer));
+                if on_capsule {
                     taskbar_response(self.taskbar.handle(event, taskbar, scale))
                 } else {
                     wm_response(self.wm.handle(event, compositor))
                 }
             }
             // The window manager takes the rest and the taskbar none of them:
-            // a primary release ends a move-grab, a scroll wheel routes to
-            // the root viewport under the pointer, and keys go to the
-            // focused window.
+            // a primary release ends a move-grab and keys go to the focused
+            // window.
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             }
-            | InputEvent::PointerScrolled { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. } => wm_response(self.wm.handle(event, compositor)),
-            InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
-                SessionInputResponse::Ignored
-            }
+            InputEvent::PointerReleased { .. } => SessionInputResponse::Ignored,
         }
     }
 }

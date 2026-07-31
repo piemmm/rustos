@@ -5,7 +5,10 @@
 //! not. Clicking a task entry follows the familiar taskbar rule
 //! ([`TaskList::activate`]): clicking the focused, non-minimised task
 //! minimises it; clicking any other task (or a minimised one) restores and
-//! focuses it.
+//! focuses it. The list also remembers the [`previous`](TaskList::previous)
+//! task — the one focused immediately before the last handover to a
+//! different task — the MRU-of-two behind the Switchboard capsule's
+//! middle-click switch.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -38,11 +41,13 @@ pub enum ActivateOutcome {
     Unknown,
 }
 
-/// The ordered list of running tasks plus the focused one.
+/// The ordered list of running tasks plus the focused one and the
+/// previous-task memory.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskList {
     entries: Vec<TaskEntry>,
     focused: Option<TaskId>,
+    previous: Option<TaskId>,
 }
 
 impl TaskList {
@@ -52,6 +57,7 @@ impl TaskList {
         Self {
             entries: Vec::new(),
             focused: None,
+            previous: None,
         }
     }
 
@@ -79,6 +85,21 @@ impl TaskList {
         self.focused
     }
 
+    /// The task focused immediately before the last handover of focus to a
+    /// *different* task — the middle-click "switch to the previous task"
+    /// target (the classic MRU-of-two: switching between two tasks toggles
+    /// them).
+    ///
+    /// Updated only when focus actually moves to a different task, never by
+    /// a re-focus of the current one or a handover to the desktop
+    /// ([`set_focused`](Self::set_focused)`(None)`), and cleared when the
+    /// remembered task closes. `None` also when the last handover arrived
+    /// from the desktop rather than from another task.
+    #[must_use]
+    pub const fn previous(&self) -> Option<TaskId> {
+        self.previous
+    }
+
     /// Mirror the window manager's focus into the list.
     ///
     /// The window manager owns keyboard focus and changes it when the user
@@ -98,6 +119,9 @@ impl TaskList {
                 let Some(index) = self.position(id) else {
                     return false;
                 };
+                if self.focused != Some(id) {
+                    self.previous = self.focused;
+                }
                 self.entries[index].minimised = false;
                 self.focused = Some(id);
                 true
@@ -131,6 +155,9 @@ impl TaskList {
         if self.focused == Some(id) {
             self.focused = None;
         }
+        if self.previous == Some(id) {
+            self.previous = None;
+        }
         true
     }
 
@@ -144,6 +171,9 @@ impl TaskList {
             self.focused = None;
             ActivateOutcome::Minimised
         } else {
+            if self.focused != Some(id) {
+                self.previous = self.focused;
+            }
             self.entries[index].minimised = false;
             self.focused = Some(id);
             ActivateOutcome::Activated

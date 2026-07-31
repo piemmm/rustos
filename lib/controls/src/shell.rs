@@ -23,9 +23,9 @@ use tairix_theme::Theme;
 use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::paint::{
-    foreground, inset, key_activation, paint_bead, paint_plate, plate_border, pointer_activation,
-    rail_thickness, resolve_bead, resolve_frame, resolve_rail, seam_thickness, seam_width,
-    surface_rect, to_i32, BeadShape, PlateStyle,
+    foreground, inset, key_activation, paint_bead, paint_count_badge, paint_plate, plate_border,
+    pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail, seam_thickness,
+    seam_width, surface_rect, to_i32, BeadShape, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState, ValidationState,
@@ -655,15 +655,102 @@ pub enum TraySignalAction {
     Activated,
 }
 
+/// The content a [`TraySignal`]'s live-state badge shows.
+///
+/// A count reads as its literal digit; once it would need more than one
+/// digit the badge caps at `"9+"` rather than growing arbitrarily wide. An
+/// urgent state with no natural count (e.g. a hung application) shows an
+/// exclamation mark instead.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TrayBadgeContent {
+    /// A small count, rendered as its literal digit while it fits in one
+    /// (`"1"` through `"9"`), else capped at `"9+"`.
+    Count(u16),
+    /// An urgent state with no natural count.
+    Alert,
+}
+
+impl TrayBadgeContent {
+    /// The literal text the badge paints for this content.
+    pub(crate) fn text(self) -> String {
+        match self {
+            Self::Count(n) if n <= 9 => {
+                let digit = b'0' + u8::try_from(n).unwrap_or(9);
+                String::from(char::from(digit))
+            }
+            Self::Count(_) => String::from("9+"),
+            Self::Alert => String::from("!"),
+        }
+    }
+}
+
+/// The palette role a [`TraySignal`] badge's fill encodes — the dominant live
+/// state driving it (spec §11.27).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TrayBadgeTone {
+    /// A background job — the theme accent.
+    Accent,
+    /// A resource pressure — the theme warning role.
+    Warning,
+    /// A hung, unresponsive application — the same danger role a destructive
+    /// action's rim takes.
+    Danger,
+    /// A recovery-available state — the theme recovery role.
+    Recovery,
+}
+
+impl TrayBadgeTone {
+    /// The badge fill colour this tone paints, from the active theme.
+    fn fill(self, theme: &Theme) -> Color {
+        let palette = theme.palette();
+        Color::from(match self {
+            Self::Accent => palette.accent,
+            Self::Warning => palette.warning,
+            Self::Danger => palette.danger,
+            Self::Recovery => palette.recovery,
+        })
+    }
+}
+
+/// A [`TraySignal`]'s live-state badge: a small filled badge on the capsule's
+/// top-trailing corner showing a count or an exclamation mark, its colour
+/// encoding the dominant live state driving it (spec §11.27).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TrayBadge {
+    content: TrayBadgeContent,
+    tone: TrayBadgeTone,
+}
+
+impl TrayBadge {
+    /// A badge with the given content and tone.
+    #[must_use]
+    pub fn new(content: TrayBadgeContent, tone: TrayBadgeTone) -> Self {
+        Self { content, tone }
+    }
+
+    /// The badge's content.
+    #[must_use]
+    pub fn content(&self) -> TrayBadgeContent {
+        self.content
+    }
+
+    /// The badge's tone.
+    #[must_use]
+    pub fn tone(&self) -> TrayBadgeTone {
+        self.tone
+    }
+}
+
 /// A compact live status capsule in the notification area (spec §11.27).
 ///
 /// A tray signal is a small glyph capsule with a calm rim: background work adds
-/// a lower Heat Seam, a resource pressure adds a leading semantic rail, and one
-/// or more alert states stack as severity-ordered mini Signal Beads on the
-/// top-trailing corner (so several states read at once without colour, spec
-/// §15). On hover or keyboard focus it expands to a short instrument readout —
-/// the state name, a count or value, and one primary safe action — which the
-/// owner positions as a popup. It renders state and reports
+/// a lower Heat Seam, a resource pressure adds a leading semantic rail, an
+/// optional [`TrayBadge`] shows a live count or alert on the top-trailing
+/// corner, and one or more alert states stack as severity-ordered mini Signal
+/// Beads starting after it (so several states read at once without colour,
+/// spec §15). On hover or keyboard focus it expands to a short instrument
+/// readout — the state name, a count or value, and one primary safe action —
+/// which the owner positions as a popup. It renders state and reports
 /// [`TraySignalAction`]; the owner enforces authority (spec §13).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraySignal {
@@ -671,6 +758,7 @@ pub struct TraySignal {
     label: String,
     value: Option<String>,
     state: ControlState,
+    badge: Option<TrayBadge>,
     action: Option<Button>,
     pointer: Point,
 }
@@ -684,6 +772,7 @@ impl TraySignal {
             label: label.into(),
             value: None,
             state: ControlState::idle(),
+            badge: None,
             action: None,
             pointer: Point::ORIGIN,
         }
@@ -700,6 +789,13 @@ impl TraySignal {
     #[must_use]
     pub fn with_state(mut self, state: ControlState) -> Self {
         self.state = state;
+        self
+    }
+
+    /// This signal with a live-state badge on its top-trailing corner.
+    #[must_use]
+    pub fn with_badge(mut self, badge: TrayBadge) -> Self {
+        self.badge = Some(badge);
         self
     }
 
@@ -725,6 +821,17 @@ impl TraySignal {
     /// Replace the signal's composed state.
     pub fn set_state(&mut self, state: ControlState) {
         self.state = state;
+    }
+
+    /// The signal's live-state badge, if any.
+    #[must_use]
+    pub fn badge(&self) -> Option<TrayBadge> {
+        self.badge
+    }
+
+    /// Replace the signal's live-state badge.
+    pub fn set_badge(&mut self, badge: Option<TrayBadge>) {
+        self.badge = badge;
     }
 
     /// Set the signal's keyboard focus (focus also expands the readout).
@@ -766,6 +873,38 @@ impl TraySignal {
             beads.push((Color::from(palette.success), BeadShape::Check));
         }
         beads
+    }
+
+    /// The live-state badge's fill colour, text, and `(w, h)` size within a
+    /// `inner_w`×`inner_h` capsule, or `None` when there is no badge or it
+    /// cannot fit. The badge is sized from the theme's bead metric scaled up
+    /// enough to hold its text legibly, never wider or taller than the
+    /// capsule it paints into.
+    fn badge_paint(
+        &self,
+        inner_w: u32,
+        inner_h: u32,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<(Color, String, u32, u32)> {
+        let badge = self.badge?;
+        let text = badge.content.text();
+        let pad = (font.glyph_height() / 4).max(1);
+        let h = scale
+            .scale_length(theme.metrics().bead_size)
+            .max(3)
+            .max(font.glyph_height().saturating_add(pad))
+            .min(inner_h);
+        let w = font
+            .text_width(&text)
+            .saturating_add(pad.saturating_mul(2))
+            .max(h)
+            .min(inner_w);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some((badge.tone.fill(theme), text, w, h))
     }
 
     /// Paint the compact capsule into `surface` at `bounds`.
@@ -838,7 +977,26 @@ impl TraySignal {
             );
         }
 
-        // Severity-ordered mini beads stacked from the top-trailing corner.
+        // The optional live-state badge on the top-trailing corner, then the
+        // severity-ordered mini beads stacked leftward starting after it.
+        let mut bx = inner_x + inner_w;
+        if let Some((fill, text, badge_w, badge_h)) =
+            self.badge_paint(inner_w, inner_h, scale, theme, font)
+        {
+            if bx >= inner_x + badge_w {
+                bx = bx.saturating_sub(badge_w);
+                paint_count_badge(
+                    surface,
+                    (bx, inner_y, badge_w, badge_h),
+                    fill,
+                    Color::from(palette.on_accent),
+                    font,
+                    &text,
+                );
+                bx = bx.saturating_sub((badge_h / 3).max(1));
+            }
+        }
+
         let beads = self.beads(theme);
         if !beads.is_empty() {
             let mini = (scale
@@ -850,7 +1008,6 @@ impl TraySignal {
             .min(inner_w)
             .min(inner_h);
             let gap = (mini / 3).max(1);
-            let mut bx = inner_x + inner_w;
             for (color, shape) in beads {
                 if bx < inner_x + mini {
                     break;

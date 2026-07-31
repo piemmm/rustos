@@ -608,7 +608,8 @@ tairix/
 │   ├── gui/             # Graphical desktop components.
 │   │   ├── wm/          # Compositing window manager.
 │   │   ├── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
-│   │   └── session/     # Desktop session glue (theme + taskbar model).
+│   │   ├── session/     # Desktop session glue (theme + taskbar model).
+│   │   └── switchboard/ # System-overview monitor service (tray feed).
 │   ├── net/             # Userland networking services.
 │   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
 │   └── apps/            # Default apps. Each app is its own crate.

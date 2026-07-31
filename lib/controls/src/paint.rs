@@ -9,6 +9,7 @@
 //! rounds, insets, and thickens identically and a change to the recipe cannot
 //! silently diverge between two controls.
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
@@ -596,4 +597,34 @@ pub(crate) fn paint_bead(
             }
         }
     }
+}
+
+/// Paint a filled count/alert badge in `rect` (`(x, y, w, h)`, like
+/// [`paint_plate`]) — a circle when `text` fits within the height, else a
+/// pill — with `text` centred inside it.
+///
+/// One definition shared by a [`Card`](crate::collection::Card)'s grouped
+/// top-trailing count/alert badge and a
+/// [`TraySignal`](crate::shell::TraySignal)'s live-state badge, so the badge
+/// recipe cannot diverge between the two families. The caller resolves the
+/// badge's rectangle and colours from its own available space and state;
+/// this paints exactly the resolved geometry and draws nothing for a
+/// degenerate (zero-sized) rectangle.
+pub(crate) fn paint_count_badge(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    fill: Color,
+    text_color: Color,
+    font: BitmapFont,
+    text: &str,
+) {
+    let (x, y, w, h) = rect;
+    if w == 0 || h == 0 {
+        return;
+    }
+    surface.fill_round_rect(x, y, w, h, h / 2, fill);
+    let tw = font.text_width(text);
+    let tx = to_i32(x) + (to_i32(w) - to_i32(tw)).max(0) / 2;
+    let ty = to_i32(y) + (to_i32(h) - to_i32(font.glyph_height())).max(0) / 2;
+    font.draw_text(surface, tx, ty, text, text_color);
 }

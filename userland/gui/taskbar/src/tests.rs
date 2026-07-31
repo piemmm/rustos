@@ -4,13 +4,20 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::TaskVisibility;
+use tairix_abi::switchboard_ipc::{
+    TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
+    TrayTaskName,
+};
+use tairix_controls::{
+    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, TaskVisibility,
+    TrayBadgeContent, TrayBadgeTone,
+};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Contrast, Theme, ThemeId};
+use tairix_theme::{Appearance, Contrast, SignalRole, Theme, ThemeId};
 
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse};
@@ -24,6 +31,7 @@ use crate::pins::PinView;
 use crate::render::TaskbarRenderer;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
+use crate::tray::derive_signal;
 
 // ---- fixtures --------------------------------------------------------
 
@@ -204,6 +212,41 @@ fn set_focused_mirrors_and_fails_closed() {
     assert_eq!(tasks.focused(), None);
 }
 
+#[test]
+fn previous_task_remembers_the_last_real_handover() {
+    let mut tasks = TaskList::new();
+    tasks.add(TaskId(1), "A");
+    tasks.add(TaskId(2), "B");
+    tasks.add(TaskId(3), "C");
+    assert_eq!(tasks.previous(), None);
+
+    // Focus arriving from the desktop remembers no previous task.
+    tasks.set_focused(Some(TaskId(1)));
+    assert_eq!(tasks.previous(), None);
+    // A handover between tasks records the one that held focus...
+    tasks.set_focused(Some(TaskId(2)));
+    assert_eq!(tasks.previous(), Some(TaskId(1)));
+    // ...a re-focus of the current task does not touch it...
+    tasks.set_focused(Some(TaskId(2)));
+    assert_eq!(tasks.previous(), Some(TaskId(1)));
+    // ...nor does parking focus on the desktop.
+    tasks.set_focused(None);
+    assert_eq!(tasks.previous(), Some(TaskId(1)));
+    // Refocusing from the desktop is a desktop handover again.
+    tasks.set_focused(Some(TaskId(3)));
+    assert_eq!(tasks.previous(), None);
+
+    // The activate toggle's restore path records the handover too.
+    tasks.activate(TaskId(1));
+    assert_eq!(tasks.previous(), Some(TaskId(3)));
+    // Minimising (activating the focused task) is not a handover.
+    tasks.activate(TaskId(1));
+    assert_eq!(tasks.previous(), Some(TaskId(3)));
+    // A closing task is forgotten rather than resurrected later.
+    tasks.remove(TaskId(3));
+    assert_eq!(tasks.previous(), None);
+}
+
 // ---- notifications --------------------------------------------------
 
 #[test]
@@ -341,7 +384,10 @@ fn leading_launchers_partition_the_leading_end() {
     assert_eq!(layout.library, Rect::new(0, 760, 48, 40));
     assert_eq!(layout.files, Rect::new(48, 760, 48, 40));
     assert_eq!(layout.task_list.left(), 96);
-    assert_eq!(layout.clock.right(), 1000);
+    // The Switchboard capsule owns the very trailing end; the clock ends
+    // where it starts.
+    assert_eq!(layout.switchboard, Rect::new(956, 760, 44, 40));
+    assert_eq!(layout.clock.right(), 956);
 }
 
 #[test]
@@ -373,6 +419,10 @@ fn hit_testing_resolves_every_region() {
     assert_eq!(
         bar.hit_test(centre_of(layout.clock), Scale::ONE),
         Some(Hit::Clock)
+    );
+    assert_eq!(
+        bar.hit_test(centre_of(layout.switchboard), Scale::ONE),
+        Some(Hit::Switchboard)
     );
     assert_eq!(bar.hit_test(Point::new(500, 100), Scale::ONE), None);
     // A gap between the last task slot and the notification area is the
@@ -491,9 +541,9 @@ fn adding_pins_reflows_the_task_region() {
 
 #[test]
 fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(200, 40), &Theme::dark());
-    // Launchers (48+48) take 96. Clock (80) takes 80. Total 176.
-    // Screen 200. Remaining for pins/tasks: 200 - 176 = 24.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(244, 40), &Theme::dark());
+    // Launchers (48+48) take 96. Switchboard (44) plus clock (80) take 124.
+    // Screen 244. Remaining for pins/tasks: 244 - 220 = 24.
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
@@ -502,7 +552,7 @@ fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
     assert!(layout.task_list.is_empty(), "no room for tasks");
 
     // Even smaller: pin is empty.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(150, 40), &Theme::dark());
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(200, 40), &Theme::dark());
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let layout = bar.layout(Scale::ONE);
     assert!(layout.pins[0].is_empty());
@@ -2577,4 +2627,782 @@ fn render_notifications_paints_a_card_in_every_theme() {
             theme.name(),
         );
     }
+}
+
+// ---- switchboard tray fixtures ----------------------------------------
+
+/// A summary with `jobs`, `recovery`, and an overall CPU fraction — no
+/// pressure and no top task.
+fn tray_summary(jobs: u16, recovery: u16, cpu_permille: u16) -> TraySummary {
+    TraySummary {
+        jobs,
+        recovery,
+        cpu_busy_permille: TrayPermille::new(cpu_permille).expect("permille"),
+        pressure: None,
+        top_task: None,
+    }
+}
+
+/// The dominant-pressure block of a summary.
+fn tray_pressure(kind: TrayPressureKind, level: u16, count: u8) -> TrayPressure {
+    TrayPressure {
+        kind,
+        level: TrayPermille::new(level).expect("permille"),
+        count: TrayPressureCount::new(count).expect("count"),
+    }
+}
+
+/// The busiest-task block of a summary.
+fn tray_task(name: &str, cpu_permille: u16) -> TrayTask {
+    TrayTask {
+        name: TrayTaskName::new(name).expect("name"),
+        cpu_permille: TrayPermille::new(cpu_permille).expect("permille"),
+    }
+}
+
+/// Move the pointer to the Switchboard capsule's centre, returning it.
+fn hover_switchboard(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> Point {
+    let centre = centre_of(taskbar.layout(Scale::ONE).switchboard);
+    input.handle(InputEvent::PointerMoved { to: centre }, taskbar, Scale::ONE);
+    centre
+}
+
+/// Move the pointer to `at` and scroll by `(dx, dy)` there.
+fn scroll_at(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    at: Point,
+    dx: i32,
+    dy: i32,
+) -> TaskbarResponse {
+    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE);
+    input.handle(InputEvent::PointerScrolled { dx, dy }, taskbar, Scale::ONE)
+}
+
+/// Move the pointer to `at` and press the middle button there.
+fn middle_press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, at: Point) -> TaskbarResponse {
+    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE);
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Middle,
+        },
+        taskbar,
+        Scale::ONE,
+    )
+}
+
+// ---- switchboard tray layout ------------------------------------------
+
+#[test]
+fn switchboard_is_trailing_most_on_every_edge() {
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let config = TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1000, 800)
+        };
+        let bar = Taskbar::new(config, &Theme::dark());
+        let layout = bar.layout(Scale::ONE);
+        let (slot_start, slot_end, clock_end, main_end) = match edge.orientation() {
+            Orientation::Horizontal => (
+                layout.switchboard.left(),
+                layout.switchboard.right(),
+                layout.clock.right(),
+                1000,
+            ),
+            Orientation::Vertical => (
+                layout.switchboard.top(),
+                layout.switchboard.bottom(),
+                layout.clock.bottom(),
+                800,
+            ),
+        };
+        assert_eq!(slot_end, main_end, "{edge:?}: the capsule is trailing-most");
+        assert_eq!(
+            clock_end, slot_start,
+            "{edge:?}: the clock ends at the capsule"
+        );
+        assert_eq!(
+            layout.hit_test(centre_of(layout.switchboard)),
+            Some(Hit::Switchboard),
+            "{edge:?}"
+        );
+    }
+}
+
+#[test]
+fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
+    // 140 px holds exactly the launchers (96) plus the 44 px capsule: the
+    // clock and the notification area collapse to nothing first.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(140, 800), &Theme::dark());
+    bar.set_status_signals(alloc::vec![StatusSignal::new(
+        IconId(1),
+        StatusKind::Network
+    )]);
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(layout.switchboard, Rect::new(96, 760, 44, 40));
+    assert!(layout.clock.is_empty());
+    assert!(layout.notification_area.is_empty());
+    assert!(layout.notifications[0].is_empty());
+    assert_eq!(
+        layout.hit_test(centre_of(layout.switchboard)),
+        Some(Hit::Switchboard)
+    );
+}
+
+#[test]
+fn tiny_screen_clips_the_switchboard_against_the_launchers() {
+    // 96 px is exactly the two permanent launchers: every trailing region,
+    // the capsule included, fails closed to empty rather than overlaying
+    // them.
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(96, 800), &Theme::dark());
+    let layout = bar.layout(Scale::ONE);
+    assert!(layout.switchboard.is_empty());
+    assert!(layout.clock.is_empty());
+    assert_eq!(layout.hit_test(Point::new(60, 780)), Some(Hit::Files));
+
+    // An absurd sliver clips into the launchers themselves; nothing panics
+    // and the empty capsule slot can never be hit.
+    let sliver = Taskbar::new(TaskbarConfig::bottom_bar(10, 800), &Theme::dark());
+    let slim = sliver.layout(Scale::ONE);
+    assert!(slim.switchboard.is_empty());
+    assert!(slim.files.is_empty());
+    assert!(!slim.library.is_empty());
+}
+
+// ---- switchboard tray derive ------------------------------------------
+
+#[test]
+fn derive_absent_service_is_calm_idle() {
+    let derived = derive_signal(None, 0);
+    assert_eq!(derived.state, ControlState::idle());
+    assert_eq!(derived.badge, None);
+    assert_eq!(derived.label, "System normal");
+    assert_eq!(derived.value, None);
+}
+
+#[test]
+fn derive_calm_previews_the_top_task() {
+    let mut summary = tray_summary(0, 0, 500);
+    summary.top_task = Some(tray_task("editor", 254));
+    let derived = derive_signal(Some(&summary), 0);
+    assert_eq!(derived.label, "System normal");
+    assert_eq!(derived.badge, None);
+    assert_eq!(derived.value.as_deref(), Some("editor — 25% CPU"));
+
+    // Without a top task the calm value is the overall CPU figure.
+    let plain = derive_signal(Some(&tray_summary(0, 0, 500)), 0);
+    assert_eq!(plain.value.as_deref(), Some("CPU 50%"));
+}
+
+#[test]
+fn derive_jobs_shows_the_accent_count_and_working_seam() {
+    let derived = derive_signal(Some(&tray_summary(3, 0, 100)), 0);
+    assert_eq!(derived.label, "Background work");
+    assert_eq!(derived.value.as_deref(), Some("3 jobs"));
+    let badge = derived.badge.expect("badge");
+    assert_eq!(badge.content(), TrayBadgeContent::Count(3));
+    assert_eq!(badge.tone(), TrayBadgeTone::Accent);
+    assert_eq!(derived.state.activity, ActivityState::Working);
+    assert_eq!(derived.state.pressure, PressureState::None);
+
+    let one = derive_signal(Some(&tray_summary(1, 0, 100)), 0);
+    assert_eq!(one.value.as_deref(), Some("1 job"));
+}
+
+#[test]
+fn derive_pressure_outranks_jobs_and_keeps_the_seam() {
+    let mut summary = tray_summary(2, 0, 800);
+    summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 730, 2));
+    let derived = derive_signal(Some(&summary), 0);
+    assert_eq!(derived.label, "Memory pressure");
+    assert_eq!(derived.value.as_deref(), Some("73%"));
+    let badge = derived.badge.expect("badge");
+    assert_eq!(badge.content(), TrayBadgeContent::Count(2));
+    assert_eq!(badge.tone(), TrayBadgeTone::Warning);
+    // The orthogonal furniture still composes: the jobs keep the working
+    // seam while the rail names the dominant pressure.
+    assert_eq!(derived.state.activity, ActivityState::Working);
+    assert_eq!(
+        derived.state.pressure,
+        PressureState::Under(PressureKind::Memory)
+    );
+}
+
+#[test]
+fn derive_maps_every_pressure_kind() {
+    for (wire, mapped, label) in [
+        (TrayPressureKind::Cpu, PressureKind::Cpu, "CPU pressure"),
+        (
+            TrayPressureKind::Memory,
+            PressureKind::Memory,
+            "Memory pressure",
+        ),
+        (TrayPressureKind::Disk, PressureKind::Disk, "Disk pressure"),
+        (
+            TrayPressureKind::Network,
+            PressureKind::Network,
+            "Network pressure",
+        ),
+        (
+            TrayPressureKind::Power,
+            PressureKind::Power,
+            "Power pressure",
+        ),
+        (
+            TrayPressureKind::Thermal,
+            PressureKind::Thermal,
+            "Thermal pressure",
+        ),
+    ] {
+        let mut summary = tray_summary(0, 0, 0);
+        summary.pressure = Some(tray_pressure(wire, 995, 1));
+        let derived = derive_signal(Some(&summary), 0);
+        assert_eq!(derived.state.pressure, PressureState::Under(mapped));
+        assert_eq!(derived.label, label);
+        assert_eq!(
+            derived.value.as_deref(),
+            Some("100%"),
+            "995 permille rounds to a whole 100%"
+        );
+    }
+}
+
+#[test]
+fn derive_recovery_shows_the_recovery_count() {
+    let derived = derive_signal(Some(&tray_summary(0, 2, 100)), 0);
+    assert_eq!(derived.label, "Recovery available");
+    assert_eq!(derived.value.as_deref(), Some("2 tasks"));
+    let badge = derived.badge.expect("badge");
+    assert_eq!(badge.content(), TrayBadgeContent::Count(2));
+    assert_eq!(badge.tone(), TrayBadgeTone::Recovery);
+    assert_eq!(derived.state.recovery, RecoveryState::Recoverable);
+}
+
+#[test]
+fn derive_hung_outranks_everything_and_composes_the_rest() {
+    let mut summary = tray_summary(2, 1, 900);
+    summary.pressure = Some(tray_pressure(TrayPressureKind::Cpu, 900, 1));
+    summary.top_task = Some(tray_task("miner", 800));
+    let derived = derive_signal(Some(&summary), 2);
+    assert_eq!(derived.label, "Not responding");
+    assert_eq!(derived.value.as_deref(), Some("2 applications"));
+    let badge = derived.badge.expect("badge");
+    assert_eq!(badge.content(), TrayBadgeContent::Alert);
+    assert_eq!(badge.tone(), TrayBadgeTone::Danger);
+    // Orthogonal furniture: the hung recovery posture, the working seam,
+    // and the CPU rail all compose beneath the dominant alert.
+    assert_eq!(derived.state.recovery, RecoveryState::Hung);
+    assert_eq!(derived.state.activity, ActivityState::Working);
+    assert_eq!(
+        derived.state.pressure,
+        PressureState::Under(PressureKind::Cpu)
+    );
+
+    let one = derive_signal(Some(&tray_summary(0, 0, 0)), 1);
+    assert_eq!(one.value.as_deref(), Some("1 application"));
+    assert_eq!(one.state.recovery, RecoveryState::Hung);
+}
+
+// ---- switchboard tray model -------------------------------------------
+
+#[test]
+fn tray_feeds_latch_repaint_only_on_change() {
+    let mut bar = bottom_bar();
+    let _ = bar.take_repaint();
+    bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
+    assert!(bar.take_repaint());
+    bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
+    assert!(!bar.take_repaint(), "an identical summary changes nothing");
+    bar.set_tray_unresponsive(2);
+    assert!(bar.take_repaint());
+    bar.set_tray_unresponsive(2);
+    assert!(!bar.take_repaint());
+    bar.set_tray_summary(None);
+    assert!(bar.take_repaint(), "service loss reverts the capsule");
+}
+
+#[test]
+fn tray_update_keeps_hover_and_pin() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    assert!(bar.tray().is_expanded(), "hover expands the readout");
+    bar.tray_mut().set_pinned(true);
+    bar.set_tray_summary(Some(tray_summary(4, 0, 100)));
+    assert!(
+        bar.tray().is_expanded(),
+        "a live update never collapses the readout"
+    );
+    assert!(bar.tray().is_pinned());
+}
+
+// ---- switchboard tray interactions ------------------------------------
+
+#[test]
+fn scroll_over_the_capsule_cycles_tasks() {
+    let mut bar = bottom_bar();
+    for id in 1..=3 {
+        bar.tasks_mut().add(TaskId(id), format!("T{id}"));
+    }
+    let mut input = TaskbarInput::new();
+    let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
+
+    // No focused task: scrolling forward starts at the first entry.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, 1),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // Forward again advances...
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, 1),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(2),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // ...and backward returns (dx is the fallback when dy is zero).
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, -1, 0),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // Backward from the first entry wraps to the last.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, -2),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(3),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // Forward from the last wraps to the first.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, 3),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // A zero-delta scroll and a scroll elsewhere change nothing.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, 0),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, Point::new(500, 780), 0, 1),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn scroll_with_no_focus_and_no_tasks_fails_closed() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
+    // No tasks at all: nothing to cycle, nothing changes.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, 1),
+        TaskbarResponse::Ignored
+    );
+
+    bar.tasks_mut().add(TaskId(7), "Solo");
+    bar.tasks_mut().add(TaskId(8), "Duo");
+    // No focused task: scrolling backward starts at the last entry.
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, capsule, 0, -1),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(8),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+}
+
+#[test]
+fn scroll_over_the_open_readout_also_cycles() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    let readout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
+    let inside = centre_of(readout.panel);
+    assert_eq!(
+        scroll_at(&mut input, &mut bar, inside, 0, 1),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+}
+
+#[test]
+fn middle_press_switches_to_the_previous_task() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().add(TaskId(2), "Browser");
+    bar.tasks_mut().activate(TaskId(1));
+    bar.tasks_mut().activate(TaskId(2));
+    assert_eq!(bar.tasks().previous(), Some(TaskId(1)));
+
+    let mut input = TaskbarInput::new();
+    let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
+    assert_eq!(
+        middle_press_at(&mut input, &mut bar, capsule),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // The switch itself was a handover: pressing again toggles back.
+    assert_eq!(
+        middle_press_at(&mut input, &mut bar, capsule),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(2),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    // Elsewhere the middle button stays inert.
+    assert_eq!(
+        middle_press_at(&mut input, &mut bar, Point::new(500, 780)),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn middle_press_fails_closed_without_a_previous_task() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().activate(TaskId(1));
+    let mut input = TaskbarInput::new();
+    let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
+    // Focus arrived from the desktop: there is no previous task yet.
+    assert_eq!(
+        middle_press_at(&mut input, &mut bar, capsule),
+        TaskbarResponse::Ignored
+    );
+
+    // A remembered task that closed is forgotten, never resurrected.
+    bar.tasks_mut().add(TaskId(2), "Browser");
+    bar.tasks_mut().activate(TaskId(2));
+    assert_eq!(bar.tasks().previous(), Some(TaskId(1)));
+    bar.tasks_mut().remove(TaskId(1));
+    assert_eq!(bar.tasks().previous(), None);
+    assert_eq!(
+        middle_press_at(&mut input, &mut bar, capsule),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn primary_press_pins_and_a_press_elsewhere_unpins() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    assert!(bar.tray().is_expanded(), "hover expands the readout");
+    assert!(!bar.tray().is_pinned());
+
+    // Pressing the capsule pins the readout open. The pin is presentation
+    // only — the Switchboard overview window arrives in a later stage — so
+    // the press reports nothing to act on.
+    assert_eq!(
+        press_at(&mut input, &mut bar, capsule.x, capsule.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(bar.tray().is_pinned());
+
+    // Pinned: the readout stays open with the pointer far away.
+    input.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(500, 400),
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(bar.tray().is_expanded());
+    assert!(bar.tray_readout_layout(Scale::ONE).is_some());
+
+    // A press elsewhere releases the pin and still does its own one thing.
+    let clock = centre_of(bar.layout(Scale::ONE).clock);
+    assert_eq!(
+        press_at(&mut input, &mut bar, clock.x, clock.y),
+        TaskbarResponse::ClockPressed
+    );
+    assert!(!bar.tray().is_pinned());
+    assert!(
+        !bar.tray().is_expanded(),
+        "unpinned with the pointer elsewhere"
+    );
+}
+
+#[test]
+fn second_press_on_the_capsule_unpins() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
+    assert!(bar.tray().is_pinned());
+    assert_eq!(
+        press_at(&mut input, &mut bar, capsule.x, capsule.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.tray().is_pinned());
+    assert!(bar.tray().is_expanded(), "still expanded by hover");
+}
+
+#[test]
+fn press_inside_the_open_readout_is_claimed_inert() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let capsule = hover_switchboard(&mut input, &mut bar);
+    let _ = press_at(&mut input, &mut bar, capsule.x, capsule.y);
+    let readout = bar.tray_readout_layout(Scale::ONE).expect("pinned open");
+    let inside = centre_of(readout.panel);
+    assert_eq!(
+        press_at(&mut input, &mut bar, inside.x, inside.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(
+        bar.tray().is_pinned(),
+        "the inert claim never collapses the readout"
+    );
+}
+
+// ---- switchboard tray readout geometry ---------------------------------
+
+#[test]
+fn readout_expands_on_hover_and_collapses_off() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    assert!(bar.tray_readout_layout(Scale::ONE).is_none());
+    hover_switchboard(&mut input, &mut bar);
+    let readout = bar.tray_readout_layout(Scale::ONE).expect("hover expands");
+    assert_eq!(
+        readout.corner_radius,
+        Theme::dark().metrics().popup_corner_radius
+    );
+    assert!(readout.contains(centre_of(readout.panel)));
+    assert!(!readout.contains(Point::new(-1, -1)));
+    input.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(500, 400),
+        },
+        &mut bar,
+        Scale::ONE,
+    );
+    assert!(
+        bar.tray_readout_layout(Scale::ONE).is_none(),
+        "hover off collapses"
+    );
+}
+
+#[test]
+fn readout_opens_outward_on_every_edge_and_stays_on_screen() {
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let config = TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1000, 800)
+        };
+        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut input = TaskbarInput::new();
+        hover_switchboard(&mut input, &mut bar);
+        let bar_rect = bar.layout(Scale::ONE).bar;
+        let readout = bar.tray_readout_layout(Scale::ONE).expect("hover expands");
+        match edge {
+            Edge::Bottom => assert_eq!(readout.panel.bottom(), bar_rect.top(), "opens above"),
+            Edge::Top => assert_eq!(readout.panel.top(), bar_rect.bottom(), "opens below"),
+            Edge::Left => assert_eq!(readout.panel.left(), bar_rect.right(), "opens rightward"),
+            Edge::Right => assert_eq!(readout.panel.right(), bar_rect.left(), "opens leftward"),
+        }
+        assert!(
+            readout.panel.left() >= 0 && readout.panel.right() <= 1000,
+            "{edge:?} clamps horizontally"
+        );
+        assert!(
+            readout.panel.top() >= 0 && readout.panel.bottom() <= 800,
+            "{edge:?} clamps vertically"
+        );
+    }
+}
+
+// ---- switchboard tray rendering ----------------------------------------
+
+#[test]
+fn capsule_paints_in_its_slot() {
+    let bar = bottom_bar();
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+    assert!(
+        region_is_varied(&surface, layout.bar, layout.switchboard),
+        "the capsule drew its plate and glyph in the slot"
+    );
+}
+
+#[test]
+fn pressure_paints_the_dominant_kind_rail() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    let mut summary = tray_summary(0, 0, 0);
+    summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 700, 1));
+    bar.set_tray_summary(Some(summary));
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.switchboard,
+        role(theme.palette().signal(SignalRole::Memory))
+    ));
+}
+
+#[test]
+fn jobs_paint_the_heat_seam_along_the_slot_bottom() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    bar.set_tray_summary(Some(tray_summary(2, 0, 0)));
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new()
+        .render(&bar, Scale::ONE)
+        .expect("bar renders");
+    // The working seam runs across the slot's lower edge — probe only the
+    // bottom band, well away from the top-corner badge.
+    let slot = layout.switchboard;
+    let band = Rect::new(slot.left(), slot.bottom() - 4, slot.width, 4);
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        band,
+        role(theme.palette().accent)
+    ));
+}
+
+#[test]
+fn badge_tones_follow_the_dominant_state() {
+    let theme = Theme::dark();
+    let hung = {
+        let mut bar = bottom_bar();
+        bar.set_tray_unresponsive(1);
+        bar
+    };
+    let pressured = {
+        let mut bar = bottom_bar();
+        let mut summary = tray_summary(0, 0, 0);
+        summary.pressure = Some(tray_pressure(TrayPressureKind::Disk, 500, 3));
+        bar.set_tray_summary(Some(summary));
+        bar
+    };
+    let working = {
+        let mut bar = bottom_bar();
+        bar.set_tray_summary(Some(tray_summary(5, 0, 0)));
+        bar
+    };
+    let recoverable = {
+        let mut bar = bottom_bar();
+        bar.set_tray_summary(Some(tray_summary(0, 3, 0)));
+        bar
+    };
+    for (bar, want, what) in [
+        (&hung, theme.palette().danger, "hung shows the danger badge"),
+        (
+            &pressured,
+            theme.palette().warning,
+            "pressure shows the warning badge",
+        ),
+        (
+            &working,
+            theme.palette().accent,
+            "jobs show the accent badge",
+        ),
+        (
+            &recoverable,
+            theme.palette().recovery,
+            "recovery shows the recovery badge",
+        ),
+    ] {
+        let layout = bar.layout(Scale::ONE);
+        let surface = TaskbarRenderer::new()
+            .render(bar, Scale::ONE)
+            .expect("bar renders");
+        assert!(
+            region_has_pixel(&surface, layout.bar, layout.switchboard, role(want)),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn capsule_renders_across_themes_and_high_contrast() {
+    // The shared controls are static renderers, so reduced motion is honoured
+    // by construction: the same still frame is what a reduced-motion desktop
+    // presents.
+    for theme in [
+        Theme::dark(),
+        Theme::light(),
+        dark_with_contrast(Contrast::High),
+        dark_reduced_motion(),
+    ] {
+        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+        let mut summary = tray_summary(2, 0, 400);
+        summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 600, 2));
+        bar.set_tray_summary(Some(summary));
+        let layout = bar.layout(Scale::ONE);
+        let surface = TaskbarRenderer::new()
+            .render(&bar, Scale::ONE)
+            .expect("bar renders");
+        assert!(
+            region_is_varied(&surface, layout.bar, layout.switchboard),
+            "{} paints the capsule",
+            theme.name()
+        );
+        assert!(
+            region_has_pixel(
+                &surface,
+                layout.bar,
+                layout.switchboard,
+                role(theme.palette().warning)
+            ),
+            "{} paints the warning badge",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn collapsed_readout_renders_nothing() {
+    let bar = bottom_bar();
+    assert!(TaskbarRenderer::new()
+        .render_tray_readout(&bar, Scale::ONE)
+        .is_none());
+}
+
+#[test]
+fn readout_renders_the_state_and_value_lines() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    let mut summary = tray_summary(0, 0, 300);
+    summary.top_task = Some(tray_task("editor", 250));
+    bar.set_tray_summary(Some(summary));
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+
+    let layout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
+    let surface = TaskbarRenderer::new()
+        .render_tray_readout(&bar, Scale::ONE)
+        .expect("readout renders");
+    assert_eq!(surface.width(), layout.panel.width);
+    assert_eq!(surface.height(), layout.panel.height);
+    // The plate carries the state-name ink over the raised surface.
+    assert!(region_has_role_ink(
+        &surface,
+        layout.panel,
+        layout.panel,
+        theme.palette().on_surface,
+        role(theme.palette().surface_raised),
+    ));
 }

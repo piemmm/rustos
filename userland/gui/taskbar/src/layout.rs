@@ -5,7 +5,8 @@
 //! itself, the two permanent leading launcher buttons (Library, then Files —
 //! never reordered, never removed), the pin strip (and a slot per pinned
 //! shortcut), the task list (and a slot per task), the notification area
-//! (and a slot per icon), and the clock. All arithmetic saturates, so a
+//! (and a slot per icon), the clock, and the Switchboard tray capsule
+//! anchored at the very trailing end. All arithmetic saturates, so a
 //! pathological screen size or extent fails closed inside the bar rather
 //! than wrapping: a leading button that does not fit is [`Rect::EMPTY`] and
 //! can never be hit.
@@ -17,12 +18,12 @@
 
 use alloc::vec::Vec;
 
-use tairix_controls::{ControlRole, Panel};
+use tairix_controls::{ControlRole, Panel, TraySignal};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
-use crate::library::{panel_origin, probe_chrome};
+use crate::library::{panel_origin, popup_font, probe_chrome};
 use crate::taskbar::TaskbarConfig;
 
 /// The element of the taskbar under a pointer, returned by
@@ -41,6 +42,8 @@ pub enum Hit {
     Notification(usize),
     /// The clock.
     Clock,
+    /// The Switchboard tray capsule at the very trailing end.
+    Switchboard,
 }
 
 /// The fully computed geometry of a taskbar.
@@ -73,8 +76,11 @@ pub struct BarLayout {
     /// One slot per icon, in icon order. An icon that does not fit is
     /// [`Rect::EMPTY`].
     pub notifications: Vec<Rect>,
-    /// The clock, anchored to the trailing end.
+    /// The clock, immediately before the Switchboard capsule.
     pub clock: Rect,
+    /// The Switchboard tray capsule, anchored to the very trailing end.
+    /// Zero-length (and so unhittable) when the bar is too short to hold it.
+    pub switchboard: Rect,
 }
 
 impl BarLayout {
@@ -125,11 +131,19 @@ impl BarLayout {
 
         // The trailing regions clip against the permanent leading launchers
         // (never the reverse), so a degenerate screen shrinks the clock and
-        // icons to nothing rather than overlaying them on a launcher.
-        let clock_start = main_total
+        // icons to nothing rather than overlaying them on a launcher. The
+        // Switchboard capsule is placed first among them: the system readout
+        // survives preferentially, so the clock and icons collapse before it
+        // does — only the leading launchers outrank it.
+        let switch_start = main_total
+            .saturating_sub(config.switch_extent)
+            .max(leading_len);
+        let switchboard = placer.place(switch_start, main_total.saturating_sub(switch_start));
+
+        let clock_start = switch_start
             .saturating_sub(config.clock_extent)
             .max(leading_len);
-        let clock = placer.place(clock_start, main_total.saturating_sub(clock_start));
+        let clock = placer.place(clock_start, switch_start.saturating_sub(clock_start));
 
         let notif_total = config.icon_extent.saturating_mul(to_u32(icon_count));
         let notif_start = clock_start.saturating_sub(notif_total).max(leading_len);
@@ -179,6 +193,7 @@ impl BarLayout {
             notification_area,
             notifications,
             clock,
+            switchboard,
         }
     }
 
@@ -194,6 +209,9 @@ impl BarLayout {
         }
         if self.files.contains(point) {
             return Some(Hit::Files);
+        }
+        if self.switchboard.contains(point) {
+            return Some(Hit::Switchboard);
         }
         if self.clock.contains(point) {
             return Some(Hit::Clock);
@@ -417,6 +435,65 @@ impl NotificationsLayout {
             .iter()
             .find(|placed| placed.card.contains(point))
             .map(|placed| placed.index)
+    }
+}
+
+/// The computed geometry of the Switchboard capsule's expanded readout: the
+/// popup panel and the radius the window manager rounds it with.
+///
+/// The readout opens outward from the Switchboard slot through the same
+/// shared origin rule as the library popup and the notification popover,
+/// sized from the capsule's own
+/// [`readout_size`](tairix_controls::TraySignal::readout_size) and clamped
+/// to the screen. The radius is the popup radius the readout plate itself
+/// draws, so the window's rounding and the plate's can never disagree.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TrayReadoutLayout {
+    /// The whole readout panel.
+    pub panel: Rect,
+    /// The corner radius the window manager applies to the readout — the
+    /// same radius the readout plate is drawn with.
+    pub corner_radius: u32,
+}
+
+impl TrayReadoutLayout {
+    /// Compute the readout panel for `signal`, opened outward from the
+    /// Switchboard slot of `bar` (pinned to `edge`) at the desktop `scale`
+    /// under `theme`.
+    #[must_use]
+    pub(crate) fn compute(
+        edge: Edge,
+        bar: &BarLayout,
+        screen_width: u32,
+        screen_height: u32,
+        scale: Scale,
+        theme: &Theme,
+        signal: &TraySignal,
+    ) -> Self {
+        let corner_radius = scale.scale_length(theme.metrics().popup_corner_radius);
+        let font = popup_font(theme, scale);
+        let (width, height) = signal.readout_size(scale, theme, font);
+        let width = width.min(screen_width).max(1);
+        let height = height.min(screen_height).max(1);
+        let origin = panel_origin(
+            edge,
+            bar.bar,
+            bar.switchboard,
+            width,
+            height,
+            screen_width,
+            screen_height,
+        );
+        Self {
+            panel: Rect::new(origin.x, origin.y, width, height),
+            corner_radius,
+        }
+    }
+
+    /// Whether `point` lies within the readout panel.
+    #[must_use]
+    pub fn contains(&self, point: Point) -> bool {
+        self.panel.contains(point)
     }
 }
 

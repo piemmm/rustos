@@ -1,0 +1,55 @@
+[package]
+name = "tairix-switchboard"
+description = "TAIRiX Switchboard monitor service: samples the live system ticklessly through the System Information API and publishes a compact tray-signal summary to the desktop session over SWITCHBOARD_ENDPOINT (plans/NEW-TASKBAR.md T10)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-fontd` and
+# `tairix-top`. `cargo build -p tairix-switchboard` builds the service
+# program with it; host tooling builds only the sampler/derive/publish/
+# schedule *library*, so the host test build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-switchboard` sampler/derive/publish/
+# schedule library (host-testable against a fake `Transport`) and the `Run`
+# entry-point binary of the service installed at
+# `/System/Services/switchboard.app/Run`. The binary is a freestanding
+# pure-Rust program on the native Tier-1 targets and an inert host stub
+# elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-switchboard-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen `Errno` table plus the Switchboard tray-summary wire vocabulary
+# (`SWITCHBOARD_ENDPOINT`, `SwitchboardRequest`, `TraySummary`) and the
+# shared status-reply frame the publish step decodes.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared System Information API client helpers: the `Transport` seam,
+# the process-list and CPU-time paging walks, and the memory-pressure fetch.
+# The sampler consumes these rather than duplicating them.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, `ipc_call`,
+# `signal_intake`, the wait-set syscalls, `clock_get`, `stderr`) and the
+# production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`),
+# enabled through `tairix-procinfo`'s own `program` feature. Both are pulled
+# in only for the bare-metal targets the program is actually built for; on
+# the host neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }

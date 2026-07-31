@@ -29,9 +29,9 @@ use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, plate_border,
-    pointer_activation, rail_thickness, resolve_bead, resolve_rail, seam_thickness, seam_width,
-    surface_rect, to_i32,
+    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_count_badge,
+    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail, seam_thickness,
+    seam_width, surface_rect, to_i32,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
@@ -929,18 +929,14 @@ impl Card {
             if pill_w > 0 && pill_h > 0 && content_right > content_left.saturating_add(pill_w) {
                 let px = content_right.saturating_sub(pill_w);
                 let py = iy.saturating_add(pad);
-                surface.fill_round_rect(
-                    px,
-                    py,
-                    pill_w,
-                    pill_h,
-                    pill_h / 2,
+                paint_count_badge(
+                    surface,
+                    (px, py, pill_w, pill_h),
                     Color::from(palette.accent),
+                    Color::from(palette.on_accent),
+                    font,
+                    text,
                 );
-                let tw = font.text_width(text);
-                let tx = to_i32(px) + (to_i32(pill_w) - to_i32(tw)).max(0) / 2;
-                let ty = to_i32(py) + (to_i32(pill_h) - to_i32(font.glyph_height())).max(0) / 2;
-                font.draw_text(surface, tx, ty, text, Color::from(palette.on_accent));
                 return px.saturating_sub(pad);
             }
         } else if let Some((color, shape)) = resolve_bead(theme, self.state) {

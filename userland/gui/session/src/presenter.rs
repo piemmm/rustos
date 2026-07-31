@@ -1,5 +1,5 @@
-//! Presenting the taskbar, its program-library popup, and its context menu
-//! through the window manager.
+//! Presenting the taskbar, its program-library popup, its context menu, and
+//! its popovers through the window manager.
 //!
 //! The taskbar models the desktop's bar and produces a *rectangular* pixel
 //! [`Surface`], and the window manager composites and
@@ -28,7 +28,8 @@
 use tairix_taskbar::{Taskbar, TaskbarRenderer};
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
-/// Presents a taskbar, its program-library popup, and its context menu as
+/// Presents a taskbar, its program-library popup, its context menu, the
+/// notification popover, and the Switchboard capsule's instrument readout as
 /// window-manager windows.
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
@@ -42,6 +43,7 @@ pub struct TaskbarPresenter {
     popup: Option<WindowId>,
     menu: Option<WindowId>,
     notifications: Option<WindowId>,
+    readout: Option<WindowId>,
 }
 
 impl TaskbarPresenter {
@@ -53,6 +55,7 @@ impl TaskbarPresenter {
             popup: None,
             menu: None,
             notifications: None,
+            readout: None,
         }
     }
 
@@ -83,6 +86,14 @@ impl TaskbarPresenter {
     #[must_use]
     pub const fn notifications_window(&self) -> Option<WindowId> {
         self.notifications
+    }
+
+    /// The compositor window currently showing the Switchboard capsule's
+    /// instrument readout, or `None` while it is collapsed (or before its
+    /// first presentation).
+    #[must_use]
+    pub const fn readout_window(&self) -> Option<WindowId> {
+        self.readout
     }
 
     /// Bring the compositor up to date with the taskbar's current model and
@@ -117,12 +128,16 @@ impl TaskbarPresenter {
         self.present_popup(compositor, renderer, taskbar, scale);
         self.present_menu(compositor, renderer, taskbar, scale);
         self.present_notifications(compositor, renderer, taskbar, scale);
+        self.present_readout(compositor, renderer, taskbar, scale);
     }
 
-    /// Remove the bar, popup, and menu windows from `compositor` and forget
-    /// them, so a later [`present`](Self::present) starts fresh. Tearing the
-    /// desktop session down leaves no orphaned windows behind.
+    /// Remove the bar, popup, menu, and popover windows from `compositor`
+    /// and forget them, so a later [`present`](Self::present) starts fresh.
+    /// Tearing the desktop session down leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
+        if let Some(id) = self.readout.take() {
+            compositor.remove(id);
+        }
         if let Some(id) = self.notifications.take() {
             compositor.remove(id);
         }
@@ -249,6 +264,43 @@ impl TaskbarPresenter {
         self.notifications = Some(place(
             compositor,
             self.notifications,
+            layout.panel.origin,
+            surface,
+            corners,
+        ));
+    }
+
+    /// Present the Switchboard capsule's instrument readout while it is
+    /// expanded (hovered or pinned), or remove it once collapsed.
+    ///
+    /// The readout opens outward from the capsule's slot at
+    /// [`TrayReadoutLayout::panel`]'s origin, rounded with
+    /// [`TrayReadoutLayout::corner_radius`]. Fails closed like the others: a
+    /// render whose surface cannot be allocated leaves the existing window
+    /// untouched.
+    ///
+    /// [`TrayReadoutLayout::panel`]: tairix_taskbar::TrayReadoutLayout::panel
+    /// [`TrayReadoutLayout::corner_radius`]: tairix_taskbar::TrayReadoutLayout::corner_radius
+    fn present_readout(
+        &mut self,
+        compositor: &mut Compositor,
+        renderer: &mut TaskbarRenderer,
+        taskbar: &Taskbar,
+        scale: Scale,
+    ) {
+        let Some(layout) = taskbar.tray_readout_layout(scale) else {
+            if let Some(id) = self.readout.take() {
+                compositor.remove(id);
+            }
+            return;
+        };
+        let Some(surface) = renderer.render_tray_readout(taskbar, scale) else {
+            return;
+        };
+        let corners = Corners::from_radius(layout.corner_radius);
+        self.readout = Some(place(
+            compositor,
+            self.readout,
             layout.panel.origin,
             surface,
             corners,

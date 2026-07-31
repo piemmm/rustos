@@ -29,14 +29,17 @@
 //! holds a control character, or a dirty reserved tail refuses rather than
 //! guessing.
 
+use crate::bounded_text::BoundedText;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the desktop session's
 /// notification service (`"NO"` ASCII hex-spelled prefix, mirroring
 /// [`crate::window_ipc::WINDOW_ENDPOINT`]'s convention). Like the window
-/// rendezvous it is **seat-scoped** ([`crate::ipc::is_reserved_endpoint`]):
-/// the kernel authorises its bind either by `CAP_IPC_BIND_PRIVILEGED` or by
+/// and Switchboard tray-summary rendezvous it is **seat-scoped**
+/// ([`crate::ipc::is_reserved_endpoint`],
+/// [`crate::ipc::is_seat_scoped_endpoint`]): the kernel authorises its
+/// bind either by `CAP_IPC_BIND_PRIVILEGED` or by
 /// the caller's kernel-attested **live seat lease** — the desktop session
 /// that owns the seat serves the notifications shown on it, and nothing
 /// else may. A squatter claiming the rendezvous first could suppress a
@@ -70,101 +73,19 @@ pub const NOTIFY_TITLE_MAX: usize = 64;
 /// ([`crate::log_ingress`]), not the desktop.
 pub const NOTIFY_BODY_MAX: usize = 192;
 
-/// A validated notification text field: at least `MIN` and at most `MAX`
-/// bytes of well-formed UTF-8 with no control characters.
-///
-/// One definition serves both the [`NotifyTitle`] and the [`NotifyBody`],
-/// which validate identically and differ only in their bounds — the size is
-/// the type parameter, so there is no second copy of the validator to drift.
-/// The text is validated at construction *and* again at decode, so a value
-/// that reached a [`NotifyRequest`] is always well-formed; a malformed field
-/// is refused, never sanitised.
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub struct NotifyText<const MIN: usize, const MAX: usize> {
-    bytes: [u8; MAX],
-    len: u8,
-}
-
-impl<const MIN: usize, const MAX: usize> NotifyText<MIN, MAX> {
-    /// Compile-time soundness of the chosen bounds: the range is
-    /// non-degenerate and the length always fits the one-byte wire prefix.
-    /// Forced to evaluate by the `let () = Self::INVARIANTS;` in every
-    /// constructor, so an unsound instantiation fails the build.
-    const INVARIANTS: () = {
-        assert!(MIN <= MAX, "NotifyText requires MIN <= MAX");
-        assert!(
-            MAX <= u8::MAX as usize,
-            "NotifyText MAX must fit its one-byte length prefix"
-        );
-    };
-
-    /// Build a text field from `text`, validating length and content.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::LengthOutOfRange`] — shorter than `MIN` or longer than
-    ///   `MAX` bytes when UTF-8 encoded.
-    /// * [`Errno::OutOfRange`] — contains a control character.
-    pub fn new(text: &str) -> Result<Self, Errno> {
-        let () = Self::INVARIANTS;
-        let len = u8::try_from(text.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        if text.len() < MIN || text.len() > MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if text.chars().any(char::is_control) {
-            return Err(Errno::OutOfRange);
-        }
-        let mut bytes = [0u8; MAX];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Self { bytes, len })
-    }
-
-    /// The text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        // The buffer was validated as UTF-8 at construction/decode; an
-        // impossible failure yields the empty string, never a panic.
-        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
-    }
-
-    /// Whether the field is empty (only possible when `MIN == 0`).
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Decode a text field from its fixed-width wire image: one length
-    /// byte's worth of validated text, with the tail required zero.
-    fn from_wire(len: u8, bytes: &[u8; MAX]) -> Result<Self, Errno> {
-        let () = Self::INVARIANTS;
-        let len_usize = usize::from(len);
-        if len_usize < MIN || len_usize > MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if bytes[len_usize..].iter().any(|&b| b != 0) {
-            return Err(Errno::BadMagic);
-        }
-        let text = core::str::from_utf8(&bytes[..len_usize]).map_err(|_| Errno::OutOfRange)?;
-        if text.chars().any(char::is_control) {
-            return Err(Errno::OutOfRange);
-        }
-        Ok(Self { bytes: *bytes, len })
-    }
-}
-
-impl<const MIN: usize, const MAX: usize> core::fmt::Debug for NotifyText<MIN, MAX> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("NotifyText").field(&self.as_str()).finish()
-    }
-}
-
 /// A notification title: one non-empty line, at most [`NOTIFY_TITLE_MAX`]
 /// bytes.
-pub type NotifyTitle = NotifyText<1, NOTIFY_TITLE_MAX>;
+///
+/// Built on the shared [`BoundedText`] validator (`crate::bounded_text`), so
+/// its construction and decode rules are identical to every other bounded
+/// display-text field in the ABI; the text is validated at construction *and*
+/// again at decode, so a value that reached a [`NotifyRequest`] is always
+/// well-formed.
+pub type NotifyTitle = BoundedText<1, NOTIFY_TITLE_MAX>;
 
 /// A notification body: at most [`NOTIFY_BODY_MAX`] bytes, and permitted to
 /// be empty (a title-only notification).
-pub type NotifyBody = NotifyText<0, NOTIFY_BODY_MAX>;
+pub type NotifyBody = BoundedText<0, NOTIFY_BODY_MAX>;
 
 /// How prominently the desktop should present a notification.
 ///
@@ -305,10 +226,11 @@ impl NotifyRequest {
                 put_u16(&mut out, 6, OP_RAISE);
                 put_u32(&mut out, KEY_OFFSET, key);
                 out[SEVERITY_OFFSET] = severity.as_u8();
-                out[TITLE_LEN_OFFSET] = title.len;
-                out[BODY_LEN_OFFSET] = body.len;
-                out[TITLE_OFFSET..TITLE_OFFSET + NOTIFY_TITLE_MAX].copy_from_slice(&title.bytes);
-                out[BODY_OFFSET..BODY_OFFSET + NOTIFY_BODY_MAX].copy_from_slice(&body.bytes);
+                out[TITLE_LEN_OFFSET] = title.len_byte();
+                out[BODY_LEN_OFFSET] = body.len_byte();
+                out[TITLE_OFFSET..TITLE_OFFSET + NOTIFY_TITLE_MAX]
+                    .copy_from_slice(title.raw_bytes());
+                out[BODY_OFFSET..BODY_OFFSET + NOTIFY_BODY_MAX].copy_from_slice(body.raw_bytes());
             }
             Self::Clear { key } => {
                 put_u16(&mut out, 6, OP_CLEAR);

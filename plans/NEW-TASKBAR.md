@@ -37,7 +37,18 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T8 done**; T9 (the Switchboard taskbar icon) is next. The
+`in progress` — **T1–T10 done**; T11 (the Switchboard window) is next. The
+**Switchboard tray** is landed whole (T9/T10 — see their done-state
+sections below): the immovable trailing-most capsule slot with the
+`SwitchboardTray` model (one pure derive, hung > pressure > jobs >
+recovery > calm, orthogonal furniture composed, count/alert badge), the
+hover/pinned instrument readout, scroll task-cycling and the middle-click
+previous-task switch, the seat-scoped `SWITCHBOARD_ENDPOINT` +
+`switchboard_ipc` summary vocabulary (`lib/abi`, fuzzed), the session's
+attested relay + `HangTracker` delivery-evidence hang detection, and the
+`userland/gui/switchboard` monitor service (tickless sampler over
+`lib/procinfo`, change-only publisher with keepalive, capability-sized
+manifest, spawned by the session at bring-up and calm-on-death). The
 library **data** layer is landed end to end: `lib/proglib` (T1 — taxonomy,
 entry model, store grammar, fail-closed parse, canonical render, `merge`,
 `reconcile`, fuzzed by `tests/fuzz_proglib.rs`), the `applib` admin command
@@ -148,8 +159,9 @@ the remaining pieces together and fills the gaps.
   icons. Empty by default; populated by pin gestures (T7).
 - **Running-task list:** the existing `TaskList` region (one `TaskbarItem` per
   top-level window), unchanged in purpose.
-- **Notification area:** status icons + transient notifications, immediately
-  left of the Switchboard icon.
+- **Notification area:** status icons + transient notifications, left of the
+  clock; the clock sits between it and the Switchboard icon (desktop1
+  panel 1).
 - **Switchboard icon:** always the trailing-most element, reserved, immovable;
   no pin, task, or tray icon may occupy or displace its slot.
 - Vertical / top / right edges reflow along the cross axis by the existing
@@ -252,14 +264,23 @@ the authority at the right granularity and, if so, uses it.
   (§16.6); the Switchboard component requests them to read the live overview.
   No new capability is minted for reading.
 - Process-control authority for the Switchboard's task actions (pause/resume,
-  reprioritise, quit/force-quit). This plan **checks first** for an existing
-  signal/priority/kill capability (the process-control syscalls `plans/SPAWN.md`
-  / the signal work): if one exists at an appropriate granularity it is used;
-  a new `CAP_PROC_CONTROL` is minted **only** if none does, and only in T10
-  alongside the service that enforces it, subject to §5.2 review. Every
-  control action is a capability-checked syscall/IPC under the Switchboard
-  component's own identity — never ambient (§4) — and every allow/deny is
-  audit-logged (§19.4).
+  quit/force-quit). The check for an existing capability is **resolved**
+  (owner-approved with T9/T10): the `signal` syscall's vocabulary already
+  carries the needed actions (`Continue`/`Stop`/`Terminate`/`Kill`,
+  `lib/abi/src/process.rs`) but its target rule is own-child-only, and no
+  existing capability expresses cross-principal process control — so **T11**
+  widens the `signal` target rule in place to the kill(2)-style "own child,
+  else same-uid, else `CAP_PROC_CONTROL`" and mints
+  `CAP_PROC_CONTROL` **in that same change**, where its live holder (the
+  Switchboard manifest; the administrative ceiling in `lib/users`) and its
+  live enforcement point (the widened kernel signal dispatch) land together
+  — never ahead of them (§5.2). "Lower priority" needs new scheduler
+  surface and stays in T12 where it is used. Every control action is a
+  capability-checked syscall under the Switchboard component's own identity
+  — never ambient (§4) — and every allow/deny is audit-logged (§19.4).
+  An ordinary user's Switchboard controls only that user's own processes
+  (the same-uid rule, no capability needed); the capability exists for the
+  administrative overview acting across principals.
 
 ## 5. On-disk stores (data, never code)
 
@@ -697,64 +718,125 @@ fail-closed, click-to-dismiss, inert status press, and card render across
 dark/light/high-contrast/reduced-motion), and the session suite (the
 producer→attest→relay→dismiss path with producer isolation).
 
-## T9 — The Switchboard taskbar icon (always right-most, immovable)
+## T9 — The Switchboard taskbar icon (always right-most, immovable) — **done**
 
-**Deliverables**
-- `userland/gui/taskbar`: reserve the trailing-most slot for the Switchboard
-  icon. It is laid out **after** everything else and can never be displaced;
-  `hit_test` → `Hit::Switchboard`, primary press →
-  `TaskbarResponse::OpenSwitchboard`, and the mockup microinteractions
-  (desktop1 panel 6): scroll to cycle tasks, middle-click to switch to
-  previous, hover preview, long-press to open recovery.
-- The icon is a `lib/controls::shell` `TraySignal` driven by a compact
+What now stands:
+- `userland/gui/taskbar`: the trailing-most slot is reserved for the
+  Switchboard capsule. It is computed **first** among the trailing regions,
+  so pins, tasks, notifications, and the clock can never displace it (only
+  the permanent leading launchers outrank it on a degenerate screen);
+  `hit_test` → `Hit::Switchboard`. The mockup microinteractions with a
+  live target landed (desktop1 panel 6): scroll over the capsule cycles the
+  running tasks (wrapping, honest no-op on an empty list), middle-click
+  switches to the previous task (an MRU-of-two the task list keeps), and
+  hover previews via the capsule's instrument readout — a primary press on
+  the capsule pins the readout open (it survives hover-away), a second
+  press there or a press anywhere else releases it. The two gestures whose
+  target is the overview window — primary press →
+  `TaskbarResponse::OpenSwitchboard` and long-press → open Recovery — land
+  in **T11 with that window** (owner-approved staging): a press that opens
+  nothing would be the "for now" stub the charter forbids, so until T11 the
+  press pins the readout, a complete behaviour in its own right.
+- The capsule is the `lib/controls::shell` `TraySignal` driven by a compact
   **tray-signal summary** (the T10 feed): its state renders Normal / Job
   Active (badge count) / Resource Pressure / Hung App (danger) / Recovery
   Available exactly as the mockup's icon-states row, using **signal beads**,
   the **pressure rail**, the **heat seam**, **danger state**, and **edge
-  wake** from the Reactive Alloy vocabulary. Any new visual (the badge count,
-  the pressure rail on the icon) is a shared `lib/controls` addition, not a
-  taskbar-private draw.
-- `userland/gui/session`: subscribe to the Switchboard service's tray-signal
-  summary and feed it to the taskbar; resolve `OpenSwitchboard` by asking the
-  Switchboard service to open/raise its window (T10/T11). If the service is
-  absent, the icon shows the calm Normal state and the click is a no-op with
-  a logged reason (fail closed, never a crash).
+  wake** from the Reactive Alloy vocabulary. The badge count is the shared
+  `lib/controls` count/alert badge (one painter with the Card badge —
+  `plans/GUI-CONTROLS-DESIGN.md` §11.27), never a taskbar-private draw. The
+  readout's value line previews the busiest task (the summary's top task)
+  when the system is calm and the dominant state's own figure otherwise.
+- `userland/gui/session`: bind and serve the seat-scoped
+  `SWITCHBOARD_ENDPOINT` (the third member of the seat-scoped reserved set),
+  accept summaries **only** from the child it spawned (kernel-attested
+  `call_peer_origin` pid against the launch table — a foreign publisher is
+  refused with a stated stderr line), and feed them to the taskbar. If the
+  service is absent or dies, the summary clears and the capsule shows the
+  calm Normal state (fail closed, never a crash).
+- **Hung App is fed by the session itself, not the service** (owner-approved:
+  detection lands now): the desktop's own event deliveries are the one
+  honest "not responding" signal — an app-ward window event is a
+  non-blocking mailbox send, so an owner whose sends come back refused as
+  mailbox-full backpressure continuously for the threshold (4 s,
+  `vigil::UNRESPONSIVE_AFTER_NS`) is flagged unresponsive, one accepted
+  delivery clears it, and a reap forgets it. The session folds that count
+  into the capsule (`HangTracker`, `userland/gui/session/src/vigil.rs`); no
+  heartbeat is fabricated and no kernel query pretends to know.
 
-**Tests**: the reserved slot is always trailing-most and never displaced by
-pins/tasks/notifications; each tray-signal state renders its beads/rails;
-microinteractions route correctly; absent-service degrades calmly.
+Tested: the reserved slot is trailing-most on every edge and never
+displaced (the clock and notifications collapse first on a narrow screen);
+the derive matrix maps every summary shape (absent service, calm + top task,
+jobs, each pressure kind + count, recovery, hung, and compositions) to the
+right state/badge/label/value; scroll cycling wraps both ways and fails
+closed on empty; middle-click follows the MRU and fails closed when the
+previous task vanished; the readout pins/unpins, holds without hover, and
+its popover claims are inert (taskbar and session routers both); pixels
+prove the capsule, rail, seam, and badge tones across
+dark/light/high-contrast; the hang tracker's evidence rules (backpressure
+only, threshold, recovery-by-drain, reap, count saturation) are covered
+exhaustively; the session suite drives the relay, the pin lifecycle, and
+both task-switch gestures end to end through `DesktopShell::handle`.
 
-**Done when**: the immovable Switchboard icon renders every live state and
-opens the overview; gate green.
-
-## T10 — The Switchboard component: monitor service + tray-signal feed
+## T10 — The Switchboard component: monitor service + tray-signal feed — **done**
 
 The dedicated, capability-sized process behind the Switchboard (§0).
+What now stands:
+- New `userland/gui/switchboard` bundle (`kind = "service"`, §16.5) whose
+  `AppInfo` requests exactly what this stage uses — `CAP_CONSOLE_WRITE`
+  (stderr diagnostics), `CAP_SYSINFO_GLOBAL` (the system-wide process list),
+  `CAP_SYSINFO_KERNEL` (the memory-pressure bands) — and nothing ahead of
+  its use: `CAP_SYSINFO_HW`, the window channel, and the process-control
+  capability arrive with the stages that consume them (T11+, §5.2/CU6). The
+  kernel intersects the request with the launching user's ceiling, so an
+  ordinary user's Switchboard runs self-scoped (its own processes, overall
+  CPU; no kernel memory bands) while an administrator's sees the whole
+  machine — authority follows the seat user, never a service account. A
+  service bundle never lists in the program library (no `library` key).
+- **Lifecycle (owner-approved)**: the desktop session spawns the service at
+  bring-up — after binding the endpoint, before the loop — as the logged-in
+  user with console inherit, records it in the launch table, and lets the
+  ordinary reap path diagnose its exit; the capsule falls back to calm when
+  the feed dies. No respawn loop: revival is on demand (T11's open press).
+  A copy launched outside a desktop session, or orphaned by a session
+  restart, discovers it on its next publish (endpoint unbound → refused
+  identity) and exits cleanly with its reason on stderr (§2.24).
+- A **sampler** (`lib`-shaped, host-tested over the `lib/procinfo`
+  `Transport` seam) that reads the live system on a **tickless one-shot
+  cadence** (2 s; the wait is a single deadline-bounded park that also wakes
+  for signals — never a busy-poll, §2.23; the periodic re-poll is the
+  sanctioned fallback because system-wide metrics expose no change event):
+  the process list (global scope when granted, else self — probed **once**
+  at startup so a denied audited query is never spammed), per-process CPU
+  deltas keyed on the stable `proc_id` (pid reuse cannot corrupt them),
+  overall CPU busy permille (the shared `lib/procinfo::CpuTotals` — one
+  arithmetic with `top`/`sysmon`), stopped-process recovery candidates, and
+  — when granted — the SMARTRAM memory-pressure band on a slower divider
+  (every 5th sample) to bound the audited-query rate. Every refusal
+  degrades its field to an honest empty, never a fabrication.
+- The **tray-signal summary** (`lib/abi::switchboard_ipc`, versioned,
+  fixed-frame, fail-closed, fuzzed): background-job count (**honest zero
+  today** — no job registry exists in the OS; the field is real, its first
+  producer is later work), recovery count, overall CPU busy permille, the
+  dominant measured pressure (CPU by busy-permille hysteresis 900‰ enter /
+  800‰ exit; memory by the kernel's own band — never a second policy) plus
+  the count of pressured resources, and the busiest task (name + permille)
+  for the readout preview. Disk/network pressure joins when a throughput
+  query exists to measure it honestly (no such sysinfo query today).
+- **Publish on change** over `ipc_call` to the seat-scoped
+  `SWITCHBOARD_ENDPOINT`: one publish per changed summary, plus a slow
+  keepalive republish (10 s) that doubles as orphan detection; bounded
+  consecutive-failure tolerance, then a stated exit — never an unbounded
+  silent retry (§2.1).
 
-**Deliverables**
-- New `userland/gui/switchboard` bundle (§16.5) with its own `AppInfo`
-  requesting exactly `CAP_SYSINFO_GLOBAL`/`CAP_SYSINFO_KERNEL`/`CAP_SYSINFO_HW`
-  (read) + the process-control authority (§4 capabilities) + the D7 window
-  class (`CAP_DISPLAY`-adjacent app-window channel). It is a long-running
-  component started with the desktop session; its manifest declares no
-  `library` folder, so the program library never lists it.
-- A **sampler** that reads the live system through `lib/procinfo` / `sysinfo`
-  on a **tickless one-shot timer** and on demand (never a busy-poll, §2.23):
-  process/task list, CPU/mem/disk/net stats, per-CPU times, pressure signals,
-  hung-task detection, recovery candidates.
-- The **tray-signal summary**: a compact, versioned, fuzzed `lib/abi` record
-  (overall state Normal/JobActive/Pressure/Hung/Recovery + badge counts)
-  published to the session for the taskbar icon (T9). Published on change
-  (event-driven), not polled.
-- Defines/uses the process-control capability (§4 above) and audit-logs every
-  control decision (§19.4).
-
-**Tests**: sampler builds a `SwitchboardModel` from a fake `sysinfo` source;
-tray-signal summary derives the right state/counts; tickless (no busy-loop);
-control action is capability-checked + audited + fails closed.
-
-**Done when**: the service samples the system tickless, publishes the tray
-signal, and holds only its sized capabilities; gate green.
+Tested: sampler scope probing and degradation, delta/permille arithmetic,
+stopped counting, top-task selection across samples, memory cadence divider;
+derive matrix incl. hysteresis boundaries and dominance; publisher
+change-only + keepalive + failure exits; schedule deadlines (tickless);
+manifest ∩ ceiling behaviour is covered by the grant-intersection kernel
+tests it rides on. Docs: `userland/gui/switchboard/README.md`,
+`docs/src/desktop/switchboard.md` (+ the session/taskbar pages), `AGENTS.md`
+§3, `PLAN.md`.
 
 ## T11 — Switchboard window: the Open Panel (desktop1 panel 2, desktop2a §1–2)
 
@@ -763,7 +845,29 @@ signal, and holds only its sized capabilities; gate green.
   composition in a real app window (`plans/APPWIN.md` AW2 channel), fed the
   live `SwitchboardModel` from the T10 sampler and emitting `SwitchboardAction`
   the service authorises + applies (pause/resume, switch-to, reveal window,
-  lower priority, quit, force-quit) through capability-checked syscalls.
+  quit, force-quit) through capability-checked syscalls; "lower priority"
+  stays in T12 with the scheduler surface it needs (§4).
+- The T9 gestures whose target now exists: primary press →
+  `TaskbarResponse::OpenSwitchboard` (the session asks the service to
+  open/raise its window, reviving a dead service on demand — the press is
+  the demand), long-press on the capsule → open the Recovery section, and
+  the readout's safe action gains "Open Switchboard".
+- The process-control authority lands here whole (§4): the `signal` target
+  rule widens in place to "own child, else same-uid, else
+  `CAP_PROC_CONTROL`", the capability is minted with this change (holder:
+  the Switchboard manifest + the administrative ceiling; enforcement: the
+  widened kernel dispatch, audited allow/deny), and the window's task
+  actions ride it — an ordinary user acts on their own processes, an
+  administrator across principals, every refusal rendered
+  `DeniedByAuthority` (§2.24), never fabricated.
+- The session→service command mailbox (the reverse direction of the T10
+  feed): the service binds an unreserved per-pid report mailbox; the session
+  sends open/reveal commands and the seat report (the unresponsive-owner
+  set from T9's `HangTracker`, so Recovery lists hung apps with restart —
+  via the attested launch path — and force-quit). Every mailbox message is
+  authenticated by its kernel-attested per-message `Origin` against the
+  session identity learned from the seat-anchored publish reply — never a
+  wire claim.
 - The header resource meters (CPU / MEM / DISK / NET) from the mockup are
   drawn with a new shared `lib/controls` **Meter** control (a rounded bar with
   the value trace + **pressure rail** colour by resource), added to

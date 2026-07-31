@@ -532,7 +532,6 @@ fn the_first_cpu_sample_shows_the_since_boot_split() {
             idle_tenths: 500,
         })
     );
-    assert_eq!(model.summary().cpu.map(|c| c.cpus), Some(2));
 }
 
 #[test]

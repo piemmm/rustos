@@ -18,7 +18,8 @@ use tairix_abi::sysinfo::{
 use tairix_curses::Event;
 use tairix_procinfo::{
     call, for_each_cpu_load, for_each_cpu_time, for_each_irq, for_each_mount, for_each_process,
-    for_each_reclaim_class, memory_pressure, ramzip_stats, CallError, ListError, Transport,
+    for_each_reclaim_class, memory_pressure, ramzip_stats, CallError, CpuTotals, ListError,
+    Transport,
 };
 
 use crate::command::{DELAY_STEP_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
@@ -265,7 +266,7 @@ struct ProcHistory {
 pub struct Model {
     snapshot: Snapshot,
     band_history: Vec<u8>,
-    prev_cpu_times: Vec<(u32, u64, u64)>,
+    prev_cpu_times: Vec<(u32, CpuTotals)>,
     cpu_busy: Vec<CpuBusy>,
     proc_history: Vec<ProcHistory>,
     prev_uptime_ns: Option<u64>,
@@ -493,9 +494,15 @@ impl Model {
     /// (the interval view), else the cumulative since-boot ratio (the
     /// honest first frame). A failed walk leaves the shares empty.
     fn sample_cpu_times(&mut self, transport: &dyn Transport) {
-        let mut now: Vec<(u32, u64, u64)> = Vec::new();
+        let mut now: Vec<(u32, CpuTotals)> = Vec::new();
         let walked = for_each_cpu_time(transport, |record| {
-            now.push((record.cpu, record.busy_ns, record.idle_ns));
+            now.push((
+                record.cpu,
+                CpuTotals {
+                    busy_ns: record.busy_ns,
+                    idle_ns: record.idle_ns,
+                },
+            ));
             Ok(())
         });
         if walked.is_err() {
@@ -504,27 +511,16 @@ impl Model {
         }
         self.cpu_busy = now
             .iter()
-            .map(|&(cpu, busy, idle)| {
-                let (dbusy, didle) = match self
+            .map(|&(cpu, totals)| {
+                let prev = self
                     .prev_cpu_times
                     .iter()
-                    .find(|(prev_cpu, _, _)| *prev_cpu == cpu)
-                {
-                    Some(&(_, pbusy, pidle)) => {
-                        (busy.saturating_sub(pbusy), idle.saturating_sub(pidle))
-                    }
-                    None => (busy, idle),
-                };
-                let total = dbusy.saturating_add(didle);
-                let busy_tenths = if total == 0 {
-                    0
-                } else {
-                    u32::try_from(u128::from(dbusy) * 1000 / u128::from(total)).unwrap_or(1000)
-                };
-                CpuBusy {
-                    cpu,
-                    busy_tenths: busy_tenths.min(1000),
-                }
+                    .find(|(prev_cpu, _)| *prev_cpu == cpu)
+                    .map(|&(_, totals)| totals)
+                    .unwrap_or_default();
+
+                let busy_tenths = CpuTotals::busy_permille(prev, totals).map_or(0, u32::from);
+                CpuBusy { cpu, busy_tenths }
             })
             .collect();
         self.prev_cpu_times = now;

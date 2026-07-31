@@ -283,10 +283,11 @@ impl CallEndpoint {
     /// a fact the *syscall handler* kernel-attested instead of
     /// `CAP_IPC_BIND_PRIVILEGED` — today exactly one such fact exists: the
     /// creator holds a live seat lease, which entitles it to the
-    /// seat-scoped window rendezvous (`tairix_abi::window_ipc`,
-    /// `plans/APPWIN.md` AW3). The attestation must come from kernel
-    /// state the handler resolved itself (the seat registry), never from
-    /// anything the caller supplied.
+    /// seat-scoped desktop rendezvous — the window, notification, and
+    /// Switchboard tray-summary channels
+    /// (`tairix_abi::ipc::is_seat_scoped_endpoint`, `plans/APPWIN.md` AW3).
+    /// The attestation must come from kernel state the handler resolved
+    /// itself (the seat registry), never from anything the caller supplied.
     ///
     /// Everything else is [`Self::create`]: the limits are re-bounded, the
     /// creator must hold every required receive capability, and a

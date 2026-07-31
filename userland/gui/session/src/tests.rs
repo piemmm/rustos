@@ -2754,3 +2754,334 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
         .notifications()
         .has_notifications());
 }
+
+// ---- window-owner responsiveness (vigil) -----------------------------
+
+#[test]
+fn hang_tracker_flags_only_after_threshold_of_backpressure() {
+    let mut tracker = crate::HangTracker::new();
+
+    // The first refusal opens the suspicion window but proves nothing yet.
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 1_000));
+    assert!(!tracker.is_unresponsive(7));
+    assert_eq!(tracker.unresponsive_count(), 0);
+
+    // Refusals inside the threshold keep the verdict unchanged.
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        1_000 + crate::UNRESPONSIVE_AFTER_NS / 2,
+    ));
+    assert!(!tracker.is_unresponsive(7));
+
+    // The refusal that crosses the threshold flags the owner — exactly once.
+    assert!(tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        1_000 + crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(tracker.is_unresponsive(7));
+    assert_eq!(tracker.unresponsive_count(), 1);
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        2_000 + crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert_eq!(tracker.unresponsive_count(), 1);
+}
+
+#[test]
+fn hang_tracker_clears_on_an_accepted_delivery() {
+    let mut tracker = crate::HangTracker::new();
+
+    // A suspect that drains before the threshold was never unresponsive:
+    // clearing it changes nothing the tray must repaint.
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_delivered(7));
+
+    // A flagged owner that drains recovers, and the change is reported.
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(tracker.note_delivered(7));
+    assert!(!tracker.is_unresponsive(7));
+    assert_eq!(tracker.unresponsive_count(), 0);
+
+    // The suspicion window restarts from scratch after a recovery.
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        2 * crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(!tracker.is_unresponsive(7));
+}
+
+#[test]
+fn hang_tracker_treats_only_backpressure_as_evidence() {
+    let mut tracker = crate::HangTracker::new();
+
+    // A torn-down mailbox is the reap path's business, not hang evidence —
+    // and it drops any standing suspicion so a recycled task id starts clean.
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::NotFound, 1));
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS + 2,
+    ));
+    assert!(!tracker.is_unresponsive(7));
+
+    // Any other refusal is no evidence either way.
+    assert!(!tracker.note_refused(9, tairix_abi::Errno::PermissionDenied, 0));
+    assert!(!tracker.note_refused(9, tairix_abi::Errno::MessageTooLarge, 0));
+    assert!(!tracker.is_unresponsive(9));
+    assert_eq!(tracker.unresponsive_count(), 0);
+}
+
+#[test]
+fn hang_tracker_forget_reports_only_a_standing_verdict() {
+    let mut tracker = crate::HangTracker::new();
+
+    // Forgetting an unknown or merely-suspect owner changes nothing.
+    assert!(!tracker.forget(7));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.forget(7));
+
+    // Forgetting a flagged owner (its exit was reaped) clears the verdict
+    // and reports the change so the tray repaints.
+    assert!(!tracker.note_refused(8, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(tracker.note_refused(
+        8,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(tracker.forget(8));
+    assert!(!tracker.is_unresponsive(8));
+    assert_eq!(tracker.unresponsive_count(), 0);
+}
+
+#[test]
+fn hang_tracker_counts_every_flagged_owner_and_saturates() {
+    let mut tracker = crate::HangTracker::new();
+    for owner in 0..3u64 {
+        assert!(!tracker.note_refused(owner, tairix_abi::Errno::LengthOutOfRange, 0));
+        assert!(tracker.note_refused(
+            owner,
+            tairix_abi::Errno::LengthOutOfRange,
+            crate::UNRESPONSIVE_AFTER_NS,
+        ));
+    }
+    assert_eq!(tracker.unresponsive_count(), 3);
+
+    // The count is a u16 for the tray summary; a pathological census
+    // saturates rather than wrapping.
+    for owner in 3..70_000u64 {
+        let _ = tracker.note_refused(owner, tairix_abi::Errno::LengthOutOfRange, 0);
+        let _ = tracker.note_refused(
+            owner,
+            tairix_abi::Errno::LengthOutOfRange,
+            crate::UNRESPONSIVE_AFTER_NS,
+        );
+    }
+    assert_eq!(tracker.unresponsive_count(), u16::MAX);
+}
+
+// ---- switchboard tray relay -------------------------------------------
+
+/// A well-formed summary fixture: `jobs` background jobs, nothing else
+/// notable, a modest CPU reading.
+fn tray_summary(jobs: u16) -> tairix_abi::switchboard_ipc::TraySummary {
+    tairix_abi::switchboard_ipc::TraySummary {
+        jobs,
+        recovery: 0,
+        cpu_busy_permille: tairix_abi::switchboard_ipc::TrayPermille::new(120).expect("permille"),
+        pressure: None,
+        top_task: None,
+    }
+}
+
+/// The centre of the Switchboard capsule's slot on the bar laid out at 100%.
+fn capsule_point(shell: &DesktopShell) -> Point {
+    let slot = shell.session().taskbar().layout(Scale::ONE).switchboard;
+    assert!(!slot.is_empty(), "the capsule slot has a region");
+    #[allow(clippy::cast_possible_wrap)]
+    Point::new(
+        slot.left() + (slot.width / 2) as i32,
+        slot.top() + (slot.height / 2) as i32,
+    )
+}
+
+/// The relay drives the capsule from the published summary and falls back to
+/// calm when the feed clears (the service exited): the session-side halves of
+/// the T9/T10 feed contract.
+#[test]
+fn tray_relay_drives_the_capsule_and_clears_to_calm() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    // No feed yet: the capsule rests calm.
+    let state = shell.session().taskbar().tray().signal().state();
+    assert_eq!(state.activity, tairix_controls::ActivityState::Idle);
+
+    // A published summary with background jobs drives the working seam.
+    shell.set_tray_summary(&mut comp, Some(tray_summary(2)));
+    let state = shell.session().taskbar().tray().signal().state();
+    assert_eq!(state.activity, tairix_controls::ActivityState::Working);
+
+    // The service died: the reap path clears the feed and the capsule
+    // returns to calm rather than freezing the dead service's last summary.
+    shell.set_tray_summary(&mut comp, None);
+    let state = shell.session().taskbar().tray().signal().state();
+    assert_eq!(state.activity, tairix_controls::ActivityState::Idle);
+}
+
+/// The session's own delivery evidence flags the capsule's hung posture and
+/// releases it — independent of the service feed.
+#[test]
+fn tray_relay_flags_and_releases_the_hung_posture() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    shell.set_tray_unresponsive(&mut comp, 1);
+    let state = shell.session().taskbar().tray().signal().state();
+    assert_eq!(state.recovery, tairix_controls::RecoveryState::Hung);
+
+    shell.set_tray_unresponsive(&mut comp, 0);
+    let state = shell.session().taskbar().tray().signal().state();
+    assert_eq!(state.recovery, tairix_controls::RecoveryState::None);
+}
+
+/// A primary press on the capsule pins the instrument readout open (it
+/// survives the pointer leaving), a press inside the open readout is claimed
+/// inert, and a press away from the bar releases the pin while the desktop
+/// acts on the press as usual.
+#[test]
+fn capsule_press_pins_the_readout_and_a_press_away_releases_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+
+    // Press the capsule: the readout pins open and is presented as a
+    // popover window.
+    let capsule = capsule_point(&shell);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(outcome, ShellOutcome::Ignored, "pinning is presentation");
+    assert!(shell.session().taskbar().tray().is_pinned());
+    assert!(shell.presenter().readout_window().is_some());
+
+    // The pin holds without hover: move the pointer to the open desktop.
+    let _ = shell.handle(moved(600, 300), &mut comp);
+    assert!(shell.session().taskbar().tray().is_expanded());
+    assert!(shell.presenter().readout_window().is_some());
+
+    // A press inside the readout is claimed inert: nothing happens, the pin
+    // holds.
+    let readout = shell
+        .session()
+        .taskbar()
+        .tray_readout_layout(Scale::ONE)
+        .expect("the pinned readout has a panel");
+    #[allow(clippy::cast_possible_wrap)]
+    let inside = Point::new(
+        readout.panel.left() + (readout.panel.width / 2) as i32,
+        readout.panel.top() + (readout.panel.height / 2) as i32,
+    );
+    let _ = shell.handle(moved(inside.x, inside.y), &mut comp);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp),
+        ShellOutcome::Ignored
+    );
+    assert!(shell.session().taskbar().tray().is_pinned());
+
+    // A press away from the bar releases the pin; the readout window is
+    // withdrawn on the same wake.
+    let _ = shell.handle(moved(600, 300), &mut comp);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert!(!shell.session().taskbar().tray().is_pinned());
+    assert!(!shell.session().taskbar().tray().is_expanded());
+    assert!(shell.presenter().readout_window().is_none());
+}
+
+/// A scroll over the capsule cycles the running tasks through the session
+/// router (the bar activates the next task); a scroll elsewhere never
+/// touches the task list.
+#[test]
+fn scroll_over_the_capsule_cycles_tasks_through_the_router() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let first = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let _second = open_app(&mut shell, &mut comp, Point::new(360, 240), "Files");
+    let first_task = shell.tasks().task_for(first).expect("tracked");
+
+    // The second window holds focus; scrolling forward over the capsule
+    // wraps to the first task and activates it.
+    let capsule = capsule_point(&shell);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
+    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
+            id: first_task,
+            outcome: ActivateOutcome::Activated,
+        })
+    );
+    assert_eq!(
+        shell.session().taskbar().tasks().focused(),
+        Some(first_task)
+    );
+
+    // A scroll away from the capsule leaves the task list alone.
+    let _ = shell.handle(moved(600, 300), &mut comp);
+    let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp);
+    assert!(!matches!(outcome, ShellOutcome::Taskbar(_)));
+    assert_eq!(
+        shell.session().taskbar().tasks().focused(),
+        Some(first_task)
+    );
+}
+
+/// A middle press over the capsule switches to the previous task (the
+/// MRU-of-two), and is inert anywhere else.
+#[test]
+fn middle_press_over_the_capsule_switches_to_the_previous_task() {
+    const MIDDLE_PRESS: InputEvent = InputEvent::PointerPressed {
+        button: PointerButton::Middle,
+    };
+    let mut shell = shell();
+    let mut comp = compositor();
+    let first = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let second = open_app(&mut shell, &mut comp, Point::new(360, 240), "Files");
+    let first_task = shell.tasks().task_for(first).expect("tracked");
+    let second_task = shell.tasks().task_for(second).expect("tracked");
+
+    // Opening `second` after `first` made `first` the previous task.
+    let capsule = capsule_point(&shell);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp);
+    let outcome = shell.handle(MIDDLE_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
+            id: first_task,
+            outcome: ActivateOutcome::Activated,
+        })
+    );
+
+    // The handover made the second task the previous one: middle-click
+    // toggles back.
+    let outcome = shell.handle(MIDDLE_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
+            id: second_task,
+            outcome: ActivateOutcome::Activated,
+        })
+    );
+
+    // A middle press on the open desktop is inert.
+    let _ = shell.handle(moved(600, 300), &mut comp);
+    assert_eq!(shell.handle(MIDDLE_PRESS, &mut comp), ShellOutcome::Ignored);
+}

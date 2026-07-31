@@ -3064,8 +3064,13 @@ are retained as a security bound (§24.4), not the unbounded
   - **Middle**: a task list showing currently running tasks (one entry per
     top-level window/application), with focus/activate and minimise/restore
     on click.
-  - **Trailing**: a clock anchored to the trailing end, with a **notification
-    icon area** immediately before it for status/notification icons.
+  - **Trailing**: a **notification icon area** for status/notification
+    icons, then the clock, then — always trailing-most, reserved, immovable
+    — the **Switchboard** tray capsule (`plans/NEW-TASKBAR.md` T9): live
+    Normal / Job Active / Pressure / Hung / Recovery states from the
+    monitor service's summary plus the session's own hang detection, with
+    the hover/pinned instrument readout, scroll task-cycling, and
+    middle-click previous-task switch.
   - **Rounded edges**: the taskbar itself supports rounded corners, drawn
     through the same compositor rounded-corner path as windows (no duplicate
     implementation, `AGENTS.md` §2.2).
@@ -3097,7 +3102,9 @@ are retained as a security bound (§24.4), not the unbounded
   correctness, fully-opaque and fully-transparent edge cases).
 - Taskbar layout tests: the two permanent launchers at the leading end and
   the program-library popup they open, running-task list in the middle,
-  notification area and clock at the trailing end; rounded-edge rendering.
+  notification area, clock, and the reserved Switchboard capsule at the
+  trailing end (the capsule survives every narrower screen the clock and
+  icons collapse on); rounded-edge rendering.
 - Theme-switch tests: dark ↔ light applies consistently across WM, taskbar,
   and default apps.
 - Input routing tests (focus, click-to-activate, drag-and-drop).
@@ -3110,7 +3117,7 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T7 done) —
+Full **icon-bar** build-out (staged, `in progress` — T1–T10 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
 entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
@@ -3139,12 +3146,23 @@ seam, memory adopts an edit only after the write lands), and both
 pin-creation gestures over the window channel's new `PinBundle`/`DragOffer`/
 `DragWithdraw` ops (`BundleRef`-validated; files context action + the
 `lib/browse` `BundleDrag` drag source; drops resolve through the shared
-`resolve_pin_drop` policy at the strip's drop index). Next (T8+): the
-notification area, and the always-rightmost Switchboard system-overview
-surface (`userland/gui/switchboard` hosting the existing
-`lib/controls::switchboard`, implementing `plans/desktop1.png` /
-`plans/desktop2a.png` — where the session controls, the light/dark toggle,
-and System Settings are reached, deliberately not the library).
+`resolve_pin_drop` policy at the strip's drop index) — and **as live
+status** (T8–T10): the notification area (the fuzzed `notify_ipc` channel
+over the seat-scoped `NOTIFY_ENDPOINT`, producer-attested relay,
+click-to-dismiss popover), and the always-rightmost **Switchboard tray**:
+the immovable capsule (shared `TraySignal` + count/alert badge; scroll
+task-cycling, middle-click previous, hover/pinned readout), the seat-scoped
+`SWITCHBOARD_ENDPOINT` + `switchboard_ipc` summary vocabulary, the
+session's attested relay + `HangTracker` delivery-evidence hang detection,
+and the `userland/gui/switchboard` monitor service (tickless
+`lib/procinfo` sampler, change-only publisher, capability-sized manifest
+intersected with the seat user's ceiling, spawned by the session and calm
+on death). Next (T11+): the Switchboard overview window hosting the
+existing `lib/controls::switchboard` composition with genuinely working
+task actions (the owner-approved `signal` widening + `CAP_PROC_CONTROL`),
+implementing `plans/desktop1.png` / `plans/desktop2a.png` — where the
+session controls, the light/dark toggle, and System Settings are reached,
+deliberately not the library.
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending
@@ -3186,9 +3204,12 @@ Shipped (headless-testable, model + renderer over injected seams):
     ships `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (permanent Library/Files launchers + program-library
   popup + pin strip with its context menu + running-task list +
-  clock/notification area) and `userland/gui/session` glue (theme registry,
-  taskbar model, catalog loading/merging, pin-store ownership + sandboxed
-  icon pipeline, launch table, `DesktopShell` event loop / `TaskBridge`).
+  notification area/clock + the reserved Switchboard tray capsule) and
+  `userland/gui/session` glue (theme registry, taskbar model, catalog
+  loading/merging, pin-store ownership + sandboxed icon pipeline, launch
+  table, `DesktopShell` event loop / `TaskBridge`, the attested
+  tray-summary relay + `HangTracker` hang detection), plus the
+  `userland/gui/switchboard` monitor service feeding the capsule.
 - Two default apps (filesystem browser, terminal emulator) — each a
   host-tested model + renderer plus a live store bundle served over the
   window channel (`plans/APPWIN.md` AW3/AW4; the AW4 `Stream` wait source).

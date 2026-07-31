@@ -48,6 +48,16 @@
 //!   and tears down fail-loud instead of parking forever or repainting
 //!   blind.
 //!
+//! The session also binds the three seat-scoped rendezvous — the window
+//! channel, the notification channel, and the Switchboard tray-summary
+//! channel — and spawns the desktop's Switchboard monitor service as the
+//! logged-in user at bring-up. The monitor's change-driven summaries feed
+//! the taskbar capsule (each publish attested against the launch table);
+//! the session's own delivery evidence (the `HangTracker` behind the event
+//! sink) feeds the capsule's "not responding" count; and a monitor that
+//! dies or was never there simply leaves the capsule calm
+//! (`plans/NEW-TASKBAR.md` T9/T10).
+//!
 //! Loss of the seat (`SeatRevoked` / `SeatNotOwner` on any drain or
 //! present) ends the session with its reason on `stderr` and a reserved
 //! exit code; the spawning supervisor decides whether a fresh session (with
@@ -73,6 +83,9 @@ mod program {
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::switchboard_ipc::{
+        SwitchboardRequest, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
+    };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
@@ -82,10 +95,11 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
         build_pin_views, load_library, parse, reap_launched, window_control_event, CliError,
-        Command, ConcludedPick, DesktopShell, DeviceInputSource, IconCache, IconRasteriser,
-        KeyboardInputSource, LaunchTable, PickConclusion, PinBridge, PinService, ResolvedPin,
-        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
-        SessionPins, SessionWindows, ShellWindowHost, FILES_LABEL, FILES_RUN_PATH, USAGE,
+        Command, ConcludedPick, DesktopShell, DeviceInputSource, HangTracker, IconCache,
+        IconRasteriser, KeyboardInputSource, LaunchTable, PickConclusion, PinBridge, PinService,
+        ResolvedPin, SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter,
+        SessionPicker, SessionPins, SessionWindows, ShellWindowHost, FILES_LABEL, FILES_RUN_PATH,
+        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -94,7 +108,9 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
-    use tairix_window::{CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX};
+    use tairix_window::{
+        event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
+    };
     use tairix_wm::{Compositor, InputResponse, Rect};
 
     extern crate alloc;
@@ -149,11 +165,18 @@ mod program {
     const EXIT_NO_WINDOW_ENDPOINT: i32 = 98;
 
     /// Exit code when the reserved `NOTIFY_ENDPOINT` could not be bound. It
-    /// is the other seat-scoped reserved id, authorised by the same live
+    /// is another seat-scoped reserved id, authorised by the same live
     /// seat lease as the window endpoint, so a refusal here is the same
     /// lease/rendezvous anomaly — exit fail-loud rather than run a desktop
     /// whose services cannot post notifications.
     const EXIT_NO_NOTIFY_ENDPOINT: i32 = 99;
+
+    /// Exit code when the reserved `SWITCHBOARD_ENDPOINT` could not be
+    /// bound. The third seat-scoped reserved id, authorised by the same
+    /// live seat lease — the same lease/rendezvous anomaly as the other
+    /// two, so the session exits fail-loud rather than run a desktop whose
+    /// monitor cannot publish.
+    const EXIT_NO_SWITCHBOARD_ENDPOINT: i32 = 100;
 
     /// Frames in the shared region: a double buffer, so the session renders
     /// into one frame while the service scans out the other.
@@ -173,6 +196,11 @@ mod program {
     /// posting or clearing a notification wakes the loop to relay it.
     const NOTIFY_TOKEN: u64 = 4;
 
+    /// The wait-set token of the served `SWITCHBOARD_ENDPOINT` member: the
+    /// Switchboard service publishing a tray summary wakes the loop to
+    /// relay it to the capsule.
+    const SWITCHBOARD_TOKEN: u64 = 5;
+
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
     /// covers several concurrent clients.
@@ -182,6 +210,11 @@ mod program {
     /// are infrequent and synchronous, so a small queue covers several
     /// producers posting at once (a fail-closed memory bound).
     const NOTIFY_CAPACITY: usize = 8;
+
+    /// Outstanding-call capacity of the Switchboard endpoint: exactly one
+    /// attested publisher posts, change-driven and synchronous, so the
+    /// queue stays tiny (a fail-closed memory bound).
+    const SWITCHBOARD_CAPACITY: usize = 4;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -298,7 +331,46 @@ mod program {
     /// owning app's event port per event. The send never parks this
     /// session (a full mailbox or a dead port is a typed refusal), so a
     /// wedged app can never wedge the desktop.
-    struct RtEventSink;
+    ///
+    /// Every send outcome doubles as responsiveness evidence: the wrapped
+    /// [`HangTracker`] folds each mailbox-full refusal and each accepted
+    /// delivery into per-owner "not responding" verdicts (keyed by the
+    /// event-mailbox endpoint, which embeds the owning task id), and the
+    /// loop drains [`take_changed`](Self::take_changed) once per wake to
+    /// bring the taskbar capsule in step. Time is stamped only on the
+    /// delivery paths, so an idle desktop reads no clock.
+    struct RtEventSink {
+        vigil: HangTracker,
+        changed: bool,
+    }
+
+    impl RtEventSink {
+        /// A sink with no delivery evidence yet.
+        const fn new() -> Self {
+            Self {
+                vigil: HangTracker::new(),
+                changed: false,
+            }
+        }
+
+        /// Whether the unresponsive set changed since the last drain,
+        /// clearing the latch.
+        fn take_changed(&mut self) -> bool {
+            core::mem::take(&mut self.changed)
+        }
+
+        /// How many window owners are currently flagged unresponsive.
+        fn unresponsive_count(&self) -> u16 {
+            self.vigil.unresponsive_count()
+        }
+
+        /// Drop every verdict held against a reaped child's event mailbox
+        /// — a dead app is not a hung app, and a recycled task id must
+        /// start clean.
+        fn forget_owner(&mut self, pid: u64) {
+            self.changed |= self.vigil.forget(event_endpoint_for(pid));
+        }
+    }
 
     impl EventSink for RtEventSink {
         fn deliver(
@@ -308,9 +380,14 @@ mod program {
         ) -> Result<(), Errno> {
             let ret = tairix_rt::ipc_send(endpoint, event);
             if ret == 0 {
+                self.changed |= self.vigil.note_delivered(endpoint);
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                let error = errno_from(ret);
+                self.changed |= self
+                    .vigil
+                    .note_refused(endpoint, error, tairix_rt::clock_get());
+                Err(error)
             }
         }
     }
@@ -366,6 +443,39 @@ mod program {
         let origin = Origin::from_bytes(&buf[..len])?;
         let request = NotifyRequest::from_bytes(request)?;
         shell.apply_notify(compositor, origin.pid(), request);
+        Ok(())
+    }
+
+    /// Attest the publisher of a pending tray-summary call, decode the
+    /// request fail-closed, and relay the summary to the taskbar capsule,
+    /// returning the status the publisher receives.
+    ///
+    /// Only the Switchboard child this session spawned may publish: the
+    /// caller's kernel-attested `call_peer_origin` pid must match the
+    /// launch table's live entry for the service's bundle path. Anything
+    /// else — a foreign process, an orphan of an earlier session, a copy
+    /// launched by hand — is a typed refusal, stated on `stderr`, and
+    /// never mutates the model (fail closed). A malformed frame refuses
+    /// the same way.
+    fn serve_switchboard(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launched: &LaunchTable,
+        ticket: u64,
+        request: &[u8],
+    ) -> Result<(), Errno> {
+        let mut buf = [0u8; ORIGIN_WIRE_LEN];
+        let len = tairix_rt::call_peer_origin(SWITCHBOARD_ENDPOINT, ticket, &mut buf)
+            .map_err(errno_from)?;
+        let origin = Origin::from_bytes(&buf[..len])?;
+        if launched.running_from(SWITCHBOARD_RUN_PATH) != Some(origin.pid()) {
+            let _ =
+                tairix_rt::stderr(b"desktop: tray summary from an unattested publisher refused\n");
+            return Err(Errno::PermissionDenied);
+        }
+        let SwitchboardRequest::PublishSummary { summary } =
+            SwitchboardRequest::from_bytes(request)?;
+        shell.set_tray_summary(compositor, Some(summary));
         Ok(())
     }
 
@@ -509,6 +619,27 @@ mod program {
             );
         }
 
+        // Bind the Switchboard rendezvous the same way: the third
+        // seat-scoped reserved id, authorised by the same live seat lease,
+        // unrestricted-sender — the serve arm attests the one legitimate
+        // publisher (the Switchboard child this session spawns) per
+        // request and refuses everyone else, so an unentitled sender only
+        // ever reaches a typed refusal.
+        if tairix_rt::call_create(
+            SWITCHBOARD_ENDPOINT,
+            &empty,
+            &empty,
+            SWITCHBOARD_MAX_REQUEST,
+            STATUS_REPLY_LEN,
+            SWITCHBOARD_CAPACITY,
+        ) != 0
+        {
+            return fail(
+                EXIT_NO_SWITCHBOARD_ENDPOINT,
+                "switchboard endpoint bind refused",
+            );
+        }
+
         // Park on the wait-set: the seat member wakes on input delivery
         // and on lease loss, the endpoint member on a posted window
         // request, and the any-child member when a spawned app exits (so
@@ -554,6 +685,16 @@ mod program {
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            SWITCHBOARD_ENDPOINT,
+            SWITCHBOARD_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "switchboard endpoint wait refused");
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
             WaitSourceKind::Child,
             tairix_abi::WAITSET_CHILD_ANY,
             CHILD_TOKEN,
@@ -575,7 +716,7 @@ mod program {
         let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
         let mut windows = SessionWindows::new();
         let mut identity = RtWindowIdentity::new();
-        let mut sink = RtEventSink;
+        let mut sink = RtEventSink::new();
         let mut focused: Option<u64> = None;
         // Every app launched from the desktop is admitted immediately and
         // loads on its own task (asynchronous launch); a load refusal now
@@ -587,6 +728,20 @@ mod program {
         // entry is removed when its child is reaped, so it never grows
         // beyond the apps currently alive.
         let mut launched = LaunchTable::new();
+        // Start the desktop's Switchboard monitor as this logged-in user
+        // (the kernel intersects its manifest with the user's ceiling, so
+        // the view follows the seat user's authority). It is recorded in
+        // the launch table like any desktop child — the reap arm names a
+        // load refusal, and the serve arm attests its publishes against
+        // this entry. A refused spawn leaves the capsule calm: the desktop
+        // runs without its monitor rather than failing over it.
+        record_launch(
+            &mut launched,
+            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes()),
+            SWITCHBOARD_LABEL,
+            SWITCHBOARD_RUN_PATH,
+        );
+        let mut switchboard_pid = launched.running_from(SWITCHBOARD_RUN_PATH);
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -662,6 +817,28 @@ mod program {
                     let reply = encode_status_reply(result);
                     let _ = tairix_rt::call_reply(NOTIFY_ENDPOINT, ticket, &reply);
                 }
+            } else if token == SWITCHBOARD_TOKEN {
+                // Serve a pending tray-summary publish: attest that the
+                // caller is the Switchboard child this session spawned
+                // (never the wire), decode fail-closed, relay the summary
+                // to the capsule, and answer with the shared status reply.
+                // A foreign publisher or a malformed frame is a typed
+                // refusal, so no caller is left parked.
+                let mut request = [0u8; SWITCHBOARD_MAX_REQUEST];
+                let mut ticket = 0u64;
+                if let Ok(len) =
+                    tairix_rt::call_recv(SWITCHBOARD_ENDPOINT, &mut request, &mut ticket)
+                {
+                    let result = serve_switchboard(
+                        &mut shell,
+                        &mut compositor,
+                        &launched,
+                        ticket,
+                        &request[..len],
+                    );
+                    let reply = encode_status_reply(result);
+                    let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply);
+                }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
                 // whose asynchronous load was refused exits with a reserved
@@ -711,6 +888,16 @@ mod program {
                         // notification counterpart of the window teardown
                         // above, run for every reaped child, windowed or not.
                         shell.clear_producer_notifications(&mut compositor, pid);
+                        // A reaped child is gone, not hung: drop its delivery
+                        // evidence so a recycled task id starts clean. And a
+                        // reaped Switchboard can publish nothing more — clear
+                        // the tray feed so the capsule falls back to calm
+                        // rather than freezing a dead service's last summary.
+                        sink.forget_owner(pid);
+                        if switchboard_pid == Some(pid) {
+                            switchboard_pid = None;
+                            shell.set_tray_summary(&mut compositor, None);
+                        }
                     },
                 );
             } else if token == SEAT_TOKEN {
@@ -763,6 +950,12 @@ mod program {
                         Err(err) => return drain_fault(err),
                     }
                 }
+            }
+            // Fold this wake's delivery evidence into the capsule exactly
+            // once: the sink latched whether any window owner crossed into
+            // or out of the unresponsive set while events were delivered.
+            if sink.take_changed() {
+                shell.set_tray_unresponsive(&mut compositor, sink.unresponsive_count());
             }
             // Bring the pin strip up to date before presenting: an edit
             // (pin, unpin, an accepted drop or app request) re-resolves the

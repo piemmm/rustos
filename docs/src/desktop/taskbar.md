@@ -5,7 +5,8 @@ GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 `PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). This page describes the **layout,
 model, and rendering**: the geometry of every region, pointer hit-testing for
 input routing, the program-library popup / pin-strip / task-list /
-notification-area state machines, the bar's right-click **context menu**,
+notification-area / Switchboard-tray state machines, the bar's right-click
+**context menu**,
 and painting those regions — including the clock label and task-title
 **text** — into a themed pixel surface, plus **routing** pointer, scroll,
 and key events into taskbar actions and drawing **notification-icon
@@ -61,10 +62,22 @@ From the leading end to the trailing end:
   and the notification area, holding one fixed-width slot per running task.
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
-- **Clock** — anchored to the trailing end. Its display text is held by a
-  `Clock` model whose label the caller sets (formatting a `Time64` value into
-  a string is an upstream concern, `AGENTS.md` §21); the bar stores only the
-  text to draw.
+- **Clock** — immediately before the Switchboard capsule. Its display text is
+  held by a `Clock` model whose label the caller sets (formatting a `Time64`
+  value into a string is an upstream concern, `AGENTS.md` §21); the bar stores
+  only the text to draw.
+- **Switchboard capsule** — anchored to the very trailing end, immovable
+  (`plans/NEW-TASKBAR.md` T9). The `SwitchboardTray` model derives the shared
+  `tairix-controls` `TraySignal` capsule from the Switchboard service's
+  tray-signal summary plus the session's unresponsive count — one pure
+  derive, dominant state hung > pressure > jobs > recovery > calm, with the
+  working seam / pressure rail / recovery posture composed orthogonally, and
+  an absent service deriving the calm capsule (fail closed). Its slot is
+  computed **first** among the trailing regions, so the clock, icons, pins,
+  and tasks can never displace it — only the permanent leading launchers
+  outrank it on a degenerate screen. Hover (or a pinning primary press)
+  expands the capsule's instrument readout, presented like the other
+  popovers (`Taskbar::tray_readout_layout`).
 
 `BarLayout::compute` turns the config plus the current pin, task, and icon
 counts into the screen `Rect` of every region. All arithmetic saturates, so a
@@ -72,10 +85,12 @@ pathological screen size or extent fails closed *inside* the bar rather than
 wrapping (`AGENTS.md` §2.9); a launcher, pin, task, or icon slot that does
 not fit its region is `Rect::EMPTY` and therefore never hit, and the trailing
 regions clip against the permanent leading launchers (never the reverse), so
-a degenerate screen shrinks the clock and icons to nothing rather than
-overlaying them on a launcher. `BarLayout::hit_test`
+a degenerate screen shrinks the clock and icons to nothing — and, last of
+all, the Switchboard capsule — rather than overlaying them on a launcher.
+`BarLayout::hit_test`
 maps a pointer to the `Hit` element under it (the Library button, the Files
-button, a pin index, a task index, a notification index, or the clock), which
+button, a pin index, a task index, a notification index, the clock, or the
+Switchboard capsule), which
 is what input routing dispatches (see *Input routing*).
 
 ## Rounded edges
@@ -124,7 +139,12 @@ colour role from the `Palette`:
   built-in glyph, and a running task whose window matches a pin **borrows**
   that same artwork, so one application shows one icon everywhere;
 - each notification icon slot draws a **scalable vector glyph** (see
-  *Notification icons* below), tinted in the **muted** foreground colour.
+  *Notification icons* below), tinted in the **muted** foreground colour;
+- the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
+  drawn in its slot — the mixer-glyph plate with its live badge, seam, rail,
+  and beads — and `TaskbarRenderer::render_tray_readout` paints the expanded
+  instrument readout as its own popover surface, rounded by the window
+  manager with `TrayReadoutLayout::corner_radius`.
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
@@ -317,7 +337,16 @@ secondary press, hit-tested against the current
   (`TaskActivated { id, outcome }`);
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
-- a primary press on the **clock** reports `ClockPressed`.
+- a primary press on the **clock** reports `ClockPressed`;
+- a primary press on the **Switchboard capsule** pins its readout open (a
+  second press — or one anywhere else — releases the pin; the press that
+  opens the overview window lands with that window,
+  `plans/NEW-TASKBAR.md` T11), a press inside the open readout is claimed
+  inert like the notification popover's chrome, **scrolling** over the
+  capsule or its readout cycles the running tasks (wrapping both ways), and
+  a **middle** press over the capsule switches to the previous task (the
+  task list's MRU-of-two) — each failing closed when there is nothing to
+  cycle or return to.
 
 Any other button, a release, a key, or a press that misses every region
 changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
@@ -389,3 +418,10 @@ regions, the accent Library plate and quiet Files glyph, focused / unfocused
 fallback and cache retint on theme switch), clock and truncated task-title
 text, and the popup's panel, rows, hover/selection states, placeholder ink,
 scrollbar, and dark / light / high-contrast rendering.
+The Switchboard tray tests cover the slot's trailing-most placement on every
+edge (and its survival order on degenerate screens), the summary→state derive
+matrix (absent service, calm top-task preview, jobs, every pressure kind,
+recovery, hung, and compositions), repaint latching, hover/pin readout
+geometry on every edge, the readout's inert press claim, scroll cycling and
+the middle-click previous-task switch with their fail-closed cases, and
+pixel probes of the capsule, rail, seam, and badge tones across themes.

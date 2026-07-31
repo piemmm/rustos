@@ -22,7 +22,7 @@ use tairix_theme::{Contrast, Rgba, Theme};
 use crate::button::{Button, ButtonContent};
 use crate::shell::{
     Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
-    TaskbarPresentation, TraySignal, TraySignalAction,
+    TaskbarPresentation, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, PressureKind,
@@ -529,6 +529,137 @@ fn tray_signal_stacks_severity_ordered_beads() {
     let s = tray_surface(&sig, &theme);
     assert!(has_pixel(&s, premul(theme.palette().denied)));
     assert!(has_pixel(&s, premul(theme.palette().warning)));
+}
+
+#[test]
+fn tray_signal_badge_paints_each_tone() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let tones = [
+        (TrayBadgeTone::Accent, palette.accent),
+        (TrayBadgeTone::Warning, palette.warning),
+        (TrayBadgeTone::Danger, palette.danger),
+        (TrayBadgeTone::Recovery, palette.recovery),
+    ];
+    for (tone, fill) in tones {
+        let sig = TraySignal::new(IconKind::Network, "Network")
+            .with_badge(TrayBadge::new(TrayBadgeContent::Count(2), tone));
+        let s = tray_surface(&sig, &theme);
+        // The badge sits on the capsule's top-trailing corner and its fill
+        // differs from the plain plate/rim colours.
+        assert!(region_has(&s, (SS / 2, SS), (0, SS / 2), premul(fill)));
+        assert_ne!(fill, palette.surface_raised);
+        assert_ne!(fill, palette.rim);
+    }
+}
+
+#[test]
+fn tray_signal_badge_content_count_differs_from_alert() {
+    let theme = Theme::dark();
+    // The host glyph transport paints every non-space scalar as one solid
+    // block (glyph fidelity is fontd's own tested contract), so a digit and
+    // an exclamation mark are pixel-identical here. Distinguishability is
+    // proven at the seam this crate owns — each content commissions a
+    // distinct scalar — plus the on-accent ink showing the commissioned text
+    // reaches the badge.
+    assert_eq!(TrayBadgeContent::Count(3).text(), "3");
+    assert_eq!(TrayBadgeContent::Alert.text(), "!");
+    for content in [TrayBadgeContent::Count(3), TrayBadgeContent::Alert] {
+        let sig = TraySignal::new(IconKind::Network, "Network")
+            .with_badge(TrayBadge::new(content, TrayBadgeTone::Accent));
+        let s = tray_surface(&sig, &theme);
+        assert!(region_has(
+            &s,
+            (SS / 2, SS),
+            (0, SS / 2),
+            premul(theme.palette().on_accent)
+        ));
+    }
+}
+
+#[test]
+fn tray_signal_badge_count_caps_at_nine_plus() {
+    let theme = Theme::dark();
+    let nine = tray_surface(
+        &TraySignal::new(IconKind::Network, "Network").with_badge(TrayBadge::new(
+            TrayBadgeContent::Count(9),
+            TrayBadgeTone::Accent,
+        )),
+        &theme,
+    );
+    let ten = tray_surface(
+        &TraySignal::new(IconKind::Network, "Network").with_badge(TrayBadge::new(
+            TrayBadgeContent::Count(10),
+            TrayBadgeTone::Accent,
+        )),
+        &theme,
+    );
+    let large = tray_surface(
+        &TraySignal::new(IconKind::Network, "Network").with_badge(TrayBadge::new(
+            TrayBadgeContent::Count(999),
+            TrayBadgeTone::Accent,
+        )),
+        &theme,
+    );
+    // A single digit and the wider "9+" overflow badge differ...
+    assert_ne!(nine.pixels(), ten.pixels());
+    // ...but every count once it overflows renders the same capped "9+".
+    assert_eq!(ten.pixels(), large.pixels());
+    assert_eq!(TrayBadgeContent::Count(9).text(), "9");
+    assert_eq!(TrayBadgeContent::Count(10).text(), "9+");
+    assert_eq!(TrayBadgeContent::Count(999).text(), "9+");
+}
+
+#[test]
+fn tray_signal_badge_coexists_with_bead_stack() {
+    // A capsule wide enough for the badge and the mini beads to both fit.
+    const W: u32 = 96;
+    let theme = Theme::dark();
+    let sig = TraySignal::new(IconKind::Generic, "Multi")
+        .with_badge(TrayBadge::new(
+            TrayBadgeContent::Count(4),
+            TrayBadgeTone::Accent,
+        ))
+        .with_state(
+            ControlState::idle()
+                .with_authority(AuthorityState::Denied)
+                .with_validation(ValidationState::Warning),
+        );
+    let mut s = Surface::new(W, SS).expect("surface");
+    sig.render(&mut s, Rect::new(0, 0, W, SS), Scale::ONE, &theme, font());
+    // The badge and both severity beads are all visible; none hides another.
+    assert!(has_pixel(&s, premul(theme.palette().accent)));
+    assert!(has_pixel(&s, premul(theme.palette().denied)));
+    assert!(has_pixel(&s, premul(theme.palette().warning)));
+}
+
+#[test]
+fn tray_signal_without_badge_keeps_prior_rendering() {
+    let theme = Theme::dark();
+    let base = TraySignal::new(IconKind::Network, "Network");
+    assert_eq!(base.badge(), None);
+    let baseline = tray_surface(&base, &theme);
+    // Setting then clearing a badge must leave rendering unchanged.
+    let mut cleared = base.with_badge(TrayBadge::new(
+        TrayBadgeContent::Alert,
+        TrayBadgeTone::Danger,
+    ));
+    cleared.set_badge(None);
+    assert_eq!(cleared.badge(), None);
+    let after_clear = tray_surface(&cleared, &theme);
+    assert_eq!(baseline.pixels(), after_clear.pixels());
+}
+
+#[test]
+fn tray_signal_badge_on_degenerate_bounds_does_not_panic() {
+    let theme = Theme::dark();
+    let sig = TraySignal::new(IconKind::Network, "Network").with_badge(TrayBadge::new(
+        TrayBadgeContent::Count(9),
+        TrayBadgeTone::Accent,
+    ));
+    let mut s = Surface::new(1, 1).expect("surface");
+    // A capsule too small to hold anything simply draws nothing, never panics.
+    sig.render(&mut s, Rect::new(0, 0, 1, 1), Scale::ONE, &theme, font());
 }
 
 #[test]

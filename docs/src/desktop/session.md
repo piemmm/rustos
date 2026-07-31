@@ -160,6 +160,39 @@ reports each refusal on `stderr` named by its label (`launch_failure_report`
 — fail loud, never fatal, `AGENTS.md` §2.24), tears down the child's
 windows, and forgets the table entry.
 
+## The Switchboard tray feed and hang detection
+
+The taskbar's right-most Switchboard capsule renders live state from two
+independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
+
+- **The published summary.** The `Run` binary spawns the Switchboard monitor
+  service (`/System/Services/switchboard.app`, `SWITCHBOARD_RUN_PATH`) at
+  bring-up as the logged-in user and binds the seat-scoped
+  `SWITCHBOARD_ENDPOINT` beside the window and notification rendezvous. Each
+  publish is attested: the caller's kernel-provided `call_peer_origin` pid
+  must match the launch table's live entry for the service's bundle path — a
+  foreign process, an orphan of an earlier session, or a hand-launched copy
+  is a typed refusal stated on `stderr`, never rendered (`AGENTS.md` §5.4).
+  The decoded `TraySummary` reaches the capsule through
+  `DesktopShell::set_tray_summary`; when the service exits, the reap path
+  clears the feed (`set_tray_summary(None)`) so the capsule falls back to
+  calm rather than freezing a dead service's last summary.
+- **The session's own delivery evidence.** The desktop is the one component
+  that observes whether an app drains its window events: every app-ward
+  event is a non-blocking mailbox send, so the production event sink folds
+  each outcome into the `vigil::HangTracker` — an owner whose sends come
+  back refused as mailbox-full backpressure continuously for
+  `UNRESPONSIVE_AFTER_NS` (4 s) is flagged *not responding*, one accepted
+  delivery clears it, and a reap forgets it (a dead app is not a hung app,
+  and a recycled task id starts clean). No heartbeat is fabricated and no
+  kernel query pretends to know. The loop drains the sink's change latch
+  once per wake into `DesktopShell::set_tray_unresponsive`, which drives the
+  capsule's danger state.
+
+Both shell feeds re-present only when the capsule actually changed (the
+bar's drained repaint latch), so an unchanged keepalive republish costs no
+frame.
+
 ## Presenting the taskbar through the window manager
 
 The taskbar paints a *rectangular* `tairix_raster::Surface` and the window
@@ -176,15 +209,19 @@ panel, and presents each as a compositor window:
   windows, never a second one (`AGENTS.md` §2.2);
 - while the popup is open its panel is placed above the bar at
   `LibraryLayout::panel`'s origin and rounded with its `corner_radius`;
-  closing the popup removes the popup window.
+  closing the popup removes the popup window;
+- the bar's context menu, the notification popover, and the Switchboard
+  capsule's instrument readout are presented the same way while each is
+  open (`MenuLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and
+  each window is removed the moment its surface closes.
 
-The presenter owns only the two compositor `WindowId` tokens it minted — the
+The presenter owns only the compositor `WindowId` tokens it minted — the
 taskbar model, the renderer, and the compositor are the embedder's, so the
 session composes the GUI crates without owning the window-manager handle. It is
 total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate its
 surface leaves the on-screen window untouched rather than blanking the bar, a
 window the compositor no longer knows is re-created on the next present, and
-`teardown` removes both windows so a session shutdown leaves nothing orphaned.
+`teardown` removes every window so a session shutdown leaves nothing orphaned.
 
 ## Routing one input stream to both routers
 
@@ -202,10 +239,17 @@ glue that fans it to the right router, driven through
   to the taskbar. Motion is still *tracked* by the window manager so its
   pointer stays in step for the moment the surface closes, but its outcome is
   discarded — nothing is delivered to the windows beneath a modal surface;
-- otherwise a **primary OR secondary press** goes to the taskbar iff the
-  pointer is over the bar (a secondary press there opens a pin's context
-  menu), and to the window manager elsewhere — the two never both act on
-  one press;
+- otherwise a **press** goes to the taskbar iff the pointer is over the bar
+  (a secondary press there opens a pin's context menu; a middle press over
+  the Switchboard capsule switches to the previous task) or over one of its
+  open non-modal popovers — the notification popover and the capsule's
+  instrument readout — and a remaining primary or secondary press goes to
+  the window manager: the two never both act on one press. A press away
+  from the bar additionally *releases* a pinned readout (presentation
+  state, like hover, never the press's one action);
+- a **scroll** over the Switchboard capsule or its open readout routes to
+  the taskbar (it cycles the running tasks); every other scroll goes to the
+  window manager's viewport under the pointer;
 - **pointer motion** is fanned to both so their tracked pointer positions stay
   in step; the window manager acts on it (dragging a grabbed window) and the
   taskbar refreshes its hover feedback;
@@ -213,8 +257,8 @@ glue that fans it to the right router, driven through
   move-grab (the taskbar ignores releases while the popup is closed);
 - **key events** go to the window manager — which delivers them to the
   focused window — except while a modal surface is open (above);
-- a non-primary button, or a press/motion neither router acted on, is
-  `SessionInputResponse::Ignored`.
+- a middle press away from the bar, or a press/motion neither router acted
+  on, is `SessionInputResponse::Ignored`.
 
 Decorations start a title-bar drag through `begin_move`, and the embedder reads
 the keyboard owner through `focused`. The router holds no pixels and grants

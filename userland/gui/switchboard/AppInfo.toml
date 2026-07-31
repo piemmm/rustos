@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the Switchboard monitor service
+# (plans/NEW-TASKBAR.md T10). Discovered by the build's app-bundle composer
+# and planted under /System/Services/. The capability list is the bundle's
+# request, intersected with the launching user's ceiling at spawn:
+# CAP_CONSOLE_WRITE (the fail-loud stderr reason on every abnormal exit),
+# CAP_SYSINFO_GLOBAL (the system-wide process list — an ordinary user's
+# ceiling yields none of it, so the sampler degrades to self-scope), and
+# CAP_SYSINFO_KERNEL (the audited memory-pressure query — degrades to no
+# memory-pressure signal without it). The service requests no filesystem,
+# spawn, or network authority: it only samples through the ungated/gated
+# sysinfo queries and posts to the seat-scoped SWITCHBOARD_ENDPOINT the
+# desktop session itself binds.
+id = "os.tairix.switchboard"
+name = "switchboard"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL"]

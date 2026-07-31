@@ -17,11 +17,14 @@
 //!   right-click [`BarMenu`] offering *Open* and *Unpin*.
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
-//! - **Trailing end** — a clock anchored to the very end, with a
-//!   [`NotificationArea`] immediately before it: the persistent status
+//! - **Trailing end** — the [`NotificationArea`]: the persistent status
 //!   signals (network, volume, battery) drawn as calm glyphs, plus a card
 //!   popover for the transient notifications a producer service raises over
-//!   the notification IPC.
+//!   the notification IPC; then the clock; and anchored at the very end —
+//!   immovable, outranked only by the leading launchers — the Switchboard
+//!   tray capsule ([`SwitchboardTray`]): the desktop's live system readout,
+//!   with a hover/pinned instrument readout, scroll-to-cycle-tasks, and a
+//!   middle-click switch to the previous task.
 //!
 //! The taskbar holds no authority and performs no I/O: pressing Files or
 //! choosing a library entry only *reports* a typed [`TaskbarResponse`]
@@ -72,6 +75,7 @@ pub mod pins;
 pub mod render;
 pub mod taskbar;
 pub mod tasks;
+pub mod tray;
 
 #[cfg(test)]
 mod tests;
@@ -79,7 +83,7 @@ mod tests;
 pub use clock::Clock;
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
-pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout};
+pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayReadoutLayout};
 pub use library::{folder_label, LibraryFocus, LibraryLayout, LibraryPopup, LibraryRow};
 pub use menu::{BarMenu, MenuLayout, MenuSubject};
 pub use notifications::{
@@ -89,3 +93,4 @@ pub use pins::{PinStrip, PinView};
 pub use render::TaskbarRenderer;
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};
+pub use tray::SwitchboardTray;

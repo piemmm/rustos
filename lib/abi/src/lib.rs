@@ -19,6 +19,7 @@
 pub mod appinfo;
 pub mod blkio;
 pub mod boot;
+pub mod bounded_text;
 pub mod capability;
 pub mod cpufeatures;
 pub mod display_ipc;
@@ -51,6 +52,7 @@ pub mod seat;
 pub mod service;
 pub mod service_control;
 pub mod stdinfo;
+pub mod switchboard_ipc;
 pub mod syscall;
 pub mod syscalls;
 pub mod sysinfo;

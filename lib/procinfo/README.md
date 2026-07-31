@@ -22,6 +22,8 @@ The crate provides:
 - `ListError` — the shared error type for the paged-list walks, returned by
   both `for_each_process` and `for_each_mount` (the generic paging loop they
   share is crate-internal).
+- `for_each_cpu_time` / `CpuTotals` — the paged CPU-time walk and its busy/idle
+  delta arithmetic.
 - `for_each_process` / `PROCESS_HEADER` / `render_process` / `state_char` —
   the paged process-list walk and its fixed-column rendering.
 - `for_each_mount` / `render_mount` / `render_options` — the paged

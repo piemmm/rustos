@@ -119,6 +119,17 @@
 //! other than exactly one whole record surfaces an error, so a truncated
 //! read can never be decoded as a spurious event.
 //!
+//! # Window-owner responsiveness ("not responding")
+//!
+//! The session's app-ward window events go out as non-blocking mailbox
+//! sends, so an app that stops draining its mailbox surfaces as refused
+//! deliveries. [`HangTracker`] (the [`vigil`] module) folds those
+//! per-delivery outcomes into per-owner verdicts — backpressure refusals
+//! spanning [`UNRESPONSIVE_AFTER_NS`] flag the owner unresponsive, one
+//! accepted delivery clears it — and the count feeds the taskbar's
+//! Switchboard tray capsule (`plans/NEW-TASKBAR.md` T9/T10) so a wedged
+//! app is visible without any fabricated heartbeat.
+//!
 //! # Running-task list ↔ window stack
 //!
 //! The taskbar models a running-task list but owns no window manager, and the
@@ -158,6 +169,7 @@ pub mod seat;
 pub mod session;
 pub mod shell;
 pub mod tasks;
+pub mod vigil;
 pub mod windows;
 
 #[cfg(test)]
@@ -167,7 +179,7 @@ pub use assets::{
     load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter, GRAPHICS_DIR,
 };
 pub use cli::{parse, CliError, Command, USAGE};
-pub use config::{FILES_LABEL, FILES_RUN_PATH};
+pub use config::{FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
@@ -185,4 +197,5 @@ pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use tasks::TaskBridge;
+pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use windows::{window_control_event, SessionWindows, ShellWindowHost};

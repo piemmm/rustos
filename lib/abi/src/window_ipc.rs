@@ -40,9 +40,11 @@ use crate::{Errno, ProcId};
 
 /// Reserved well-known call-endpoint id of the desktop session's window
 /// service (`"WI"` ASCII hex-spelled prefix, mirroring
-/// [`crate::seat::SEATMGR_ENDPOINT`]'s convention). It is the one
-/// **seat-scoped** reserved id ([`crate::ipc::is_reserved_endpoint`]):
-/// the kernel authorises its bind either by `CAP_IPC_BIND_PRIVILEGED`
+/// [`crate::seat::SEATMGR_ENDPOINT`]'s convention). Like the
+/// notification and Switchboard tray-summary rendezvous it is
+/// **seat-scoped** ([`crate::ipc::is_reserved_endpoint`],
+/// [`crate::ipc::is_seat_scoped_endpoint`]): the kernel authorises its
+/// bind either by `CAP_IPC_BIND_PRIVILEGED`
 /// or by the caller's kernel-attested **live seat lease** — the desktop
 /// session that owns the seat serves the windows shown on it, and
 /// nothing else may. A squatter claiming the rendezvous first would

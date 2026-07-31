@@ -77,6 +77,9 @@ pub enum IconKind {
     /// A three-by-three grid of application tiles, for the taskbar's
     /// program-library launcher.
     Library,
+    /// Three horizontal fader tracks with a knob offset differently on each,
+    /// for the taskbar's always-trailing Switchboard tray capsule.
+    Switchboard,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -110,6 +113,7 @@ impl IconKind {
             "trash" => Self::Trash,
             "empty-trash" => Self::EmptyTrash,
             "library" => Self::Library,
+            "switchboard" => Self::Switchboard,
             _ => Self::Generic,
         }
     }
@@ -147,6 +151,7 @@ impl IconKind {
             Self::Trash => 20,
             Self::EmptyTrash => 21,
             Self::Library => 22,
+            Self::Switchboard => 23,
         }
     }
 
@@ -183,6 +188,7 @@ impl IconKind {
             Self::Trash => "trash",
             Self::EmptyTrash => "empty-trash",
             Self::Library => "library",
+            Self::Switchboard => "switchboard",
         }
     }
 }
@@ -216,6 +222,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Trash => trash(color),
         IconKind::EmptyTrash => empty_trash(color),
         IconKind::Library => library(color),
+        IconKind::Switchboard => switchboard(color),
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -500,6 +507,26 @@ fn library(color: Color) -> alloc::vec::Vec<IconLayer> {
         }
     }
     layers
+}
+
+/// Three horizontal fader tracks, each with a small knob offset to a
+/// different position along it — the mixer/fader motif for the desktop's
+/// Switchboard tray capsule.
+fn switchboard(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LINE1: &[(i32, i32)] = &[(3, 6), (21, 6), (21, 8), (3, 8)];
+    const KNOB1: &[(i32, i32)] = &[(5, 5), (9, 5), (9, 9), (5, 9)];
+    const LINE2: &[(i32, i32)] = &[(3, 11), (21, 11), (21, 13), (3, 13)];
+    const KNOB2: &[(i32, i32)] = &[(15, 10), (19, 10), (19, 14), (15, 14)];
+    const LINE3: &[(i32, i32)] = &[(3, 16), (21, 16), (21, 18), (3, 18)];
+    const KNOB3: &[(i32, i32)] = &[(10, 15), (14, 15), (14, 19), (10, 19)];
+    vec![
+        IconLayer::from_points(color, LINE1),
+        IconLayer::from_points(color, KNOB1),
+        IconLayer::from_points(color, LINE2),
+        IconLayer::from_points(color, KNOB2),
+        IconLayer::from_points(color, LINE3),
+        IconLayer::from_points(color, KNOB3),
+    ]
 }
 
 /// The fallback placeholder: a filled diamond.

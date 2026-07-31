@@ -726,9 +726,9 @@ impl SeatRegistry {
     /// Whether `owner` holds the live lease of **any** registered seat —
     /// the kernel-attested fact behind the seat-scoped reserved-endpoint
     /// bind (`plans/APPWIN.md` AW3): the desktop session that owns a seat
-    /// may bind the window rendezvous without `CAP_IPC_BIND_PRIVILEGED`,
-    /// and nothing else may. A revoked or released lease answers `false`
-    /// (fail closed).
+    /// may bind the window, notification, and Switchboard tray-summary
+    /// rendezvous without `CAP_IPC_BIND_PRIVILEGED`, and nothing else may.
+    /// A revoked or released lease answers `false` (fail closed).
     #[must_use]
     pub fn holds_live_lease(&self, owner: SeatOwner) -> bool {
         if self.primary.state.lock().access(owner).is_ok() {

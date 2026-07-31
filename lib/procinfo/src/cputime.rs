@@ -19,6 +19,59 @@ use crate::transport::Transport;
 /// the list.
 pub const CPU_TIME_PAGE: u16 = 64;
 
+/// Cumulative busy and idle nanoseconds across one or more CPUs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuTotals {
+    /// Cumulative busy nanoseconds across the sampled set.
+    pub busy_ns: u64,
+    /// Cumulative idle nanoseconds across the sampled set.
+    pub idle_ns: u64,
+}
+
+impl CpuTotals {
+    /// Sum every CPU's cumulative busy and idle nanoseconds (via
+    /// [`for_each_cpu_time`]) into one aggregate sample.
+    ///
+    /// The walk **fails closed**: any transport or service failure returns
+    /// [`ListError`], and an empty CPU list yields `Ok(None)` — an absent
+    /// sample, never a fabricated all-zero total.
+    pub fn fetch_all(transport: &dyn Transport) -> Result<Option<Self>, ListError> {
+        let mut totals = Self::default();
+        let mut count = 0u32;
+        for_each_cpu_time(transport, |record| {
+            count = count.saturating_add(1);
+            totals.busy_ns = totals.busy_ns.saturating_add(record.busy_ns);
+            totals.idle_ns = totals.idle_ns.saturating_add(record.idle_ns);
+            Ok(())
+        })?;
+        if count > 0 {
+            Ok(Some(totals))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// The busy share of the interval between the `prev` and `now` samples,
+    /// in **tenths of a percent** (permille, clamped to `0..=1000`).
+    ///
+    /// The counters are differenced with saturating arithmetic, so a
+    /// counter regression reads as an empty interval, never a wild figure.
+    /// `None` means the interval is empty (zero total delta) and the caller
+    /// decides its own truthful fallback; an all-zero `prev` yields the
+    /// honest cumulative since-boot ratio a first sample wants.
+    #[must_use]
+    pub fn busy_permille(prev: Self, now: Self) -> Option<u16> {
+        let busy = u128::from(now.busy_ns.saturating_sub(prev.busy_ns));
+        let idle = u128::from(now.idle_ns.saturating_sub(prev.idle_ns));
+        let total = busy + idle;
+        if total == 0 {
+            return None;
+        }
+        let permille = (busy * 1000 / total).min(1000);
+        Some(u16::try_from(permille).unwrap_or(1000))
+    }
+}
+
 /// Page through the per-CPU execution-time accounting and hand each decoded
 /// [`CpuTimeRecord`] to `sink`.
 ///
@@ -65,7 +118,7 @@ pub fn for_each_cpu_time(
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_cpu_time, CPU_TIME_PAGE};
+    use super::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -133,6 +186,71 @@ mod tests {
             Ok(())
         })?;
         Ok(seen.into_inner())
+    }
+
+    #[test]
+    fn totals_accumulation_sums_every_cpu() {
+        let fixture = Fixture::new(alloc::vec![record(0, 750, 250), record(1, 250, 750)]);
+        let totals = CpuTotals::fetch_all(&fixture).expect("ok").expect("some");
+        assert_eq!(totals.busy_ns, 1000);
+        assert_eq!(totals.idle_ns, 1000);
+    }
+
+    #[test]
+    fn empty_totals_returns_none() {
+        let fixture = Fixture::new(Vec::new());
+        assert_eq!(CpuTotals::fetch_all(&fixture).expect("ok"), None);
+    }
+
+    #[test]
+    fn busy_permille_calculates_the_split() {
+        let prev = CpuTotals {
+            busy_ns: 1000,
+            idle_ns: 1000,
+        };
+        let now = CpuTotals {
+            busy_ns: 1750,
+            idle_ns: 1250,
+        };
+        // delta: busy=750, idle=250, total=1000 -> 75%
+        assert_eq!(CpuTotals::busy_permille(prev, now), Some(750));
+    }
+
+    #[test]
+    fn busy_permille_clamps_at_full() {
+        let prev = CpuTotals {
+            busy_ns: 1000,
+            idle_ns: 1000,
+        };
+        let now = CpuTotals {
+            busy_ns: 2500,
+            idle_ns: 500, // saturating_sub(1000) will be 0
+        };
+        // delta: busy=1500, idle=0, total=1500 -> 100%
+        assert_eq!(CpuTotals::busy_permille(prev, now), Some(1000));
+    }
+
+    #[test]
+    fn busy_permille_none_on_empty_interval() {
+        let totals = CpuTotals {
+            busy_ns: 1000,
+            idle_ns: 1000,
+        };
+        assert_eq!(CpuTotals::busy_permille(totals, totals), None);
+    }
+
+    #[test]
+    fn busy_permille_handles_counter_regression_gracefully() {
+        let prev = CpuTotals {
+            busy_ns: 2000,
+            idle_ns: 2000,
+        };
+        let now = CpuTotals {
+            busy_ns: 1000,
+            idle_ns: 1000,
+        };
+        // delta: busy=0, idle=0, total=0 (due to saturating_sub)
+        assert_eq!(CpuTotals::busy_permille(prev, now), None);
     }
 
     #[test]

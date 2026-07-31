@@ -45,6 +45,7 @@ fn for_asset_maps_known_ids() {
     assert_eq!(IconKind::for_asset("trash"), IconKind::Trash);
     assert_eq!(IconKind::for_asset("empty-trash"), IconKind::EmptyTrash);
     assert_eq!(IconKind::for_asset("library"), IconKind::Library);
+    assert_eq!(IconKind::for_asset("switchboard"), IconKind::Switchboard);
 }
 
 #[test]

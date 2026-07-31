@@ -56,6 +56,6 @@ mod tests;
 pub use app::{list_capacity, render, run};
 pub use command::{parse, Command, DEFAULT_DELAY_TENTHS, MIN_DELAY_TENTHS, USAGE};
 pub use error::TopError;
-pub use model::{Action, CpuSplit, CpuTimes, Model, Scope, ALL_DENIED_NOTICE};
+pub use model::{Action, CpuSplit, Model, Scope, ALL_DENIED_NOTICE};
 pub use tairix_curses::{Screen, Tty};
 pub use tairix_procinfo::Transport;

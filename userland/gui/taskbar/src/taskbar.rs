@@ -1,11 +1,11 @@
 //! The taskbar itself: its placement configuration and live state.
 //!
 //! [`Taskbar`] ties the two permanent leading launcher buttons (Library and
-//! Files), the [`LibraryPopup`], the [`TaskList`], and the
-//! [`NotificationArea`] to a [`TaskbarConfig`] (which screen edge, how thick,
-//! and the per-region extents) and the active [`Theme`]. It produces a
-//! [`BarLayout`] on demand from the current state and answers pointer hits
-//! for input routing.
+//! Files), the [`LibraryPopup`], the [`TaskList`], the [`NotificationArea`],
+//! and the [`SwitchboardTray`] capsule to a [`TaskbarConfig`] (which screen
+//! edge, how thick, and the per-region extents) and the active [`Theme`]. It
+//! produces a [`BarLayout`] on demand from the current state and answers
+//! pointer hits for input routing.
 //!
 //! The bar owns a copy of the active theme so its layout, hit-testing, and
 //! painting all read one definition — the radius a hit-test assumes and the
@@ -16,6 +16,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_controls::{ControlRole, IconButton, PointerState, TaskbarItem, TaskbarPresentation};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -25,12 +26,13 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::clock::Clock;
 use crate::edge::Edge;
-use crate::layout::{BarLayout, Hit, NotificationsLayout};
+use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
 use crate::library::{LibraryLayout, LibraryPopup};
 use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::pins::{PinStrip, PinView};
 use crate::tasks::TaskList;
+use crate::tray::SwitchboardTray;
 
 /// Where the taskbar sits and how big each region is.
 ///
@@ -62,6 +64,8 @@ pub struct TaskbarConfig {
     pub icon_extent: u32,
     /// Main-axis length of the clock.
     pub clock_extent: u32,
+    /// Main-axis length of the Switchboard tray capsule.
+    pub switch_extent: u32,
 }
 
 impl TaskbarConfig {
@@ -84,6 +88,7 @@ impl TaskbarConfig {
             task_extent: scale.scale_length(self.task_extent),
             icon_extent: scale.scale_length(self.icon_extent),
             clock_extent: scale.scale_length(self.clock_extent),
+            switch_extent: scale.scale_length(self.switch_extent),
         }
     }
 
@@ -101,13 +106,14 @@ impl TaskbarConfig {
             task_extent: 160,
             icon_extent: 24,
             clock_extent: 80,
+            switch_extent: 44,
         }
     }
 }
 
 /// The taskbar: placement configuration plus the leading launcher buttons,
-/// the program-library popup, the task list, and the notification area,
-/// themed by the active [`Theme`].
+/// the program-library popup, the task list, the notification area, and the
+/// Switchboard tray capsule, themed by the active [`Theme`].
 ///
 /// The bar does **not** own a UI scale: the desktop density belongs to the
 /// output, so the scale is supplied by the compositor at layout, hit-test,
@@ -127,6 +133,7 @@ pub struct Taskbar {
     task_hover: Option<usize>,
     notifications: NotificationArea,
     clock: Clock,
+    tray: SwitchboardTray,
     repaint: bool,
 }
 
@@ -150,6 +157,7 @@ impl Taskbar {
             task_hover: None,
             notifications: NotificationArea::new(),
             clock: Clock::new(),
+            tray: SwitchboardTray::new(),
             repaint: false,
         }
     }
@@ -291,6 +299,41 @@ impl Taskbar {
         &mut self.clock
     }
 
+    /// The Switchboard tray capsule.
+    #[must_use]
+    pub const fn tray(&self) -> &SwitchboardTray {
+        &self.tray
+    }
+
+    /// The Switchboard tray capsule, mutably.
+    pub fn tray_mut(&mut self) -> &mut SwitchboardTray {
+        &mut self.tray
+    }
+
+    /// Adopt the latest Switchboard tray summary — or its absence, when the
+    /// service is gone — latching a repaint when the capsule changed. This is
+    /// how the session relays the summary the Switchboard service publishes.
+    pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) {
+        self.repaint |= self.tray.set_summary(summary);
+    }
+
+    /// Adopt the session's count of unresponsive applications, latching a
+    /// repaint when the capsule changed.
+    pub fn set_tray_unresponsive(&mut self, count: u16) {
+        self.repaint |= self.tray.set_unresponsive(count);
+    }
+
+    /// Release the capsule's pinned readout, latching a repaint when it was
+    /// pinned. The embedder calls this when a press lands away from the bar
+    /// entirely — releasing the pin is presentation state, so the press
+    /// still performs its own one action wherever it landed.
+    pub fn release_tray_pin(&mut self) {
+        if self.tray.is_pinned() {
+            self.tray.set_pinned(false);
+            self.repaint = true;
+        }
+    }
+
     /// Adopt a new theme. The rest of the taskbar's state is unchanged, so a
     /// runtime dark/light switch needs no relayout of the model.
     pub fn apply_theme(&mut self, theme: &Theme) {
@@ -379,6 +422,34 @@ impl Taskbar {
         ))
     }
 
+    /// Compute the Switchboard readout's geometry, or `None` while the
+    /// readout is collapsed (no hover, no pin) or the capsule's slot has no
+    /// room on a degenerate bar.
+    ///
+    /// The readout opens outward from the Switchboard slot on the bar's
+    /// edge; the window manager places it and rounds it with
+    /// [`TrayReadoutLayout::corner_radius`], exactly as it does the bar's
+    /// other popovers.
+    #[must_use]
+    pub fn tray_readout_layout(&self, scale: Scale) -> Option<TrayReadoutLayout> {
+        if !self.tray.is_expanded() {
+            return None;
+        }
+        let bar = self.layout(scale);
+        if bar.switchboard.is_empty() {
+            return None;
+        }
+        Some(TrayReadoutLayout::compute(
+            self.config.edge,
+            &bar,
+            self.config.screen_width,
+            self.config.screen_height,
+            scale,
+            &self.theme,
+            self.tray.signal(),
+        ))
+    }
+
     /// Compute the context menu's geometry, or `None` while it is closed.
     ///
     /// The row text is measured with the same body font the renderer paints
@@ -457,8 +528,9 @@ impl Taskbar {
     }
 
     /// Track the pointer for the bar's hover feedback — the leading
-    /// buttons, the pin slots, and the task slots — latching a repaint when
-    /// any visual state changes.
+    /// buttons, the pin slots, the task slots, and the Switchboard capsule
+    /// (whose readout expands on hover) — latching a repaint when any visual
+    /// state changes.
     ///
     /// While the popup is open the Library button stays visually pressed
     /// (it is "held open"); the Files button hovers as normal.
@@ -485,6 +557,12 @@ impl Taskbar {
             self.task_hover = task_hover;
             self.repaint = true;
         }
+        let readout = self
+            .tray_readout_layout(scale)
+            .map_or(Rect::EMPTY, |readout| readout.panel);
+        self.repaint |= self
+            .tray
+            .track(point, layout.switchboard, readout, scale, &self.theme);
     }
 }
 

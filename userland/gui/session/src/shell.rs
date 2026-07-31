@@ -38,6 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::notify_ipc::NotifyRequest;
+use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
@@ -513,6 +514,34 @@ impl DesktopShell {
             .taskbar_mut()
             .clear_producer_notifications(producer)
         {
+            self.present(compositor);
+        }
+    }
+
+    /// Relay a tray-signal summary from the attested Switchboard service to
+    /// the taskbar capsule, re-presenting when it changed the rendering.
+    ///
+    /// `None` is the honest "no feed" — the service is absent or exited —
+    /// and derives the calm state; the capsule never fabricates. The
+    /// embedder attests the producer on the endpoint before this call, so
+    /// the model only ever renders what the desktop's own service published.
+    pub fn set_tray_summary(&mut self, compositor: &mut Compositor, summary: Option<TraySummary>) {
+        self.session.taskbar_mut().set_tray_summary(summary);
+        if self.session.taskbar_mut().take_repaint() {
+            self.present(compositor);
+        }
+    }
+
+    /// Adopt the session's own count of unresponsive applications into the
+    /// taskbar capsule, re-presenting when it changed the rendering.
+    ///
+    /// The count comes from the desktop's delivery evidence (the
+    /// [`HangTracker`](crate::HangTracker)), not from the Switchboard
+    /// service — the session is the one component that observes whether an
+    /// app drains its window events.
+    pub fn set_tray_unresponsive(&mut self, compositor: &mut Compositor, count: u16) {
+        self.session.taskbar_mut().set_tray_unresponsive(count);
+        if self.session.taskbar_mut().take_repaint() {
             self.present(compositor);
         }
     }

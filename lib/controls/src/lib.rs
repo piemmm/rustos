@@ -141,9 +141,11 @@
 //! semantic beads plus a source attribution; a taskbar item combines
 //! application identity with a [`TaskVisibility`] window state, activity,
 //! attention, and recovery/authority beads; and a tray signal is a compact
-//! status capsule that stacks severity-ordered beads and expands to an
-//! instrument readout on hover or focus. Each emits a typed action; the owner
-//! enforces authority.
+//! status capsule that shows an optional [`TrayBadge`] (a count or alert
+//! encoding the dominant live state) on its top-trailing corner, stacks
+//! severity-ordered beads starting after it, and expands to an instrument
+//! readout on hover or focus. Each emits a typed action; the owner enforces
+//! authority.
 //!
 //! The [`decision`] module is the decision-surface family — [`Dialog`],
 //! [`Tooltip`], and [`HelpTip`]. A dialog is a modal choice surface whose
@@ -191,7 +193,7 @@ pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use shell::{
     Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
-    TaskbarPresentation, TraySignal, TraySignalAction,
+    TaskbarPresentation, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,

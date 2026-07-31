@@ -35,6 +35,13 @@
 //! raised notification (severity mapped to the card's composed state),
 //! presented by the window manager as its own small window above the bar.
 //!
+//! [`TaskbarRenderer::render_tray_readout`] paints the Switchboard capsule's
+//! expanded readout: the shared [`TraySignal`](tairix_controls::TraySignal)
+//! draws its own elevated plate at the geometry
+//! [`Taskbar::tray_readout_layout`] computed, presented by the window
+//! manager as its own small window beside the capsule (the capsule itself is
+//! painted on the bar by [`render`](TaskbarRenderer::render)).
+//!
 //! Region rectangles are in screen space; each is translated into the
 //! surface's local space by subtracting the surface's origin. The translation
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
@@ -235,6 +242,16 @@ impl TaskbarRenderer {
             fonts,
             &mut icons,
         );
+
+        if !layout.switchboard.is_empty() {
+            taskbar.tray().signal().render(
+                &mut surface,
+                local_rect(layout.switchboard, origin),
+                scale,
+                theme,
+                fonts.text,
+            );
+        }
         Some(surface)
     }
 
@@ -373,6 +390,30 @@ impl TaskbarRenderer {
                 fonts.text,
             );
         }
+        Some(surface)
+    }
+
+    /// Paint the Switchboard capsule's expanded readout into a [`Surface`]
+    /// using the taskbar's own theme.
+    ///
+    /// Returns `None` while the readout is collapsed (there is nothing to
+    /// draw) or when the surface cannot be allocated, so the caller fails
+    /// closed rather than panicking. The window manager places the returned
+    /// surface beside the capsule and rounds it with
+    /// [`TrayReadoutLayout::corner_radius`](crate::TrayReadoutLayout::corner_radius)
+    /// — the same popup radius the readout plate draws for itself, kept in
+    /// step by construction.
+    #[must_use]
+    pub fn render_tray_readout(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let layout = taskbar.tray_readout_layout(scale)?;
+        let theme = taskbar.theme();
+        let fonts = PanelFonts::resolve(theme, scale);
+        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
+        let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+        taskbar
+            .tray()
+            .signal()
+            .render_readout(&mut surface, local, scale, theme, fonts.text);
         Some(surface)
     }
 }

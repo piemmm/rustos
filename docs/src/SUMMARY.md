@@ -139,6 +139,7 @@
 - [Seat ownership](./desktop/seat.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
 - [Desktop session glue](./desktop/session.md)
+- [Switchboard monitor service](./desktop/switchboard.md)
 - [Desktop theming](./desktop/theming.md)
 - [Pointer cursors](./desktop/cursors.md)
 - [Desktop icons](./desktop/icons.md)

@@ -834,6 +834,12 @@ A tray signal is a compact live status capsule.
 - Pressure: side rail in semantic role.
 - Recovery: recovery bead.
 - Multiple states: stacked mini beads, ordered by severity.
+- As built, live badge: an optional top-trailing filled count/alert badge —
+  a count capped at "9+", or an exclamation mark for a countless urgent
+  state (a hung app) — toned accent (background job), warning (pressure),
+  danger (hung, the destructive role's red), or recovery. It shares the one
+  badge painter with the §11.25 card count badge; the mini-bead stack starts
+  after it, hiding nothing.
 
 A tray signal expands to an instrument readout on hover or focus. The readout must be short: state name, count or value, and primary safe action.
 

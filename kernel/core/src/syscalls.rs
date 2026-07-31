@@ -6316,19 +6316,20 @@ where
         // creator must hold every `recv` capability it requires, and must
         // hold `CAP_IPC_BIND_PRIVILEGED` to bind a restricted-sender endpoint.
         //
-        // The window and notification rendezvous are the seat-scoped
-        // reserved ids: the desktop session that holds a seat's live lease
-        // serves them, and a session is an ordinary user process whose
-        // account ceiling never carries the service-class privileged-bind
-        // capability. Binding either is therefore alternatively authorised
-        // by the kernel-attested seat-lease fact — resolved here from the
-        // seat registry against the kernel-trusted caller id, never a claim
-        // — and refused as usual for everyone else (fail closed): a squatter
-        // without the lease cannot claim app windows or feed the desktop
-        // spoofed notifications, and losing the seat ends the session, whose
-        // exit reclaims the endpoints. The seat-scoped set has one shared
-        // definition in `tairix_abi::ipc`, so this check cannot drift from
-        // it.
+        // The window, notification, and Switchboard tray-summary rendezvous
+        // are the seat-scoped reserved ids: the desktop session that holds
+        // a seat's live lease serves them, and a session is an ordinary
+        // user process whose account ceiling never carries the
+        // service-class privileged-bind capability. Binding any of them is
+        // therefore alternatively authorised by the kernel-attested
+        // seat-lease fact — resolved here from the seat registry against
+        // the kernel-trusted caller id, never a claim — and refused as
+        // usual for everyone else (fail closed): a squatter without the
+        // lease cannot claim app windows, feed the desktop spoofed
+        // notifications, or feed it a fabricated tray summary, and losing
+        // the seat ends the session, whose exit reclaims the endpoints. The
+        // seat-scoped set has one shared definition in `tairix_abi::ipc`,
+        // so this check cannot drift from it.
         let limits = CallEndpointLimits {
             max_request,
             max_reply,
@@ -25030,12 +25031,12 @@ mod tests {
     }
 
     /// Binding a seat-scoped rendezvous (`WINDOW_ENDPOINT`,
-    /// `NOTIFY_ENDPOINT`) is authorised by the kernel-attested live seat
-    /// lease and nothing else for an unprivileged caller: refused before the
-    /// lease exists, allowed while the caller holds it, and refused again
-    /// once the lease is released (fail closed on loss). The attestation is
-    /// resolved from the seat registry against the kernel-trusted caller id,
-    /// never a claim.
+    /// `NOTIFY_ENDPOINT`, `SWITCHBOARD_ENDPOINT`) is authorised by the
+    /// kernel-attested live seat lease and nothing else for an unprivileged
+    /// caller: refused before the lease exists, allowed while the caller
+    /// holds it, and refused again once the lease is released (fail closed
+    /// on loss). The attestation is resolved from the seat registry against
+    /// the kernel-trusted caller id, never a claim.
     #[test]
     fn call_create_seat_scoped_endpoints_bind_only_for_the_live_seat_lease_holder() {
         install_trace_filter();
@@ -25068,11 +25069,12 @@ mod tests {
         )
         .with_seat_registry(seat);
 
-        // Both seat-scoped rendezvous behave identically; assert each at
-        // every lease phase rather than duplicating the test body.
+        // All three seat-scoped rendezvous behave identically; assert each
+        // at every lease phase rather than duplicating the test body.
         let seat_scoped = [
             tairix_abi::window_ipc::WINDOW_ENDPOINT,
             tairix_abi::notify_ipc::NOTIFY_ENDPOINT,
+            tairix_abi::switchboard_ipc::SWITCHBOARD_ENDPOINT,
         ];
 
         // No lease yet: each stays privileged and the bind is refused with

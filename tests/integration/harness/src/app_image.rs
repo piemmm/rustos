@@ -760,6 +760,7 @@ mod tests {
                 "sleep",
                 "ss",
                 "stress",
+                "switchboard",
                 "sysinfo",
                 "sysinfod",
                 "sysmon",
@@ -790,7 +791,15 @@ mod tests {
             .collect();
         assert_eq!(
             services,
-            ["devmgr", "fontd", "login", "netstack", "seatmgr", "sysinfod"]
+            [
+                "devmgr",
+                "fontd",
+                "login",
+                "netstack",
+                "seatmgr",
+                "switchboard",
+                "sysinfod"
+            ]
         );
     }
 

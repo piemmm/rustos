@@ -47,6 +47,10 @@ use tairix_abi::service_control::{
     decode_reply as decode_service_control_reply, ServiceControlRequest,
     REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
 };
+use tairix_abi::switchboard_ipc::{
+    SwitchboardRequest, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind,
+    TraySummary, TrayTask, TrayTaskName,
+};
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
     KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
@@ -407,6 +411,17 @@ fn exercise_notify_ipc(bytes: &[u8]) {
     }
 }
 
+/// Drive the Switchboard tray-summary decoder on `bytes` (one arm of
+/// [`exercise`]): an accepted publish request must round-trip through its
+/// encoder; a corrupt frame must refuse cleanly, never panic.
+fn exercise_switchboard_ipc(bytes: &[u8]) {
+    if let Ok(request) = SwitchboardRequest::from_bytes(bytes) {
+        let redecoded = SwitchboardRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted switchboard request must succeed");
+        assert_eq!(request, redecoded);
+    }
+}
+
 /// Drive every ABI decoder on `bytes`.
 ///
 /// Returns silently. The contract is "must not panic for any input"; a
@@ -444,6 +459,7 @@ fn exercise(bytes: &[u8]) {
     exercise_font_ipc(bytes);
     exercise_window_ipc(bytes);
     exercise_notify_ipc(bytes);
+    exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
     exercise_elevate(bytes);
@@ -904,6 +920,39 @@ fn structured_notify_inputs_with_corrupted_fields_never_panic() {
                 exercise(&base);
                 base[byte] ^= 1 << bit;
             }
+        }
+    }
+}
+
+#[test]
+fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the tray-summary publish
+    // request from a well-formed frame carrying every optional block: a
+    // bit-flip of any byte — magic, version, op, a count, the pressure
+    // kind or level, a permille, a length prefix, or a name byte — must
+    // fail closed, never panic.
+    let mut base = SwitchboardRequest::PublishSummary {
+        summary: TraySummary {
+            jobs: 4,
+            recovery: 1,
+            cpu_busy_permille: TrayPermille::new(640).expect("a valid fraction"),
+            pressure: Some(TrayPressure {
+                kind: TrayPressureKind::Memory,
+                level: TrayPermille::new(870).expect("a valid fraction"),
+                count: TrayPressureCount::new(2).expect("a valid count"),
+            }),
+            top_task: Some(TrayTask {
+                name: TrayTaskName::new("compositor").expect("a valid name"),
+                cpu_permille: TrayPermille::new(250).expect("a valid fraction"),
+            }),
+        },
+    }
+    .to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
         }
     }
 }

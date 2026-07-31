@@ -33,6 +33,15 @@
 //! into it first, and a press outside its plate dismisses only the menu
 //! (one click does one thing), leaving whatever is beneath for the next
 //! click.
+//!
+//! The Switchboard capsule at the trailing end has its own quiet
+//! microinteractions: a primary press pins its readout open (and a primary
+//! press anywhere else releases the pin before acting as usual — collapsing
+//! an informational readout is never the click's action), a press inside
+//! the open readout is claimed inert exactly like the notification
+//! popover's chrome, scrolling over the capsule or its readout cycles the
+//! task list, and a middle press over the capsule switches back to the
+//! previous task.
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
@@ -157,10 +166,12 @@ impl TaskbarInput {
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale);
         }
-        // The notification popover is non-modal: unlike the menu and library
-        // popup it does not swallow the whole stream. A primary press that
-        // lands on it dismisses the card it hits (or is claimed harmlessly on
-        // the panel's chrome), so it neither acts on the bar beneath it nor
+        // The notification popover and the Switchboard readout are
+        // non-modal: unlike the menu and library popup they do not swallow
+        // the whole stream. A primary press that lands on the popover
+        // dismisses the card it hits (or is claimed harmlessly on the
+        // panel's chrome); one that lands inside the open readout is claimed
+        // inert. Either way the press neither acts on the bar beneath nor
         // reaches the windows below; every other event routes on as usual.
         if matches!(
             event,
@@ -171,6 +182,9 @@ impl TaskbarInput {
             if let Some(response) = self.press_notification(taskbar, scale) {
                 return response;
             }
+            if self.over_tray_readout(taskbar, scale) {
+                return TaskbarResponse::Ignored;
+            }
         }
         match event {
             InputEvent::PointerPressed {
@@ -179,10 +193,12 @@ impl TaskbarInput {
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             } => self.press_secondary(taskbar, scale),
+            InputEvent::PointerPressed {
+                button: PointerButton::Middle,
+            } => self.press_middle(taskbar, scale),
+            InputEvent::PointerScrolled { dx, dy } => self.scroll_tasks(taskbar, scale, dx, dy),
             InputEvent::PointerMoved { .. }
-            | InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. }
-            | InputEvent::PointerScrolled { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. } => TaskbarResponse::Ignored,
         }
@@ -190,8 +206,18 @@ impl TaskbarInput {
 
     /// Handle a primary-button press at the current pointer position with
     /// the popup closed, hit-tested at the desktop `scale`.
+    ///
+    /// A press that is not on the Switchboard capsule first releases a
+    /// pinned readout — collapsing an informational readout is not an
+    /// action, so the press still acts on whatever it landed on (one click
+    /// does one thing).
     fn press_primary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
-        let Some(hit) = taskbar.hit_test(self.pointer, scale) else {
+        let hit = taskbar.hit_test(self.pointer, scale);
+        if hit != Some(Hit::Switchboard) && taskbar.tray().is_pinned() {
+            taskbar.tray_mut().set_pinned(false);
+            taskbar.request_repaint();
+        }
+        let Some(hit) = hit else {
             return TaskbarResponse::Ignored;
         };
         match hit {
@@ -213,6 +239,15 @@ impl TaskbarInput {
             // treatment arrives with the live tray-signal feed).
             Hit::Notification(_) => TaskbarResponse::Ignored,
             Hit::Clock => TaskbarResponse::ClockPressed,
+            // Pressing the capsule toggles the readout pin and nothing
+            // else: the readout is presentation, and the Switchboard
+            // overview window this press will eventually raise arrives
+            // with a later stage (`plans/NEW-TASKBAR.md`).
+            Hit::Switchboard => {
+                taskbar.tray_mut().toggle_pinned();
+                taskbar.request_repaint();
+                TaskbarResponse::Ignored
+            }
         }
     }
 
@@ -238,6 +273,85 @@ impl TaskbarInput {
             }
         }
         Some(TaskbarResponse::Ignored)
+    }
+
+    /// Whether the current pointer position lies inside the open Switchboard
+    /// readout panel.
+    fn over_tray_readout(&self, taskbar: &Taskbar, scale: Scale) -> bool {
+        taskbar
+            .tray_readout_layout(scale)
+            .is_some_and(|readout| readout.contains(self.pointer))
+    }
+
+    /// Handle a middle-button press at the current pointer position: over
+    /// the Switchboard capsule it switches to the previous task (the
+    /// MRU-of-two the task list remembers); anywhere else it is ignored. No
+    /// remembered task, or one that vanished, changes nothing (fail closed).
+    fn press_middle(&self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
+        if taskbar.hit_test(self.pointer, scale) != Some(Hit::Switchboard) {
+            return TaskbarResponse::Ignored;
+        }
+        let Some(id) = taskbar.tasks().previous() else {
+            return TaskbarResponse::Ignored;
+        };
+        Self::focus_task(taskbar, id)
+    }
+
+    /// Handle a scroll over the Switchboard capsule (or its open readout):
+    /// cycle the task list, focusing the entry after the focused one for a
+    /// positive step and the one before it for a negative step, wrapping at
+    /// both ends (no focused task starts at the first or last entry). The
+    /// vertical delta decides; the horizontal one is the fallback when it is
+    /// zero. No tasks, no net direction, or a pointer anywhere else changes
+    /// nothing.
+    fn scroll_tasks(
+        &self,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+        dx: i32,
+        dy: i32,
+    ) -> TaskbarResponse {
+        let over_capsule = taskbar.layout(scale).switchboard.contains(self.pointer);
+        if !over_capsule && !self.over_tray_readout(taskbar, scale) {
+            return TaskbarResponse::Ignored;
+        }
+        let step = if dy != 0 { dy } else { dx };
+        if step == 0 {
+            return TaskbarResponse::Ignored;
+        }
+        let entries = taskbar.tasks().entries();
+        if entries.is_empty() {
+            return TaskbarResponse::Ignored;
+        }
+        let focused = taskbar
+            .tasks()
+            .focused()
+            .and_then(|id| entries.iter().position(|entry| entry.id == id));
+        let index = if step > 0 {
+            focused.map_or(0, |index| (index + 1) % entries.len())
+        } else {
+            focused.map_or(entries.len() - 1, |index| {
+                (index + entries.len() - 1) % entries.len()
+            })
+        };
+        let Some(id) = entries.get(index).map(|entry| entry.id) else {
+            return TaskbarResponse::Ignored;
+        };
+        Self::focus_task(taskbar, id)
+    }
+
+    /// Restore-and-focus the task with `id` (never the minimise toggle),
+    /// reporting the activation — or nothing when the task vanished (fail
+    /// closed).
+    fn focus_task(taskbar: &mut Taskbar, id: TaskId) -> TaskbarResponse {
+        if taskbar.tasks_mut().set_focused(Some(id)) {
+            TaskbarResponse::TaskActivated {
+                id,
+                outcome: ActivateOutcome::Activated,
+            }
+        } else {
+            TaskbarResponse::Ignored
+        }
     }
 
     /// Handle a secondary-button press at the current pointer position with
