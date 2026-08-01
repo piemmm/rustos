@@ -1778,40 +1778,104 @@ pub fn ancestor_imposed_status(nodes: &[HwNode], node_id: u32) -> BlkStatus {
 /// controller/hub blip to the fault domain instead of to the disk.
 #[must_use]
 pub fn ancestor_imposed_status_from_snapshot(blob: &[u8], node_id: u32) -> BlkStatus {
-    // Validate the whole promised extent up front (identical shape to the
-    // device manager's snapshot walk): a malformed or truncated snapshot is
-    // never partially interpreted — it imposes nothing (degrade safe to `Ok`).
-    let Ok(header) = HwTreeHeader::from_bytes(blob) else {
+    // A malformed or truncated snapshot is never partially interpreted: it
+    // imposes nothing, so the driver degrades safe to answering on the
+    // device's own health rather than fabricating a fault from bytes it
+    // cannot trust.
+    let Some(snapshot) = snapshot_nodes(blob) else {
         return BlkStatus::Ok;
     };
-    let Ok(count) = usize::try_from(header.node_count()) else {
-        return BlkStatus::Ok;
-    };
-    let within_bounds = count
-        .checked_mul(HwNode::WIRE_LEN)
-        .and_then(|records| records.checked_add(HwTreeHeader::WIRE_LEN))
-        .is_some_and(|span| blob.len() >= span);
-    if !within_bounds {
-        return BlkStatus::Ok;
-    }
-
-    // Look one node up by id by scanning the records in wire order and
-    // decoding each through the shared, bounds-checked `HwNode::from_bytes`
-    // (one decoder, no reimplemented field offsets). A record that fails to
-    // decode is skipped, never trusted.
+    let count = snapshot.len();
     let lookup = |id: u32| -> Option<FaultNode> {
-        let mut off = HwTreeHeader::WIRE_LEN;
-        for _ in 0..count {
-            if let Ok(node) = HwNode::from_bytes(&blob[off..off + HwNode::WIRE_LEN]) {
-                if node.id() == id {
-                    return Some(FaultNode::of(&node));
-                }
-            }
-            off += HwNode::WIRE_LEN;
-        }
-        None
+        snapshot
+            .clone()
+            .find(|node| node.id() == id)
+            .map(|node| FaultNode::of(&node))
     };
     fold_ancestor_status(node_id, count, &lookup)
+}
+
+/// The nodes of a kernel hardware-tree snapshot, decoded lazily in wire order.
+///
+/// Built by [`snapshot_nodes`]; holds only a borrow of the snapshot bytes, so
+/// walking a tree of any size costs no allocation and imposes no node ceiling.
+/// A record whose bytes do not decode is **skipped**, never half-trusted, so a
+/// corrupt record can hide a node but can never invent one.
+#[derive(Clone, Debug)]
+pub struct HwTreeNodes<'a> {
+    /// The record region alone: the header is consumed by [`snapshot_nodes`],
+    /// which has already validated that this holds exactly `remaining` whole
+    /// records.
+    records: &'a [u8],
+    remaining: usize,
+}
+
+impl HwTreeNodes<'_> {
+    /// How many records the snapshot promised.
+    ///
+    /// A count, not a yield guarantee: an undecodable record is skipped, so the
+    /// iterator can yield fewer nodes than this.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.remaining
+    }
+
+    /// Whether the snapshot promised no records at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+impl Iterator for HwTreeNodes<'_> {
+    type Item = HwNode;
+
+    fn next(&mut self) -> Option<HwNode> {
+        while self.remaining > 0 {
+            // The checked split keeps the walk total: the constructor sized
+            // `records` to exactly `remaining` whole records, so this cannot
+            // come up short, and taking the checked form means a future change
+            // that broke that pairing would end the walk rather than panic in
+            // a driver's request path.
+            let Some((record, rest)) = self.records.split_at_checked(HwNode::WIRE_LEN) else {
+                self.remaining = 0;
+                return None;
+            };
+            self.records = rest;
+            self.remaining -= 1;
+            if let Ok(node) = HwNode::from_bytes(record) {
+                return Some(node);
+            }
+        }
+        None
+    }
+}
+
+/// Read the **wire snapshot** a task obtains from `hw_tree_read` — a
+/// [`HwTreeHeader`] followed by [`HwTreeHeader::node_count`] records of
+/// [`HwNode::WIRE_LEN`] bytes — as an iterator over its nodes.
+///
+/// This is the one definition of how the kernel's snapshot is walked, so a
+/// consumer never re-derives the header validation or the record stride. It
+/// fails closed to [`None`] for a snapshot whose promised extent cannot be
+/// trusted — a short or malformed header, a node count that does not fit the
+/// host, or a byte span that overflows or exceeds `blob` — rather than
+/// interpreting a truncated tree, because a partially-read tree would silently
+/// omit nodes a security decision may depend on.
+#[must_use]
+pub fn snapshot_nodes(blob: &[u8]) -> Option<HwTreeNodes<'_>> {
+    let header = HwTreeHeader::from_bytes(blob).ok()?;
+    let count = usize::try_from(header.node_count()).ok()?;
+    let span = count
+        .checked_mul(HwNode::WIRE_LEN)?
+        .checked_add(HwTreeHeader::WIRE_LEN)?;
+    if blob.len() < span {
+        return None;
+    }
+    Some(HwTreeNodes {
+        records: &blob[HwTreeHeader::WIRE_LEN..span],
+        remaining: count,
+    })
 }
 
 #[cfg(test)]
@@ -2822,6 +2886,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_snapshot_reads_back_as_the_nodes_it_was_encoded_from() {
+        // The one definition of how the kernel's wire snapshot is walked: every
+        // record decodes back to the node it was encoded from, in wire order,
+        // and the promised count is reported without decoding anything.
+        let nodes = usb_shaped_tree();
+        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
+        let len = encode_snapshot(&mut blob, 11, &nodes);
+        let snapshot = snapshot_nodes(&blob[..len]).expect("a well-formed snapshot reads");
+        assert_eq!(snapshot.len(), nodes.len());
+        assert!(!snapshot.is_empty());
+        let mut seen = 0usize;
+        for (read, expected) in snapshot.zip(nodes.iter()) {
+            assert_eq!(read.id(), expected.id());
+            assert_eq!(read.parent(), expected.parent());
+            assert_eq!(read.class(), expected.class());
+            assert_eq!(read.resources(), expected.resources());
+            assert_eq!(read.match_keys(), expected.match_keys());
+            seen += 1;
+        }
+        assert_eq!(seen, nodes.len(), "every promised record is yielded");
+    }
+
+    #[test]
+    fn a_snapshot_whose_extent_cannot_be_trusted_reads_as_nothing() {
+        // A partially-read tree would silently omit nodes a security decision
+        // may depend on, so a snapshot that does not hold what its header
+        // promises is refused outright rather than walked as far as it goes.
+        assert!(snapshot_nodes(&[0u8; 4]).is_none(), "a short header");
+        let nodes = usb_shaped_tree();
+        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
+        let len = encode_snapshot(&mut blob, 1, &nodes);
+        assert!(
+            snapshot_nodes(&blob[..len - 1]).is_none(),
+            "a header promising one more record than the buffer holds"
+        );
+        // A count whose byte span overflows is refused before any arithmetic
+        // on it can wrap.
+        let mut overflowing = [0u8; HwTreeHeader::WIRE_LEN];
+        overflowing[..HwTreeHeader::WIRE_LEN]
+            .copy_from_slice(&HwTreeHeader::new(0, u64::MAX).to_le_bytes());
+        assert!(snapshot_nodes(&overflowing).is_none());
+        // An empty tree is well-formed and simply yields nothing.
+        let header = HwTreeHeader::new(3, 0).to_le_bytes();
+        let empty = snapshot_nodes(&header).expect("an empty snapshot is well-formed");
+        assert!(empty.is_empty());
+        assert_eq!(empty.count(), 0);
+    }
+
+    #[test]
+    fn an_undecodable_record_is_skipped_never_half_trusted() {
+        // A corrupt record can hide a node; it must never invent one, and it
+        // must not stop the walk reaching the records behind it.
+        let nodes = usb_shaped_tree();
+        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
+        let len = encode_snapshot(&mut blob, 1, &nodes);
+        // Corrupt the first record's device-class field to a value no class
+        // decodes from, leaving every later record intact.
+        let class_at = HwTreeHeader::WIRE_LEN + 12;
+        blob[class_at] = 11;
+        blob[class_at + 1] = 0;
+        let read: usize = snapshot_nodes(&blob[..len])
+            .expect("the extent is still sound")
+            .filter(|node| node.id() == nodes[0].id())
+            .count();
+        assert_eq!(read, 0, "the corrupt record is not yielded");
+        let survivors: usize = snapshot_nodes(&blob[..len])
+            .expect("the extent is still sound")
+            .count();
+        assert_eq!(
+            survivors,
+            nodes.len() - 1,
+            "and every intact record behind it still is"
+        );
     }
 
     #[test]

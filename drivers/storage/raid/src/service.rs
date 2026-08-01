@@ -8,7 +8,7 @@
 //! array, and when one may come online — are the pure `compose::MemberRegistry`
 //! next door. This module is the other pure half: given those decisions, it
 //! builds and serves the array. It is generic over the member
-//! [`Block`](tairix_abi::driver::block::Block) type and takes its clock as a
+//! [`Block`] type and takes its clock as a
 //! value, so the whole of it is provable on the host over member doubles; the
 //! `Run` program supplies the real block clients, the syscalls, and the audit
 //! trail.
@@ -34,6 +34,12 @@
 //!   behind can never return masquerading as up to date. A re-stamp that
 //!   cannot be written fails the whole bring-up closed rather than serving an
 //!   array whose metadata lies.
+//! * An array whose composed geometry is not the geometry its members' own
+//!   metadata agree on is refused. The members' capacity is what the
+//!   composition engine actually measures, while the identity records what the
+//!   array was created as; publishing a device shorter than the one a
+//!   filesystem was made on would leave every address past the end silently
+//!   unreachable.
 //!
 //! Each member is composed through a [`PartitionBlock`] view that begins at
 //! [`RESERVED_METADATA_BLOCKS`], so a member's own superblock can never be
@@ -49,7 +55,8 @@ use tairix_partition::PartitionBlock;
 use tairix_raid::{
     fill_members, ArrayIdentity, ArraySuperblock, AssembleError, AssembleMember, Candidate,
     DualParityMember, MirrorMember, OwnedRaidArray, ParityMember, RaidLevel, SlotDisposition,
-    StripeMember, SuperblockError, TripleParityMember, SCRATCH_BLOCKS as DUAL_PARITY_SCRATCH_BLOCKS,
+    StripeMember, SuperblockError, TripleParityMember,
+    SCRATCH_BLOCKS as DUAL_PARITY_SCRATCH_BLOCKS,
     TRIPLE_SCRATCH_BLOCKS as TRIPLE_PARITY_SCRATCH_BLOCKS, WIRE_LEN as SUPERBLOCK_WIRE_LEN,
 };
 use tairix_raidmeta::{RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK};
@@ -94,6 +101,11 @@ pub enum ServiceError {
     /// A composition engine refused the assembled members (a live device
     /// unwell or absent at assembly, an overflowing geometry).
     Assembly,
+    /// The array the members compose to is not the array their own metadata
+    /// describes: the composed logical geometry differs from the identity's.
+    /// Refused rather than published at whichever size the disks happen to
+    /// have.
+    GeometryMismatch,
     /// A table could not grow to hold the array's members or scratch;
     /// exhaustion is a value, never a panic.
     OutOfMemory,
@@ -151,7 +163,7 @@ pub fn write_superblock<B: Block>(
 /// superblock or is larger than the staging buffer.
 fn superblock_block_size<B: Block>(device: &B) -> Result<usize, ServiceError> {
     let block_size = device.geometry().map_err(ServiceError::Device)?.block_size as usize;
-    if block_size < SUPERBLOCK_WIRE_LEN || block_size > MAX_BLOCK_SIZE {
+    if !(SUPERBLOCK_WIRE_LEN..=MAX_BLOCK_SIZE).contains(&block_size) {
         return Err(ServiceError::BlockSize);
     }
     Ok(block_size)
@@ -230,7 +242,8 @@ pub fn assemble_array<B: Block>(
         let SlotDisposition::Present { tag, in_sync } = *slot else {
             continue;
         };
-        let mut raw = take_raw(tag).ok_or(ServiceError::Fill(AssembleError::MissingDevice { tag }))?;
+        let mut raw =
+            take_raw(tag).ok_or(ServiceError::Fill(AssembleError::MissingDevice { tag }))?;
         if degraded && in_sync {
             let slot = u16::try_from(slot_index).map_err(|_| ServiceError::Unservable)?;
             let restamped = effective
@@ -239,11 +252,19 @@ pub fn assemble_array<B: Block>(
             write_superblock(&mut raw, &restamped)?;
         }
         let view = wrap_member(raw)?;
-        prepared.try_reserve(1).map_err(|_| ServiceError::OutOfMemory)?;
+        prepared
+            .try_reserve(1)
+            .map_err(|_| ServiceError::OutOfMemory)?;
         prepared.push((tag, view));
     }
 
-    let array = build_owned(&effective, &slots, &mut prepared)?;
+    let mut array = build_owned(&effective, &slots, &mut prepared)?;
+    // The composed device is measured from the members; the identity records
+    // what the array was created as. A disagreement means these disks are not
+    // the array this metadata describes, so it is never published.
+    if array.array_geometry() != effective.geometry {
+        return Err(ServiceError::GeometryMismatch);
+    }
     Ok(Assembled {
         array,
         identity: effective,
@@ -294,7 +315,8 @@ fn build_owned<B: Block>(
                     .ok_or(ServiceError::Fill(AssembleError::MissingDevice { tag }))?;
                 members.push(StripeMember::new(device));
             }
-            OwnedRaidArray::assemble_stripe(members, chunk_blocks).map_err(|_| ServiceError::Assembly)
+            OwnedRaidArray::assemble_stripe(members, chunk_blocks)
+                .map_err(|_| ServiceError::Assembly)
         }
         RaidLevel::Parity => {
             let members: Vec<ParityMember<PartitionBlock<B>>> =
@@ -320,7 +342,8 @@ fn build_owned<B: Block>(
         RaidLevel::Raid10 => {
             let members: Vec<MirrorMember<PartitionBlock<B>>> =
                 placed_members(count, slots, prepared)?;
-            OwnedRaidArray::assemble_raid10(members, chunk_blocks).map_err(|_| ServiceError::Assembly)
+            OwnedRaidArray::assemble_raid10(members, chunk_blocks)
+                .map_err(|_| ServiceError::Assembly)
         }
     }
 }
@@ -361,7 +384,8 @@ fn take_prepared<B: Block>(
 /// a value the caller fails closed on rather than a panic.
 fn try_vec<T: Clone>(count: usize, value: T) -> Result<Vec<T>, ServiceError> {
     let mut out = Vec::new();
-    out.try_reserve(count).map_err(|_| ServiceError::OutOfMemory)?;
+    out.try_reserve(count)
+        .map_err(|_| ServiceError::OutOfMemory)?;
     out.resize(count, value);
     Ok(out)
 }
@@ -369,7 +393,8 @@ fn try_vec<T: Clone>(count: usize, value: T) -> Result<Vec<T>, ServiceError> {
 /// A fallibly-allocated empty vector with room reserved for `count` elements.
 fn try_empty<T>(count: usize) -> Result<Vec<T>, ServiceError> {
     let mut out = Vec::new();
-    out.try_reserve(count).map_err(|_| ServiceError::OutOfMemory)?;
+    out.try_reserve(count)
+        .map_err(|_| ServiceError::OutOfMemory)?;
     Ok(out)
 }
 
@@ -387,12 +412,17 @@ fn try_scratch(blocks: usize, block_size: u32) -> Result<Vec<u8>, ServiceError> 
 /// endpoint, shared data window, and hardware-tree node it is published
 /// through.
 ///
+/// It is generic over the *raw* member device `B` (a block client) and owns
+/// the composed [`OwnedRaidArray`] over each member's metadata-offset
+/// [`PartitionBlock`] view, so a returning member is placed by handing the
+/// runtime a raw device and letting it wrap it, never a pre-wrapped one.
+///
 /// An array answers block requests through the *same* shared
 /// [`serve_request_recovering`] engine a leaf device does, so it is fault-aware
 /// exactly as a disk is and no second serve path exists.
 pub struct ArrayRuntime<B: Block> {
     identity: ArrayIdentity,
-    array: OwnedRaidArray<B>,
+    array: OwnedRaidArray<PartitionBlock<B>>,
     health: BlkHealth,
     endpoint: u64,
     window_id: u64,
@@ -410,7 +440,7 @@ impl<B: Block> ArrayRuntime<B> {
     #[must_use]
     pub fn new(
         identity: ArrayIdentity,
-        array: OwnedRaidArray<B>,
+        array: OwnedRaidArray<PartitionBlock<B>>,
         endpoint: u64,
         window_id: u64,
         node_id: u32,

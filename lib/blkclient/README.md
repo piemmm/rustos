@@ -34,13 +34,24 @@ them, so it lives here once and both consumers link it.
 - `BlkCall` — the transport seam `RemoteBlock` is generic over, so the
   client is host-testable without a kernel: a host test double fills the
   shared window directly, playing the serving driver.
-- `RtBlkCall` — the production transport: `call_post`/`call_reap` on the
-  granted endpoint with the caller's own per-request deadline, parking on a
-  `CallReply` wait-set rather than a busy poll, so a wedged device fails a
-  transfer closed at its deadline instead of parking the caller forever.
+- `RtBlkCall::new(endpoint, waitset)` — the production transport:
+  `call_post`/`call_reap` on the granted endpoint with the caller's own
+  per-request deadline, parking on the **caller's** `CallReply` wait-set
+  rather than a busy poll, so a wedged device fails a transfer closed at its
+  deadline instead of parking the caller forever.
 
 ## Design
 
+- **The caller owns the wait-set.** A transport parks on a set it is handed,
+  never one it mints for itself. The kernel reclaims a wait-set only when its
+  owning process exits, so a self-minting transport would strand one per
+  instance — harmless in a run-to-completion program like the volume manager,
+  but an unbounded kernel-memory leak in a long-lived one that opens a
+  transport per device or per retry, as the RAID composer does on every
+  assembly attempt. Handing the set in makes it part of the process's own
+  one-time setup whatever its shape, and lets one set carry every member of a
+  multi-device consumer. Readiness is level-triggered, so sharing a set costs
+  nothing but an occasional re-check and consumes no wake from its owner.
 - Everything a served device reports is untrusted: the geometry is
   validated at connect time before any consumer sees it, every reply frame
   is decoded fail-closed, and a transfer never reads more bytes out of the

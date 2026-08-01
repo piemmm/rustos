@@ -1156,7 +1156,15 @@ name = "tairix-drv-storage-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-blkclient",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-partition",
  "tairix-raid",
+ "tairix-raidmeta",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4817,6 +4825,7 @@ dependencies = [
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-virtio-net",
+ "tairix-drv-storage-raid",
  "tairix-drv-storage-raid-member",
  "tairix-drv-storage-usb-msd",
  "tairix-drv-storage-volmgr",

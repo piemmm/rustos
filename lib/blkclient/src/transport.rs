@@ -11,6 +11,17 @@
 //! own declared class, so this transport carries no deadline policy of its
 //! own. The serving driver fills the shared window during the call, so the
 //! window parameter is untouched here.
+//!
+//! # The caller owns the wait-set
+//!
+//! A transport parks on a wait-set the **caller** supplies rather than one it
+//! mints for itself. The kernel reclaims a wait-set only when its owning
+//! process exits, so a transport that minted its own would strand one per
+//! instance — invisible in a run-to-completion program, but an unbounded
+//! kernel-memory leak in a long-lived one that opens a transport per device or
+//! per retry (the RAID composer reconnects a member on every assembly
+//! attempt). Handing the set in makes that cost part of the process's own
+//! one-time setup, whatever its shape.
 
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::Errno;
@@ -24,50 +35,54 @@ fn errno_from(neg: i64) -> Errno {
     Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
 }
 
-/// The production blkio transport: one call endpoint plus the wait-set
-/// multiplexing its reply completions.
+/// The production blkio transport: one call endpoint plus the caller's
+/// wait-set, on which this endpoint's reply completions are observed.
 pub struct RtBlkCall {
     endpoint: u64,
-    /// Created lazily on first use and `0` until then. One device needs
-    /// only one member, but using the wait-set seam even here keeps the
-    /// single transport shape a multi-device consumer also uses.
+    /// The caller's wait-set, parked on for every reply.
     waitset: u64,
+    /// Whether this endpoint's `CallReply` member has been placed in the set.
+    /// Registered on first use rather than at construction, so building a
+    /// transport cannot fail and the first transfer surfaces a refusal.
+    registered: bool,
 }
 
 impl RtBlkCall {
-    /// A fresh transport for `endpoint`, its wait-set unset until the first
-    /// [`BlkCall::call`].
+    /// A fresh transport for `endpoint`, parking on the caller's `waitset`.
+    ///
+    /// The set must outlive this transport. It may hold any number of other
+    /// members: readiness is level-triggered, so a wake caused by an unrelated
+    /// member re-checks and parks again, and no wake is consumed away from the
+    /// set's owner.
     #[must_use]
-    pub fn new(endpoint: u64) -> Self {
+    pub const fn new(endpoint: u64, waitset: u64) -> Self {
         Self {
             endpoint,
-            waitset: 0,
+            waitset,
+            registered: false,
         }
     }
 
-    /// Mint the reply wait-set and register this endpoint's `CallReply`
-    /// member, once. The wait-set is reclaimed by the kernel when the
-    /// owning run-to-completion program exits, so it needs no explicit
-    /// teardown.
-    fn ensure_waitset(&mut self) -> Result<u64, Errno> {
-        if self.waitset == 0 {
-            let set = tairix_rt::waitset_create();
-            if set < 0 {
-                return Err(errno_from(set));
-            }
-            #[allow(clippy::cast_sign_loss)] // `set >= 0` is the minted handle, checked above.
-            let set = set as u64;
+    /// Ensure this endpoint's replies are observable on the caller's set.
+    ///
+    /// A duplicate `(kind, id)` membership is refused by the kernel and is
+    /// treated as success: another transport on the same endpoint has already
+    /// made its replies observable, which is exactly the state needed. Every
+    /// other refusal fails the transfer closed rather than parking on a set
+    /// that will never report this endpoint.
+    fn ensure_registered(&mut self) -> Result<u64, Errno> {
+        if !self.registered {
             let ctl = tairix_rt::waitset_ctl(
-                set,
+                self.waitset,
                 WaitSetOp::Add,
                 WaitSourceKind::CallReply,
                 self.endpoint,
                 0,
             );
-            if ctl < 0 {
+            if ctl < 0 && errno_from(ctl) != Errno::AlreadyExists {
                 return Err(errno_from(ctl));
             }
-            self.waitset = set;
+            self.registered = true;
         }
         Ok(self.waitset)
     }
@@ -81,7 +96,7 @@ impl BlkCall for RtBlkCall {
         _window: &mut [u8],
         deadline_ns: u64,
     ) -> Result<usize, Errno> {
-        let set = self.ensure_waitset()?;
+        let set = self.ensure_registered()?;
         let ticket =
             tairix_rt::call_post(self.endpoint, request, deadline_ns).map_err(errno_from)?;
         loop {

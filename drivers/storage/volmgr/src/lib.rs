@@ -52,6 +52,7 @@ extern crate alloc;
 pub mod name;
 pub mod plan;
 
+use tairix_abi::raid_ipc::RAID_ARRAY_COMPATIBLE;
 use tairix_abi::{DriverBindKey, HwMatchKey};
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
@@ -59,19 +60,39 @@ use tairix_abi::{DriverBindKey, HwMatchKey};
 /// drivers.
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table: the per-LUN block-service storage
-/// node the USB mass-storage class driver emits. Future hot-pluggable
-/// block sources join by adding their node's compatible key here — never
-/// by naming a bus in the engine. This `const` is the single source of
-/// truth the signed-manifest bind table is authored from (`tools/xtask`
-/// image builder) and `devmgr` resolves a discovered storage node against.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(b"tairix,usb-msd-lun") {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// This driver's hardware bind table: every block-service storage node
+/// whose volumes this policy driver owns — the per-LUN node the USB
+/// mass-storage class driver emits, and the composed-array node the RAID
+/// array composer emits. Future hot-pluggable block sources join by adding
+/// their node's compatible key here — never by naming a bus in the engine.
+/// This `const` is the single source of truth the signed-manifest bind
+/// table is authored from (`tools/xtask` image builder) and `devmgr`
+/// resolves a discovered storage node against.
+///
+/// An array is deliberately probed by the *same* driver as a leaf disk and
+/// through the same code: to this policy engine a composed array is simply a
+/// block device with geometry, so its partitions and filesystems are found,
+/// named, and attached by one implementation rather than a second one that
+/// could drift from it. That an array is several disks underneath is the
+/// composer's business, and arrays stack over arrays for free because the
+/// node an array publishes is indistinguishable in kind from a disk's.
+pub const BIND_KEYS: &[DriverBindKey] = &[
+    DriverBindKey::new(
+        BIND_PRIORITY,
+        match HwMatchKey::compatible(b"tairix,usb-msd-lun") {
+            Ok(key) => key,
+            // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
+            // too-long literal would be a compile-time const-eval error here,
+            // never a runtime panic.
+            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+        },
+    ),
+    DriverBindKey::new(
+        BIND_PRIORITY,
+        match HwMatchKey::compatible(RAID_ARRAY_COMPATIBLE) {
+            Ok(key) => key,
+            // Unreachable, as above: the shared constant is a short literal.
+            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+        },
+    ),
+];

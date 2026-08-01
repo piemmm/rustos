@@ -729,9 +729,11 @@ doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).
 ### Volume manager (automount policy) — `drivers/storage/volmgr`
 
 `tairix-drv-storage-volmgr` closes the hotplug loop (`plans/DEVICES.md`
-D3c): it is the **policy driver** `devmgr` autoloads against each per-LUN
-block-service node (compatible `tairix,usb-msd-lun`), one instance per
-node, spawned with exactly that node's blkio endpoint + shared-window
+D3c): it is the **policy driver** `devmgr` autoloads against each
+block-service node — a disk's per-LUN node (compatible
+`tairix,usb-msd-lun`) or a composed array's (`tairix,raid-array`), which
+are indistinguishable in kind — one instance per node, spawned with
+exactly that node's blkio endpoint + shared-window
 grants — the same discovery/match/grant machinery every driver uses, so
 no new kernel surface and no ambient authority (an instance can never
 reach a sibling device's transport; the per-endpoint grant gates every
@@ -766,3 +768,26 @@ staged D4 work.
 The blkio client, probe plan, and naming policy are host-proven over
 scripted devices and synthetic disk images; the live path is Pi 4 metal
 acceptance, following the `usb_msd` precedent.
+
+### RAID array composer — `drivers/storage/raid`
+
+`tairix-drv-storage-raid` is the **policy driver** that turns discovered array
+members into served arrays. It binds no hardware: `devmgr` matches it to the
+kernel's one synthetic `tairix,virtual-bus` node, so a single instance runs per
+machine whether or not a member exists. Each member disk reaches it through the
+sibling per-disk agent (`drivers/storage/raid_member`), which delegates that
+device's blkio endpoint and window to the composer's reserved rendezvous and
+parks — the parked call *is* the membership.
+
+The composer reads every offered device's superblock itself, assembles the
+array its metadata describes, and publishes it as a `tairix,raid-array` node
+carrying the array's own endpoint and window. The volume manager above binds
+that node exactly as it binds a disk's, so an array's filesystems mount through
+the unmodified path, and an array can itself be a member of another array. Each
+live array is served through the same `serve_request_recovering` engine a leaf
+device is served with, so it rides the same recovery grace window.
+
+The assembly decisions, the degraded-start re-stamp that stops a returning
+member masquerading as current, and the reserved-metadata offset that keeps a
+member's superblock out of array data are documented with the composition
+engines in the RAID library page.

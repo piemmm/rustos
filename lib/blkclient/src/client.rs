@@ -69,7 +69,7 @@ enum Access {
 }
 
 /// A [`Block`] view of one served logical unit, opened under an explicit
-/// [`Access`] stance ([`RemoteBlock::connect_read_only`] /
+/// access stance ([`RemoteBlock::connect_read_only`] /
 /// [`RemoteBlock::connect_read_write`]).
 pub struct RemoteBlock<'w, C: BlkCall> {
     call: C,

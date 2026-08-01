@@ -44,6 +44,10 @@ const EXIT_NO_TRANSPORT: i32 = 91;
 /// device fault — never merely an unrecognised layout).
 const EXIT_DEVICE_FAILED: i32 = 92;
 
+/// Exit code when the wait-set the block transport parks each reply on could
+/// not be minted — without it every wait would have to become a poll.
+const EXIT_NO_WAITSET: i32 = 93;
+
 /// Diagnostic event id: the device was probed; carries the planned and
 /// unrecognised counts.
 const VOLMGR_PROBED: EventId = EventId(4180);
@@ -234,7 +238,13 @@ fn main() -> i32 {
     let window =
         unsafe { core::slice::from_raw_parts_mut(window_base as usize as *mut u8, BLK_DATA_LEN) };
 
-    let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint), window) {
+    // The one wait-set this program's block transport parks its replies on.
+    // The kernel reclaims it when this process exits.
+    let Ok(waitset) = u64::try_from(tairix_rt::waitset_create()) else {
+        return EXIT_NO_WAITSET;
+    };
+    let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint, waitset), window)
+    {
         Ok(client) => client,
         Err(err) => {
             log_hex_event(

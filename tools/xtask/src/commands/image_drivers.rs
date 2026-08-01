@@ -109,6 +109,12 @@ pub const VOLMGR_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"volmgr", b"R
 /// binds the array-member nodes the volume manager emits.
 pub const RAID_MEMBER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"raid_member", b"Run"];
 
+/// Store path of the RAID array-composer driver bundle: class `storage`, the
+/// `raid` leaf naming the (vendor-neutral, bus-neutral) policy driver that
+/// binds the kernel's synthetic virtual bus and composes the offered members
+/// into served arrays.
+pub const RAID_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"raid", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -465,6 +471,54 @@ pub fn build_raid_member_bundle(
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_storage_raid_member::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the RAID array-composer **policy**-driver bundle.
+///
+/// Matched to the kernel's synthetic virtual bus, one instance owns the
+/// reserved rendezvous the per-disk member agents delegate to. It binds that
+/// reserved endpoint id and each composed array's own block-service endpoint
+/// and connects to each member (`CAP_IPC_ENDPOINT` plus
+/// `CAP_IPC_BIND_PRIVILEGED`, which the reserved id requires so a squatter
+/// cannot claim the rendezvous first and harvest the members' transports),
+/// maps each offered data window and creates each array's own
+/// (`CAP_SHM`), publishes the composed array as a `tairix,raid-array` storage
+/// node (`CAP_HW_EMIT`) so the volume manager mounts its filesystems through
+/// the unchanged path, and records its decisions (`CAP_LOG_EMIT`) — and
+/// nothing more. It holds **no** MMIO, DMA, IRQ, or mount authority: it never
+/// touches hardware directly and never mounts. Carries
+/// `tairix_drv_storage_raid::BIND_KEYS`, so it autoloads against the one
+/// synthetic virtual-bus node and needs no member present to start
+/// (`plans/FIX-IO.md` `IO6d`).
+///
+/// It is deliberately a separate bundle from the sibling member agent: one
+/// signed bundle grants its whole manifest's capability set to every instance
+/// loaded from it, and the agent runs once per member disk, so sharing a
+/// bundle would hand every per-disk agent this driver's privileged-bind and
+/// node-emit authority it has no need of.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_raid_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-storage-raid",
+        &[
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::SHM,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ],
+        tairix_drv_storage_raid::BIND_KEYS,
         profile,
     )
 }

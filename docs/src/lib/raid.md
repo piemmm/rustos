@@ -20,10 +20,12 @@ multi-device volumes (`drivers/filesystem/arxfs`). Neither could reach a copy
 held by the other, since one driver crate may not depend on another.
 
 The autoloaded serve process that reads each discovered device's superblock,
-assembles the members, turns those maintenance decisions into real transfers,
-and publishes the composed device as its own block-service node is designed and
-staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f); the engine, its metadata, and the
-policy are proven host-side first, as the other FIX-IO primitives were.
+assembles the members, and publishes the composed device as its own
+block-service node is the RAID array-composer driver
+(`drivers/storage/raid`), described below; turning the maintenance decisions
+into real scheduled transfers is the stage that follows it
+(`plans/FIX-IO.md` §2.6). The engine, its metadata, and the policy are proven
+host-side first, as the other FIX-IO primitives were.
 
 ## How a device reaches the composer
 
@@ -130,6 +132,60 @@ offers:
 - The member table grows fallibly (`try_reserve`): there is no member ceiling
   (`AGENTS.md` §24.1) and allocation failure is a value the caller ends the
   membership on, never a panic (§2.9).
+
+## Bringing an array online and serving it
+
+The other pure half of the composer driver (`drivers/storage/raid`,
+`service.rs`) turns those decisions into a live device. It is generic over the
+member `Block` type and takes its clock as a value, so it too is proven
+host-side over member doubles; the `Run` program supplies the real block
+clients, the syscalls, and the audit trail.
+
+`assemble_array` resolves the slot table, refuses anything
+`RaidLevel::can_serve` rejects, and builds the level's `OwnedRaidArray` through
+the shared engines. Three invariants govern it.
+
+- **A degraded start re-stamps its survivors.** If any slot is absent or
+  behind, the identity's generation is bumped and every surviving *current*
+  member's superblock is rewritten at the new generation *before* the array is
+  composed. A member that was away keeps its lower generation and therefore
+  resolves as the stale rebuild target it is on return; a member that is
+  already behind is left alone, so a rebuild target is never promoted by the
+  act of starting without it. A re-stamp that cannot be written fails the whole
+  bring-up rather than serving an array whose metadata lies about who is
+  current.
+- **A member's own metadata is not array data.** Every member is composed
+  through a `tairix_partition::PartitionBlock` view beginning at
+  `RESERVED_METADATA_BLOCKS`, so the superblock and the maintenance record sit
+  below block 0 of the view and no array read or write can reach them. A device
+  with no room beyond its reserved blocks is refused rather than composed as a
+  zero-length member.
+- **The composed array must be the array its metadata describes.** The engine
+  measures the device from the members it was handed; the identity records what
+  the array was created as. A disagreement means these disks are not that array,
+  so it is refused rather than published at whatever size the disks happen to
+  have — publishing a device shorter than the one a filesystem was made on would
+  leave every address past the end silently unreachable.
+
+Every refusal is a typed `ServiceError` and no array is ever composed short: a
+superblock that does not decode, a block size that cannot hold the record, a
+present slot whose device cannot be reached, an engine refusal, and allocation
+failure are all values the caller fails closed on.
+
+`ArrayRuntime` is one live array — its identity, its owning composed device,
+its `BlkHealth`, and the ids of the block endpoint, shared window, and
+hardware-tree node it was published on. It answers requests through the *same*
+`blkio::serve_request_recovering` engine a leaf device is served with, so an
+array rides the same recovery grace window a disk does, a member blip inside
+that window is answered reissuably, and there is no second serve path to keep
+in step.
+
+The published node carries the `tairix,raid-array` compatible key plus the
+array's endpoint and window as resources. The volume manager binds it exactly
+as it binds a disk's per-LUN node, so an array's filesystems are probed and
+mounted through the unmodified volume path — and because the node is
+indistinguishable in kind from a disk's, an array can itself be a member of
+another array with no extra machinery.
 
 ## RAID1 mirror (`MirrorArray`)
 

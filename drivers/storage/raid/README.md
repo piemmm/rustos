@@ -1,67 +1,66 @@
 # `tairix-drv-storage-raid`
 
-TAIRiX **RAID composition driver**: the autoloaded policy driver that turns
-discovered array members into served arrays (`plans/FIX-IO.md` IO6;
+TAIRiX **RAID array-composer driver**: the autoloaded policy driver that turns
+discovered array members into served arrays (`plans/FIX-IO.md` `IO6`;
 `docs/src/lib/raid.md`).
 
 The composition arithmetic is not here. The six levels, the `RaidArray`
 dispatch, the assembly bridge and the maintenance scheduler are the shared
 `lib/raid` crate, because the native filesystem's multi-device volumes drive
 the same engines. This crate is the driver: the bind table its signed bundle
-publishes, the pure decision logic, and the `Run` program the kernel spawns for
-a matched node.
+publishes, the pure decision and live-array logic, and the `Run` program the
+kernel spawns for the matched node. The per-disk agent that delegates a
+member's transport to it is the sibling crate `drivers/storage/raid_member`.
+
+Stability tier: **experimental**.
 
 ## Supported hardware
 
 None directly. It binds no device and issues no MMIO, DMA, or interrupt: it
-binds *nodes*, and the storage beneath them is reached only through the public
-block ABI by the process it hands the transport to. It is therefore
-bus-neutral and vendor-neutral by construction.
+binds the kernel's synthetic `tairix,virtual-bus` node, and every disk it
+composes is reached only through the public block ABI over a transport some
+other process already held and delegated. It is therefore bus-neutral and
+vendor-neutral by construction, and works over any device whose driver serves
+the block ABI.
 
-## The member agent
+## What it does
 
-An array is several block devices driven as one, so one process must hold
-client authority over every member at once. A driver is spawned for exactly one
-matched hardware-tree node and receives exactly that node's resource grants, so
-no process is born able to reach a whole array. The member agent closes that
-gap without widening anyone's authority.
+One instance runs per machine. The kernel's hardware-tree bootstrap publishes
+exactly one synthetic virtual bus, so `devmgr` matches this driver to exactly
+one node and the composer starts whether or not any array member exists yet.
 
-Matched to a `tairix,raid-member` node — the node the volume manager emits for
-a device whose own first block probed as array metadata — one instance:
+1. It binds the reserved rendezvous endpoint and waits. Each per-disk member
+   agent delegates its device's block endpoint and data window there and posts
+   a `MemberOffer` naming them.
+2. For each offer it maps the window, connects a read/write block client, and
+   **reads that device's own superblock itself**. A member node says only
+   "look here": which array a device belongs to, which slot it fills and how
+   current it is are read off the disk, never taken from the offering agent.
+3. The registered members feed `MemberRegistry`, whose `next_action` says what
+   to do: assemble a ready array, place a member that turned up late into an
+   array already serving, or wait until a deadline.
+4. An array it assembles gets its own block-service endpoint and shared data
+   window, and is published as a `tairix,raid-array` storage node carrying
+   both. The volume manager binds that node exactly as it binds a disk's, so
+   the array's filesystems mount through the unchanged path — and an array can
+   itself become a member of another array, because its node is
+   indistinguishable in kind from a disk's.
+5. It then serves every live array's block requests through the same
+   fault-aware engine a leaf device is served with, so an array is as
+   fault-aware as a disk and there is no second serve path.
 
-1. Resolves its two grants: the device's block-service call endpoint and its
-   shared data window.
-2. **Delegates** both to the array composer's reserved rendezvous
-   (`call_grant`, `shm_grant`) and posts a `MemberOffer` naming them.
-3. Holds the membership open. The composer answers only when the membership
-   ends, so one outstanding call carries the whole lifecycle: the agent parks
-   on the reply, and the composer's endpoint being torn down cancels the call
-   and wakes it.
-4. On a release or a vanished composer, offers again on a bounded escalating
-   cadence. On a refusal it stops: that verdict came from reading the device
-   itself, so the same unchanged device would only reach it again.
+The membership is the agent's own parked call: an accepted member's offer is
+held open and answered only when the membership ends, so no separate liveness
+protocol exists. A member the registry refuses is answered at once.
 
-Nothing polls: the reply and the cancellation are events, and the only timed
-wait is the paced re-offer when no composer is listening yet. The pacing is the
-shared `tairix_raid::RetryCadence`, the same escalation an array uses to
-re-probe a faulted member, so the two cannot drift.
+Nothing polls. One wait-set carries the rendezvous and every live array's
+endpoint, and the single park's timeout is the soonest of the registry's
+settle/backoff deadline and the arrays' recovery grace windows.
 
-The agent never reads or writes the device. Which array a device belongs to,
-which slot it holds and which generation it last saw are read from the device
-itself by the composer, through the shared on-disk metadata definition — never
-taken from the agent, which is an ordinary user-space process.
-
-## The composer's assembly decisions
-
-The other half of the same binary is the composer every agent delegates to. Its
-*judgement* — which offered devices form which array, and when an array may be
-brought online — is where the data-integrity risk lives, so it is pure logic
-(`src/compose.rs`, `MemberRegistry`) driven by a caller-supplied monotonic
-clock and proven host-side over member doubles; the live half reads a device's
-superblock, hands it in, and does what `next_action` says.
+## Data-integrity rules
 
 Two failures are possible and both lose data, so the rules that avoid them live
-in one place:
+in one place.
 
 - **An array that cannot answer for itself is never published.** A stripe
   missing a member, or a RAID5 missing two, has holes no redundancy can fill.
@@ -76,68 +75,109 @@ in one place:
   with `BlkDeviceClass::most_patient`), and it runs from the array's first
   member, so widening it for a slow disk can never become an indefinite
   postponement.
+- **A degraded start re-stamps its survivors.** When an array comes online with
+  any slot absent or behind, its generation is bumped and every surviving
+  current member's superblock is rewritten at the new generation before the
+  array is composed. A member that was away therefore keeps its lower
+  generation and resolves as the stale rebuild target it is — it can never come
+  back masquerading as up to date. A re-stamp that cannot be written fails the
+  whole bring-up rather than serving an array whose metadata lies.
+- **A member's own metadata is not array data.** Every member is composed
+  through a `tairix_partition::PartitionBlock` view that begins past the
+  reserved metadata blocks, so no array read or write can reach the superblock
+  or the maintenance record beneath it.
+- **The composed array must be the array its metadata describes.** The
+  composition engine measures the device from the members it was handed; the
+  identity records what the array was created as. A disagreement means these
+  disks are not that array, so it is refused rather than published at whatever
+  size the disks happen to have — publishing a device shorter than the one a
+  filesystem was made on would leave every address past the end silently
+  unreachable.
 
 A member the authoritative shape does not place — one contradicting the array's
 width, or losing a slot contest to a fresher copy — is held unused rather than
 refused: a later, fresher member can legitimately redefine the array, and
 refusing would let one corrupt disk evict a healthy one from consideration. A
-member that turns up after the array started degraded is placed into the live
-array as the in-sync or stale copy its own generation counter says it is, never
-into a slot a serving member already holds. A refused assembly escalates the
-shared `RetryState` instead of being retried at once, every wait is a deadline
-strictly in the future, and the member table grows fallibly, so there is no
-member ceiling and allocation failure is a value rather than a panic.
+refused assembly escalates the shared `RetryState` instead of being retried at
+once, every wait is a deadline strictly in the future, and every table grows
+fallibly, so there is no member ceiling and allocation failure is a value
+rather than a panic.
 
 ## Required capabilities
 
-The member agent holds `CAP_IPC_ENDPOINT` (delegate its one granted block
-endpoint and post the offer), `CAP_SHM` (delegate its one granted data window),
-and `CAP_LOG_EMIT` (diagnostics). No MMIO, DMA, IRQ, node-emission, or mount
-authority, and no filesystem access.
+Five, and no more. It holds **no** MMIO, DMA, IRQ, or mount authority: it never
+touches hardware directly and never mounts a filesystem.
 
-Two properties bound what a compromised agent could do. It can delegate only a
-resource it already holds a grant for, so it can never hand over another
-device's transport; and the rendezvous id is reserved, so only a holder of
-`CAP_IPC_BIND_PRIVILEGED` can be on the receiving end. Without that second
-gate an unprivileged squatter that claimed the id first would be handed
-read/write authority over every array member on the machine as each agent
-delegated to it in turn.
+- `CAP_IPC_ENDPOINT` — own the rendezvous the agents offer to and each composed
+  array's own block-service endpoint, and issue block calls on each member's
+  delegated endpoint.
+- `CAP_IPC_BIND_PRIVILEGED` — the rendezvous id is **reserved**, and binding a
+  reserved id needs this. It is the gate that stops an unprivileged squatter
+  claiming the id first and being handed read/write authority over every array
+  member on the machine as each agent delegates to it in turn. It buys nothing
+  else: the per-array endpoints are ordinary ids.
+- `CAP_SHM` — map each member's delegated data window and create each array's
+  own, the buffers every block transfer is staged through.
+- `CAP_HW_EMIT` — publish the composed array as a storage node so the volume
+  manager finds it. The node can only forward transport the composer itself
+  created or was granted, so the emission widens no one's authority.
+- `CAP_LOG_EMIT` — record each admission, refusal, publication and degraded
+  start.
+
+It is deliberately its own bundle, separate from the sibling member agent: one
+signed bundle grants its whole manifest's capability set to every instance
+loaded from it, and the agent runs once per member disk, so a shared bundle
+would hand every per-disk agent this driver's privileged-bind and node-emit
+authority it has no need of.
+
+## Limitations
+
+- Rebuilding a member placed into a degraded live array, and promoting it back
+  to current when the rebuild finishes, is the maintenance stage that follows
+  (`plans/FIX-IO.md` `IO6e`); a returning member is placed and rebuilt from the
+  survivors by the composition engines, but the composer does not yet drive a
+  scheduled resync pass.
+- A member is never released once admitted, so a device that vanishes leaves
+  its slot held until the composer restarts.
+- Arrays are discovered from member metadata only. There is no creation or
+  administration surface here; an array is created by writing its members'
+  superblocks.
 
 ## Runtime load and unload
 
-Loadable and unloadable at runtime like any other bundle. The instance's
-lifetime is its member's presence: when the device goes, its node goes, and
-`devmgr` unloads the instance. While the device is there, the agent is what
-lets a restarted composer reassemble the array without a reboot.
+Loadable and unloadable at runtime like any other bundle. Unloading tears down
+the rendezvous, which cancels every parked membership and wakes each agent to
+re-offer, so a restarted composer reassembles every array without a reboot.
 
 ## Tests
 
-The agent's lifecycle is proven host-side over its pure decision logic
-(`src/agent/tests.rs`): the first offer is immediate, a delivered offer parks
-with no deadline, an undelivered one is paced and escalates to a bounded
-ceiling, a release and a vanished composer both lead to a re-offer, a refusal
-stops the agent for good, and a successful offer clears a previous outage's
-escalation. The escalation arithmetic underneath is proven once in `lib/raid`.
+The composer's decisions are proven host-side over member doubles
+(`src/compose/tests.rs`): a complete array is composed with no wait at all
+while an incomplete one settles first; the settle window is read from the
+members' own declared classes and widens to the slowest of them without
+restarting; an array its members cannot serve is never brought online; composing
+one array marks only its own members; a member that turns up late joins the
+array already serving as the stale rebuild target it is; a stale claimant of an
+occupied slot and a member that disagrees about the array's shape are both held
+unused rather than refused; a refused assembly backs off and escalates; and
+releasing the last member forgets the array.
 
-The composer's decisions are proven the same way (`src/compose/tests.rs`): a
-complete array is composed with no wait at all while an incomplete one settles
-first; the settle window is read from the members' own declared classes and
-widens to the slowest of them without restarting; an array its members cannot
-serve — a punctured stripe, a twice-punctured RAID5 — is never brought online
-and asks for no deadline; composing one array marks only its own members; a
-member that turns up late joins the array already serving as the stale rebuild
-target it is; a stale claimant of an occupied slot and a member that disagrees
-about the array's shape are both held unused rather than refused; a refused
-assembly backs off and escalates; and releasing the last member forgets the
-array. The reassembly and escalation arithmetic underneath is proven once in
-`lib/raidmeta` and `lib/raid`.
+The live half is proven the same way (`src/service/tests.rs`): a member's
+metadata is read back from its own first block; a device that cannot report its
+geometry is neither read nor written; a block size that cannot stage the record
+fails closed; a device with no valid metadata is refused rather than guessed at;
+a complete array starts clean and leaves every member's metadata alone; a
+degraded start records a new generation on every surviving member; a survivor
+that cannot be re-stamped fails the whole bring-up closed; a member the metadata
+proved stale joins as a rebuild target; an array its members cannot serve is
+never composed; a present slot whose device cannot be supplied, a member with
+nothing past its metadata, and an array that is not the size its own metadata
+records are each refused; a member's reserved metadata is never reachable as
+array data; a member of another array is never drawn into this one; and the live
+runtime answers block requests through the shared serve engine, refuses a
+malformed one without touching the array's health, reports the ids it was
+published on, and places a returning member past its own metadata exactly once,
+refusing a slot outside the array or a device too small for its own metadata.
 
-The live path — a real delegation to a real composer — arrives with the
-composer's serving half (`plans/FIX-IO.md` IO6d) and its QEMU vertical.
-
-## Scope
-
-The member agent and the composer's assembly decisions. The composer's live
-half — matched to the synthetic virtual bus, connecting to each offered device,
-composing each array through the shared engines and publishing it as its own
-block-service node — is staged as IO6d onward in `plans/FIX-IO.md` §2.6.
+The reassembly, escalation and composition arithmetic underneath is proven once
+in `lib/raidmeta` and `lib/raid`.

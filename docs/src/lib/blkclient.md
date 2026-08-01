@@ -57,6 +57,22 @@ on a `CallReply` wait-set rather than a busy poll when a reply is not yet
 ready. A wedged device therefore fails a transfer closed at its deadline
 instead of parking the caller forever.
 
+That wait-set is the **caller's**, supplied to `RtBlkCall::new(endpoint,
+waitset)`. A wait-set is reclaimed only when its owning process exits, so a
+transport that minted one for itself would strand a kernel object per
+instance. That is invisible in a run-to-completion consumer like the volume
+manager, which opens exactly one transport and then exits — but the RAID
+composer is long-lived and reconnects a member device on *every* assembly
+attempt, so a self-minting transport would leak a wait-set per attempt and an
+array that can never be assembled would drive that leak on its backoff timer
+indefinitely. Taking the set from the caller makes it part of that process's
+own one-time setup whatever its shape, and lets a single set carry every
+member of a multi-device consumer. The transport adds its endpoint's
+`CallReply` member on first use and treats an already-present membership as
+success, so several transports may legitimately share one set; readiness is
+level-triggered, so a wake caused by an unrelated member simply re-checks and
+parks again, and no wake is consumed away from the set's owner.
+
 `RtBlkCall` builds on `tairix-rt`'s syscall wrappers, which themselves
 build cleanly on the host (the underlying syscall trap fails closed with a
 sentinel there rather than requiring a live kernel), so this crate needs no

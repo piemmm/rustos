@@ -181,6 +181,7 @@ tairix-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", v
 tairix-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
 tairix-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
 tairix-drv-storage-raid-member = { path = "../../drivers/storage/raid_member", version = "=0.0.0" }
+tairix-drv-storage-raid = { path = "../../drivers/storage/raid", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump
 # assert compares the dumped scan-out against the theme's own desktop
 # colour, so the expected pixels have one definition (never a literal).
