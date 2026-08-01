@@ -59,15 +59,17 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, Key, NamedKey};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::collection::{Card, CardAction, ListRow, Panel, PanelAction, RowAction};
+use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
 use crate::paint::{clamp_permille, to_i32};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
@@ -77,18 +79,23 @@ use crate::state::{
     RecoveryState, WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 use crate::tabs::{Tab, Tabs, TabsAction};
+use crate::text::{TextAction, TextField};
 use crate::window::{
     FrameLayout, FurniturePart, ResizeEvent, ResizeGrabber, ScrollCorner, TitleBarEvent,
     WindowFrame,
 };
 
-/// One of Switchboard's four top-level sections (spec §17).
+/// One of Switchboard's six top-level sections (spec §17).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Section {
     /// Live application/task list.
     Tasks,
     /// Background jobs with known or working progress.
     Jobs,
+    /// Resource-pressure causes and their recommended relief actions.
+    Pressure,
+    /// Grouped tasks that move, pause, and close together.
+    Activities,
     /// Hung objects and their recovery actions.
     Recovery,
     /// Resource, service, and system-action overview.
@@ -97,9 +104,11 @@ pub enum Section {
 
 impl Section {
     /// The sections in tab order.
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 6] = [
         Section::Tasks,
         Section::Jobs,
+        Section::Pressure,
+        Section::Activities,
         Section::Recovery,
         Section::Overview,
     ];
@@ -110,8 +119,10 @@ impl Section {
         match self {
             Section::Tasks => 0,
             Section::Jobs => 1,
-            Section::Recovery => 2,
-            Section::Overview => 3,
+            Section::Pressure => 2,
+            Section::Activities => 3,
+            Section::Recovery => 4,
+            Section::Overview => 5,
         }
     }
 
@@ -127,6 +138,8 @@ impl Section {
         match self {
             Section::Tasks => "Tasks",
             Section::Jobs => "Jobs",
+            Section::Pressure => "Pressure",
+            Section::Activities => "Activities",
             Section::Recovery => "Recovery",
             Section::Overview => "Overview",
         }
@@ -157,6 +170,9 @@ pub struct TaskSummary {
     /// Whether the caller may perform the row action. A false value renders
     /// the action denied (Authority Mark) and fails closed on activation.
     pub action_allowed: bool,
+    /// The activity this task is grouped into, as an index into
+    /// [`SwitchboardModel::activities`]; `None` when it is ungrouped.
+    pub group: Option<usize>,
 }
 
 /// One background job with known or working progress (spec §17).
@@ -309,6 +325,141 @@ pub struct SystemAction {
     pub allowed: bool,
 }
 
+/// The typed outcome of checking whether an action may be performed, mapped
+/// to exactly one [`ControlState`] (spec §13) so every Switchboard action
+/// verdict — however it was reached — renders and fails closed the same way.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ActionVerdict {
+    /// The action is available.
+    Ready,
+    /// The object's own state makes the action invalid right now.
+    DisabledByState,
+    /// The caller lacks the authority to perform the action.
+    DeniedByAuthority,
+}
+
+impl ActionVerdict {
+    /// The one [`ControlState`] this verdict renders and fails closed as:
+    /// [`ActionVerdict::Ready`] is idle and interactive,
+    /// [`ActionVerdict::DisabledByState`] is a plain disabled control, and
+    /// [`ActionVerdict::DeniedByAuthority`] carries the Authority Mark.
+    #[must_use]
+    pub const fn to_state(self) -> ControlState {
+        match self {
+            ActionVerdict::Ready => ControlState::idle(),
+            ActionVerdict::DisabledByState => ControlState::disabled(),
+            ActionVerdict::DeniedByAuthority => {
+                ControlState::idle().with_authority(AuthorityState::NeedsCapability)
+            }
+        }
+    }
+}
+
+/// A relief action a Switchboard pressure card can recommend or offer
+/// (spec `plans/NEW-TASKBAR.md` T12).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PressureControl {
+    /// Pause the culprit.
+    Pause,
+    /// Lower the culprit's scheduling priority.
+    LowerPriority,
+    /// Show the culprit on the Tasks section, focused.
+    ShowTasks,
+}
+
+/// One footer action on a pressure [`Card`] (spec T12).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PressureAction {
+    /// The action's button label.
+    pub label: String,
+    /// Which relief action this is.
+    pub control: PressureControl,
+    /// Whether the action is available, and if not, why.
+    pub verdict: ActionVerdict,
+    /// Whether this is the model's recommended action (Action Warmth,
+    /// [`ControlRole::Recommended`]); every other action stays
+    /// [`ControlRole::Neutral`].
+    pub recommended: bool,
+}
+
+/// One cause of resource pressure, shown as a Pressure section [`Card`]
+/// (spec T12).
+///
+/// The card's title is [`culprit`](Self::culprit) and its body is
+/// [`cause`](Self::cause); its leading rail and heat seam come from `kind`
+/// and `activity`, and its footer is one [`Button`] per
+/// [`action`](Self::actions).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PressureCause {
+    /// The pressured resource's display name (e.g. "Memory").
+    pub resource: String,
+    /// Which resource this is, driving the card's semantic Pressure Rail.
+    pub kind: PressureKind,
+    /// The object responsible, in plain language (the card's title).
+    pub culprit: String,
+    /// A plain-language explanation of the pressure (the card's body).
+    pub cause: String,
+    /// The culprit's live rate of work, drawn as the card's Heat Seam.
+    pub activity: ActivityState,
+    /// The culprit's index within [`SwitchboardModel::tasks`], if it is a
+    /// task, so [`PressureControl::ShowTasks`] can focus it.
+    pub task_index: Option<usize>,
+    /// The recommended and alternative relief actions.
+    pub actions: Vec<PressureAction>,
+}
+
+/// An action a Switchboard activity header row can request (spec T12).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ActivityControl {
+    /// Switch to the activity.
+    Switch,
+    /// Pause every member of the activity.
+    Pause,
+    /// Resume every member of the activity.
+    Resume,
+    /// Close the activity and every member.
+    Close,
+}
+
+/// One task grouped into an [`ActivitySummary`] (spec T12).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivityMember {
+    /// The member's display name.
+    pub name: String,
+    /// A short trailing detail (e.g. owner, CPU%).
+    pub detail: String,
+    /// The member's live activity, drawn as its own Heat Seam.
+    pub activity: ActivityState,
+}
+
+/// One activity: a named group of tasks that move, pause, and close together
+/// (spec T12).
+///
+/// Rendered as a header [`ListRow`] plus one [`ListRow`] per
+/// [`member`](Self::members), indented beneath it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivitySummary {
+    /// A stable identity for this activity, independent of its position in
+    /// the list, so an in-flight rename can survive a refresh that reorders
+    /// or shortens [`SwitchboardModel::activities`].
+    pub id: u64,
+    /// The activity's display name.
+    pub name: String,
+    /// A short trailing detail (e.g. member count).
+    pub detail: String,
+    /// The activity's combined live activity, drawn as the header's Heat
+    /// Seam.
+    pub activity: ActivityState,
+    /// Whether every member is currently paused.
+    pub paused: bool,
+    /// Whether the caller may pause/resume/close this activity.
+    pub can_control: bool,
+    /// Whether another task may still be grouped into this activity.
+    pub can_accept_member: bool,
+    /// The activity's member tasks.
+    pub members: Vec<ActivityMember>,
+}
+
 /// The complete typed model Switchboard renders (spec §17).
 ///
 /// It is one sample of a moving system, not a lasting handle: the caller hands
@@ -336,6 +487,13 @@ pub struct SwitchboardModel {
     pub services: Vec<ServiceSummary>,
     /// The system-level actions.
     pub system_actions: Vec<SystemAction>,
+    /// The resource-pressure causes and their recommended relief actions.
+    pub pressure: Vec<PressureCause>,
+    /// The activities: named groups of tasks that move, pause, and close
+    /// together.
+    pub activities: Vec<ActivitySummary>,
+    /// Whether the caller may group a task into a new activity.
+    pub can_create_activity: bool,
 }
 
 impl SwitchboardModel {
@@ -357,6 +515,9 @@ impl SwitchboardModel {
             resources: Vec::new(),
             services: Vec::new(),
             system_actions: Vec::new(),
+            pressure: Vec::new(),
+            activities: Vec::new(),
+            can_create_activity: true,
         }
     }
 }
@@ -449,6 +610,39 @@ pub enum SwitchboardAction {
         /// The new first-visible item index.
         offset: u64,
     },
+    /// A pressure cause's relief action was invoked.
+    Pressure {
+        /// The cause's index within the model.
+        index: usize,
+        /// Which relief action.
+        control: PressureControl,
+    },
+    /// A task was grouped into an activity, or into a newly created one.
+    TaskGrouped {
+        /// The task's index within the model.
+        task: usize,
+        /// The activity's index within the model, or `None` to create a new
+        /// activity containing just this task.
+        activity: Option<usize>,
+    },
+    /// A task was removed from its activity.
+    TaskUngrouped {
+        /// The task's index within the model.
+        task: usize,
+    },
+    /// An activity's action was invoked.
+    Activity {
+        /// The activity's index within the model.
+        index: usize,
+        /// Which activity action.
+        control: ActivityControl,
+    },
+    /// An activity's inline rename was committed. The new name is read with
+    /// [`Switchboard::submitted_activity_name`].
+    ActivityRenamed {
+        /// The activity's index within the model.
+        index: usize,
+    },
 }
 
 // --- Internal control state ------------------------------------------------
@@ -462,19 +656,27 @@ const SYSTEM_PANEL_TITLE: &str = "System";
 /// A permitted action is interactive; a refused one is
 /// [`AuthorityState::NeedsCapability`] so it renders with the Authority Mark
 /// and fails closed on activation, never collapsing to a plain disabled look.
+/// The one mapping every action verdict renders through is
+/// [`ActionVerdict::to_state`]; this is simply its `bool` shorthand.
 fn action_state(allowed: bool) -> ControlState {
     if allowed {
-        ControlState::idle()
+        ActionVerdict::Ready.to_state()
     } else {
-        ControlState::idle().with_authority(AuthorityState::NeedsCapability)
+        ActionVerdict::DeniedByAuthority.to_state()
     }
 }
 
-/// One task rendered as a [`ListRow`] plus its single action [`Button`].
+/// One task rendered as a [`ListRow`] plus its primary action [`Button`] and
+/// its `Group` [`Button`] (which opens the Group popup menu).
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TaskEntry {
     row: ListRow,
     action: Button,
+    group_button: Button,
+    /// The task's activity, as of the last [`Switchboard::adopt`], mirroring
+    /// [`TaskSummary::group`] so the Group popup can be built without the
+    /// model.
+    group: Option<usize>,
 }
 
 /// One recovery object rendered as a [`ListRow`] plus Restart and Force
@@ -500,6 +702,71 @@ struct ResourceEntry {
 struct ServiceEntry {
     row: ListRow,
     action: Button,
+}
+
+/// One pressure cause rendered as a [`Card`], plus the cause's own relief
+/// actions so a footer activation can be mapped back to its
+/// [`ActionVerdict`] and [`PressureControl`] without the model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PressureEntry {
+    card: Card,
+    actions: Vec<PressureAction>,
+    task_index: Option<usize>,
+}
+
+/// One activity rendered as a header [`ListRow`] plus its Switch/Pause-or-
+/// Resume/Rename/Close [`Button`]s, and one [`ListRow`] per member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActivityEntry {
+    id: u64,
+    name: String,
+    detail: String,
+    activity: ActivityState,
+    header: ListRow,
+    switch: Button,
+    pause_resume: Button,
+    rename: Button,
+    close: Button,
+    paused: bool,
+    can_control: bool,
+    can_accept_member: bool,
+    members: Vec<ListRow>,
+}
+
+/// Which row a flattened Activities-section list index names: an activity's
+/// own header row, or one of its member rows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ActivityRow {
+    /// The header row of the activity at this index.
+    Header(usize),
+    /// A member row: the owning activity's index, then the member's index
+    /// within it.
+    Member(usize, usize),
+}
+
+/// The Group popup [`Menu`], anchored on a Tasks row's `Group` button.
+///
+/// It names the task by index rather than by a captured screen rectangle: the
+/// anchor rectangle is re-derived from the current layout every time the
+/// popup is rendered or hit-tested, so it never goes stale across a resize —
+/// and it needs no bounds/scale/theme to open from the keyboard, which
+/// [`Switchboard::on_key`] cannot supply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GroupPopup {
+    task: usize,
+    menu: Menu,
+}
+
+/// An in-flight inline rename of an activity's header row.
+///
+/// `id` is the activity's stable identity (spec T12): a model refresh that
+/// still has an activity with this `id` relocates `index` to match, so typing
+/// survives a refresh unless the activity itself is gone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenameEdit {
+    id: u64,
+    index: usize,
+    field: TextField,
 }
 
 /// Which region of the composition currently holds keyboard focus, cycled by
@@ -561,12 +828,22 @@ pub struct Switchboard {
     recovery: Vec<RecoveryEntry>,
     resources: Vec<ResourceEntry>,
     services: Vec<ServiceEntry>,
+    pressure: Vec<PressureEntry>,
+    activities: Vec<ActivityEntry>,
+    can_create_activity: bool,
     panel: Panel,
     section: Section,
-    offsets: [u64; 4],
+    offsets: [u64; 6],
     focus: FocusRegion,
     content_focus: usize,
+    /// Which of the focused row's/card's several buttons is keyboard-focused
+    /// (Left/Right cycles it; Enter activates it). Reset whenever
+    /// `content_focus` or `section` changes.
+    row_action: usize,
     pointer: Point,
+    group_popup: Option<GroupPopup>,
+    rename: Option<RenameEdit>,
+    submitted_activity_name: Option<String>,
 }
 
 impl Switchboard {
@@ -599,12 +876,19 @@ impl Switchboard {
             recovery: Vec::new(),
             resources: Vec::new(),
             services: Vec::new(),
+            pressure: Vec::new(),
+            activities: Vec::new(),
+            can_create_activity: true,
             panel: Panel::new(SYSTEM_PANEL_TITLE),
             section: Section::Tasks,
-            offsets: [0; 4],
+            offsets: [0; 6],
             focus: FocusRegion::Content,
             content_focus: 0,
+            row_action: 0,
             pointer: Point::ORIGIN,
+            group_popup: None,
+            rename: None,
+            submitted_activity_name: None,
         };
         switchboard
             .frame
@@ -695,14 +979,46 @@ impl Switchboard {
                 .map(Self::build_system_button)
                 .collect(),
         );
+        self.pressure = model
+            .pressure
+            .into_iter()
+            .map(Self::build_pressure)
+            .collect();
+        self.activities = model
+            .activities
+            .into_iter()
+            .map(Self::build_activity)
+            .collect();
+        self.can_create_activity = model.can_create_activity;
+
+        // The Group popup only ever anchors on a Tasks row, and every section
+        // change already drops it; a refresh drops it too, rather than
+        // re-validating a menu built from the now-superseded activity list.
+        self.group_popup = None;
+
+        // An in-flight rename survives a refresh only as long as its activity
+        // still exists, re-located by stable id — never by its old position,
+        // which a refresh may have shifted or removed entirely (fail closed).
+        self.rename = self.rename.take().and_then(|edit| {
+            self.activities
+                .iter()
+                .position(|a| a.id == edit.id)
+                .map(|index| RenameEdit {
+                    id: edit.id,
+                    index,
+                    field: edit.field,
+                })
+        });
+        self.submitted_activity_name = None;
 
         self.content_focus = self
             .content_focus
             .min(self.active_count().saturating_sub(1));
+        self.row_action = 0;
         self.apply_focus_marks();
     }
 
-    /// Build a task's row + action button.
+    /// Build a task's row + primary action button + Group button.
     fn build_task(task: TaskSummary) -> TaskEntry {
         let state = ControlState::idle()
             .with_pressure(task.pressure)
@@ -713,7 +1029,114 @@ impl Switchboard {
             .with_state(state);
         let mut action = Button::labelled(task.action);
         action.set_state(action_state(task.action_allowed));
-        TaskEntry { row, action }
+        let group_button = Button::labelled("Group");
+        TaskEntry {
+            row,
+            action,
+            group_button,
+            group: task.group,
+        }
+    }
+
+    /// Build a pressure cause's card, with one footer button per relief
+    /// action.
+    fn build_pressure(cause: PressureCause) -> PressureEntry {
+        let PressureCause {
+            resource: _,
+            kind,
+            culprit,
+            cause: cause_text,
+            activity,
+            task_index,
+            actions,
+        } = cause;
+        let footer = actions
+            .iter()
+            .map(|action| {
+                let role = if action.recommended {
+                    ControlRole::Recommended
+                } else {
+                    ControlRole::Neutral
+                };
+                let mut button = Button::new(ButtonContent::Label(action.label.clone()), role);
+                button.set_state(action.verdict.to_state());
+                button
+            })
+            .collect();
+        let card = Card::new(culprit)
+            .with_body(cause_text)
+            .with_state(
+                ControlState::idle()
+                    .with_pressure(PressureState::Under(kind))
+                    .with_activity(activity),
+            )
+            .with_footer(footer);
+        PressureEntry {
+            card,
+            actions,
+            task_index,
+        }
+    }
+
+    /// Build an activity's header row + Switch/Pause-or-Resume/Rename/Close
+    /// buttons, and one row per member.
+    fn build_activity(summary: ActivitySummary) -> ActivityEntry {
+        let header = Self::build_activity_header(&summary.name, &summary.detail, summary.activity);
+        let switch = Button::new(
+            ButtonContent::Label(String::from("Switch")),
+            ControlRole::Primary,
+        );
+        let gated = if summary.can_control {
+            ActionVerdict::Ready
+        } else {
+            ActionVerdict::DeniedByAuthority
+        };
+        let mut pause_resume = Button::labelled(if summary.paused { "Resume" } else { "Pause" });
+        pause_resume.set_state(gated.to_state());
+        let rename = Button::labelled("Rename");
+        let mut close = Button::new(
+            ButtonContent::Label(String::from("Close")),
+            ControlRole::Destructive,
+        );
+        close.set_state(if summary.can_control {
+            ControlState::idle().with_authority(AuthorityState::NeedsConfirmation)
+        } else {
+            ActionVerdict::DeniedByAuthority.to_state()
+        });
+        let members = summary
+            .members
+            .into_iter()
+            .map(|member| {
+                ListRow::new(member.name)
+                    .with_trailing(member.detail)
+                    .with_state(ControlState::idle().with_activity(member.activity))
+            })
+            .collect();
+        ActivityEntry {
+            id: summary.id,
+            name: summary.name,
+            detail: summary.detail,
+            activity: summary.activity,
+            header,
+            switch,
+            pause_resume,
+            rename,
+            close,
+            paused: summary.paused,
+            can_control: summary.can_control,
+            can_accept_member: summary.can_accept_member,
+            members,
+        }
+    }
+
+    /// Build (or rebuild, after a rename commit) an activity header row from
+    /// its name, trailing detail, and live activity — the one place that
+    /// composes a header [`ListRow`], so a rename can never drift from how
+    /// [`build_activity`](Self::build_activity) first built it.
+    fn build_activity_header(name: &str, detail: &str, activity: ActivityState) -> ListRow {
+        ListRow::new(name)
+            .with_trailing(detail)
+            .with_state(ControlState::idle().with_activity(activity))
     }
 
     /// Build a background-job card with its footer actions.
@@ -803,6 +1226,16 @@ impl Switchboard {
     #[must_use]
     pub fn scroll_offset(&self) -> u64 {
         self.offsets[self.section.index()]
+    }
+
+    /// The name committed by the most recent inline activity rename.
+    ///
+    /// `Some` from the [`SwitchboardAction::ActivityRenamed`] emission until
+    /// the next [`set_model`](Switchboard::set_model), mirroring how a host
+    /// reads a committed [`TextField::text`] before refreshing its model.
+    #[must_use]
+    pub fn submitted_activity_name(&self) -> Option<&str> {
+        self.submitted_activity_name.as_deref()
     }
 
     /// Show `section`, as if its tab had been pressed, and report the change.
@@ -1012,6 +1445,16 @@ impl Switchboard {
                 item_h: Self::card_item_height(scale, theme),
                 count: self.jobs.len(),
             },
+            Section::Pressure => ListInfo {
+                list_rect: content,
+                item_h: Self::card_item_height(scale, theme),
+                count: self.pressure.len(),
+            },
+            Section::Activities => ListInfo {
+                list_rect: content,
+                item_h: Self::row_item_height(scale, theme),
+                count: self.total_activity_rows(),
+            },
             Section::Recovery => ListInfo {
                 list_rect: content,
                 item_h: Self::row_item_height(scale, theme),
@@ -1080,9 +1523,35 @@ impl Switchboard {
         match self.section {
             Section::Tasks => self.tasks.len(),
             Section::Jobs => self.jobs.len(),
+            Section::Pressure => self.pressure.len(),
+            Section::Activities => self.total_activity_rows(),
             Section::Recovery => self.recovery.len(),
             Section::Overview => self.services.len(),
         }
+    }
+
+    /// The flattened row count of the Activities section: one header row per
+    /// activity plus one row per member.
+    fn total_activity_rows(&self) -> usize {
+        self.activities.iter().map(|a| 1 + a.members.len()).sum()
+    }
+
+    /// The activity row a flattened Activities-section index names — its
+    /// owning activity's header, or one of its members — or `None` past the
+    /// end of the flattened list.
+    fn activity_row_at(&self, index: usize) -> Option<ActivityRow> {
+        let mut remaining = index;
+        for (ai, entry) in self.activities.iter().enumerate() {
+            if remaining == 0 {
+                return Some(ActivityRow::Header(ai));
+            }
+            remaining -= 1;
+            if remaining < entry.members.len() {
+                return Some(ActivityRow::Member(ai, remaining));
+            }
+            remaining -= entry.members.len();
+        }
+        None
     }
 
     /// Re-range the scrollbar over `count` items in a `viewport` of whole
@@ -1111,6 +1580,62 @@ impl Switchboard {
         let layout = self.compute_layout(bounds, scale, theme, font);
         let info = self.list_info(&layout, scale, theme);
         self.set_scroll_range(info.count, u64::from(info.visible()));
+    }
+
+    /// The Group popup's anchor rectangle: the Tasks row `task`'s `Group`
+    /// button, re-derived from the current layout and scroll offset every
+    /// time, so it can never go stale across a resize or a scroll.
+    ///
+    /// A `task` scrolled out of view (the popup stays open while the list
+    /// keeps scrolling) has no rectangle to anchor on; the content area's own
+    /// rectangle is used instead so the popup still lands somewhere inside
+    /// the window (fail closed, never a panic).
+    fn group_anchor_rect(
+        &self,
+        task: usize,
+        layout: &SbLayout,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Rect {
+        let info = self.list_info(layout, scale, theme);
+        let start = usize::try_from(self.offsets[Section::Tasks.index()]).unwrap_or(0);
+        if let Some(slot) = task.checked_sub(start) {
+            if let Ok(slot) = u32::try_from(slot) {
+                if slot < info.visible() {
+                    let (_, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+                    if let Some(rect) = buttons.get(1) {
+                        return *rect;
+                    }
+                }
+            }
+        }
+        layout.content
+    }
+
+    /// The Group popup's on-screen rectangle: `menu`'s preferred size, placed
+    /// below `anchor` (or above it when there is no room below), clamped
+    /// inside `bounds` so it never draws outside the window.
+    fn popup_rect(
+        menu: &Menu,
+        anchor: Rect,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Rect {
+        let w = menu.preferred_width(scale, theme, font).min(bounds.width);
+        let h = menu.preferred_height(scale, theme).min(bounds.height);
+        let max_x = bounds.left().max(bounds.right() - to_i32(w));
+        let x = anchor.left().clamp(bounds.left(), max_x);
+        let below = anchor.bottom();
+        let y = if below + to_i32(h) <= bounds.bottom() {
+            below
+        } else {
+            (anchor.top() - to_i32(h)).max(bounds.top())
+        };
+        let max_y = bounds.top().max(bounds.bottom() - to_i32(h));
+        let y = y.clamp(bounds.top(), max_y);
+        Rect::new(x, y, w, h)
     }
 }
 
@@ -1141,6 +1666,14 @@ impl Switchboard {
         self.scroll.render(surface, layout.scroll, scale, theme);
         self.corner.render(surface, layout.corner, scale, theme);
         self.grabber.render(surface, layout.corner, scale, theme);
+
+        // The Group popup, painted last of all so it sits above every other
+        // region, including the scrollbar and grabber.
+        if let Some(popup) = &self.group_popup {
+            let anchor = self.group_anchor_rect(popup.task, &layout, scale, theme);
+            let rect = Self::popup_rect(&popup.menu, anchor, bounds, scale, theme, font);
+            popup.menu.render(surface, rect, scale, theme, font);
+        }
     }
 
     /// Paint the always-visible header resource band: every resource's
@@ -1175,12 +1708,14 @@ impl Switchboard {
         match self.section {
             Section::Tasks => self.render_task_rows(surface, info, scale, theme, font),
             Section::Jobs => self.render_job_cards(surface, info, scale, theme, font),
+            Section::Pressure => self.render_pressure_cards(surface, info, scale, theme, font),
+            Section::Activities => self.render_activity_rows(surface, info, scale, theme, font),
             Section::Recovery => self.render_recovery_rows(surface, info, scale, theme, font),
             Section::Overview => self.render_overview(surface, layout, info, scale, theme, font),
         }
     }
 
-    /// Render the visible task rows and their action buttons.
+    /// Render the visible task rows and their primary action + Group buttons.
     fn render_task_rows(
         &self,
         surface: &mut Surface,
@@ -1194,10 +1729,106 @@ impl Switchboard {
             let Some(entry) = self.tasks.get(start + slot as usize) else {
                 break;
             };
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 1, scale, theme);
+            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
             entry.row.render(surface, row_rect, scale, theme, font);
             if let Some(rect) = buttons.first() {
                 entry.action.render(surface, *rect, scale, theme, font);
+            }
+            if let Some(rect) = buttons.get(1) {
+                entry
+                    .group_button
+                    .render(surface, *rect, scale, theme, font);
+            }
+        }
+    }
+
+    /// Render the visible pressure cards.
+    fn render_pressure_cards(
+        &self,
+        surface: &mut Surface,
+        info: ListInfo,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let gap = scale.scale_length(theme.metrics().control_gap);
+        let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);
+        for slot in 0..info.visible() {
+            let Some(entry) = self.pressure.get(start + slot as usize) else {
+                break;
+            };
+            let item = info.item_rect(slot);
+            let card_rect = Rect::new(
+                item.left(),
+                item.top(),
+                item.width,
+                item.height.saturating_sub(gap),
+            );
+            entry.card.render(surface, card_rect, scale, theme, font);
+        }
+    }
+
+    /// Render the visible activity rows: a header row (with its Switch/Pause-
+    /// or-Resume/Rename/Close buttons, or an in-flight rename field in place
+    /// of the header) followed by its indented member rows.
+    fn render_activity_rows(
+        &self,
+        surface: &mut Surface,
+        info: ListInfo,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let indent = scale.scale_length(theme.metrics().control_height);
+        let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);
+        for slot in 0..info.visible() {
+            let Some(row) = self.activity_row_at(start + slot as usize) else {
+                break;
+            };
+            let item = info.item_rect(slot);
+            match row {
+                ActivityRow::Header(ai) => {
+                    let Some(entry) = self.activities.get(ai) else {
+                        continue;
+                    };
+                    let (row_rect, buttons) = Self::split_row(item, 4, scale, theme);
+                    if let Some(edit) = self.rename.as_ref().filter(|e| e.index == ai) {
+                        edit.field.render(surface, row_rect, scale, theme, font);
+                    } else {
+                        entry.header.render(surface, row_rect, scale, theme, font);
+                    }
+                    if let Some(rect) = buttons.first() {
+                        entry.switch.render(surface, *rect, scale, theme, font);
+                    }
+                    if let Some(rect) = buttons.get(1) {
+                        entry
+                            .pause_resume
+                            .render(surface, *rect, scale, theme, font);
+                    }
+                    if let Some(rect) = buttons.get(2) {
+                        entry.rename.render(surface, *rect, scale, theme, font);
+                    }
+                    if let Some(rect) = buttons.get(3) {
+                        entry.close.render(surface, *rect, scale, theme, font);
+                    }
+                }
+                ActivityRow::Member(ai, mi) => {
+                    let Some(member) = self
+                        .activities
+                        .get(ai)
+                        .and_then(|entry| entry.members.get(mi))
+                    else {
+                        continue;
+                    };
+                    let indented = Rect::new(
+                        item.left() + to_i32(indent),
+                        item.top(),
+                        item.width.saturating_sub(indent),
+                        item.height,
+                    );
+                    let (row_rect, _) = Self::split_row(indented, 0, scale, theme);
+                    member.render(surface, row_rect, scale, theme, font);
+                }
             }
         }
     }
@@ -1325,6 +1956,14 @@ impl Switchboard {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
+
+        // The Group popup is modal over the rest of the composition: every
+        // event routes to it first, and a primary press outside its bounds
+        // dismisses it rather than falling through to whatever sits beneath.
+        if self.group_popup.is_some() {
+            return self.group_popup_on_pointer(event, bounds, scale, theme, font);
+        }
+
         self.sync_scroll(bounds, scale, theme, font);
         let layout = self.compute_layout(bounds, scale, theme, font);
 
@@ -1390,13 +2029,15 @@ impl Switchboard {
         match self.section {
             Section::Tasks => self.tasks_on_pointer(event, info, start, scale, theme),
             Section::Jobs => self.jobs_on_pointer(event, info, start, scale, theme),
+            Section::Pressure => self.pressure_on_pointer(event, info, start, scale, theme),
+            Section::Activities => self.activities_on_pointer(event, info, start, scale, theme),
             Section::Recovery => self.recovery_on_pointer(event, info, start, scale, theme),
             Section::Overview => self.overview_on_pointer(event, layout, info, start, scale, theme),
         }
     }
 
-    /// Route a pointer event to the task rows (their action buttons and row
-    /// selection).
+    /// Route a pointer event to the task rows (their primary action and Group
+    /// buttons, and row selection).
     fn tasks_on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1408,7 +2049,7 @@ impl Switchboard {
         let mut selected = None;
         for slot in 0..info.visible() {
             let idx = start + slot as usize;
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 1, scale, theme);
+            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
             let Some(entry) = self.tasks.get_mut(idx) else {
                 break;
             };
@@ -1417,6 +2058,12 @@ impl Switchboard {
             }) {
                 return Some(SwitchboardAction::Task { index: idx });
             }
+            if buttons.get(1).is_some_and(|rect| {
+                entry.group_button.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+            }) {
+                self.open_group_popup(idx);
+                return None;
+            }
             if entry.row.on_pointer(event, row_rect) == Some(RowAction::Activated) {
                 selected = Some(idx);
             }
@@ -1424,6 +2071,114 @@ impl Switchboard {
         if let Some(idx) = selected {
             for (i, entry) in self.tasks.iter_mut().enumerate() {
                 entry.row.set_selected(i == idx);
+            }
+        }
+        None
+    }
+
+    /// Route a pointer event to the pressure cards' footer relief actions.
+    fn pressure_on_pointer(
+        &mut self,
+        event: &InputEvent,
+        info: ListInfo,
+        start: usize,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<SwitchboardAction> {
+        for slot in 0..info.visible() {
+            let idx = start + slot as usize;
+            let item = info.item_rect(slot);
+            let Some(entry) = self.pressure.get_mut(idx) else {
+                break;
+            };
+            if let Some(CardAction::FooterActivated { index }) =
+                entry.card.on_pointer(event, item, scale, theme)
+            {
+                return self.resolve_pressure_footer(idx, index);
+            }
+        }
+        None
+    }
+
+    /// Route a pointer event to the Activities section: header rows (their
+    /// Switch/Pause-or-Resume/Rename/Close buttons, or an in-flight rename
+    /// field) and member rows (selection only).
+    fn activities_on_pointer(
+        &mut self,
+        event: &InputEvent,
+        info: ListInfo,
+        start: usize,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<SwitchboardAction> {
+        let indent = scale.scale_length(theme.metrics().control_height);
+        for slot in 0..info.visible() {
+            let Some(row) = self.activity_row_at(start + slot as usize) else {
+                break;
+            };
+            let item = info.item_rect(slot);
+            match row {
+                ActivityRow::Header(ai) => {
+                    let (_, buttons) = Self::split_row(item, 4, scale, theme);
+                    let Some(entry) = self.activities.get_mut(ai) else {
+                        continue;
+                    };
+                    if buttons.first().is_some_and(|rect| {
+                        entry.switch.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                    }) {
+                        return Some(SwitchboardAction::Activity {
+                            index: ai,
+                            control: ActivityControl::Switch,
+                        });
+                    }
+                    if buttons.get(1).is_some_and(|rect| {
+                        entry.pause_resume.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                    }) {
+                        let control = if entry.paused {
+                            ActivityControl::Resume
+                        } else {
+                            ActivityControl::Pause
+                        };
+                        return Some(SwitchboardAction::Activity { index: ai, control });
+                    }
+                    if buttons.get(2).is_some_and(|rect| {
+                        entry.rename.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                    }) {
+                        self.begin_rename(ai);
+                        return None;
+                    }
+                    if buttons.get(3).is_some_and(|rect| {
+                        entry.close.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                    }) {
+                        return Some(SwitchboardAction::Activity {
+                            index: ai,
+                            control: ActivityControl::Close,
+                        });
+                    }
+                }
+                ActivityRow::Member(ai, mi) => {
+                    let indented = Rect::new(
+                        item.left() + to_i32(indent),
+                        item.top(),
+                        item.width.saturating_sub(indent),
+                        item.height,
+                    );
+                    let (row_rect, _) = Self::split_row(indented, 0, scale, theme);
+                    let Some(member) = self
+                        .activities
+                        .get_mut(ai)
+                        .and_then(|entry| entry.members.get_mut(mi))
+                    else {
+                        continue;
+                    };
+                    if member.on_pointer(event, row_rect) == Some(RowAction::Activated) {
+                        if let Some(entry) = self.activities.get_mut(ai) {
+                            for (i, row) in entry.members.iter_mut().enumerate() {
+                                row.set_selected(i == mi);
+                            }
+                        }
+                    }
+                }
             }
         }
         None
@@ -1541,12 +2296,187 @@ impl Switchboard {
         None
     }
 
+    /// Route a pointer event to the open Group popup: a primary press outside
+    /// its bounds dismisses it without emitting; otherwise the event feeds the
+    /// popup itself.
+    fn group_popup_on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<SwitchboardAction> {
+        let popup = self.group_popup.as_ref()?;
+        let layout = self.compute_layout(bounds, scale, theme, font);
+        let anchor = self.group_anchor_rect(popup.task, &layout, scale, theme);
+        let popup_rect = Self::popup_rect(&popup.menu, anchor, bounds, scale, theme, font);
+
+        if let InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        } = event
+        {
+            if popup
+                .menu
+                .row_at(popup_rect, scale, theme, self.pointer)
+                .is_none()
+            {
+                self.group_popup = None;
+                return None;
+            }
+        }
+
+        let popup = self.group_popup.as_mut()?;
+        match popup.menu.on_pointer(event, popup_rect, scale, theme) {
+            Some(MenuAction::Activated { index }) => self.resolve_group_activation(index),
+            Some(MenuAction::Dismissed) => {
+                self.group_popup = None;
+                None
+            }
+            Some(MenuAction::OpenSubmenu { .. }) | None => None,
+        }
+    }
+
+    /// Open the Group popup, anchored on the given task's `Group` button.
+    ///
+    /// The item list is built once from the current `activities` and
+    /// `can_create_activity` (spec T12): each activity, disabled with a
+    /// reason when it is the task's current activity or is full; then
+    /// `"New activity"`, disabled when the caller may not create one; then,
+    /// only when the task is already grouped, `"Remove from activity"`.
+    fn open_group_popup(&mut self, task: usize) {
+        let Some(entry) = self.tasks.get(task) else {
+            return;
+        };
+        let current = entry.group;
+        let mut items: Vec<MenuItem> = self
+            .activities
+            .iter()
+            .enumerate()
+            .map(|(i, activity)| {
+                let mut item = MenuItem::new(activity.name.clone());
+                if current == Some(i) {
+                    item = item
+                        .with_state(ControlState::disabled())
+                        .with_reason("Current activity");
+                } else if !activity.can_accept_member {
+                    item = item
+                        .with_state(ControlState::disabled())
+                        .with_reason("Activity is full");
+                }
+                item
+            })
+            .collect();
+        let mut new_activity = MenuItem::new("New activity");
+        if !self.can_create_activity {
+            new_activity = new_activity
+                .with_state(ControlState::disabled())
+                .with_reason("Activity limit reached");
+        }
+        items.push(new_activity);
+        if current.is_some() {
+            items.push(MenuItem::new("Remove from activity"));
+        }
+        self.group_popup = Some(GroupPopup {
+            task,
+            menu: Menu::new(items),
+        });
+    }
+
+    /// Map an activated Group popup row to its [`SwitchboardAction`] and
+    /// close the popup.
+    fn resolve_group_activation(&mut self, index: usize) -> Option<SwitchboardAction> {
+        let popup = self.group_popup.take()?;
+        let task = popup.task;
+        match index.cmp(&self.activities.len()) {
+            Ordering::Less => Some(SwitchboardAction::TaskGrouped {
+                task,
+                activity: Some(index),
+            }),
+            Ordering::Equal => Some(SwitchboardAction::TaskGrouped {
+                task,
+                activity: None,
+            }),
+            Ordering::Greater => Some(SwitchboardAction::TaskUngrouped { task }),
+        }
+    }
+
+    /// Map a pressure card's activated footer button to its
+    /// [`SwitchboardAction`], failing closed unless the action's verdict is
+    /// [`ActionVerdict::Ready`] (the button's own state already refuses
+    /// activation, but the verdict is checked again here rather than trusted
+    /// implicitly).
+    ///
+    /// [`PressureControl::ShowTasks`] is resolved internally: it runs the
+    /// section transition to [`Section::Tasks`], focuses the cause's task,
+    /// and reports that transition's [`SwitchboardAction::SectionChanged`].
+    fn resolve_pressure_footer(
+        &mut self,
+        cause: usize,
+        action_index: usize,
+    ) -> Option<SwitchboardAction> {
+        let entry = self.pressure.get(cause)?;
+        let action = entry.actions.get(action_index)?;
+        if action.verdict != ActionVerdict::Ready {
+            return None;
+        }
+        let control = action.control;
+        let task_index = entry.task_index;
+        match control {
+            PressureControl::Pause | PressureControl::LowerPriority => {
+                Some(SwitchboardAction::Pressure {
+                    index: cause,
+                    control,
+                })
+            }
+            PressureControl::ShowTasks => self.resolve_show_tasks(task_index),
+        }
+    }
+
+    /// Run the one section transition to [`Section::Tasks`], focus
+    /// `task_index` (clamped into range; `None` focuses the first task), and
+    /// report the transition's [`SwitchboardAction::SectionChanged`].
+    fn resolve_show_tasks(&mut self, task_index: Option<usize>) -> Option<SwitchboardAction> {
+        let action = self.select_section_index(Section::Tasks.index());
+        self.content_focus = task_index
+            .unwrap_or(0)
+            .min(self.tasks.len().saturating_sub(1));
+        self.row_action = 0;
+        self.ensure_focus_visible();
+        self.apply_focus_marks();
+        action
+    }
+
+    /// Begin an inline rename of the activity at `index`, pre-filled with its
+    /// current name.
+    fn begin_rename(&mut self, index: usize) {
+        let Some(entry) = self.activities.get(index) else {
+            return;
+        };
+        let mut field = TextField::new().with_text(&entry.name).with_max_len(48);
+        field.set_focused(true);
+        self.rename = Some(RenameEdit {
+            id: entry.id,
+            index,
+            field,
+        });
+    }
+
     /// Feed one key event, returning the typed action it produced (if any).
     ///
+    /// An in-flight rename, then an open Group popup, take every key first:
+    /// both are modal editors over the composition, so no key reaches the
+    /// regions beneath them until they commit, cancel, or dismiss. Otherwise
     /// Tab cycles keyboard focus between the tab strip, the content list, the
     /// scrollbar, and the title-bar command group; keys are then routed to the
     /// focused region's control.
     pub fn on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
+        if self.rename.is_some() {
+            return self.rename_on_key(key);
+        }
+        if self.group_popup.is_some() {
+            return self.group_popup_on_key(key);
+        }
         if key == Key::Named(NamedKey::Tab) {
             self.focus = self.focus.next();
             self.apply_focus_marks();
@@ -1569,8 +2499,10 @@ impl Switchboard {
         }
     }
 
-    /// Route a key to the focused content item (Up/Down move focus, Enter/Space
-    /// activate its primary action).
+    /// Route a key to the focused content item: Up/Down move the row focus
+    /// (resetting the action focus to the row's first button), Left/Right
+    /// move the action focus along the row's buttons, and Enter/Space
+    /// activate the action-focused button.
     fn content_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
         let count = self.active_count();
         if count == 0 {
@@ -1579,13 +2511,26 @@ impl Switchboard {
         match key {
             Key::Named(NamedKey::Down) => {
                 self.content_focus = (self.content_focus + 1).min(count - 1);
+                self.row_action = 0;
                 self.ensure_focus_visible();
                 self.apply_focus_marks();
                 None
             }
             Key::Named(NamedKey::Up) => {
                 self.content_focus = self.content_focus.saturating_sub(1);
+                self.row_action = 0;
                 self.ensure_focus_visible();
+                self.apply_focus_marks();
+                None
+            }
+            Key::Named(NamedKey::Right) => {
+                let last = self.focused_action_count().saturating_sub(1);
+                self.row_action = (self.row_action + 1).min(last);
+                self.apply_focus_marks();
+                None
+            }
+            Key::Named(NamedKey::Left) => {
+                self.row_action = self.row_action.saturating_sub(1);
                 self.apply_focus_marks();
                 None
             }
@@ -1593,14 +2538,44 @@ impl Switchboard {
         }
     }
 
-    /// Feed an activation key to the focused item's primary action button.
+    /// How many inline action buttons the focused content item carries — the
+    /// bound for the Left/Right action focus. Activities member rows are
+    /// display-only and carry none.
+    fn focused_action_count(&self) -> usize {
+        match self.section {
+            Section::Tasks | Section::Recovery => 2,
+            Section::Jobs => self
+                .jobs
+                .get(self.content_focus)
+                .map_or(0, |card| card.footer().len()),
+            Section::Pressure => self
+                .pressure
+                .get(self.content_focus)
+                .map_or(0, |entry| entry.card.footer().len()),
+            Section::Activities => match self.activity_row_at(self.content_focus) {
+                Some(ActivityRow::Header(_)) => 4,
+                Some(ActivityRow::Member(..)) | None => 0,
+            },
+            Section::Overview => 1,
+        }
+    }
+
+    /// Feed an activation key to the focused item's action-focused button.
+    /// A disabled or denied button refuses the key itself, so a refused
+    /// activation emits nothing (fail closed).
     fn activate_focused_item(&mut self, key: Key) -> Option<SwitchboardAction> {
         let idx = self.content_focus;
         match self.section {
             Section::Tasks => {
                 let entry = self.tasks.get_mut(idx)?;
-                (entry.action.on_key(key) == Some(ButtonAction::Activated))
-                    .then_some(SwitchboardAction::Task { index: idx })
+                if self.row_action == 0 {
+                    return (entry.action.on_key(key) == Some(ButtonAction::Activated))
+                        .then_some(SwitchboardAction::Task { index: idx });
+                }
+                if entry.group_button.on_key(key) == Some(ButtonAction::Activated) {
+                    self.open_group_popup(idx);
+                }
+                None
             }
             Section::Jobs => {
                 let card = self.jobs.get_mut(idx)?;
@@ -1612,12 +2587,26 @@ impl Switchboard {
                         },
                     )
             }
+            Section::Pressure => {
+                let action = self.pressure.get_mut(idx)?.card.on_key(key);
+                let CardAction::FooterActivated { index } = action?;
+                self.resolve_pressure_footer(idx, index)
+            }
+            Section::Activities => self.activate_focused_activity(key),
             Section::Recovery => {
                 let entry = self.recovery.get_mut(idx)?;
-                (entry.restart.on_key(key) == Some(ButtonAction::Activated)).then_some(
+                if self.row_action == 0 {
+                    return (entry.restart.on_key(key) == Some(ButtonAction::Activated)).then_some(
+                        SwitchboardAction::Recovery {
+                            index: idx,
+                            control: RecoveryControl::Restart,
+                        },
+                    );
+                }
+                (entry.force.on_key(key) == Some(ButtonAction::Activated)).then_some(
                     SwitchboardAction::Recovery {
                         index: idx,
-                        control: RecoveryControl::Restart,
+                        control: RecoveryControl::Force,
                     },
                 )
             }
@@ -1626,6 +2615,88 @@ impl Switchboard {
                 (entry.action.on_key(key) == Some(ButtonAction::Activated))
                     .then_some(SwitchboardAction::Service { index: idx })
             }
+        }
+    }
+
+    /// Activate the focused Activities row's action-focused header button
+    /// (Switch, Pause-or-Resume, Rename, Close, in action-focus order).
+    /// Member rows are display-only, so they activate nothing.
+    fn activate_focused_activity(&mut self, key: Key) -> Option<SwitchboardAction> {
+        let Some(ActivityRow::Header(ai)) = self.activity_row_at(self.content_focus) else {
+            return None;
+        };
+        let entry = self.activities.get_mut(ai)?;
+        match self.row_action {
+            0 => (entry.switch.on_key(key) == Some(ButtonAction::Activated)).then_some(
+                SwitchboardAction::Activity {
+                    index: ai,
+                    control: ActivityControl::Switch,
+                },
+            ),
+            1 => {
+                let control = if entry.paused {
+                    ActivityControl::Resume
+                } else {
+                    ActivityControl::Pause
+                };
+                (entry.pause_resume.on_key(key) == Some(ButtonAction::Activated))
+                    .then_some(SwitchboardAction::Activity { index: ai, control })
+            }
+            2 => {
+                if entry.rename.on_key(key) == Some(ButtonAction::Activated) {
+                    self.begin_rename(ai);
+                }
+                None
+            }
+            _ => (entry.close.on_key(key) == Some(ButtonAction::Activated)).then_some(
+                SwitchboardAction::Activity {
+                    index: ai,
+                    control: ActivityControl::Close,
+                },
+            ),
+        }
+    }
+
+    /// Route a key to the in-flight rename field: Enter commits (rebuilding
+    /// the header row and reporting the rename), Escape cancels without
+    /// emitting, and everything else edits the field.
+    fn rename_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
+        let action = self
+            .rename
+            .as_mut()?
+            .field
+            .on_key(key, Modifiers::default());
+        match action {
+            Some(TextAction::Submitted) => {
+                let edit = self.rename.take()?;
+                let index = edit.index;
+                let entry = self.activities.get_mut(index)?;
+                entry.name = String::from(edit.field.text());
+                entry.header =
+                    Self::build_activity_header(&entry.name, &entry.detail, entry.activity);
+                self.submitted_activity_name = Some(entry.name.clone());
+                Some(SwitchboardAction::ActivityRenamed { index })
+            }
+            Some(TextAction::Cancelled) => {
+                self.rename = None;
+                None
+            }
+            Some(TextAction::Edited) | None => None,
+        }
+    }
+
+    /// Route a key to the open Group popup: arrows move its focus, Enter or
+    /// Space activates the focused row, and Escape dismisses without
+    /// emitting.
+    fn group_popup_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
+        let action = self.group_popup.as_mut()?.menu.on_key(key);
+        match action {
+            Some(MenuAction::Activated { index }) => self.resolve_group_activation(index),
+            Some(MenuAction::Dismissed) => {
+                self.group_popup = None;
+                None
+            }
+            Some(MenuAction::OpenSubmenu { .. }) | None => None,
         }
     }
 
@@ -1647,6 +2718,11 @@ impl Switchboard {
         self.section = section;
         self.tabs.set_selected(index);
         self.content_focus = 0;
+        self.row_action = 0;
+        // The Group popup anchors on a row of the section that opened it; a
+        // section change invalidates that anchor, so the popup drops rather
+        // than floating over unrelated content.
+        self.group_popup = None;
         self.apply_focus_marks();
         Some(SwitchboardAction::SectionChanged { section })
     }
@@ -1694,21 +2770,44 @@ impl Switchboard {
 
         let content = self.focus == FocusRegion::Content;
         let idx = self.content_focus;
+        let action = self.row_action;
         for (i, entry) in self.tasks.iter_mut().enumerate() {
-            entry
-                .action
-                .set_focused(content && self.section == Section::Tasks && i == idx);
+            let focus_here = content && self.section == Section::Tasks && i == idx;
+            entry.action.set_focused(focus_here && action == 0);
+            entry.group_button.set_focused(focus_here && action == 1);
         }
         for (i, card) in self.jobs.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Jobs && i == idx;
             for (b, button) in card.footer_mut().iter_mut().enumerate() {
-                button.set_focused(focus_here && b == 0);
+                button.set_focused(focus_here && b == action);
             }
+        }
+        for (i, entry) in self.pressure.iter_mut().enumerate() {
+            let focus_here = content && self.section == Section::Pressure && i == idx;
+            for (b, button) in entry.card.footer_mut().iter_mut().enumerate() {
+                button.set_focused(focus_here && b == action);
+            }
+        }
+        // Only an Activities header row carries buttons, so the flattened row
+        // focus marks a button only when it names a header.
+        let focused_header = (content && self.section == Section::Activities)
+            .then(|| self.activity_row_at(idx))
+            .flatten()
+            .and_then(|row| match row {
+                ActivityRow::Header(ai) => Some(ai),
+                ActivityRow::Member(..) => None,
+            });
+        for (i, entry) in self.activities.iter_mut().enumerate() {
+            let focus_here = focused_header == Some(i);
+            entry.switch.set_focused(focus_here && action == 0);
+            entry.pause_resume.set_focused(focus_here && action == 1);
+            entry.rename.set_focused(focus_here && action == 2);
+            entry.close.set_focused(focus_here && action == 3);
         }
         for (i, entry) in self.recovery.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Recovery && i == idx;
-            entry.restart.set_focused(focus_here);
-            entry.force.set_focused(false);
+            entry.restart.set_focused(focus_here && action == 0);
+            entry.force.set_focused(focus_here && action == 1);
         }
         for (i, entry) in self.services.iter_mut().enumerate() {
             entry

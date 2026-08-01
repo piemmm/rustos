@@ -24,8 +24,10 @@ use crate::state::{
     RecoveryState,
 };
 use crate::switchboard::{
-    JobControl, JobSummary, RecoveryControl, RecoveryItem, ResourceSummary, Section,
-    ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, TaskSummary,
+    ActionVerdict, ActivityControl, ActivityMember, ActivityRow, ActivitySummary, JobControl,
+    JobSummary, PressureAction, PressureCause, PressureControl, RecoveryControl, RecoveryItem,
+    ResourceSummary, Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel,
+    SystemAction, TaskSummary,
 };
 use crate::window::FurniturePart;
 
@@ -84,6 +86,7 @@ fn model() -> SwitchboardModel {
             recovery: RecoveryState::None,
             action: alloc::string::String::from("End"),
             action_allowed: true,
+            group: None,
         });
     }
     for i in 0..8 {
@@ -95,6 +98,8 @@ fn model() -> SwitchboardModel {
             can_cancel: true,
         });
     }
+    m.pressure = (0..8).map(model_pressure_cause).collect();
+    m.activities = (0..6).map(model_activity).collect();
     for i in 0..6 {
         m.recovery.push(RecoveryItem {
             name: alloc::format!("hung {i}"),
@@ -156,6 +161,67 @@ fn model() -> SwitchboardModel {
         allowed: true,
     });
     m
+}
+
+/// The CPU pressure cause at `index` of the populated model: Working, blamed
+/// on task `index`, offering a recommended Pause, Lower priority, and Show
+/// tasks — all Ready.
+fn model_pressure_cause(index: usize) -> PressureCause {
+    PressureCause {
+        resource: alloc::string::String::from("CPU"),
+        kind: PressureKind::Cpu,
+        culprit: alloc::format!("culprit {index}"),
+        cause: alloc::string::String::from("busy loop"),
+        activity: ActivityState::Working,
+        task_index: Some(index),
+        actions: alloc::vec![
+            PressureAction {
+                label: alloc::string::String::from("Pause"),
+                control: PressureControl::Pause,
+                verdict: ActionVerdict::Ready,
+                recommended: true,
+            },
+            PressureAction {
+                label: alloc::string::String::from("Lower priority"),
+                control: PressureControl::LowerPriority,
+                verdict: ActionVerdict::Ready,
+                recommended: false,
+            },
+            PressureAction {
+                label: alloc::string::String::from("Show tasks"),
+                control: PressureControl::ShowTasks,
+                verdict: ActionVerdict::Ready,
+                recommended: false,
+            },
+        ],
+    }
+}
+
+/// The activity at `index` of the populated model: stable id `100 + index`,
+/// controllable, accepting members, paused on the odd indices, with one
+/// working and one idle member.
+fn model_activity(index: u64) -> ActivitySummary {
+    ActivitySummary {
+        id: 100 + index,
+        name: alloc::format!("activity {index}"),
+        detail: alloc::string::String::from("2 tasks"),
+        activity: ActivityState::Working,
+        paused: index % 2 == 1,
+        can_control: true,
+        can_accept_member: true,
+        members: alloc::vec![
+            ActivityMember {
+                name: alloc::format!("member {index}.0"),
+                detail: alloc::string::String::from("running"),
+                activity: ActivityState::Working,
+            },
+            ActivityMember {
+                name: alloc::format!("member {index}.1"),
+                detail: alloc::string::String::from("idle"),
+                activity: ActivityState::Idle,
+            },
+        ],
+    }
 }
 
 fn bounds() -> Rect {
@@ -254,8 +320,8 @@ fn tab_click_switches_section() {
     let mut sb = Switchboard::new(model());
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
-    // The second tab (Jobs) occupies the second quarter of the strip.
-    let tab_w = layout.tabs.width / 4;
+    // The second tab (Jobs) occupies the second sixth of the strip.
+    let tab_w = layout.tabs.width / u32::try_from(Section::ALL.len()).unwrap_or(1);
     let x = layout.tabs.left()
         + i32::try_from(tab_w).unwrap_or(0)
         + i32::try_from(tab_w).unwrap_or(0) / 2;
@@ -327,7 +393,7 @@ fn allowed_task_action_activates() {
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
     let info = sb.list_info(&layout, Scale::ONE, &theme);
-    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 1, Scale::ONE, &theme);
+    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 2, Scale::ONE, &theme);
     let (x, y) = centre(buttons[0]);
     let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
     assert!(actions.contains(&SwitchboardAction::Task { index: 0 }));
@@ -345,12 +411,13 @@ fn denied_task_action_fails_closed() {
         recovery: RecoveryState::None,
         action: alloc::string::String::from("End"),
         action_allowed: false,
+        group: None,
     });
     let mut sb = Switchboard::new(m);
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
     let info = sb.list_info(&layout, Scale::ONE, &theme);
-    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 1, Scale::ONE, &theme);
+    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 2, Scale::ONE, &theme);
     let (x, y) = centre(buttons[0]);
     let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
     assert!(actions.is_empty(), "a denied action must not activate");
@@ -367,6 +434,7 @@ fn denied_action_renders_distinct_from_disabled() {
         recovery: RecoveryState::None,
         action: alloc::string::String::from("End"),
         action_allowed: false,
+        group: None,
     });
     let sb = Switchboard::new(m);
     // A refused action is DeniedByAuthority, never a plain disabled control.
@@ -652,7 +720,7 @@ fn press_just_below_band_still_reaches_the_tabs() {
     let mut sb = Switchboard::new(model());
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
-    let tab_w = layout.tabs.width / 4;
+    let tab_w = layout.tabs.width / u32::try_from(Section::ALL.len()).unwrap_or(1);
     let x = layout.tabs.left()
         + i32::try_from(tab_w).unwrap_or(0)
         + i32::try_from(tab_w).unwrap_or(0) / 2;
@@ -817,8 +885,9 @@ fn direct_selection_and_the_keyboard_path_agree() {
         assert_eq!(direct.on_key(Key::Named(NamedKey::Tab)), None);
     }
     // One walks the strip to Recovery and commits it...
-    assert_eq!(by_key.on_key(Key::Named(NamedKey::Right)), None);
-    assert_eq!(by_key.on_key(Key::Named(NamedKey::Right)), None);
+    for _ in 0..Section::Recovery.index() {
+        assert_eq!(by_key.on_key(Key::Named(NamedKey::Right)), None);
+    }
     let by_key_action = by_key.on_key(Key::Named(NamedKey::Enter));
     // ...the other asks for it directly.
     let direct_action = direct.select_section(Section::Recovery);
@@ -853,6 +922,7 @@ fn refreshed_model(tasks: usize, resources: usize) -> SwitchboardModel {
             recovery: RecoveryState::None,
             action: alloc::string::String::from("End"),
             action_allowed: i > 0,
+            group: None,
         });
     }
     for i in 0..resources {
@@ -998,7 +1068,7 @@ fn pointer_after_set_model_addresses_the_new_rows() {
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
     let info = sb.list_info(&layout, Scale::ONE, &theme);
     let action_button = |slot: u32| {
-        let (_, buttons) = Switchboard::split_row(info.item_rect(slot), 1, Scale::ONE, &theme);
+        let (_, buttons) = Switchboard::split_row(info.item_rect(slot), 2, Scale::ONE, &theme);
         centre(buttons[0])
     };
 
@@ -1029,7 +1099,7 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
     let info = sb.list_info(&layout, Scale::ONE, &theme);
-    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 1, Scale::ONE, &theme);
+    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 2, Scale::ONE, &theme);
     let (x, y) = centre(buttons[0]);
 
     // Arm the first task's action, refresh under the held pointer, let go.
@@ -1127,5 +1197,1048 @@ fn overview_resource_cards_still_render_from_the_extended_model() {
     assert!(
         has_ink(&surface, block),
         "the resource card block must still paint"
+    );
+}
+
+// --- The six-section tab strip -------------------------------------------
+
+#[test]
+fn six_sections_in_tab_order() {
+    assert_eq!(
+        Section::ALL.map(Section::title),
+        [
+            "Tasks",
+            "Jobs",
+            "Pressure",
+            "Activities",
+            "Recovery",
+            "Overview"
+        ]
+    );
+    for (i, section) in Section::ALL.iter().enumerate() {
+        assert_eq!(section.index(), i);
+        assert_eq!(Section::from_index(i), Some(*section));
+    }
+    assert_eq!(Section::from_index(Section::ALL.len()), None);
+}
+
+#[test]
+fn offsets_persist_for_the_new_sections() {
+    let theme = Theme::dark();
+    let mut sb = Switchboard::new(model());
+    let b = bounds();
+    sb.select_section(Section::Pressure);
+    sb.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 2 },
+        b,
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+    assert_eq!(sb.scroll_offset(), 2);
+    sb.select_section(Section::Activities);
+    assert_eq!(sb.scroll_offset(), 0);
+    sb.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+        b,
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+    assert_eq!(sb.scroll_offset(), 3);
+    sb.select_section(Section::Pressure);
+    assert_eq!(sb.scroll_offset(), 2);
+    sb.select_section(Section::Activities);
+    assert_eq!(sb.scroll_offset(), 3);
+}
+
+// --- The Pressure section -------------------------------------------------
+
+/// One relief action for a hand-built pressure cause.
+fn relief_action(
+    control: PressureControl,
+    verdict: ActionVerdict,
+    recommended: bool,
+) -> PressureAction {
+    PressureAction {
+        label: alloc::string::String::from("Relieve"),
+        control,
+        verdict,
+        recommended,
+    }
+}
+
+/// A model with three tasks and one CPU pressure cause carrying `actions`,
+/// for the Pressure tests that need a precise footer.
+fn pressure_model(actions: alloc::vec::Vec<PressureAction>) -> SwitchboardModel {
+    let mut m = SwitchboardModel::new("Switchboard");
+    for i in 0..3 {
+        m.tasks.push(TaskSummary {
+            name: alloc::format!("task {i}"),
+            detail: alloc::string::String::new(),
+            pressure: PressureState::None,
+            activity: ActivityState::Idle,
+            recovery: RecoveryState::None,
+            action: alloc::string::String::from("End"),
+            action_allowed: true,
+            group: None,
+        });
+    }
+    m.pressure.push(PressureCause {
+        resource: alloc::string::String::from("CPU"),
+        kind: PressureKind::Cpu,
+        culprit: alloc::string::String::from("culprit"),
+        cause: alloc::string::String::from("busy loop"),
+        activity: ActivityState::Working,
+        task_index: None,
+        actions,
+    });
+    m
+}
+
+/// The centre of the pressure card footer button at `action` for the cause
+/// at `index`, in window coordinates.
+fn pressure_footer_centre(
+    sb: &Switchboard,
+    b: Rect,
+    theme: &Theme,
+    index: usize,
+    action: usize,
+) -> (i32, i32) {
+    let layout = sb.compute_layout(b, Scale::ONE, theme, font());
+    let info = sb.list_info(&layout, Scale::ONE, theme);
+    let item = info.item_rect(u32::try_from(index).unwrap_or(0));
+    let rects = sb.pressure[index]
+        .card
+        .footer_rects(item, Scale::ONE, theme);
+    centre(rects[action])
+}
+
+#[test]
+fn pressure_card_rail_differs_across_kinds() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut painted = alloc::vec::Vec::new();
+    for kind in [PressureKind::Cpu, PressureKind::Memory, PressureKind::Disk] {
+        let mut m = pressure_model(alloc::vec::Vec::new());
+        m.pressure[0].kind = kind;
+        m.pressure[0].activity = ActivityState::Idle;
+        let mut sb = Switchboard::new(m);
+        sb.select_section(Section::Pressure);
+        let mut surface = Surface::new(b.width, b.height).expect("surface");
+        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        painted.push((kind, surface.pixels().to_vec()));
+    }
+    for (i, (kind, pixels)) in painted.iter().enumerate() {
+        for (other_kind, other_pixels) in painted.iter().skip(i + 1) {
+            assert_ne!(
+                pixels, other_pixels,
+                "{kind:?} and {other_kind:?} drew the same semantic rail"
+            );
+        }
+    }
+}
+
+#[test]
+fn pressure_card_heat_seam_marks_working() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut painted = alloc::vec::Vec::new();
+    for activity in [ActivityState::Idle, ActivityState::Working] {
+        let mut m = pressure_model(alloc::vec::Vec::new());
+        m.pressure[0].activity = activity;
+        let mut sb = Switchboard::new(m);
+        sb.select_section(Section::Pressure);
+        let mut surface = Surface::new(b.width, b.height).expect("surface");
+        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        painted.push(surface.pixels().to_vec());
+    }
+    assert_ne!(
+        painted[0], painted[1],
+        "a Working cause must show its heat seam"
+    );
+}
+
+#[test]
+fn recommended_relief_action_carries_action_warmth() {
+    let sb = Switchboard::new(model());
+    let footer = sb.pressure[0].card.footer();
+    assert_eq!(footer[0].role(), ControlRole::Recommended);
+    assert_eq!(footer[1].role(), ControlRole::Neutral);
+}
+
+#[test]
+fn ready_relief_action_activates() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Pressure);
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::Pressure {
+        index: 0,
+        control: PressureControl::Pause
+    }));
+}
+
+#[test]
+fn disabled_relief_action_renders_muted_and_fails_closed() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(pressure_model(alloc::vec![relief_action(
+        PressureControl::Pause,
+        ActionVerdict::DisabledByState,
+        false,
+    )]));
+    sb.select_section(Section::Pressure);
+    assert_eq!(
+        sb.pressure[0].card.footer()[0].state().disposition(),
+        ControlDisposition::DisabledByState
+    );
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        "a disabled relief action must not activate"
+    );
+}
+
+#[test]
+fn denied_relief_action_renders_authority_and_fails_closed() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(pressure_model(alloc::vec![relief_action(
+        PressureControl::Pause,
+        ActionVerdict::DeniedByAuthority,
+        false,
+    )]));
+    sb.select_section(Section::Pressure);
+    assert_eq!(
+        sb.pressure[0].card.footer()[0].state().disposition(),
+        ControlDisposition::DeniedByAuthority
+    );
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        "a denied relief action must not activate"
+    );
+}
+
+#[test]
+fn show_tasks_lands_on_the_culprit_task() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Pressure);
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 1, 2);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::SectionChanged {
+        section: Section::Tasks
+    }));
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, SwitchboardAction::Pressure { .. })),
+        "an internally resolved relief action must not also emit Pressure"
+    );
+    assert_eq!(sb.section(), Section::Tasks);
+    assert_eq!(
+        sb.content_focus, 1,
+        "the culprit's task row takes the focus"
+    );
+}
+
+#[test]
+fn show_tasks_clamps_a_missing_or_stale_task_index() {
+    let theme = Theme::dark();
+    let b = bounds();
+    // No task index: the focus falls to the first task.
+    let mut sb = Switchboard::new(pressure_model(alloc::vec![relief_action(
+        PressureControl::ShowTasks,
+        ActionVerdict::Ready,
+        false,
+    )]));
+    sb.select_section(Section::Pressure);
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::SectionChanged {
+        section: Section::Tasks
+    }));
+    assert_eq!(sb.content_focus, 0);
+
+    // A stale index past the list end clamps to the last task.
+    let mut m = pressure_model(alloc::vec![relief_action(
+        PressureControl::ShowTasks,
+        ActionVerdict::Ready,
+        false,
+    )]);
+    m.pressure[0].task_index = Some(999);
+    let mut sb = Switchboard::new(m);
+    sb.select_section(Section::Pressure);
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::SectionChanged {
+        section: Section::Tasks
+    }));
+    assert_eq!(
+        sb.content_focus, 2,
+        "a stale task index clamps into the shown list"
+    );
+}
+
+#[test]
+fn empty_pressure_section_has_nothing_to_activate() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(SwitchboardModel::new("Switchboard"));
+    sb.select_section(Section::Pressure);
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+}
+
+#[test]
+fn keyboard_reaches_every_pressure_footer() {
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Pressure);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Pressure {
+            index: 0,
+            control: PressureControl::Pause
+        })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Pressure {
+            index: 0,
+            control: PressureControl::LowerPriority
+        })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::SectionChanged {
+            section: Section::Tasks
+        })
+    );
+    assert_eq!(sb.section(), Section::Tasks);
+    assert_eq!(sb.content_focus, 0, "cause 0 names task 0");
+}
+
+// --- The Activities section -----------------------------------------------
+
+/// The centre of the activity header button at `button` for the header in
+/// flattened row `slot`, in window coordinates.
+fn activity_button_centre(
+    sb: &Switchboard,
+    b: Rect,
+    theme: &Theme,
+    slot: u32,
+    button: usize,
+) -> (i32, i32) {
+    let layout = sb.compute_layout(b, Scale::ONE, theme, font());
+    let info = sb.list_info(&layout, Scale::ONE, theme);
+    let (_, buttons) = Switchboard::split_row(info.item_rect(slot), 4, Scale::ONE, theme);
+    centre(buttons[button])
+}
+
+/// The premultiplied channel values of the `width`-wide strip at the leading
+/// edge of `rect`.
+fn leading_strip(surface: &Surface, rect: Rect, width: u32) -> alloc::vec::Vec<(u8, u8, u8, u8)> {
+    let mut out = alloc::vec::Vec::new();
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.left() + i32::try_from(width).unwrap_or(0) {
+            let (xu, yu) = (u32::try_from(x).unwrap_or(0), u32::try_from(y).unwrap_or(0));
+            if let Some(p) = surface.get(xu, yu) {
+                out.push((p.r, p.g, p.b, p.a));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn activities_flatten_headers_and_indent_members() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    assert_eq!(sb.activity_row_at(0), Some(ActivityRow::Header(0)));
+    assert_eq!(sb.activity_row_at(1), Some(ActivityRow::Member(0, 0)));
+    assert_eq!(sb.activity_row_at(2), Some(ActivityRow::Member(0, 1)));
+    assert_eq!(sb.activity_row_at(3), Some(ActivityRow::Header(1)));
+    assert_eq!(sb.activity_row_at(17), Some(ActivityRow::Member(5, 1)));
+    assert_eq!(sb.activity_row_at(18), None);
+
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
+    let info = sb.list_info(&layout, Scale::ONE, &theme);
+    let indent = Scale::ONE.scale_length(theme.metrics().control_height);
+    let header = info.item_rect(0);
+    let member = info.item_rect(1);
+    // The header row owns its leading edge; a member row leaves the same
+    // strip to the background, which is what makes the hierarchy visible.
+    assert_ne!(
+        leading_strip(&surface, header, indent),
+        leading_strip(&surface, member, indent),
+        "a member row must be indented off its leading edge"
+    );
+    let inset = Rect::new(
+        member.left() + i32::try_from(indent).unwrap_or(0),
+        member.top(),
+        member.width.saturating_sub(indent.saturating_mul(2)),
+        member.height,
+    );
+    assert!(
+        has_ink(&surface, inset),
+        "a member row paints when indented"
+    );
+}
+
+#[test]
+fn activity_switch_and_close_activate_by_pointer() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    let (x, y) = activity_button_centre(&sb, b, &theme, 0, 0);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::Activity {
+        index: 0,
+        control: ActivityControl::Switch
+    }));
+    let (x, y) = activity_button_centre(&sb, b, &theme, 0, 3);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::Activity {
+        index: 0,
+        control: ActivityControl::Close
+    }));
+}
+
+#[test]
+fn pause_resume_emission_follows_the_paused_flag() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    // Activity 0 runs, so its header offers Pause.
+    let (x, y) = activity_button_centre(&sb, b, &theme, 0, 1);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::Activity {
+        index: 0,
+        control: ActivityControl::Pause
+    }));
+    // Activity 1 is paused; its header (flattened row 3) offers Resume.
+    let (x, y) = activity_button_centre(&sb, b, &theme, 3, 1);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::Activity {
+        index: 1,
+        control: ActivityControl::Resume
+    }));
+}
+
+#[test]
+fn activity_close_carries_confirmation_posture() {
+    let sb = Switchboard::new(model());
+    assert_eq!(sb.activities[0].close.role(), ControlRole::Destructive);
+    assert_eq!(
+        sb.activities[0].close.state().disposition(),
+        ControlDisposition::NeedsConfirmation
+    );
+}
+
+#[test]
+fn uncontrollable_activity_fails_closed() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut m = model();
+    m.activities[0].can_control = false;
+    let mut sb = Switchboard::new(m);
+    sb.select_section(Section::Activities);
+    assert_eq!(
+        sb.activities[0].pause_resume.state().disposition(),
+        ControlDisposition::DeniedByAuthority
+    );
+    assert_eq!(
+        sb.activities[0].close.state().disposition(),
+        ControlDisposition::DeniedByAuthority
+    );
+    for button in [1, 3] {
+        let (x, y) = activity_button_centre(&sb, b, &theme, 0, button);
+        assert!(
+            click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+            "a denied activity control must not activate"
+        );
+    }
+    // Switching needs no control authority, so it stays available.
+    let (x, y) = activity_button_centre(&sb, b, &theme, 0, 0);
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).contains(&SwitchboardAction::Activity {
+            index: 0,
+            control: ActivityControl::Switch
+        })
+    );
+}
+
+#[test]
+fn member_rows_are_display_only() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
+    let info = sb.list_info(&layout, Scale::ONE, &theme);
+    let (x, y) = centre(info.item_rect(1));
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        "a member row is display-only"
+    );
+}
+
+#[test]
+fn keyboard_reaches_every_activity_header_button() {
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Activity {
+            index: 0,
+            control: ActivityControl::Switch
+        })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Activity {
+            index: 0,
+            control: ActivityControl::Pause
+        })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        None,
+        "Rename begins an edit instead of emitting"
+    );
+    assert!(sb.rename.is_some());
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert!(sb.rename.is_none());
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Activity {
+            index: 0,
+            control: ActivityControl::Close
+        })
+    );
+
+    // A member row (flattened row 1) has no buttons to focus or activate.
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+}
+
+// --- The Group popup --------------------------------------------------------
+
+/// Open the Group popup on task row 0 by clicking its Group button.
+fn open_group_popup_on_first_task(sb: &mut Switchboard, b: Rect, theme: &Theme) {
+    let layout = sb.compute_layout(b, Scale::ONE, theme, font());
+    let info = sb.list_info(&layout, Scale::ONE, theme);
+    let (_, buttons) = Switchboard::split_row(info.item_rect(0), 2, Scale::ONE, theme);
+    let (x, y) = centre(buttons[1]);
+    assert!(
+        click(sb, b, Scale::ONE, theme, x, y).is_empty(),
+        "opening the popup emits nothing"
+    );
+    assert!(sb.group_popup.is_some(), "the Group popup must open");
+}
+
+/// A window point that hits row `index` of the open Group popup.
+fn popup_row_point(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> (i32, i32) {
+    let layout = sb.compute_layout(b, Scale::ONE, theme, font());
+    let popup = sb.group_popup.as_ref().expect("an open Group popup");
+    let anchor = sb.group_anchor_rect(popup.task, &layout, Scale::ONE, theme);
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, theme, font());
+    let x = rect.left() + i32::try_from(rect.width).unwrap_or(0) / 2;
+    for y in rect.top()..rect.bottom() {
+        if popup.menu.row_at(rect, Scale::ONE, theme, Point::new(x, y)) == Some(index) {
+            return (x, y);
+        }
+    }
+    panic!("popup row {index} is not hit-testable");
+}
+
+#[test]
+fn group_button_opens_the_popup_on_its_task() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let popup = sb.group_popup.as_ref().expect("popup");
+    assert_eq!(popup.task, 0);
+    // One row per activity, then "New activity"; an ungrouped task gets no
+    // "Remove from activity" row.
+    assert_eq!(popup.menu.items().len(), 7);
+    assert_eq!(popup.menu.items()[0].label(), "activity 0");
+    assert_eq!(popup.menu.items()[6].label(), "New activity");
+}
+
+#[test]
+fn group_popup_anchors_below_its_button_inside_the_window() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
+    let popup = sb.group_popup.as_ref().expect("popup");
+    let anchor = sb.group_anchor_rect(popup.task, &layout, Scale::ONE, &theme);
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme, font());
+    assert_eq!(
+        rect.top(),
+        anchor.bottom(),
+        "the popup opens below its anchor"
+    );
+    assert!(rect.left() >= b.left());
+    assert!(rect.right() <= b.right());
+    assert!(rect.bottom() <= b.bottom());
+}
+
+#[test]
+fn group_popup_lists_activities_with_disable_reasons() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut m = model();
+    m.tasks[0].group = Some(0);
+    m.activities[1].can_accept_member = false;
+    m.can_create_activity = false;
+    let mut sb = Switchboard::new(m);
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let items = sb.group_popup.as_ref().expect("popup").menu.items();
+    assert_eq!(items.len(), 8);
+    assert_eq!(
+        items[0].state().disposition(),
+        ControlDisposition::DisabledByState
+    );
+    assert_eq!(items[0].reason(), Some("Current activity"));
+    assert_eq!(
+        items[1].state().disposition(),
+        ControlDisposition::DisabledByState
+    );
+    assert_eq!(items[1].reason(), Some("Activity is full"));
+    assert_eq!(
+        items[2].state().disposition(),
+        ControlDisposition::Interactive
+    );
+    assert_eq!(items[6].label(), "New activity");
+    assert_eq!(
+        items[6].state().disposition(),
+        ControlDisposition::DisabledByState
+    );
+    assert_eq!(items[6].reason(), Some("Activity limit reached"));
+    assert_eq!(items[7].label(), "Remove from activity");
+    assert_eq!(
+        items[7].state().disposition(),
+        ControlDisposition::Interactive
+    );
+}
+
+#[test]
+fn group_popup_groups_to_an_existing_activity() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let (x, y) = popup_row_point(&sb, b, &theme, 2);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::TaskGrouped {
+        task: 0,
+        activity: Some(2)
+    }));
+    assert!(sb.group_popup.is_none(), "activation closes the popup");
+}
+
+#[test]
+fn group_popup_new_activity_groups_to_none() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let (x, y) = popup_row_point(&sb, b, &theme, 6);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::TaskGrouped {
+        task: 0,
+        activity: None
+    }));
+    assert!(sb.group_popup.is_none());
+}
+
+#[test]
+fn group_popup_removes_a_grouped_task() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut m = model();
+    m.tasks[0].group = Some(0);
+    let mut sb = Switchboard::new(m);
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let (x, y) = popup_row_point(&sb, b, &theme, 7);
+    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(actions.contains(&SwitchboardAction::TaskUngrouped { task: 0 }));
+    assert!(sb.group_popup.is_none());
+}
+
+#[test]
+fn group_popup_refuses_a_disabled_row() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut m = model();
+    m.tasks[0].group = Some(0);
+    let mut sb = Switchboard::new(m);
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    // Row 0 is the task's current activity, disabled with its reason.
+    let (x, y) = popup_row_point(&sb, b, &theme, 0);
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        "a disabled popup row must not activate"
+    );
+    assert!(
+        sb.group_popup.is_some(),
+        "a refused activation leaves the popup open"
+    );
+}
+
+#[test]
+fn group_popup_escape_dismisses_without_emitting() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert!(sb.group_popup.is_none());
+}
+
+#[test]
+fn group_popup_outside_press_dismisses_without_emitting() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
+    let popup = sb.group_popup.as_ref().expect("popup");
+    let anchor = sb.group_anchor_rect(popup.task, &layout, Scale::ONE, &theme);
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme, font());
+    let (x, y) = centre(layout.band);
+    assert!(
+        !rect.contains(Point::new(x, y)),
+        "the probe point must sit outside the popup"
+    );
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        "an outside press dismisses without emitting"
+    );
+    assert!(sb.group_popup.is_none());
+}
+
+#[test]
+fn group_popup_drops_on_refresh_and_section_change() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    sb.set_model(model());
+    assert!(
+        sb.group_popup.is_none(),
+        "a refresh supersedes the menu the popup was built from"
+    );
+
+    open_group_popup_on_first_task(&mut sb, b, &theme);
+    sb.select_section(Section::Jobs);
+    assert!(
+        sb.group_popup.is_none(),
+        "a section change invalidates the popup's anchor"
+    );
+}
+
+#[test]
+fn keyboard_group_flow_reaches_the_popup_and_activates() {
+    let mut sb = Switchboard::new(model());
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        None,
+        "opening the popup emits nothing"
+    );
+    assert_eq!(sb.group_popup.as_ref().map(|p| p.task), Some(0));
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::TaskGrouped {
+            task: 0,
+            activity: Some(0)
+        })
+    );
+    assert!(sb.group_popup.is_none());
+}
+
+// --- Inline rename ----------------------------------------------------------
+
+/// Begin an inline rename of the first activity's header by pointer.
+fn begin_first_rename(sb: &mut Switchboard, b: Rect, theme: &Theme) {
+    sb.select_section(Section::Activities);
+    let (x, y) = activity_button_centre(sb, b, theme, 0, 2);
+    assert!(
+        click(sb, b, Scale::ONE, theme, x, y).is_empty(),
+        "beginning a rename emits nothing"
+    );
+    assert!(sb.rename.is_some(), "the rename must begin");
+}
+
+#[test]
+fn rename_commits_by_enter_and_reports_the_name() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    begin_first_rename(&mut sb, b, &theme);
+    assert_eq!(
+        sb.rename.as_ref().map(|e| e.field.text()),
+        Some("activity 0"),
+        "the field pre-fills with the current name"
+    );
+    assert_eq!(sb.on_key(Key::Char('!')), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::ActivityRenamed { index: 0 })
+    );
+    assert_eq!(sb.submitted_activity_name(), Some("activity 0!"));
+    assert_eq!(sb.activities[0].name, "activity 0!");
+    assert!(sb.rename.is_none());
+}
+
+#[test]
+fn rename_escape_cancels_without_emitting() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    begin_first_rename(&mut sb, b, &theme);
+    assert_eq!(sb.on_key(Key::Char('!')), None);
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert!(sb.rename.is_none());
+    assert_eq!(sb.submitted_activity_name(), None);
+    assert_eq!(
+        sb.activities[0].name, "activity 0",
+        "a cancel changes nothing"
+    );
+}
+
+#[test]
+fn rename_survives_a_refresh_that_moves_its_activity() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    begin_first_rename(&mut sb, b, &theme);
+    assert_eq!(sb.on_key(Key::Char('!')), None);
+
+    // The refresh reorders the list: id 100 moves from index 0 to index 5.
+    let mut m = model();
+    m.activities.rotate_left(1);
+    sb.set_model(m);
+
+    let edit = sb.rename.as_ref().expect("the edit survives its activity");
+    assert_eq!(edit.index, 5, "the edit re-locates its activity by id");
+    assert_eq!(edit.field.text(), "activity 0!", "the typed text survives");
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::ActivityRenamed { index: 5 })
+    );
+    assert_eq!(sb.submitted_activity_name(), Some("activity 0!"));
+    assert_eq!(sb.activities[5].name, "activity 0!");
+}
+
+#[test]
+fn rename_drops_when_its_activity_vanishes() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    begin_first_rename(&mut sb, b, &theme);
+
+    let mut m = model();
+    m.activities.remove(0);
+    sb.set_model(m);
+
+    assert!(
+        sb.rename.is_none(),
+        "an edit never re-attaches to a different activity"
+    );
+    assert_eq!(sb.submitted_activity_name(), None);
+}
+
+#[test]
+fn submitted_name_clears_on_the_next_refresh() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    begin_first_rename(&mut sb, b, &theme);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::ActivityRenamed { index: 0 })
+    );
+    assert!(sb.submitted_activity_name().is_some());
+    sb.set_model(model());
+    assert_eq!(
+        sb.submitted_activity_name(),
+        None,
+        "a committed name is read before the next sample"
+    );
+}
+
+// --- Keyboard action focus -------------------------------------------------
+
+#[test]
+fn keyboard_reaches_the_recovery_force_action() {
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Recovery);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Recovery {
+            index: 0,
+            control: RecoveryControl::Restart
+        })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Recovery {
+            index: 0,
+            control: RecoveryControl::Force
+        }),
+        "Force must be keyboard-reachable"
+    );
+}
+
+#[test]
+fn keyboard_reaches_the_task_group_button() {
+    let mut sb = Switchboard::new(model());
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Task { index: 0 })
+    );
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        sb.group_popup.as_ref().map(|p| p.task),
+        Some(0),
+        "the popup opens on the focused task"
+    );
+}
+
+#[test]
+fn keyboard_reaches_the_job_cancel_footer() {
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Jobs);
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        sb.on_key(Key::Named(NamedKey::Enter)),
+        Some(SwitchboardAction::Job {
+            index: 0,
+            control: JobControl::Cancel
+        })
+    );
+}
+
+#[test]
+fn action_focus_clamps_and_resets_with_the_row_focus() {
+    let mut sb = Switchboard::new(model());
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Left)), None);
+    assert_eq!(sb.row_action, 0, "Left at the first button stays put");
+    for _ in 0..5 {
+        assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    }
+    assert_eq!(sb.row_action, 1, "Right clamps at the last button");
+    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        sb.row_action, 0,
+        "moving the row focus resets the action focus"
+    );
+}
+
+// --- The new sections under themes and refresh identity ---------------------
+
+#[test]
+fn light_and_high_contrast_render_the_new_sections() {
+    let b = bounds();
+    for theme in [Theme::light(), high_contrast()] {
+        for section in [Section::Pressure, Section::Activities] {
+            let mut sb = Switchboard::new(model());
+            sb.select_section(section);
+            let mut surface = Surface::new(b.width, b.height).expect("surface");
+            sb.render(&mut surface, b, Scale::ONE, &theme, font());
+            let layout = sb.compute_layout(b, Scale::ONE, &theme, font());
+            assert!(
+                has_ink(&surface, layout.content),
+                "{section:?} painted nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn set_model_cannot_complete_a_press_begun_on_a_replaced_pressure_card() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Pressure);
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    let (x, y) = pressure_footer_centre(&sb, b, &theme, 0, 0);
+
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
+        None
+    );
+    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    sb.set_model(model());
+
+    assert_eq!(
+        sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        None,
+        "a press must not complete against the card that replaced its target"
+    );
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).contains(&SwitchboardAction::Pressure {
+            index: 0,
+            control: PressureControl::Pause
+        }),
+        "a fresh gesture on the new card must still work"
+    );
+}
+
+#[test]
+fn set_model_cannot_complete_a_press_begun_on_a_replaced_activity_row() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(model());
+    sb.select_section(Section::Activities);
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    let (x, y) = activity_button_centre(&sb, b, &theme, 0, 0);
+
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
+        None
+    );
+    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    sb.set_model(model());
+
+    assert_eq!(
+        sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        None,
+        "a press must not complete against the row that replaced its target"
+    );
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, x, y).contains(&SwitchboardAction::Activity {
+            index: 0,
+            control: ActivityControl::Switch
+        }),
+        "a fresh gesture on the new row must still work"
     );
 }

@@ -197,7 +197,7 @@ mod tests {
     use tairix_abi::sysinfo::{
         ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::{Errno, ProcId, SchedPriority};
 
     /// An in-memory `sysinfod` stand-in answering process-list queries from a
     /// fixed record set, decoding the request exactly as the real service.
@@ -255,6 +255,7 @@ mod tests {
             1000,
             state,
             0,
+            SchedPriority::Normal,
             0,
             0,
             name,

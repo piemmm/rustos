@@ -104,7 +104,7 @@ mod tests {
     use tairix_abi::sysinfo::{
         ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::{Errno, ProcId, SchedPriority};
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::{Output, Transport};
 
@@ -246,6 +246,7 @@ mod tests {
             1000,
             state,
             0,
+            SchedPriority::Normal,
             0,
             0,
             name,

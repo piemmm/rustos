@@ -7,7 +7,7 @@ use tairix_abi::sysinfo::{
     CpuTimeListRequest, CpuTimeRecord, MemoryPressureStats, ProcessListRequest, ProcessRecord,
     ProcessState, SysinfoQueryId, SysinfoRequestHeader,
 };
-use tairix_abi::{Errno, ProcId};
+use tairix_abi::{Errno, ProcId, SchedPriority};
 use tairix_procinfo::Transport;
 
 use super::{probe_scopes, DegradedField, Sampler, ScopeVerdicts};
@@ -127,6 +127,7 @@ fn process(
         1000,
         state,
         0,
+        SchedPriority::Normal,
         cpu_time_ns,
         0,
         name,

@@ -126,6 +126,12 @@ impl MenuItem {
         &self.label
     }
 
+    /// The item's disabled-row reason, if one was set.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
     /// The item's role.
     #[must_use]
     pub fn role(&self) -> ControlRole {

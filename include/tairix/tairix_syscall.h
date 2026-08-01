@@ -127,6 +127,7 @@ extern "C" {
 #define TAIRIX_SYS_CALL_CANCEL 101u
 #define TAIRIX_SYS_HW_NODE_HEALTH 102u
 #define TAIRIX_SYS_HW_SELF_NODE 103u
+#define TAIRIX_SYS_SCHED_SET_PRIORITY 104u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -239,6 +240,16 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_SIGNAL_INTAKE_OP_ENABLE 0u
 #define TAIRIX_SIGNAL_INTAKE_OP_DISABLE 1u
 #define TAIRIX_SIGNAL_INTAKE_OP_TAKE 2u
+
+/* sched_set_priority() service levels (the `priority` argument, uint32_t),
+* also carried in tairix_process_record.priority. 0 is reserved and never
+* valid; a value outside this set is rejected with TAIRIX_E_OUT_OF_RANGE.
+* The target rule mirrors signal(): an own child, else a process of the
+* caller's own principal, else TAIRIX_CAP_PROC_CONTROL. Raising the level
+* (toward HIGH) always requires TAIRIX_CAP_PROC_CONTROL. */
+#define TAIRIX_SCHED_PRIORITY_HIGH 1u
+#define TAIRIX_SCHED_PRIORITY_NORMAL 2u
+#define TAIRIX_SCHED_PRIORITY_LOW 3u
 
 /* waitset_ctl() operations (the `op` argument, uint32_t) and member source
 * kinds (the `kind` argument, uint32_t). A value outside either set is
@@ -359,6 +370,7 @@ uint64_t tairix_sys_call_reap(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3)
 int32_t tairix_sys_call_cancel(uint64_t a0, uint64_t a1);
 int32_t tairix_sys_hw_node_health(uint64_t a0);
 uint64_t tairix_sys_hw_self_node(void);
+int32_t tairix_sys_sched_set_priority(int32_t a0, uint32_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

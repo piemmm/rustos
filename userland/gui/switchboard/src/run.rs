@@ -72,8 +72,8 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        CapabilityId, CapabilityQuery, Errno, Origin, ProcId, Signal, SignalIntakeOp, WaitSetOp,
-        WaitSourceKind, ORIGIN_WIRE_LEN,
+        CapabilityId, CapabilityQuery, Errno, Origin, ProcId, SchedPriority, Signal,
+        SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
     use tairix_controls::{Switchboard, SwitchboardAction};
     use tairix_font::BitmapFont;
@@ -475,6 +475,15 @@ mod program {
             }
         }
 
+        fn lower_priority(&mut self, pid: i32) -> Result<(), Errno> {
+            let ret = tairix_rt::sched_set_priority(pid, SchedPriority::Low);
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Errno::from_syscall(ret))
+            }
+        }
+
         fn report_refusal(&mut self, action: &str, refusal: Errno) {
             say(&refusal_notice(action, refusal));
         }
@@ -655,7 +664,9 @@ mod program {
             | WindowEvent::PickCancelled { .. } => return,
         };
         if let Some(action) = action {
-            service.panel_mut().act(host, action, authority);
+            if let Some(outcome) = service.panel_mut().act(host, action, authority) {
+                service.apply_grouping(host, outcome, authority);
+            }
         }
         service.panel_mut().redraw(host);
     }

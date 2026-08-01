@@ -3512,6 +3512,11 @@ fn restart_owner_relaunches_the_recorded_bundle() {
 fn every_bar_section_maps_onto_its_wire_section() {
     assert_eq!(command_section(Section::Tasks), CommandSection::Tasks);
     assert_eq!(command_section(Section::Jobs), CommandSection::Jobs);
+    assert_eq!(command_section(Section::Pressure), CommandSection::Pressure);
+    assert_eq!(
+        command_section(Section::Activities),
+        CommandSection::Activities
+    );
     assert_eq!(command_section(Section::Recovery), CommandSection::Recovery);
     assert_eq!(command_section(Section::Overview), CommandSection::Overview);
 }

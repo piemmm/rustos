@@ -14,7 +14,7 @@ use tairix_abi::sysinfo::{
     ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED,
     RECLAIM_CLASS_COUNT,
 };
-use tairix_abi::{Duration64, Errno, ProcId};
+use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_curses::{Event, Screen, Size, Tty};
 use tairix_procinfo::Transport;
 use tairix_termcap::TermType;
@@ -318,6 +318,7 @@ fn record_with(pid: u64, name: &[u8], cpu_time_ns: u64, mem_bytes: u64) -> Proce
         1000,
         ProcessState::Running,
         0,
+        SchedPriority::Normal,
         cpu_time_ns,
         mem_bytes,
         name,

@@ -34,19 +34,23 @@
 //! * [`command`] — [`command::authenticate_command`], which drops any
 //!   command not attested to the desktop session's identity before it is
 //!   ever decoded, let alone applied.
+//! * [`activities`] — [`activities::Activities`], the service-held,
+//!   session-lifetime state that groups live processes into named
+//!   activities the Activities section renders and acts on.
 //! * [`model`] — [`model::build_model`], the pure function that turns a
-//!   [`sample::Sample`], the rolling [`model::LiveMeters`] state, and the
-//!   session's [`tairix_abi::switchboard_ipc::SeatReport`] into the live
-//!   overview panel's [`tairix_controls::SwitchboardModel`], and
-//!   [`model::apply_action`], which maps the panel's reported
-//!   [`tairix_controls::SwitchboardAction`] back onto the outbound
-//!   [`model::Effect`] it implies.
+//!   [`sample::Sample`], the rolling [`model::LiveMeters`] state, the
+//!   session's [`tairix_abi::switchboard_ipc::SeatReport`], and the
+//!   service's [`activities::Activities`] into the live overview panel's
+//!   [`tairix_controls::SwitchboardModel`], and [`model::apply_action`],
+//!   which maps the panel's reported [`tairix_controls::SwitchboardAction`]
+//!   back onto the outbound [`model::Effect`]s it implies.
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
 //!   raise, refresh, close) and effect application.
 //! * [`service`] — [`service::ServiceHost`], the single seam through which
 //!   everything outside this process is reached, and [`service::Service`],
-//!   the run loop's body: sample, derive, record, refresh the panel, and
-//!   publish — every cycle, whether or not a window is open.
+//!   the run loop's body: sample, derive, record, prune and refresh the
+//!   activity-grouping state, refresh the panel, and publish — every
+//!   cycle, whether or not a window is open.
 //! * [`wait`] — the wait-set token vocabulary the run loop's single
 //!   multiplexed park covers: its own termination signal, the session's
 //!   command mailbox, and — only while a window is open — that window's
@@ -78,8 +82,15 @@
 //!   button. Offering one it could not perform would be an action that
 //!   fails at the point of use rather than being honestly absent.
 //!
-//! Disk and network resource rows are absent for the same reason: the
-//! System Information API exposes no throughput query for either.
+//! A disk resource row is absent for the same reason: the System
+//! Information API exposes no disk-throughput query. A network resource
+//! row is absent for a different reason — the System Information API does
+//! carry a live throughput query
+//! ([`tairix_abi::sysinfo::SysinfoQueryId::NET_INTERFACE_RATES`]), but this
+//! service does not consume it: that query's capability gate and sampling
+//! budget belong to the tray's own pressure latches, and no CPU/memory-style
+//! pressure latch exists yet for network, so there is nothing this crate
+//! could honestly render a rail or a card from.
 //!
 //! # Layering & safety
 //!
@@ -95,6 +106,7 @@
 
 extern crate alloc;
 
+pub mod activities;
 pub mod command;
 pub mod derive;
 pub mod model;
@@ -108,12 +120,16 @@ pub mod wait;
 #[cfg(test)]
 mod test_host;
 
+pub use activities::{
+    Activities, ActivityView, Member, ACTIVITY_NAME_MAX, MAX_ACTIVITIES, MAX_ACTIVITY_MEMBERS,
+};
 pub use command::{authenticate_command, is_from_session};
 pub use derive::{derive_summary, memory_pressured, Hysteresis};
 pub use model::{
-    apply_action, build_model, map_section, signal_pid, Effect, LiveMeters, PanelModel,
+    apply_action, build_model, derive_self_uid, map_section, signal_pid, Effect, GroupingEdit,
+    LiveMeters, PanelModel,
 };
-pub use panel::{refusal_notice, CommandOutcome, Panel, PANEL_TITLE};
+pub use panel::{refusal_notice, CommandOutcome, Panel, PanelOutcome, PANEL_TITLE};
 pub use publish::Publisher;
 pub use sample::{
     probe_scopes, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,

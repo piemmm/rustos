@@ -53,11 +53,11 @@ use tairix_abi::{
     ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode,
     NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
     ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit,
-    ResourceLimitRecord, RxePermission, Segment, Severity, Signal, SignalIntakeOp, StdInfoKind,
-    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
-    UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind,
-    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal, SignalIntakeOp,
+    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64,
+    UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp,
+    WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -1642,8 +1642,10 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused\n\
          * process-instance identities (correlate on those, not the numeric ids).\n\
          * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently\n\
-         * scheduled; cpu_time_ns is the cumulative on-CPU time and mem_bytes the\n\
-         * mapped address-space size. The inline name is valid for name_len bytes. */\n\
+         * scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service\n\
+         * level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and\n\
+         * mem_bytes the mapped address-space size. The inline name is valid for\n\
+         * name_len bytes. */\n\
          typedef struct tairix_process_record {\n\
          \x20   uint64_t pid;\n\
          \x20   uint64_t parent_pid;\n\
@@ -1653,6 +1655,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint32_t gid;\n\
          \x20   uint8_t state;\n\
          \x20   uint8_t cpu;\n\
+         \x20   uint32_t priority;\n\
          \x20   uint64_t cpu_time_ns;\n\
          \x20   uint64_t mem_bytes;\n\
          \x20   uint8_t name_len;\n\
@@ -2320,6 +2323,31 @@ fn emit_signal_contract(out: &mut String) {
         out,
         "#define TAIRIX_SIGNAL_INTAKE_OP_TAKE {}u",
         SignalIntakeOp::Take.as_u32()
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* sched_set_priority() service levels (the `priority` argument, uint32_t),\n\
+         * also carried in tairix_process_record.priority. 0 is reserved and never\n\
+         * valid; a value outside this set is rejected with TAIRIX_E_OUT_OF_RANGE.\n\
+         * The target rule mirrors signal(): an own child, else a process of the\n\
+         * caller's own principal, else TAIRIX_CAP_PROC_CONTROL. Raising the level\n\
+         * (toward HIGH) always requires TAIRIX_CAP_PROC_CONTROL. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SCHED_PRIORITY_HIGH {}u",
+        SchedPriority::High.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SCHED_PRIORITY_NORMAL {}u",
+        SchedPriority::Normal.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SCHED_PRIORITY_LOW {}u",
+        SchedPriority::Low.as_u32()
     );
     out.push('\n');
 }
@@ -3003,6 +3031,33 @@ mod tests {
         assert!(
             h.contains("int32_t tairix_sys_console_foreground(uint32_t a0, int32_t a1);"),
             "console_foreground prototype carries the fd and pid arguments: {h}"
+        );
+    }
+
+    /// The `sched_set_priority()` contract: the prototype carries its
+    /// `(pid, level)` arguments and the service-level discriminants are
+    /// read from `lib/abi`, never re-typed.
+    #[test]
+    fn syscall_header_carries_the_sched_priority_contract() {
+        let h = body("tairix_syscall.h");
+        assert!(
+            h.contains("int32_t tairix_sys_sched_set_priority(int32_t a0, uint32_t a1);"),
+            "sched_set_priority prototype carries the pid and level arguments: {h}"
+        );
+        for (name, level) in [
+            ("TAIRIX_SCHED_PRIORITY_HIGH", SchedPriority::High),
+            ("TAIRIX_SCHED_PRIORITY_NORMAL", SchedPriority::Normal),
+            ("TAIRIX_SCHED_PRIORITY_LOW", SchedPriority::Low),
+        ] {
+            let line = format!("#define {name} {}u", level.as_u32());
+            assert!(h.contains(&line), "level constant pinned: {line}");
+        }
+        // The record mirror carries the same level, so a C consumer can
+        // interpret tairix_process_record.priority with one vocabulary.
+        let s = body("tairix_sysinfo.h");
+        assert!(
+            s.contains("uint32_t priority;"),
+            "process record mirror carries the service level: {s}"
         );
     }
 

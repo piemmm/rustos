@@ -1,14 +1,23 @@
 //! Unit tests for the run loop's body: the service samples, refreshes the
 //! panel, and publishes every cycle, whether or not a window is open.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardCommand};
-use tairix_abi::Errno;
+use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
+use tairix_abi::{Errno, ProcId};
 use tairix_controls::Section;
 
 use super::{CycleOutcome, Service, MAX_CONSECUTIVE_PUBLISH_FAILURES};
+use crate::model::GroupingEdit;
+use crate::panel::PanelOutcome;
 use crate::publish::KEEPALIVE_NS;
 use crate::sample::{DegradedField, ScopeVerdicts};
-use crate::test_host::{DeadTransport, RecordingHost, NO_AUTHORITY};
+use crate::test_host::{
+    process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
+    PROC_CONTROL_AUTHORITY,
+};
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.
@@ -17,6 +26,13 @@ const OWN_PID: u64 = 4242;
 /// Neither optional scope granted — the ordinary unprivileged ceiling.
 const NO_SCOPES: ScopeVerdicts = ScopeVerdicts {
     global_process_scope: false,
+    memory_pressure: false,
+};
+
+/// The global process scope granted, so [`ProcessListTransport`]'s records
+/// are read exactly like the real gate would serve them.
+const GRANTED_SCOPES: ScopeVerdicts = ScopeVerdicts {
+    global_process_scope: true,
     memory_pressure: false,
 };
 
@@ -169,4 +185,180 @@ fn a_seat_report_is_folded_into_the_panel_at_once() {
     );
 
     assert_eq!(service.panel().seat_report().owners(), &[11]);
+}
+
+/// Two sampled rows: the service's own, and a target task grouped into an
+/// activity by the tests below.
+fn two_row_records(self_pid: u64, target_pid: u64) -> Vec<ProcessRecord> {
+    alloc::vec![
+        process_record(
+            self_pid,
+            ProcId::from_raw([1; 16]),
+            DEFAULT_UID,
+            ProcessState::Running,
+            b"switchboard"
+        ),
+        process_record(
+            target_pid,
+            ProcId::from_raw([2; 16]),
+            DEFAULT_UID,
+            ProcessState::Running,
+            b"task"
+        ),
+    ]
+}
+
+#[test]
+fn self_uid_derived_from_the_services_own_row_grants_same_uid_control() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Edit(GroupingEdit::Assign {
+            task: 1,
+            activity: None,
+        }),
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(service.panel().model().model.activities.len(), 1);
+    assert!(
+        service.panel().model().model.activities[0].can_control,
+        "the target shares the service's own derived uid"
+    );
+}
+
+#[test]
+fn a_missing_self_row_denies_control_without_the_capability() {
+    let target_pid = 50;
+    let records = alloc::vec![process_record(
+        target_pid,
+        ProcId::from_raw([2; 16]),
+        DEFAULT_UID,
+        ProcessState::Running,
+        b"task"
+    )];
+    let transport = ProcessListTransport::new(records);
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Edit(GroupingEdit::Assign {
+            task: 0,
+            activity: None,
+        }),
+        &NO_AUTHORITY,
+    );
+    assert!(
+        !service.panel().model().model.activities[0].can_control,
+        "an unknown self uid must never grant the same-uid rule"
+    );
+
+    // The capability alone still grants it, even with no self row.
+    service.command(
+        &mut host,
+        SwitchboardCommand::SeatReport {
+            report: SeatReport::HEALTHY,
+        },
+        &PROC_CONTROL_AUTHORITY,
+    );
+    assert!(service.panel().model().model.activities[0].can_control);
+}
+
+#[test]
+fn a_grouping_edit_re_presents_the_panel_immediately() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    service.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Activities,
+        },
+        &NO_AUTHORITY,
+    );
+    let presents = host.presents;
+
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Edit(GroupingEdit::Assign {
+            task: 1,
+            activity: None,
+        }),
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(service.panel().model().model.activities.len(), 1);
+    assert!(
+        host.presents > presents,
+        "the new activity is shown without waiting for the next sample"
+    );
+}
+
+#[test]
+fn activities_survive_a_degraded_process_list_sample() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Edit(GroupingEdit::Assign {
+            task: 1,
+            activity: None,
+        }),
+        &NO_AUTHORITY,
+    );
+    assert_eq!(service.panel().model().model.activities.len(), 1);
+
+    // A later cycle whose process-list query fails must not wipe the
+    // activity: an honestly empty list from a query failure is not "every
+    // process exited".
+    service.cycle(&mut host, &DeadTransport, KEEPALIVE_NS, &NO_AUTHORITY);
+    assert_eq!(
+        service.panel().model().model.activities.len(),
+        1,
+        "a degraded sample must never prune live activities"
+    );
+}
+
+#[test]
+fn a_rename_refusal_is_reported_and_leaves_the_name_unchanged() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Edit(GroupingEdit::Assign {
+            task: 1,
+            activity: None,
+        }),
+        &NO_AUTHORITY,
+    );
+
+    service.apply_grouping(
+        &mut host,
+        PanelOutcome::Renamed {
+            activity: 0,
+            name: String::from("   "),
+        },
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(
+        service.panel().model().model.activities[0].name,
+        "Activity 1"
+    );
+    assert_eq!(host.refused_actions(), alloc::vec!["rename that activity"]);
 }

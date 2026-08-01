@@ -248,6 +248,15 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn sched_set_priority(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _priority: tairix_abi::SchedPriority,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn rlimit_get(&self, _c: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -888,6 +897,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::SIGNAL_INTAKE {
         let raw = u32::try_from(args[0] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         if tairix_abi::SignalIntakeOp::from_u32(raw).is_err() {
+            return false;
+        }
+    }
+    // `sched_set_priority`'s level argument (arg 1) carries the same extra
+    // semantic check: the dispatcher runs the raw `U32` through
+    // `SchedPriority::from_u32`, which rejects any value outside the closed
+    // level set (including the reserved 0). Mirror that here.
+    if spec.number == SyscallNumber::SCHED_SET_PRIORITY {
+        let raw = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if tairix_abi::SchedPriority::from_u32(raw).is_err() {
             return false;
         }
     }

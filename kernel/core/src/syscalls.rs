@@ -73,7 +73,9 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
-use crate::sched::{CpuId, SchedClass, SchedError, Scheduler, SchedulerArch};
+use crate::sched::{
+    level_of_priority, priority_of_level, CpuId, SchedClass, SchedError, Scheduler, SchedulerArch,
+};
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
@@ -84,13 +86,13 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
     Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
-    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SignalIntakeOp,
-    SpawnAttach, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags,
-    WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
-    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal,
+    SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags,
+    WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
+    LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
+    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -3086,17 +3088,46 @@ where
         pid: i32,
         signal: Signal,
     ) -> Result<SecTaskId, Errno> {
-        // `signal` names exactly one process — it has no wildcard selector —
-        // so a non-positive `pid` is not a task id and is refused before any
-        // table is consulted.
+        let (target, rule) = self.cross_principal_rule(caller, pid)?;
+        self.audit_cross_principal_signal(caller.task_id, pid, target, signal, rule);
+        if rule.allows() {
+            Ok(target)
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
+    /// Resolve `pid` to a task that is *not* the caller's child and derive
+    /// which [`CrossPrincipalRule`] governs the caller's authority over it.
+    ///
+    /// The shared resolution both process-target syscalls (`signal`,
+    /// `sched_set_priority`) sit on, so the same-principal /
+    /// `CAP_PROC_CONTROL` decision can never drift between them. Returns
+    /// the rule — including [`CrossPrincipalRule::Denied`] — rather than
+    /// enforcing it, so each caller audits the decision with its own
+    /// operation's payload before failing closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when `pid` is not a positive task id or the
+    /// capability table knows no such task (the kernel never guesses an
+    /// owner).
+    fn cross_principal_rule(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i32,
+    ) -> Result<(SecTaskId, CrossPrincipalRule), Errno> {
+        // Both callers name exactly one process — neither has a wildcard
+        // selector — so a non-positive `pid` is not a task id and is refused
+        // before any table is consulted.
         let target = match u32::try_from(pid) {
             Ok(raw) if raw != 0 => SecTaskId(u64::from(raw)),
             _ => return Err(Errno::NotFound),
         };
 
         // Read the target's owner under a briefly held read lock and release
-        // it before deciding, so neither the audit emit nor the delivery
-        // runs with the capability table borrowed.
+        // it before deciding, so neither the audit emit nor the operation
+        // itself runs with the capability table borrowed.
         let owner = {
             let guard = self.caps.read();
             match guard.caps_for(target) {
@@ -3112,12 +3143,61 @@ where
         } else {
             CrossPrincipalRule::Denied
         };
-        self.audit_cross_principal_signal(caller.task_id, pid, target, signal, rule);
-        if rule.allows() {
-            Ok(target)
-        } else {
-            Err(Errno::PermissionDenied)
-        }
+        Ok((target, rule))
+    }
+
+    /// Emit the one [`AuditEvent::ProcessPriorityChange`] record for a
+    /// `sched_set_priority` decision that needed authority beyond the
+    /// caller's own child: a cross-principal target or a raise.
+    ///
+    /// An allowed change is routine (`Info`); a refusal is the anomaly a
+    /// reviewer looks for (`Warn`). The record carries the attested caller,
+    /// the requested pid and the task it resolved to, the requested level's
+    /// wire discriminant, which target rule applied, and whether the change
+    /// raised service — all program state, never a capability token.
+    fn audit_priority_change(
+        &self,
+        caller: SecTaskId,
+        pid: i32,
+        target: SecTaskId,
+        priority: SchedPriority,
+        decision: PriorityDecision,
+    ) {
+        crate::audit::emit(
+            self.audit,
+            if decision.allowed {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            AuditEvent::ProcessPriorityChange,
+            &[
+                Field {
+                    key: "caller",
+                    value: tairix_log::FieldValue::UnsignedInt(caller.0),
+                },
+                Field {
+                    key: "pid",
+                    value: tairix_log::FieldValue::SignedInt(i64::from(pid)),
+                },
+                Field {
+                    key: "target",
+                    value: tairix_log::FieldValue::UnsignedInt(target.0),
+                },
+                Field {
+                    key: "priority",
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(priority.as_u32())),
+                },
+                Field {
+                    key: "rule",
+                    value: tairix_log::FieldValue::Str(decision.rule.as_str()),
+                },
+                Field {
+                    key: "raise",
+                    value: tairix_log::FieldValue::Bool(decision.raise),
+                },
+            ],
+        );
     }
 
     /// Emit the one [`AuditEvent::ProcessSignalCrossPrincipal`] record for a
@@ -3170,14 +3250,19 @@ where
     }
 }
 
-/// Which rule decided a cross-principal `signal` — the target is not the
-/// caller's child, so one of these three answers applies.
+/// Which rule decided the caller's authority over a process target
+/// (`signal`, `sched_set_priority`).
 ///
 /// Carrying the outcome as a value keeps the audited `rule` field and the
 /// allow/deny answer from ever disagreeing: both are read off the same
-/// decision.
+/// decision. `signal`'s audit fires only on the cross-principal path, so it
+/// never records [`OwnChild`](Self::OwnChild); a priority *raise* is audited
+/// on every path, so the own-child rule is first-class here.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum CrossPrincipalRule {
+    /// The target is a live child the caller spawned — the standing grant
+    /// job control sits on, needing no capability.
+    OwnChild,
     /// The target belongs to the caller's own principal, which controls its
     /// own processes without any capability.
     SameUid,
@@ -3190,19 +3275,36 @@ enum CrossPrincipalRule {
 }
 
 impl CrossPrincipalRule {
-    /// Whether this rule permits the delivery.
+    /// Whether this rule permits the operation.
     const fn allows(self) -> bool {
-        matches!(self, Self::SameUid | Self::Capability)
+        matches!(self, Self::OwnChild | Self::SameUid | Self::Capability)
     }
 
     /// The stable `rule` spelling carried on the audit record.
     const fn as_str(self) -> &'static str {
         match self {
+            Self::OwnChild => "own_child",
             Self::SameUid => "same_uid",
             Self::Capability => "capability",
             Self::Denied => "denied",
         }
     }
+}
+
+/// The audited outcome of one `sched_set_priority` authority decision:
+/// which target rule applied, whether the requested level raised service,
+/// and whether the change was allowed.
+///
+/// One value carries the whole verdict to the audit emitter so the record
+/// and the returned errno are read off the same decision.
+#[derive(Copy, Clone)]
+struct PriorityDecision {
+    /// The rule that resolved the caller's authority over the target.
+    rule: CrossPrincipalRule,
+    /// Whether the requested level outranks the target's current one.
+    raise: bool,
+    /// Whether the change was permitted.
+    allowed: bool,
 }
 
 /// The operation-specific detail a filesystem-mutation audit record carries
@@ -5681,6 +5783,96 @@ where
             Ok(()) => Ok(0),
             // The task is unknown or terminal (a concurrent teardown): fail
             // closed rather than pretend the class changed.
+            Err(_) => Err(Errno::NotFound),
+        }
+    }
+
+    fn sched_set_priority(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i32,
+        priority: SchedPriority,
+    ) -> SyscallResult {
+        // The dispatcher already validated that `pid` is a sign-extended
+        // `i32` and `priority` a defined `SchedPriority`, and audited the
+        // call. Who may re-weight whom is decided *here*, before the
+        // scheduler is touched, from the kernel-trusted `caller.task_id` /
+        // `caller.caps` — never a caller-supplied identity.
+        //
+        // The target rule is `signal`'s, narrowest first: a live child the
+        // caller spawned needs no capability, then the target's own
+        // principal, then `CAP_PROC_CONTROL`. Any other producer error (an
+        // inert interface) propagates verbatim rather than being
+        // reinterpreted as a target question.
+        let (target, rule) = match self.process_signal.resolve_child(caller.task_id, pid) {
+            Ok(child) => (child, CrossPrincipalRule::OwnChild),
+            Err(Errno::NotFound) => self.cross_principal_rule(caller, pid)?,
+            Err(err) => return Err(err),
+        };
+        if !rule.allows() {
+            self.audit_priority_change(
+                caller.task_id,
+                pid,
+                target,
+                priority,
+                PriorityDecision {
+                    rule,
+                    raise: false,
+                    allowed: false,
+                },
+            );
+            return Err(Errno::PermissionDenied);
+        }
+
+        // Raising service (toward `High`) is an administrative act under
+        // `CAP_PROC_CONTROL` regardless of the target rule, so no user can
+        // weight their own work above other principals' fair share. The
+        // current level is the scheduler's own record; a task it no longer
+        // knows is gone (fail closed, never a guessed level).
+        let current = match self.sched.priority(target.0) {
+            Ok(current) => level_of_priority(current),
+            Err(_) => return Err(Errno::NotFound),
+        };
+        let raise = priority.outranks(current);
+        if raise && !caller.caps.has(CapabilityId::PROC_CONTROL) {
+            self.audit_priority_change(
+                caller.task_id,
+                pid,
+                target,
+                priority,
+                PriorityDecision {
+                    rule,
+                    raise,
+                    allowed: false,
+                },
+            );
+            return Err(Errno::PermissionDenied);
+        }
+
+        // An own-child lowering is the parent's standing grant (job
+        // control's tier) and stays unaudited, exactly as own-child signal
+        // delivery does; every cross-principal outcome and every raise is
+        // recorded once.
+        if raise || rule != CrossPrincipalRule::OwnChild {
+            self.audit_priority_change(
+                caller.task_id,
+                pid,
+                target,
+                priority,
+                PriorityDecision {
+                    rule,
+                    raise,
+                    allowed: true,
+                },
+            );
+        }
+        match self
+            .sched
+            .set_priority(target.0, priority_of_level(priority))
+        {
+            Ok(()) => Ok(0),
+            // The task is unknown or terminal (a concurrent teardown): fail
+            // closed rather than pretend the level changed.
             Err(_) => Err(Errno::NotFound),
         }
     }
@@ -22173,6 +22365,362 @@ mod tests {
         assert!(cross_principal_records(sink).is_empty());
     }
 
+    /// Every `sched_set_priority` decision the sink captured, in arrival
+    /// order.
+    fn priority_records(sink: &TestSink) -> Vec<crate::test_sink::CapturedEvent> {
+        sink.snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::ProcessPriorityChange.id())
+            .collect()
+    }
+
+    /// Admit one parked task so the scheduler genuinely knows the target,
+    /// returning its id as both the scheduler's `u64` and the syscall's
+    /// `i32` pid spelling.
+    fn spawn_priority_target(sched: &Scheduler<TestArch>) -> (u64, i32) {
+        let id = sched
+            .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn target");
+        (id, i32::try_from(id).expect("test task id fits i32"))
+    }
+
+    /// Lowering a caller's own live child needs no capability and stays off
+    /// the audit log — the parent's standing grant, exactly as own-child
+    /// signal delivery — and the scheduler records the new level.
+    #[test]
+    fn sched_set_priority_of_own_child_lowers_silently() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.sched_set_priority(&ctx, pid, SchedPriority::Low), Ok(0));
+        assert_eq!(sched.priority(target), Ok(Priority::Low));
+        // No delivery mechanism is involved and no audit record is due.
+        assert_eq!(*producer.last.lock(), None);
+        assert!(priority_records(sink).is_empty());
+    }
+
+    /// Restating the level a task already holds is an idempotent success on
+    /// the plain target rule — an equal level never counts as a raise.
+    #[test]
+    fn sched_set_priority_restating_the_level_is_not_a_raise() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(
+            h.sched_set_priority(&ctx, pid, SchedPriority::Normal),
+            Ok(0)
+        );
+        assert_eq!(sched.priority(target), Ok(Priority::Normal));
+        assert!(priority_records(sink).is_empty());
+    }
+
+    /// Raising an own child toward `High` is an administrative act: without
+    /// `CAP_PROC_CONTROL` it is refused before the scheduler is touched and
+    /// the refusal is audited as a raise under the own-child rule.
+    #[test]
+    fn sched_set_priority_raise_of_own_child_needs_proc_control() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(
+            h.sched_set_priority(&ctx, pid, SchedPriority::High),
+            Err(Errno::PermissionDenied)
+        );
+        // The level is untouched: the refusal precedes the mechanism.
+        assert_eq!(sched.priority(target), Ok(Priority::Normal));
+        let records = priority_records(sink);
+        assert_eq!(records.len(), 1, "the refused raise is on the audit log");
+        assert_eq!(records[0].level, Level::Warn);
+        assert_eq!(field_of(&records[0], "rule"), "own_child");
+        assert_eq!(field_of(&records[0], "raise"), "true");
+        assert_eq!(field_of(&records[0], "priority"), "1");
+    }
+
+    /// With `CAP_PROC_CONTROL` the same raise is admitted and audited once,
+    /// still under the own-child rule.
+    #[test]
+    fn sched_set_priority_raise_with_proc_control_is_allowed_and_audited() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.sched_set_priority(&ctx, pid, SchedPriority::High), Ok(0));
+        assert_eq!(sched.priority(target), Ok(Priority::High));
+        let records = priority_records(sink);
+        assert_eq!(records.len(), 1, "the granted raise is on the audit log");
+        assert_eq!(records[0].level, Level::Info);
+        assert_eq!(field_of(&records[0], "rule"), "own_child");
+        assert_eq!(field_of(&records[0], "raise"), "true");
+    }
+
+    /// A process may lower another process of its **own** principal without
+    /// any capability, and the cross-principal decision is audited exactly
+    /// as `signal`'s is.
+    #[test]
+    fn sched_set_priority_of_a_same_uid_non_child_is_allowed() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The target is another task of the same user — not a child.
+        table
+            .write()
+            .insert(make_owned_caps_record(target, 1000, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.sched_set_priority(&ctx, pid, SchedPriority::Low), Ok(0));
+        assert_eq!(sched.priority(target), Ok(Priority::Low));
+        let records = priority_records(sink);
+        assert_eq!(records.len(), 1, "one record per cross-principal decision");
+        assert_eq!(records[0].level, Level::Info);
+        assert_eq!(field_of(&records[0], "rule"), "same_uid");
+        assert_eq!(field_of(&records[0], "raise"), "false");
+    }
+
+    /// Another principal's process is off-limits without
+    /// `CAP_PROC_CONTROL`: the handler refuses before the scheduler is
+    /// touched and the refusal reaches the audit log.
+    #[test]
+    fn sched_set_priority_of_another_principal_is_denied_without_the_capability() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The target belongs to a different user.
+        table
+            .write()
+            .insert(make_owned_caps_record(target, 1001, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(
+            h.sched_set_priority(&ctx, pid, SchedPriority::Low),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(sched.priority(target), Ok(Priority::Normal));
+        let records = priority_records(sink);
+        assert_eq!(records.len(), 1, "the refusal is on the audit log");
+        assert_eq!(records[0].level, Level::Warn);
+        assert_eq!(field_of(&records[0], "rule"), "denied");
+        assert_eq!(field_of(&records[0], "caller"), "2");
+        assert_eq!(field_of(&records[0], "raise"), "false");
+    }
+
+    /// `CAP_PROC_CONTROL` is what admits a priority change on another
+    /// principal's process, and the allowed decision is audited as such.
+    #[test]
+    fn sched_set_priority_of_another_principal_is_allowed_with_proc_control() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let (target, pid) = spawn_priority_target(&sched);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        table
+            .write()
+            .insert(make_owned_caps_record(target, 1001, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.sched_set_priority(&ctx, pid, SchedPriority::Low), Ok(0));
+        assert_eq!(sched.priority(target), Ok(Priority::Low));
+        let records = priority_records(sink);
+        assert_eq!(records.len(), 1, "the grant is on the audit log");
+        assert_eq!(records[0].level, Level::Info);
+        assert_eq!(field_of(&records[0], "rule"), "capability");
+        assert_eq!(field_of(&records[0], "priority"), "3");
+    }
+
+    /// A pid the capability table does not know fails closed with
+    /// `NotFound` before any decision, and a non-positive pid never touches
+    /// a table at all — neither leaves an audit record.
+    #[test]
+    fn sched_set_priority_of_unknown_or_non_positive_pid_fails_closed() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        for pid in [9, 0, -1, i32::MIN] {
+            assert_eq!(
+                h.sched_set_priority(&ctx, pid, SchedPriority::Low),
+                Err(Errno::NotFound)
+            );
+        }
+        assert!(priority_records(sink).is_empty());
+    }
+
+    /// A target the capability table knows but the scheduler has already
+    /// drained fails closed with `NotFound` rather than pretending a level
+    /// changed.
+    #[test]
+    fn sched_set_priority_of_a_task_the_scheduler_dropped_is_not_found() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The capability table still carries a record for task 9 (same
+        // principal), but the scheduler never admitted it.
+        table
+            .write()
+            .insert(make_owned_caps_record(9, 1000, &[], sink));
+        sink.clear();
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(
+            h.sched_set_priority(&ctx, 9, SchedPriority::Low),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// With no producer installed the handler holds `NULL_PROCESS_SIGNAL`
+    /// and fails closed with `NotImplemented`, never reinterpreting an
+    /// inert interface as a target question.
+    #[test]
+    fn sched_set_priority_without_producer_is_not_implemented() {
+        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.sched_set_priority(&ctx, 9, SchedPriority::Low),
+            Err(Errno::NotImplemented)
+        );
+        assert!(priority_records(sink).is_empty());
+    }
+
     /// A producer error (e.g. `pid` is not a child of the caller) propagates
     /// verbatim, and the `status` pointer is never written on the error path
     /// (fail closed).
@@ -23619,6 +24167,7 @@ mod tests {
             0,
             tairix_abi::sysinfo::ProcessState::Running,
             0,
+            SchedPriority::Normal,
             0,
             0,
             b"init",
@@ -29699,6 +30248,7 @@ mod tests {
             0,
             tairix_abi::sysinfo::ProcessState::Running,
             0,
+            SchedPriority::Normal,
             0,
             0,
             b"init",

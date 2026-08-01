@@ -145,6 +145,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  99 | `call_post`    | `IpcEndpoint`, `user_ptr` (req), `len`, `user_ptr` (ticket out), `u64 deadline_ns` | `errno` | — | yes |
 | 100 | `call_reap`    | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len` | `u64` (bytes) | — | no |
 | 101 | `call_cancel`  | `IpcEndpoint`, `Handle` (ticket)        | `errno` | — | no |
+| 102 | `hw_node_health` | `u64 state` (`FaultDomainState`)      | `errno`       | `CAP_HW_EMIT` | yes   |
+| 103 | `hw_self_node` | —                                       | `u64` (node id) | —           | no    |
+| 104 | `sched_set_priority` | `i32 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -340,6 +343,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
+| `CAP_PROC_CONTROL` | `signal`, `sched_set_priority` (both enforced *in the handler*: the capability is one tier of the per-target rule — own child, else same principal, else this capability — so the dispatcher cannot gate the call flat; `sched_set_priority` additionally requires it for any *raise*) |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -1066,6 +1070,52 @@ the C stub is `tairix_sys_signal_intake` and the header defines
 `TAIRIX_SIGNAL_INTAKE_OP_ENABLE` / `TAIRIX_SIGNAL_INTAKE_OP_DISABLE` /
 `TAIRIX_SIGNAL_INTAKE_OP_TAKE` beside the `TAIRIX_WAITSET_OP_*` and
 `TAIRIX_WAIT_SOURCE_*` member vocabulary.
+
+`sched_set_priority` (no. 104) moves a process to a **time-shared
+scheduling service level** (`plans/NEW-TASKBAR.md` T12) — the `nice`
+analogue the Switchboard's "lower priority" pressure action drives. The
+level is the closed `tairix_abi::SchedPriority` vocabulary (`High` = 1,
+`Normal` = 2, `Low` = 3; every process is admitted at `Normal`), carried
+as a `u32`; the reserved `0` or any unknown value fails closed with
+`OutOfRange` before dispatch, exactly like a bad `Signal`. Its target
+rule is `signal`'s, resolved by the same shared handler helper so the
+two can never drift: the caller's **own live child** needs no capability
+(resolved through the same `ProcessSignal::resolve_child` bookkeeping),
+else a process of the caller's **own principal** (kernel-attested owner
+uid) needs none, else only a holder of **`CAP_PROC_CONTROL`** may act on
+another principal's process. On top of that target rule sits one more
+gate: **raising** service — asking for a level that outranks the one the
+scheduler currently records (`SchedPriority::outranks`) — always
+requires `CAP_PROC_CONTROL`, whatever the target, so no user can weight
+their own work above other principals' fair share; lowering and
+re-stating the current level (an idempotent success) follow the plain
+target rule, mirroring how `rlimit_set` lets anyone lower a bound but
+gates a raise on `CAP_RLIMIT_RAISE`. Every call is dispatcher-audited
+like `signal`, and each decision that reaches beyond the own-child
+standing grant — a cross-principal target (allowed or denied) or any
+raise attempt — additionally emits one `PROCESS_PRIORITY_CHANGE` record
+(audit id 4037, [kernel audit events](kernel.md)) naming the caller task
+id, the target's pid and task id, the requested level, the deciding
+rule, and whether it was a raise; an own-child lowering stays unrecorded,
+exactly as own-child signal delivery does. The recorded level takes
+effect at the target's **next enqueue** through the one
+`SchedulerPolicy::set_priority` / `priority` contract every policy
+implements (CFQ and EEVDF re-derive their 4:2:1 fair-share weight from
+it on every enqueue; MLFQ places the task in that band *now*, its
+demotion and anti-starvation boost rules still apply afterwards — the
+starvation guarantee is never suspended to pin a task low, see
+[the scheduler page](./scheduler.md)). A non-positive or unknown `pid`,
+or a target the scheduler has already drained, fails closed with
+`NotFound` — never a guess — and a call before the process-signal
+producer is installed fails closed with `NotImplemented`. The reported
+level is observable: the sysinfo process record carries each process's
+current `priority`, read from the scheduler's own record, which is how
+the Switchboard renders an already-lowered culprit's action as spent
+instead of re-offering it. The first-party Rust wrapper is
+`tairix_rt::sched_set_priority`; the C stub is
+`tairix_sys_sched_set_priority` and the header defines
+`TAIRIX_SCHED_PRIORITY_HIGH` / `TAIRIX_SCHED_PRIORITY_NORMAL` /
+`TAIRIX_SCHED_PRIORITY_LOW` beside the `TAIRIX_SIGNAL_*` vocabulary.
 
 `console_foreground` (no. 72) grants (or releases, `pid = 0`) the
 **controlling ownership** of the console behind readable descriptor `fd`

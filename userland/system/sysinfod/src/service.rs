@@ -732,7 +732,7 @@ mod tests {
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{
         CapabilityId, CapabilitySummary, Errno, LimitKind, Origin, ProcId, ResourceLimit,
-        TrustDomain, ORIGIN_WIRE_LEN,
+        SchedPriority, TrustDomain, ORIGIN_WIRE_LEN,
     };
     use tairix_log::{Event, Level, Sink};
 
@@ -915,6 +915,7 @@ mod tests {
                     uid,
                     ProcessState::Running,
                     0,
+                    SchedPriority::Normal,
                     0,
                     0,
                     name,

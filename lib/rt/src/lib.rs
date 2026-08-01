@@ -60,9 +60,10 @@ use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, CapabilityId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags,
-    Origin, RandomFlags, ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize,
-    Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
-    ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    Origin, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
+    TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 
@@ -122,6 +123,9 @@ const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
 const NUM_CAP_QUERY: u64 = SyscallNumber::CAP_QUERY.as_u16() as u64;
 /// `sched_set_realtime` syscall number (as above).
 const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
+
+/// `sched_set_priority` syscall number (as above).
+const NUM_SCHED_SET_PRIORITY: u64 = SyscallNumber::SCHED_SET_PRIORITY.as_u16() as u64;
 
 /// `mem_unpin` syscall number (as above).
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
@@ -2032,6 +2036,45 @@ pub fn signal(pid: i32, signal: Signal) -> i64 {
         raw_syscall(
             NUM_SIGNAL,
             [i32_arg(pid), u64::from(signal.as_u32()), 0, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Move process `pid` to the time-shared scheduling service level
+/// `priority` (`SyscallNumber::SCHED_SET_PRIORITY`, `plans/NEW-TASKBAR.md`
+/// T12).
+///
+/// The kernel identifies the caller from its own current-task slot (never a
+/// caller-supplied identity) and settles the target exactly as [`signal`]
+/// does: a live **child** of the caller needs no capability, a target owned
+/// by the caller's **own principal** needs none either, and only a caller
+/// holding `CAP_PROC_CONTROL` may act on a process belonging to a
+/// *different* principal. **Raising** the level (toward
+/// [`SchedPriority::High`]) additionally requires `CAP_PROC_CONTROL`
+/// whatever the target rule, so no user can weight their own work above
+/// other principals' fair share; lowering and re-stating the current level
+/// follow the plain target rule. Cross-principal outcomes and every raise
+/// attempt are audited.
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: `0` on success, and a negative value is
+/// `-errno` (recover the [`tairix_abi::Errno`] discriminant as `-ret`) —
+/// `Errno::NotFound` when `pid` names no live task,
+/// `Errno::PermissionDenied` when the caller holds no authority over the
+/// target or the raise, and `Errno::NotImplemented` until the kernel's
+/// scheduler control is installed. The wrapper surfaces that raw signed
+/// value; it adds no authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn sched_set_priority(pid: i32, priority: SchedPriority) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel authorises
+    // the target and validates the level value on the far side of the trap.
+    // `sched_set_priority` dereferences no user pointer.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SCHED_SET_PRIORITY,
+            [i32_arg(pid), u64::from(priority.as_u32()), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -5280,6 +5323,28 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(signal(9, Signal::Kill), want);
+        });
+    }
+
+    #[test]
+    fn sched_set_priority_marshals_pid_and_level_discriminant() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sched_set_priority(9, SchedPriority::Low), 0);
+        });
+        assert_eq!(number, NUM_SCHED_SET_PRIORITY);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], u64::from(SchedPriority::Low.as_u32()));
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sched_set_priority_surfaces_negative_errno_encoding() {
+        // A raise without `CAP_PROC_CONTROL` is refused; the wrapper hands
+        // the signed encoding back unchanged.
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(sched_set_priority(9, SchedPriority::High), want);
         });
     }
 

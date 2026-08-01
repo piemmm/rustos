@@ -54,6 +54,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     realtime_is_not_preempted_by_time_shared_then_releases_on_park::<S>();
     realtime_peers_share_the_cpu_round_robin::<S>();
     sched_class_reports_and_fails_closed_on_unknown::<S>();
+    priority_reports_changes_and_fails_closed::<S>();
     smp_stress_four_cores::<S>();
     heterogeneous_topology_preserves_liveness::<S>();
 }
@@ -724,6 +725,60 @@ fn sched_class_reports_and_fails_closed_on_unknown<S: SchedulerPolicy<TestArch>>
         .set_sched_class(id, SchedClass::TimeShared)
         .expect("idempotent no-op");
     assert_eq!(sched.sched_class(id), Ok(SchedClass::TimeShared));
+}
+
+/// `priority` reports the admitted level, `set_priority` records a new one
+/// observably and idempotently, and both fail closed on an unknown id; a
+/// terminal task refuses a change rather than applying it.
+fn priority_reports_changes_and_fails_closed<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    assert_eq!(
+        sched.priority(999),
+        Err(SchedError::NoSuchTask),
+        "priority of an unknown id is refused"
+    );
+    assert_eq!(
+        sched.set_priority(999, Priority::Low),
+        Err(SchedError::NoSuchTask),
+        "re-prioritising an unknown id is refused"
+    );
+    let id = sched
+        .spawn_parked(0, Priority::Normal, |_ctx| TaskAction::Exit)
+        .expect("spawn");
+    assert_eq!(
+        sched.priority(id),
+        Ok(Priority::Normal),
+        "a task reports the priority it was admitted with"
+    );
+    sched
+        .set_priority(id, Priority::Low)
+        .expect("lower the task");
+    assert_eq!(
+        sched.priority(id),
+        Ok(Priority::Low),
+        "the priority change is observable before the task ever runs"
+    );
+    // Idempotent: re-setting the priority a task already holds is a no-op.
+    sched
+        .set_priority(id, Priority::Low)
+        .expect("idempotent no-op");
+    assert_eq!(sched.priority(id), Ok(Priority::Low));
+    // A lowered task still runs to completion — the change is a service
+    // level, never a suspension.
+    sched.unpark(id).expect("wake the lowered task");
+    arch.set_current_cpu(0);
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "lowered task ran");
+    assert_eq!(sched.state_of(id), TaskState::Exited, "task exited");
+    // A terminal task refuses the change; whether the record is still
+    // retained (InvalidState) or already drained (NoSuchTask) is the
+    // policy's own reclamation timing, but it never applies.
+    assert!(
+        matches!(
+            sched.set_priority(id, Priority::High),
+            Err(SchedError::InvalidState | SchedError::NoSuchTask)
+        ),
+        "a terminal task cannot be re-prioritised"
+    );
 }
 
 /// Deadlock-free, lossless, bounded-latency dispatch of a large task

@@ -22,8 +22,27 @@ use tairix_abi::switchboard_ipc::{SeatReport, SwitchboardCommand, SwitchboardReq
 use tairix_abi::{CapabilityQuery, Errno, Signal};
 use tairix_controls::{Section, Switchboard, SwitchboardAction};
 
-use crate::model::{apply_action, map_section, signal_pid, Effect, PanelModel};
+use crate::model::{apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel};
 use crate::service::ServiceHost;
+
+/// What the panel reports upward after applying an action whose effect
+/// touches the service's own grouping state, since the panel itself stays
+/// stateless about it (only [`crate::service::Service`] owns
+/// [`crate::activities::Activities`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PanelOutcome {
+    /// Apply this edit to the service's grouping state.
+    Edit(GroupingEdit),
+    /// An activity's inline rename was committed to this name, read from
+    /// the widget at the moment the action was reported (the widget's own
+    /// buffer is transient, so the caller must capture it now).
+    Renamed {
+        /// The activity's index within the model.
+        activity: usize,
+        /// The committed name.
+        name: String,
+    },
+}
 
 /// What the caller must do after handing the panel a command.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -62,6 +81,13 @@ impl Panel {
     #[must_use]
     pub const fn is_open(&self) -> bool {
         self.view.is_some()
+    }
+
+    /// The panel's current model, for resolving a grouping outcome's
+    /// indices back to stable identities.
+    #[must_use]
+    pub const fn model(&self) -> &PanelModel {
+        &self.model
     }
 
     /// The section the open window is showing, or `None` while closed.
@@ -152,32 +178,74 @@ impl Panel {
         self.redraw(host);
     }
 
-    /// Apply the effect `action` implies under `authority`.
+    /// Apply every effect `action` implies under `authority`, in order, and
+    /// report any grouping-state edit upward for the caller to apply to the
+    /// service's own [`crate::activities::Activities`] — the panel stays
+    /// stateless about grouping.
+    ///
+    /// A refusal on one entry of a multi-effect action (a signal sweep, an
+    /// activation sweep) is stated and the rest still run: one member
+    /// refusing must never abort the others.
     pub fn act(
         &mut self,
         host: &mut dyn ServiceHost,
         action: SwitchboardAction,
         authority: &dyn CapabilityQuery,
-    ) {
-        match apply_action(&self.model, action, authority) {
-            Effect::None => {}
-            Effect::CloseWindow => self.close(host),
-            Effect::ActivateOwner { owner } => {
-                Self::attempt(
-                    host,
-                    "switch to that task's window",
-                    SwitchboardRequest::ActivateOwner { owner },
-                );
+    ) -> Option<PanelOutcome> {
+        let mut outcome = None;
+        for effect in apply_action(&self.model, action, authority) {
+            match effect {
+                Effect::CloseWindow => self.close(host),
+                Effect::ActivateOwner { owner } => {
+                    Self::attempt(
+                        host,
+                        "switch to that task's window",
+                        SwitchboardRequest::ActivateOwner { owner },
+                    );
+                }
+                Effect::RestartOwner { owner } => {
+                    Self::attempt(
+                        host,
+                        "restart that task",
+                        SwitchboardRequest::RestartOwner { owner },
+                    );
+                }
+                Effect::Signal { pid, signal } => {
+                    Self::signal_one(host, pid, signal, "force that task to quit");
+                }
+                Effect::LowerPriority { pid } => Self::lower_priority(host, pid),
+                Effect::SignalMany { pids, signal } => {
+                    let action = sweep_action(signal);
+                    for pid in pids {
+                        Self::signal_one(host, pid, signal, action);
+                    }
+                }
+                Effect::ActivateOwners { owners } => {
+                    // Raising back-to-front leaves the first member
+                    // frontmost, since each raise brings its owner above
+                    // whatever is already on top.
+                    for &owner in owners.iter().rev() {
+                        Self::attempt(
+                            host,
+                            "switch to that activity's window",
+                            SwitchboardRequest::ActivateOwner { owner },
+                        );
+                    }
+                }
+                Effect::Grouping(GroupingEdit::Rename { activity }) => {
+                    let name = self
+                        .view
+                        .as_ref()
+                        .and_then(Switchboard::submitted_activity_name)
+                        .map(String::from);
+                    if let Some(name) = name {
+                        outcome = Some(PanelOutcome::Renamed { activity, name });
+                    }
+                }
+                Effect::Grouping(edit) => outcome = Some(PanelOutcome::Edit(edit)),
             }
-            Effect::RestartOwner { owner } => {
-                Self::attempt(
-                    host,
-                    "restart that task",
-                    SwitchboardRequest::RestartOwner { owner },
-                );
-            }
-            Effect::Signal { pid, signal } => Self::force(host, pid, signal),
         }
+        outcome
     }
 
     /// Send one owner-directed request, stating a refusal rather than
@@ -188,16 +256,29 @@ impl Panel {
         }
     }
 
-    /// Deliver a control signal to a sampled task id, refusing an id that
-    /// does not fit the syscall's signed width rather than truncating it
-    /// into a different, arbitrary process.
-    fn force(host: &mut dyn ServiceHost, pid: u64, signal: Signal) {
+    /// Deliver `signal` to a sampled task id, refusing an id that does not
+    /// fit the syscall's signed width rather than truncating it into a
+    /// different, arbitrary process. `action` names the attempted action in
+    /// plain words for the refusal notice.
+    fn signal_one(host: &mut dyn ServiceHost, pid: u64, signal: Signal, action: &str) {
         let Some(target) = signal_pid(pid) else {
-            host.report_refusal("force that task to quit", Errno::OutOfRange);
+            host.report_refusal(action, Errno::OutOfRange);
             return;
         };
         if let Err(refusal) = host.signal(target, signal) {
-            host.report_refusal("force that task to quit", refusal);
+            host.report_refusal(action, refusal);
+        }
+    }
+
+    /// Lower a sampled task id's scheduling priority, refusing an id that
+    /// does not fit the syscall's signed width rather than truncating it.
+    fn lower_priority(host: &mut dyn ServiceHost, pid: u64) {
+        let Some(target) = signal_pid(pid) else {
+            host.report_refusal("lower priority", Errno::OutOfRange);
+            return;
+        };
+        if let Err(refusal) = host.lower_priority(target) {
+            host.report_refusal("lower priority", refusal);
         }
     }
 
@@ -221,6 +302,18 @@ impl Panel {
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);
         }
+    }
+}
+
+/// The plain-words action name for a refusal notice on one member of a
+/// [`Effect::SignalMany`] sweep, named from the signal it carries so the
+/// stated reason matches the activity action that issued it.
+fn sweep_action(signal: Signal) -> &'static str {
+    match signal {
+        Signal::Stop => "pause that activity",
+        Signal::Continue => "resume that activity",
+        Signal::Terminate => "close that activity",
+        Signal::Interrupt | Signal::Kill => "signal that activity's task",
     }
 }
 

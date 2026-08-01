@@ -456,10 +456,12 @@ fn command_section_rejects_the_reserved_zero_and_unknown_bytes() {
         CommandSection::Jobs,
         CommandSection::Recovery,
         CommandSection::Overview,
+        CommandSection::Pressure,
+        CommandSection::Activities,
     ] {
         assert_eq!(CommandSection::from_u8(section.as_u8()), Ok(section));
     }
-    for byte in [0u8, 5, 0xFF] {
+    for byte in [0u8, 7, 0xFF] {
         assert_eq!(CommandSection::from_u8(byte), Err(Errno::OutOfRange));
     }
 }
@@ -497,6 +499,8 @@ fn round_trips_open_panel_for_every_section() {
         CommandSection::Jobs,
         CommandSection::Recovery,
         CommandSection::Overview,
+        CommandSection::Pressure,
+        CommandSection::Activities,
     ] {
         let command = SwitchboardCommand::OpenPanel { section };
         assert_eq!(

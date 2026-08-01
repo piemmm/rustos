@@ -237,6 +237,15 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn sched_set_priority(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _priority: tairix_abi::SchedPriority,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn signal_intake(
         &self,
         _c: &CallerContext<'_>,

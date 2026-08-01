@@ -29,6 +29,7 @@
 //! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (fail closed). |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
+//! | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE` | audit | A `sched_set_priority` decision that needed authority beyond the caller's own child: a cross-principal target (same-uid or `CAP_PROC_CONTROL`) or a raise toward `High` (always `CAP_PROC_CONTROL`). Allowed is `Info`, denied is `Warn`; the `caller`, `pid`, `target`, `priority`, `rule`, and `raise` fields carry the decision. An own-child lowering is the caller's standing grant and is not recorded here. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
@@ -188,6 +189,18 @@ pub enum AuditEvent {
     /// caller's task id, the target's pid and task id, the requested
     /// signal, and which rule decided it — never a capability token.
     ProcessSignalCrossPrincipal,
+    /// A `sched_set_priority` authority decision that reached beyond the
+    /// caller's own child: a cross-principal target or a raise toward
+    /// `High` (`plans/NEW-TASKBAR.md` T12).
+    ///
+    /// Emitted once per such decision, allowed (`Info`) or denied
+    /// (`Warn`). The record carries the kernel-attested caller's task id,
+    /// the target's pid and task id, the requested level's wire
+    /// discriminant, which rule decided the target, and whether the
+    /// change was a raise — never a capability token. An own-child
+    /// lowering is the parent's standing grant and stays unrecorded,
+    /// exactly as own-child signal delivery does.
+    ProcessPriorityChange,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -513,6 +526,7 @@ impl AuditEvent {
             Self::TaskFaultKilled => 4034,
             Self::TaskExitedNonzero => 4035,
             Self::ProcessSignalCrossPrincipal => 4036,
+            Self::ProcessPriorityChange => 4037,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -572,6 +586,7 @@ impl AuditEvent {
             Self::TaskFaultKilled => "task killed by unresolvable user fault",
             Self::TaskExitedNonzero => "task exited with nonzero status",
             Self::ProcessSignalCrossPrincipal => "process signal cross-principal decision",
+            Self::ProcessPriorityChange => "process scheduling-priority change decision",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",
@@ -646,6 +661,7 @@ mod tests {
             AuditEvent::TaskFaultKilled,
             AuditEvent::TaskExitedNonzero,
             AuditEvent::ProcessSignalCrossPrincipal,
+            AuditEvent::ProcessPriorityChange,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
             AuditEvent::GroupsDbLoaded,
@@ -708,6 +724,7 @@ mod tests {
             AuditEvent::TaskFaultKilled.id().0,
             AuditEvent::TaskExitedNonzero.id().0,
             AuditEvent::ProcessSignalCrossPrincipal.id().0,
+            AuditEvent::ProcessPriorityChange.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
             AuditEvent::GroupsDbLoaded.id().0,

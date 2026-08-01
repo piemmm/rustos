@@ -10,8 +10,8 @@
 
 use tairix_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
-    RandomFlags, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
-    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
+    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
     SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
@@ -684,6 +684,23 @@ pub trait SyscallHandlers {
     /// control wired never pretends a task's priority changed. The real
     /// handler is installed in `kernel/core`.
     fn sched_set_realtime(&self, _caller: &CallerContext<'_>, _realtime: bool) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Change a target process's time-shared scheduling service level
+    /// (`SyscallNumber::SCHED_SET_PRIORITY`).
+    ///
+    /// The default refuses with [`Errno::NotImplemented`] (fail closed) so
+    /// a kernel build with no scheduler control wired never pretends a
+    /// task's priority changed. The real handler is installed in
+    /// `kernel/core`; it owns the own-child / same-principal /
+    /// `CAP_PROC_CONTROL` target rule and the raise gate.
+    fn sched_set_priority(
+        &self,
+        _caller: &CallerContext<'_>,
+        _pid: i32,
+        _priority: SchedPriority,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2608,6 +2625,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let realtime = decode_u32(args.0[0]) != 0;
                 self.handlers.sched_set_realtime(caller, realtime)
             }
+            SyscallNumber::SCHED_SET_PRIORITY => {
+                // args[0] is a sign-extended `i32` PID recovered the same way
+                // `WAIT`/`SIGNAL` recover theirs; args[1] is the
+                // `SchedPriority` discriminant, rejected before dispatch if it
+                // is not one of the closed set (fail closed on an unknown or
+                // zeroed value).
+                #[allow(clippy::cast_possible_wrap)]
+                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                let priority = SchedPriority::from_u32(decode_u32(args.0[1]))?;
+                self.handlers.sched_set_priority(caller, pid, priority)
+            }
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
@@ -3736,6 +3764,19 @@ mod tests {
             // assert the dispatcher decoded it without wiring the real
             // scheduler class control here.
             Ok(u64::from(realtime))
+        }
+        fn sched_set_priority(
+            &self,
+            _c: &CallerContext<'_>,
+            pid: i32,
+            priority: SchedPriority,
+        ) -> SyscallResult {
+            self.record("sched_set_priority");
+            // Echo the decoded pid and level back so the reachability test
+            // can assert the dispatcher decoded `(pid, priority)` without
+            // wiring the real scheduler control here.
+            #[allow(clippy::cast_sign_loss)]
+            Ok(u64::from(pid as u32) + u64::from(priority.as_u32()))
         }
         fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("users_db_read");

@@ -15,7 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
-use tairix_abi::ProcId;
+use tairix_abi::{ProcId, SchedPriority};
 use tairix_procinfo::{call, for_each_process, memory_pressure, CallError, CpuTotals, Transport};
 
 use crate::schedule::MEMORY_SAMPLE_DIVIDER;
@@ -55,6 +55,20 @@ pub struct ProcessSummary {
     pub name: Vec<u8>,
     /// Lifecycle state.
     pub state: ProcessState,
+    /// The owning user id, kernel-attested through the record.
+    ///
+    /// The pressure and activity actions compare it against the service's
+    /// own uid so a control renders denied exactly where the kernel's
+    /// same-principal rule would refuse it.
+    pub uid: u32,
+    /// Bytes of memory currently mapped in the process's address space
+    /// ([`ProcessRecord::mem_bytes`]) — what names the memory-pressure
+    /// culprit.
+    pub mem_bytes: u64,
+    /// The process's time-shared scheduling service level, read from the
+    /// scheduler's own record — what lets an already-lowered process render
+    /// its "lower priority" action spent instead of re-offering it.
+    pub priority: SchedPriority,
     /// Its CPU share over the sample interval, in permille. `None` on the
     /// very first sample or an unmeasurable interval, exactly like
     /// [`TopTask::cpu_permille`] for the busiest task.
@@ -71,6 +85,10 @@ pub struct MemoryPressureSample {
     /// `(total_bytes - free_bytes) * 1000 / total_bytes`, clamped to
     /// `1000`, or `0` when `total_bytes` is zero.
     pub used_permille: u16,
+    /// The machine's total usable memory in bytes, as the same reading
+    /// reported it — what a per-process `mem_bytes` is a fraction *of* in
+    /// the pressure card's cause text.
+    pub total_bytes: u64,
 }
 
 /// Which kind of measurement degraded to its honest empty value this
@@ -324,6 +342,9 @@ impl Sampler {
                 proc_id: record.proc_id,
                 name: record.name_bytes().to_vec(),
                 state: record.state,
+                uid: record.uid,
+                mem_bytes: record.mem_bytes,
+                priority: record.priority,
                 cpu_permille: elapsed_ns.and_then(|interval| permille_of(delta, interval)),
             })
             .collect();
@@ -382,6 +403,7 @@ impl Sampler {
                 self.last_memory = Some(MemoryPressureSample {
                     band: stats.band,
                     used_permille: used_permille(stats.total_bytes, stats.free_bytes),
+                    total_bytes: stats.total_bytes,
                 });
             }
             Err(_) => {

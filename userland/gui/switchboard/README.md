@@ -1,7 +1,7 @@
 # tairix-switchboard
 
 The TAIRiX **Switchboard monitor service** (`plans/NEW-TASKBAR.md`
-T10/T11): the dedicated, capability-sized process behind the taskbar's
+T10–T12): the dedicated, capability-sized process behind the taskbar's
 always-right-most Switchboard icon. It samples the live system through the
 System Information API, publishes a compact `TraySummary` to the desktop
 session over the seat-scoped `SWITCHBOARD_ENDPOINT`
@@ -23,11 +23,14 @@ Each cycle gathers one `Sample` (`src/sample.rs`):
 
 - **The process list** — system-wide when `CAP_SYSINFO_GLOBAL` was granted,
   the caller's own processes otherwise. From it: the count of `Stopped`
-  processes (the tray's `recovery` signal) and the **top task** — the
+  processes (the tray's `recovery` signal), the **top task** — the
   process with the highest CPU-time delta since the previous sample, keyed
   on the stable, never-reused `proc_id` so numeric-pid reuse can never
-  stitch two lifetimes together. The first sample honestly has no top task:
-  there is no interval to measure over.
+  stitch two lifetimes together — and per process the kernel-attested
+  owner uid, mapped bytes, and current scheduling service level, which the
+  Pressure cards' verdicts and culprit attribution are built from. The
+  first sample honestly has no top task: there is no interval to measure
+  over.
 - **Aggregate CPU time** — the shared `tairix_procinfo::CpuTotals` delta,
   yielding the overall busy fraction in permille.
 - **Memory pressure** — the audited `MEMORY_PRESSURE` query (needs
@@ -71,10 +74,23 @@ changed.
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list; the row action raises that owner's window |
+| Tasks | the sampled process list; the row action raises that owner's window, and its `Group` button files the task into an activity |
+| Pressure | one cause card per resource the tray's own latches flag, naming the measured culprit (busiest task for CPU, largest mapped space for memory) with `Ready`/`DisabledByState`/`DeniedByAuthority` verdicts on each action (`src/model.rs::build_pressure`) |
+| Activities | this service's live, session-lifetime task groupings (`src/activities.rs`), members joined against the current sample |
 | Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
 | Overview | the CPU and memory readings, the CPU meter's sparkline fed from a bounded rolling history, each meter carrying the pressure `derive_summary` itself latched |
 | Jobs | always empty — see below |
+
+An **activity** is a named grouping of live processes for the current
+session, keyed on `proc_id` (single membership; auto-named; inline rename
+validated to ≤ 48 trimmed, unique chars; bounds of 12 groups × 32 members
+rendered as the controls' disable reasons). Members are pruned — and an
+emptied group dissolved — only on a sample whose process list succeeded,
+so a degraded sample never wipes groupings; set actions sweep **only
+members joined to the current sample**, because a stored numeric pid whose
+process exited may have been reused by an unrelated process. Grouping
+edits re-present the window immediately (`Service::apply_grouping`) rather
+than waiting for the next sample.
 
 The seat report carries owner **ids only**; the names beside them are the
 ones this service attested itself, so display text is never taken from the
@@ -94,8 +110,13 @@ exist**, not because they are unfinished:
   memory pressure.
 - **System actions** — there is no power or session-lock interface this
   service may drive, so it offers no shut-down, restart, or lock button.
-- **Disk and network resource rows** — the System Information API exposes
-  no throughput query for either.
+- **Disk and network pressure cards and resource rows** — no
+  disk-throughput query exists at all; a per-interface network-rates query
+  exists (`NET_INTERFACE_RATES`) but no tray latch is derived from it, so
+  a card would be a guess rather than a measured cause.
+- **App "sleep", disk "throttle", activity snapshot/hibernate** (concept
+  boards) — no such kernel interfaces exist; the panel offers only actions
+  that genuinely work today.
 
 A control that would fail at the point of use is worse than an honest
 absence.
@@ -116,18 +137,28 @@ any session has been attested, and a frame that does not decode.
 | Control | Effect |
 |---|---|
 | Task row | `SwitchboardRequest::ActivateOwner { owner }` to the session |
+| Task *Group* menu | file the task into / out of an activity (service-local state) |
+| Pressure *Pause* | `signal(pid, Stop)` on the measured culprit |
+| Pressure *Lower priority* | `sched_set_priority(pid, Low)` — renders spent once the record already reads `Low` |
+| Pressure *Show tasks* | widget-internal jump to the culprit's task row |
+| Activity *Switch* | `ActivateOwner` per joined member, reverse order so the first lands frontmost |
+| Activity *Pause*/*Resume* | `signal(pid, Stop)`/`signal(pid, Continue)` swept over joined members; a refusal is reported and the sweep continues |
+| Activity *Close* | `signal(pid, Terminate)` swept over joined members (graceful — force-kill stays Recovery's), then the grouping dissolves |
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — needs `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |
 
-Each row's `action_allowed` reflects what this service can *genuinely* do:
-it reads its own effective capability set through `cap_query`, so a control
-whose authority is absent renders with the Authority Mark and is never
-attempted. A sampled task id that does not fit the `signal` syscall's
-signed width is refused, never truncated into a different, arbitrary
-process. A refusal from the kernel or the session is stated on `stderr`,
-leaves the model untouched, and never ends the service — a refused optional
-action is an answer, not a fatal error.
+Each control's verdict reflects what this service can *genuinely* do: it
+reads its own effective capability set through `cap_query` and compares
+each row's kernel-attested owner uid with its own (the same rule the
+kernel enforces), and the verdict is re-derived at apply time from the
+same inputs so render and enforcement cannot disagree. A control whose
+authority is absent renders with the Authority Mark and is never
+attempted. A sampled task id that does not fit the syscalls' signed width
+is refused, never truncated into a different, arbitrary process. A refusal
+from the kernel or the session is stated on `stderr`, leaves the model
+untouched, and never ends the service — a refused optional action is an
+answer, not a fatal error.
 
 ## Capability sizing
 

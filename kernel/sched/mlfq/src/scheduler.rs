@@ -791,8 +791,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // and on next yield we re-enqueue at their new band.
         for task in self.tasks.read().values() {
             if task.load_state() != TaskState::Exited {
-                task.priority.store(Priority::High as u8, Ordering::Release);
-                task.yields_at_band.store(0, Ordering::Release);
+                task.store_priority(Priority::High);
             }
         }
     }
@@ -1294,6 +1293,47 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)
     }
 
+    /// Move `id` to the `priority` band, governing its next enqueue onward
+    /// (see [`SchedulerPolicy::set_priority`]).
+    ///
+    /// MLFQ priorities are dynamic by definition: the demotion rule and
+    /// the anti-starvation boost keep adjusting the band afterwards, so an
+    /// external placement is the task's band *now*, not a pinned level —
+    /// the starvation guarantee is never suspended to hold a task low.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()> {
+        let task = self
+            .tasks
+            .read()
+            .get(&id)
+            .cloned()
+            .ok_or(SchedError::NoSuchTask)?;
+        if task.load_state() == TaskState::Exited {
+            return Err(SchedError::InvalidState);
+        }
+        // Record the band with fresh yield residency; every enqueue point
+        // reads it, and a task already sitting in a band keeps that slot
+        // until its next enqueue (the Chase–Lev deque supports no
+        // arbitrary removal), matching the policy-neutral contract.
+        task.store_priority(priority);
+        Ok(())
+    }
+
+    /// The current [`Priority`] band of `id`.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    pub fn priority(&self, id: TaskId) -> SchedResult<Priority> {
+        self.tasks
+            .read()
+            .get(&id)
+            .map(|t| t.load_priority())
+            .ok_or(SchedError::NoSuchTask)
+    }
+
     /// Publish `id` as the current task on `cpu`. Out-of-range `cpu`
     /// is a silent no-op: the only writer is [`Self::dispatch`], which
     /// already validated `cpu` via [`Self::cpu_state`] before invoking
@@ -1438,6 +1478,14 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
         Scheduler::set_sched_class(self, id, class)
+    }
+
+    fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()> {
+        Scheduler::set_priority(self, id, priority)
+    }
+
+    fn priority(&self, id: TaskId) -> SchedResult<Priority> {
+        Scheduler::priority(self, id)
     }
 
     fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {

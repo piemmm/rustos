@@ -80,6 +80,7 @@ const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
 const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
+const NUM_SCHED_SET_PRIORITY: u64 = SyscallNumber::SCHED_SET_PRIORITY.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
@@ -991,6 +992,33 @@ pub extern "C" fn sys_sched_set_realtime(realtime: u32) -> i32 {
         ret_i32(raw_syscall(
             NUM_SCHED_SET_REALTIME,
             [u64::from(realtime), 0, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `sched_set_priority`: move process `pid` to the time-shared scheduling
+/// service level `priority` — a `TAIRIX_SCHED_PRIORITY_*` discriminant
+/// (`SyscallNumber::SCHED_SET_PRIORITY`, `plans/NEW-TASKBAR.md` T12).
+/// Returns a `TAIRIX_E_*` code.
+///
+/// The kernel settles the target exactly as `signal()` does: an own child
+/// or a process of the caller's own principal needs no capability; another
+/// principal's process needs `TAIRIX_CAP_PROC_CONTROL`. Raising the level
+/// (toward `TAIRIX_SCHED_PRIORITY_HIGH`) additionally requires
+/// `TAIRIX_CAP_PROC_CONTROL` whatever the target, so no user can weight
+/// their own work above other principals' fair share. Re-stating the
+/// current level is success; `0` and unknown level values are rejected
+/// with `TAIRIX_E_OUT_OF_RANGE`.
+#[must_use]
+#[export_name = "tairix_sys_sched_set_priority"]
+pub extern "C" fn sys_sched_set_priority(pid: i32, priority: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel authorises the target and validates the level on the far side
+    // of the trap.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_SCHED_SET_PRIORITY,
+            [i32_arg(pid), u64::from(priority), 0, 0, 0, 0],
         ))
     }
 }
@@ -2640,6 +2668,7 @@ mod tests {
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
         (NUM_SCHED_SET_REALTIME, "sched_set_realtime", 1),
+        (NUM_SCHED_SET_PRIORITY, "sched_set_priority", 2),
     ];
 
     #[test]
@@ -2696,6 +2725,28 @@ mod tests {
         assert_eq!(number, NUM_SCHED_SET_REALTIME);
         assert_eq!(args[0], 0);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sched_set_priority_marshals_pid_and_level() {
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_sched_set_priority(9, tairix_abi::SchedPriority::Low.as_u32()),
+                0
+            );
+        });
+        assert_eq!(number, NUM_SCHED_SET_PRIORITY);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], u64::from(tairix_abi::SchedPriority::Low.as_u32()));
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+
+        // A negative pid is sign-extended through the register exactly as
+        // `signal`'s is.
+        let (number, args) = capture(0, || {
+            let _ = sys_sched_set_priority(-1, tairix_abi::SchedPriority::Normal.as_u32());
+        });
+        assert_eq!(number, NUM_SCHED_SET_PRIORITY);
+        assert_eq!(args[0], u64::MAX);
     }
 
     #[test]

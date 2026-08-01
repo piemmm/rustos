@@ -213,8 +213,10 @@ pub use state::{
     WindowFurnitureState, WindowSizeState,
 };
 pub use switchboard::{
-    JobControl, JobSummary, RecoveryControl, RecoveryItem, ResourceSummary, Section,
-    ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, TaskSummary,
+    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, JobControl, JobSummary,
+    PressureAction, PressureCause, PressureControl, RecoveryControl, RecoveryItem, ResourceSummary,
+    Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction,
+    TaskSummary,
 };
 pub use tabs::{Tab, Tabs, TabsAction};
 pub use text::{SearchField, TextAction, TextField};

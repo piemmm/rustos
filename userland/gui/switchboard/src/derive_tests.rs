@@ -102,6 +102,7 @@ fn memory_pressure_is_reported_at_and_above_the_band_threshold() {
     s.memory_pressure = Some(MemoryPressureSample {
         band: 0,
         used_permille: 999,
+        total_bytes: 0,
     });
     let summary = derive_summary(&s, &mut Hysteresis::new());
     assert!(
@@ -112,6 +113,7 @@ fn memory_pressure_is_reported_at_and_above_the_band_threshold() {
     s.memory_pressure = Some(MemoryPressureSample {
         band: 1,
         used_permille: 850,
+        total_bytes: 0,
     });
     let summary = derive_summary(&s, &mut Hysteresis::new());
     let pressure = summary.pressure.expect("mild band is pressure");
@@ -128,6 +130,7 @@ fn both_pressures_report_the_higher_level_dominant_with_count_two() {
     s.memory_pressure = Some(MemoryPressureSample {
         band: 2,
         used_permille: 999,
+        total_bytes: 0,
     });
     let summary = derive_summary(&s, &mut hysteresis);
     let pressure = summary.pressure.expect("both pressured");
@@ -143,6 +146,7 @@ fn a_tie_between_both_pressures_favours_cpu() {
     s.memory_pressure = Some(MemoryPressureSample {
         band: 1,
         used_permille: CPU_PRESSURE_ENTER_PERMILLE,
+        total_bytes: 0,
     });
     let summary = derive_summary(&s, &mut hysteresis);
     let pressure = summary.pressure.expect("both pressured");

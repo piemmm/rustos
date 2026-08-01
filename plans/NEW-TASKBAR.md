@@ -37,7 +37,7 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T11 done**; each stage's done-state section below
+`in progress` — **T1–T12 done**; each stage's done-state section below
 records what it now guarantees. The **Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
 `SwitchboardTray` model (one pure derive, hung > pressure > jobs >
@@ -985,27 +985,68 @@ outcome audited once (event **4036**, `Warn` on refusal, carrying caller,
 pid, target, signal and the deciding rule as one value so the record and the
 verdict cannot diverge).
 
-## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3)
+## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3) — **done**
 
-**Deliverables**
-- Extend the `lib/controls::switchboard` `SwitchboardModel` **in place**
-  (§2.13 — no v2) with a **Pressure** section ("why is my machine slow": a
-  per-resource `Card` with a plain-language cause, a **pressure rail**, a
-  **heat seam** for live rate, and recommended actions — Sleep app / Show
-  memory / Throttle / Lower priority) and an **Activities** section (group
-  related tasks into an activity to focus/pause/snapshot/hibernate/close as a
-  set). Both are new sections + view models on the existing typed model; the
-  Tabs strip gains the entries.
-- The pressure causes and recovery recommendations come from the T10 sampler
-  (measured, not guessed, §2.16); actions are `SwitchboardAction`s authorised
-  server-side.
+The panel carries six sections — Tasks, Jobs, **Pressure**, **Activities**,
+Recovery, Overview — on the same in-place `SwitchboardModel` (no v2), with
+the wire `CommandSection` and the session/service mappings extended in step.
 
-**Tests**: pressure cards render per resource with the right rail/seam;
-recommended actions emit + authorise; activity group focus/pause/close emits
-the right set actions; danger posture on a destructive action.
+**Pressure** ("why is my machine slow") shows one cause `Card` per resource
+the **tray's own latches** flag (CPU ≥ 900‰ enter / < 800‰ exit; memory
+band ≥ mild) — measured, never guessed: the card names the sampled culprit
+(busiest task by CPU delta; largest `mem_bytes` for memory), renders the
+pressure rail by kind and the heat seam from the measured rate
+(`ActivityState::Progress`), and offers only actions that genuinely work
+today: **Pause** (`Stop`), **Lower priority** (the new syscall below), and
+**Show tasks** (widget-internal jump to the culprit's row). Each action
+carries a truthful verdict — `Ready`, `DisabledByState` (already `Low`,
+already stopped), `DeniedByAuthority` (rendered from the same owner-uid +
+`CAP_PROC_CONTROL` rule the kernel enforces, re-checked at apply) — and the
+boards' "Sleep app" / "Throttle" stay absent: no app-nap or disk-throttle
+interface exists, and no disk/network latch exists to hang a card on
+(`docs/src/desktop/switchboard.md` records the divergences).
 
-**Done when**: pressure and activities panels are live and actionable; gate
-green.
+**Activities** are **live, session-lifetime groupings of running
+processes**, held by the monitor service keyed on the never-reused
+`proc_id` (`userland/gui/switchboard/src/activities.rs`): single
+membership, auto-named "Activity N", inline rename (trimmed, unique,
+≤ 48 chars, refusals stated), bounds 12 groups × 32 members rendered as
+disable reasons, members pruned — and emptied groups dissolved — only on a
+sample whose process list succeeded, so degradation never wipes groupings.
+Set actions: **Switch** (`ActivateOwner` per joined member, reverse order so
+the first lands frontmost), **Pause/Resume** (`Stop`/`Continue` sweep),
+**Close** (`Terminate` sweep — graceful; force-kill stays Recovery's — then
+dissolve), all sweeping **only members joined to the current sample** (a
+stored pid may have been reused; unjoined members are skipped by
+construction). Tasks rows gained a `Group` button opening a `Menu` popup
+(assign / new activity / remove, with honest disabled reasons); grouping
+edits re-present the panel immediately rather than waiting a sample. The
+mockups' Snapshot/Hibernate are absent: no process snapshot interface
+exists. Keyboard completeness came with it: a horizontal action focus
+(Left/Right + Enter) reaches every row button in every section — fixing the
+pre-existing gap where Recovery's Force was keyboard-unreachable.
+
+**"Lower priority" scheduler surface** (the plan's promised new surface):
+`SchedulerPolicy::set_priority`/`priority` — recorded at once, governs the
+next enqueue, idempotent, fail-closed on unknown/terminal ids — implemented
+by all three policies (CFQ/EEVDF re-derive their 4:2:1 weight per enqueue;
+MLFQ re-bands with fresh yield residency, its demotion/boost dynamics — and
+the starvation guarantee — untouched) and pinned policy-neutrally by the
+shared conformance suite. Syscall **104 `sched_set_priority(pid,
+SchedPriority)`** (`SchedPriority{High=1,Normal=2,Low=3}`, 0 reserved,
+fail-closed decode): target rule shared with `signal` through one handler
+helper (own child → same principal → `CAP_PROC_CONTROL`), plus a **raise
+gate** — any change toward `High` needs `CAP_PROC_CONTROL` whatever the
+target, so no user outweighs other principals' fair share. Audited per call
+by the dispatcher plus one `PROCESS_PRIORITY_CHANGE` decision record (id
+**4037**, `Info`/`Warn`, caller/pid/target/priority/rule/raise; own-child
+lowering stays unrecorded like own-child signals). The sysinfo
+`ProcessRecord` carries the live `priority` (the old reserved byte 59) read
+from the scheduler's record, which is what lets the panel render an
+already-lowered culprit's action spent; `tairix_rt::sched_set_priority`,
+the `tairix_sys_sched_set_priority` C stub, and the regenerated headers
+(`TAIRIX_SCHED_PRIORITY_*`) expose it, and the syscall/dispatch/fuzz/
+proptest oracles cover it end to end.
 
 ## T13 — System menu / quick actions + System Settings access (desktop1 panel 5)
 
@@ -1083,12 +1124,11 @@ green.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 
-- **Process-control capability**: does an adequate signal/priority/kill
-  capability already exist (`plans/SPAWN.md` / the signal work)? If yes, reuse
-  it; only mint `CAP_PROC_CONTROL` in T10 if none fits (§5.2).
-- **Switchboard lifecycle**: started by the session at desktop bring-up vs. a
-  `/System/Services` autostart — decide in T10 against `plans/DISPLAY.md` and
-  the CU6 sizing rule; the taskbar icon must degrade calmly when it is absent.
 - **Desktop-icon drag source** (T7): depends on the not-yet-present
   desktop-icons work; the taskbar drop-target and payload land now, the
   desktop source is a later, separate source.
+
+(The T10 questions are settled and recorded in their done-state sections:
+`CAP_PROC_CONTROL` was minted with its live enforcement point — no earlier
+capability fit — and the monitor service is session-spawned, with the
+capsule degrading calmly when it is absent.)

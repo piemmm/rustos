@@ -14,8 +14,35 @@
 // Re-export the policy-neutral vocabulary so the rest of `kernel/core`
 // names one canonical definition.
 pub(crate) use tairix_kernel_sched_api::{
-    CpuId, SchedClass, SchedError, SchedulerArch, SchedulerConfig,
+    CpuId, Priority, SchedClass, SchedError, SchedulerArch, SchedulerConfig,
 };
+
+use tairix_abi::SchedPriority;
+
+/// Map the wire scheduling level onto the scheduler's own [`Priority`].
+///
+/// The one write-path conversion the `sched_set_priority` handler uses, so
+/// the wire vocabulary and the policy vocabulary can never pair up
+/// differently in two places.
+pub(crate) const fn priority_of_level(level: SchedPriority) -> Priority {
+    match level {
+        SchedPriority::High => Priority::High,
+        SchedPriority::Normal => Priority::Normal,
+        SchedPriority::Low => Priority::Low,
+    }
+}
+
+/// Map the scheduler's [`Priority`] onto the wire scheduling level.
+///
+/// The one read-path conversion the introspection feed and the raise gate
+/// use; the inverse of [`priority_of_level`].
+pub(crate) const fn level_of_priority(priority: Priority) -> SchedPriority {
+    match priority {
+        Priority::High => SchedPriority::High,
+        Priority::Normal => SchedPriority::Normal,
+        Priority::Low => SchedPriority::Low,
+    }
+}
 
 /// The concrete scheduler policy selected for this image.
 ///
@@ -61,3 +88,22 @@ compile_error!(
      exactly one `scheduler-*` feature per image; disable the default \
      with `--no-default-features` before selecting another (AGENTS.md §17.1)"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{level_of_priority, priority_of_level, Priority, SchedPriority};
+
+    #[test]
+    fn level_conversions_round_trip_every_level() {
+        for level in [
+            SchedPriority::High,
+            SchedPriority::Normal,
+            SchedPriority::Low,
+        ] {
+            assert_eq!(level_of_priority(priority_of_level(level)), level);
+        }
+        for priority in [Priority::High, Priority::Normal, Priority::Low] {
+            assert_eq!(priority_of_level(level_of_priority(priority)), priority);
+        }
+    }
+}

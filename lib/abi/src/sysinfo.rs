@@ -21,6 +21,7 @@ use crate::blkio::{BlkHealthCounters, BlkHealthState, BlkStatus, BLK_HEALTH_COUN
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
+use crate::process::SchedPriority;
 use crate::rlimit::{LimitKind, ResourceLimit};
 use crate::time::{Duration64, Time64};
 use crate::{CapabilityId, Errno};
@@ -1124,6 +1125,15 @@ pub struct ProcessRecord {
     /// CPU the process is currently executing on, or [`PROCESS_CPU_NONE`]
     /// when it is not presently scheduled on any CPU.
     pub cpu: u8,
+    /// Time-shared scheduling service level, read from the scheduler's own
+    /// record (never a caller claim).
+    ///
+    /// Every process is admitted at [`SchedPriority::Normal`]; the value
+    /// changes only through the capability-gated
+    /// [`crate::SyscallNumber::SCHED_SET_PRIORITY`] rule, so a consumer
+    /// (the Switchboard's "lower priority" recovery action) can render an
+    /// already-lowered process as such instead of re-offering the change.
+    pub priority: SchedPriority,
     /// Cumulative on-CPU time of the process, in nanoseconds.
     ///
     /// Accounted by the scheduler as the task is dispatched (kernel and
@@ -1164,6 +1174,7 @@ impl ProcessRecord {
         gid: u32,
         state: ProcessState,
         cpu: u8,
+        priority: SchedPriority,
         cpu_time_ns: u64,
         mem_bytes: u64,
         name: &[u8],
@@ -1183,6 +1194,7 @@ impl ProcessRecord {
             gid,
             state,
             cpu,
+            priority,
             cpu_time_ns,
             mem_bytes,
             name_len,
@@ -1209,7 +1221,7 @@ impl ProcessRecord {
         out[56] = self.state.as_u8();
         out[57] = self.cpu;
         out[58] = self.name_len;
-        // out[59] reserved, already zero.
+        out[59] = self.priority as u8;
         put_u64(&mut out, 60, self.cpu_time_ns);
         put_u64(&mut out, 68, self.mem_bytes);
         out[76..76 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
@@ -1219,7 +1231,8 @@ impl ProcessRecord {
     /// Decode from `bytes`.
     ///
     /// Returns [`Errno::BufferTooSmall`] if the slice is short,
-    /// [`Errno::OutOfRange`] for an unknown [`ProcessState`], or
+    /// [`Errno::OutOfRange`] for an unknown [`ProcessState`] or
+    /// [`SchedPriority`] (a zeroed level byte fails closed), or
     /// [`Errno::LengthOutOfRange`] if `name_len` exceeds
     /// [`PROCESS_NAME_MAX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -1229,6 +1242,7 @@ impl ProcessRecord {
         let proc_id = ProcId::from_bytes(&bytes[16..32])?;
         let parent_proc_id = ProcId::from_bytes(&bytes[32..48])?;
         let state = ProcessState::from_u8(bytes[56])?;
+        let priority = SchedPriority::from_u32(u32::from(bytes[59]))?;
         let name_len = bytes[58];
         if name_len as usize > PROCESS_NAME_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -1244,6 +1258,7 @@ impl ProcessRecord {
             gid: read_u32(bytes, 52),
             state,
             cpu: bytes[57],
+            priority,
             cpu_time_ns: read_u64(bytes, 60),
             mem_bytes: read_u64(bytes, 68),
             name_len,
@@ -4485,6 +4500,7 @@ mod tests {
     use crate::blkio::{BlkHealthCounters, BLK_HEALTH_COUNTERS_LEN};
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
+    use crate::process::SchedPriority;
     use crate::rlimit::{LimitKind, ResourceLimit};
     use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
@@ -5097,6 +5113,7 @@ mod tests {
             1000,
             ProcessState::Running,
             2,
+            SchedPriority::Low,
             1_234_567_890,
             5 * 4096,
             b"init",
@@ -5108,6 +5125,7 @@ mod tests {
         assert_eq!(decoded.name_bytes(), b"init");
         assert_eq!(decoded.proc_id, ProcId::from_raw([0x11; 16]));
         assert_eq!(decoded.parent_proc_id, ProcId::from_raw([0x22; 16]));
+        assert_eq!(decoded.priority, SchedPriority::Low);
         assert_eq!(decoded.cpu_time_ns, 1_234_567_890);
         assert_eq!(decoded.mem_bytes, 5 * 4096);
     }
@@ -5125,6 +5143,7 @@ mod tests {
                 0,
                 ProcessState::Runnable,
                 PROCESS_CPU_NONE,
+                SchedPriority::Normal,
                 0,
                 0,
                 &too_long,
@@ -5141,6 +5160,7 @@ mod tests {
             0,
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
+            SchedPriority::Normal,
             0,
             0,
             b"a",
@@ -5159,6 +5179,7 @@ mod tests {
             0,
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
+            SchedPriority::Normal,
             0,
             0,
             b"a",
@@ -5170,6 +5191,31 @@ mod tests {
             ProcessRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)
         );
+    }
+
+    #[test]
+    fn process_record_rejects_unknown_priority() {
+        let mut bytes = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            ProcessState::Runnable,
+            PROCESS_CPU_NONE,
+            SchedPriority::Normal,
+            0,
+            0,
+            b"a",
+        )
+        .unwrap()
+        .to_le_bytes();
+        // The reserved zero and every unknown discriminant fail closed.
+        bytes[59] = 0;
+        assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        bytes[59] = 4;
+        assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
     #[test]

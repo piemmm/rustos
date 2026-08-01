@@ -138,15 +138,24 @@ instruments, a `Tabs` strip, `ListRow`/`Card`/`Panel`/`Button` content, and one
 vertical `ScrollBar` over the `scroll` engine — with no application-painted
 chrome and no second copy of any control's behaviour. `Switchboard::new` turns
 a typed `SwitchboardModel`
-(`TaskSummary`/`JobSummary`/`RecoveryItem`/`ResourceSummary`/`ServiceSummary`/
-`SystemAction`) into controls, and `select_section` opens the panel on whichever
-section the host's caller asked for rather than steering it with synthetic
-input. A host sampling live state publishes each new reading with `set_model`,
-which runs that same one derivation over the new model while keeping the
-section, scroll offsets, and keyboard focus the user chose — a scrolled list is
-never snatched back to the top by the next sample — and drops the row
-selection, hover, and any half-finished press that named a row the refresh may
-have replaced. The always-visible resource band draws one meter per
+(`TaskSummary`/`JobSummary`/`PressureCause`/`ActivitySummary`/`RecoveryItem`/
+`ResourceSummary`/`ServiceSummary`/`SystemAction`) into controls, and
+`select_section` opens the panel on whichever section the host's caller asked
+for rather than steering it with synthetic input. Pressure cards carry a
+per-action `ActionVerdict` (ready / disabled-by-state / denied-by-authority —
+one mapping onto `ControlState`, shared with every other action button);
+activity rows compose a flat header+member list with a `Menu`-based Group
+popup on task rows and a `TextField`-based inline rename whose committed text
+the host reads back through `submitted_activity_name`; and a horizontal
+action focus (Left/Right, then Enter) makes every row button
+keyboard-reachable in every section. A host sampling live state publishes
+each new reading with `set_model`, which runs that same one derivation over
+the new model while keeping the section, scroll offsets, and keyboard focus
+the user chose — a scrolled list is never snatched back to the top by the
+next sample — and drops the row selection, hover, any open popup, and any
+half-finished press that named a row the refresh may have replaced (an
+in-flight rename survives only while an activity with the same stable id
+remains). The always-visible resource band draws one meter per
 `ResourceSummary` — the same fact the Overview resource cards show — and takes
 no input, so a press over it reaches nothing beneath it. Every interaction
 returns a typed `SwitchboardAction` for the hosting service to authorise, and

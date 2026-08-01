@@ -41,7 +41,7 @@ look changes.
   glyphs in `lib/icon` and `lib/cursor`.
 
 - **`switchboard1.png`, `switchboard2.png`** (plus the `-light` variants) —
-  storyboards for **Switchboard**, a proposed system control panel pinned to the
+  storyboards for **Switchboard**, the system-overview panel pinned to the
   far right of the taskbar. The boards explore a glanceable overview (CPU /
   memory / disk / network), running tasks, background jobs, a plain-language
   "system pressure" view with per-task actions, activity grouping, a recovery
@@ -55,9 +55,13 @@ correctly under both themes; it is a design check, not two separate designs.
 
 ## Status
 
-These are exploratory concepts. The mascot and iconset feed the brand and the
-`/System/Graphics` SVG sources; **Switchboard is an unimplemented proposal** —
-there is no Switchboard crate under `userland/gui/`, and adding one would be
-governed by the desktop rules (`AGENTS.md` §10, §17.3) and tracked in `PLAN.md`
-like any other component. This page is documentation of the artwork, not a
-commitment to ship every idea it depicts.
+The mascot and iconset are exploratory concepts feeding the brand and the
+`/System/Graphics` SVG sources. The Switchboard boards graduated from proposal
+to design brief: the monitor service and its panel are implemented
+(`userland/gui/switchboard`, staged by `plans/NEW-TASKBAR.md`; see
+[the Switchboard page](./switchboard.md)), with the boards remaining the
+visual reference their measured, honest implementation is judged against.
+This page is documentation of the artwork, not a commitment to ship every
+idea it depicts — where a board sketches an interface the OS does not have
+(a disk/network throughput gauge, app "sleep"), the shipped panel shows the
+measured truth instead.

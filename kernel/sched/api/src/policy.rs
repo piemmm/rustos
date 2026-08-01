@@ -305,4 +305,46 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// # Errors
     /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
     fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass>;
+
+    /// Move `id` to the [`Priority`] `priority`.
+    ///
+    /// The priority is recorded at once and governs the task's **next
+    /// enqueue** onward, exactly like [`set_sched_class`]: a task sitting
+    /// ready in a run queue adopts the new band or weight at its next
+    /// dispatch rather than being surgically moved, so the observable
+    /// contract is identical across policies. Idempotent: setting the
+    /// priority a task already holds is a successful no-op.
+    ///
+    /// The recorded value is the task's *time-shared* service level. A
+    /// weight-based policy honours it lastingly on every subsequent
+    /// enqueue; a decay policy whose priorities are dynamic by definition
+    /// (MLFQ) treats it as the task's current band and may later adjust it
+    /// through its own demotion and anti-starvation rules — the
+    /// anti-starvation guarantee is never suspended to pin a task low. A
+    /// [`SchedClass::Realtime`] task keeps the recorded value for when it
+    /// returns to [`SchedClass::TimeShared`]; the strict-priority band is
+    /// unaffected by it.
+    ///
+    /// Who may change which task's priority is decided at the syscall
+    /// boundary (lowering under the process-target rule, raising under
+    /// `CAP_PROC_CONTROL`); the policy trusts the caller and does not
+    /// itself perform the capability check.
+    ///
+    /// [`set_sched_class`]: Self::set_sched_class
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::InvalidState`] if the task is terminal.
+    fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()>;
+
+    /// The current [`Priority`] of `id`.
+    ///
+    /// A read-only observation for the System Information introspection
+    /// feed and the syscall boundary's raise/lower decision. Under a
+    /// dynamic-priority policy the answer is the band the task holds right
+    /// now, which is the truthful reading.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    fn priority(&self, id: TaskId) -> SchedResult<Priority>;
 }

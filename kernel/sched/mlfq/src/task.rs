@@ -129,6 +129,17 @@ impl TaskInner {
         Priority::from_index(raw).unwrap_or(Priority::High)
     }
 
+    /// Atomically place the task in the `priority` band and reset its
+    /// consecutive-yield count, so it starts fresh residency there.
+    ///
+    /// Takes effect at the task's next enqueue. Used by the
+    /// anti-starvation boost and the external priority change alike; the
+    /// demotion rule keeps its own interleaved counter arithmetic.
+    pub(crate) fn store_priority(&self, priority: Priority) {
+        self.priority.store(priority as u8, Ordering::Release);
+        self.yields_at_band.store(0, Ordering::Release);
+    }
+
     /// Atomically load the scheduling class.
     pub(crate) fn load_sched_class(&self) -> SchedClass {
         // Only `SchedClass`-produced values are ever stored; a corrupt byte
@@ -180,5 +191,14 @@ mod tests {
             .expect("ready -> running");
         assert_eq!(t.load_state(), TaskState::Running);
         assert!(t.cas_state(TaskState::Ready, TaskState::Running).is_err());
+    }
+
+    #[test]
+    fn store_priority_places_the_band_and_resets_yield_residency() {
+        let t = TaskInner::new(1, 0, Priority::High, Box::new(|_| TaskAction::Exit));
+        t.yields_at_band.store(3, Ordering::Release);
+        t.store_priority(Priority::Low);
+        assert_eq!(t.load_priority(), Priority::Low);
+        assert_eq!(t.yields_at_band.load(Ordering::Acquire), 0);
     }
 }

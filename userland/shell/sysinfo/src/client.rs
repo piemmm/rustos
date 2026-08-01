@@ -701,7 +701,7 @@ mod tests {
         CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
+    use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, SchedPriority, RLIMIT_INFINITY};
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::{Output, Transport};
 
@@ -1062,6 +1062,7 @@ mod tests {
             1000,
             state,
             0,
+            SchedPriority::Normal,
             0,
             0,
             name,

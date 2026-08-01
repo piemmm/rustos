@@ -115,8 +115,10 @@ typedef struct tairix_process_list_request {
 * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused
 * process-instance identities (correlate on those, not the numeric ids).
 * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently
-* scheduled; cpu_time_ns is the cumulative on-CPU time and mem_bytes the
-* mapped address-space size. The inline name is valid for name_len bytes. */
+* scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service
+* level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and
+* mem_bytes the mapped address-space size. The inline name is valid for
+* name_len bytes. */
 typedef struct tairix_process_record {
     uint64_t pid;
     uint64_t parent_pid;
@@ -126,6 +128,7 @@ typedef struct tairix_process_record {
     uint32_t gid;
     uint8_t state;
     uint8_t cpu;
+    uint32_t priority;
     uint64_t cpu_time_ns;
     uint64_t mem_bytes;
     uint8_t name_len;

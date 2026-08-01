@@ -3117,7 +3117,7 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T11 done) —
+Full **icon-bar** build-out (staged, `in progress` — T1–T12 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
 entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
@@ -3179,12 +3179,24 @@ interim pin-on-press API is gone). Task/job/recovery actions are real:
 `ProcessSignal` split into `resolve_child` + `signal_task` over one delivery
 engine and every cross-principal decision audited (event 4036, `Warn` on
 refusal); an action whose authority the service lacks renders with the
-Authority Mark and is never attempted. Next (T12+): the panel's services
-list and the T13 System menu (session controls, light/dark toggle, System
-Settings) — both blocked on interfaces that do not exist yet, a System
-Information API service-enumeration query and a session power/lock
-interface, so the panel leaves both lists honestly empty rather than
-fabricating rows.
+Authority Mark and is never attempted — and **as the Pressure + Activities
+panels** (T12): the "why is my machine slow" cause cards driven by the
+tray's own latches (measured culprit, rail + heat seam, Pause / Lower
+priority / Show tasks with truthful Ready/DisabledByState/DeniedByAuthority
+verdicts re-checked at apply), the live session-lifetime activity groupings
+(`proc_id`-keyed, single-membership, Group menu + inline rename,
+Switch/Pause/Resume/Close sweeps over sample-joined members only), the
+keyboard action-focus that made every row button reachable, and the new
+scheduler surface behind "Lower priority": `SchedulerPolicy::set_priority`/
+`priority` across all three policies + conformance, syscall 104
+`sched_set_priority` (signal's target rule + a `CAP_PROC_CONTROL` raise
+gate, audit event 4037), the `ProcessRecord.priority` field, and the
+regenerated C headers (`plans/NEW-TASKBAR.md` T12). Next: the T13 System
+menu (session controls, light/dark toggle, System Settings) — its power/
+lock half is blocked on a session power/lock interface that does not exist
+yet — and the panel's services list, blocked on a System Information API
+service-enumeration query, so the panel leaves those honestly empty rather
+than fabricating rows.
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending

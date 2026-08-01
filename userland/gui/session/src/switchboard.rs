@@ -197,6 +197,8 @@ pub const fn command_section(section: Section) -> CommandSection {
     match section {
         Section::Tasks => CommandSection::Tasks,
         Section::Jobs => CommandSection::Jobs,
+        Section::Pressure => CommandSection::Pressure,
+        Section::Activities => CommandSection::Activities,
         Section::Recovery => CommandSection::Recovery,
         Section::Overview => CommandSection::Overview,
     }

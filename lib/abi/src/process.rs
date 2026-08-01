@@ -972,6 +972,68 @@ impl Signal {
     }
 }
 
+/// A process's time-shared scheduling service level, set by
+/// [`crate::SyscallNumber::SCHED_SET_PRIORITY`] and reported in the System
+/// Information process record (`plans/NEW-TASKBAR.md` T12).
+///
+/// The closed three-level vocabulary every scheduling policy shares (the
+/// kernel's fair-queuing weights and band placement derive from it), one
+/// definition for the kernel, the C ABI view, and every first-party caller.
+/// Every process is admitted at [`Normal`](Self::Normal). Lowering a
+/// process's level follows the same target rule as
+/// [`Signal`] delivery; raising one is an administrative act
+/// (`CAP_PROC_CONTROL`), so no user can weight their own work above other
+/// principals' fair share. The discriminant is the `u32` carried in the
+/// syscall's `priority` register; `0` is reserved and never valid, so a
+/// zeroed register fails closed rather than resolving to a real level.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SchedPriority {
+    /// Above-normal service: the strongest time-shared weight/band.
+    High = 1,
+    /// The default service level every process is admitted at.
+    Normal = 2,
+    /// Background service: the weakest time-shared weight/band.
+    Low = 3,
+}
+
+impl SchedPriority {
+    /// The discriminant carried on the wire.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover a [`SchedPriority`] from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// level (including the reserved `0`), so an unknown or zeroed register
+    /// fails closed rather than being interpreted as a level the caller did
+    /// not name.
+    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::High),
+            2 => Ok(Self::Normal),
+            3 => Ok(Self::Low),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether this level grants more CPU service than `other`.
+    ///
+    /// The one definition of "raising" the kernel's authority gate uses: a
+    /// change to a level that outranks the current one requires
+    /// `CAP_PROC_CONTROL`, while an equal or weaker level follows the plain
+    /// target rule. Stronger service is the numerically smaller
+    /// discriminant.
+    #[must_use]
+    pub const fn outranks(self, other: Self) -> bool {
+        (self as u32) < (other as u32)
+    }
+}
+
 /// The operation [`crate::SyscallNumber::SIGNAL_INTAKE`] performs on the
 /// calling process's own signal intake (`plans/STRESSTEST.md` ST3).
 ///
@@ -1426,9 +1488,9 @@ mod tests {
     extern crate alloc;
     use super::{
         load_failure_reason, load_failure_status, DescriptorTable, FdWire, ProcessStart,
-        ProcessStartHeader, Signal, SignalIntakeOp, SpawnAttach, StreamMode, StringSlot,
-        WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND,
-        LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode,
+        StringSlot, WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED,
+        LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
         PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
         SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN, STDINFO, STDOUT,
         STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
@@ -1624,6 +1686,48 @@ mod tests {
         // chooses, so a reaper can tell a signalled death from a normal one.
         for signal in [Signal::Interrupt, Signal::Terminate, Signal::Kill] {
             assert!(signal.termination_status().expect("terminating") > 128);
+        }
+    }
+
+    #[test]
+    fn sched_priority_discriminants_are_frozen() {
+        // The discriminants are the on-wire level values; do not renumber.
+        assert_eq!(SchedPriority::High.as_u32(), 1);
+        assert_eq!(SchedPriority::Normal.as_u32(), 2);
+        assert_eq!(SchedPriority::Low.as_u32(), 3);
+    }
+
+    #[test]
+    fn sched_priority_round_trips_and_rejects_reserved_and_unknown() {
+        for level in [
+            SchedPriority::High,
+            SchedPriority::Normal,
+            SchedPriority::Low,
+        ] {
+            assert_eq!(SchedPriority::from_u32(level.as_u32()), Ok(level));
+        }
+        // 0 is reserved so a zeroed register fails closed, and every value
+        // past the defined set is rejected rather than guessed.
+        assert_eq!(SchedPriority::from_u32(0), Err(Errno::OutOfRange));
+        assert_eq!(SchedPriority::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(SchedPriority::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn sched_priority_outranks_orders_service_strength() {
+        // The raise gate keys off this one ordering: High > Normal > Low,
+        // and no level outranks itself (an idempotent re-set is a lower).
+        assert!(SchedPriority::High.outranks(SchedPriority::Normal));
+        assert!(SchedPriority::High.outranks(SchedPriority::Low));
+        assert!(SchedPriority::Normal.outranks(SchedPriority::Low));
+        assert!(!SchedPriority::Low.outranks(SchedPriority::Normal));
+        assert!(!SchedPriority::Normal.outranks(SchedPriority::High));
+        for level in [
+            SchedPriority::High,
+            SchedPriority::Normal,
+            SchedPriority::Low,
+        ] {
+            assert!(!level.outranks(level));
         }
     }
 

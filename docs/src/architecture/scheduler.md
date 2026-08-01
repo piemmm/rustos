@@ -360,6 +360,41 @@ band its `step` consults before the fair band), and the shared
 `realtime_peers_share_the_cpu_round_robin`,
 `sched_class_reports_and_fails_closed_on_unknown`).
 
+## Changing a live task's priority
+
+The *nice level* itself is mutable after admission through the
+`SchedulerPolicy::set_priority` / `priority` pair — the contract behind the
+`sched_set_priority` syscall (`plans/NEW-TASKBAR.md` T12; the target rule,
+the `CAP_PROC_CONTROL` raise gate, and the audit record are the syscall
+page's, [`syscalls.md`](./syscalls.md)). The contract is deliberately the
+same shape as `set_sched_class`:
+
+* the new level is **recorded at once** and governs the task's **next
+  enqueue** onward — a task sitting ready in a run queue adopts the new
+  weight or band at its next dispatch rather than being surgically moved,
+  so the observable behaviour is identical across policies (the Chase–Lev
+  deques support no arbitrary removal, and no policy needs one);
+* re-stating the level a task already holds is an **idempotent success**;
+* an unknown id fails closed with `NoSuchTask` and a terminal task with
+  `InvalidState` — never a fabricated change;
+* the recorded value is the task's *time-shared* service level: a
+  `Realtime`-class task keeps it for when it returns to the fair band, and
+  the strict-priority band is unaffected by it.
+
+Per policy: **CFQ** and **EEVDF** re-derive their 4:2:1 fair-share weight
+from the stored level on every enqueue, so the change simply takes effect
+lastingly from the next dispatch. **MLFQ** treats the recorded level as the
+task's *current band* with fresh yield residency — its demotion rule and
+anti-starvation boost keep adjusting the band afterwards, exactly as they
+do for every other task, so an externally lowered task is still boosted
+out of starvation on the boost cadence; the starvation guarantee is never
+suspended to pin a task low. `priority` reports the band the task holds
+*right now*, which under a decay policy is the truthful reading — it feeds
+the System Information process record so a task manager can render an
+already-lowered process as such. The shared conformance suite pins the
+whole contract for every policy
+(`priority_reports_changes_and_fails_closed`).
+
 ## IPI-based preemption hook
 
 The scheduler never sleeps or busy-waits on its own. It signals

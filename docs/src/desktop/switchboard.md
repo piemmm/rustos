@@ -1,7 +1,7 @@
 # Switchboard monitor service
 
 `userland/gui/switchboard` (`tairix-switchboard`) is the **Switchboard
-monitor service** (`plans/NEW-TASKBAR.md` T10/T11): a small, dedicated
+monitor service** (`plans/NEW-TASKBAR.md` T10–T12): a small, dedicated
 process the desktop session spawns as the logged-in user, which samples the
 live system through the System Information API, feeds the taskbar's
 always-right-most Switchboard icon its tray signals, and hosts the live
@@ -61,13 +61,32 @@ actually changed. What it carries:
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list; each row's action asks the session to raise that owner's window |
+| Tasks | the sampled process list; each row's primary action asks the session to raise that owner's window, and its `Group` button files the task into an activity (below) |
+| Pressure | "why is my machine slow": one cause card per resource the **tray's own latches** flag (CPU ≥ 90 % with < 80 % release; memory band ≥ mild), naming the measured culprit — the busiest sampled task for CPU, the largest mapped address space for memory — with a plain-language cause line and recommended actions, each rendered `Ready`, `DisabledByState` (a culprit already at `Low` priority or already stopped) or `DeniedByAuthority` per the same rule the kernel enforces. No latch, no card; no per-task rate yet, a culprit-less card with the one action that is still honest (`Show tasks`) |
+| Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from a task row's `Group` menu; renamed inline; paused/resumed/closed as a set |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
 | Overview | the CPU and memory readings, with the CPU meter's sparkline fed from a bounded rolling history and each meter carrying the pressure the tray derivation itself latched |
 | Jobs | always empty — see below |
 
 A resource the service could not measure this cycle reads `unknown` with an
 unmeasured meter, never a fabricated `0%`.
+
+### Activities are live groupings, not saved workspaces
+
+An activity is a **grouping of live processes for the current session**,
+held by this service in memory: members are ephemeral processes, so a
+persisted grouping would outlive the only things it names. Members that
+exit are pruned (and an emptied group dissolved) — but **only on a sample
+whose process list actually succeeded**, so a degraded sample can never
+wipe the user's groupings. Set actions (pause/resume/close/switch) act
+only on members **joined to the current sample** by `proc_id`: a stored
+numeric pid whose process has exited may have been reused by an unrelated
+process, so acting on unjoined members is refused by construction rather
+than risked. Names are bounded (48 characters), trimmed, unique per
+instance, and validated on rename — a refused rename is stated on `stderr`
+and changes nothing. The bounds (12 activities × 32 members) are
+hand-curation scale; the panel renders the honest reason ("Activity limit
+reached", "Activity is full") on the controls they disable.
 
 ### What is deliberately empty, and why
 
@@ -78,8 +97,13 @@ unmeasured meter, never a fabricated `0%`.
   memory pressure.
 - **System actions** — there is no power or session-lock interface this
   service may drive, so it offers no shut-down, restart, or lock button.
-- **Disk and network resource rows** — the System Information API exposes
-  no throughput query for either.
+- **Disk and network pressure cards and resource rows** — the API exposes
+  no disk-throughput query at all, and while a per-interface network-rates
+  query exists (`NET_INTERFACE_RATES`), no tray latch is derived from it,
+  so a card would be a guess rather than a measured cause.
+- **App "sleep" and disk "throttle"** (sketched on the concept boards) —
+  no such kernel interfaces exist; the pressure cards offer only actions
+  that genuinely work today: pause (`Stop`), lower priority, show tasks.
 
 Offering a control that would fail at the point of use is worse than an
 honest absence, so these stay empty.
@@ -89,17 +113,27 @@ honest absence, so these stay empty.
 | Control | Effect |
 |---|---|
 | Task row | `SwitchboardRequest::ActivateOwner { owner }` to the session |
+| Task *Group* menu | file the task into an activity / a new activity / out of its activity (service-local state; no syscall) |
+| Pressure *Pause* | `signal(pid, Stop)` on the measured culprit |
+| Pressure *Lower priority* | `sched_set_priority(pid, Low)` on the culprit — lowering follows the kernel's own-child / same-principal / `CAP_PROC_CONTROL` target rule, and the card renders the action spent once the record already reads `Low` |
+| Pressure *Show tasks* | resolved inside the widget: jumps to the Tasks section focused on the culprit row |
+| Activity *Switch* | one `ActivateOwner` per joined member, raised in reverse order so the first member lands frontmost |
+| Activity *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` swept over the joined members — one refusal is reported and the sweep continues |
+| Activity *Close* | `signal(pid, Terminate)` swept over the joined members (the graceful ask — force-kill stays Recovery's job), then the grouping dissolves |
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — requires `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |
 
 Every row's availability reflects what this service can *genuinely* do: it
-queries its own effective capability set through `cap_query`, and a control
-whose authority is absent renders with the Authority Mark and is never
-attempted. A sampled task id that does not fit the `signal` syscall's signed
-width is refused rather than truncated into a different, arbitrary process.
-A refusal from the kernel or the session is stated on `stderr` and leaves
-the model untouched; it never ends the service.
+queries its own effective capability set through `cap_query`, compares each
+row's kernel-attested owner uid against its own, and a control whose
+authority is absent renders with the Authority Mark and is never attempted
+— the same verdict is re-derived at apply time from the same inputs, so
+render and enforcement cannot disagree. A sampled task id that does not fit
+the `signal`/`sched_set_priority` signed width is refused rather than
+truncated into a different, arbitrary process. A refusal from the kernel or
+the session is stated on `stderr` and leaves the model untouched; it never
+ends the service.
 
 ## Waiting
 

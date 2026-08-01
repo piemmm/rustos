@@ -2552,6 +2552,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::SCHED_SET_PRIORITY,
+        name: "sched_set_priority",
+        arg_count: 2,
+        args: [
+            // The target PID (an `I32`, sign-extended in the register per
+            // the ABI convention), then the `SchedPriority` discriminant.
+            // The handler validates both.
+            AbiType::I32,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The authority depends on the target, exactly as `signal`'s does,
+        // so the dispatcher cannot gate the call with one capability: the
+        // caller may lower a child it spawned or another process of its own
+        // principal, a cross-principal target needs `CAP_PROC_CONTROL`, and
+        // *raising* a level needs `CAP_PROC_CONTROL` regardless — all
+        // checked in the handler against the target's kernel-attested owner
+        // and the scheduler's recorded level. It IS audited per call —
+        // re-weighting a process's CPU share is a security-relevant
+        // process-lifecycle decision, exactly as `signal` is audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

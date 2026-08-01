@@ -767,7 +767,7 @@ impl Card {
     /// The footer button rectangles, laid out equal-width across the bottom of
     /// the card's content, above the progress seam. Shared by rendering and
     /// pointer routing so the two never disagree.
-    fn footer_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    pub(crate) fn footer_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let mut rects = Vec::new();
         if self.footer.is_empty() {
             return rects;

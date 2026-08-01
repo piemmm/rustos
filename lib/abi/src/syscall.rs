@@ -2017,6 +2017,26 @@ impl SyscallNumber {
     /// (not an autoloaded driver) fails closed with [`Errno::NotFound`].
     pub const HW_SELF_NODE: Self = Self(103);
 
+    /// Change a process's time-shared scheduling service level
+    /// ([`crate::SchedPriority`]) — the Switchboard's "lower priority"
+    /// recovery action (`plans/NEW-TASKBAR.md` T12).
+    ///
+    /// Arguments: `pid` (sign-extended `i32`, the target process) and
+    /// `priority` (a [`crate::SchedPriority`] wire discriminant; `0` and
+    /// unknown values fail closed with [`Errno::OutOfRange`]).
+    ///
+    /// The target rule mirrors [`SyscallNumber::SIGNAL`]: the caller may
+    /// act on its **own child**, else a process of its **own principal**,
+    /// else it needs [`crate::CapabilityId::PROC_CONTROL`] — so the
+    /// dispatcher cannot gate the call with one capability and the handler
+    /// decides per target. **Raising** the level (toward
+    /// [`crate::SchedPriority::High`]) additionally requires
+    /// `CAP_PROC_CONTROL` regardless of the target rule, so no user can
+    /// weight their own work above other principals' fair share; lowering
+    /// and re-stating the current level follow the plain target rule.
+    /// Cross-principal outcomes and every raise attempt are audited.
+    pub const SCHED_SET_PRIORITY: Self = Self(104);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

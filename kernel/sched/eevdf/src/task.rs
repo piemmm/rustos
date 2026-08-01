@@ -177,6 +177,14 @@ impl TaskInner {
         weight_of(self.load_priority())
     }
 
+    /// Atomically store the priority.
+    ///
+    /// Takes effect at the task's next enqueue: every weight read
+    /// re-derives from this field, so no queued entry needs surgery.
+    pub(crate) fn store_priority(&self, priority: Priority) {
+        self.priority.store(priority as u8, Ordering::Release);
+    }
+
     /// Atomically load the state.
     pub(crate) fn load_state(&self) -> TaskState {
         let raw = self.state.load(Ordering::Acquire);
@@ -254,7 +262,8 @@ mod tests {
     fn weight_tracks_priority_field() {
         let t = TaskInner::new(2, 0, Priority::Low, Box::new(|_| TaskAction::Exit));
         assert_eq!(t.weight(), weight_of(Priority::Low));
-        t.priority.store(Priority::High as u8, Ordering::Release);
+        t.store_priority(Priority::High);
+        assert_eq!(t.load_priority(), Priority::High);
         assert_eq!(t.weight(), weight_of(Priority::High));
     }
 }

@@ -32,7 +32,7 @@ use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use tairix_kernel_mem::pressure::PressureBand;
 use tairix_kernel_mem::reclaim::ReclaimClass;
 use tairix_kernel_mem::PAGE_SIZE;
-use tairix_kernel_sched_api::{SchedulerPolicy, TaskId, TaskState};
+use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::TaskId as SecTaskId;
 
 use crate::bootinfo::KernelArch;
@@ -40,7 +40,7 @@ use crate::fs::FilesystemService;
 use crate::init::KernelState;
 use crate::introspect::IntrospectSource;
 use crate::loadavg::LoadTracker;
-use crate::sched::SchedulerArch;
+use crate::sched::{level_of_priority, SchedulerArch};
 use crate::users::UsersDbSource;
 use crate::wallclock::WallClockSource;
 
@@ -219,6 +219,16 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 .resolve(SecTaskId(task_id))
                 .map_or(0, |(space, _)| space.mapped_pages() as u64)
                 .saturating_mul(PAGE_SIZE as u64);
+            // The task's service level from the scheduler's own record. A
+            // record the scheduler has already drained no longer competes
+            // for CPU at any level; the admission default is the honest
+            // reading for it, never an error that would fail the whole page.
+            let priority = level_of_priority(
+                self.state
+                    .scheduler
+                    .priority(task_id)
+                    .unwrap_or(Priority::Normal),
+            );
             let process = ProcessRecord::new(
                 task_id,
                 resolve_parent(record.parent_proc_id()),
@@ -228,6 +238,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 record.primary_gid().0,
                 state,
                 cpu,
+                priority,
                 cpu_time_ns,
                 mem_bytes,
                 record.name().as_bytes(),

@@ -1100,6 +1100,36 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)
     }
 
+    /// Move `id` to `priority`, governing its next enqueue onward (see
+    /// [`SchedulerPolicy::set_priority`]).
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()> {
+        let task = self.lookup(id)?;
+        if task.load_state() == TaskState::Exited {
+            return Err(SchedError::InvalidState);
+        }
+        // Record the priority; the next enqueue derives its virtual
+        // eligible/deadline pair from the new weight, so the task's fair
+        // share changes without any queued entry needing surgery.
+        task.store_priority(priority);
+        Ok(())
+    }
+
+    /// The current [`Priority`] of `id`.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    pub fn priority(&self, id: TaskId) -> SchedResult<Priority> {
+        self.tasks
+            .read()
+            .get(&id)
+            .map(|t| t.load_priority())
+            .ok_or(SchedError::NoSuchTask)
+    }
+
     fn set_current(&self, cpu: CpuId, id: TaskId) {
         if let Some(slot) = self.current.get(cpu as usize) {
             slot.store(id, Ordering::Release);
@@ -1236,6 +1266,14 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
         Scheduler::set_sched_class(self, id, class)
+    }
+
+    fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()> {
+        Scheduler::set_priority(self, id, priority)
+    }
+
+    fn priority(&self, id: TaskId) -> SchedResult<Priority> {
+        Scheduler::priority(self, id)
     }
 
     fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {
