@@ -18,9 +18,29 @@ router**:
   supersampling, with a square-corner opt-out — the single
   rounded-corner path the taskbar reuses (`AGENTS.md` §2.2).
 - Damage tracking (`damage`): only changed pixels are recomposited.
+  `Compositor::composite` returns the `DamageRegion` it actually
+  recomposited (screen-clipped), and `has_damage` answers exactly what
+  that next composite would produce, so a wake loop can skip a frame
+  outright. An update that changes nothing marks nothing: a `move_window`
+  to the origin the window already has, `set_corners`/`set_visible`/
+  `set_opacity` to the current value, still return `true` (only an unknown
+  id returns `false`) but repaint no pixel. A content edit reports its own
+  damage — `edit_window_surface` takes an edit returning `(value, Rect)`
+  in content-local pixels, translated into the window's client rectangle
+  and clipped to it — because only the edit, having compared the pixels it
+  wrote against the ones already there, knows what truly changed. A
+  replaced *surface* is always assumed changed.
 - The `Compositor`: a z-ordered window stack composited over an opaque
   background into a `DisplayMode`-shaped byte frame, presented through a
-  `Display` seam.
+  `Display` seam. `present` composites and then moves only what changed:
+  **no damage means no driver call at all** (a wake that changed nothing
+  costs neither a scan-out copy nor a blit), whole-screen damage is one
+  `Display::present`, and anything else is one `Display::present_region`
+  per disjoint dirty rectangle — up to `MAX_PRESENT_REGIONS`, past which a
+  single bounding-box present costs less than the round trips it replaces.
+  Recomposition resolves each covering layer's source row, the back-buffer
+  row, and the frame row once per row (`Window::row`), leaving a column a
+  slice index and a blend.
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
@@ -37,7 +57,15 @@ router**:
   events without depending on the window manager (`AGENTS.md` §17.4).
 - Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
   `tairix_cursor::CursorImage` composited as the top-most layer so its
-  hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4).
+  hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4). Cursor damage is
+  derived at composite time from the footprint the *last* composite drew,
+  so it is that rectangle plus the one the cursor now occupies — a whole
+  batch of pointer samples pumped between two composites costs two
+  rectangles, not one per sample, because no intermediate position was
+  ever drawn. Replacement artwork always repaints even on an identical
+  rectangle (the pointer picking up a text or resize shape without
+  moving), and a move that lands where the cursor already is repaints
+  nothing.
 - Cursor selection (`select`): `desired_cursor` chooses the
   `tairix_theme::CursorKind` from live interaction state — a window
   move-grab shows the move cursor, otherwise the pointer takes the
@@ -82,11 +110,17 @@ cargo test -p tairix-wm
 Headless tests against a virtual framebuffer cover premultiplied-alpha
 correctness (opaque and transparent edge cases), per-region alpha
 blending, rounded-corner masking, z-order, window move/hide/remove with
-damage repaint, channel-order encoding, the present seam, and input
-routing (hit-testing, click-to-activate focus and raise,
-desktop-clears-focus, programmatic `focus`/`unfocus` with the fail-closed
-unknown-window path, move-grab drag, and the fail-closed grab edge
-cases), the cursor overlay (compositing above windows, move/hide repaint
-with damage), and cursor selection (the move-grab/window-hint/desktop
-policy, controller shape switching, re-rendering on scale and
-cursor-set changes, and reuse of a cached kind when it recurs).
+damage repaint, channel-order encoding, the present seam (no damage
+presents nothing, disjoint rectangles present individually, whole-screen
+damage presents once, and more rectangles than the limit collapse to one
+bounding-box present), no-op updates marking nothing, edit-reported
+content damage (offset by a decoration band, clipped to the client, empty
+marking nothing), and input routing (hit-testing, click-to-activate focus
+and raise, desktop-clears-focus, programmatic `focus`/`unfocus` with the
+fail-closed unknown-window path, move-grab drag, and the fail-closed grab
+edge cases), the cursor overlay (compositing above windows, move/hide
+repaint with damage, a multi-sample sweep composing the byte-identical
+frame a single move to the same place does), and cursor selection (the
+move-grab/window-hint/desktop policy, controller shape switching,
+re-rendering on scale and cursor-set changes, and reuse of a cached kind
+when it recurs).

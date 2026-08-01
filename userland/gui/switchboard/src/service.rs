@@ -37,6 +37,41 @@ use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
 /// rather than retrying forever.
 pub const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = 5;
 
+/// A cheap-to-compare snapshot of every render input besides the
+/// composition value itself: the window's client bounds, the active
+/// theme's identity, and the render scale.
+///
+/// [`crate::panel::Panel::flush`] keeps a record of the last one of these it
+/// presented alongside its own composition, and skips a present entirely
+/// when a fresh snapshot and the held composition both compare equal to
+/// what is already on screen — reading a handful of fields is orders of
+/// magnitude cheaper than the render-and-composite work a present performs.
+///
+/// The fields are plain integers rather than `tairix-geometry`'s
+/// `Rect`/`Scale` or `tairix-theme`'s `Theme`: this crate's
+/// sampler/derive/publish core links neither crate (only the freestanding
+/// `Run` binary and the host tests do), so the one comparison that needs
+/// them takes a value shape the host builds from its own real types rather
+/// than this crate naming them. A theme's stable identity stands in for its
+/// full value: a theme registry never mutates a registered theme in place
+/// and refuses to register a duplicate id, so two snapshots that agree on
+/// `theme_id` always agree on every pixel that theme would draw.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RenderInputs {
+    /// The window's client-area left edge.
+    pub bounds_left: i32,
+    /// The window's client-area top edge.
+    pub bounds_top: i32,
+    /// The window's client-area width, in pixels.
+    pub bounds_width: u32,
+    /// The window's client-area height, in pixels.
+    pub bounds_height: u32,
+    /// The active theme's stable identity.
+    pub theme_id: u32,
+    /// The active render scale, as its whole-percent value.
+    pub scale_percent: u32,
+}
+
 /// Everything outside this process the service reaches for, in one seam.
 ///
 /// The production implementation lives in the service's `Run` binary; the
@@ -69,6 +104,16 @@ pub trait ServiceHost {
     ///
     /// The session's typed refusal, or a surface that could not be built.
     fn present(&mut self, panel: &mut Switchboard) -> Result<(), Errno>;
+
+    /// The render inputs a present would use right now — the window's
+    /// client bounds, the active theme, and the render scale — or `None`
+    /// while no window is open: with nothing to present there is nothing
+    /// to compare.
+    ///
+    /// [`Panel::flush`] queries this once per flush, before touching the
+    /// composition at all, so a wake that changed nothing a present would
+    /// draw never renders or presents.
+    fn render_inputs(&self) -> Option<RenderInputs>;
 
     /// Send one owner-directed request to the desktop session's Switchboard
     /// endpoint.
@@ -280,9 +325,10 @@ impl Service {
     }
 
     /// Apply a grouping-related outcome the panel reported from a window
-    /// action, then mark the panel for re-presentation.
+    /// action, then rebuild the panel's model so the change is on the
+    /// composition the next flush compares against what is on screen.
     ///
-    /// The edit is marked and presented once in this same wake, before the
+    /// The edit is applied and presented once in this same wake, before the
     /// service parks again — so the popup or rename the user just committed
     /// is visible now, not at the next sample.
     ///

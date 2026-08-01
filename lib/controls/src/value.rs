@@ -4,7 +4,7 @@
 //! (`0..=1000`). A [`Slider`] is interactive — its thumb runs along a rail, its
 //! value track fills from the start to the thumb, drag and keyboard update the
 //! visual value immediately while the change commits through the owning model
-//! (`AGENTS.md` §5.4) — while [`Progress`] is a read-only instrument trace of
+//! — while [`Progress`] is a read-only instrument trace of
 //! known, working, indeterminate, complete, or failed work. Both resolve every
 //! colour/metric/radius from the active [`Theme`] and [`Scale`] and round their
 //! plates through the shared drawing core the button and selector families use,
@@ -29,7 +29,7 @@ use tairix_theme::Theme;
 use crate::paint::{
     clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
     progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect,
-    to_i32, PlateStyle, FULL,
+    to_i32, PlateStyle, RenderInvariant, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -39,7 +39,7 @@ use crate::state::{
 ///
 /// A slider updates its own displayed value immediately so a drag reads
 /// smoothly, but the authoritative change still commits through the owning
-/// model (`AGENTS.md` §5.4): the owner receives the requested value and applies
+/// model: the owner receives the requested value and applies
 /// it (calling [`Slider::set_value`] to confirm, or a different value to
 /// reject/clamp it).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -136,6 +136,11 @@ fn slider_layout(bounds: Rect) -> Option<SliderLayout> {
 /// A denied slider keeps its value and shows an Authority Mark rather than
 /// looking merely disabled (spec §13); a bounded slider shows a cap marker at
 /// the constrained edge and cannot be dragged past it.
+///
+/// Equal sliders draw the same pixels, so a host may use `==` as its repaint
+/// gate: the role, visible state, value, steps, and cap all compare. The
+/// pointer coordinate and the drag latch do not — no render path reads either,
+/// and what a drag *shows* is the value it commits, which is compared.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Slider {
     role: ControlRole,
@@ -144,8 +149,12 @@ pub struct Slider {
     line_step: u16,
     page_step: u16,
     cap: Option<u16>,
-    pointer: Point,
-    dragging: bool,
+    /// The last pointer position, mapped to a value on press and on each drag
+    /// sample — hit-testing input, never a drawn property.
+    pointer: RenderInvariant<Point>,
+    /// Whether the thumb is being dragged; the press *look* lives in
+    /// `state.pointer` and the moved thumb in `value`.
+    dragging: RenderInvariant<bool>,
 }
 
 impl Slider {
@@ -160,8 +169,8 @@ impl Slider {
             line_step: 10,
             page_step: 100,
             cap: None,
-            pointer: Point::ORIGIN,
-            dragging: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            dragging: RenderInvariant::new(false),
         }
     }
 
@@ -322,23 +331,23 @@ impl Slider {
     /// failed-closed slider ignores pointer input (fail closed).
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SliderAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let layout = slider_layout(bounds)?;
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.state.is_actionable() {
-                    self.dragging = true;
+                    *self.dragging = true;
                     self.state.pointer = PointerState::Pressed;
                     return self.request(layout.value_for(self.pointer.x));
                 }
                 None
             }
             InputEvent::PointerMoved { .. } => {
-                if self.dragging {
+                if *self.dragging {
                     self.request(layout.value_for(self.pointer.x))
                 } else {
                     self.state.pointer = if inside {
@@ -352,7 +361,7 @@ impl Slider {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                self.dragging = false;
+                *self.dragging = false;
                 self.state.pointer = if inside {
                     PointerState::Hover
                 } else {

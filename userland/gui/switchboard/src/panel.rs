@@ -23,7 +23,7 @@ use tairix_abi::{CapabilityQuery, Errno, Signal};
 use tairix_controls::{Section, Switchboard, SwitchboardAction};
 
 use crate::model::{apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel};
-use crate::service::ServiceHost;
+use crate::service::{RenderInputs, ServiceHost};
 
 /// What the panel reports upward after applying an action whose effect
 /// touches the service's own grouping state, since the panel itself stays
@@ -54,6 +54,17 @@ pub enum CommandOutcome {
     Rebuild,
 }
 
+/// Exactly what [`Panel::flush`] last presented: the composition value plus
+/// the [`RenderInputs`] snapshot of everything else that changes the
+/// pixels. Comparing a would-be present against this is what lets `flush`
+/// know, for a fact rather than a guess, whether presenting again would
+/// draw anything different.
+#[derive(Debug)]
+struct Presented {
+    composition: Switchboard,
+    inputs: RenderInputs,
+}
+
 /// The overview panel: the live model, the window when one is open, and the
 /// session's latest unresponsive-owner report.
 #[derive(Debug)]
@@ -62,7 +73,7 @@ pub struct Panel {
     seat_report: SeatReport,
     model: PanelModel,
     view: Option<Switchboard>,
-    dirty: bool,
+    presented: Option<Presented>,
 }
 
 impl Panel {
@@ -75,7 +86,7 @@ impl Panel {
             seat_report: SeatReport::HEALTHY,
             model,
             view: None,
-            dirty: false,
+            presented: None,
         }
     }
 
@@ -132,17 +143,6 @@ impl Panel {
         }
     }
 
-    /// Record that the composition has changed and needs re-presenting on
-    /// the next [`flush`](Self::flush).
-    ///
-    /// Marking is what lets a whole drained batch of window events cost one
-    /// present instead of one per event: presenting is a blocking round-trip
-    /// to the session, so a dense pointer sweep that repainted per event
-    /// would keep the service from draining its own mailbox.
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     /// Show the panel on `section`: create the window if none is open, or
     /// ask the session to raise the one that is.
     ///
@@ -166,7 +166,6 @@ impl Panel {
         if let Some(view) = self.view.as_mut() {
             let _ = view.select_section(section);
         }
-        self.mark_dirty();
     }
 
     /// Adopt a freshly built model, re-rendering only when it actually
@@ -188,7 +187,6 @@ impl Panel {
             return;
         };
         view.set_model(self.model.model.clone());
-        self.mark_dirty();
     }
 
     /// Apply every effect `action` implies under `authority`, in order, and
@@ -295,23 +293,55 @@ impl Panel {
         }
     }
 
-    /// Re-present the open composition if it has been marked dirty,
-    /// stating a refusal rather than ending the session over it.
+    /// Re-present the open composition iff what it would draw differs from
+    /// what was last presented, stating a refusal rather than ending the
+    /// session over it.
     ///
-    /// The flag is cleared by every flush, so the panel is never dirty
-    /// afterwards — including when the present was refused (the refusal is
-    /// already reported through [`ServiceHost::report_refusal`], and
-    /// re-attempting it every wake with nothing changed would be a refusal
-    /// storm) and when no window is open (a closed panel draws nothing, and
-    /// opening one marks it afresh, so nothing stale can be carried over).
+    /// This replaces a hand-set dirty flag with proof: the composition
+    /// value plus every other input [`Switchboard::render`] reads (the
+    /// window's client bounds, the active theme, and the render scale —
+    /// see [`RenderInputs`]) are compared against what was last presented,
+    /// and a present happens only when at least one of them actually
+    /// differs. Reading those inputs and comparing them against the held
+    /// record costs a handful of field reads and, at most, one `Eq`
+    /// comparison of the composition; a present costs a full render plus
+    /// the desktop's compositing of the result, several thousand times
+    /// more. Unlike a flag some caller must remember to set on every path
+    /// that might matter, this can never miss a real change and never
+    /// re-draws an unchanged one: it is the exact thing about to be drawn
+    /// compared against the exact thing already on screen.
+    ///
+    /// The record is updated whether or not the present is accepted: a
+    /// refusal is already reported once through
+    /// [`ServiceHost::report_refusal`], and re-attempting an unchanged
+    /// panel on every wake would storm the refusal path. The next genuine
+    /// change compares unequal again and presents.
     pub fn flush(&mut self, host: &mut dyn ServiceHost) {
-        if !self.dirty {
-            return;
-        }
-        self.dirty = false;
         let Some(view) = self.view.as_mut() else {
             return;
         };
+        let Some(inputs) = host.render_inputs() else {
+            return;
+        };
+        let unchanged = self
+            .presented
+            .as_ref()
+            .is_some_and(|last| last.inputs == inputs && last.composition == *view);
+        if unchanged {
+            return;
+        }
+        match self.presented.as_mut() {
+            Some(last) => {
+                last.composition.clone_from(view);
+                last.inputs = inputs;
+            }
+            None => {
+                self.presented = Some(Presented {
+                    composition: view.clone(),
+                    inputs,
+                });
+            }
+        }
         if let Err(refusal) = host.present(view) {
             host.report_refusal("redraw the overview window", refusal);
         }
@@ -319,10 +349,16 @@ impl Panel {
 
     /// Destroy the window and return to headless sampling. Closing an
     /// already-closed panel does nothing.
+    ///
+    /// The last-presented record is dropped along with the window: a
+    /// reopened panel builds a fresh composition, and comparing it against
+    /// a record from before the close could otherwise skip that first
+    /// present by coincidence rather than by fact.
     pub fn close(&mut self, host: &mut dyn ServiceHost) {
         if self.view.take().is_none() {
             return;
         }
+        self.presented = None;
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);
         }

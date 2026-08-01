@@ -2242,3 +2242,173 @@ fn set_model_cannot_complete_a_press_begun_on_a_replaced_activity_row() {
         "a fresh gesture on the new row must still work"
     );
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+/// Paint `sb` at the standard bounds and hand back the surface a host would
+/// present.
+fn painted(sb: &mut Switchboard, theme: &Theme) -> Surface {
+    let b = bounds();
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, theme, font());
+    surface
+}
+
+/// A Switchboard whose layout has been settled by one render, so a following
+/// pointer event resolves against the geometry the next render will use.
+fn settled(theme: &Theme) -> Switchboard {
+    let mut sb = Switchboard::new(model());
+    let _ = painted(&mut sb, theme);
+    sb
+}
+
+/// A point over the header resource band — an instrument that takes no
+/// pointer input, so a sample there crosses no control.
+fn band_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
+    centre(sb.compute_layout(bounds(), Scale::ONE, theme, font()).band)
+}
+
+/// A point over the first row of the active section's content.
+fn content_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
+    let content = sb
+        .compute_layout(bounds(), Scale::ONE, theme, font())
+        .content;
+    (content.left() + 4, content.top() + 4)
+}
+
+fn feed(sb: &mut Switchboard, theme: &Theme, event: &InputEvent) -> Option<SwitchboardAction> {
+    sb.on_pointer(event, bounds(), Scale::ONE, theme, font())
+}
+
+#[test]
+fn pointer_move_that_crosses_no_control_leaves_the_composition_equal() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let (x, y) = band_point(&sb, &theme);
+    feed(&mut sb, &theme, &moved(x, y));
+
+    let before = sb.clone();
+    feed(&mut sb, &theme, &moved(x + 5, y + 1));
+
+    assert_ne!(
+        *sb.pointer, *before.pointer,
+        "the sample must genuinely land on a new coordinate, or this proves \
+         nothing"
+    );
+    assert_eq!(
+        sb, before,
+        "a sample at a new coordinate over the inert band draws the same \
+         pixels, so it must not defeat a host's repaint gate"
+    );
+}
+
+#[test]
+fn pointer_position_alone_never_changes_the_pixels() {
+    let theme = Theme::dark();
+    let mut moved_pointer = settled(&theme);
+    let mut resting = moved_pointer.clone();
+    *moved_pointer.pointer = Point::new(517, 313);
+
+    assert_ne!(
+        *moved_pointer.pointer, *resting.pointer,
+        "the two must genuinely differ in the excluded field"
+    );
+    assert_eq!(
+        moved_pointer, resting,
+        "the raw pointer coordinate is excluded from equality"
+    );
+    let a = painted(&mut moved_pointer, &theme);
+    let b = painted(&mut resting, &theme);
+    assert_eq!(
+        a.pixels(),
+        b.pixels(),
+        "that exclusion is only sound because no render path reads it"
+    );
+}
+
+#[test]
+fn pointer_move_onto_a_row_changes_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let (bx, by) = band_point(&sb, &theme);
+    feed(&mut sb, &theme, &moved(bx, by));
+
+    let before = sb.clone();
+    let (x, y) = content_point(&sb, &theme);
+    feed(&mut sb, &theme, &moved(x, y));
+
+    assert_ne!(
+        sb, before,
+        "a hover highlight is visible, so it must force a repaint"
+    );
+}
+
+#[test]
+fn press_and_release_each_change_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let (x, y) = content_point(&sb, &theme);
+    feed(&mut sb, &theme, &moved(x, y));
+
+    let hovered = sb.clone();
+    feed(&mut sb, &theme, &PRESS);
+    assert_ne!(sb, hovered, "a press is visible on the pressed row");
+
+    let pressed = sb.clone();
+    feed(&mut sb, &theme, &RELEASE);
+    assert_ne!(sb, pressed, "the release drops the pressed treatment");
+}
+
+#[test]
+fn selection_change_changes_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = sb.clone();
+
+    sb.select_section(Section::Jobs);
+
+    assert_ne!(
+        sb, before,
+        "the marked tab and the shown section are both visible"
+    );
+}
+
+#[test]
+fn focus_change_changes_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = sb.clone();
+
+    sb.on_key(Key::Named(NamedKey::Tab));
+
+    assert_ne!(sb, before, "the focus ring moves to another region");
+}
+
+#[test]
+fn scrolling_the_content_changes_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = sb.clone();
+
+    feed(
+        &mut sb,
+        &theme,
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    );
+
+    assert_ne!(sb.scroll_offset(), before.scroll_offset());
+    assert_ne!(sb, before, "different rows are on screen");
+}
+
+#[test]
+fn model_refresh_changes_the_composition() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = sb.clone();
+
+    let mut refreshed = model();
+    refreshed.tasks[0].detail = alloc::string::String::from("99%");
+    sb.set_model(refreshed);
+
+    assert_ne!(sb, before, "a re-derived row shows the new reading");
+}

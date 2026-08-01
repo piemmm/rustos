@@ -533,3 +533,110 @@ fn search_renders_in_light_without_panic() {
     let surface = search_surface(&search, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+/// Two samples clear of the field, so only the recorded coordinate differs.
+const OFF_A: (i32, i32) = (400, 60);
+const OFF_B: (i32, i32) = (460, 70);
+
+#[test]
+fn pointer_position_alone_never_changes_a_text_field_render() {
+    let theme = Theme::dark();
+    let mut a = TextField::new().with_text("hello");
+    let mut b = a.clone();
+    a.on_pointer(
+        &moved(OFF_A.0, OFF_A.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+    b.on_pointer(
+        &moved(OFF_B.0, OFF_B.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+
+    assert_eq!(
+        a, b,
+        "where the pointer last was is hit-testing state; the caret it \
+         places lives in the editor and is still compared"
+    );
+    let sa = field_surface(&a, &theme);
+    let sb = field_surface(&b, &theme);
+    assert_eq!(
+        sa.pixels(),
+        sb.pixels(),
+        "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn selection_drag_latch_alone_never_changes_a_text_field_render() {
+    let theme = Theme::dark();
+    // An empty field maps every press to byte zero, so the press moves no
+    // caret and creates no selection: the drag latch is the only difference.
+    let mut dragging = TextField::new();
+    dragging.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
+    dragging.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
+
+    let mut shown = TextField::new();
+    shown.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
+    let mut pressed = ControlState::idle();
+    pressed.pointer = crate::state::PointerState::Pressed;
+    shown.set_state(pressed);
+
+    assert_eq!(
+        dragging, shown,
+        "whether a press is still extending a selection is bookkeeping"
+    );
+    let sa = field_surface(&dragging, &theme);
+    let sb = field_surface(&shown, &theme);
+    assert_eq!(
+        sa.pixels(),
+        sb.pixels(),
+        "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn pointer_position_alone_never_changes_a_search_field_render() {
+    let theme = Theme::dark();
+    let mut a = SearchField::new();
+    let mut b = a.clone();
+    a.on_pointer(
+        &moved(OFF_A.0, OFF_A.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+    b.on_pointer(
+        &moved(OFF_B.0, OFF_B.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+    );
+
+    assert_eq!(a, b);
+    let sa = search_surface(&a, &theme);
+    let sb = search_surface(&b, &theme);
+    assert_eq!(sa.pixels(), sb.pixels());
+}
+
+#[test]
+fn hover_and_typing_each_change_a_text_field_render() {
+    let theme = Theme::dark();
+    let resting = TextField::new();
+
+    let mut hovered = resting.clone();
+    hovered.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
+    assert_ne!(resting, hovered, "a hover highlight is visible");
+
+    let typed = TextField::new().with_text("a");
+    assert_ne!(resting, typed, "the text is visible");
+}

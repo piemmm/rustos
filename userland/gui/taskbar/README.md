@@ -24,12 +24,36 @@ owns:
   `library_layout` take the `Scale` as a parameter and the presenter supplies
   `Compositor::scale` at present time. A runtime DPI change is therefore just
   a re-present at the new density — transparent to the bar, no model rebuild.
-- **The owned theme and the repaint latch** — the bar owns a copy of the
-  active `Theme` (`Taskbar::theme`, swapped by `apply_theme`), so layout,
-  hit-testing, and painting read one definition. Pixel-only state changes (a
-  launcher hover, a popup scroll or edit, a theme switch) set a repaint
-  latch the embedder drains with `take_repaint`, so one present follows each
-  visual change — never a per-frame busy repaint (`AGENTS.md` §2.16).
+- **The owned theme** — the bar owns a copy of the active `Theme`
+  (`Taskbar::theme`, swapped by `apply_theme`), so layout, hit-testing, and
+  painting read one definition.
+- **The per-surface repaint latch** — pixel-only state changes (a launcher
+  hover, a popup scroll or edit, a theme switch) set a repaint latch the
+  embedder drains with `take_repaint`, so one present follows each visual
+  change — never a per-frame busy repaint (`AGENTS.md` §2.16). The latch is a
+  `TaskbarRepaint`: one flag per rendered surface (`bar`, `library`, `menu`,
+  `notifications`, `readout`), composed with `|` / `|=`, never a single
+  "something changed" bit. The five surfaces cost wildly different amounts to
+  produce — measured on the host in release, the bar renders in 1655 µs and
+  the library popup in 1001 µs against the context menu's 104 µs — so one bit
+  forced the embedder to re-render and re-push all five for any change at all:
+  a pointer drifting between two rows of a small open menu cost ~2.8 ms of
+  rendering and a recomposite of five window rectangles where 104 µs and one
+  small rectangle would do. That was the desktop's pointer lag. The contract
+  every mutator upholds is exact: **every change latches every surface it
+  touches**, and a change touching several latches all of them — opening the
+  popup also presses the bar's Library button, a raised or dismissed
+  notification changes the popover *and* the bar's notification icon, a tray
+  summary changes the bar *and* the readout while it is expanded, and a theme
+  swap or a `set_config` edge/resize changes all five. Latch sites **err
+  toward latching more, never less**: an extra latch costs one redundant
+  repaint, while a missing one leaves stale pixels on screen, which is a
+  correctness bug. That holds even for a borrow the bar cannot see into: each
+  `&mut` sub-model accessor latches as it hands the borrow out (`tasks_mut`
+  and `clock_mut` the bar, `library_mut` the popup *and* the bar). The
+  embedder may therefore present strictly from the drained latch, and present
+  nothing at all when it is empty; only the compositor-supplied `Scale` stays
+  the embedder's own.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
   under it (the Library button, the Files button, a pin, a task, a
   notification icon, the clock, or the Switchboard capsule) for input

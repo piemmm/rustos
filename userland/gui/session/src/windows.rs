@@ -264,15 +264,23 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let wm = record.wm;
         // Convert exactly the damaged pixels of the presented frame
         // directly into the compositor's own window surface — the single
-        // owned copy — and mark it dirty for the next composite. The
-        // engine validated the damage against the window's surface and
-        // handed a frame slice sized from the mode, but every index in
-        // `convert_damage` is still checked: a disagreement refuses the
-        // present rather than reading out of bounds. A window the
-        // compositor no longer knows fails closed.
-        let Some(result) = self.compositor.edit_window_surface(wm, |content| {
-            convert_damage(content, surface, frame, damage)
-        }) else {
+        // owned copy — and mark dirty only the pixels the conversion
+        // genuinely changed, so an app that repaints its whole
+        // composition for a one-row highlight costs one row of
+        // recomposition rather than a whole window. The engine validated
+        // the damage against the window's surface and handed a frame
+        // slice sized from the mode, but every index in `convert_damage`
+        // is still checked: a disagreement refuses the present rather
+        // than reading out of bounds, and refuses it before writing
+        // anything. A window the compositor no longer knows fails closed.
+        let Some(result) =
+            self.compositor.edit_window_surface(wm, |content| {
+                match convert_damage(content, surface, frame, damage) {
+                    Ok(changed) => (Ok(()), changed),
+                    Err(err) => (Err(err), Rect::EMPTY),
+                }
+            })
+        else {
             return Err(Errno::NotFound);
         };
         result
@@ -336,14 +344,30 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 }
 
 /// Convert the pixels of `damage` from the presented `frame` (laid out
-/// per `mode`) into `surface`, fail-closed on any out-of-bounds index.
+/// per `mode`) into `surface`, returning the sub-rectangle of `damage`
+/// whose pixels the conversion actually *changed* — [`Rect::EMPTY`] when
+/// the presented pixels were identical to the ones already there.
+///
+/// The returned rectangle is the window's real damage, and it is what
+/// keeps a repaint proportional to the change. An app re-renders its
+/// whole composition and presents whole-window damage, because a toolkit
+/// generally cannot say which pixels its own paint touched; taking that
+/// claim at face value would recomposite every pixel of the window for a
+/// hover highlight a few rows tall. The comparison is exact — a pixel
+/// reported unchanged carries the byte-identical value it already had —
+/// and costs one extra read on a loop that already reads the frame and
+/// writes the surface.
+///
+/// Fails closed: every index the conversion will use is validated before
+/// the first write, so a malformed or hostile geometry refuses the whole
+/// present rather than leaving the window half-converted.
 fn convert_damage(
     surface: &mut Surface,
     mode: &DisplayMode,
     frame: &[u8],
     damage: DamageRect,
-) -> Result<(), Errno> {
-    let bpp = mode.format.bytes_per_pixel();
+) -> Result<Rect, Errno> {
+    let bpp = mode.format.bytes_per_pixel() as usize;
     let x_end = damage
         .x
         .checked_add(damage.width_px)
@@ -355,37 +379,108 @@ fn convert_damage(
     if x_end > surface.width() || y_end > surface.height() {
         return Err(Errno::OutOfRange);
     }
+    // The alpha byte is the app's own and honoured (premultiplied for the
+    // compositor's blend), so an app can render translucent regions. A
+    // format this bridge does not know how to convert is refused, never
+    // guessed (the enum is non-exhaustive by design). Resolving it once
+    // keeps the decision off the per-pixel path.
+    let decode: fn([u8; 4]) -> Color = match mode.format {
+        DisplayFormat::Rgba8888 => |b| Color::rgba(b[0], b[1], b[2], b[3]),
+        DisplayFormat::Bgra8888 => |b| Color::rgba(b[2], b[1], b[0], b[3]),
+        _ => return Err(Errno::OutOfRange),
+    };
+    let stride = mode.stride_bytes as usize;
+    let start = (damage.x as usize)
+        .checked_mul(bpp)
+        .ok_or(Errno::OutOfRange)?;
+    let span = (damage.width_px as usize)
+        .checked_mul(bpp)
+        .ok_or(Errno::OutOfRange)?;
+    // Prove every row of the request is inside `frame` before a single
+    // pixel is written: a refusal must leave the window exactly as it
+    // was, never half-converted.
+    let row_offset = |y: u32| -> Result<usize, Errno> {
+        (y as usize)
+            .checked_mul(stride)
+            .and_then(|row| row.checked_add(start))
+            .ok_or(Errno::OutOfRange)
+    };
     for y in damage.y..y_end {
-        // Checked arithmetic throughout: a hostile stride/geometry
-        // combination refuses the present, never indexes past the frame.
-        let row = (y as usize)
-            .checked_mul(mode.stride_bytes as usize)
-            .ok_or(Errno::OutOfRange)?;
-        for x in damage.x..x_end {
-            let offset = row
-                .checked_add(
-                    (x as usize)
-                        .checked_mul(bpp as usize)
-                        .ok_or(Errno::OutOfRange)?,
-                )
-                .ok_or(Errno::OutOfRange)?;
-            let bytes = frame
-                .get(offset..offset.checked_add(4).ok_or(Errno::OutOfRange)?)
-                .ok_or(Errno::OutOfRange)?;
-            // The alpha byte is the app's own and honoured (premultiplied
-            // for the compositor's blend), so an app can render
-            // translucent regions. A format this bridge does not know how
-            // to convert is refused, never guessed (the enum is
-            // non-exhaustive by design).
-            let color = match mode.format {
-                DisplayFormat::Rgba8888 => Color::rgba(bytes[0], bytes[1], bytes[2], bytes[3]),
-                DisplayFormat::Bgra8888 => Color::rgba(bytes[2], bytes[1], bytes[0], bytes[3]),
-                _ => return Err(Errno::OutOfRange),
-            };
-            surface.set(x, y, color.premultiply());
+        let offset = row_offset(y)?;
+        let end = offset.checked_add(span).ok_or(Errno::OutOfRange)?;
+        if end > frame.len() {
+            return Err(Errno::OutOfRange);
         }
     }
-    Ok(())
+
+    let first = damage.x as usize;
+    let last = x_end as usize;
+    let mut changed = DamageBounds::default();
+    for y in damage.y..y_end {
+        let offset = row_offset(y)?;
+        let (Some(source), Some(target)) = (
+            frame.get(offset..offset.saturating_add(span)),
+            surface.row_mut(y).and_then(|row| row.get_mut(first..last)),
+        ) else {
+            return Err(Errno::OutOfRange);
+        };
+        // One row address and one bounds check per row, not per pixel: this
+        // loop runs over every damaged pixel of every application repaint.
+        for (index, (chunk, slot)) in source.chunks_exact(bpp).zip(target).enumerate() {
+            let [b0, b1, b2, b3, ..] = *chunk else {
+                return Err(Errno::OutOfRange);
+            };
+            let pixel = decode([b0, b1, b2, b3]).premultiply();
+            if *slot == pixel {
+                continue;
+            }
+            *slot = pixel;
+            let Ok(step) = u32::try_from(index) else {
+                return Err(Errno::OutOfRange);
+            };
+            changed.include(damage.x.saturating_add(step), y);
+        }
+    }
+    changed.rect()
+}
+
+/// The bounding box of the pixels a conversion changed, accumulated as
+/// inclusive edges so an untouched conversion stays distinguishable from
+/// one that changed the single pixel at the origin.
+#[derive(Default)]
+struct DamageBounds {
+    edges: Option<(u32, u32, u32, u32)>,
+}
+
+impl DamageBounds {
+    /// Grow the box to cover the changed pixel `(x, y)`.
+    fn include(&mut self, x: u32, y: u32) {
+        self.edges = Some(match self.edges {
+            None => (x, y, x, y),
+            Some((left, top, right, bottom)) => {
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            }
+        });
+    }
+
+    /// The accumulated box as a surface-local rectangle, or
+    /// [`Rect::EMPTY`] when nothing changed. Fails closed rather than
+    /// wrapping if a surface is somehow wider than the coordinate space
+    /// the compositor addresses.
+    fn rect(self) -> Result<Rect, Errno> {
+        let Some((left, top, right, bottom)) = self.edges else {
+            return Ok(Rect::EMPTY);
+        };
+        let (Ok(x), Ok(y)) = (i32::try_from(left), i32::try_from(top)) else {
+            return Err(Errno::OutOfRange);
+        };
+        Ok(Rect::new(
+            x,
+            y,
+            right.saturating_sub(left).saturating_add(1),
+            bottom.saturating_sub(top).saturating_add(1),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -592,6 +687,151 @@ mod tests {
         assert_eq!(
             host.window_presented(99, &m, &frame, full),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// Re-presenting pixels the window already carries marks no damage at
+    /// all: an app that repaints its whole composition and claims
+    /// whole-window damage must not cost a whole-window recomposite when
+    /// nothing it drew actually differs.
+    #[test]
+    fn present_of_identical_pixels_marks_no_damage() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        let frame = [0x40u8; 8 * 8 * 4];
+        let full = DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 8,
+            height_px: 8,
+        };
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_opened(1, &m, "w", false).expect("opens");
+            host.window_presented(1, &m, &frame, full)
+                .expect("first present lands");
+        }
+        // Drain the damage the open and the first present produced.
+        compositor.composite();
+        assert!(!compositor.has_damage());
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_presented(1, &m, &frame, full)
+                .expect("the repeat present is accepted");
+        }
+        assert!(
+            !compositor.has_damage(),
+            "an identical present must not dirty a single pixel"
+        );
+    }
+
+    /// A whole-window present that changes one pixel marks exactly that
+    /// pixel — placed at the window's content origin, so a decorated
+    /// window's frame is never dragged into the damage.
+    #[test]
+    fn present_marks_only_the_pixels_that_changed() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        let mut frame = [0x40u8; 8 * 8 * 4];
+        let full = DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 8,
+            height_px: 8,
+        };
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_opened(1, &m, "w", false).expect("opens");
+            host.window_presented(1, &m, &frame, full)
+                .expect("first present lands");
+        }
+        compositor.composite();
+        let wm = windows.records.get(&1).expect("live").wm;
+        let client = compositor.window(wm).expect("composited").client_rect();
+        // Change the single content pixel at (5, 3).
+        let offset = (3 * 8 + 5) * 4;
+        frame[offset..offset + 4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_presented(1, &m, &frame, full)
+                .expect("the second present lands");
+        }
+        assert_eq!(
+            compositor.composite().bounds(),
+            Rect::new(client.left() + 5, client.top() + 3, 1, 1),
+            "only the one changed pixel is recomposited"
+        );
+    }
+
+    /// A frame too short for the requested damage is refused *before* any
+    /// pixel is written, so a rejected present can never leave the window
+    /// half-converted.
+    #[test]
+    fn a_refused_present_writes_nothing() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        // Long enough for the first rows, short of the last.
+        let frame = [0xFFu8; 8 * 6 * 4];
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_opened(1, &m, "w", false).expect("opens");
+            assert_eq!(
+                host.window_presented(
+                    1,
+                    &m,
+                    &frame,
+                    DamageRect {
+                        x: 0,
+                        y: 0,
+                        width_px: 8,
+                        height_px: 8,
+                    },
+                ),
+                Err(Errno::OutOfRange)
+            );
+        }
+        let wm = windows.records.get(&1).expect("live").wm;
+        let content = compositor.window(wm).expect("composited").surface();
+        assert_eq!(
+            content.get(0, 0),
+            Some(OPEN_FILL.premultiply()),
+            "the refused present left the opening fill intact"
         );
     }
 

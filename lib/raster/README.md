@@ -18,17 +18,25 @@ This crate owns:
   which keeps per-region opacity and rounded-corner coverage correct
   (`AGENTS.md` §10).
 - `Surface` — a dense row-major premultiplied pixel buffer with bounds-checked
-  `get`/`set`, `fill`, and clipped `fill_rect`. It is the rendered content of
-  a window for the compositor and the painted body of the taskbar.
+  `get`/`set`, whole-row `row_mut`, `fill`, and clipped
+  `fill_rect`/`fill_round_rect`. It is the rendered content of a window for the
+  compositor and the painted body of the taskbar.
 - `Surface::fill_polygon` — the single supersampled, anti-aliased
   filled-polygon scan converter. Vector artwork (pointer cursors in
   `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
   drawn through this one path, so the desktop has exactly one polygon
-  rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10).
+  rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10). Only
+  the polygon's bounding box, clipped to the surface, is scanned, so a small
+  shape on a large canvas costs its own area rather than the whole surface.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `round_rect_coverage` — the single anti-aliased rounded-rectangle coverage
+  definition, supersampled with a fast interior path so its own cost is the
+  corner area, not the whole rectangle. The window manager's corner mask and
+  `Surface::fill_round_rect`'s Reactive Alloy control plates both round
+  through this one function, so the two never drift apart (`AGENTS.md` §2.2).
 - `RasterCache` — the single scale/theme-keyed rasterisation cache. Desktop
   assets are authored as resolution-independent vector forms and rasterised
   into a `Surface` only when they can change; the SVG-first rule (`AGENTS.md`
@@ -47,10 +55,30 @@ that algebra at a single edge — `From<Rgba> for Color` — which is why this
 crate depends on `lib/theme`: the conversion is owned in one place rather than
 re-implemented by each consumer.
 
-This crate does **not** round corners: that is the window manager's single
-anti-aliased rounded-corner path (`AGENTS.md` §2.2). The taskbar renders a
-rectangular `Surface` and the window manager rounds it at composition time,
-exactly as it rounds windows.
+Every fill and `blit` writes a row at a time: the destination row's starting
+index is computed once, then the rest of the row is read or written through
+plain slice iteration rather than a per-pixel bounds check and index
+recomputation. This keeps the cost of a fill or a blit proportional to the
+shape it draws — a clipped rectangle, a polygon's bounding box, or the
+overlap between source and destination — never the whole canvas.
+
+`fill_round_rect` is the union of full-coverage spans and the four
+`radius`×`radius` corner squares, because only a corner pixel can be partially
+covered. An interior row, and the middle span of a corner row, take the same
+whole-span path `fill_rect` uses; only a corner pixel evaluates
+`round_rect_coverage`. A rounded panel therefore costs a rectangle fill plus
+its corners — at a 12-pixel radius that is 576 corner pixels however large the
+panel is — rather than a coverage evaluation per pixel.
+
+A fully opaque source keeps none of the destination, so `Pixel::over` returns
+it unchanged and a full-coverage opaque span is a single slice fill rather
+than a per-pixel blend. A translucent source still takes the general
+Porter–Duff path.
+
+`row_mut` is the row-at-a-time write seam for a consumer that composites
+through a mask of its own — `lib/font`'s glyph blitter scales a text colour by
+a coverage bitmap through it — so such a consumer also pays one bounds check
+and one index computation per row instead of per pixel.
 
 ## Why it lives in `lib/`
 

@@ -280,3 +280,29 @@ fn empty_toolbar_reports_no_tools() {
     assert!(toolbar.is_empty());
     assert_eq!(toolbar.on_key(Key::Named(NamedKey::Enter)), None);
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn pointer_position_alone_never_changes_a_toolbar_render() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    // Two samples clear of the bar, so only the recorded coordinate differs;
+    // what a hover *does* to a tool lives in that tool and is still compared.
+    let mut a = grouped_toolbar();
+    let mut b = a.clone();
+    let x = i32::try_from(W).expect("width");
+    let y = i32::try_from(H).expect("height");
+    a.on_pointer(&moved(x + 40, y + 40), bounds, Scale::ONE, &theme);
+    b.on_pointer(&moved(x + 90, y + 12), bounds, Scale::ONE, &theme);
+
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the bar is not a drawn property"
+    );
+    assert_eq!(
+        render(&a, &theme).pixels(),
+        render(&b, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+}

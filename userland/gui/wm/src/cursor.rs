@@ -55,14 +55,31 @@ impl CursorLayer {
         )
     }
 
-    /// The premultiplied cursor pixel at screen `(x, y)`, or `None` where
-    /// the cursor draws nothing (outside its image, or a transparent pixel
-    /// within it).
+    /// This cursor's local row for screen row `y`, or `None` when the row
+    /// falls outside its image.
+    ///
+    /// The composite hot loop calls this once per dirty screen row rather
+    /// than re-deriving the image-local `y` for every column in it.
     #[must_use]
-    pub fn sample(&self, x: i32, y: i32) -> Option<Pixel> {
-        let local_x = u32::try_from(x.checked_sub(self.origin.x)?).ok()?;
-        let local_y = u32::try_from(y.checked_sub(self.origin.y)?).ok()?;
-        self.sample_local(local_x, local_y)
+    pub fn local_row(&self, y: i32) -> Option<u32> {
+        let ly = u32::try_from(y.checked_sub(self.origin.y)?).ok()?;
+        if ly >= self.image.height() {
+            return None;
+        }
+        Some(ly)
+    }
+
+    /// The premultiplied cursor pixel at column `x` of local row `ly` (as
+    /// produced by [`Self::local_row`]), or `None` where the cursor draws
+    /// nothing there (outside its image, or a transparent pixel within it).
+    ///
+    /// This is [`Self::sample_local`] with the row already resolved to an
+    /// image-local `y`, so the composite hot loop pays that conversion once
+    /// per row instead of once per pixel.
+    #[must_use]
+    pub fn sample_row(&self, x: i32, ly: u32) -> Option<Pixel> {
+        let lx = u32::try_from(x.checked_sub(self.origin.x)?).ok()?;
+        self.sample_local(lx, ly)
     }
 
     /// The premultiplied cursor pixel at *image-local* `(lx, ly)`, or

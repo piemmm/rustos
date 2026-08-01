@@ -5,7 +5,7 @@
 //! immediate-affordance hint, and the explanation of why an action is
 //! unavailable or recommended. Each is drawn over the shared `crate::paint`
 //! core (the one elevated-plate recipe) and the shared `lib/theme` tokens, so
-//! nothing here restates a visual recipe (`AGENTS.md` §2.2). A dialog and a
+//! nothing here restates a visual recipe. A dialog and a
 //! help tip render state and emit typed actions; the owning service enforces
 //! authority, and a capability denial reads distinctly from a disabled control
 //! — never collapsed into a generic inactive look (spec §13).

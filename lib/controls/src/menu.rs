@@ -6,8 +6,8 @@
 //! trailing shortcut, submenu marker, and reason. The [`Menu`] owns keyboard
 //! navigation (Up/Down move the current row, Enter/Space activate it, Escape
 //! dismisses), pointer hover/click, and emits a typed [`MenuAction`]; it
-//! performs no privileged work — the owner enforces authority (`AGENTS.md`
-//! §5.4). Every colour, metric, and radius resolves from the active [`Theme`]
+//! performs no privileged work — the owner enforces authority. Every colour,
+//! metric, and radius resolves from the active [`Theme`]
 //! and [`Scale`]; nothing here restates a recipe the shared `crate::paint`
 //! core already owns.
 
@@ -23,7 +23,7 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     draw_outline, heavy_contrast, inset, paint_bead, paint_chevron, plate_border, resolve_bead,
-    surface_rect, to_i32, ChevronDir,
+    surface_rect, to_i32, ChevronDir, RenderInvariant,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState};
 
@@ -350,17 +350,28 @@ impl MenuItem {
 /// (wrapping), Home/End jump to the ends, Enter/Space activate the current row
 /// (opening a submenu parent), and Escape dismisses. Pointer hover sets the
 /// current row and a primary click activates it. Every activation is a typed
-/// [`MenuAction`] the owner dispatches; the menu enforces no authority
-/// (`AGENTS.md` §5.4). A non-actionable row (disabled, denied, pending,
-/// failed-closed) can be highlighted — so its reason and Authority Mark are
-/// legible — but never activates (fail closed).
+/// [`MenuAction`] the owner dispatches; the menu enforces no authority. A
+/// non-actionable row (disabled, denied, pending, failed-closed) can be
+/// highlighted — so its reason and Authority Mark are legible — but never
+/// activates (fail closed).
+///
+/// Equal menus draw the same pixels, so a host may use `==` as its repaint
+/// gate: the rows, the highlighted row, and whether that highlight came from
+/// the keyboard all compare. The pointer coordinate and the pressed-row latch
+/// do not — no render path reads either, and the *visible* consequence of a
+/// press is the highlight the same event sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Menu {
     items: Vec<MenuItem>,
     current: Option<usize>,
     keyboard_focus: bool,
-    pointer: Point,
-    armed: Option<usize>,
+    /// The last pointer position, mapped to a row on the next press or
+    /// release — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The row a primary press landed on, held until release so a click that
+    /// slides onto a different row does not activate it; the pressed row's
+    /// *look* is `current`.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl Menu {
@@ -371,8 +382,8 @@ impl Menu {
             items,
             current: None,
             keyboard_focus: false,
-            pointer: Point::ORIGIN,
-            armed: None,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(None),
         }
     }
 
@@ -609,9 +620,9 @@ impl Menu {
         theme: &Theme,
     ) -> Option<MenuAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let over = self.row_at(bounds, scale, theme, self.pointer);
+        let over = self.row_at(bounds, scale, theme, *self.pointer);
         match event {
             InputEvent::PointerMoved { .. } => {
                 if self.armed.is_none() {
@@ -623,7 +634,7 @@ impl Menu {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.armed = over;
+                *self.armed = over;
                 if let Some(i) = over {
                     self.current = Some(i);
                     self.keyboard_focus = false;

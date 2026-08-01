@@ -17,7 +17,7 @@ use tairix_controls::Switchboard;
 use tairix_procinfo::Transport;
 
 use crate::sample::{DegradedField, ProcessSummary, Sample};
-use crate::service::ServiceHost;
+use crate::service::{RenderInputs, ServiceHost};
 use crate::wait::{required_members, WaitToken};
 
 /// The uid [`process_summary`] gives a fixture row when the caller does not
@@ -229,6 +229,16 @@ pub(crate) struct RecordingHost {
     pub(crate) signal_refusal: Option<Errno>,
     /// Refusal to answer a priority lowering with.
     pub(crate) lower_refusal: Option<Errno>,
+    /// The client bounds a present would use while a window is open, as
+    /// `(left, top, width, height)`. Tests mutate this directly to
+    /// simulate a resize.
+    pub(crate) bounds: (i32, i32, u32, u32),
+    /// The active theme's identity a present would use. Tests mutate this
+    /// directly to simulate a theme change.
+    pub(crate) theme_id: u32,
+    /// The active render scale, as its whole-percent value, a present
+    /// would use. Tests mutate this directly to simulate a scale change.
+    pub(crate) scale_percent: u32,
 }
 
 impl RecordingHost {
@@ -251,6 +261,9 @@ impl RecordingHost {
             publish_refusal: None,
             signal_refusal: None,
             lower_refusal: None,
+            bounds: (0, 0, 600, 400),
+            theme_id: 1,
+            scale_percent: 100,
         }
     }
 
@@ -314,6 +327,20 @@ impl ServiceHost for RecordingHost {
 
     fn report_refusal(&mut self, action: &str, refusal: Errno) {
         self.refusals.push((action.to_string(), refusal));
+    }
+
+    fn render_inputs(&self) -> Option<RenderInputs> {
+        if !self.armed.contains(&WaitToken::WindowEvent) {
+            return None;
+        }
+        Some(RenderInputs {
+            bounds_left: self.bounds.0,
+            bounds_top: self.bounds.1,
+            bounds_width: self.bounds.2,
+            bounds_height: self.bounds.3,
+            theme_id: self.theme_id,
+            scale_percent: self.scale_percent,
+        })
     }
 
     fn note_degradation(&mut self, field: DegradedField) {

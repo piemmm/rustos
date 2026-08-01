@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_plate, plate_border, pointer_activation,
     resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape, ChevronDir,
-    PlateStyle,
+    PlateStyle, RenderInvariant,
 };
 use crate::state::{ActivityState, ControlDisposition, ControlRole, ControlState, PointerState};
 
@@ -298,15 +298,28 @@ fn paint_content(
 /// A `Button` owns its typed [`ControlState`] and its [`ControlRole`]; it
 /// renders itself into a [`Surface`] and consumes pointer/keyboard input,
 /// emitting a [`ButtonAction`] when activated. It performs no privileged work
-/// — activation is a signal to the owning container, which enforces authority
-/// (`AGENTS.md` §5.4).
+/// — activation is a signal to the owning container, which enforces authority.
+///
+/// # Equality is render equivalence
+///
+/// Equal buttons draw the same pixels for the same bounds, scale, theme, and
+/// font, so a host may use `==` to decide whether a surface holding one needs
+/// repainting. The content, role, and every visible part of the composed
+/// [`ControlState`] — hover, press, focus, validation, authority — take part.
+/// The last pointer coordinate and the press latch do not: they are
+/// hit-testing bookkeeping no render path reads, and the *visible* result of a
+/// press is the state's [`PointerState`], which is compared.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Button {
     content: ButtonContent,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position, resolved against `bounds` on the next press
+    /// or release — hit-testing input, never a drawn property.
+    pointer: RenderInvariant<Point>,
+    /// Whether a primary press landed on this button and has not yet been
+    /// released; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl Button {
@@ -317,8 +330,8 @@ impl Button {
             content,
             role,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -377,9 +390,9 @@ impl Button {
     /// primary click.
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<ButtonAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
             Some(ButtonAction::Activated)
         } else {
@@ -398,13 +411,19 @@ impl Button {
 ///
 /// It shares the button state model, rendering, and interaction; only its
 /// content differs (an [`IconKind`] rather than a label).
+///
+/// Its equality is the render-equivalence relation [`Button`] documents: the
+/// icon, role, and visible state are compared; the pointer coordinate and
+/// press latch behind it are not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IconButton {
     icon: IconKind,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl IconButton {
@@ -415,8 +434,8 @@ impl IconButton {
             icon,
             role,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -468,9 +487,9 @@ impl IconButton {
     /// Feed a pointer event; see [`Button::on_pointer`].
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<ButtonAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         pointer_activation(&mut self.state, &mut self.armed, event, inside)
             .then_some(ButtonAction::Activated)
     }
@@ -526,15 +545,25 @@ fn split_regions(bounds: Rect, scale: Scale, theme: &Theme) -> (Rect, Rect) {
 /// The two regions expose *separate* focus and pointer states over one shared
 /// Signal Rim; the Heat Seam and Signal Bead belong to the primary action (its
 /// job). Activation reports which region fired via [`SplitAction`].
+///
+/// Its equality is the render-equivalence relation [`Button`] documents: the
+/// content, role, and both regions' visible states are compared; the shared
+/// pointer coordinate and the two press latches behind them are not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SplitButton {
     content: ButtonContent,
     role: ControlRole,
     primary: ControlState,
     disclosure: ControlState,
-    pointer: Point,
-    primary_armed: bool,
-    disclosure_armed: bool,
+    /// The last pointer position, resolved against whichever region it fell
+    /// in — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The primary region's press latch; its press *look* lives in
+    /// `primary.pointer`.
+    primary_armed: RenderInvariant<bool>,
+    /// The disclosure region's press latch; its press *look* lives in
+    /// `disclosure.pointer`.
+    disclosure_armed: RenderInvariant<bool>,
 }
 
 impl SplitButton {
@@ -547,9 +576,9 @@ impl SplitButton {
             role,
             primary: ControlState::idle(),
             disclosure: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            primary_armed: false,
-            disclosure_armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            primary_armed: RenderInvariant::new(false),
+            disclosure_armed: RenderInvariant::new(false),
         }
     }
 
@@ -625,11 +654,11 @@ impl SplitButton {
         theme: &Theme,
     ) -> Option<SplitAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let (primary_rect, disclosure_rect) = split_regions(bounds, scale, theme);
-        let in_primary = primary_rect.contains(self.pointer);
-        let in_disclosure = disclosure_rect.contains(self.pointer);
+        let in_primary = primary_rect.contains(*self.pointer);
+        let in_disclosure = disclosure_rect.contains(*self.pointer);
         let primary_fired = pointer_activation(
             &mut self.primary,
             &mut self.primary_armed,

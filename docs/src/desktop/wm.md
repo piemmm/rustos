@@ -17,10 +17,19 @@ The compositor turns a stack of windows into one scan-out frame:
 2. `Compositor::composite` walks the damaged screen regions and, for
    every dirty pixel, blends each covering window *over* the opaque
    background, bottom-to-top in z-order, using the Porter–Duff *over*
-   operator (`Pixel::over`).
+   operator (`Pixel::over`). It returns the `DamageRegion` it actually
+   recomposited (screen-clipped), which is what the present step moves.
 3. Each composited pixel is encoded into a byte frame laid out for the
    active `DisplayMode` (`Rgba8888` or `Bgra8888`).
-4. `Compositor::present` hands that frame to a `Display` driver.
+4. `Compositor::present` hands the changed part of that frame to a
+   `Display` driver.
+
+A row, not a pixel, is the unit of work: for each dirty row the
+compositor resolves every covering layer's source row (`Window::row`),
+the back-buffer row, and the frame row once, so a column is a slice index
+and a blend rather than a coordinate conversion, a layer decision, and a
+`y * stride + x * 4` offset recomputed per pixel. Only windows whose
+bounds overlap the dirty rectangle are considered at all.
 
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
@@ -118,8 +127,68 @@ compositor (`AGENTS.md` §2.4). The router never panics and fails closed:
 
 `DamageRegion` records the screen rectangles that changed since the last
 frame (a window was added, moved, restyled, hidden, raised, or removed).
-`Compositor::composite` recomputes only those pixels and then clears the
-damage, so an idle desktop costs nothing to recomposite.
+`Compositor::composite` recomputes only those pixels, returns the region
+it recomposited, and clears the damage, so an idle desktop costs nothing
+to recomposite.
+
+**An update that changes nothing marks nothing.** `move_window` to the
+origin a window already has, and `set_corners` / `set_visible` /
+`set_opacity` to the value already in effect, repaint no pixel; they
+still return `true`, because `false` means only "unknown window". This
+matters because a presenter re-issues exactly those calls every frame,
+and each spurious mark would recomposite a whole window for nothing. A
+replaced *surface* (`set_surface`) is always assumed changed: comparing
+two whole buffers costs more than recompositing the window.
+
+**A content edit reports its own damage.** `edit_window_surface` takes an
+edit returning `(value, Rect)`, where the rectangle is in content-local
+pixels; the compositor translates it by the window's content origin and
+intersects it with the client rectangle, so an empty rectangle marks
+nothing and an over-large one is clipped rather than ever reaching a
+neighbouring window. The edit reports the rectangle rather than the
+caller declaring one up front because only the edit — having compared
+each pixel it wrote against the one already there — knows what truly
+changed; a conservative rectangle handed down beforehand would repaint
+pixels that never moved.
+
+**Cursor damage is the rectangle it left plus the one it reached.** The
+pointer overlay is not damaged as it moves; `composite` diffs the
+cursor's current footprint against the one the *previous* composite drew.
+A desktop that pumps a whole batch of pointer samples before repainting
+therefore recomposites two rectangles, not one per sample: no
+intermediate position was ever drawn, so those pixels are already
+correct, and the composited frame is byte-for-byte the one a single move
+to the same place produces. A move that lands on the identical rectangle
+repaints nothing. Replacement artwork (`set_cursor`) always repaints,
+even on an identical rectangle, because the pointer picking up a text or
+resize shape without moving changes the pixels there.
+
+`Compositor::has_damage` answers exactly what the next composite would
+produce: `true` if and only if at least one pixel would be recomposited,
+counting a pending cursor move or artwork change and discounting damage
+marked wholly off screen. A session driving a wake loop can therefore
+skip a frame outright when it is `false` without ever missing a repaint.
+
+## Presenting only what changed
+
+`Compositor::present` composites and then moves the smallest sensible
+number of bytes:
+
+- **No damage presents nothing.** The display driver is not called at
+  all, so a wake that changed nothing costs neither the whole-frame
+  shared-memory copy nor the driver blit. The first frame still shows: a
+  new compositor marks the whole screen dirty.
+- **Whole-screen damage is one `Display::present`.**
+- **Anything else is one `Display::present_region` per disjoint dirty
+  rectangle**, so the bytes moved are proportional to what changed rather
+  than to the bounding box of scattered damage — a dirty taskbar strip
+  along the bottom edge plus a cursor near the top is two small blits,
+  not a near-full-screen one.
+- **Past `MAX_PRESENT_REGIONS` rectangles, one bounding-box present
+  replaces the batch.** Each region present is a synchronous round trip to
+  the display service whose fixed cost is paid however few pixels it
+  carries, while a larger copy costs only more bytes; beyond a handful of
+  rectangles the round trips cost more than one call copying their box.
 
 ## Server-side window decorations
 

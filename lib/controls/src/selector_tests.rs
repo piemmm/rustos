@@ -3,7 +3,7 @@
 //! These cover measurement (each control paints its plate within its bounds
 //! and rounds its corners), the shape-coded value marks (toggle contact/thumb,
 //! checkbox filled-square vs mixed-bar, radio bead) so state reads without
-//! colour, theme switching, the §13 denied-vs-disabled distinction, the
+//! colour, theme switching, the spec §13 denied-vs-disabled distinction, the
 //! Pressure Rail, the pending Heat Seam, focus, high contrast, and the
 //! pointer/keyboard activation and next-value semantics of each control.
 
@@ -441,4 +441,96 @@ fn renders_at_a_larger_scale_without_panicking() {
         font(),
     );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
+}
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+/// The bounds every render-equivalence case draws into.
+fn plate() -> Rect {
+    Rect::new(0, 0, W, H)
+}
+
+/// Paint `draw` into a fresh surface and hand back its pixels.
+fn pixels_of(draw: impl FnOnce(&mut Surface)) -> alloc::vec::Vec<Pixel> {
+    let mut surface = Surface::new(W, H).expect("surface");
+    draw(&mut surface);
+    surface.pixels().to_vec()
+}
+
+#[test]
+fn pointer_position_alone_never_changes_a_selector_render() {
+    let theme = Theme::dark();
+    // Both samples stay off the plate, so only the recorded coordinate — the
+    // one thing the shared selector core keeps for hit-testing — differs.
+    let outside = moved(i32::try_from(W).expect("width") + 30, 4);
+    let farther = moved(i32::try_from(W).expect("width") + 80, 9);
+
+    let mut a = Toggle::new("Wi-Fi", false);
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate());
+    b.on_pointer(&farther, plate());
+    assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        "…and the two must therefore paint identically"
+    );
+
+    let mut a = Checkbox::new("Include hidden", SelectionState::Unselected);
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate());
+    b.on_pointer(&farther, plate());
+    assert_eq!(a, b);
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+    );
+
+    let mut a = Radio::new("Daily", false);
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate());
+    b.on_pointer(&farther, plate());
+    assert_eq!(a, b);
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+    );
+}
+
+#[test]
+fn press_latch_alone_never_changes_a_selector_render() {
+    let theme = Theme::dark();
+    // One toggle holds a real press latch; the other is merely *shown*
+    // pressed. Only the latch differs, and a latch is not drawn.
+    let mut latched = Toggle::new("Wi-Fi", false);
+    latched.on_pointer(&PRESS, plate());
+
+    let mut shown = Toggle::new("Wi-Fi", false);
+    let mut pressed = ControlState::idle();
+    pressed.pointer = crate::state::PointerState::Pressed;
+    shown.set_state(pressed);
+
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme, font())),
+        "…and the two must therefore paint identically"
+    );
+    assert_eq!(
+        latched.on_pointer(&RELEASE, plate()),
+        Some(SelectorAction::Set { on: true }),
+        "the latch still governs activation, it is only invisible"
+    );
+}
+
+#[test]
+fn hover_and_value_each_change_a_selector_render() {
+    let resting = Toggle::new("Wi-Fi", false);
+
+    let mut hovered = resting.clone();
+    hovered.on_pointer(&moved(4, 4), plate());
+    assert_ne!(resting, hovered, "a hover highlight is visible");
+
+    let switched = Toggle::new("Wi-Fi", true);
+    assert_ne!(resting, switched, "the value's thumb position is visible");
 }

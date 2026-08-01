@@ -145,8 +145,17 @@ impl Pixel {
     ///
     /// Both operands are premultiplied; the result is
     /// `src + dst * (1 - src.a)`, the Porter–Duff *over* operator.
+    ///
+    /// An opaque source keeps none of the destination, so the general form
+    /// below already reduces to `self`; returning it directly turns opaque
+    /// text, panel fills, and window presents into plain stores instead of
+    /// four multiplies and four divisions per pixel, mirroring the
+    /// `factor == 255` fast path in [`Self::scale_alpha`].
     #[must_use]
     pub fn over(self, dst: Self) -> Self {
+        if self.a == 255 {
+            return self;
+        }
         let inv = 255 - u32::from(self.a);
         let blend = |s: u8, d: u8| s.saturating_add(div255(u32::from(d) * inv));
         Self {

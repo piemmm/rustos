@@ -395,3 +395,50 @@ fn scale_floors_the_thumb_at_the_scaled_minimum() {
         "scaled min thumb {two} must exceed unscaled {one}"
     );
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn the_drag_anchor_alone_never_changes_a_scrollbar_render() {
+    let theme = theme();
+    // Two bars grab the thumb at different points, so each keeps a different
+    // grab offset within it, then both release and come to rest on the same
+    // point. Everything a reader can see — the offset, the hover, the held
+    // part — now matches; only the anchor differs, and it is consulted solely
+    // while a drag is in flight.
+    let grab = |y: i32| {
+        let mut bar = vbar();
+        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&moved(2, 40), vbounds(), Scale::ONE, &theme);
+        bar
+    };
+    let near = grab(20);
+    let far = grab(30);
+
+    assert_eq!(
+        near.model().offset(),
+        far.model().offset(),
+        "a grab inside the thumb must not move the content"
+    );
+    // Both presses really do capture a different grab offset: while a drag is
+    // live the anchor decides where the same pointer lands.
+    let drag_from = |y: i32| {
+        let mut bar = vbar();
+        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme);
+        off(bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme))
+    };
+    assert_ne!(
+        drag_from(20),
+        drag_from(30),
+        "both presses must land inside the thumb, or this proves nothing"
+    );
+    assert_eq!(near, far, "the drag anchor is not a drawn property");
+    assert_eq!(
+        render(&near, vbounds(), &theme).pixels(),
+        render(&far, vbounds(), &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+}

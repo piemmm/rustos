@@ -213,9 +213,15 @@ impl TaskBridge {
                 None => return false,
             },
         };
-        let before = taskbar.tasks().focused();
+        // Reading first and writing only on a real move keeps a click that
+        // lands on the already-focused window from latching a bar repaint:
+        // handing out the mutable task list is indistinguishable from
+        // changing it, so the taskbar must assume the worst.
+        if taskbar.tasks().focused() == target {
+            return false;
+        }
         taskbar.tasks_mut().set_focused(target);
-        taskbar.tasks().focused() != before
+        true
     }
 }
 

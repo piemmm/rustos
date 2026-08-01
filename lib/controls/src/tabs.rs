@@ -7,7 +7,7 @@
 //! bead so its state is legible without colour (spec §11.12, §15). The strip
 //! owns keyboard navigation (Left/Right move the current tab, Home/End jump to
 //! the ends, Enter/Space select it) and pointer hover/click, emitting a typed
-//! [`TabsAction`]; it enforces no authority (`AGENTS.md` §5.4). Every colour,
+//! [`TabsAction`]; it enforces no authority. Every colour,
 //! metric, and radius resolves from the active [`Theme`] and [`Scale`].
 
 use alloc::string::String;
@@ -21,6 +21,7 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     draw_outline, heavy_contrast, paint_bead, plate_border, surface_rect, to_i32, BeadShape,
+    RenderInvariant,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, SelectionState, ValidationState,
@@ -112,13 +113,24 @@ impl Tab {
 /// *selected* tab, which is the one whose view is shown). Selection commits
 /// through the owner via [`TabsAction::Selected`]; the owner then updates the
 /// items' [`SelectionState`] (helper [`Tabs::set_selected`]).
+///
+/// Equal strips draw the same pixels, so a host may use `==` as its repaint
+/// gate: the items, the current tab, and whether that focus came from the
+/// keyboard all compare. The pointer coordinate and the pressed-tab latch do
+/// not — no render path reads either, and the *visible* consequence of a press
+/// is the `current` tab the same event sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tabs {
     items: Vec<Tab>,
     current: Option<usize>,
     keyboard_focus: bool,
-    pointer: Point,
-    armed: Option<usize>,
+    /// The last pointer position, mapped to a tab on the next press or
+    /// release — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The tab a primary press landed on, held until release so a click that
+    /// slides onto another tab does not select it; the pressed tab's *look* is
+    /// `current`.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl Tabs {
@@ -129,8 +141,8 @@ impl Tabs {
             items: tabs,
             current: None,
             keyboard_focus: false,
-            pointer: Point::ORIGIN,
-            armed: None,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(None),
         }
     }
 
@@ -383,9 +395,9 @@ impl Tabs {
     /// selects it.
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<TabsAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let over = self.tab_at(bounds, self.pointer);
+        let over = self.tab_at(bounds, *self.pointer);
         match event {
             InputEvent::PointerMoved { .. } => {
                 if self.armed.is_none() {
@@ -397,7 +409,7 @@ impl Tabs {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.armed = over;
+                *self.armed = over;
                 if let Some(i) = over {
                     self.current = Some(i);
                     self.keyboard_focus = false;

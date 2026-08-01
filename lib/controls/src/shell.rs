@@ -5,7 +5,7 @@
 //! taskbar entry, and the notification-area status capsule. Each is a
 //! first-class Reactive Alloy control drawn over the shared `crate::paint`
 //! core (plate, rail, Heat Seam, Signal Bead) and the shared `lib/theme`
-//! tokens, so nothing here restates a visual recipe (`AGENTS.md` §2.2). A
+//! tokens, so nothing here restates a visual recipe. A
 //! control renders state and emits a typed userland action; the owning
 //! service enforces authority, and a denied action reads distinctly from a
 //! disabled one (spec §13).
@@ -25,7 +25,7 @@ use crate::collection::{Card, CardAction};
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_plate, plate_border,
     pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail, seam_thickness,
-    seam_width, surface_rect, to_i32, BeadShape, PlateStyle,
+    seam_width, surface_rect, to_i32, BeadShape, PlateStyle, RenderInvariant,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState, ValidationState,
@@ -282,6 +282,11 @@ pub enum TaskbarPresentation {
 /// Seam; an attention request or a recovery/denied state shows a shape-coded
 /// Signal Bead (spec §13, §15). It renders state and reports
 /// [`TaskbarItemAction`]; the owner performs the window operation.
+///
+/// Equal items draw the same pixels, so a taskbar may use `==` as its repaint
+/// gate: the label, icon, presentation, window visibility, attention flag, and
+/// visible state compare. The pointer coordinate and press latch do not — no
+/// render path reads either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskbarItem {
     label: String,
@@ -290,8 +295,10 @@ pub struct TaskbarItem {
     state: ControlState,
     visibility: TaskVisibility,
     attention: bool,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl TaskbarItem {
@@ -305,8 +312,8 @@ impl TaskbarItem {
             state: ControlState::idle(),
             visibility: TaskVisibility::Running,
             attention: false,
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -632,9 +639,9 @@ impl TaskbarItem {
     /// [`TaskbarItemAction::Activated`].
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<TaskbarItemAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         pointer_activation(&mut self.state, &mut self.armed, event, inside)
             .then_some(TaskbarItemAction::Activated)
     }
@@ -752,6 +759,12 @@ impl TrayBadge {
 /// readout — the state name, a count or value, and one primary safe action —
 /// which the owner positions as a popup. It renders state and reports
 /// [`TraySignalAction`]; the owner enforces authority (spec §13).
+///
+/// Equal signals draw the same pixels, so a tray may use `==` as its repaint
+/// gate: the glyph, label, readout value, badge, action button, and visible
+/// state — including the hover that expands the readout — all compare. The
+/// pointer coordinate does not: it decides *which* region a press lands on,
+/// and the hover it implies is already in `state`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraySignal {
     icon: IconKind,
@@ -760,7 +773,8 @@ pub struct TraySignal {
     state: ControlState,
     badge: Option<TrayBadge>,
     action: Option<Button>,
-    pointer: Point,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
 }
 
 impl TraySignal {
@@ -774,7 +788,7 @@ impl TraySignal {
             state: ControlState::idle(),
             badge: None,
             action: None,
-            pointer: Point::ORIGIN,
+            pointer: RenderInvariant::new(Point::ORIGIN),
         }
     }
 
@@ -1136,11 +1150,11 @@ impl TraySignal {
         theme: &Theme,
     ) -> Option<TraySignalAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let expanded_before = self.is_expanded();
-        let over_capsule = capsule_bounds.contains(self.pointer);
-        let over_readout = expanded_before && readout_bounds.contains(self.pointer);
+        let over_capsule = capsule_bounds.contains(*self.pointer);
+        let over_readout = expanded_before && readout_bounds.contains(*self.pointer);
         self.state.pointer = if over_capsule || over_readout {
             PointerState::Hover
         } else {

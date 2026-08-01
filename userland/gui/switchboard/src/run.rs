@@ -82,8 +82,8 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
     use tairix_switchboard::{
-        authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField, Service,
-        ServiceHost, WaitToken, PANEL_TITLE,
+        authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
+        RenderInputs, Service, ServiceHost, WaitToken, PANEL_TITLE,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{WindowClient, WindowTransport};
@@ -411,6 +411,7 @@ mod program {
         }
 
         fn present(&mut self, panel: &mut Switchboard) -> Result<(), Errno> {
+            let bounds = self.bounds().ok_or(Errno::NotFound)?;
             let Self {
                 client,
                 themes,
@@ -419,7 +420,6 @@ mod program {
             } = self;
             let window = window.as_mut().ok_or(Errno::NotFound)?;
             let theme = themes.active();
-            let bounds = Rect::new(0, 0, window.mode.width_px, window.mode.height_px);
             panel.render(
                 &mut window.surface,
                 bounds,
@@ -438,6 +438,19 @@ mod program {
                 slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
             }
             client.present(window.id, 0, DamageRect::full(&window.mode))
+        }
+
+        fn render_inputs(&self) -> Option<RenderInputs> {
+            let bounds = self.bounds()?;
+            let theme = self.themes.active();
+            Some(RenderInputs {
+                bounds_left: bounds.origin.x,
+                bounds_top: bounds.origin.y,
+                bounds_width: bounds.width,
+                bounds_height: bounds.height,
+                theme_id: theme.id().0,
+                scale_percent: Scale::ONE.percent(),
+            })
         }
 
         fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {
@@ -614,10 +627,12 @@ mod program {
 
     /// Apply one delivered window event.
     ///
-    /// Every event that reaches the composition may have changed what it
-    /// draws — a hover highlight and a focus move are as visible as an
-    /// activation — so the panel is re-presented after each one; events the
-    /// composition never sees change nothing and are not drawn for.
+    /// Nothing here decides whether to re-present: the main loop's single
+    /// end-of-wake [`Panel::flush`](tairix_switchboard::Panel::flush) call
+    /// compares what the composition would now draw against what is
+    /// already on screen and presents only on an actual difference, so a
+    /// dense batch of events that changed nothing costs no present and one
+    /// that did costs exactly one.
     fn apply_window_event(
         service: &mut Service,
         host: &mut RtHost,
@@ -635,7 +650,6 @@ mod program {
                 ..
             } => {
                 host.resize(width_px, height_px);
-                service.panel_mut().mark_dirty();
                 return;
             }
             WindowEvent::Key {
@@ -664,7 +678,6 @@ mod program {
                 service.apply_grouping(host, outcome, authority);
             }
         }
-        service.panel_mut().mark_dirty();
     }
 
     /// Drain every window event the session has delivered, applying each in

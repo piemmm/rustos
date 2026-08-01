@@ -1,7 +1,7 @@
 //! Unit tests for the decision-surface controls (spec §11.24, §11.32, §20).
 //!
 //! These cover the dialog (title/message, Action Warmth for a recommended
-//! action vs a destructive one, the §13 denial rendering, the inline reason,
+//! action vs a destructive one, the spec §13 denial rendering, the inline reason,
 //! right-aligned action layout, and pointer/keyboard activation), the tooltip
 //! (short anchored text, sizing), and the help tip (reason tone by role and the
 //! one safe next-step action), across both themes, high contrast, and scale.

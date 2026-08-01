@@ -2,7 +2,7 @@
 //!
 //! These cover measurement (the plate paints within its bounds and rounds its
 //! corners), state transitions (pointer press/release and keyboard
-//! activation), theme switching, the §13 denied-vs-disabled distinction,
+//! activation), theme switching, the spec §13 denied-vs-disabled distinction,
 //! proportional progress seams, and the split button's two regions.
 
 use tairix_font::BitmapFont;
@@ -500,4 +500,106 @@ fn pressing_darkens_the_plate() {
         &surface,
         premul(theme.palette().surface_raised)
     ));
+}
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+/// The bounds every render-equivalence case draws into.
+fn plate() -> Rect {
+    Rect::new(0, 0, W, H)
+}
+
+/// Paint `draw` into a fresh surface and hand back its pixels.
+fn pixels_of(draw: impl FnOnce(&mut Surface)) -> alloc::vec::Vec<Pixel> {
+    let mut surface = Surface::new(W, H).expect("surface");
+    draw(&mut surface);
+    surface.pixels().to_vec()
+}
+
+#[test]
+fn pointer_position_alone_never_changes_a_button_family_render() {
+    let theme = Theme::dark();
+    // A move that stays outside the control changes only the recorded
+    // coordinate: it leaves the resting hover state exactly as it was.
+    let outside = moved(iv(W) + 40, iv(H) + 40);
+    let farther = moved(iv(W) + 90, iv(H) + 12);
+
+    let mut a = Button::labelled("OK");
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate());
+    b.on_pointer(&farther, plate());
+    assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        "…and the two must therefore paint identically"
+    );
+
+    let mut a = IconButton::new(IconKind::Bell, ControlRole::Neutral);
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate());
+    b.on_pointer(&farther, plate());
+    assert_eq!(a, b);
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+    );
+
+    let mut a = SplitButton::new(
+        ButtonContent::Label(alloc::string::String::from("Run")),
+        ControlRole::Primary,
+    );
+    let mut b = a.clone();
+    a.on_pointer(&outside, plate(), Scale::ONE, &theme);
+    b.on_pointer(&farther, plate(), Scale::ONE, &theme);
+    assert_eq!(a, b);
+    assert_eq!(
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+    );
+}
+
+#[test]
+fn press_latch_alone_never_changes_a_button_render() {
+    let theme = Theme::dark();
+    // One button holds a real press latch; the other is merely *shown*
+    // pressed. Only the latch differs, and a latch is not drawn.
+    let mut latched = Button::labelled("OK");
+    latched.on_pointer(&PRESS, plate());
+
+    let mut shown = Button::labelled("OK");
+    let mut pressed = ControlState::idle();
+    pressed.pointer = crate::state::PointerState::Pressed;
+    shown.set_state(pressed);
+
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme, font())),
+        "…and the two must therefore paint identically"
+    );
+    assert_eq!(
+        latched.on_pointer(&RELEASE, plate()),
+        Some(ButtonAction::Activated),
+        "the latch still governs activation, it is only invisible"
+    );
+}
+
+#[test]
+fn hover_press_and_focus_each_change_a_button_render() {
+    let resting = Button::labelled("OK");
+
+    let mut hovered = resting.clone();
+    hovered.on_pointer(&moved(iv(W) / 2, iv(H) / 2), plate());
+    assert_ne!(resting, hovered, "a hover highlight is visible");
+
+    let mut held = hovered.clone();
+    held.on_pointer(&PRESS, plate());
+    assert_ne!(hovered, held, "a press is visible");
+
+    let mut focused = resting.clone();
+    let mut state = ControlState::idle();
+    state.focus = focused_state();
+    focused.set_state(state);
+    assert_ne!(resting, focused, "a focus ring is visible");
 }

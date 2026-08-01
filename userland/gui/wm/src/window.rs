@@ -134,9 +134,12 @@ impl Window {
         &self.surface
     }
 
-    /// Borrow the window's content surface mutably, for an in-place
-    /// update of its pixels (the compositor marks the window's bounds
-    /// dirty around the edit).
+    /// Borrow the window's content surface mutably, for an in-place update
+    /// of its pixels. The caller ([`Compositor::edit_window_surface`])
+    /// marks only the content-local rectangle the edit itself reports
+    /// changed, not the whole surface.
+    ///
+    /// [`Compositor::edit_window_surface`]: crate::Compositor::edit_window_surface
     pub(crate) fn surface_mut(&mut self) -> &mut Surface {
         &mut self.surface
     }
@@ -196,17 +199,93 @@ impl Window {
         self.frame.as_ref()
     }
 
-    /// The composited contribution of this window at screen `(x, y)`:
-    /// the source pixel scaled by the combined opacity and rounded-corner
-    /// coverage, or `None` when the point falls outside the surface or
-    /// the window is hidden.
-    pub(crate) fn sample(&self, x: i32, y: i32) -> Option<Pixel> {
+    /// This window's contribution to screen row `y`, resolved once for the
+    /// whole row, or `None` when the row draws nothing at all (the window
+    /// is hidden, the row falls outside its outer bounds, or the furniture
+    /// gutter clips the row away).
+    ///
+    /// Which layer a column comes from, where its source row sits in the
+    /// buffer, and what alpha applies are all fixed for a row. Answering
+    /// them here leaves the per-column path a single slice index, instead
+    /// of re-deriving the coordinate conversion, the layer choice, and two
+    /// bounds checks for every pixel of a repainted window.
+    #[must_use]
+    pub(crate) fn row(&self, y: i32) -> Option<WindowRow<'_>> {
         if !self.visible {
             return None;
         }
-        let lx = u32::try_from(i64::from(x) - i64::from(self.origin.x)).ok()?;
         let ly = u32::try_from(i64::from(y) - i64::from(self.origin.y)).ok()?;
-        self.sample_local(lx, ly)
+        if ly >= self.outer_size().1 {
+            return None;
+        }
+        let (inset_x, inset_y) = match self.band {
+            Some(insets) => (insets.left, insets.top),
+            None => (0, 0),
+        };
+        let content_row = ly
+            .checked_sub(inset_y)
+            .filter(|sy| *sy < self.surface.height());
+        let (content, client_cols) = match content_row {
+            Some(sy) => (self.client_row(sy), self.surface.width()),
+            None => (&[][..], 0),
+        };
+        let decoration = match (self.band, self.decoration.as_ref()) {
+            (Some(_), Some(surface)) => surface_row(surface, ly),
+            _ => &[][..],
+        };
+        if content.is_empty() && decoration.is_empty() {
+            return None;
+        }
+        Some(WindowRow {
+            content,
+            decoration,
+            client_x: self.origin.x.saturating_add_unsigned(inset_x),
+            decoration_x: self.origin.x,
+            client_cols,
+            opacity: self.opacity,
+            rounding: self.row_rounding(ly),
+        })
+    }
+
+    /// The drawable client pixels of content row `sy`: the content surface
+    /// row truncated where the furniture gutter clips it, and empty when
+    /// the gutter clips the whole row away.
+    fn client_row(&self, sy: u32) -> &[Pixel] {
+        let (cols, rows) = self.client_extent();
+        if sy >= rows {
+            return &[];
+        }
+        let row = surface_row(&self.surface, sy);
+        let cols = usize::try_from(cols).unwrap_or(row.len());
+        row.get(..cols.min(row.len())).unwrap_or(&[])
+    }
+
+    /// The content columns and rows the furniture gutter leaves drawable:
+    /// the whole surface unless a root viewport reserves a gutter for its
+    /// scrollbars, whose track is furniture and never shows client pixels.
+    fn client_extent(&self) -> (u32, u32) {
+        let Some(viewport) = self.viewport else {
+            return (self.surface.width(), self.surface.height());
+        };
+        let local = Rect::new(0, 0, self.surface.width(), self.surface.height());
+        let client = viewport.layout(local).client;
+        (client.width, client.height)
+    }
+
+    /// The rounded-corner coverage this window applies across row `ly`, or
+    /// `None` where every column is fully covered. A decorated window's
+    /// rounding belongs to the frame rim and is baked into the decoration
+    /// as partial alpha, so its rectangular client rounds nothing.
+    fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
+        match (self.band, self.corners) {
+            (None, corners @ Corners::Rounded { .. }) => Some(RowRounding {
+                corners,
+                ly,
+                width: self.surface.width(),
+                height: self.surface.height(),
+            }),
+            _ => None,
+        }
     }
 
     /// The composited contribution of this window at *window-local*
@@ -214,81 +293,53 @@ impl Window {
     /// combined opacity and rounded-corner coverage, or `None` outside the
     /// content, in the reserved frame band, or when the window is hidden.
     ///
-    /// This is the same per-pixel result as [`Self::sample`] addressed in
-    /// the window's own coordinate space; the hardware-layer present path
-    /// (`Compositor::present_accelerated`) uses it to bake a window into a
-    /// premultiplied layer without re-deriving screen coordinates.
+    /// This is [`Self::row`] addressed in the window's own coordinate
+    /// space — the same single definition of what the window draws where —
+    /// which the hardware-layer present path
+    /// (`Compositor::present_accelerated`) uses to bake a window into a
+    /// premultiplied layer.
     pub(crate) fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
-        if !self.visible {
-            return None;
-        }
-        match self.band {
-            Some(_) => self.sample_decorated(lx, ly),
-            None => self.sample_plain(lx, ly),
-        }
+        let x = self.origin.x.checked_add(i32::try_from(lx).ok()?)?;
+        let y = self.origin.y.checked_add(i32::try_from(ly).ok()?)?;
+        self.row(y)?.sample(x)
     }
 
-    /// The composited contribution of an *undecorated* window at
-    /// window-local `(lx, ly)`: the content pixel scaled by opacity and this
-    /// window's own rounded-corner coverage (the client is the whole window).
-    fn sample_plain(&self, lx: u32, ly: u32) -> Option<Pixel> {
-        if self.clipped_by_furniture(lx, ly) {
-            return None;
+    /// Move the window to `origin`, returning whether it actually changed
+    /// (`false` when it was already there, so the caller marks no damage
+    /// for a no-op move).
+    pub(crate) fn set_origin(&mut self, origin: Point) -> bool {
+        if origin == self.origin {
+            return false;
         }
-        let pixel = self.surface.get(lx, ly)?;
-        let coverage = self
-            .corners
-            .coverage(lx, ly, self.surface.width(), self.surface.height());
-        Some(pixel.scale_alpha(combine(self.opacity, coverage)))
-    }
-
-    /// The composited contribution of a *decorated* window at outer-local
-    /// `(lx, ly)`: the inset client content where the point maps into the
-    /// content surface, otherwise the pre-rendered window-manager furniture
-    /// ([`Self::render_decoration`]) in the reserved band. The rounded corners
-    /// belong to the frame rim (baked into the decoration as partial alpha),
-    /// not the rectangular client, so the client is sampled at full coverage.
-    fn sample_decorated(&self, lx: u32, ly: u32) -> Option<Pixel> {
-        if let Some((sx, sy)) = self.to_content(lx, ly) {
-            if self.clipped_by_furniture(sx, sy) {
-                return None;
-            }
-            let pixel = self.surface.get(sx, sy)?;
-            return Some(pixel.scale_alpha(self.opacity));
-        }
-        let pixel = self.decoration.as_ref()?.get(lx, ly)?;
-        Some(pixel.scale_alpha(self.opacity))
-    }
-
-    /// Translate outer-window-local `(lx, ly)` into content-surface
-    /// coordinates, or `None` when the point falls in the reserved frame band
-    /// (outside the client). A plain window maps one-to-one.
-    fn to_content(&self, lx: u32, ly: u32) -> Option<(u32, u32)> {
-        let Some(insets) = self.band else {
-            return Some((lx, ly));
-        };
-        let sx = lx.checked_sub(insets.left)?;
-        let sy = ly.checked_sub(insets.top)?;
-        if sx >= self.surface.width() || sy >= self.surface.height() {
-            return None;
-        }
-        Some((sx, sy))
-    }
-
-    pub(crate) fn set_origin(&mut self, origin: Point) {
         self.origin = origin;
+        true
     }
 
-    pub(crate) fn set_opacity(&mut self, opacity: u8) {
+    /// Set the window's opacity, returning whether it actually changed.
+    pub(crate) fn set_opacity(&mut self, opacity: u8) -> bool {
+        if opacity == self.opacity {
+            return false;
+        }
         self.opacity = opacity;
+        true
     }
 
-    pub(crate) fn set_corners(&mut self, corners: Corners) {
+    /// Set the window's corner style, returning whether it actually changed.
+    pub(crate) fn set_corners(&mut self, corners: Corners) -> bool {
+        if corners == self.corners {
+            return false;
+        }
         self.corners = corners;
+        true
     }
 
-    pub(crate) fn set_visible(&mut self, visible: bool) {
+    /// Show or hide the window, returning whether it actually changed.
+    pub(crate) fn set_visible(&mut self, visible: bool) -> bool {
+        if visible == self.visible {
+            return false;
+        }
         self.visible = visible;
+        true
     }
 
     pub(crate) fn set_cursor_hint(&mut self, cursor: CursorKind) {
@@ -299,8 +350,14 @@ impl Window {
         self.surface = surface;
     }
 
-    pub(crate) fn set_viewport(&mut self, viewport: Option<RootViewport>) {
+    /// Attach, replace, or clear the window's scrollable-content viewport,
+    /// returning whether it actually changed.
+    pub(crate) fn set_viewport(&mut self, viewport: Option<RootViewport>) -> bool {
+        if viewport == self.viewport {
+            return false;
+        }
         self.viewport = viewport;
+        true
     }
 
     pub(crate) fn viewport_mut(&mut self) -> Option<&mut RootViewport> {
@@ -609,18 +666,90 @@ impl Window {
             None => Rect::EMPTY,
         }
     }
+}
 
-    /// `true` when surface-local `(lx, ly)` falls in a reserved scrollbar
-    /// gutter, so the client pixel there is clipped away (the furniture, not
-    /// the client, owns that strip).
-    fn clipped_by_furniture(&self, lx: u32, ly: u32) -> bool {
-        let Some(viewport) = self.viewport else {
-            return false;
-        };
-        let local = Rect::new(0, 0, self.surface.width(), self.surface.height());
-        let client = viewport.layout(local).client;
-        lx >= client.width || ly >= client.height
+/// One screen row of a window's composited contribution, resolved by
+/// [`Window::row`].
+///
+/// Holds the source row slices this window draws from and the row-constant
+/// factors that apply to them, so [`sample`](Self::sample) is a slice
+/// index rather than a fresh layer decision per column.
+pub(crate) struct WindowRow<'a> {
+    /// Drawable client pixels, the first at screen column `client_x`.
+    /// Shorter than `client_cols` where the furniture gutter clips the
+    /// row's tail, and empty where it clips the whole row.
+    content: &'a [Pixel],
+    /// Decoration pixels, the first at screen column `decoration_x`, or
+    /// empty for an undecorated window.
+    decoration: &'a [Pixel],
+    /// Screen column of `content`'s first pixel.
+    client_x: i32,
+    /// Screen column of `decoration`'s first pixel.
+    decoration_x: i32,
+    /// Columns from `client_x` the client owns, drawable or gutter-clipped:
+    /// a clipped client pixel draws nothing rather than letting the
+    /// decoration behind it show through.
+    client_cols: u32,
+    /// Alpha applied to every pixel this row draws.
+    opacity: u8,
+    /// Rounded-corner coverage across the row, or `None` where every
+    /// column is fully covered.
+    rounding: Option<RowRounding>,
+}
+
+impl WindowRow<'_> {
+    /// The composited contribution at screen column `x`: the source pixel
+    /// scaled by the combined opacity and rounded-corner coverage, or
+    /// `None` where this window draws nothing there.
+    #[must_use]
+    pub(crate) fn sample(&self, x: i32) -> Option<Pixel> {
+        if let Some(lx) = x
+            .checked_sub(self.client_x)
+            .and_then(|d| u32::try_from(d).ok())
+        {
+            if lx < self.client_cols {
+                let pixel = *self.content.get(lx as usize)?;
+                let alpha = match self.rounding {
+                    Some(rounding) => combine(self.opacity, rounding.coverage(lx)),
+                    None => self.opacity,
+                };
+                return Some(pixel.scale_alpha(alpha));
+            }
+        }
+        let lx = x
+            .checked_sub(self.decoration_x)
+            .and_then(|d| usize::try_from(d).ok())?;
+        Some(self.decoration.get(lx)?.scale_alpha(self.opacity))
     }
+}
+
+/// The rounded-corner coverage a plain window applies across one row.
+#[derive(Copy, Clone)]
+struct RowRounding {
+    corners: Corners,
+    ly: u32,
+    width: u32,
+    height: u32,
+}
+
+impl RowRounding {
+    /// Coverage in `0..=255` for content column `lx` of this row.
+    fn coverage(self, lx: u32) -> u8 {
+        self.corners.coverage(lx, self.ly, self.width, self.height)
+    }
+}
+
+/// Row `y` of `surface` left to right, or an empty slice when the row is
+/// out of bounds — a row that does not exist simply draws nothing.
+fn surface_row(surface: &Surface, y: u32) -> &[Pixel] {
+    let width = usize::try_from(surface.width()).unwrap_or(0);
+    let Some(start) = usize::try_from(y).ok().and_then(|y| y.checked_mul(width)) else {
+        return &[];
+    };
+    let Some(end) = start.checked_add(width) else {
+        return &[];
+    };
+    surface.pixels().get(start..end).unwrap_or(&[])
 }
 
 /// Combine two `0..=255` factors as `a * b / 255` (shared `div255`).

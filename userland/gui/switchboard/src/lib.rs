@@ -136,5 +136,7 @@ pub use sample::{
     ScopeVerdicts, TopTask,
 };
 pub use schedule::{MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
-pub use service::{CycleOutcome, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES};
+pub use service::{
+    CycleOutcome, RenderInputs, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES,
+};
 pub use wait::{required_members, WaitToken};

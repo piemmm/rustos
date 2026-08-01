@@ -437,11 +437,26 @@ impl DesktopShell {
     /// its owned theme: repaint and place the bar and, while the
     /// program-library popup is open, its panel.
     ///
+    /// Only the surfaces the taskbar latched as changed are repainted. The
+    /// latch is the taskbar's own record of what its model altered, so a
+    /// pointer crossing one open menu repaints that menu and leaves the
+    /// bar, popup, popover, and readout exactly as they are — the whole
+    /// point being that re-rendering all five and pushing them back into
+    /// the compositor costs milliseconds and damages five window
+    /// rectangles. Draining the latch here, at the one site that presents,
+    /// means no caller has to reason about which surfaces its edit
+    /// touched, and nothing can be presented twice.
+    ///
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     pub fn present(&mut self, compositor: &mut Compositor) {
-        self.presenter
-            .present(compositor, &mut self.renderer, self.session.taskbar());
+        let parts = self.session.taskbar_mut().take_repaint();
+        self.presenter.present(
+            compositor,
+            &mut self.renderer,
+            self.session.taskbar(),
+            parts,
+        );
     }
 
     /// Hand the taskbar's program-library popup the resolved `catalog` (the
@@ -527,9 +542,7 @@ impl DesktopShell {
     /// the model only ever renders what the desktop's own service published.
     pub fn set_tray_summary(&mut self, compositor: &mut Compositor, summary: Option<TraySummary>) {
         self.session.taskbar_mut().set_tray_summary(summary);
-        if self.session.taskbar_mut().take_repaint() {
-            self.present(compositor);
-        }
+        self.present(compositor);
     }
 
     /// Adopt the session's own count of unresponsive applications into the
@@ -541,9 +554,7 @@ impl DesktopShell {
     /// app drains its window events.
     pub fn set_tray_unresponsive(&mut self, compositor: &mut Compositor, count: u16) {
         self.session.taskbar_mut().set_tray_unresponsive(count);
-        if self.session.taskbar_mut().take_repaint() {
-            self.present(compositor);
-        }
+        self.present(compositor);
     }
 
     /// Show, raise, and focus the running task shown as `window`, restoring
@@ -627,15 +638,13 @@ impl DesktopShell {
                     ShellOutcome::Taskbar(response)
                 }
             };
-        // One present per event, at one site: an acted taskbar response
-        // changed the bar (a highlight, the popup opening or closing), and a
-        // pixel-only change (a hover, a popup scroll or edit) latched the
-        // taskbar's repaint flag instead of producing a response. The latch
-        // is always drained, so nothing is presented twice.
-        let latched = self.session.taskbar_mut().take_repaint();
-        if latched || matches!(outcome, ShellOutcome::Taskbar(_)) {
-            self.present(compositor);
-        }
+        // One present per event, at one site. Every change to what a
+        // taskbar surface draws — an acted response opening a popup, or a
+        // pixel-only hover that produced no response at all — latches that
+        // surface on the model, so presenting straight from the latch
+        // repaints exactly what moved and nothing when the pointer merely
+        // crossed dead space.
+        self.present(compositor);
         // Whatever the event did to focus — a click-to-activate, a taskbar
         // activate/minimise, a desktop press — keep the decorated active frame
         // in step, so exactly the focused window shows its active title bar.

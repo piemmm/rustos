@@ -71,7 +71,7 @@ use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::collection::{Card, CardAction, ListRow, Panel, PanelAction, RowAction};
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
-use crate::paint::{clamp_permille, to_i32};
+use crate::paint::{clamp_permille, to_i32, RenderInvariant};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{
@@ -816,6 +816,26 @@ impl FocusRegion {
 /// [`set_model`](Switchboard::set_model), which re-derives every row, card, and
 /// meter but keeps the section, scroll offsets, and keyboard focus the user
 /// chose.
+///
+/// # Equality is render equivalence
+///
+/// Equal `Switchboard`s draw the same pixels for the same bounds, scale,
+/// theme, and font, so a host may use `==` as its repaint gate: a composition
+/// that compares equal to the one already on screen needs neither a render nor
+/// a present. Everything the picture depends on takes part in that comparison
+/// — the model-derived rows, cards, and meters, the section, the scroll
+/// offsets, hover and press highlights, the focus rings, the open Group popup,
+/// and the in-flight rename. The last pointer coordinate does not: it is pure
+/// hit-testing input that no render path reads, and a sample that crosses no
+/// control would otherwise force a full repaint of an unchanged surface.
+///
+/// The relation is deliberately conservative in the safe direction only.
+/// Unequal compositions *may* still draw identically (a focus index that moves
+/// while focus rests elsewhere), which costs one needless repaint; equal ones
+/// never differ on screen. The exclusion lives in the type of the excluded
+/// field — a crate-internal wrapper that always compares equal — rather than
+/// in a hand-written `PartialEq`, so a field added later counts towards
+/// equality by default.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Switchboard {
     frame: WindowFrame,
@@ -840,7 +860,10 @@ pub struct Switchboard {
     /// (Left/Right cycles it; Enter activates it). Reset whenever
     /// `content_focus` or `section` changes.
     row_action: usize,
-    pointer: Point,
+    /// The last pointer position, kept so a press can be resolved against the
+    /// coordinate the pointer actually reached — hit-testing input, never a
+    /// drawn property.
+    pointer: RenderInvariant<Point>,
     group_popup: Option<GroupPopup>,
     rename: Option<RenameEdit>,
     submitted_activity_name: Option<String>,
@@ -885,7 +908,7 @@ impl Switchboard {
             focus: FocusRegion::Content,
             content_focus: 0,
             row_action: 0,
-            pointer: Point::ORIGIN,
+            pointer: RenderInvariant::new(Point::ORIGIN),
             group_popup: None,
             rename: None,
             submitted_activity_name: None,
@@ -1954,7 +1977,7 @@ impl Switchboard {
         font: BitmapFont,
     ) -> Option<SwitchboardAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
 
         // The Group popup is modal over the rest of the composition: every
@@ -1971,7 +1994,7 @@ impl Switchboard {
         // no pointer input, so a press over it must fall through to nothing
         // rather than reaching the tab strip, the content, or the scrollbar
         // it happens to sit above (no fabricated SwitchboardAction).
-        if layout.band.contains(self.pointer) {
+        if layout.band.contains(*self.pointer) {
             return None;
         }
 
@@ -2318,7 +2341,7 @@ impl Switchboard {
         {
             if popup
                 .menu
-                .row_at(popup_rect, scale, theme, self.pointer)
+                .row_at(popup_rect, scale, theme, *self.pointer)
                 .is_none()
             {
                 self.group_popup = None;

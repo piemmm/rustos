@@ -41,6 +41,10 @@
 //! a [`Work::Closure`] job prints a start/end marker around its own run (the
 //! QEMU closures keep their serial logs inside the returned error, so a
 //! failure's log is printed once, by [`aggregate`], with no interleaving).
+//! Each job is additionally announced at the moment it is *admitted*, with the
+//! resulting in-flight weight, so the log reflects real concurrency rather
+//! than a wall of near-simultaneous start lines that says nothing about
+//! admission.
 //! When at most one job can ever run at a time (budget `1`), a
 //! [`Work::Command`] job instead streams its stdio live, exactly like a plain
 //! sequential run. The runner fails closed: every job runs to completion even
@@ -153,12 +157,28 @@ pub fn run(jobs: Vec<Job>, budget: usize) -> Result<(), String> {
             // Admit the job once it fits the remaining budget, or once nothing
             // is running (so a job heavier than the whole budget still runs,
             // alone, rather than deadlocking).
-            {
+            let in_flight_now = {
                 let mut flight = in_flight_ref.lock().expect("in-flight lock");
                 while *flight != 0 && *flight + weight > budget {
                     flight = capacity_ref.wait(flight).expect("capacity wait");
                 }
                 *flight += weight;
+                *flight
+            };
+            // Announce the job at the moment it is *admitted*, with the
+            // resulting in-flight weight, so the log honestly reflects how much
+            // work is running concurrently. Without this, successful closure
+            // jobs print nothing on completion, so their worker-side start
+            // lines pile up into a wall that looks simultaneous and says
+            // nothing about admission. A whole-budget job now shows
+            // `admitted (N/N in flight)` with no further admission until it
+            // completes, making its isolation visible in the log itself.
+            {
+                let _guard = stdio_ref.lock().expect("stdio lock");
+                eprintln!(
+                    "xtask: [{}] admitted ({in_flight_now}/{budget} in flight)",
+                    job.label
+                );
             }
             scope.spawn(move || {
                 let outcome = run_captured(job, stdio_ref);
@@ -263,7 +283,7 @@ fn aggregate(failures: Vec<String>) -> Result<(), String> {
 mod tests {
     use super::{default_concurrency, host_parallelism, run, Job};
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn ok_job(label: &str) -> Job {
@@ -381,6 +401,51 @@ mod tests {
             peak.load(Ordering::SeqCst) <= budget,
             "in-flight weight {} exceeded budget {budget}",
             peak.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn a_whole_budget_job_runs_strictly_alone() {
+        // A job weighing the entire budget must never overlap another job:
+        // this is the isolation the QEMU matrix relies on for a full-boot SMP
+        // guest, whose mutually synchronising vCPU threads starve if
+        // co-scheduled. Small jobs mark themselves "live" while they run; the
+        // whole-budget job asserts nothing else is live for its whole run.
+        let budget = 4;
+        let live = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let mut jobs: Vec<Job> = Vec::new();
+        for i in 0..8 {
+            let live_small = Arc::clone(&live);
+            jobs.push(Job::closure(format!("small{i}"), 1, move || {
+                live_small.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                live_small.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            // Drop the whole-budget job into the middle of the stream so
+            // small jobs are in flight both before and after it.
+            if i == 4 {
+                let live_whole = Arc::clone(&live);
+                let overlapped_whole = Arc::clone(&overlapped);
+                jobs.push(Job::closure("whole", budget, move || {
+                    // On entry and after a deliberate hold, no other job may
+                    // be live — the whole-budget job owns the runner alone.
+                    if live_whole.load(Ordering::SeqCst) != 0 {
+                        overlapped_whole.store(true, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    if live_whole.load(Ordering::SeqCst) != 0 {
+                        overlapped_whole.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }));
+            }
+        }
+        assert!(run(jobs, budget).is_ok());
+        assert!(
+            !overlapped.load(Ordering::SeqCst),
+            "a whole-budget job ran concurrently with another job"
         );
     }
 

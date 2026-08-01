@@ -14,6 +14,8 @@
 //! so anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
 
+use core::ops::Range;
+
 use tairix_abi::font_ipc::FontWeight;
 use tairix_geometry::Scale;
 use tairix_raster::{Color, Pixel, Surface};
@@ -256,6 +258,12 @@ fn coverage_sources(color: Color) -> [Pixel; 256] {
 /// Blit one service-returned glyph at top-left `(x, y)` from its row-major
 /// `width * height` 8-bit coverage, blending each covered pixel up to
 /// `visible` columns. Off-surface pixels clip rather than panic.
+///
+/// Both axes are clipped against the surface once, before any pixel is
+/// touched, so the loop below walks only pixels that land on it: each row
+/// blends the glyph's coverage bytes against the destination row slice in
+/// step, paying one bounds check and one row-address computation per row
+/// rather than per pixel.
 fn draw_coverage_glyph(
     surface: &mut Surface,
     x: i32,
@@ -264,26 +272,75 @@ fn draw_coverage_glyph(
     visible: u32,
     sources: &[Pixel; 256],
 ) {
-    let width = glyph.width;
-    for row in 0..glyph.height {
-        let py = y.saturating_add(step(row));
-        let Ok(uy) = u32::try_from(py) else { continue };
-        for col in 0..visible.min(width) {
-            let coverage = glyph
-                .data
-                .get((row * width + col) as usize)
-                .copied()
-                .unwrap_or(0);
-            if coverage == 0 {
+    let Some(columns) = visible_span(x, visible.min(glyph.width), surface.width()) else {
+        return;
+    };
+    let Some(rows) = visible_span(y, glyph.height, surface.height()) else {
+        return;
+    };
+    let Ok(first_row) = u32::try_from(rows.destination) else {
+        return;
+    };
+    for (source_row, destination_row) in rows.source.zip(first_row..) {
+        let Some(coverage) = glyph_row(glyph, source_row, &columns.source) else {
+            continue;
+        };
+        let Some(destination) = surface
+            .row_mut(destination_row)
+            .and_then(|row| row.get_mut(columns.destination..))
+        else {
+            continue;
+        };
+        for (&level, pixel) in coverage.iter().zip(destination.iter_mut()) {
+            if level == 0 {
                 continue;
             }
-            let px = x.saturating_add(step(col));
-            let Ok(ux) = u32::try_from(px) else { continue };
-            if let Some(dst) = surface.get(ux, uy) {
-                surface.set(ux, uy, sources[usize::from(coverage)].over(dst));
-            }
+            *pixel = sources[usize::from(level)].over(*pixel);
         }
     }
+}
+
+/// The part of one glyph axis that lands on the surface: the half-open source
+/// range of glyph rows (or columns) to read, and the surface row (or column)
+/// the first of them writes to.
+struct VisibleSpan {
+    source: Range<usize>,
+    destination: usize,
+}
+
+/// Clip `count` glyph rows (or columns) drawn at `origin` against a surface
+/// extent of `limit`, or `None` when none of them lands on it.
+///
+/// The arithmetic is widened so a glyph drawn far off either edge clips to
+/// nothing instead of wrapping onto the wrong pixels.
+fn visible_span(origin: i32, count: u32, limit: u32) -> Option<VisibleSpan> {
+    let origin = i64::from(origin);
+    let first = (-origin).max(0);
+    let last = (i64::from(limit) - origin).min(i64::from(count));
+    if first >= last {
+        return None;
+    }
+    Some(VisibleSpan {
+        source: usize::try_from(first).ok()?..usize::try_from(last).ok()?,
+        destination: usize::try_from(origin + first).ok()?,
+    })
+}
+
+/// Glyph row `row`'s coverage bytes over the `columns` the surface can show.
+///
+/// A decoded reply carries exactly `width * height` bytes, so this yields
+/// `None` only for a structurally impossible short bitmap — which skips the
+/// row rather than reading past it.
+fn glyph_row<'a>(
+    glyph: &'a client::CachedGlyph,
+    row: usize,
+    columns: &Range<usize>,
+) -> Option<&'a [u8]> {
+    let width = usize::try_from(glyph.width).ok()?;
+    let base = row.checked_mul(width)?;
+    glyph
+        .data
+        .get(base.checked_add(columns.start)?..base.checked_add(columns.end)?)
 }
 
 /// The pen advance for one character as an `i32` step, saturating.
@@ -291,7 +348,111 @@ fn advance_step(advance: u32) -> i32 {
     i32::try_from(advance).unwrap_or(i32::MAX)
 }
 
-/// A glyph row/column offset as an `i32` step, saturating.
-fn step(offset: u32) -> i32 {
-    i32::try_from(offset).unwrap_or(i32::MAX)
+#[cfg(test)]
+mod blit_tests {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    use tairix_raster::{Color, Pixel, Surface};
+
+    use super::{coverage_sources, draw_coverage_glyph};
+    use crate::client::CachedGlyph;
+
+    /// The straightforward blit: walk every glyph pixel, clip it, and
+    /// composite it through the surface's per-pixel accessors.
+    /// [`draw_coverage_glyph`] clips both axes up front and writes row
+    /// slices instead, which must be a pure cost change; this loop is the
+    /// yardstick that proves it and lives only here, so production keeps one
+    /// definition of the blit.
+    fn reference_coverage_glyph(
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        glyph: &CachedGlyph,
+        visible: u32,
+        sources: &[Pixel; 256],
+    ) {
+        let width = glyph.width;
+        for row in 0..glyph.height {
+            let py = y.saturating_add(i32::try_from(row).unwrap_or(i32::MAX));
+            let Ok(uy) = u32::try_from(py) else { continue };
+            for col in 0..visible.min(width) {
+                let coverage = glyph
+                    .data
+                    .get((row * width + col) as usize)
+                    .copied()
+                    .unwrap_or(0);
+                if coverage == 0 {
+                    continue;
+                }
+                let px = x.saturating_add(i32::try_from(col).unwrap_or(i32::MAX));
+                let Ok(ux) = u32::try_from(px) else { continue };
+                if let Some(dst) = surface.get(ux, uy) {
+                    surface.set(ux, uy, sources[usize::from(coverage)].over(dst));
+                }
+            }
+        }
+    }
+
+    /// A glyph whose coverage spans transparent, partial, and full levels, so
+    /// a blit that mishandles any of them shows up.
+    fn varied_glyph(width: u32, height: u32) -> CachedGlyph {
+        let data: Vec<u8> = (0..width * height)
+            .map(|index| match index % 5 {
+                0 => 0,
+                1 => 255,
+                other => u8::try_from((index * 37 + other) % 256).unwrap_or(0),
+            })
+            .collect();
+        CachedGlyph {
+            width,
+            height,
+            data: Box::from(data.as_slice()),
+        }
+    }
+
+    /// A surface whose every pixel differs, so a blit that composites against
+    /// the wrong destination cannot hide behind a uniform background.
+    fn patterned_surface(width: u32, height: u32) -> Surface {
+        let mut surface = Surface::new(width, height).expect("allocates");
+        for y in 0..height {
+            for x in 0..width {
+                let channel = |factor: u32| u8::try_from((x * factor + y * 7) % 256).unwrap_or(0);
+                let color = Color::rgba(channel(3), channel(11), channel(29), channel(53));
+                surface.set(x, y, color.premultiply());
+            }
+        }
+        surface
+    }
+
+    #[test]
+    fn coverage_blit_matches_the_per_pixel_reference() {
+        let glyph = varied_glyph(10, 14);
+        // Origins on, straddling, and wholly off each edge, plus the extremes
+        // where the old per-pixel offset arithmetic saturated.
+        let origins = [i32::MIN, -40, -9, -1, 0, 1, 13, 23, 24, 90, i32::MAX];
+        for &color in &[Color::rgba(240, 20, 90, 255), Color::rgba(240, 20, 90, 180)] {
+            let sources = coverage_sources(color);
+            for &visible in &[0u32, 1, 6, 10, 40] {
+                for &x in &origins {
+                    for &y in &origins {
+                        let mut actual = patterned_surface(24, 18);
+                        let mut expected = actual.clone();
+                        draw_coverage_glyph(&mut actual, x, y, &glyph, visible, &sources);
+                        reference_coverage_glyph(&mut expected, x, y, &glyph, visible, &sources);
+                        for (index, (got, want)) in
+                            actual.pixels().iter().zip(expected.pixels()).enumerate()
+                        {
+                            assert_eq!(
+                                got, want,
+                                "pixel {index} differs at ({x},{y}) \
+                                 visible {visible} alpha {}",
+                                color.a
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

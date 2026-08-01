@@ -2,7 +2,7 @@
 //!
 //! These cover slider measurement and value-to-position mapping, drag and
 //! keyboard stepping (with fail-closed bounds and zero-step), the bounded-cap
-//! marker, the §13 denied-vs-disabled distinction, the resource (pressure)
+//! marker, the spec §13 denied-vs-disabled distinction, the resource (pressure)
 //! rail colour, dark/light and high-contrast coverage, scale, and the progress
 //! trace's known/working/indeterminate/complete/failed rendering including the
 //! reduced-motion static trace.
@@ -505,5 +505,49 @@ fn progress_default_matches_new() {
     assert_eq!(
         progress_surface(&Progress::default(), &theme).pixels(),
         progress_surface(&Progress::new(), &theme).pixels()
+    );
+}
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_slider() {
+    let theme = Theme::dark();
+    let b = bounds();
+
+    // Two samples clear of the track, so only the recorded coordinate differs.
+    let mut a = Slider::new(500);
+    let mut c = a.clone();
+    assert_eq!(a.on_pointer(&moved(400, 90), b), None);
+    assert_eq!(c.on_pointer(&moved(460, 70), b), None);
+    assert_eq!(
+        a, c,
+        "a coordinate clear of the track is not a drawn property"
+    );
+    assert_eq!(
+        slider_surface(&a, &theme).pixels(),
+        slider_surface(&c, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // One holds a live drag, the other is merely *shown* pressed. A press
+    // only requests a value, so the two also carry the same reading.
+    let mut dragging = Slider::new(500);
+    dragging.on_pointer(&moved(100, 14), b);
+    dragging.on_pointer(&PRESS, b);
+    let mut shown = Slider::new(500);
+    let mut pressed = ControlState::idle();
+    pressed.pointer = crate::state::PointerState::Pressed;
+    shown.set_state(pressed);
+    assert_eq!(dragging.value(), shown.value());
+    assert_eq!(dragging, shown, "the drag latch is not a drawn property");
+    assert_eq!(
+        slider_surface(&dragging, &theme).pixels(),
+        slider_surface(&shown, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+    assert!(
+        dragging.on_pointer(&moved(151, 14), b).is_some(),
+        "the latch still governs the drag, it is only invisible"
     );
 }

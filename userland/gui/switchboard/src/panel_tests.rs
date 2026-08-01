@@ -11,7 +11,7 @@ use tairix_controls::{
     WindowControlKind,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
@@ -208,6 +208,19 @@ fn wheel(panel: &mut Panel, lines: i32) -> u64 {
         BitmapFont::inconsolata(),
     );
     view.scroll_offset()
+}
+
+/// Feed a bare pointer move to the open panel, the way the run loop
+/// delivers a `WindowEvent::Pointer` `Moved` action.
+fn pointer_move(panel: &mut Panel, to: Point) {
+    let view = panel.view_mut().expect("the panel is open");
+    view.on_pointer(
+        &InputEvent::PointerMoved { to },
+        WINDOW,
+        Scale::ONE,
+        &Theme::dark(),
+        BitmapFont::inconsolata(),
+    );
 }
 
 #[test]
@@ -657,21 +670,33 @@ fn a_refusal_notice_names_the_action_and_the_refusal() {
 }
 
 #[test]
-fn flushing_a_dirty_panel_presents_exactly_once() {
+fn the_first_flush_after_opening_always_presents() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
 
-    panel.mark_dirty();
-    panel.mark_dirty();
+    panel.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+    );
     panel.flush(&mut host);
 
-    assert_eq!(host.presents, presents + 1);
+    assert_eq!(host.presents, 1);
 }
 
 #[test]
-fn flushing_a_clean_panel_presents_nothing() {
+fn flushing_a_closed_panel_presents_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, 0);
+}
+
+#[test]
+fn flushing_an_unchanged_panel_presents_nothing() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
     open(&mut panel, &mut host, CommandSection::Tasks);
@@ -683,18 +708,98 @@ fn flushing_a_clean_panel_presents_nothing() {
 }
 
 #[test]
-fn flushing_a_closed_panel_presents_nothing() {
+fn repeated_unchanged_flushes_present_only_once_in_total() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
-    // Marking it dirty while closed.
-    panel.mark_dirty();
-    panel.flush(&mut host);
+    panel.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+    );
 
-    assert_eq!(host.presents, 0);
+    // The first flush presents the initial paint; every later one, with
+    // nothing having changed in between, must not.
+    for _ in 0..5 {
+        panel.flush(&mut host);
+    }
+
+    assert_eq!(host.presents, 1);
 }
 
 #[test]
-fn a_refused_present_is_reported_once_and_not_retried_until_marked_dirty_again() {
+fn a_pointer_move_that_reaches_the_composition_unchanged_presents_nothing() {
+    // Regression test for the reported defect: a pointer that reports the
+    // same position again crosses no control and leaves the composition
+    // byte-for-byte what it was, so the panel that used to redraw on every
+    // delivered event no longer may.
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    pointer_move(&mut panel, Point::new(5, 5));
+    panel.flush(&mut host);
+    let presents = host.presents;
+
+    pointer_move(&mut panel, Point::new(5, 5));
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents);
+}
+
+#[test]
+fn a_scroll_that_changes_the_composition_presents_exactly_once() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    assert_eq!(wheel(&mut panel, 4), 4);
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn a_window_resize_alone_presents_again() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    host.bounds.2 += 100;
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn a_theme_change_alone_presents_again() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    host.theme_id = 2;
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn a_scale_change_alone_presents_again() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    host.scale_percent = 150;
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn a_refused_present_is_reported_once_and_not_retried_by_an_unchanged_flush() {
     let mut host = RecordingHost::new();
     host.present_refusal = Some(Errno::PermissionDenied);
     let mut panel = Panel::new(OWN_PID, empty_model());
@@ -705,15 +810,16 @@ fn a_refused_present_is_reported_once_and_not_retried_until_marked_dirty_again()
         alloc::vec!["redraw the overview window"]
     );
 
-    // A second flush with no new mark does nothing.
+    // A second flush with nothing changed does not retry: the record was
+    // updated even though the present was refused.
     panel.flush(&mut host);
     assert_eq!(
         host.refused_actions(),
         alloc::vec!["redraw the overview window"]
     );
 
-    // Marking it dirty again retries.
-    panel.mark_dirty();
+    // An actual change compares unequal again and retries.
+    host.theme_id = 2;
     panel.flush(&mut host);
     assert_eq!(
         host.refused_actions(),
@@ -722,7 +828,7 @@ fn a_refused_present_is_reported_once_and_not_retried_until_marked_dirty_again()
 }
 
 #[test]
-fn refreshing_with_an_unchanged_model_marks_nothing_dirty() {
+fn refreshing_with_an_unchanged_model_then_flushing_presents_nothing() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
     open(&mut panel, &mut host, CommandSection::Tasks);
@@ -732,23 +838,4 @@ fn refreshing_with_an_unchanged_model_marks_nothing_dirty() {
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents);
-}
-
-#[test]
-fn opening_a_marked_closed_panel_presents_on_flush() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, empty_model());
-
-    // Marking it while closed records the intent.
-    panel.mark_dirty();
-    // Opening it marks it dirty again.
-    panel.command(
-        &mut host,
-        SwitchboardCommand::OpenPanel {
-            section: CommandSection::Tasks,
-        },
-    );
-
-    panel.flush(&mut host);
-    assert_eq!(host.presents, 1);
 }

@@ -107,11 +107,81 @@ There is no second rounded-corner implementation (`AGENTS.md` §2.2).
 The bar owns a copy of the active `Theme` (`Taskbar::theme`), adopted at
 construction and swapped by `Taskbar::apply_theme`. Layout, hit-testing, and
 painting all read that one copy, so the radius a hit-test assumes and the
-radius the painter draws can never come from two different themes. It also
-carries a **repaint latch**: pixel-only state changes (a launcher hover, a
-popup scroll or edit, a theme switch) set it, and the embedder drains it with
+radius the painter draws can never come from two different themes.
+
+## The per-surface repaint latch
+
+Pixel-only state changes (a launcher hover, a popup scroll or edit, a theme
+switch) set a **repaint latch**, and the embedder drains it with
 `Taskbar::take_repaint` to re-present exactly when something changed — one
 present per visual change, no per-frame busy repainting (`AGENTS.md` §2.16).
+
+The latch is a `TaskbarRepaint`, and it names **each rendered surface
+separately** rather than carrying one "something changed" bit:
+
+| Flag            | Surface                                              |
+| --------------- | ---------------------------------------------------- |
+| `bar`           | the bar strip itself                                  |
+| `library`       | the program-library popup                             |
+| `menu`          | the bar's context menu                                |
+| `notifications` | the notification popover                              |
+| `readout`       | the Switchboard capsule's expanded instrument readout |
+
+`TaskbarRepaint::NONE` and `::ALL` are the two extremes, one constant names
+each single surface, `any()` asks whether anything is pending, and `|` / `|=`
+compose latches, so a mutator touching two surfaces latches both in one
+expression.
+
+**Why per surface.** The five surfaces are wildly unequal in cost: measured on
+the host in release, rendering the bar takes 1655 µs and the library popup
+1001 µs, against the context menu's 104 µs. With a single boolean the embedder
+could not tell which had changed, so it re-rendered and re-pushed all five
+every time — a pointer drifting from one row to the next of a small open menu
+cost about 2.8 ms of rendering plus a recomposite of five window rectangles,
+when 104 µs and one small rectangle was the whole of the change. That is a
+pointer moving over a menu, the most frequent interaction the desktop has, and
+it is why the desktop felt laggy. Naming the surface lets the presenter repaint
+the 104 µs one and leave the other four exactly as the compositor already has
+them.
+
+**The contract.** Every change that alters what a surface draws latches that
+surface, and a change touching several latches all of them:
+
+- a hover moving between bar buttons, pins, or task slots → `bar`;
+- a highlight moving inside the open context menu → `menu`;
+- opening or closing the popup → `library` **and** `bar` (the Library button
+  reads as visually held open);
+- raising or dismissing a notification → `notifications` **and** `bar` (the
+  notification-area icon);
+- a Switchboard tray summary change → `bar`, plus `readout` while the readout
+  is expanded;
+- a theme swap, or an edge or resize through `Taskbar::set_config` → `ALL`,
+  since every surface draws from the palette and anchors off the bar's
+  geometry.
+
+Latch sites deliberately **err toward latching more, never less**: an extra
+latch costs one redundant repaint, while a missing one leaves stale pixels on
+screen, which is a correctness bug. Because the contract holds at every
+mutator, the embedder may present *strictly* from the drained latch — and
+present nothing at all when it is empty.
+
+The contract holds even for a borrow the bar cannot see into. Each `&mut`
+sub-model accessor latches the moment it hands the borrow out, whether or not
+the caller goes on to change anything: `tasks_mut` and `clock_mut` latch
+`bar`, and `library_mut` latches `library` **and** `bar`, since the same
+borrow can open or close the popup and so redraw the Library button. Those
+accessors carry genuine state changes — a task added, a catalog resolved, the
+clock advanced — never a per-input-sample update, so the conservative latch
+costs nothing on the hot path. The crate-internal routing seams the input
+router borrows the popup and the menu through are the deliberate opposite:
+they do not latch, because the router latches from the outcome the sub-model
+reports, which is what keeps a pointer sample over the open popup from
+repainting it.
+
+That leaves exactly one thing the embedder still owns: the desktop `Scale`,
+which the compositor passes per layout and render call rather than being bar
+state, so a scale change is the caller's own and it knows it dirtied
+everything.
 
 ## Rendering
 
@@ -423,7 +493,19 @@ focus/minimise rule, notification add/remove deduplication, the region layout
 and hit-testing for a bottom bar (both permanent launchers included),
 vertical-bar layout, all four edges, overflow clipping, degenerate
 (tiny-screen) fail-closed clipping of the launcher buttons, DPI scaling of
-layout and hit-testing, and the theme-driven corner radius and repaint latch.
+layout and hit-testing, and the theme-driven corner radius. The repaint tests
+pin the per-surface attribution itself: a hover that changes only a bar button
+latches `bar` alone, a highlight moving inside the open menu latches `menu`
+alone, a pointer move that changes no hover state latches nothing at all,
+opening and closing the popup latches `library` and `bar`, raising and
+dismissing a notification latches `notifications` and `bar`, typing in the
+popup's filter latches `library` and not `menu`, a theme swap and a
+`set_config` edge move each latch every surface, and draining clears the
+latch. Further tests pin the borrow rule: each `&mut` sub-model accessor
+latches its surfaces even when the caller changes nothing, reading through the
+immutable accessors latches nothing, a repeated pointer sample over the open
+popup latches nothing, and `NONE` / `ALL` / `any()` / `|` compose as
+documented.
 The pin tests cover the strip's placement between the launchers and the
 task list (and its reflow as pins come and go), pin hit-testing on every
 edge, the drop-index mapping (leading/trailing halves, the empty-strip

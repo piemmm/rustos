@@ -456,8 +456,9 @@ What now stands:
   `Primary` invoker carrying the new `lib/icon` `Library` glyph (a
   three-by-three tile grid), pressed-in while its popup is open; Files is a
   quiet `Neutral` folder glyph — with hover feedback driven through the
-  bar's repaint latch (`Taskbar::take_repaint`), so a hover repaints without
-  a per-frame present. The bar owns a copy of the active `Theme`
+  bar's per-surface repaint latch (`Taskbar::take_repaint` →
+  `TaskbarRepaint`), so a hover repaints only the surface it changed and
+  never a per-frame present. The bar owns a copy of the active `Theme`
   (layout/hit/paint read one definition) and the renderer signature dropped
   its separate theme parameter.
 - The generic start menu is **gone** (`StartMenu`/`MenuLayout`/`MenuAction`/
@@ -521,8 +522,10 @@ What now stands:
   (so `applib` edits show live), hands the catalog over with
   `DesktopShell::set_library`, and resolves `LibraryLaunch { entry }` back
   through that catalog to the entry's `Run` path — async-spawned, refusals
-  reported loudly by the shared reap path. One present per event: acted
-  responses and the drained repaint latch share a single present site.
+  reported loudly by the shared reap path. One present per event, at one
+  site, driven purely by the drained per-surface latch: every model change
+  latches the surfaces it alters, so a pointer crossing no control presents
+  nothing at all.
 - **Deliberate deviation, recorded**: the staged text had T5 "offer" the
   right-click *Pin to taskbar* typed action with its session path arriving
   in T7. A typed action emitted before any consumer exists is speculative

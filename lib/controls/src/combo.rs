@@ -3,12 +3,12 @@
 //! A combo box is a field plus a disclosure action: a quiet Alloy Plate showing
 //! the currently selected choice with a trailing down chevron, expanding to a
 //! [`Menu`] of choices. It composes the text-field focus model (a plate, a
-//! focus ring, the §13 authority treatment) and the [`Menu`] model for the
-//! expanded list rather than re-deriving either (`AGENTS.md` §2.2): the popup
+//! focus ring, the spec §13 authority treatment) and the [`Menu`] model for the
+//! expanded list rather than re-deriving either: the popup
 //! *is* a [`Menu`] built from the choices, so the menu's keyboard navigation,
 //! hover, and rendering are reused unchanged. Selection belongs to the choice
 //! list, never to string parsing inside the control. Every activation is a
-//! typed [`ComboAction`]; the control enforces no authority (`AGENTS.md` §5.4).
+//! typed [`ComboAction`]; the control enforces no authority.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,7 +22,7 @@ use tairix_theme::Theme;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame,
-    surface_rect, to_i32, ChevronDir, PlateStyle,
+    surface_rect, to_i32, ChevronDir, PlateStyle, RenderInvariant,
 };
 use crate::state::{ControlRole, ControlState, SelectionState};
 
@@ -47,6 +47,11 @@ pub enum ComboAction {
 /// selected one highlighted. The owner renders the collapsed field with
 /// [`ComboBox::render`] and, while [`ComboBox::is_expanded`] is true, renders
 /// the popup with [`ComboBox::render_popup`] sized by [`ComboBox::popup_size`].
+///
+/// Equal combo boxes draw the same pixels, so a host may use `==` as its
+/// repaint gate: the choices, selection, placeholder, expanded flag, popup
+/// menu, role, and visible state compare. The pointer coordinate and the press
+/// latch do not — no render path reads either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComboBox {
     choices: Vec<String>,
@@ -56,8 +61,11 @@ pub struct ComboBox {
     menu: Menu,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// Whether a primary press landed on the field and has not yet been
+    /// released; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl ComboBox {
@@ -73,8 +81,8 @@ impl ComboBox {
             menu,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -189,7 +197,7 @@ impl ComboBox {
             return None;
         }
         self.expanded = false;
-        self.armed = false;
+        *self.armed = false;
         Some(ComboAction::Closed)
     }
 
@@ -329,14 +337,14 @@ impl ComboBox {
         theme: &Theme,
     ) -> Option<ComboAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         if self.expanded {
             match self.menu.on_pointer(event, popup_bounds, scale, theme) {
                 Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
                     self.select_internal(index);
                     self.expanded = false;
-                    self.armed = false;
+                    *self.armed = false;
                     return Some(ComboAction::Selected { index });
                 }
                 Some(MenuAction::Dismissed) => return self.close(),
@@ -347,27 +355,27 @@ impl ComboBox {
                 InputEvent::PointerPressed {
                     button: PointerButton::Primary
                 }
-            ) && !popup_bounds.contains(self.pointer)
-                && !field_bounds.contains(self.pointer)
+            ) && !popup_bounds.contains(*self.pointer)
+                && !field_bounds.contains(*self.pointer)
             {
                 return self.close();
             }
             return None;
         }
 
-        let inside = field_bounds.contains(self.pointer);
+        let inside = field_bounds.contains(*self.pointer);
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.armed = inside && self.state.is_actionable();
+                *self.armed = inside && self.state.is_actionable();
                 None
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                let fire = self.armed && inside && self.state.is_actionable();
-                self.armed = false;
+                let fire = *self.armed && inside && self.state.is_actionable();
+                *self.armed = false;
                 if fire {
                     self.open()
                 } else {

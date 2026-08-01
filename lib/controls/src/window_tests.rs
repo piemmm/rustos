@@ -786,3 +786,115 @@ fn outer_for_client_uses_the_light_theme_metrics_too() {
     let outer = frame.outer_for_client(client, Scale::ONE, &theme);
     assert_eq!(frame.layout(outer, Scale::ONE, &theme).client, client);
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_window_control() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, 40, 40);
+
+    // Two samples clear of the glyph, so only the recorded coordinate differs.
+    let mut a = WindowControl::new(WindowControlKind::Close);
+    let mut b = a.clone();
+    let _ = a.on_pointer(&moved(80, 80), bounds);
+    let _ = b.on_pointer(&moved(120, 12), bounds);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the glyph is not a drawn property"
+    );
+    assert_eq!(
+        render_control(&a, &theme, 40).pixels(),
+        render_control(&b, &theme, 40).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // One holds a real press latch, the other is merely *shown* pressed.
+    let mut latched = WindowControl::new(WindowControlKind::Close);
+    let _ = latched.on_pointer(&moved(10, 10), bounds);
+    let _ = latched.on_pointer(&PRESS, bounds);
+    let mut shown = WindowControl::new(WindowControlKind::Close);
+    let mut pressed = ControlState::idle();
+    pressed.pointer = PointerState::Pressed;
+    shown.set_state(pressed);
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        render_control(&latched, &theme, 40).pixels(),
+        render_control(&shown, &theme, 40).pixels(),
+        "…and the two must therefore paint identically"
+    );
+    assert_eq!(
+        latched.on_pointer(&RELEASE, bounds),
+        Some(WindowControlAction::Invoked(WindowControlKind::Close)),
+        "the latch still governs activation, it is only invisible"
+    );
+}
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let paint = |bar: &TitleBar| {
+        let mut surface = Surface::new(300, 28).expect("surface");
+        bar.render(&mut surface, bounds, Scale::ONE, &theme, font());
+        surface.pixels().to_vec()
+    };
+
+    // Two samples clear of the bar, so only the recorded coordinate differs.
+    let mut a = TitleBar::new(furniture());
+    let mut b = a.clone();
+    let _ = a.on_pointer(&moved(50, 200), bounds, Scale::ONE, &theme);
+    let _ = b.on_pointer(&moved(90, 240), bounds, Scale::ONE, &theme);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the bar is not a drawn property"
+    );
+    assert_eq!(
+        paint(&a),
+        paint(&b),
+        "…and the two must therefore paint identically"
+    );
+
+    // Both are pressed in the drag region, at different points: the origin
+    // the drag threshold is measured from is bookkeeping, not a picture.
+    let mut near = TitleBar::new(furniture());
+    let _ = near.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme);
+    let _ = near.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let mut far = TitleBar::new(furniture());
+    let _ = far.on_pointer(&moved(90, 14), bounds, Scale::ONE, &theme);
+    let _ = far.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    assert_eq!(near, far, "the press origin is not a drawn property");
+    assert_eq!(
+        paint(&near),
+        paint(&far),
+        "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn pointer_position_alone_never_changes_a_grabber_render() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, 20, 20);
+    let paint = |grabber: &ResizeGrabber| {
+        let mut surface = Surface::new(20, 20).expect("surface");
+        grabber.render(&mut surface, bounds, Scale::ONE, &theme);
+        surface.pixels().to_vec()
+    };
+
+    // Two samples clear of the teeth, so only the recorded coordinate
+    // differs; a drag in progress is visible and stays compared.
+    let mut a = ResizeGrabber::new();
+    let mut b = a.clone();
+    let _ = a.on_pointer(&moved(60, 60), bounds);
+    let _ = b.on_pointer(&moved(90, 40), bounds);
+
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the grabber is not a drawn property"
+    );
+    assert_eq!(
+        paint(&a),
+        paint(&b),
+        "…and the two must therefore paint identically"
+    );
+}

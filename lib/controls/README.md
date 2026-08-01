@@ -3,7 +3,7 @@
 Stability tier: **experimental**.
 
 Shared **Reactive Alloy** GUI control behaviour for the TAIRiX desktop
-(`lib/controls`, `AGENTS.md` §6 / §17.4 — `plans/GUI-CONTROLS-DESIGN.md`).
+(`lib/controls` — see `plans/GUI-CONTROLS-DESIGN.md`).
 
 Reactive Alloy is TAIRiX's GUI control design language: controls are typed
 Rust state resolved against the shared theme (`lib/theme`) and drawn through
@@ -44,7 +44,7 @@ non-zero denominator, so no path panics. Invalid, overflowing, or stale range
 data fails closed to a non-draggable, zero-offset scrollbar rather than
 producing out-of-bounds geometry.
 
-The **typed control-state vocabulary** (`state`) is the §5 model as composed
+The **typed control-state vocabulary** (`state`) is the spec §5 model as composed
 Rust: `ControlKind`/`ControlRole`, `ControlState` built from small typed fields
 (`FocusState`/`PointerState`/`SelectionState`/`ValidationState`/`AuthorityState`/
 `ActivityState`/`PressureState`/`RecoveryState`), the derived `ControlDisposition`
@@ -107,6 +107,35 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 The shared chevron and focus-ring/cell-outline primitives live once in the
 private `paint` module (`ChevronDir`/`paint_chevron`, `draw_outline`), so no
 family carries its own triangle or outline recipe.
+
+## Equality is render equivalence
+
+Every control and composition in this crate compares equal exactly when the
+two values **would draw the same pixels**. That is a deliberate contract, not
+an accident of `#[derive(PartialEq)]`, and a consumer may rely on it: a host
+that holds the composition it last drew can compare the one it is about to
+draw against it and skip the render and the window present entirely when
+they match. A comparison costs microseconds where a full composition render
+plus a window repaint costs milliseconds, so this is the difference between
+a desktop that stays responsive under a moving pointer and one that does not.
+
+Controls also carry state that exists only for hit testing — the last raw
+pointer coordinate, the press latch that remembers where a button-down
+landed, a scrollbar's drag anchor. None of it reaches `render`, so counting
+it as a difference would defeat the contract: a pointer sample crossing no
+control would look like a change. Such a field is wrapped in
+`RenderInvariant<T>` (see `src/paint.rs`), a transparent newtype whose own
+`PartialEq` always compares equal. The exception therefore lives in the
+*type of the excluded field*, so each struct keeps its `derive` and a field
+added later is covered automatically — where a hand-written `PartialEq` per
+struct could silently forget one.
+
+Visible state stays in equality: a hover highlight, a pressed appearance, a
+focus ring, a selection, and a scrollbar's `dragging`/`held` (which it draws)
+all make two values unequal, because they make them look different. Every
+exclusion carries a drift guard in the tests: two values differing *only* in
+that field are rendered and their pixels compared byte for byte, so the
+exclusion is proved rather than asserted.
 
 ## Where it sits
 

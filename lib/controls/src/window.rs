@@ -34,6 +34,7 @@ use tairix_theme::Theme;
 use crate::paint::{
     draw_outline, heavy_contrast, inset, key_activation, paint_bead, paint_plate, plate_border,
     pointer_activation, resolve_bead, resolve_frame, surface_rect, to_i32, PlateStyle,
+    RenderInvariant,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, SizeAction, WindowActivationState,
@@ -234,18 +235,26 @@ pub enum WindowControlAction {
 /// Built from the shared button behaviour (the `crate::paint` plate,
 /// focus-ring, press-latch, and keyboard-activation core the [`crate::Button`]
 /// family uses), it draws the command's glyph on a quiet plate that brightens
-/// on hover/focus/press and mutes on an inactive frame, and carries the §13
+/// on hover/focus/press and mutes on an inactive frame, and carries the spec §13
 /// authority treatment (a denied control keeps its slot and shows the lock
 /// bead rather than looking merely disabled). A [`WindowControlKind::SizeToggle`]
 /// shows the glyph and accessible name of the action it will perform *next*.
+///
+/// Equal controls draw the same pixels, so a host may use `==` as its repaint
+/// gate: the command, the next size action, whether the frame is active, and
+/// the visible state all compare. The pointer coordinate and press latch do
+/// not — no render path reads either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowControl {
     kind: WindowControlKind,
     state: ControlState,
     next_size: SizeAction,
     active_frame: bool,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch, kept while the pointer slides off so the control still
+    /// fires on release over it; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl WindowControl {
@@ -257,8 +266,8 @@ impl WindowControl {
             state: ControlState::idle(),
             next_size: SizeAction::Maximize,
             active_frame: true,
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -405,9 +414,9 @@ impl WindowControl {
     /// control (a size toggle) or takes the frame away (close/minimise/back).
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<WindowControlAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
             self.rest();
             Some(WindowControlAction::Invoked(self.kind))
@@ -437,13 +446,13 @@ impl WindowControl {
     fn rest(&mut self) {
         self.state.pointer = PointerState::None;
         self.state.focus.focused = false;
-        self.armed = false;
+        *self.armed = false;
     }
 
     /// Whether the control currently holds a captured press latch.
     #[must_use]
     fn armed(&self) -> bool {
-        self.armed
+        *self.armed
     }
 }
 
@@ -559,6 +568,15 @@ fn sanitize_label(text: &str) -> String {
 /// title text is untrusted application data, so it is length-bounded, control
 /// characters are replaced, and it truncates with an ellipsis before it would
 /// overlap the controls.
+///
+/// Equal title bars draw the same pixels, so a host may use `==` as its
+/// repaint gate: the furniture state, control placement, the four commands
+/// with their own visible states, and both texts all compare. The whole drag
+/// gesture behind them does not — the pointer coordinate, the pending-press
+/// and dragging latches, and the press origin the threshold is measured from
+/// are hit-testing bookkeeping no render path reads. What a drag *shows* is
+/// the window moving, which is the owner's geometry rather than this bar's
+/// pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBar {
     furniture: WindowFurnitureState,
@@ -566,10 +584,15 @@ pub struct TitleBar {
     controls: [WindowControl; 4],
     app_name: String,
     title: String,
-    pointer: Point,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// Whether a press landed on the drag region and has not been released.
     press_pending: bool,
+    /// Whether that press has passed the drag threshold and become a move.
     dragging: bool,
-    press_origin: Point,
+    /// Where the pending press started, so the threshold measures the whole
+    /// gesture rather than the last sample.
+    press_origin: RenderInvariant<Point>,
 }
 
 impl TitleBar {
@@ -589,10 +612,10 @@ impl TitleBar {
             controls,
             app_name: String::new(),
             title: String::new(),
-            pointer: Point::ORIGIN,
+            pointer: RenderInvariant::new(Point::ORIGIN),
             press_pending: false,
             dragging: false,
-            press_origin: Point::ORIGIN,
+            press_origin: RenderInvariant::new(Point::ORIGIN),
         };
         bar.apply_furniture();
         bar
@@ -818,7 +841,7 @@ impl TitleBar {
         theme: &Theme,
     ) -> Option<TitleBarEvent> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let layout = self.layout(bounds, scale, theme);
 
@@ -838,17 +861,17 @@ impl TitleBar {
         let over_control = layout
             .controls
             .iter()
-            .any(|(_, r)| r.contains(self.pointer));
+            .any(|(_, r)| r.contains(*self.pointer));
         let any_armed = self.controls.iter().any(WindowControl::armed);
 
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                if !over_control && !any_armed && bounds.contains(self.pointer) {
+                if !over_control && !any_armed && bounds.contains(*self.pointer) {
                     self.press_pending = true;
                     self.dragging = false;
-                    self.press_origin = self.pointer;
+                    *self.press_origin = *self.pointer;
                     return Some(TitleBarEvent::Activate);
                 }
                 None
@@ -1301,11 +1324,18 @@ pub enum ResizeEvent {
 /// maximized window disables the grabber; a disabled grabber ignores input
 /// (fail closed). Geometry follows the pointer with no easing, so it is
 /// reduced-motion correct.
+///
+/// Equal grabbers draw the same pixels, so a host may use `==` as its repaint
+/// gate: the visible state, whether the frame is active, and — unlike the
+/// other furniture — the `dragging` flag all compare, because a grabber in a
+/// drag draws its teeth in the pressed treatment. Only the pointer coordinate
+/// is excluded; no render path reads it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResizeGrabber {
     state: ControlState,
     active_frame: bool,
-    pointer: Point,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
     dragging: bool,
 }
 
@@ -1322,7 +1352,7 @@ impl ResizeGrabber {
         Self {
             state: ControlState::idle(),
             active_frame: true,
-            pointer: Point::ORIGIN,
+            pointer: RenderInvariant::new(Point::ORIGIN),
             dragging: false,
         }
     }
@@ -1409,9 +1439,9 @@ impl ResizeGrabber {
     /// or denied grabber ignores input (fail closed).
     pub fn on_pointer(&mut self, event: &InputEvent, hit_bounds: Rect) -> Option<ResizeEvent> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = hit_bounds.contains(self.pointer);
+        let inside = hit_bounds.contains(*self.pointer);
         match event {
             InputEvent::PointerMoved { to } => {
                 if self.dragging {

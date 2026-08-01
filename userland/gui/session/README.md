@@ -122,6 +122,17 @@ is session glue. Given a `&mut tairix_wm::Compositor` and the taskbar's own
   the bar at `LibraryLayout::panel`'s origin, and rounds it the same way;
   closing the popup removes the popup window.
 
+`present` repaints **only the surfaces the taskbar latched as changed**
+(`TaskbarRepaint`, drained once by `DesktopShell::present`). The bar, the
+library popup, the context menu, the notification popover, and the capsule's
+instrument readout each cost a full re-render and a full window damage
+rectangle, so a pointer crossing one small open menu repaints that menu and
+leaves the other four exactly as they are. Two things override an empty
+latch: a surface that has no window yet is always painted, so the first frame
+puts everything on screen; and a change of desktop density repaints
+everything, because the scale belongs to the output rather than to the
+taskbar model the latch tracks.
+
 The presenter owns only the two compositor `WindowId` tokens it minted, so the
 session composes the GUI crates without holding the window-manager handle. It
 is total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate
@@ -191,10 +202,12 @@ live device events" thread:
 - A taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and surfaced as
   `ShellOutcome::Taskbar` for the embedder; the bar is re-presented exactly
-  once per event at one site (an acted response and the drained repaint
-  latch share the decision), so an opened/closed popup or a hover reaches
-  the screen without double-painting; a window-manager action needs no
-  re-present, so motion and drags stay cheap.
+  once per event at one site, straight from the taskbar's drained per-surface
+  repaint latch. Every model change that alters what a surface draws latches
+  that surface, so an opened/closed popup or a hover reaches the screen
+  without double-painting, and a motion that crosses no control — over the
+  desktop, over a window, or over dead space on the bar — repaints nothing at
+  all.
 - `set_library` hands the popup the merged catalog (refreshing an open popup
   in place) and `raise_window` shows, raises, and focuses a tracked task's
   window — the Files button's idempotent open.
@@ -263,6 +276,24 @@ fixed-width drain, so the channel implements **both** seam traits through
 one shared validation path rather than two (`AGENTS.md` §2.2); which records
 flow is decided by the reader it wraps. Wrap a pointer reader in
 `DeviceInputSource`, or a keyboard reader in `KeyboardInputSource`.
+
+## What an application's presented frame costs
+
+An application repaints its whole composition and presents whole-window
+damage, because a toolkit generally cannot say which pixels its own paint
+touched. `ShellWindowHost::window_presented` therefore converts the presented
+pixels into the compositor's own content surface **and measures what actually
+changed while it does so**: the conversion returns the bounding rectangle of
+the pixels whose value differs, and only that rectangle is marked dirty. A
+hover highlight a few rows tall costs a few rows of recomposition instead of
+a whole window, and a repaint that changes nothing at all costs nothing. The
+comparison is exact — a pixel reported unchanged carries the byte-identical
+value it already had — and it rides a loop that already reads the frame and
+writes the surface, so it adds one read per pixel and no allocation.
+
+The conversion also validates every index it will use *before* the first
+write, so a malformed or hostile geometry refuses the whole present and
+leaves the window exactly as it was, never half-converted.
 
 ## Running-task list ↔ window stack
 

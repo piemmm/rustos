@@ -24,7 +24,9 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use crate::paint::{draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir};
+use crate::paint::{
+    draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir, RenderInvariant,
+};
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
 use crate::state::{ControlDisposition, ControlState, PointerState};
 
@@ -145,6 +147,14 @@ impl BarLayout {
 /// a private offset beside it) and reports every requested change as a typed
 /// [`ScrollAction`]; a denied or disabled bar keeps its position and ignores
 /// input rather than looking merely inert (spec §13).
+///
+/// Equal bars draw the same pixels, so a host may use `==` as its repaint
+/// gate. Unusually for this crate most of the interaction state is *visible*
+/// here and so still compares: the pointer coordinate lights the end control
+/// beneath it, and `dragging`/`held` brighten the thumb and the held end.
+/// Only the drag anchor is excluded — it is the grab offset within the thumb,
+/// read solely to keep the thumb under the pointer, and no render path reads
+/// it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ScrollBar {
     orientation: ScrollOrientation,
@@ -152,7 +162,9 @@ pub struct ScrollBar {
     state: ControlState,
     pointer: Point,
     dragging: bool,
-    anchor: i32,
+    /// How far along the thumb the drag was grabbed, so the thumb keeps its
+    /// offset under the pointer instead of jumping its start to it.
+    anchor: RenderInvariant<i32>,
     held: Option<ScrollPart>,
 }
 
@@ -166,7 +178,7 @@ impl ScrollBar {
             state: ControlState::idle(),
             pointer: Point::ORIGIN,
             dragging: false,
-            anchor: 0,
+            anchor: RenderInvariant::new(0),
             held: None,
         }
     }
@@ -284,7 +296,7 @@ impl ScrollBar {
                 if self.dragging {
                     let offset = layout
                         .geometry
-                        .offset_for_drag(layout.along(self.pointer), self.anchor);
+                        .offset_for_drag(layout.along(self.pointer), *self.anchor);
                     self.apply(|m| m.scroll_to(offset))
                 } else {
                     self.state.pointer = if layout.bar.contains(self.pointer) {
@@ -326,7 +338,7 @@ impl ScrollBar {
                         if layout.geometry.draggable() {
                             self.dragging = true;
                             let thumb_start = to_i32(layout.geometry.thumb().start);
-                            self.anchor = layout.along(self.pointer) - thumb_start;
+                            *self.anchor = layout.along(self.pointer) - thumb_start;
                             self.state.pointer = PointerState::Pressed;
                         }
                         None

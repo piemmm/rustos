@@ -7,7 +7,7 @@
 //! present (spec §11.8). Both resolve every colour/metric/radius from the active
 //! [`Theme`] and [`Scale`], round their plate through the shared drawing core
 //! the button/selector/value families use, and emit a typed [`TextAction`] — the
-//! owning service enforces authority (`AGENTS.md` §5.4).
+//! owning service enforces authority.
 //!
 //! A read-only field is enabled and legible (its text stays full-contrast and
 //! selectable for copy) but refuses edits; that is deliberately distinct from a
@@ -24,7 +24,7 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     paint_bead, paint_plate, plate_border, resolve_bead, resolve_frame, surface_rect, to_i32,
-    PlateStyle,
+    PlateStyle, RenderInvariant,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, PointerState, ValidationState};
 
@@ -49,7 +49,7 @@ pub enum TextAction {
 /// is the (possibly empty) range between them. Editing operations clamp to the
 /// optional character limit and can never leave the caret mid-scalar, so a
 /// renderer never has to defend against an invalid index (illegal states
-/// unrepresentable, `AGENTS.md` §2.11).
+/// unrepresentable).
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TextEditor {
     text: String,
@@ -344,8 +344,13 @@ fn byte_from_x(font: BitmapFont, text: &str, rel: i32) -> usize {
 /// The shared single-line field: editor, role, composed state, read-only flag,
 /// placeholder, and inline message, plus the render and input behaviour every
 /// text control reuses. [`TextField`] and [`SearchField`] wrap one of these so
-/// the editing model, clipped scrolling, caret/selection drawing, and the §13
-/// disposition rendering are defined once (`AGENTS.md` §2.2).
+/// the editing model, clipped scrolling, caret/selection drawing, and the spec §13
+/// disposition rendering are defined once.
+///
+/// Sharing the core also gives both fields the same render-equivalence
+/// equality: the text, caret, selection endpoints, role, visible state,
+/// placeholder, and message all compare — while the pointer coordinate and the
+/// selection-drag latch, which no render path reads, do not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FieldCore {
     editor: TextEditor,
@@ -354,8 +359,12 @@ struct FieldCore {
     read_only: bool,
     placeholder: Option<String>,
     message: Option<String>,
-    pointer: Point,
-    selecting: bool,
+    /// The last pointer position, mapped to a byte index when a press or a
+    /// drag places the caret — hit-testing input, never a drawn property.
+    pointer: RenderInvariant<Point>,
+    /// Whether a press is still extending a selection; what that produces —
+    /// the caret and the selection endpoints — lives in `editor`.
+    selecting: RenderInvariant<bool>,
 }
 
 impl FieldCore {
@@ -368,8 +377,8 @@ impl FieldCore {
             read_only: false,
             placeholder: None,
             message: None,
-            pointer: Point::ORIGIN,
-            selecting: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            selecting: RenderInvariant::new(false),
         }
     }
 
@@ -588,16 +597,16 @@ impl FieldCore {
         leading: u32,
     ) -> Option<TextAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let geom = field_geom(bounds, scale, theme, font, leading)?;
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.actionable() {
-                    self.selecting = true;
+                    *self.selecting = true;
                     self.state.pointer = PointerState::Pressed;
                     let byte = self.byte_at(geom.text_x0, geom.avail_w, font);
                     self.editor.place_caret(byte, false);
@@ -605,7 +614,7 @@ impl FieldCore {
                 None
             }
             InputEvent::PointerMoved { .. } => {
-                if self.selecting {
+                if *self.selecting {
                     let byte = self.byte_at(geom.text_x0, geom.avail_w, font);
                     self.editor.place_caret(byte, true);
                 } else {
@@ -620,7 +629,7 @@ impl FieldCore {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                self.selecting = false;
+                *self.selecting = false;
                 self.state.pointer = if inside {
                     PointerState::Hover
                 } else {
@@ -699,7 +708,7 @@ impl FieldCore {
 /// text buffer; it renders itself into a [`Surface`] and consumes pointer and
 /// keyboard input, emitting a [`TextAction`] when the content changes or the
 /// user submits/cancels. It performs no privileged work — the owning container
-/// validates the value and enforces authority (`AGENTS.md` §5.4). A read-only
+/// validates the value and enforces authority. A read-only
 /// field stays legible and selectable but refuses edits, distinct from a
 /// disabled field (muted) and a denied field (Authority Mark), per spec §13.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -878,7 +887,7 @@ fn paint_magnifier(surface: &mut Surface, x: u32, y: u32, size: u32, color: Colo
 /// so the query state is legible from the leading affordance. Escape clears a
 /// non-empty query (reporting [`TextAction::Edited`]) before dismissing the
 /// field; every other behaviour matches [`TextField`], over one shared editing
-/// and rendering core (`AGENTS.md` §2.2).
+/// and rendering core.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchField {
     core: FieldCore,

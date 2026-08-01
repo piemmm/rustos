@@ -38,6 +38,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+#[cfg(migration_smp)]
+use crate::progress::StallGuard;
 use tairix_abi::{CapabilityId, Errno, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS};
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
@@ -153,8 +155,14 @@ static WITHIN_ARG: [u8; DEC_MAX] = dec_bytes(WITHIN_BYTES);
 /// [`OVER_BYTES`] as a decimal argument-vector value.
 static OVER_ARG: [u8; DEC_MAX] = dec_bytes(OVER_BYTES);
 
-/// Cooperative-loop watchdog: maximum `step` iterations before the test
-/// declares the workload deadlocked. Sized generously for QEMU TCG.
+/// Liveness budget for the cooperative driver loops, sized generously for
+/// QEMU TCG. In the single-CPU `drive_process` loop, where the process
+/// advances only when the boot CPU steps it, this bounds the total steps
+/// before the run is declared deadlocked. In the four-vCPU migration driver,
+/// where the child advances independently on the secondaries, it instead
+/// bounds the *consecutive no-progress* iterations (the `StallGuard`), so the
+/// give-up there measures the child's progress rather than the controller's
+/// spin rate against a host-scheduled backdrop.
 const MAX_STEPS: u64 = 5_000_000;
 
 /// Stable audit-event ids for the QEMU transcript.
@@ -879,8 +887,22 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let mut last_cpu = None;
         let mut migrations = 0u32;
         let mut exit_code = None;
-        for _ in 0..MAX_STEPS {
-            let _ = tairix_kernel_core::waitq::drain_pending_wakes();
+        // Give up only on a genuine stall — a run of controller iterations in
+        // which the child made no progress at all — never after a fixed count
+        // of total iterations. This loop spins on the boot CPU while the child
+        // advances on the secondaries, so a total-iteration budget would
+        // measure how fast this loop spins relative to the child, a ratio the
+        // host sets arbitrarily by how it schedules the four vCPU threads; a
+        // busy or unevenly co-scheduled host could then exhaust it before a
+        // healthy child finishes. Counting only consecutive no-progress
+        // iterations makes the give-up independent of host load: any sign the
+        // child is still advancing — a drained wake answering its blocking
+        // IPC, the child seen running on a secondary, or a fresh forced
+        // migration — resets the guard, so a slow-but-live run waits as long
+        // as it needs and only a truly wedged child is declared deadlocked.
+        let mut guard = StallGuard::new(MAX_STEPS);
+        loop {
+            let mut progressed = tairix_kernel_core::waitq::drain_pending_wakes();
             let mut running_cpu = None;
             for cpu in 1..CPU_COUNT {
                 if sys.sched.current_task(cpu) == Some(ipc_pid) {
@@ -890,6 +912,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                 }
             }
             if let Some(cpu) = running_cpu {
+                progressed = true;
                 if last_cpu != Some(cpu) {
                     if let Some(previous) = last_cpu {
                         migrations += 1;
@@ -918,6 +941,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                 },
                 Err(Errno::WouldBlock) => {}
                 Err(_) => qemu_exit::exit_failure(FAIL_POLL),
+            }
+            if guard.observe(progressed) {
+                break;
             }
         }
         SMP_PAUSED.store(0, Ordering::Release);

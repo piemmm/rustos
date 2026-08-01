@@ -320,3 +320,42 @@ fn selected_helper_builds_a_selected_state() {
     let tabs = Tabs::new(vec![Tab::new("A").with_state(selected_state())]);
     assert_eq!(tabs.selected(), Some(0));
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+
+    // Two samples clear of the strip, so only the recorded coordinate differs.
+    let mut a = three_tabs();
+    let mut b = a.clone();
+    a.on_pointer(&moved(xi(W) + 40, xi(H) + 40), bounds);
+    b.on_pointer(&moved(xi(W) + 90, xi(H) + 12), bounds);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the strip is not a drawn property"
+    );
+    assert_eq!(
+        render(&a, &theme).pixels(),
+        render(&b, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // Both hover the already-selected tab, so the selection and the hover
+    // match; only one holds the press, and which tab a release would choose
+    // is not drawn.
+    let over_selected = moved(xi(EACH) / 2, xi(H) / 2);
+    let mut latched = three_tabs();
+    latched.on_pointer(&over_selected, bounds);
+    latched.on_pointer(&PRESS, bounds);
+    let mut hovered = three_tabs();
+    hovered.on_pointer(&over_selected, bounds);
+    assert_eq!(latched, hovered, "the armed tab is not a drawn property");
+    assert_eq!(
+        render(&latched, &theme).pixels(),
+        render(&hovered, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+}

@@ -13,7 +13,7 @@
 //! every shared recipe (plate rounding, Signal Bead, Pressure Rail, focus ring)
 //! comes from the shared `crate::paint` core rather than a second copy. A
 //! control renders state and emits a typed action; it performs no privileged
-//! work — the owning service enforces authority (`AGENTS.md` §5.4). A denied
+//! work — the owning service enforces authority. A denied
 //! surface keeps its value and shows an Authority Mark rather than collapsing
 //! into a plain disabled look (spec §13).
 
@@ -31,7 +31,7 @@ use crate::button::{Button, ButtonAction};
 use crate::paint::{
     dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_count_badge,
     plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail, seam_thickness,
-    seam_width, surface_rect, to_i32,
+    seam_width, surface_rect, to_i32, RenderInvariant,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
@@ -48,8 +48,7 @@ pub enum RowAction {
 // [`ListRow`] and [`TableRow`] paint the same background, rails, activity
 // seam, Signal Bead, and focus ring; only their *content* (a label vs a set
 // of aligned cells) differs. That shared recipe lives here once so a change
-// to how a selected or pressured row reads cannot diverge between the two
-// (`AGENTS.md` §2.2).
+// to how a selected or pressured row reads cannot diverge between the two.
 
 /// Paint the shared row chrome — background tint, leading pressure and
 /// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
@@ -176,6 +175,11 @@ fn centred_text_y(font: BitmapFont, y: u32, h: u32) -> i32 {
 /// and drawn by the shared row chrome. The row renders state and never
 /// dispatches — a completed click or Space/Enter reports [`RowAction`] and the
 /// owner selects or opens it.
+///
+/// Equal rows draw the same pixels, so a host may use `==` as its repaint
+/// gate: the label, icon, trailing caption, role, and every visible part of
+/// the composed state compare, while the pointer coordinate and press latch
+/// beneath them — which no render path reads — do not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListRow {
     label: String,
@@ -183,8 +187,10 @@ pub struct ListRow {
     icon: Option<IconKind>,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl ListRow {
@@ -197,8 +203,8 @@ impl ListRow {
             icon: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -335,9 +341,9 @@ impl ListRow {
     /// click over an actionable row reports [`RowAction::Activated`].
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<RowAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         pointer_activation(&mut self.state, &mut self.armed, event, inside)
             .then_some(RowAction::Activated)
     }
@@ -486,13 +492,19 @@ impl TableCell {
 /// column widths. Because the cells are laid out relative to the shared content
 /// rect, a row's state changing never shifts a column — the table stays aligned
 /// (spec §11.13). A completed click or Space/Enter reports [`RowAction`].
+///
+/// Its equality is the render-equivalence relation [`ListRow`] documents: the
+/// cells, role, and visible state compare; the pointer coordinate and press
+/// latch do not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableRow {
     cells: Vec<TableCell>,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl TableRow {
@@ -503,8 +515,8 @@ impl TableRow {
             cells,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -633,9 +645,9 @@ impl TableRow {
     /// click over an actionable row reports [`RowAction::Activated`].
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<RowAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         pointer_activation(&mut self.state, &mut self.armed, event, inside)
             .then_some(RowAction::Activated)
     }

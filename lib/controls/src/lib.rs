@@ -101,7 +101,7 @@
 //! The [`menu`] module is the menu command surface — [`Menu`] and
 //! [`MenuItem`]. A menu is an elevated command plate carrying a column of row
 //! controls (label, optional icon, shortcut, submenu chevron, and a disabled
-//! row's reason); it owns keyboard navigation, pointer hover/click, the §13
+//! row's reason); it owns keyboard navigation, pointer hover/click, the spec §13
 //! authority rendering (a denied row keeps its slot and shows an Authority
 //! Mark), and a destructive row's danger rail, emitting a typed [`MenuAction`].
 //!

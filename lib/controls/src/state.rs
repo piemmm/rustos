@@ -98,7 +98,7 @@ pub enum ControlKind {
 
 /// The intent a control carries, which drives its default emphasis.
 ///
-/// A role never grants authority (`AGENTS.md` §5.4): a [`ControlRole::Primary`]
+/// A role never grants authority: a [`ControlRole::Primary`]
 /// or [`ControlRole::Recommended`] action can still be refused by the backing
 /// service after activation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -198,7 +198,7 @@ pub enum ValidationState {
 /// Whether the caller may perform a control's action, and if not, why.
 ///
 /// A denial is rendered distinctly from a plain disabled control
-/// (`AGENTS.md` §5.4 / spec §13): the control never silently collapses "you
+/// (spec §13): the control never silently collapses "you
 /// lack authority" into "this is inactive". Security-sensitive reasons are
 /// conveyed as concise user-facing text by the renderer, never as secrets or
 /// capability tokens.
@@ -221,7 +221,7 @@ pub enum AuthorityState {
 ///
 /// Constructed through [`ProgressValue::new`], which clamps out-of-range
 /// input, so a renderer can never receive a fraction beyond full and never
-/// has to defend against one (fail closed, `AGENTS.md` §2.9).
+/// has to defend against one (fail closed).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ProgressValue {
     permille: u16,

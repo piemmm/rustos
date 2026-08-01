@@ -71,8 +71,12 @@ publishing continue unchanged whether or not a window is open**, because
 the window is a view onto a monitor that never stops monitoring. The
 system is re-sampled strictly on its 2 s deadline: an input or command
 wake never re-queries the system. The model is rebuilt on that same
-tickless cadence and re-presented at most once per wake, only when it
-actually changed.
+tickless cadence, and the panel presents **at most once per wake, and only
+when what it would draw differs from what it last drew** — the
+composition itself, the window's bounds, the active theme, and the render
+scale (`src/panel.rs::Panel::flush`). A wake that delivered an event but
+left every one of those unchanged, such as a pointer move that crosses no
+control, costs no render and no present.
 
 | Section | Source |
 |---|---|
@@ -90,9 +94,10 @@ rendered as the controls' disable reasons). Members are pruned — and an
 emptied group dissolved — only on a sample whose process list succeeded,
 so a degraded sample never wipes groupings; set actions sweep **only
 members joined to the current sample**, because a stored numeric pid whose
-process exited may have been reused by an unrelated process. Grouping
-edits mark the panel dirty and are presented once in the same wake, before
-the service parks again.
+process exited may have been reused by an unrelated process. A grouping
+edit changes the model the panel holds, so it compares unequal to what was
+last presented and is drawn once in the same wake, before the service
+parks again.
 
 The seat report carries owner **ids only**; the names beside them are the
 ones this service attested itself, so display text is never taken from the

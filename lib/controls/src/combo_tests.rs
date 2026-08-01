@@ -270,3 +270,50 @@ fn renders_at_a_larger_scale_without_panicking() {
     );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
+    let theme = Theme::dark();
+    let render = |combo: &ComboBox| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme, font());
+        surface
+    };
+
+    // Two samples clear of the field, so only the recorded coordinate differs.
+    let none = Rect::new(0, 0, 0, 0);
+    let mut a = combo();
+    let mut b = a.clone();
+    a.on_pointer(&moved(400, 60), field_bounds(), none, Scale::ONE, &theme);
+    b.on_pointer(&moved(460, 70), field_bounds(), none, Scale::ONE, &theme);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the field is not a drawn property"
+    );
+    assert_eq!(
+        render(&a).pixels(),
+        render(&b).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // A press on the field only latches; the disposition a press *shows* is
+    // the owner-set `ControlState`, which is still compared.
+    let mut latched = combo();
+    latched.on_pointer(&moved(8, 14), field_bounds(), none, Scale::ONE, &theme);
+    latched.on_pointer(&PRESS, field_bounds(), none, Scale::ONE, &theme);
+    let resting = combo();
+    assert_eq!(latched, resting, "the press latch is not a drawn property");
+    assert_eq!(
+        render(&latched).pixels(),
+        render(&resting).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    let mut pressed = combo();
+    let mut state = ControlState::idle();
+    state.pointer = crate::state::PointerState::Pressed;
+    pressed.set_state(state);
+    assert_ne!(resting, pressed, "the shown pressed disposition is visible");
+}

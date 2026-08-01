@@ -35,7 +35,7 @@ use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
 use crate::viewport::{FurnitureHit, RootViewport};
-use crate::window::{Window, WindowId};
+use crate::window::{Window, WindowId, WindowRow};
 
 /// Scan-out channel order for a supported [`DisplayFormat`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -61,6 +61,23 @@ pub struct Compositor {
     order: ChannelOrder,
     windows: Vec<Window>,
     cursor: Option<CursorLayer>,
+    /// The screen rectangle the cursor covered as of the last
+    /// [`composite`](Self::composite), or `None` if it was hidden then.
+    /// [`composite`](Self::composite) diffs the *current* cursor state
+    /// against this to decide the cursor's damage, so a whole batch of
+    /// [`set_cursor`](Self::set_cursor) / [`move_cursor`](Self::move_cursor) /
+    /// [`hide_cursor`](Self::hide_cursor) calls pumped between two
+    /// composites recomposites only the rectangle the cursor is leaving and
+    /// the one it ends up in, never an intermediate position nothing was
+    /// ever drawn to.
+    cursor_on_screen: Option<Rect>,
+    /// Whether [`set_cursor`](Self::set_cursor) installed artwork the last
+    /// [`composite`](Self::composite) did not draw. Replacement artwork is
+    /// always assumed to differ from what is on screen — exactly as a
+    /// replaced window surface is — so a shape change landing on the very
+    /// same rectangle (the pointer picking up a text or resize shape
+    /// without moving) still repaints.
+    cursor_replaced: bool,
     back: Surface,
     frame: Vec<u8>,
     damage: DamageRegion,
@@ -96,6 +113,8 @@ impl Compositor {
             order,
             windows: Vec::new(),
             cursor: None,
+            cursor_on_screen: None,
+            cursor_replaced: false,
             back,
             frame,
             damage: DamageRegion::new(),
@@ -261,55 +280,84 @@ impl Compositor {
     }
 
     /// Move a window to a new screen position; both the old and new
-    /// covered rectangles are marked dirty.
+    /// covered rectangles are marked dirty. A move to the window's current
+    /// origin marks no damage and still returns `true` (only an unknown
+    /// `id` returns `false`).
     pub fn move_window(&mut self, id: WindowId, origin: Point) -> bool {
-        self.mutate(id, |w| {
-            w.set_origin(origin);
-        })
+        self.mutate(id, |w| w.set_origin(origin))
     }
 
-    /// Set a window's opacity (`255` opaque); its bounds are marked
-    /// dirty.
+    /// Set a window's opacity (`255` opaque); its bounds are marked dirty.
+    /// Setting the opacity it already has marks no damage and still
+    /// returns `true` (only an unknown `id` returns `false`).
     pub fn set_opacity(&mut self, id: WindowId, opacity: u8) -> bool {
         self.mutate(id, |w| w.set_opacity(opacity))
     }
 
-    /// Set a window's corner style; its bounds are marked dirty.
+    /// Set a window's corner style; its bounds are marked dirty. Setting
+    /// the corners it already has marks no damage and still returns `true`
+    /// (only an unknown `id` returns `false`).
     pub fn set_corners(&mut self, id: WindowId, corners: Corners) -> bool {
         self.mutate(id, |w| w.set_corners(corners))
     }
 
-    /// Show or hide a window; its bounds are marked dirty.
+    /// Show or hide a window; its bounds are marked dirty. Setting the
+    /// visibility it already has marks no damage and still returns `true`
+    /// (only an unknown `id` returns `false`).
     pub fn set_visible(&mut self, id: WindowId, visible: bool) -> bool {
         self.mutate(id, |w| w.set_visible(visible))
     }
 
     /// Replace a window's content surface; the union of the old and new
-    /// bounds is marked dirty.
+    /// bounds is marked dirty. A replacement surface is always assumed to
+    /// change the window's appearance, so this never skips damage the way
+    /// [`move_window`](Self::move_window) and its siblings do for a
+    /// genuine no-op.
     pub fn set_surface(&mut self, id: WindowId, surface: Surface) -> bool {
-        self.mutate(id, |w| w.replace_surface(surface))
+        self.mutate(id, |w| {
+            w.replace_surface(surface);
+            true
+        })
     }
 
-    /// Edit a window's content surface **in place**, marking the window's
-    /// bounds dirty, and return the edit's own result — or `None` for an
-    /// unknown `id`.
+    /// Edit a window's content surface **in place**, marking dirty only the
+    /// content-local rectangle the edit reports it changed, and return the
+    /// edit's own value — or `None` for an unknown `id`.
     ///
     /// Unlike [`set_surface`](Self::set_surface), the caller writes into
     /// the window's existing buffer rather than handing over a fresh one,
     /// so a presenter applying a per-frame damage region into the
     /// window's persistent content needs no second copy of the surface to
-    /// convert into and clone from. The edit must not resize the surface
-    /// (a window's dimensions are fixed for its lifetime); the marked
-    /// bounds are the window's current bounds.
+    /// convert into and clone from. The edit reports its own damage rather
+    /// than the caller declaring one up front, because only the edit
+    /// itself — by comparing each converted pixel against the one already
+    /// there — learns which pixels genuinely changed; a rectangle handed
+    /// down before the edit runs would have to be conservative and repaint
+    /// pixels that never moved.
+    ///
+    /// The reported `Rect` is in content-surface-local pixels (origin at
+    /// the content's top-left). It is translated by the window's content
+    /// origin and intersected with its client rectangle
+    /// ([`Window::client_rect`]), so an empty rectangle marks nothing and
+    /// an over-large one is clipped rather than ever reaching into a
+    /// neighbouring window. The edit must not resize the surface (a
+    /// window's dimensions are fixed for its lifetime).
     pub fn edit_window_surface<T>(
         &mut self,
         id: WindowId,
-        edit: impl FnOnce(&mut Surface) -> T,
+        edit: impl FnOnce(&mut Surface) -> (T, Rect),
     ) -> Option<T> {
         let window = self.windows.iter_mut().find(|w| w.id() == id)?;
-        let bounds = window.bounds();
-        let out = edit(window.surface_mut());
-        self.damage.add(bounds);
+        let (out, local_damage) = edit(window.surface_mut());
+        let client = window.client_rect();
+        let screen_damage = Rect::new(
+            client.left().saturating_add(local_damage.left()),
+            client.top().saturating_add(local_damage.top()),
+            local_damage.width,
+            local_damage.height,
+        )
+        .intersection(&client);
+        self.damage.add(screen_damage);
         Some(out)
     }
 
@@ -411,7 +459,8 @@ impl Compositor {
     /// Give the window named by `id` a root viewport, so the window manager
     /// composes its scrollbars as furniture around the client. Returns
     /// `false` for an unknown id. The window's bounds are marked dirty (the
-    /// reserved gutter re-clips the client).
+    /// reserved gutter re-clips the client), unless it already had this
+    /// exact viewport, in which case nothing is marked.
     pub fn set_root_viewport(&mut self, id: WindowId, viewport: RootViewport) -> bool {
         self.mutate(id, |w| w.set_viewport(Some(viewport)))
     }
@@ -419,7 +468,8 @@ impl Compositor {
     /// Remove the root viewport from the window named by `id`, so the window
     /// manager stops composing scrollbar furniture and the client reclaims
     /// the reserved gutter. Returns `false` for an unknown id. The window's
-    /// bounds are marked dirty (the reclaimed gutter recomposites).
+    /// bounds are marked dirty (the reclaimed gutter recomposites), unless
+    /// it had no viewport already, in which case nothing is marked.
     pub fn clear_root_viewport(&mut self, id: WindowId) -> bool {
         self.mutate(id, |w| w.set_viewport(None))
     }
@@ -659,44 +709,48 @@ impl Compositor {
     }
 
     /// Show `image` as the pointer cursor with its hotspot at `pointer`,
-    /// replacing any current cursor. The old and new covered rectangles are
-    /// marked dirty so the overlay is recomposited in place.
+    /// replacing any current cursor.
     ///
     /// The artwork comes from `lib/cursor` (a scalable, colourful, vector
     /// cursor rasterised at the display scale); the compositor only places
-    /// and blends it.
+    /// and blends it. This does not mark damage itself:
+    /// [`composite`](Self::composite) derives it from the footprint
+    /// recorded at the *previous* composite, so any mix of `set_cursor`,
+    /// [`move_cursor`](Self::move_cursor), and
+    /// [`hide_cursor`](Self::hide_cursor) calls pumped before the next
+    /// composite recomposites only the rectangle the cursor is leaving and
+    /// the one it ends up in — never an intermediate position nothing was
+    /// ever drawn to.
+    ///
+    /// Replacement artwork always repaints, even when it covers exactly the
+    /// rectangle already on screen: the pointer picks up a text or resize
+    /// shape without moving, and those pixels differ however identical the
+    /// rectangle is.
     pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) {
-        if let Some(cursor) = &self.cursor {
-            self.damage.add(cursor.bounds());
-        }
-        let cursor = CursorLayer::new(image, pointer);
-        self.damage.add(cursor.bounds());
-        self.cursor = Some(cursor);
+        self.cursor = Some(CursorLayer::new(image, pointer));
+        self.cursor_replaced = true;
     }
 
-    /// Move the pointer cursor so its hotspot sits at `pointer`, marking the
-    /// old and new covered rectangles dirty. Returns `false` when no cursor
-    /// is shown.
+    /// Move the pointer cursor so its hotspot sits at `pointer`. Returns
+    /// `false` when no cursor is shown.
+    ///
+    /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
+    /// derived.
     pub fn move_cursor(&mut self, pointer: Point) -> bool {
         let Some(cursor) = &mut self.cursor else {
             return false;
         };
-        let before = cursor.bounds();
         cursor.set_pointer(pointer);
-        let after = cursor.bounds();
-        self.damage.add(before);
-        self.damage.add(after);
         true
     }
 
-    /// Hide the pointer cursor, marking its covered rectangle dirty so the
-    /// pixels beneath it are restored. Returns `false` when none was shown.
+    /// Hide the pointer cursor so the pixels beneath it are restored on the
+    /// next composite. Returns `false` when none was shown.
+    ///
+    /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
+    /// derived.
     pub fn hide_cursor(&mut self) -> bool {
-        let Some(cursor) = self.cursor.take() else {
-            return false;
-        };
-        self.damage.add(cursor.bounds());
-        true
+        self.cursor.take().is_some()
     }
 
     /// The screen rectangle the cursor currently covers, if one is shown.
@@ -705,10 +759,39 @@ impl Compositor {
         self.cursor.as_ref().map(CursorLayer::bounds)
     }
 
-    /// Whether any pixels are pending recomposition.
+    /// Whether any pixels are pending recomposition — either an explicitly
+    /// marked rectangle or a cursor move/show/hide/replacement whose damage
+    /// has not yet been derived by a [`composite`](Self::composite).
+    ///
+    /// This answers exactly the question the next
+    /// [`composite`](Self::composite) does: it is `true` if and only if
+    /// that composite would recompose at least one pixel. A caller driving
+    /// a wake loop can therefore skip the frame entirely when it is
+    /// `false`, and never miss one when it is `true`. Damage marked wholly
+    /// off screen is no pending work: composite clips every rectangle to
+    /// the screen, so this clips them too rather than promising a frame
+    /// that would recompose nothing.
     #[must_use]
     pub fn has_damage(&self) -> bool {
-        !self.damage.is_empty()
+        let screen = self.screen_rect();
+        let on_screen = |rect: Rect| !rect.intersection(&screen).is_empty();
+        if self.damage.rects().iter().any(|&rect| on_screen(rect)) {
+            return true;
+        }
+        if !self.cursor_needs_recompose() {
+            return false;
+        }
+        self.cursor_on_screen.is_some_and(on_screen) || self.cursor_bounds().is_some_and(on_screen)
+    }
+
+    /// Whether the cursor overlay's pixels differ from the ones the last
+    /// [`composite`](Self::composite) drew: it moved, appeared,
+    /// disappeared, or its artwork was replaced
+    /// ([`set_cursor`](Self::set_cursor)). The rectangle it occupied then
+    /// and the one it occupies now are its whole damage, however many
+    /// pointer samples were pumped in between.
+    fn cursor_needs_recompose(&self) -> bool {
+        self.cursor_replaced || self.cursor_bounds() != self.cursor_on_screen
     }
 
     /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
@@ -724,14 +807,38 @@ impl Compositor {
     /// scan-out frame, then clear the damage. Pixels outside the damage
     /// region keep their previous value (the point of damage tracking).
     ///
-    /// Returns the smallest screen rectangle covering every recomposed
-    /// pixel — [`Rect::EMPTY`] when nothing was dirty — so a presenter
-    /// can hand the display only the changed region
-    /// ([`Display::present_region`]).
-    pub fn composite(&mut self) -> Rect {
+    /// Returns the [`DamageRegion`] actually recomposited — the
+    /// screen-clipped rectangles every mutation marked dirty since the
+    /// last composite, plus the cursor's own damage (see below) — empty
+    /// when nothing was dirty. Presenting each of its rectangles individually
+    /// (via [`Display::present_region`]) moves bytes proportional to what
+    /// changed rather than their bounding box, which can span far more of
+    /// the screen than the union of the pixels that actually moved (a
+    /// dirty taskbar strip plus a cursor near the opposite edge, say).
+    ///
+    /// The pointer cursor is not damaged as it moves; instead this method
+    /// diffs the cursor's current footprint (and artwork identity) against
+    /// what was recorded at the *previous* composite
+    /// ([`set_cursor`](Self::set_cursor)'s docs) and damages just the
+    /// rectangle it left and the one it is now in, so a whole batch of
+    /// pointer samples pumped between two composites costs exactly two
+    /// rectangles, not one per sample.
+    pub fn composite(&mut self) -> DamageRegion {
         let screen = self.screen_rect();
+        let current_cursor = self.cursor_bounds();
+        if self.cursor_needs_recompose() {
+            if let Some(old) = self.cursor_on_screen {
+                self.damage.add(old);
+            }
+            if let Some(new) = current_cursor {
+                self.damage.add(new);
+            }
+        }
+        self.cursor_on_screen = current_cursor;
+        self.cursor_replaced = false;
+
         let damage = core::mem::take(&mut self.damage);
-        let mut bounds = Rect::EMPTY;
+        let mut composited = DamageRegion::new();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
         let base = self.background.premultiply();
@@ -743,7 +850,7 @@ impl Compositor {
             if area.is_empty() {
                 continue;
             }
-            bounds = bounds.union(&area);
+            composited.add(area);
             // Only a window whose bounds overlap this rectangle can
             // contribute a pixel inside it; every other window's sample
             // is unconditionally `None` here, so skipping it is exact
@@ -755,13 +862,9 @@ impl Compositor {
                     hits.push(index);
                 }
             }
-            for y in area.top()..area.bottom() {
-                for x in area.left()..area.right() {
-                    self.recompose_pixel(x, y, base, &hits);
-                }
-            }
+            self.recompose_rect(area, base, &hits);
         }
-        bounds
+        composited
     }
 
     /// The current scan-out frame, laid out for [`Compositor::mode`].
@@ -776,27 +879,46 @@ impl Compositor {
         &self.back
     }
 
-    /// Composite any pending damage and present the frame to `display`.
+    /// Composite any pending damage and present it to `display`.
     ///
-    /// When the recomposed damage is a strict sub-rectangle of the screen
-    /// the frame is handed over through [`Display::present_region`], so a
-    /// driver whose scan-out path is a copy (and the remote display
-    /// client's shared-memory blit) touches only the changed pixels; a
-    /// whole-screen damage — and the no-damage case, whose present is the
-    /// caller's explicit request to (re-)show the current frame — takes
-    /// the full [`Display::present`] path.
+    /// No damage means nothing changed since the last present, so this
+    /// does nothing at all and does not call `display` — a wake that
+    /// changed nothing must not cost a scan-out copy or a driver blit.
+    /// A composited region spanning the whole screen takes the full
+    /// [`Display::present`] path. Otherwise each composited rectangle is
+    /// handed to [`Display::present_region`] individually, so the bytes
+    /// moved are proportional to what actually changed rather than the
+    /// bounding box of a scattered set of dirty rectangles (a taskbar
+    /// strip and a cursor near the opposite edge, say) — unless there are
+    /// more than [`MAX_PRESENT_REGIONS`] of them, in which case a single
+    /// bounding-box present replaces the whole batch (see its docs for
+    /// why). Whatever is finally presented — a single rectangle from the
+    /// per-rectangle path or the fallback bounding box — still takes the
+    /// full-screen path if it turns out to cover the whole screen.
     ///
     /// # Errors
     ///
     /// Propagates any [`DriverError`] the display driver returns from
     /// [`Display::present`] / [`Display::present_region`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
-        let bounds = self.composite();
-        if let Some(damage) = sub_screen_damage(&bounds, &self.mode) {
-            display.present_region(&self.frame, damage)
-        } else {
-            display.present(&self.frame)
+        let region = self.composite();
+        if region.is_empty() {
+            return Ok(());
         }
+        let Some(bounding_damage) = sub_screen_damage(&region.bounds(), &self.mode) else {
+            return display.present(&self.frame);
+        };
+        let rects = region.rects();
+        if rects.len() > MAX_PRESENT_REGIONS {
+            return display.present_region(&self.frame, bounding_damage);
+        }
+        for &rect in rects {
+            match sub_screen_damage(&rect, &self.mode) {
+                Some(damage) => display.present_region(&self.frame, damage)?,
+                None => display.present(&self.frame)?,
+            }
+        }
+        Ok(())
     }
 
     /// Present via the display's hardware layer engine when it can serve
@@ -912,48 +1034,110 @@ impl Compositor {
         })
     }
 
-    /// Apply `change` to the window named by `id`, marking the union of
-    /// its bounds before and after dirty. Returns `false` for an unknown
-    /// id.
-    fn mutate(&mut self, id: WindowId, change: impl FnOnce(&mut Window)) -> bool {
+    /// Apply `change` to the window named by `id` and mark the union of
+    /// its bounds before and after dirty, but only when `change` reports
+    /// it actually changed the window — an unknown `id` still returns
+    /// `false`. A no-op update (a move to the same origin, corners set to
+    /// what they already were, a visibility flip to the current value)
+    /// therefore repaints nothing: the caller learns the true outcome
+    /// only by attempting the change, exactly as [`edit_window_surface`]
+    /// learns a content edit's true damage only by performing it.
+    ///
+    /// [`edit_window_surface`]: Self::edit_window_surface
+    fn mutate(&mut self, id: WindowId, change: impl FnOnce(&mut Window) -> bool) -> bool {
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
         };
         let before = window.bounds();
-        change(window);
+        if !change(window) {
+            return true;
+        }
         let after = window.bounds();
         self.damage.add(before);
         self.damage.add(after);
         true
     }
 
-    /// Recompute the composited value of screen pixel `(x, y)` and write
-    /// it to the back buffer and the encoded frame.
-    fn recompose_pixel(&mut self, x: i32, y: i32, base: Pixel, hits: &[usize]) {
-        let mut acc = base;
-        for &index in hits {
-            if let Some(src) = self.windows[index].sample(x, y) {
-                acc = src.over(acc);
+    /// Recompute every pixel of screen rectangle `area` (already clipped
+    /// to the screen) and write it to the back buffer and the encoded
+    /// frame. `hits` is the index, into `self.windows`, of every window
+    /// whose bounds overlap `area` — the only windows that can contribute
+    /// a pixel here.
+    ///
+    /// Everything that is constant across a row is resolved before the
+    /// column loop: each covering layer's source row ([`Window::row`]),
+    /// the destination row of the back buffer, and the destination row of
+    /// the encoded frame. A column is then a slice index and a blend,
+    /// rather than a coordinate conversion, a layer decision, and a
+    /// `y * stride + x * 4` offset recomputed for every pixel — which is
+    /// what made the previous per-pixel dispatch cost several times the
+    /// arithmetic it actually needed. The one allocation is the row-view
+    /// list, made once per damaged rectangle and refilled per row, never
+    /// per pixel.
+    fn recompose_rect(&mut self, area: Rect, base: Pixel, hits: &[usize]) {
+        let Self {
+            mode,
+            order,
+            windows,
+            cursor,
+            back,
+            frame,
+            ..
+        } = self;
+        let stride = mode.stride_bytes as usize;
+        let order = *order;
+        let windows: &[Window] = windows;
+        let cursor = cursor.as_ref();
+        let (Ok(first_col), Ok(cols)) = (usize::try_from(area.left()), usize::try_from(area.width))
+        else {
+            return;
+        };
+        let (Some(last_col), Some(first_byte), Some(row_bytes)) = (
+            first_col.checked_add(cols),
+            first_col.checked_mul(4),
+            cols.checked_mul(4),
+        ) else {
+            return;
+        };
+        let mut rows: Vec<WindowRow<'_>> = Vec::with_capacity(hits.len());
+        for y in area.top()..area.bottom() {
+            let Ok(py) = u32::try_from(y) else { continue };
+            rows.clear();
+            rows.extend(hits.iter().filter_map(|&index| windows.get(index)?.row(y)));
+            let cursor_row = cursor.and_then(|c| c.local_row(y));
+            let Some(back_row) = back
+                .row_mut(py)
+                .and_then(|row| row.get_mut(first_col..last_col))
+            else {
+                continue;
+            };
+            let Some(frame_row) = (py as usize)
+                .checked_mul(stride)
+                .and_then(|row_start| row_start.checked_add(first_byte))
+                .and_then(|start| frame.get_mut(start..start.checked_add(row_bytes)?))
+            else {
+                continue;
+            };
+            let (frame_pixels, _) = frame_row.as_chunks_mut::<4>();
+            for ((dst, bytes), x) in back_row
+                .iter_mut()
+                .zip(frame_pixels)
+                .zip(area.left()..area.right())
+            {
+                let mut acc = base;
+                for row in &rows {
+                    if let Some(src) = row.sample(x) {
+                        acc = src.over(acc);
+                    }
+                }
+                if let Some(ly) = cursor_row {
+                    if let Some(src) = cursor.and_then(|c| c.sample_row(x, ly)) {
+                        acc = src.over(acc);
+                    }
+                }
+                *dst = acc;
+                *bytes = encode_pixel(order, acc);
             }
-        }
-        if let Some(cursor) = &self.cursor {
-            if let Some(src) = cursor.sample(x, y) {
-                acc = src.over(acc);
-            }
-        }
-        let Ok(px) = u32::try_from(x) else { return };
-        let Ok(py) = u32::try_from(y) else { return };
-        self.back.set(px, py, acc);
-        self.encode_pixel(px, py, acc);
-    }
-
-    /// Write the four scan-out bytes for `(px, py)` in the active format.
-    fn encode_pixel(&mut self, px: u32, py: u32, pixel: Pixel) {
-        let stride = self.mode.stride_bytes as usize;
-        let offset = py as usize * stride + px as usize * 4;
-        let bytes = encode_pixel(self.order, pixel);
-        if let Some(slot) = self.frame.get_mut(offset..offset + 4) {
-            slot.copy_from_slice(&bytes);
         }
     }
 }
@@ -985,14 +1169,35 @@ impl LayerBuf {
     }
 }
 
+/// The most rectangles [`Compositor::present`] will hand to
+/// [`Display::present_region`] individually before falling back to a
+/// single bounding-box present.
+///
+/// Each `present_region` call is a synchronous IPC round trip to the
+/// display service: its fixed dispatch cost (marshalling the message,
+/// the context switch into the driver and back) is paid once per call no
+/// matter how few pixels the rectangle covers, while the *marginal* cost
+/// of a larger copy is just more bytes memcpy'd — the measured whole
+/// 1024×768×4 frame copy this crate optimises away (~108 microseconds
+/// for almost 3.2 MiB) puts that marginal cost at a small fraction of a
+/// microsecond per extra kilobyte. The fixed per-call cost therefore
+/// dominates well before the combined bounding box grows large: past a
+/// handful of rectangles, the sum of their round trips costs more than
+/// one call that copies their (larger) bounding box in a single trip.
+/// Eight keeps the common cases — a moved window plus the cursor, a
+/// couple of repainted widgets — on the cheap per-rectangle path while
+/// capping a pathological scattered-damage frame at one round trip
+/// instead of dozens.
+pub const MAX_PRESENT_REGIONS: usize = 8;
+
 /// Convert composited damage `bounds` into the [`DamageRect`] a
 /// [`Display::present_region`] call carries, or `None` when the full
-/// [`Display::present`] path should run instead: an empty bounds (the
-/// present is then an explicit re-show of the current frame) or a bounds
-/// covering the whole screen. The bounds are already clipped to the
-/// screen, so the coordinate conversions cannot fail; a rectangle that
-/// nevertheless does not fit falls back to the full present rather than
-/// presenting a wrong region.
+/// [`Display::present`] path should run instead: a bounds covering the
+/// whole screen, or (defensively; every caller already screen-clips and
+/// skips empty rectangles) a degenerate empty one. The bounds are already
+/// clipped to the screen, so the coordinate conversions cannot fail; a
+/// rectangle that nevertheless does not fit falls back to the full
+/// present rather than presenting a wrong region.
 fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect> {
     if bounds.is_empty() {
         return None;

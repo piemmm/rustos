@@ -8,7 +8,7 @@
 //! Signal Bead, and pressure rail come from that tool's [`crate::button`]
 //! state, so background work shows on the tool, not across the whole strip).
 //! Activation is reported as a typed [`ToolbarAction`]; the toolbar enforces no
-//! authority (`AGENTS.md` §5.4). Every metric resolves from the active
+//! authority. Every metric resolves from the active
 //! [`Theme`] and [`Scale`].
 
 use alloc::vec::Vec;
@@ -20,7 +20,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{IconButton, SplitAction, SplitButton};
-use crate::paint::{heavy_contrast, plate_border, surface_rect, to_i32};
+use crate::paint::{heavy_contrast, plate_border, surface_rect, to_i32, RenderInvariant};
 
 /// Which region of a tool an activation came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -67,11 +67,19 @@ struct Entry {
 /// [`Toolbar::set_active`]) carries a persistent lower accent seam. Keyboard
 /// focus moves between tools with Left/Right (Home/End to the ends) and
 /// Enter/Space activates the focused tool.
+///
+/// Equal toolbars draw the same pixels, so a host may use `==` as its repaint
+/// gate: the tools with their own hover/press/active state, their group ids,
+/// and the keyboard focus index all compare. The pointer coordinate does not
+/// — the strip only forwards it to the tool it lands on, and no render path
+/// reads it.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct Toolbar {
     entries: Vec<Entry>,
     focus: Option<usize>,
-    pointer: Point,
+    /// The last pointer position, forwarded to the tool it falls on —
+    /// hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
 }
 
 impl Toolbar {
@@ -307,7 +315,7 @@ impl Toolbar {
         theme: &Theme,
     ) -> Option<ToolbarAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let (rects, _) = self.layout(bounds, scale, theme);
         let mut fired = None;

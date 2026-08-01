@@ -57,6 +57,7 @@ use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
 use crate::pins::PinView;
+use crate::repaint::TaskbarRepaint;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
 
@@ -537,9 +538,9 @@ impl TaskbarInput {
         };
         let theme = taskbar.theme().clone();
         let outcome = match event {
-            InputEvent::KeyPressed { key, .. } => taskbar.menu_mut().route_key(key),
+            InputEvent::KeyPressed { key, .. } => taskbar.menu_routing_mut().route_key(key),
             InputEvent::KeyReleased { .. } => MenuOutcome::Ignored,
-            ref pointer_event => taskbar.menu_mut().route_pointer(
+            ref pointer_event => taskbar.menu_routing_mut().route_pointer(
                 pointer_event,
                 self.pointer,
                 &layout,
@@ -550,11 +551,13 @@ impl TaskbarInput {
         match outcome {
             MenuOutcome::Ignored => TaskbarResponse::Ignored,
             MenuOutcome::Changed | MenuOutcome::Dismissed => {
-                taskbar.request_repaint();
+                // The menu is its own overlay surface: a highlight move, a
+                // fold, or a dismiss changes only what it draws.
+                taskbar.request_repaint(TaskbarRepaint::MENU);
                 TaskbarResponse::Ignored
             }
             MenuOutcome::Choose(choice) => {
-                taskbar.request_repaint();
+                taskbar.request_repaint(TaskbarRepaint::MENU);
                 Self::apply_choice(taskbar, choice)
             }
         }
@@ -625,11 +628,11 @@ impl TaskbarInput {
         let layout = taskbar.library_layout(scale);
         let theme = taskbar.theme().clone();
         let outcome = match event {
-            InputEvent::KeyPressed { key, modifiers } => {
-                taskbar.library_mut().route_key(key, modifiers, &layout)
-            }
+            InputEvent::KeyPressed { key, modifiers } => taskbar
+                .library_routing_mut()
+                .route_key(key, modifiers, &layout),
             InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
-            ref pointer_event => taskbar.library_mut().route_pointer(
+            ref pointer_event => taskbar.library_routing_mut().route_pointer(
                 pointer_event,
                 self.pointer,
                 &layout,
@@ -640,7 +643,10 @@ impl TaskbarInput {
         match outcome {
             PopupOutcome::Ignored => TaskbarResponse::Ignored,
             PopupOutcome::Changed => {
-                taskbar.request_repaint();
+                // A scroll, a filter edit, or a fold changes only what the
+                // popup itself draws — the bar's Library button is already
+                // latched once, by the open that made the popup modal.
+                taskbar.request_repaint(TaskbarRepaint::LIBRARY);
                 TaskbarResponse::Ignored
             }
             PopupOutcome::Launch(entry) => {

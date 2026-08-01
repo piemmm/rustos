@@ -29,6 +29,7 @@ use crate::notifications::{
 };
 use crate::pins::PinView;
 use crate::render::TaskbarRenderer;
+use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
 use crate::tray::derive_signal;
@@ -73,10 +74,13 @@ fn office_and_games() -> Catalog {
     ])
 }
 
-/// A bottom-bar taskbar over the standard fixture with its popup closed.
+/// A bottom-bar taskbar over the standard fixture with its popup closed,
+/// handed back settled: seeding the catalog latches the popup and the bar,
+/// and that is the fixture's own doing, never what a test measures.
 fn bottom_bar() -> Taskbar {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
     bar.library_mut().set_catalog(office_and_games());
+    let _ = bar.take_repaint();
     bar
 }
 
@@ -350,6 +354,32 @@ fn notifications_order_by_severity_then_recency() {
         .collect();
     // Critical first, then Warning, then the two Info newest-first (c before a).
     assert_eq!(titles, ["b", "d", "c", "a"]);
+}
+
+#[test]
+fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
+    let mut bar = bottom_bar();
+    let _ = bar.take_repaint();
+
+    assert!(bar.raise_notification(TransientNotification::new(
+        7,
+        1,
+        NotifySeverity::Info,
+        "Sync",
+        "Started",
+    )));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
+        "a raise shows a card in the popover and updates the bar's icon"
+    );
+
+    assert!(bar.clear_notification(7, 1));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
+        "a dismiss removes the card and updates the bar's icon"
+    );
 }
 
 #[test]
@@ -719,13 +749,31 @@ fn corner_radius_comes_from_the_theme() {
 }
 
 #[test]
-fn apply_theme_swaps_the_owned_theme_and_latches_a_repaint() {
+fn apply_theme_swaps_the_owned_theme_and_latches_every_surface() {
     let mut bar = bottom_bar();
-    assert!(!bar.take_repaint(), "a fresh bar has nothing pending");
+    assert!(!bar.take_repaint().any(), "a fresh bar has nothing pending");
     bar.apply_theme(&Theme::light());
     assert_eq!(bar.theme().id(), Theme::light().id());
-    assert!(bar.take_repaint(), "a theme switch needs a repaint");
-    assert!(!bar.take_repaint(), "taking the latch clears it");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::ALL,
+        "every surface draws from the palette, so a theme switch repaints them all"
+    );
+    assert!(!bar.take_repaint().any(), "taking the latch clears it");
+}
+
+#[test]
+fn set_config_latches_every_surface() {
+    let mut bar = bottom_bar();
+    let _ = bar.take_repaint();
+    let mut config = *bar.config();
+    config.edge = Edge::Top;
+    bar.set_config(config);
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::ALL,
+        "every surface is laid out from the config, so a resize or edge move repaints them all"
+    );
 }
 
 #[test]
@@ -985,17 +1033,22 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
     );
     assert!(bar.menu().is_open());
 
-    // Motion over the menu highlights rows and latches repaint.
+    // Motion over the menu highlights rows. The pointer also leaves the
+    // pin slot it started on, so the bar's own hover feedback latches too.
     let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
     let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
-    bar.take_repaint();
+    let _ = bar.take_repaint();
     input.handle(
         InputEvent::PointerMoved { to: menu_item_0 },
         &mut bar,
         Scale::ONE,
         NOW_NS,
     );
-    assert!(bar.take_repaint());
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::MENU,
+        "leaving the pin repaints the bar, and the new highlight repaints the menu"
+    );
     assert_eq!(bar.menu().control().current(), Some(0));
 
     // Scroll is claimed (Ignored).
@@ -1042,6 +1095,40 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
         TaskbarResponse::Ignored
     );
     assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn keyboard_highlight_moves_in_the_menu_latch_only_the_menu() {
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
+    input.handle(
+        InputEvent::PointerMoved { to: slot },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert!(bar.menu().is_open());
+
+    // The keyboard never touches pointer hover, so a highlight move this
+    // way latches the menu alone — no incidental bar change to compose with.
+    let _ = bar.take_repaint();
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(bar.menu().control().current(), Some(0));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::MENU,
+        "a keyboard highlight move repaints only the menu"
+    );
 }
 
 #[test]
@@ -1186,7 +1273,7 @@ fn unpin_from_entry_menu_identifies_the_pin_index() {
     open_library(&mut input, &mut bar);
 
     // Open menu for the entry.
-    bar.menu_mut().open(
+    bar.menu_routing_mut().open(
         MenuSubject::Entry {
             entry: entry_id,
             pinned: Some(1),
@@ -1245,9 +1332,10 @@ fn a_miss_and_non_primary_input_change_nothing() {
 fn motion_tracks_the_pointer_and_latches_hover_changes() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    bar.take_repaint();
+    let _ = bar.take_repaint();
 
-    // Entering the Library button changes its hover state: repaint.
+    // Entering the Library button changes its hover state: repaint the bar
+    // only — the four other surfaces are untouched by a bar-button hover.
     input.handle(
         InputEvent::PointerMoved {
             to: Point::new(10, 780),
@@ -1257,7 +1345,11 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         NOW_NS,
     );
     assert_eq!(input.pointer(), Point::new(10, 780));
-    assert!(bar.take_repaint(), "hover enter repaints");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "hover enter repaints only the bar"
+    );
 
     // Moving within the same button changes nothing.
     input.handle(
@@ -1268,9 +1360,12 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         Scale::ONE,
         NOW_NS,
     );
-    assert!(!bar.take_repaint(), "no visual change, no repaint");
+    assert!(
+        !bar.take_repaint().any(),
+        "no visual change, so nothing latches"
+    );
 
-    // Leaving it changes its hover state back: repaint.
+    // Leaving it changes its hover state back: repaint the bar only.
     input.handle(
         InputEvent::PointerMoved {
             to: Point::new(500, 400),
@@ -1279,10 +1374,42 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
         Scale::ONE,
         NOW_NS,
     );
-    assert!(bar.take_repaint(), "hover exit repaints");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "hover exit repaints only the bar"
+    );
 }
 
 // ---- input: open popup ----------------------------------------------
+
+#[test]
+fn opening_and_closing_the_library_popup_latches_the_popup_and_the_bar() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let _ = bar.take_repaint();
+
+    let centre = centre_of(bar.layout(Scale::ONE).library);
+    assert_eq!(
+        press_at(&mut input, &mut bar, centre.x, centre.y),
+        TaskbarResponse::OpenLibrary
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
+        "opening presses the bar's Library button in and shows the popup"
+    );
+
+    assert_eq!(
+        press_at(&mut input, &mut bar, centre.x, centre.y),
+        TaskbarResponse::LibraryDismissed
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
+        "closing releases the button and hides the popup"
+    );
+}
 
 #[test]
 fn click_away_dismisses_without_acting_on_what_it_hit() {
@@ -1395,13 +1522,17 @@ fn clicking_a_folder_toggles_its_expansion() {
     assert_eq!(index, 0);
 
     let centre = centre_of(rect);
-    bar.take_repaint();
+    let _ = bar.take_repaint();
     assert_eq!(
         press_at(&mut input, &mut bar, centre.x, centre.y),
         TaskbarResponse::Ignored,
         "a fold is the popup's own state change"
     );
-    assert!(bar.take_repaint(), "the fold repaints");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY,
+        "a fold repaints only the popup"
+    );
     assert!(bar.library().is_open());
     assert_eq!(
         bar.library().rows().len(),
@@ -1451,7 +1582,7 @@ fn wheel_scrolls_the_overflowing_popup() {
     assert!(layout.scrollbar.is_some(), "an overflow shows a scrollbar");
     assert_eq!(layout.rows[0].0, 0);
 
-    bar.take_repaint();
+    let _ = bar.take_repaint();
     assert_eq!(
         input.handle(
             InputEvent::PointerScrolled { dx: 0, dy: 1 },
@@ -1461,7 +1592,11 @@ fn wheel_scrolls_the_overflowing_popup() {
         ),
         TaskbarResponse::Ignored
     );
-    assert!(bar.take_repaint(), "a scroll repaints");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY,
+        "a scroll repaints only the popup"
+    );
     let scrolled = bar.library_layout(Scale::ONE);
     assert_eq!(scrolled.rows[0].0, 1, "the viewport moved down one row");
 
@@ -1585,6 +1720,23 @@ fn typing_filters_case_insensitively_and_enter_launches_first_match() {
     };
     assert_eq!(entry.as_str(), "os.tairix.chess");
     assert!(!bar.library().is_open());
+}
+
+#[test]
+fn typing_in_the_filter_latches_only_the_popup() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let _ = bar.take_repaint();
+
+    press_key(&mut input, &mut bar, Key::Char('c'));
+    let latched = bar.take_repaint();
+    assert_eq!(
+        latched,
+        TaskbarRepaint::LIBRARY,
+        "a filter edit repaints the popup only"
+    );
+    assert!(!latched.menu, "the filter never touches the context menu");
 }
 
 #[test]
@@ -2100,25 +2252,25 @@ fn theme_switch_repaints_the_bar() {
 #[test]
 fn pin_and_menu_actions_latch_repaints() {
     let mut bar = bottom_bar();
-    bar.take_repaint();
+    let _ = bar.take_repaint();
 
-    // set_pins latches.
+    // set_pins draws on the bar's own pin strip: bar only.
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
-    // Opening the menu latches.
+    // Opening the menu is its own overlay: menu only.
     bar.open_pin_menu(0, Rect::EMPTY);
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 
-    // Motion over a pin latches.
+    // Motion over a pin changes the bar's own hover feedback: bar only.
     let layout = bar.layout(Scale::ONE);
     let pin_centre = centre_of(layout.pins[0]);
     bar.track_hover(pin_centre, Scale::ONE);
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
-    // Closing the menu latches.
+    // Closing the menu: menu only.
     bar.close_menu();
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 }
 
 #[test]
@@ -2272,7 +2424,7 @@ fn render_menu_paints_the_modal_plate_and_follows_theme() {
     assert!(renderer.render_menu(&bar, Scale::ONE).is_none());
 
     // Open and check render.
-    bar.menu_mut().open(
+    bar.menu_routing_mut().open(
         MenuSubject::Pin {
             index: 0,
             running: false,
@@ -3027,16 +3179,25 @@ fn derive_hung_outranks_everything_and_composes_the_rest() {
 fn tray_feeds_latch_repaint_only_on_change() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();
+    // The readout is collapsed throughout, so only the bar's capsule
+    // latches — the readout is not being presented to need one.
     bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
     bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
-    assert!(!bar.take_repaint(), "an identical summary changes nothing");
+    assert!(
+        !bar.take_repaint().any(),
+        "an identical summary changes nothing"
+    );
     bar.set_tray_unresponsive(2);
-    assert!(bar.take_repaint());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
     bar.set_tray_unresponsive(2);
-    assert!(!bar.take_repaint());
+    assert!(!bar.take_repaint().any());
     bar.set_tray_summary(None);
-    assert!(bar.take_repaint(), "service loss reverts the capsule");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "service loss reverts the capsule"
+    );
 }
 
 #[test]
@@ -3045,10 +3206,16 @@ fn tray_update_keeps_the_hovered_readout_open() {
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
     assert!(bar.tray().is_expanded(), "hover expands the readout");
+    let _ = bar.take_repaint();
     bar.set_tray_summary(Some(tray_summary(4, 0, 100)));
     assert!(
         bar.tray().is_expanded(),
         "a live update never collapses the readout"
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::READOUT,
+        "the readout is open, so a tray update repaints it alongside the bar"
     );
 }
 
@@ -3624,4 +3791,202 @@ fn readout_renders_the_state_and_value_lines() {
         theme.palette().on_surface,
         role(theme.palette().surface_raised),
     ));
+}
+
+// ---- TaskbarRepaint ---------------------------------------------------
+
+#[test]
+fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
+    assert!(!TaskbarRepaint::NONE.any());
+    assert!(TaskbarRepaint::ALL.any());
+    assert_eq!(TaskbarRepaint::default(), TaskbarRepaint::NONE);
+    assert_eq!(
+        TaskbarRepaint::BAR
+            | TaskbarRepaint::LIBRARY
+            | TaskbarRepaint::MENU
+            | TaskbarRepaint::NOTIFICATIONS
+            | TaskbarRepaint::READOUT,
+        TaskbarRepaint::ALL
+    );
+}
+
+#[test]
+fn taskbar_repaint_single_surface_constants_set_only_that_field() {
+    assert_eq!(
+        TaskbarRepaint::BAR,
+        TaskbarRepaint {
+            bar: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    assert_eq!(
+        TaskbarRepaint::LIBRARY,
+        TaskbarRepaint {
+            library: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    assert_eq!(
+        TaskbarRepaint::MENU,
+        TaskbarRepaint {
+            menu: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    assert_eq!(
+        TaskbarRepaint::NOTIFICATIONS,
+        TaskbarRepaint {
+            notifications: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    assert_eq!(
+        TaskbarRepaint::READOUT,
+        TaskbarRepaint {
+            readout: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    for single in [
+        TaskbarRepaint::BAR,
+        TaskbarRepaint::LIBRARY,
+        TaskbarRepaint::MENU,
+        TaskbarRepaint::NOTIFICATIONS,
+        TaskbarRepaint::READOUT,
+    ] {
+        assert!(single.any());
+        assert_ne!(single, TaskbarRepaint::NONE);
+    }
+}
+
+#[test]
+fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
+    let composed = TaskbarRepaint::BAR | TaskbarRepaint::MENU;
+    assert_eq!(
+        composed,
+        TaskbarRepaint {
+            bar: true,
+            library: false,
+            menu: true,
+            notifications: false,
+            readout: false,
+        }
+    );
+
+    let mut assigned = TaskbarRepaint::NONE;
+    assigned |= TaskbarRepaint::LIBRARY;
+    assigned |= TaskbarRepaint::READOUT;
+    assert_eq!(assigned, TaskbarRepaint::LIBRARY | TaskbarRepaint::READOUT);
+
+    // Composing is idempotent: latching the same surface twice changes
+    // nothing further.
+    assert_eq!(
+        TaskbarRepaint::BAR | TaskbarRepaint::BAR,
+        TaskbarRepaint::BAR
+    );
+}
+
+// ---- repaint latch: sub-model accessors -------------------------------
+
+#[test]
+fn tasks_mut_latches_the_bar() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "task slots draw on the bar and nowhere else"
+    );
+}
+
+#[test]
+fn library_mut_latches_the_popup_and_the_bar() {
+    let mut bar = bottom_bar();
+    bar.library_mut().set_catalog(office_and_games());
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
+        "the same borrow can also open or close the popup, which redraws the Library button"
+    );
+}
+
+#[test]
+fn clock_mut_latches_the_bar() {
+    let mut bar = bottom_bar();
+    bar.clock_mut().set_label("12:34");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "the clock draws on the bar and nowhere else"
+    );
+}
+
+#[test]
+fn handing_out_a_mutable_sub_model_latches_even_when_nothing_is_changed() {
+    let mut bar = bottom_bar();
+
+    let _ = bar.tasks_mut();
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+
+    let _ = bar.clock_mut();
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+
+    let _ = bar.library_mut();
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
+        "the bar cannot see into a borrow, so handing one out must assume a change"
+    );
+}
+
+#[test]
+fn reading_through_an_immutable_accessor_latches_nothing() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    let _ = bar.take_repaint();
+
+    assert_eq!(bar.tasks().len(), 1);
+    assert!(!bar.library().is_open());
+    assert!(!bar.menu().is_open());
+    assert!(bar.clock().label().is_empty());
+    assert!(!bar.tray().is_expanded());
+    assert_eq!(bar.notifications().signal_count(), 0);
+    assert_eq!(bar.pins().len(), 0);
+    assert_eq!(bar.task_hover(), None);
+
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "reading redraws nothing, so it latches nothing"
+    );
+}
+
+#[test]
+fn routing_a_pointer_sample_over_the_open_popup_latches_only_what_changed() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let layout = bar.library_layout(Scale::ONE);
+    let row = centre_of(layout.rows[0].1);
+    input.handle(
+        InputEvent::PointerMoved { to: row },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let _ = bar.take_repaint();
+
+    // The same row again: the router reaches into the popup, but nothing it
+    // draws changed, so the 1 ms popup render must not be asked for.
+    input.handle(
+        InputEvent::PointerMoved { to: row },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "routing borrows the popup mutably, but only a real change may latch it"
+    );
 }

@@ -476,6 +476,55 @@ fn many_sub_deadline_cycles_produce_exactly_one_sample_once_the_deadline_passes(
 }
 
 #[test]
+fn an_unchanged_sample_one_period_later_presents_nothing_new() {
+    let transport = ProcessListTransport::new(alloc::vec![process_record(
+        10,
+        test_proc_id(10),
+        DEFAULT_UID,
+        ProcessState::Running,
+        b"alpha"
+    )]);
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+        &NO_AUTHORITY,
+    );
+    // The first sample has no prior reading to diff a per-process CPU share
+    // against, so it measures as unmeasured; the second sample is the first
+    // one that can measure a share at all (0%, the fixture's rows never
+    // advance their recorded CPU time) and so still differs from the first.
+    // Only from the third sample on is the reading itself genuinely steady.
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    service.panel_mut().flush(&mut host);
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS,
+        &NO_AUTHORITY,
+    );
+    service.panel_mut().flush(&mut host);
+    let presents = host.presents;
+
+    // One full sample period later still, the transport reports the exact
+    // same process list and the measured share is the same steady 0%.
+    // Nothing the composition draws differs, so this must not present
+    // again.
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS * 2,
+        &NO_AUTHORITY,
+    );
+    service.panel_mut().flush(&mut host);
+
+    assert_eq!(host.presents, presents);
+}
+
+#[test]
 fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
     let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);
     let mut host = RecordingHost::new();

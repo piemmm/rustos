@@ -57,8 +57,12 @@ window is open, because the window is a view onto a monitor that never stops
 monitoring. The system is re-sampled strictly on its 2 s deadline: an input
 or command wake never re-queries the system.
 
-The model is rebuilt on the same sample cadence and re-presented at most
-once per wake, only when it actually changed. What it carries:
+The model is rebuilt on the same sample cadence, and the panel presents at
+most once per wake, and only when what it would draw differs from what it
+last drew — the composition itself, the window's bounds, the active
+theme, and the render scale. A wake that delivered an event but left every
+one of those unchanged, such as a pointer move that crosses no control,
+costs no render and no present. What it carries:
 
 | Section | Source |
 |---|---|

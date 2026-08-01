@@ -2,6 +2,7 @@
 
 use crate::cache::RasterCache;
 use crate::color::{Color, Pixel};
+use crate::round::round_rect_coverage;
 use crate::surface::Surface;
 
 const BLUE: Color = Color::rgb(0, 0, 255);
@@ -56,6 +57,30 @@ fn over_half_alpha_blends_premultiplied() {
             a: 255
         }
     );
+}
+
+#[test]
+fn over_opaque_shortcut_matches_the_general_blend() {
+    // The `a == 255` shortcut must be exactly what `src + dst * (1 - src.a)`
+    // computes, for every channel combination — not merely for a clean
+    // primary colour.
+    let general = |src: Pixel, dst: Pixel| {
+        let inv = 255 - u32::from(src.a);
+        let blend = |s: u8, d: u8| s.saturating_add(crate::color::div255(u32::from(d) * inv));
+        Pixel {
+            r: blend(src.r, dst.r),
+            g: blend(src.g, dst.g),
+            b: blend(src.b, dst.b),
+            a: blend(src.a, dst.a),
+        }
+    };
+    for channels in [0u8, 1, 17, 128, 254, 255] {
+        for alpha in [0u8, 1, 128, 254, 255] {
+            let src = Color::rgba(channels, 200, 3, alpha).premultiply();
+            let dst = Color::rgba(9, channels, 240, 200).premultiply();
+            assert_eq!(src.over(dst), general(src, dst), "{src:?} over {dst:?}");
+        }
+    }
 }
 
 #[test]
@@ -167,6 +192,126 @@ fn fill_sets_every_pixel() {
     assert!(s.pixels().iter().all(|p| *p == BLUE.premultiply()));
 }
 
+// ---- rounded-rectangle fill ------------------------------------------
+
+#[test]
+fn fill_round_rect_zero_radius_matches_a_clipped_square_fill() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.fill_round_rect(2, 2, 10, 10, 0, RED);
+    assert_eq!(s.get(3, 3), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn fill_round_rect_zero_size_is_a_no_op() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.fill_round_rect(1, 1, 0, 3, 2, RED);
+    s.fill_round_rect(1, 1, 3, 0, 2, RED);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+#[test]
+fn fill_round_rect_corners_are_clear_and_composite_over_the_background() {
+    let mut s = Surface::new(20, 20).expect("allocates");
+    s.fill(BLUE);
+    s.fill_round_rect(0, 0, 20, 20, 8, RED);
+    // The extreme corner is outside the rounded arc, so the blue background
+    // shows through untouched.
+    assert_eq!(s.get(0, 0), Some(BLUE.premultiply()));
+    // Deep inside the rounded rectangle is fully opaque red.
+    assert_eq!(s.get(10, 10), Some(RED.premultiply()));
+    // The corner arc itself is anti-aliased: neither the source nor the
+    // background alone.
+    let corner = s.get(2, 2).expect("in bounds");
+    assert_ne!(corner, RED.premultiply());
+    assert_ne!(corner, BLUE.premultiply());
+}
+
+/// The straightforward rounded-rectangle fill: evaluate every pixel's
+/// coverage and composite it. [`Surface::fill_round_rect`] splits the same
+/// shape into its four corner squares and the fully-covered remainder, which
+/// must be a pure cost change; this loop is the yardstick that proves it and
+/// lives only here, so production keeps one definition of the fill.
+fn reference_round_rect(
+    surface: &mut Surface,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    color: Color,
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let source = color.premultiply();
+    let x_end = x.saturating_add(w).min(surface.width());
+    let y_end = y.saturating_add(h).min(surface.height());
+    for row in y..y_end {
+        for col in x..x_end {
+            let coverage = round_rect_coverage(col - x, row - y, w, h, radius);
+            if coverage == 0 {
+                continue;
+            }
+            let Some(dst) = surface.get(col, row) else {
+                continue;
+            };
+            surface.set(col, row, source.scale_alpha(coverage).over(dst));
+        }
+    }
+}
+
+/// A surface whose every pixel differs, so a fill that blends wrongly against
+/// its destination cannot hide behind a uniform background.
+fn patterned_surface(width: u32, height: u32) -> Surface {
+    let mut surface = Surface::new(width, height).expect("allocates");
+    for y in 0..height {
+        for x in 0..width {
+            let channel = |factor: u32| u8::try_from((x * factor + y * 7) % 256).unwrap_or(0);
+            let color = Color::rgba(channel(3), channel(11), channel(29), channel(53));
+            surface.set(x, y, color.premultiply());
+        }
+    }
+    surface
+}
+
+#[test]
+fn fill_round_rect_matches_the_per_pixel_reference() {
+    // Degenerate and ordinary geometries together: a radius of zero, a radius
+    // larger than half the shorter side, rectangles clipped on the right and
+    // bottom, one-pixel sides, and colours from fully transparent to opaque.
+    for &(surface_w, surface_h) in &[(1u32, 1u32), (5, 4), (20, 20), (23, 9)] {
+        for &(x, y, w, h) in &[
+            (0u32, 0u32, 1u32, 1u32),
+            (0, 0, surface_w, surface_h),
+            (1, 1, surface_w, surface_h),
+            (2, 1, 7, 5),
+            (surface_w - 1, surface_h - 1, 9, 9),
+            (0, 0, 3, 40),
+            (0, 0, 40, 3),
+        ] {
+            for radius in [0u32, 1, 2, 3, 8, 100] {
+                for alpha in [0u8, 1, 64, 128, 254, 255] {
+                    let color = Color::rgba(200, 30, 60, alpha);
+                    let mut actual = patterned_surface(surface_w, surface_h);
+                    let mut expected = actual.clone();
+                    actual.fill_round_rect(x, y, w, h, radius, color);
+                    reference_round_rect(&mut expected, x, y, w, h, radius, color);
+                    for (index, (got, want)) in
+                        actual.pixels().iter().zip(expected.pixels()).enumerate()
+                    {
+                        assert_eq!(
+                            got, want,
+                            "pixel {index} of {surface_w}x{surface_h} differs for \
+                             rect ({x},{y},{w},{h}) radius {radius} alpha {alpha}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- from_rgba8 --------------------------------------------------------
 
 #[test]
@@ -250,6 +395,35 @@ fn fill_polygon_triangle_is_anti_aliased() {
 
     // The opposite corner is wholly inside and opaque.
     assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+}
+
+/// The bounding-box restriction is a pure optimisation: it must leave every
+/// pixel outside a small shape's box exactly as a full-canvas scan would
+/// (untouched), while still painting the shape itself correctly, so only the
+/// scan cost changes, never a pixel.
+#[test]
+fn fill_polygon_small_shape_only_touches_its_own_bounding_box() {
+    let mut s = Surface::new(40, 40).expect("allocates");
+    // A right triangle occupying only the design range [10, 20) of a
+    // 40-unit design grid: a small corner of the 40x40 canvas.
+    let triangle = [(10, 10), (20, 10), (10, 20)];
+    s.fill_polygon(&triangle, 40, RED);
+
+    // Every corner of the canvas, far from the triangle, is untouched.
+    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(39, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(0, 39), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(39, 39), Some(Pixel::TRANSPARENT));
+
+    // The right-angle corner of the triangle is deep inside it.
+    assert_eq!(s.get(10, 10), Some(RED.premultiply()));
+
+    // The hypotenuse crosses this pixel with partial coverage.
+    let edge = s.get(15, 14).expect("in bounds");
+    assert!(
+        edge.a > 0 && edge.a < 255,
+        "expected partial coverage near the hypotenuse: {edge:?}"
+    );
 }
 
 // ---- blit ------------------------------------------------------------

@@ -75,10 +75,14 @@ the payload exceeds the pre-Korean size ceiling.
   height) plus the glyph blitter. `draw_text` composites each covered pixel
   onto a `lib/raster` `Surface` through that crate's single
   premultiplied-alpha `Pixel::over` path, scaling the text colour once into a
-  16-entry coverage table — anti-aliased edges and translucent text both
+  256-entry coverage table — anti-aliased edges and translucent text both
   blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
-  §2.2). `text_width` and `truncate_to_width` give the shared layout
-  arithmetic.
+  §2.2). Both of a glyph's axes are clipped against the surface once, before
+  any pixel is touched, and each visible row then blends its coverage bytes
+  against the destination row slice (`Surface::row_mut`) in step, so a bounds
+  check and a row address are paid per row rather than per pixel and a glyph
+  off the edge clips instead of being tested pixel by pixel. `text_width` and
+  `truncate_to_width` give the shared layout arithmetic.
 - `cache` — the on-demand outline rasteriser (over embedded faces + the shared
   `lib/fontface` engine) and its bounded, process-global cache (behind
   `render`). See *Rendering at a chosen size* below.

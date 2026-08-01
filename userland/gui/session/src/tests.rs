@@ -23,12 +23,13 @@ use tairix_proglib::{
     LibraryEntry, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
 };
 use tairix_taskbar::{
-    ActivateOutcome, LibraryRow, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    ActivateOutcome, LibraryRow, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarRepaint,
+    TaskbarResponse,
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
-    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Scale, Surface,
-    WindowActivationState, WindowId,
+    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Rect, Scale,
+    Surface, WindowActivationState, WindowId,
 };
 
 use crate::{
@@ -302,7 +303,12 @@ fn present_adds_a_bar_window_placed_and_rounded() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
 
     let id = presenter.bar_window().expect("the bar was presented");
     assert_eq!(comp.window_count(), 1);
@@ -323,13 +329,156 @@ fn presenting_twice_reuses_the_bar_window() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     let first = presenter.bar_window().expect("first present");
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     let second = presenter.bar_window().expect("second present");
 
     assert_eq!(first, second, "the same window is reused");
     assert_eq!(comp.window_count(), 1, "no second bar window is created");
+}
+
+/// The screen rectangle a presented window occupies, for asserting which
+/// surface a repaint actually touched.
+fn window_rect(comp: &Compositor, id: WindowId) -> Rect {
+    let window = comp.window(id).expect("the window is presented");
+    Rect::new(
+        window.origin().x,
+        window.origin().y,
+        window.surface().width(),
+        window.surface().height(),
+    )
+}
+
+#[test]
+fn presenting_an_empty_latch_repaints_nothing() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
+    comp.composite();
+    assert!(!comp.has_damage(), "the first paint has been drained");
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::NONE,
+    );
+
+    assert!(
+        !comp.has_damage(),
+        "a pointer that changed nothing must not dirty a pixel"
+    );
+}
+
+#[test]
+fn presenting_one_latched_surface_leaves_the_others_alone() {
+    let mut session = session();
+    session
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
+    comp.composite();
+    let popup = presenter.popup_window().expect("the popup is presented");
+    let popup_rect = window_rect(&comp, popup);
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint {
+            library: true,
+            ..TaskbarRepaint::NONE
+        },
+    );
+
+    assert_eq!(
+        comp.composite().bounds(),
+        popup_rect,
+        "only the popup was repainted; the bar keeps its pixels"
+    );
+}
+
+#[test]
+fn a_surface_with_no_window_is_presented_however_empty_the_latch() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::NONE,
+    );
+
+    assert!(
+        presenter.bar_window().is_some(),
+        "the first paint cannot wait for a latch that only reports changes"
+    );
+}
+
+#[test]
+fn a_density_change_repaints_every_surface() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
+    comp.composite();
+    let bar = presenter.bar_window().expect("the bar is presented");
+    let before = window_rect(&comp, bar);
+
+    assert!(comp.set_scale(Scale::from_percent(200).expect("a valid density")));
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::NONE,
+    );
+
+    let after = window_rect(&comp, bar);
+    assert_ne!(
+        before, after,
+        "the bar re-laid at the new density, though the taskbar model never changed"
+    );
 }
 
 #[test]
@@ -346,7 +495,12 @@ fn opening_the_popup_presents_a_popup_window() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
 
     let popup = presenter.popup_window().expect("the popup was presented");
     assert_eq!(comp.window_count(), 2, "bar and popup are both present");
@@ -371,7 +525,12 @@ fn closing_the_popup_removes_the_popup_window() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     let popup = presenter.popup_window().expect("the popup is open");
 
     let centre = Point::new(24, 1060); // library slot centre
@@ -384,7 +543,12 @@ fn closing_the_popup_removes_the_popup_window() {
     );
     assert!(!session.taskbar().library().is_open());
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
 
     assert!(
         presenter.popup_window().is_none(),
@@ -409,7 +573,12 @@ fn teardown_removes_every_window() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     assert_eq!(comp.window_count(), 2);
 
     presenter.teardown(&mut comp);
@@ -425,11 +594,21 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     let first = presenter.bar_window().expect("first present");
 
     assert!(comp.remove(first), "an embedder removed the bar window");
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
 
     let second = presenter.bar_window().expect("the bar was re-created");
     assert_ne!(first, second, "a fresh window id is minted");
@@ -447,7 +626,12 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
     let mut renderer = TaskbarRenderer::new();
     let mut presenter = TaskbarPresenter::new();
 
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
     let id = presenter.bar_window().expect("the bar was presented");
     let dark_radius = session.taskbar().layout(Scale::ONE).corner_radius;
     assert_eq!(
@@ -458,7 +642,12 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
     );
 
     session.set_theme(ThemeId(100)).unwrap();
-    presenter.present(&mut comp, &mut renderer, session.taskbar());
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+    );
 
     let light_radius = session.taskbar().layout(Scale::ONE).corner_radius;
     assert_ne!(dark_radius, light_radius);
@@ -1026,8 +1215,12 @@ fn handle_routes_a_window_press_to_the_window_manager() {
     let mut shell = shell();
     let mut comp = compositor();
     let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    shell.present(&mut comp);
+    let bar = shell.presenter().bar_window();
+    assert!(bar.is_some(), "the desktop paints its bar before any input");
 
     shell.handle(moved(250, 250), &mut comp, 0);
+    comp.composite();
     let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
     assert_eq!(
@@ -1038,9 +1231,15 @@ fn handle_routes_a_window_press_to_the_window_manager() {
         })
     );
     assert_eq!(shell.router().focused(), Some(window));
+    assert_eq!(
+        shell.presenter().bar_window(),
+        bar,
+        "a window-manager action reuses the bar window rather than re-creating it"
+    );
+    let bar_rect = window_rect(&comp, bar.expect("the bar is painted"));
     assert!(
-        shell.presenter().bar_window().is_none(),
-        "a window-manager action does not present the bar"
+        comp.composite().bounds().intersection(&bar_rect).is_empty(),
+        "activating a window repaints that window's furniture, never the bar"
     );
 }
 
@@ -1259,9 +1458,12 @@ fn pump_coalescing_is_safe_because_handle_runs_per_event() {
 }
 
 #[test]
-fn motion_is_ignored_and_does_not_present_the_bar() {
+fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
     let mut shell = shell();
     let mut comp = compositor();
+    shell.present(&mut comp);
+    let bar = shell.presenter().bar_window().expect("the bar is painted");
+    comp.composite();
 
     // Motion over the empty desktop (far from the bar).
     let outcomes = shell
@@ -1269,22 +1471,43 @@ fn motion_is_ignored_and_does_not_present_the_bar() {
         .expect("source does not fault");
 
     assert_eq!(outcomes, [ShellOutcome::Ignored]);
+    let bar_rect = window_rect(&comp, bar);
     assert!(
-        shell.presenter().bar_window().is_none(),
-        "motion does not present the bar"
+        comp.composite().bounds().intersection(&bar_rect).is_empty(),
+        "a motion that crosses no control repaints no part of the bar"
     );
 
-    // Motion onto the library button.
+    // Motion onto the library button. The bar is itself a compositor
+    // window, so the window manager reports the motion over it; nothing is
+    // forwarded, because no application owns the bar.
     let outcomes = shell
         .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp, 0)
         .expect("source does not fault");
-    assert_eq!(outcomes, [ShellOutcome::Ignored]);
+    assert_eq!(
+        outcomes,
+        [ShellOutcome::WindowManager(
+            InputResponse::ClientPointerMoved {
+                window: bar,
+                local: Point::new(24, 20),
+            }
+        )]
+    );
 
-    // Verify hover feedback happened (the bar was presented).
-    assert!(shell.presenter().bar_window().is_some());
+    // The hover changed, so the bar — and only the bar — was repainted.
+    assert_eq!(
+        shell.presenter().bar_window(),
+        Some(bar),
+        "the same bar window is reused"
+    );
     assert_eq!(
         shell.session().taskbar().library_button().state().pointer,
         PointerState::Hover
+    );
+    let damage = comp.composite().bounds();
+    assert_eq!(
+        damage.union(&bar_rect),
+        damage,
+        "the hover change repainted the whole bar"
     );
 }
 

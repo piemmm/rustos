@@ -281,6 +281,17 @@ panel, and presents each as a compositor window:
   open (`MenuLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and
   each window is removed the moment its surface closes.
 
+`present` repaints **only the surfaces the taskbar latched as changed**. It
+takes the `tairix_taskbar::TaskbarRepaint` that `DesktopShell::present`
+drains from the model, and each of the five surfaces above is re-rendered
+and re-pushed only when its flag is set. This is what makes hovering cheap:
+each surface costs a full re-render and marks its whole window rectangle
+dirty, so a pointer crossing one small open menu must repaint that menu
+alone. Two things override an empty latch — a surface that has no window yet
+is always painted, so the first frame puts everything on screen, and a
+change of desktop density repaints everything, because the scale belongs to
+the output rather than to the taskbar model the latch tracks.
+
 The presenter owns only the compositor `WindowId` tokens it minted — the
 taskbar model, the renderer, and the compositor are the embedder's, so the
 session composes the GUI crates without owning the window-manager handle. It is
@@ -336,6 +347,24 @@ Decorations start a title-bar drag through `begin_move`, and the embedder reads
 the keyboard owner through `focused`. The router holds no pixels and grants
 itself no authority; every routed sub-call is itself total and fails closed
 (`AGENTS.md` §2.9).
+
+## What an application's presented frame costs
+
+An application repaints its whole composition and presents whole-window
+damage, because a toolkit generally cannot say which pixels its own paint
+touched. Taking that claim at face value would recomposite every pixel of the
+window for a hover highlight a few rows tall, so the session measures the
+truth instead: `ShellWindowHost::window_presented` converts the presented
+pixels into the compositor's own content surface and returns the bounding
+rectangle of the pixels whose value actually differs, and only that rectangle
+is marked dirty. A repaint that changes nothing marks nothing.
+
+The comparison is exact — a pixel reported unchanged carries the
+byte-identical value it already had — and it rides a loop that already reads
+the frame and writes the surface, so it adds one read per pixel and no
+allocation. It fails closed: every index the conversion will use is validated
+before the first write, so a malformed or hostile geometry refuses the whole
+present rather than leaving the window half-converted.
 
 ## Running-task list ↔ window stack
 
@@ -393,12 +422,13 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   `now_ns`;
 - a taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and the bar is
-  re-presented — **exactly once per event, at one site**: an acted response
-  and the taskbar's drained repaint latch (a hover, a popup scroll or edit)
-  share a single present decision, so an opened/closed popup, a fold, or a
-  changed task highlight reaches the screen without double-painting; a
-  window-manager action re-presents only when it moved focus between tasks,
-  so motion and drags stay cheap;
+  re-presented — **exactly once per event, at one site**, straight from the
+  taskbar's drained per-surface repaint latch. Every model change that
+  alters what a surface draws latches that surface, so an opened/closed
+  popup, a fold, or a changed task highlight reaches the screen without
+  double-painting, while a motion that crosses no control — over the
+  desktop, over a window, or over dead space on the bar — repaints nothing
+  at all;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
   before the fault stay applied and the embedder replaces or re-polls the
   source (`AGENTS.md` §2.9 / §19.5).

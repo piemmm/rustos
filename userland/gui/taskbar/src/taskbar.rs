@@ -9,10 +9,12 @@
 //!
 //! The bar owns a copy of the active theme so its layout, hit-testing, and
 //! painting all read one definition — the radius a hit-test assumes and the
-//! radius the painter draws can never disagree. It also carries a repaint
-//! latch: state changes that alter only pixels (a hover, a popup scroll) set
-//! it, and the embedder drains it with [`take_repaint`](Taskbar::take_repaint)
-//! to re-present exactly when something changed.
+//! radius the painter draws can never disagree. It also carries a per-surface
+//! [`TaskbarRepaint`] latch: a state change that alters only what one of the
+//! bar's five rendered surfaces draws sets that surface's flag (and every
+//! surface it genuinely touches — never fewer), and the embedder drains it
+//! with [`take_repaint`](Taskbar::take_repaint) to re-present exactly the
+//! surfaces that changed.
 
 use alloc::vec::Vec;
 
@@ -34,6 +36,7 @@ use crate::library::{LibraryLayout, LibraryPopup};
 use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::pins::{PinStrip, PinView};
+use crate::repaint::TaskbarRepaint;
 use crate::tasks::TaskList;
 use crate::tray::SwitchboardTray;
 
@@ -137,7 +140,7 @@ pub struct Taskbar {
     notifications: NotificationArea,
     clock: Clock,
     tray: SwitchboardTray,
-    repaint: bool,
+    repaint: TaskbarRepaint,
 }
 
 impl Taskbar {
@@ -161,7 +164,7 @@ impl Taskbar {
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
-            repaint: false,
+            repaint: TaskbarRepaint::NONE,
         }
     }
 
@@ -202,8 +205,31 @@ impl Taskbar {
     }
 
     /// The program-library popup, mutably — how the session hands it the
-    /// resolved catalog ([`LibraryPopup::set_catalog`]).
+    /// resolved catalog ([`LibraryPopup::set_catalog`]) — latching the popup
+    /// and the bar.
+    ///
+    /// Handing out a mutable view is indistinguishable from changing it: the
+    /// bar cannot see what the caller does through the borrow, and a missed
+    /// latch leaves stale pixels, so the borrow itself latches. The bar
+    /// latches with the popup because the same view can open or close it,
+    /// which changes how the Library button draws. Callers take this borrow
+    /// to make a real state change — a resolved catalog — never once per
+    /// input sample, so the conservative latch costs nothing on the hot
+    /// path; the input router borrows the popup through a crate-internal
+    /// seam instead and latches from what the popup reports.
     pub fn library_mut(&mut self) -> &mut LibraryPopup {
+        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
+        &mut self.library
+    }
+
+    /// The program-library popup, mutably, for routing one input event into
+    /// it.
+    ///
+    /// Unlike [`library_mut`](Self::library_mut) this latches nothing,
+    /// because the router latches from the outcome the popup reports: every
+    /// pointer sample over the open popup routes through here, and a sample
+    /// that changes no pixel must repaint nothing.
+    pub(crate) fn library_routing_mut(&mut self) -> &mut LibraryPopup {
         &mut self.library
     }
 
@@ -215,10 +241,11 @@ impl Taskbar {
 
     /// Replace the pin strip's resolved views — how the session hands the
     /// bar its pins (and their running-window matches) whenever the store,
-    /// the catalog, or the launch table changes.
+    /// the catalog, or the launch table changes. The pin strip draws on the
+    /// bar itself, so this latches only [`bar`](TaskbarRepaint::bar).
     pub fn set_pins(&mut self, pins: Vec<PinView>) {
         self.pins.set_pins(pins);
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::BAR;
     }
 
     /// The bar's context menu (open or closed).
@@ -227,8 +254,12 @@ impl Taskbar {
         &self.menu
     }
 
-    /// The bar's context menu, mutably (input routing only).
-    pub(crate) fn menu_mut(&mut self) -> &mut BarMenu {
+    /// The bar's context menu, mutably, for routing one input event into it.
+    ///
+    /// This latches nothing: the router latches from the outcome the menu
+    /// reports, and every pointer sample over the open menu routes through
+    /// here, so a sample that changes no pixel must repaint nothing.
+    pub(crate) fn menu_routing_mut(&mut self) -> &mut BarMenu {
         &mut self.menu
     }
 
@@ -244,8 +275,18 @@ impl Taskbar {
         &self.tasks
     }
 
-    /// The running-task list, mutably.
+    /// The running-task list, mutably — how the session adds, removes,
+    /// focuses, and minimises task slots — latching the bar.
+    ///
+    /// Handing out a mutable view is indistinguishable from changing it, so
+    /// the borrow itself latches; the bar cannot see what the caller does
+    /// through it, and a missed latch leaves stale pixels. Task slots draw
+    /// on the bar and nowhere else, so only the bar latches. Callers take
+    /// this borrow to make a real state change — a window opened, closed, or
+    /// focused — never once per input sample, so the conservative latch
+    /// costs nothing on the hot path.
     pub fn tasks_mut(&mut self) -> &mut TaskList {
+        self.repaint |= TaskbarRepaint::BAR;
         &mut self.tasks
     }
 
@@ -256,38 +297,50 @@ impl Taskbar {
     }
 
     /// Replace the notification area's status signals — how the session hands
-    /// the bar its tray signals (network, volume, battery). Latches a repaint.
+    /// the bar its tray signals (network, volume, battery). The persistent
+    /// signal glyphs draw on the bar itself, so this latches only
+    /// [`bar`](TaskbarRepaint::bar).
     pub fn set_status_signals(&mut self, signals: Vec<StatusSignal>) {
         self.notifications.set_signals(signals);
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::BAR;
     }
 
     /// Raise (or update in place) a transient notification, latching a repaint
     /// when it changed the shown set — how the session relays a producer's
-    /// raise over the notification IPC. Returns whether anything changed.
+    /// raise over the notification IPC. A raise changes both the popover that
+    /// shows the card and the bar's notification-area icon (the count it
+    /// implies), so both latch together. Returns whether anything changed.
     pub fn raise_notification(&mut self, note: TransientNotification) -> bool {
         let changed = self.notifications.raise(note);
-        self.repaint |= changed;
+        if changed {
+            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
+        }
         changed
     }
 
     /// Clear the transient notification identified by `(producer, key)`,
     /// latching a repaint when one was removed — how the session relays a
-    /// producer's clear and resolves a user dismiss. Returns whether one was
-    /// removed.
+    /// producer's clear and resolves a user dismiss. A clear changes both the
+    /// popover and the bar's notification-area icon, so both latch together.
+    /// Returns whether one was removed.
     pub fn clear_notification(&mut self, producer: u64, key: u32) -> bool {
         let changed = self.notifications.clear(producer, key);
-        self.repaint |= changed;
+        if changed {
+            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
+        }
         changed
     }
 
     /// Clear every transient notification raised by `producer`, latching a
     /// repaint when any were removed — how the session drops a dead
-    /// producer's notifications when it exits. Returns whether any were
-    /// removed.
+    /// producer's notifications when it exits. A clear changes both the
+    /// popover and the bar's notification-area icon, so both latch together.
+    /// Returns whether any were removed.
     pub fn clear_producer_notifications(&mut self, producer: u64) -> bool {
         let changed = self.notifications.clear_producer(producer);
-        self.repaint |= changed;
+        if changed {
+            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
+        }
         changed
     }
 
@@ -297,8 +350,18 @@ impl Taskbar {
         &self.clock
     }
 
-    /// The clock, mutably, so the caller can update its label.
+    /// The clock, mutably, so the caller can update its label — latching the
+    /// bar.
+    ///
+    /// Handing out a mutable view is indistinguishable from changing it, so
+    /// the borrow itself latches; the bar cannot see what the caller does
+    /// through it, and a missed latch leaves stale pixels. The clock draws
+    /// on the bar and nowhere else, so only the bar latches. Callers take
+    /// this borrow to make a real state change — the minute advancing —
+    /// never once per input sample, so the conservative latch costs nothing
+    /// on the hot path.
     pub fn clock_mut(&mut self) -> &mut Clock {
+        self.repaint |= TaskbarRepaint::BAR;
         &mut self.clock
     }
 
@@ -308,28 +371,46 @@ impl Taskbar {
         &self.tray
     }
 
-    /// The Switchboard tray capsule, mutably.
-    pub fn tray_mut(&mut self) -> &mut SwitchboardTray {
-        &mut self.tray
-    }
-
     /// Adopt the latest Switchboard tray summary — or its absence, when the
     /// service is gone — latching a repaint when the capsule changed. This is
     /// how the session relays the summary the Switchboard service publishes.
+    /// The capsule's badge and label live on the bar; while its readout is
+    /// open the same derived state feeds the readout's value line too, so
+    /// the readout latches alongside the bar exactly then.
     pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) {
-        self.repaint |= self.tray.set_summary(summary);
+        if self.tray.set_summary(summary) {
+            self.latch_tray();
+        }
     }
 
     /// Adopt the session's count of unresponsive applications, latching a
-    /// repaint when the capsule changed.
+    /// repaint when the capsule changed. See
+    /// [`set_tray_summary`](Self::set_tray_summary) for which surfaces latch.
     pub fn set_tray_unresponsive(&mut self, count: u16) {
-        self.repaint |= self.tray.set_unresponsive(count);
+        if self.tray.set_unresponsive(count) {
+            self.latch_tray();
+        }
+    }
+
+    /// Latch the surfaces a tray-capsule change alters: the bar always (the
+    /// capsule's badge, label, and furniture live there), and the readout
+    /// too while it is currently expanded, since it renders the same derived
+    /// state.
+    fn latch_tray(&mut self) {
+        self.repaint |= TaskbarRepaint::BAR;
+        if self.tray.is_expanded() {
+            self.repaint |= TaskbarRepaint::READOUT;
+        }
     }
 
     /// Feed a primary press or release `event` to the Switchboard readout's
     /// "Open Switchboard" safe action, latching a repaint when the
     /// capsule's visual state changed. Returns the action the readout's
     /// control reports, if the click completed on it.
+    ///
+    /// This only ever fires for an event that already landed inside the open
+    /// readout, so both it and the bar's capsule — which shares the same
+    /// underlying control state — latch together.
     pub(crate) fn tray_pointer(
         &mut self,
         event: &InputEvent,
@@ -342,32 +423,62 @@ impl Taskbar {
         let (changed, action) = self
             .tray
             .on_pointer(event, capsule, readout, scale, &self.theme);
-        self.repaint |= changed;
+        if changed {
+            self.repaint |= TaskbarRepaint::BAR | TaskbarRepaint::READOUT;
+        }
         action
     }
 
     /// Adopt a new theme. The rest of the taskbar's state is unchanged, so a
-    /// runtime dark/light switch needs no relayout of the model.
+    /// runtime dark/light switch needs no relayout of the model. Every
+    /// surface draws from the theme's palette, so every surface repaints.
     pub fn apply_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
-        self.repaint = true;
+        self.repaint = TaskbarRepaint::ALL;
     }
 
-    /// Reposition or resize the bar.
+    /// Reposition or resize the bar. Every surface is laid out from the
+    /// config (the popups and menu anchor off the bar's own computed
+    /// geometry), so every surface repaints.
     pub fn set_config(&mut self, config: TaskbarConfig) {
         self.config = config;
+        self.repaint = TaskbarRepaint::ALL;
     }
 
-    /// Take the repaint latch: `true` when pixel-only state (a hover, a
-    /// popup scroll or edit) changed since the last take, so the embedder
-    /// re-presents exactly when needed. Reading it clears it.
-    pub fn take_repaint(&mut self) -> bool {
+    /// Take the repaint latch: which of the bar's five rendered surfaces
+    /// (the bar strip, the library popup, the context menu, the notification
+    /// popover, and the Switchboard readout) changed since the last take, so
+    /// the embedder re-presents exactly those and none of the rest. Reading
+    /// it clears it.
+    ///
+    /// The contract every mutator on this type upholds: a change that alters
+    /// what a surface draws latches that surface, and a change touching more
+    /// than one latches all of them. An embedder may therefore present
+    /// strictly from the drained latch — and present nothing at all when it
+    /// is empty. Every site in this crate that sets the latch is reviewed to
+    /// err toward latching a surface it merely might affect rather than
+    /// omitting one it does: a missed latch leaves stale pixels on screen,
+    /// which is a correctness bug, while an extra latch only costs a
+    /// redundant repaint.
+    ///
+    /// The `&mut` accessors ([`tasks_mut`](Self::tasks_mut),
+    /// [`library_mut`](Self::library_mut), [`clock_mut`](Self::clock_mut))
+    /// are no exception: the bar cannot see into a borrow, so each latches
+    /// its surfaces the moment it hands one out, whether or not the caller
+    /// goes on to change anything.
+    ///
+    /// One thing stays the caller's to present: the desktop [`Scale`], which
+    /// the compositor supplies per layout and render call rather than
+    /// storing here, so a scale change is the caller's own and it knows it
+    /// dirtied everything.
+    #[must_use]
+    pub fn take_repaint(&mut self) -> TaskbarRepaint {
         core::mem::take(&mut self.repaint)
     }
 
-    /// Set the repaint latch (see [`take_repaint`](Self::take_repaint)).
-    pub(crate) fn request_repaint(&mut self) {
-        self.repaint = true;
+    /// Latch `parts` (see [`take_repaint`](Self::take_repaint)).
+    pub(crate) fn request_repaint(&mut self, parts: TaskbarRepaint) {
+        self.repaint |= parts;
     }
 
     /// Compute the bar's geometry for its current pin, task, and icon counts
@@ -495,6 +606,8 @@ impl Taskbar {
     }
 
     /// Open the context menu for the pin at `index`, anchored at its slot.
+    /// The menu is its own overlay surface, so this latches only
+    /// [`menu`](TaskbarRepaint::menu).
     pub(crate) fn open_pin_menu(&mut self, index: usize, anchor: Rect) {
         let running = self
             .pins
@@ -502,25 +615,29 @@ impl Taskbar {
             .and_then(PinView::window)
             .is_some_and(|id| self.tasks.entries().iter().any(|entry| entry.id == id));
         self.menu.open(MenuSubject::Pin { index, running }, anchor);
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::MENU;
     }
 
     /// Open the context menu for a program-library entry row, anchored at
-    /// that row.
+    /// that row. Latches only [`menu`](TaskbarRepaint::menu): the popup
+    /// beneath is unaffected by an overlay opening on top of it.
     pub(crate) fn open_entry_menu(&mut self, entry: EntryId, anchor: Rect) {
         let pinned = self.pins.position_of_entry(&entry);
         self.menu.open(MenuSubject::Entry { entry, pinned }, anchor);
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::MENU;
     }
 
-    /// Close the context menu without acting.
+    /// Close the context menu without acting. Latches only
+    /// [`menu`](TaskbarRepaint::menu).
     pub(crate) fn close_menu(&mut self) {
         self.menu.close();
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::MENU;
     }
 
     /// Open the program-library popup (fresh: search cleared, folders
-    /// expanded, cursor at the top) and press the Library button in.
+    /// expanded, cursor at the top) and press the Library button in. This
+    /// changes both the popup itself and the bar (the Library button reads
+    /// as visually held open), so both latch.
     pub(crate) fn open_library(&mut self) {
         self.library.open();
         self.library_button.set_state(
@@ -528,15 +645,17 @@ impl Taskbar {
                 .state()
                 .with_pointer(PointerState::Pressed),
         );
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
     }
 
-    /// Close the program-library popup and release the Library button.
+    /// Close the program-library popup and release the Library button. Both
+    /// the popup and the bar's now-released Library button change, so both
+    /// latch.
     pub(crate) fn close_library(&mut self) {
         self.library.close();
         self.library_button
             .set_state(self.library_button.state().with_pointer(PointerState::None));
-        self.repaint = true;
+        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
     }
 
     /// Track the pointer for the bar's hover feedback — the leading
@@ -545,7 +664,10 @@ impl Taskbar {
     /// state changes.
     ///
     /// While the popup is open the Library button stays visually pressed
-    /// (it is "held open"); the Files button hovers as normal.
+    /// (it is "held open"); the Files button hovers as normal. Every hover
+    /// target tracked here paints on the bar itself, so a change latches
+    /// only [`bar`](TaskbarRepaint::bar) — except the Switchboard capsule,
+    /// whose hover can also expand or collapse its readout.
     pub(crate) fn track_hover(&mut self, point: Point, scale: Scale) {
         let layout = self.layout(scale);
         let library_pointer = if self.library.is_open() {
@@ -560,21 +682,32 @@ impl Taskbar {
         } else {
             PointerState::None
         };
-        self.repaint |= set_pointer(&mut self.library_button, library_pointer);
-        self.repaint |= set_pointer(&mut self.files_button, files_pointer);
+        let mut bar_changed = set_pointer(&mut self.library_button, library_pointer);
+        bar_changed |= set_pointer(&mut self.files_button, files_pointer);
         let pin_hover = layout.pins.iter().position(|slot| slot.contains(point));
-        self.repaint |= self.pins.set_hover(pin_hover);
+        bar_changed |= self.pins.set_hover(pin_hover);
         let task_hover = layout.tasks.iter().position(|slot| slot.contains(point));
         if self.task_hover != task_hover {
             self.task_hover = task_hover;
-            self.repaint = true;
+            bar_changed = true;
         }
+        if bar_changed {
+            self.repaint |= TaskbarRepaint::BAR;
+        }
+
+        let was_expanded = self.tray.is_expanded();
         let readout = self
             .tray_readout_layout(scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
-        self.repaint |= self
+        let tray_changed = self
             .tray
             .track(point, layout.switchboard, readout, scale, &self.theme);
+        if tray_changed {
+            self.repaint |= TaskbarRepaint::BAR;
+            if was_expanded || self.tray.is_expanded() {
+                self.repaint |= TaskbarRepaint::READOUT;
+            }
+        }
     }
 }
 

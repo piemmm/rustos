@@ -3,11 +3,12 @@
 extern crate alloc;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayFormat, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
 };
 use tairix_abi::DriverError;
 
 use crate::color::Color;
+use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect};
@@ -39,12 +40,16 @@ fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     [frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]
 }
 
-/// A display seam that records the last presented frame, or always
-/// fails when `fail` is set.
+/// A display seam that records the last presented frame and, separately,
+/// how many times each of [`Display::present`] (a whole-frame present) and
+/// [`Display::present_region`] (naming the exact rectangle presented) were
+/// called, or always fails when `fail` is set.
 struct MockDisplay {
     mode: DisplayMode,
     last: alloc::vec::Vec<u8>,
     fail: bool,
+    full_presents: usize,
+    regions: alloc::vec::Vec<DamageRect>,
 }
 
 impl MockDisplay {
@@ -53,7 +58,20 @@ impl MockDisplay {
             mode,
             last: alloc::vec::Vec::new(),
             fail: false,
+            full_presents: 0,
+            regions: alloc::vec::Vec::new(),
         }
+    }
+
+    /// Record `frame` as the latest presented bytes, or fail when `fail`
+    /// is set. Shared by both [`Display`] methods so only the call-count
+    /// bookkeeping differs between a whole-frame and a region present.
+    fn record(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        if self.fail {
+            return Err(DriverError::DeviceFault);
+        }
+        self.last = frame.to_vec();
+        Ok(())
     }
 }
 
@@ -63,10 +81,14 @@ impl Display for MockDisplay {
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        if self.fail {
-            return Err(DriverError::DeviceFault);
-        }
-        self.last = frame.to_vec();
+        self.record(frame)?;
+        self.full_presents += 1;
+        Ok(())
+    }
+
+    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+        self.record(frame)?;
+        self.regions.push(damage);
         Ok(())
     }
 }
@@ -260,7 +282,7 @@ fn set_background_repaints_the_whole_screen() {
     assert!(c.set_background(RED));
     assert_eq!(c.background(), RED);
     assert!(c.has_damage(), "a changed background dirties the screen");
-    assert_eq!(c.composite(), Rect::new(0, 0, 2, 2));
+    assert_eq!(c.composite().bounds(), Rect::new(0, 0, 2, 2));
     assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
     assert_eq!(frame_pixel(&c, 1, 1), [255, 0, 0, 255]);
 }
@@ -442,6 +464,217 @@ fn back_buffer_holds_premultiplied_pixels() {
     assert_eq!(c.back_buffer().get(0, 0), Some(BLUE.premultiply()));
 }
 
+// ---- pending work: has_damage agrees with composite ------------------
+
+/// Composite `c`, first asserting [`Compositor::has_damage`] answered
+/// exactly what that composite produces, and return the region.
+///
+/// A caller skips a frame entirely when `has_damage` is `false`, so a
+/// disagreement either drops a repaint the user is waiting for or burns a
+/// wake compositing nothing.
+fn composite_checked(c: &mut Compositor) -> DamageRegion {
+    let claimed = c.has_damage();
+    let region = c.composite();
+    assert_eq!(
+        claimed,
+        !region.is_empty(),
+        "has_damage promised {claimed}, composite produced {region:?}"
+    );
+    region
+}
+
+#[test]
+fn has_damage_answers_exactly_what_the_next_composite_produces() {
+    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    // The very first frame: a new compositor marks the whole screen.
+    assert!(!composite_checked(&mut c).is_empty());
+    assert!(composite_checked(&mut c).is_empty());
+
+    let id = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    assert!(!composite_checked(&mut c).is_empty());
+    assert!(c.move_window(id, Point::new(2, 2)));
+    assert!(composite_checked(&mut c).is_empty());
+    assert!(c.move_window(id, Point::new(6, 6)));
+    assert!(!composite_checked(&mut c).is_empty());
+
+    c.set_cursor(solid_cursor(4, RED), Point::new(10, 10));
+    assert!(!composite_checked(&mut c).is_empty());
+    assert!(c.move_cursor(Point::new(14, 14)));
+    assert!(!composite_checked(&mut c).is_empty());
+    assert!(c.hide_cursor());
+    assert!(!composite_checked(&mut c).is_empty());
+    assert!(composite_checked(&mut c).is_empty());
+}
+
+#[test]
+fn a_cursor_move_landing_on_the_same_rectangle_is_no_work() {
+    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(5, 5));
+    c.composite();
+
+    assert!(c.move_cursor(Point::new(5, 5)));
+    assert!(!c.has_damage(), "the pointer did not actually move");
+    assert!(composite_checked(&mut c).is_empty());
+}
+
+#[test]
+fn replacing_the_cursor_artwork_repaints_its_unchanged_rectangle() {
+    // A hover shape change (arrow -> text) installs a same-size image at the
+    // same pointer: the rectangle is identical, the pixels are not.
+    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(5, 5));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 6, 6), [255, 0, 0, 255]);
+
+    c.set_cursor(solid_cursor(4, Color::rgb(0, 255, 0)), Point::new(5, 5));
+    assert!(c.has_damage());
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(5, 5, 4, 4)]);
+    assert_eq!(frame_pixel(&c, 6, 6), [0, 255, 0, 255]);
+}
+
+#[test]
+fn damage_marked_entirely_off_screen_is_no_pending_work() {
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let offscreen = c.add_window(Point::new(100, 100), opaque(4, 4, RED));
+    c.composite();
+
+    // Nothing this window does reaches a pixel, so waking to composite it
+    // would be a frame spent on nothing.
+    assert!(c.move_window(offscreen, Point::new(120, 120)));
+    assert!(!c.has_damage());
+    assert!(composite_checked(&mut c).is_empty());
+}
+
+// ---- no-op updates and reported content damage -----------------------
+
+#[test]
+fn no_op_window_updates_mark_no_damage_and_still_report_success() {
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    assert!(c.set_corners(id, Corners::Rounded { radius: 2 }));
+    assert!(c.set_opacity(id, 200));
+    c.composite();
+
+    // The taskbar presenter re-issues exactly these on every frame, so a
+    // repaint here is a whole window recomposited for nothing.
+    assert!(c.move_window(id, Point::new(2, 2)));
+    assert!(c.set_corners(id, Corners::Rounded { radius: 2 }));
+    assert!(c.set_visible(id, true));
+    assert!(c.set_opacity(id, 200));
+    assert!(!c.has_damage(), "an unchanged window repaints nothing");
+    assert!(composite_checked(&mut c).is_empty());
+}
+
+#[test]
+fn a_genuine_move_still_damages_the_vacated_and_the_new_rectangle() {
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let id = c.add_window(Point::ORIGIN, opaque(4, 4, RED));
+    c.composite();
+
+    assert!(c.move_window(id, Point::new(8, 8)));
+    let region = composite_checked(&mut c);
+    assert_eq!(region.rects().len(), 2);
+    assert!(region.rects().contains(&Rect::new(0, 0, 4, 4)));
+    assert!(region.rects().contains(&Rect::new(8, 8, 4, 4)));
+}
+
+#[test]
+fn replacing_a_surface_always_marks_damage() {
+    // Comparing two whole buffers costs more than recompositing the window,
+    // so a replacement is assumed to differ.
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(1, 1), opaque(4, 4, RED));
+    c.composite();
+
+    assert!(c.set_surface(id, opaque(4, 4, RED)));
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(1, 1, 4, 4)]);
+}
+
+#[test]
+fn a_content_edit_marks_only_the_rectangle_it_reports() {
+    let mut c = Compositor::new(mode(32, 32), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(4, 4), opaque(16, 16, RED));
+    c.composite();
+
+    let green = Color::rgb(0, 255, 0);
+    let edited = c.edit_window_surface(id, |surface| {
+        surface.set(2, 3, green.premultiply());
+        (green, Rect::new(2, 3, 1, 1))
+    });
+    assert_eq!(edited, Some(green));
+
+    // Content-local (2, 3) is screen (6, 7) for a window at (4, 4).
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(6, 7, 1, 1)]);
+    assert_eq!(frame_pixel(&c, 6, 7), [0, 255, 0, 255]);
+    assert_eq!(frame_pixel(&c, 7, 7), [255, 0, 0, 255]);
+}
+
+#[test]
+fn content_damage_is_offset_by_a_decorated_window_frame() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    let client = c.window_client_rect(id).expect("decorated client");
+    let outer = c.window(id).expect("window").bounds();
+    assert!(client.left() > outer.left() && client.top() > outer.top());
+
+    let edit = c.edit_window_surface(id, |surface| {
+        surface.set(0, 0, Color::rgb(0, 255, 0).premultiply());
+        ((), Rect::new(0, 0, 2, 2))
+    });
+    assert_eq!(edit, Some(()));
+
+    // The reported rectangle is content-local, so it lands at the client's
+    // top-left inside the furniture band, never at the outer origin.
+    let expected = Rect::new(client.left(), client.top(), 2, 2);
+    assert_eq!(composite_checked(&mut c).rects(), &[expected]);
+}
+
+#[test]
+fn content_damage_larger_than_the_window_is_clipped_to_its_client() {
+    let mut c = Compositor::new(mode(32, 32), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(8, 8, RED));
+    c.add_window(Point::new(0, 0), opaque(8, 8, BLUE));
+    c.composite();
+    let client = c.window_client_rect(id).expect("client");
+
+    // An over-large report must never reach a neighbouring window's pixels.
+    let edit = c.edit_window_surface(id, |_surface| ((), Rect::new(0, 0, 1_000, 1_000)));
+    assert_eq!(edit, Some(()));
+    assert_eq!(composite_checked(&mut c).rects(), &[client]);
+}
+
+#[test]
+fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    c.composite();
+
+    let mut ran = false;
+    let edited = c.edit_window_surface(id, |_surface| {
+        ran = true;
+        (42_u8, Rect::EMPTY)
+    });
+    assert_eq!(edited, Some(42));
+    assert!(ran, "the edit still runs and reports its value");
+    assert!(
+        !c.has_damage(),
+        "an edit that changed nothing repaints nothing"
+    );
+    assert!(composite_checked(&mut c).is_empty());
+}
+
+#[test]
+fn editing_an_unknown_window_never_runs_the_edit() {
+    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut ran = false;
+    let edited = c.edit_window_surface(WindowId(9_999), |_surface| {
+        ran = true;
+        ((), Rect::new(0, 0, 4, 4))
+    });
+    assert_eq!(edited, None);
+    assert!(!ran);
+}
+
 // ---- present seam ----------------------------------------------------
 
 #[test]
@@ -462,6 +695,107 @@ fn present_propagates_driver_error() {
     let mut display = MockDisplay::new(m);
     display.fail = true;
     assert_eq!(c.present(&mut display), Err(DriverError::DeviceFault));
+}
+
+#[test]
+fn a_present_with_no_damage_never_touches_the_display() {
+    let m = mode(8, 8);
+    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+
+    // A new compositor marks the whole screen, so the desktop's very first
+    // present still reaches the driver.
+    assert!(c.present(&mut display).is_ok());
+    assert_eq!(display.full_presents, 1);
+    assert_eq!(display.last, c.frame());
+
+    // A wake that changed nothing must cost neither the scan-out copy nor
+    // the driver blit.
+    display.last.clear();
+    assert!(c.present(&mut display).is_ok());
+    assert_eq!(display.full_presents, 1);
+    assert!(display.regions.is_empty());
+    assert!(display.last.is_empty(), "the driver was not called at all");
+}
+
+#[test]
+fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
+    let m = mode(64, 64);
+    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    assert!(c.present(&mut display).is_ok());
+    display.full_presents = 0;
+
+    // A repaint at the top-left and one at the bottom-right: their bounding
+    // box is nearly the whole screen, the changed pixels are two small
+    // rectangles.
+    c.add_window(Point::ORIGIN, opaque(4, 4, RED));
+    c.add_window(Point::new(56, 58), opaque(4, 4, RED));
+    assert!(c.present(&mut display).is_ok());
+
+    assert_eq!(
+        display.full_presents, 0,
+        "a partial frame is not a full present"
+    );
+    assert_eq!(display.regions.len(), 2);
+    assert!(display.regions.contains(&DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 4,
+    }));
+    assert!(display.regions.contains(&DamageRect {
+        x: 56,
+        y: 58,
+        width_px: 4,
+        height_px: 4,
+    }));
+}
+
+#[test]
+fn whole_screen_damage_presents_the_frame_once() {
+    let m = mode(32, 32);
+    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    assert!(c.present(&mut display).is_ok());
+    display.full_presents = 0;
+
+    assert!(c.set_background(RED));
+    assert!(c.present(&mut display).is_ok());
+    assert_eq!(display.full_presents, 1);
+    assert!(
+        display.regions.is_empty(),
+        "a whole-screen region is one full present, never a region blit"
+    );
+}
+
+#[test]
+fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
+    let m = mode(64, 64);
+    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    assert!(c.present(&mut display).is_ok());
+    display.full_presents = 0;
+
+    // One more scattered rectangle than the per-rectangle path carries:
+    // their round trips would cost more than one call copying their box.
+    let count = i32::try_from(MAX_PRESENT_REGIONS + 1).expect("a small limit");
+    for step in 0..count {
+        c.add_window(Point::new(step * 6, 0), opaque(4, 4, RED));
+    }
+    assert!(c.present(&mut display).is_ok());
+
+    assert_eq!(display.full_presents, 0);
+    let width = u32::try_from((count - 1) * 6 + 4).expect("on screen");
+    assert_eq!(
+        display.regions,
+        [DamageRect {
+            x: 0,
+            y: 0,
+            width_px: width,
+            height_px: 4,
+        }]
+    );
 }
 
 // ---- shared theme integration (lib/theme) ---------------------------
@@ -1035,6 +1369,94 @@ fn replacing_the_cursor_image_marks_both_footprints_dirty() {
     c.composite();
     assert_eq!(c.cursor_bounds(), Some(Rect::new(2, 2, 12, 12)));
     assert_eq!(frame_pixel(&c, 12, 12), [255, 0, 0, 255]);
+}
+
+#[test]
+fn a_cursor_sweep_damages_only_the_rectangle_it_left_and_the_one_it_reached() {
+    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::ORIGIN);
+    c.composite();
+
+    // A whole batch of pointer samples pumped between two composites: the
+    // intermediate positions were never drawn, so their pixels are already
+    // correct and recompositing them is pure waste.
+    for x in 1..=8 {
+        assert!(c.move_cursor(Point::new(x, 0)));
+    }
+    let region = composite_checked(&mut c);
+    assert_eq!(
+        region.rects().len(),
+        2,
+        "one rectangle per sample would be 9"
+    );
+    assert!(region.rects().contains(&Rect::new(0, 0, 4, 4)));
+    assert!(region.rects().contains(&Rect::new(8, 0, 4, 4)));
+}
+
+#[test]
+fn a_single_cursor_move_damages_both_of_its_rectangles() {
+    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::ORIGIN);
+    c.composite();
+
+    assert!(c.move_cursor(Point::new(8, 0)));
+    let region = composite_checked(&mut c);
+    assert_eq!(region.rects().len(), 2);
+    assert!(region.rects().contains(&Rect::new(0, 0, 4, 4)));
+    assert!(region.rects().contains(&Rect::new(8, 0, 4, 4)));
+}
+
+#[test]
+fn hiding_and_reshowing_the_cursor_damages_one_rectangle_each() {
+    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(10, 10));
+    c.composite();
+
+    // Hiding restores what the cursor covered and touches nothing else...
+    assert!(c.hide_cursor());
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(10, 10, 4, 4)]
+    );
+
+    // ...and showing it elsewhere paints only where it now is.
+    c.set_cursor(solid_cursor(4, RED), Point::new(30, 30));
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(30, 30, 4, 4)]
+    );
+    assert_eq!(frame_pixel(&c, 31, 31), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 11, 11), [0, 0, 255, 255]);
+}
+
+/// Composite a small scene with a window under the pointer, apply every
+/// `sample` to the cursor, composite once more, and return the resulting
+/// scan-out frame — the shape of a desktop wake that pumps a batch of
+/// pointer motion before repainting.
+fn cursor_sweep_frame(samples: &[Point]) -> alloc::vec::Vec<u8> {
+    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    c.add_window(Point::new(4, 4), opaque(12, 12, RED));
+    c.set_cursor(solid_cursor(6, Color::rgb(0, 255, 0)), Point::ORIGIN);
+    c.composite();
+    for &sample in samples {
+        assert!(c.move_cursor(sample));
+    }
+    c.composite();
+    c.frame().to_vec()
+}
+
+#[test]
+fn a_swept_cursor_composites_the_frame_a_single_move_would() {
+    // The decisive check that damaging only the leaving and arriving
+    // rectangles is not lossy: a sweep of samples must leave the screen
+    // byte-for-byte where one move to the same place leaves it.
+    let sweep: alloc::vec::Vec<Point> = (1..=10).map(|step| Point::new(step, step)).collect();
+    let swept = cursor_sweep_frame(&sweep);
+    let direct = cursor_sweep_frame(&[Point::new(10, 10)]);
+    assert_eq!(swept, direct);
+
+    // ...and the sweep really did move the cursor rather than draw nothing.
+    assert_ne!(swept, cursor_sweep_frame(&[Point::ORIGIN]));
 }
 
 // ---- cursor selection from interaction state -------------------------

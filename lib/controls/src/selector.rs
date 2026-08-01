@@ -25,7 +25,7 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
+    resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle, RenderInvariant,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
@@ -33,7 +33,7 @@ use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState
 ///
 /// A selector never applies its own change: it reports the value it would take
 /// and the owning container performs the mutation under the caller's authority
-/// (`AGENTS.md` §5.4). A toggle or checkbox requests the flipped value; a mixed
+/// A toggle or checkbox requests the flipped value; a mixed
 /// checkbox resolves to `on = true`; a radio always requests `on = true`, since
 /// a radio is cleared by selecting a sibling, never by clicking itself.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -261,13 +261,20 @@ fn mark_rect(inner: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
 /// The three families differ only in their value semantics and their glyph;
 /// their focus/pointer/keyboard plumbing is identical, so it lives here once
 /// (the press-latch and Space/Enter activation both come from `crate::paint`).
+///
+/// Sharing the core also gives all three selectors the same render-equivalence
+/// equality: the label, role, and visible state compare, while the pointer
+/// coordinate and press latch — hit-testing bookkeeping no render path reads
+/// — do not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SelectorCore {
     label: String,
     role: ControlRole,
     state: ControlState,
-    pointer: Point,
-    armed: bool,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
 }
 
 impl SelectorCore {
@@ -276,8 +283,8 @@ impl SelectorCore {
             label,
             role,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
-            armed: false,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -285,9 +292,9 @@ impl SelectorCore {
     /// the control's `bounds`.
     fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> bool {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let inside = bounds.contains(self.pointer);
+        let inside = bounds.contains(*self.pointer);
         pointer_activation(&mut self.state, &mut self.armed, event, inside)
     }
 

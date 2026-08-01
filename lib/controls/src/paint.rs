@@ -8,6 +8,11 @@
 //! than being copied into each family's module, so the whole control set
 //! rounds, insets, and thickens identically and a change to the recipe cannot
 //! silently diverge between two controls.
+//!
+//! It is also the home of [`RenderInvariant`], the one marker that keeps a
+//! control's derived equality honest about what it draws.
+
+use core::ops::{Deref, DerefMut};
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -19,6 +24,83 @@ use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, PressureKind,
     PressureState, RecoveryState, ValidationState,
 };
+
+/// A value the renderer never reads, wrapped so it cannot make two controls
+/// that draw the same pixels compare unequal.
+///
+/// # The contract it buys
+///
+/// Every drawn control in this crate derives `PartialEq`, and a host uses that
+/// equality as a *render gate*: it re-renders and re-presents only when the
+/// composition it is about to draw differs from the one it last drew. That is
+/// sound only if equality means "these two would draw the same pixels", so a
+/// control may hold no field that changes without changing the picture. Raw
+/// pointer coordinates, press latches, and drag anchors are exactly such
+/// fields: they are hit-testing bookkeeping consumed by `on_pointer`, and the
+/// *visible* consequence of a press or a hover is a separate, still-compared
+/// `ControlState`. Left bare, one pointer sample over inert background would
+/// make the whole composition compare as changed and pay a full repaint.
+///
+/// Wrapping such a field in `RenderInvariant` makes it compare equal to every
+/// other value of its type, so it drops out of the surrounding `derive` while
+/// every other field keeps its ordinary meaning.
+///
+/// # Why a wrapper rather than a hand-written `PartialEq`
+///
+/// The alternative — writing `impl PartialEq` per control and simply omitting
+/// the excluded field — has to restate every *remaining* field. A field added
+/// later is then silently absent from equality, and a visible change stops
+/// forcing a repaint: stale pixels, the failure direction that a test is
+/// unlikely to catch. Localising the exception in the *type of the excluded
+/// field* inverts that: the struct keeps `#[derive(PartialEq)]`, a new field is
+/// covered automatically, and exempting one takes a deliberate, greppable,
+/// self-documenting change at the field itself.
+///
+/// # The obligation on the author
+///
+/// Wrap a field only with positive evidence that no render path reads it, and
+/// prove it with a drift-guard test that renders two values differing only in
+/// that field and compares the surfaces byte for byte. The cost of the two
+/// mistakes is not symmetric: a field wrongly left bare only costs a needless
+/// repaint, while one wrongly wrapped freezes the screen on stale pixels.
+///
+/// It deliberately implements no `Hash`: equality here is coarser than the
+/// wrapped value, so any hash derived from that value would break the
+/// `Hash`/`Eq` agreement.
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct RenderInvariant<T>(T);
+
+impl<T> RenderInvariant<T> {
+    /// Mark `value` as state the renderer never reads.
+    pub(crate) const fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+/// Two wrapped values are always equal — that is the whole point of the
+/// wrapper, and the reason the surrounding control's derived equality means
+/// "would draw the same pixels".
+impl<T> PartialEq for RenderInvariant<T> {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for RenderInvariant<T> {}
+
+impl<T> Deref for RenderInvariant<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for RenderInvariant<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
 
 /// Map a resource pressure to its theme signal role, in one place so no
 /// renderer restates the mapping.
@@ -350,8 +432,8 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
 /// control mutes it, a denial takes the denied role, a failed-closed attempt
 /// the recovery role, and an interactive control takes its role's accent
 /// (destructive danger, recovery, otherwise the theme accent). Sharing this
-/// with the selector family keeps the mark recipe defined once (`AGENTS.md`
-/// §2.2), so a selector's tick and a slider's track can never diverge.
+/// with the selector family keeps the mark recipe defined once, so a
+/// selector's tick and a slider's track can never diverge.
 #[must_use]
 pub(crate) fn resolve_mark(theme: &Theme, role: ControlRole, state: ControlState) -> Color {
     let palette = theme.palette();

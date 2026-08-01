@@ -50,6 +50,13 @@ extern crate alloc;
 #[cfg(all(itest_aarch64, feature = "test-hooks"))]
 mod kernel;
 
+// The migration driver's give-up policy. Compiled for the freestanding
+// migration kernel body that uses it, and for host `cargo test`, which runs
+// its unit tests without needing that body. Gated on the exact conditions the
+// consumer (`kernel::…`) needs so the host bin build never carries it unused.
+#[cfg(any(test, all(itest_aarch64, feature = "test-hooks", migration_smp)))]
+mod progress;
+
 // --- Stub when the test-hooks feature is off ----------------------
 #[cfg(all(itest_aarch64, not(feature = "test-hooks")))]
 #[no_mangle]

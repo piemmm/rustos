@@ -25,7 +25,7 @@
 //! has disappeared from the compositor (an embedder removed it), the next
 //! present re-creates it rather than silently doing nothing.
 
-use tairix_taskbar::{Taskbar, TaskbarRenderer};
+use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its context menu, the
@@ -34,9 +34,9 @@ use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
 /// [`present`](Self::present) whenever the taskbar's model or the active theme
-/// changes; the presenter creates the bar, popup, and menu windows on first
-/// sight and keeps their surface, position, and corner radius in step
-/// thereafter.
+/// changes, naming the surfaces that changed; the presenter creates the bar,
+/// popup, and menu windows on first sight and keeps their surface, position,
+/// and corner radius in step thereafter.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarPresenter {
     bar: Option<WindowId>,
@@ -44,6 +44,10 @@ pub struct TaskbarPresenter {
     menu: Option<WindowId>,
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
+    /// The density the surfaces on screen were laid out at, so a runtime
+    /// DPI change is caught even though it never touches the taskbar
+    /// model that drives the repaint latch.
+    presented_scale: Option<Scale>,
 }
 
 impl TaskbarPresenter {
@@ -56,6 +60,7 @@ impl TaskbarPresenter {
             menu: None,
             notifications: None,
             readout: None,
+            presented_scale: None,
         }
     }
 
@@ -97,7 +102,7 @@ impl TaskbarPresenter {
     }
 
     /// Bring the compositor up to date with the taskbar's current model and
-    /// its owned theme.
+    /// its owned theme, repainting only the surfaces `parts` names.
     ///
     /// The bar is repainted and re-placed at [`BarLayout::bar`]'s origin,
     /// rounded with [`BarLayout::corner_radius`]. If the program-library
@@ -105,6 +110,17 @@ impl TaskbarPresenter {
     /// [`LibraryLayout::panel`]'s origin, rounded with
     /// [`LibraryLayout::corner_radius`]; when the popup is closed any popup
     /// window is removed.
+    ///
+    /// Repainting only the latched surfaces is what keeps a pointer moving
+    /// over one small open menu cheap: re-rendering all five surfaces and
+    /// pushing them back into the compositor costs milliseconds and damages
+    /// five window rectangles, where the menu alone costs a fraction of
+    /// that and damages one. A surface with no window yet is always
+    /// presented, whatever the latch says, so the first paint after startup
+    /// (or after a [`teardown`](Self::teardown)) puts everything on screen.
+    /// A change of desktop density is the one input the taskbar's own latch
+    /// cannot see — the scale belongs to the output, not the model — so a
+    /// scale that differs from the last presented one repaints everything.
     ///
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
@@ -118,23 +134,41 @@ impl TaskbarPresenter {
         compositor: &mut Compositor,
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
+        parts: TaskbarRepaint,
     ) {
         // The desktop density belongs to the output the bar is on, so it is
         // read from the compositor here and laid out at present time — a
         // runtime DPI change re-presents the bar at the new scale with no
         // taskbar state to update.
         let scale = compositor.scale();
-        self.present_bar(compositor, renderer, taskbar, scale);
-        self.present_popup(compositor, renderer, taskbar, scale);
-        self.present_menu(compositor, renderer, taskbar, scale);
-        self.present_notifications(compositor, renderer, taskbar, scale);
-        self.present_readout(compositor, renderer, taskbar, scale);
+        let parts = if self.presented_scale == Some(scale) {
+            parts
+        } else {
+            TaskbarRepaint::ALL
+        };
+        self.presented_scale = Some(scale);
+        if parts.bar || self.bar.is_none() {
+            self.present_bar(compositor, renderer, taskbar, scale);
+        }
+        if parts.library || self.popup.is_none() {
+            self.present_popup(compositor, renderer, taskbar, scale);
+        }
+        if parts.menu || self.menu.is_none() {
+            self.present_menu(compositor, renderer, taskbar, scale);
+        }
+        if parts.notifications || self.notifications.is_none() {
+            self.present_notifications(compositor, renderer, taskbar, scale);
+        }
+        if parts.readout || self.readout.is_none() {
+            self.present_readout(compositor, renderer, taskbar, scale);
+        }
     }
 
     /// Remove the bar, popup, menu, and popover windows from `compositor`
     /// and forget them, so a later [`present`](Self::present) starts fresh.
     /// Tearing the desktop session down leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
+        self.presented_scale = None;
         if let Some(id) = self.readout.take() {
             compositor.remove(id);
         }

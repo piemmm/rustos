@@ -2,7 +2,7 @@
 //!
 //! These cover the shared row chrome (hover/selection/pressure rails, the
 //! bottom activity Heat Seam, the recovery/complete/denied Signal Bead, the
-//! focus ring, and the §13 disposition), the column-alignment invariant (a
+//! focus ring, and the spec §13 disposition), the column-alignment invariant (a
 //! row's content never shifts when its state changes), table cells (alignment
 //! and cell-specific state), the card's three-edge state (leading dominant
 //! rail, bottom progress seam, top-trailing count/alert) with footer actions,
@@ -631,4 +631,92 @@ fn panel_action_rects(panel: &Panel, bounds: Rect, theme: &Theme) -> alloc::vec:
 fn panel_renders_in_light_theme() {
     let s = panel_surface(&Panel::new("Light"), &Theme::light());
     assert!(has_pixel(&s, premul(Theme::light().palette().on_surface)));
+}
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+/// Two samples clear of the row, so only the recorded coordinate differs.
+const OFF_A: (i32, i32) = (400, 60);
+const OFF_B: (i32, i32) = (460, 70);
+
+/// The state a pressed row *shows*, without holding the press latch.
+fn shown_pressed() -> ControlState {
+    let mut state = ControlState::idle();
+    state.pointer = crate::state::PointerState::Pressed;
+    state
+}
+
+fn table_surface(row: &TableRow, theme: &Theme) -> Surface {
+    let mut surface = Surface::new(W, H).expect("surface");
+    row.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        theme,
+        font(),
+        &[120, 120],
+    );
+    surface
+}
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_list_row() {
+    let theme = Theme::dark();
+    let mut a = ListRow::new("Documents");
+    let mut b = a.clone();
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H));
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H));
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the row is not a drawn property"
+    );
+    assert_eq!(
+        row_surface(&a, &theme, Scale::ONE).pixels(),
+        row_surface(&b, &theme, Scale::ONE).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    let mut latched = ListRow::new("Documents");
+    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H));
+    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H));
+    let mut shown = ListRow::new("Documents");
+    shown.set_state(shown_pressed());
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        row_surface(&latched, &theme, Scale::ONE).pixels(),
+        row_surface(&shown, &theme, Scale::ONE).pixels(),
+        "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_table_row() {
+    let theme = Theme::dark();
+    let cells = || vec![TableCell::new("Name"), TableCell::numeric("128")];
+
+    let mut a = TableRow::new(cells());
+    let mut b = a.clone();
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H));
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H));
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the row is not a drawn property"
+    );
+    assert_eq!(
+        table_surface(&a, &theme).pixels(),
+        table_surface(&b, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    let mut latched = TableRow::new(cells());
+    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H));
+    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H));
+    let mut shown = TableRow::new(cells());
+    shown.set_state(shown_pressed());
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        table_surface(&latched, &theme).pixels(),
+        table_surface(&shown, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
 }

@@ -730,3 +730,70 @@ fn tray_signal_readout_action_activates_by_keyboard() {
         Some(TraySignalAction::Activated)
     );
 }
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, TW, TH);
+
+    // Two samples clear of the item, so only the recorded coordinate differs.
+    let mut a = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut b = a.clone();
+    a.on_pointer(&moved(iv(TW) + 40, iv(TH) + 40), bounds);
+    b.on_pointer(&moved(iv(TW) + 90, iv(TH) + 12), bounds);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the item is not a drawn property"
+    );
+    assert_eq!(
+        task_surface(&a, &theme, Scale::ONE).pixels(),
+        task_surface(&b, &theme, Scale::ONE).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // One holds a real press latch, the other is merely *shown* pressed.
+    let mut latched = TaskbarItem::new("Editor", IconKind::Generic);
+    latched.on_pointer(&moved(iv(TW) / 2, iv(TH) / 2), bounds);
+    latched.on_pointer(&PRESS, bounds);
+    let mut shown = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut pressed = ControlState::idle();
+    pressed.pointer = PointerState::Pressed;
+    shown.set_state(pressed);
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
+    assert_eq!(
+        task_surface(&latched, &theme, Scale::ONE).pixels(),
+        task_surface(&shown, &theme, Scale::ONE).pixels(),
+        "…and the two must therefore paint identically"
+    );
+    assert_eq!(
+        latched.on_pointer(&RELEASE, bounds),
+        Some(TaskbarItemAction::Activated),
+        "the latch still governs activation, it is only invisible"
+    );
+}
+
+#[test]
+fn pointer_position_alone_never_changes_a_tray_signal_render() {
+    let theme = Theme::dark();
+    let capsule = Rect::new(0, 0, SS, SS);
+    let readout = Rect::new(0, iv(SS), 120, 60);
+    // Two samples clear of both the capsule and the readout, so only the
+    // recorded coordinate differs; the expansion a hover *causes* is a
+    // separate, still-compared property.
+    let mut a = TraySignal::new(IconKind::Battery, "Battery").with_value("82%");
+    let mut b = a.clone();
+    let _ = a.on_pointer(&moved(500, 500), capsule, readout, Scale::ONE, &theme);
+    let _ = b.on_pointer(&moved(640, 480), capsule, readout, Scale::ONE, &theme);
+
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the signal is not a drawn property"
+    );
+    assert_eq!(
+        tray_surface(&a, &theme).pixels(),
+        tray_surface(&b, &theme).pixels(),
+        "…and the two must therefore paint identically"
+    );
+}

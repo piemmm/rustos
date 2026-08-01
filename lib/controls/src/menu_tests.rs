@@ -1,7 +1,7 @@
 //! Unit tests for the menu command surface (spec §11.10, §20 checklist).
 //!
 //! These cover measurement (preferred sizing, the elevated plate and rim), the
-//! current-row highlight, the §13 denied-vs-disabled distinction and the
+//! current-row highlight, the spec §13 denied-vs-disabled distinction and the
 //! Authority Mark, the destructive danger rail, the full keyboard model
 //! (Up/Down wrap, Home/End, Enter/Space, Escape, submenu open), the pointer
 //! hover/click model with fail-closed non-actionable rows, hit-testing, theme
@@ -386,4 +386,44 @@ fn renders_at_a_larger_scale_without_panicking() {
         font(),
     );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
+}
+
+// --- Render-equivalence equality (the host's repaint gate) ----------------
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_menu() {
+    let theme = Theme::dark();
+    let h = ROW_H * 3 + BORDER * 2;
+    let bounds = Rect::new(0, 0, W, h);
+    let away = moved(xi(W) + 40, xi(h) + 40);
+
+    // Two samples clear of the menu, so only the recorded coordinate differs.
+    let mut a = three_item_menu();
+    let mut b = a.clone();
+    a.on_pointer(&away, bounds, Scale::ONE, &theme);
+    b.on_pointer(&moved(xi(W) + 90, xi(h) + 12), bounds, Scale::ONE, &theme);
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the menu is not a drawn property"
+    );
+    assert_eq!(
+        render(&a, &theme, h).pixels(),
+        render(&b, &theme, h).pixels(),
+        "…and the two must therefore paint identically"
+    );
+
+    // Both hover row 1, so the highlight matches; only one of them holds the
+    // press, and which row a release would activate is not drawn.
+    let over_row = moved(xi(W) / 2, row_centre_y(1));
+    let mut latched = three_item_menu();
+    latched.on_pointer(&over_row, bounds, Scale::ONE, &theme);
+    latched.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let mut hovered = three_item_menu();
+    hovered.on_pointer(&over_row, bounds, Scale::ONE, &theme);
+    assert_eq!(latched, hovered, "the armed row is not a drawn property");
+    assert_eq!(
+        render(&latched, &theme, h).pixels(),
+        render(&hovered, &theme, h).pixels(),
+        "…and the two must therefore paint identically"
+    );
 }
