@@ -37,8 +37,10 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T12 done**; each stage's done-state section below
-records what it now guarantees. The **Switchboard tray** is landed whole
+`in progress` — **T1–T14 done**, and T15's documentation deliverable with
+them; the one outstanding item is T15's QEMU pin + Switchboard vertical.
+Each stage's done-state section below records what it now guarantees. The
+**Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
 `SwitchboardTray` model (one pure derive, hung > pressure > jobs >
 recovery > calm, orthogonal furniture composed, count/alert badge), the
@@ -1090,7 +1092,7 @@ the `tairix_sys_sched_set_priority` C stub, and the regenerated headers
 (`TAIRIX_SCHED_PRIORITY_*`) expose it, and the syscall/dispatch/fuzz/
 proptest oracles cover it end to end.
 
-## T13 — System menu / quick actions + System Settings access (desktop1 panel 5)
+## T13 — System menu / quick actions + System Settings access (desktop1 panel 5) — done
 
 Where System Settings lives (issue requirement: **not** in the library).
 
@@ -1290,22 +1292,61 @@ exactly on the first action button's left edge.
 
 ## T15 — Documentation, integration tests, and the validation gate
 
-**Deliverables**
-- `docs/src/desktop/`: update/author `taskbar.md` (the icon-bar layout,
-  program library, pins, notification area) and add `switchboard.md`
-  (the system-overview surface, data feed, actions, capabilities); update
-  `docs/src/lib/` pages for `proglib`/`taskpins`; rustdoc on every new public
-  item (§2.8, §13). Update the `README.md` support matrix if a per-arch state
-  changes (§13).
-- A QEMU integration vertical: boot the graphical session, open the library,
-  launch an app, pin it, open the Switchboard, and screendump-verify the bar +
-  Switchboard render (the D7-style host-side proof).
-- Run the whole-project gate (§7): `cargo fmt --all`, `cargo xtask ci` (once),
-  `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both --secs 20`; fix any
-  failure in the same change.
+**Documentation: done.** `docs/src/desktop/taskbar.md` (icon-bar layout,
+program library, pins, notification area), `docs/src/desktop/switchboard.md`
+(the system-overview surface, feed, sections, actions, capabilities, and the
+relayed power transition), `docs/src/desktop/session.md` (every quick-action
+outcome and the trusted power-confirmation prompt),
+`docs/src/desktop/theming.md` (the live Light/Dark control), and the
+`docs/src/lib/` pages for `proglib`/`taskpins`/`controls`/`image` are current
+against the built surfaces, as is the crate `README.md` beside the monitor
+service. The `README.md` support matrix needs no row: the desktop is
+architecture-neutral, and the security matrix's re-authenticated screen-lock
+row already covers T13.
 
-**Done when**: docs current, integration vertical green, whole-project gate
-green.
+**Prerequisite settled while landing this stage.** A pinned shortcut only
+survives if the pin store can be written, and `<home>/Settings/Taskbar/` is
+two levels below the home while the session's writer creates exactly one
+parent. Homes were being created bare — no `Settings/`, no `Desktop/`, none
+of the fixed shape — so the very first per-user write of any kind failed
+`NotFound` on a real install. The home's shape is now one shared definition
+(`tairix_users::{HOME_MODE, HOME_SUBDIRS}`, `plans/USERS.md` U1) that the
+`CAP_USER_ADMIN` provisioning path, `tools/mkimage`, and the QEMU users-root
+fixture all read, so a pin written in the guest lands on a home shaped like a
+real one.
+
+**Remaining: the QEMU vertical.** Boot the graphical session, open the
+library, launch an app, **pin it**, open the Switchboard, and
+screendump-verify the bar + Switchboard render (the D7-style host-side
+proof). The existing `autoload_input_qemu_aarch64` vertical already covers
+boot → library → launch with a host-reconstructed screendump assertion; the
+pin and Switchboard stages are the gap. Notes for whoever lands it:
+- The pin gesture is a **secondary** press on a library-popup entry row
+  (`Taskbar::open_entry_menu` → `MenuSubject::Entry`), then the menu's *Pin
+  to taskbar* row; its geometry comes from `Taskbar::menu_layout` +
+  `Menu::row_rect`, reconstructed host-side exactly as the popup rows already
+  are (`reconstructed_library`).
+- The witness for "the pin launched its app" is the `APP_LOADED` record's
+  `bundle` field (uniquely attributable); `PROCESS_SPAWNED` carries only an
+  entry address and cannot attribute a bundle. Pin an app the earlier stages
+  do **not** launch, so the record is unambiguous.
+- `BarLayout.pins` is empty until a pin exists, so slot 0's rect is only
+  reconstructable after the pin is persisted — gate the pin press on the
+  store write, not on a fixed count.
+- The Switchboard capsule press relays `OpenPanel` to the already-spawned
+  `/System/Services/switchboard.app`; its window is `WIN_WIDTH`×`WIN_HEIGHT`
+  at the next `cascade_origin_for` slot, and its creation shows up as one
+  further window-frame map (`sc=shm_map`).
+- D20 applies: this is a fourth stage on an already long blind pointer
+  choreography. Prefer a **dedicated short vertical** over lengthening the
+  existing one, so a gate mis-count in one stage cannot wedge the other.
+
+**Gate**: `cargo fmt --all`, `cargo xtask ci` (once), `cargo xtask fuzz
+--secs 5`, and `tools/ci/soak.sh both --secs 20`; any failure is fixed in the
+same change.
+
+**Done when**: docs current (done), the integration vertical green, and the
+whole-project gate green.
 
 ---
 

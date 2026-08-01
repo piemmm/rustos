@@ -16,9 +16,10 @@
 //! sibling temporary node carrying the original's security record, then
 //! renamed over the original, so a power cut mid-write leaves either the
 //! old or the new database — never a torn one. Home provisioning walks
-//! and creates the directory path, then stamps the leaf owner-only under
-//! the new account's identity; an already-present leaf is left untouched
-//! (idempotent).
+//! and creates the directory path, stamps the leaf owner-only under the
+//! new account's identity, and fills in the fixed home shape
+//! ([`tairix_users::HOME_SUBDIRS`]) inside it; an already-present
+//! directory is left exactly as it is (idempotent).
 
 use alloc::sync::Arc;
 
@@ -27,9 +28,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
-
-/// Owner-only mode a freshly provisioned home directory is stamped with.
-const HOME_MODE: u32 = 0o700;
+use tairix_users::{HOME_MODE, HOME_SUBDIRS};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
 /// mounted encrypted root volume.
@@ -86,25 +85,22 @@ where
         let mut fs = self.fs.lock();
         let fs = &mut *fs;
         let mut dir = fs.root();
-        let mut walked = false;
+        let mut leaf = None;
         let mut remaining = components.peekable();
         while let Some(component) = remaining.next() {
             if component.is_empty() {
                 return Err(Errno::OutOfRange);
             }
-            walked = true;
             let is_leaf = remaining.peek().is_none();
             match fs.lookup(dir, component.as_bytes()) {
                 Ok(node) => {
-                    // An already-present leaf is left untouched: provisioning
-                    // is idempotent and never rewrites ownership of existing
-                    // data. An intermediate must be a directory.
+                    // An already-present directory keeps its ownership:
+                    // provisioning is idempotent and never rewrites
+                    // existing data. A non-directory in the path is not a
+                    // home and is refused rather than replaced.
                     let info = fs.node_info(node).map_err(driver_errno)?;
                     if info.kind != NodeKind::Directory {
                         return Err(Errno::AlreadyExists);
-                    }
-                    if is_leaf {
-                        return Ok(());
                     }
                     dir = node;
                 }
@@ -115,20 +111,57 @@ where
                     if is_leaf {
                         fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
                             .map_err(driver_errno)?;
-                        return fs.flush().map_err(driver_errno);
                     }
                     dir = node;
                 }
                 Err(err) => return Err(driver_errno(err)),
             }
+            if is_leaf {
+                leaf = Some(dir);
+            }
         }
         // A path with no components ("/") provisions nothing.
-        if walked {
-            Ok(())
-        } else {
-            Err(Errno::OutOfRange)
+        let Some(home) = leaf else {
+            return Err(Errno::OutOfRange);
+        };
+        // Fill in the shape only inside a home this account owns. An
+        // administrator may point a new account at a directory that
+        // already exists; creating directories for the new account inside
+        // somebody else's home would be provisioning one principal's
+        // storage into another's.
+        if fs.security(home).map_err(driver_errno)?.uid == uid {
+            ensure_home_shape(fs, home, uid, gid)?;
+        }
+        fs.flush().map_err(driver_errno)
+    }
+}
+
+/// Create the fixed home shape inside `home`, each directory owned by
+/// `(uid, gid)` and owner-only.
+///
+/// Idempotent: a name already present is left exactly as it is, whatever
+/// it is — the account's own data is never rewritten — and only a missing
+/// one is created. Creating them with the account is what lets the first
+/// per-user write land: those paths are a level below the home, and the
+/// writers create only their immediate parent.
+fn ensure_home_shape<F>(fs: &mut F, home: NodeId, uid: u32, gid: u32) -> Result<(), Errno>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
+{
+    for name in HOME_SUBDIRS {
+        match fs.lookup(home, name.as_bytes()) {
+            Ok(_) => {}
+            Err(DriverError::NotFound) => {
+                let node = fs
+                    .create(home, name.as_bytes(), NodeKind::Directory)
+                    .map_err(driver_errno)?;
+                fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
+                    .map_err(driver_errno)?;
+            }
+            Err(err) => return Err(driver_errno(err)),
         }
     }
+    Ok(())
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
@@ -368,6 +401,114 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         assert_eq!(backing.provision_home("/", 1, 1), Err(Errno::OutOfRange));
+    }
+
+    /// A provisioned home carries the fixed shape, each directory owned by
+    /// the account and owner-only. Without it the first per-user write —
+    /// a settings store, an app cache — lands on a missing ancestor.
+    #[test]
+    fn provision_home_lays_down_the_fixed_home_shape() {
+        let backing = backing();
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("provisions");
+
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+        let home = fs.lookup(users, b"grace").expect("home exists");
+        for name in HOME_SUBDIRS {
+            let node = fs
+                .lookup(home, name.as_bytes())
+                .unwrap_or_else(|_| panic!("{name} exists in a fresh home"));
+            assert_eq!(
+                fs.node_info(node).expect("info").kind,
+                NodeKind::Directory,
+                "{name} is a directory"
+            );
+            let security = fs.security(node).expect("security");
+            assert_eq!(security.mode, HOME_MODE, "{name} is owner-only");
+            assert_eq!(security.uid, 1001, "{name} belongs to the account");
+            assert_eq!(security.gid, 100, "{name} carries the primary group");
+        }
+    }
+
+    /// Re-provisioning fills in a missing directory and leaves an existing
+    /// one exactly as it is, including one the account replaced with a file
+    /// of its own: provisioning never rewrites a user's own data.
+    #[test]
+    fn provision_home_repairs_a_missing_shape_without_rewriting_what_is_there() {
+        let backing = backing();
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("provisions");
+        {
+            let mut fs = backing.fs.lock();
+            let fs = &mut *fs;
+            let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+            let home = fs.lookup(users, b"grace").expect("home exists");
+            fs.remove(home, b"Settings").expect("removes Settings");
+            fs.remove(home, b"Desktop").expect("removes Desktop");
+            fs.create(home, b"Desktop", NodeKind::RegularFile)
+                .expect("the account puts a file there instead");
+        }
+
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("idempotent");
+
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+        let home = fs.lookup(users, b"grace").expect("home exists");
+        let settings = fs.lookup(home, b"Settings").expect("Settings is restored");
+        assert_eq!(
+            fs.node_info(settings).expect("info").kind,
+            NodeKind::Directory
+        );
+        let desktop = fs.lookup(home, b"Desktop").expect("Desktop is still there");
+        assert_eq!(
+            fs.node_info(desktop).expect("info").kind,
+            NodeKind::RegularFile,
+            "what the account put there is left alone"
+        );
+    }
+
+    /// An administrator pointing a new account at a directory that already
+    /// belongs to somebody else provisions nothing inside it: one
+    /// principal's storage is never laid out in another's home.
+    #[test]
+    fn provision_home_never_lays_a_shape_inside_another_accounts_home() {
+        let backing = backing();
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("provisions grace");
+        {
+            let mut fs = backing.fs.lock();
+            let fs = &mut *fs;
+            let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+            let home = fs.lookup(users, b"grace").expect("home exists");
+            fs.remove(home, b"Settings").expect("removes Settings");
+        }
+
+        backing
+            .provision_home("/Users/grace", 2002, 200)
+            .expect("succeeds without touching the home");
+
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+        let home = fs.lookup(users, b"grace").expect("home exists");
+        assert_eq!(
+            fs.lookup(home, b"Settings").unwrap_err(),
+            DriverError::NotFound,
+            "nothing was created for the other account"
+        );
+        assert_eq!(
+            fs.security(home).expect("security").uid,
+            1001,
+            "and the owner is unchanged"
+        );
     }
 
     #[test]

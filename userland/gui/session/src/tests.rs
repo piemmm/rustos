@@ -35,10 +35,11 @@ use tairix_wm::{
 use crate::{
     command_section, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
     open_tray, serve_switchboard_request, DesktopSession, DesktopShell, InputSource, LaunchTable,
-    LockOutcome, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService, ScreenLock,
-    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
-    ShellOutcome, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
-    TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
+    LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService,
+    ScreenLock, SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter,
+    SessionPins, ShellOutcome, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH,
+    UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -4700,6 +4701,139 @@ fn repaint_while_locked_keeps_exactly_one_lock_window_and_stays_locked() {
         comp.window_count(),
         1,
         "a repaint never adds a second lock window"
+    );
+}
+
+// --- The locked drain -------------------------------------------------
+//
+// One wake's worth of seat events fed into a locked screen. What matters
+// here is what happens to the events *behind* the one that unlocks: they
+// are the tail of the gesture that typed the password, and they must be
+// discarded rather than delivered into the desktop that has just become
+// visible.
+
+/// Feed one drain's worth of events, as the embedder's loop does: every
+/// event goes to [`LockedDrain::feed`], including the ones after an unlock.
+fn drain(
+    events: &[InputEvent],
+    lock: &mut ScreenLock,
+    unlocker: &mut dyn Unlocker,
+    shell: &DesktopShell,
+    comp: &mut Compositor,
+) -> LockedDrain {
+    let mut drain = LockedDrain::new();
+    for event in events {
+        drain.feed(lock, event, unlocker, shell, comp);
+    }
+    drain
+}
+
+/// The typing that unlocks the screen, as a drainable batch: the password's
+/// characters, the submitting Enter, and then the tail that is still queued
+/// behind it at the instant the lock comes down.
+fn unlocking_batch(password: &str, tail: &[InputEvent]) -> Vec<InputEvent> {
+    let mut events: Vec<InputEvent> = password
+        .chars()
+        .map(|ch| key_press(Key::Char(ch)))
+        .collect();
+    events.push(key_press(Key::Named(NamedKey::Enter)));
+    events.extend_from_slice(tail);
+    events
+}
+
+#[test]
+fn a_drain_that_never_unlocks_feeds_every_event_to_the_lock() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::refusing();
+
+    let drained = drain(
+        &unlocking_batch("wrong", &[key_press(Key::Char('x'))]),
+        &mut lock,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+
+    assert!(!drained.unlocked(), "a refused password unlocks nothing");
+    assert!(lock.is_locked(), "the screen is still secured");
+    assert_eq!(
+        unlocker.offered,
+        vec![String::from("wrong")],
+        "the one submission reached the verifier"
+    );
+}
+
+/// The security property: once the password is verified part-way through a
+/// batch, nothing after it in that batch is delivered anywhere. Were the
+/// tail routed on, the keystrokes still queued behind a password entry
+/// would land in whatever holds focus on the desktop that just appeared.
+#[test]
+fn a_mid_batch_unlock_discards_the_rest_of_the_drain() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+    // A keystroke and a submitting Enter behind the unlock: were they
+    // routed on, this second Enter would offer "s" as a password.
+    let tail = [
+        key_press(Key::Char('s')),
+        key_press(Key::Named(NamedKey::Enter)),
+        PRIMARY_PRESS,
+    ];
+
+    let drained = drain(
+        &unlocking_batch("correct", &tail),
+        &mut lock,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+
+    assert!(drained.unlocked(), "the lock came down during the drain");
+    assert!(!lock.is_locked(), "and stayed down");
+    assert_eq!(
+        unlocker.offered,
+        vec![String::from("correct")],
+        "the Enter still queued behind the unlock never offered a second password"
+    );
+    assert_eq!(
+        comp.window_count(),
+        0,
+        "the discarded tail added nothing to the screen"
+    );
+}
+
+/// The discard is observable, not merely internal: the lock places the
+/// pointer for every sample it is given, so a motion sample still queued
+/// behind the unlock would jerk the cursor of the desktop that has just
+/// become visible. Nothing typed or moved at a locked screen may surface.
+#[test]
+fn a_pointer_sample_behind_the_unlock_never_moves_the_desktop_cursor() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.refresh_cursor(&mut comp);
+    let resting = comp.cursor_bounds().expect("the pointer is shown");
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+
+    let drained = drain(
+        &unlocking_batch("correct", &[moved(1500, 900)]),
+        &mut lock,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+
+    assert!(drained.unlocked(), "the lock came down during the drain");
+    assert_eq!(
+        comp.cursor_bounds().expect("the pointer is still shown"),
+        resting,
+        "the discarded sample never reached the handler that would have moved it"
     );
 }
 

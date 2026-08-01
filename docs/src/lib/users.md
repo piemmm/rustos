@@ -155,16 +155,40 @@ seed the storage group into the on-disk registry beside them.
 The shared **account-authoring policy** lives beside the format so every
 author agrees on it (`AGENTS.md` §2.2): `DEFAULT_SHELL` (the default
 shell's store-bundle `Run` binary, drift-pinned to the `lib/abi` store
-spellings), `default_home` (the §16 `/Users/<name>` layout), and the
-range-aware `next_id` (auto-allocation of a free uid/gid inside a
-reserved band: one above the highest taken id in the band, fail closed on
-band exhaustion — ids below the current maximum are deliberately not
-re-used, and an allocation never spills into the neighbouring band).
+spellings), `default_home` (the §16 `/Users/<name>` layout), the home's
+own layout (below), and the range-aware `next_id` (auto-allocation of a
+free uid/gid inside a reserved band: one above the highest taken id in the
+band, fail closed on band exhaustion — ids below the current maximum are
+deliberately not re-used, and an allocation never spills into the
+neighbouring band).
 System uids/gids occupy `0..=999` (`IdRange::System`); interactive users
 start at `FIRST_USER_UID`/`FIRST_USER_GID` = 1000 (`IdRange::User`). The
 interactive `users` session, the one-shot `useradd`/`groupadd` command
 apps (user range), and the image builder all import these definitions
 rather than carrying private copies.
+
+### The shape of a home
+
+A home is not just its top directory. `HOME_SUBDIRS` is the fixed set the
+installed-system contract requires inside `/Users/<name>` — `Apps`,
+`Desktop`, `Documents`, `Library`, `Settings` (`AGENTS.md` §16.3) — and
+`HOME_MODE` (`0o700`) is the owner-only mode the home and each of those
+directories is stamped with, so an account's storage is private by
+construction rather than by per-file hardening.
+
+They are created **with the account**, not on first use, because the
+per-user paths the system writes to sit one level deeper — a settings
+store under `Settings/<App>/`, an app cache under `Library/<App>/`, the
+user's own bundles under `Apps/` — and a writer that creates only its
+immediate parent would fail on a brand-new account the first time anything
+was saved. Every route that lays a home down reads this one definition:
+the `CAP_USER_ADMIN` provisioning path (`RootAdminBacking::provision_home`,
+which also fills in a missing directory on a later provisioning and never
+rewrites what the account itself put there), the image builder's seeded
+home, and the QEMU users-root fixture. Provisioning fills in the shape
+only inside a home the account **owns**: an administrator pointing a new
+account at an existing directory never has one principal's storage laid
+out inside another's.
 
 The compiled-in **system identity** (`plans/USERS.md`) is defined here
 too: `system_accounts()` — the no-login `system` record (uid 0, group

@@ -37,8 +37,10 @@ commands from.
 
 Commands travel the other way, over the per-instance mailbox
 `command_endpoint_for(<own pid>)` that this service binds: `OpenPanel` (show
-the overview on a named section) and `SeatReport` (which window owners the
-session's liveness vigil finds unresponsive). Every command is authenticated
+the overview on a named section), `SeatReport` (which window owners the
+session's liveness vigil finds unresponsive), and `Power` (the machine
+transition the user confirmed in the taskbar's quick-actions menu — see
+[Power transitions](#power-transitions)). Every command is authenticated
 against the kernel-attested sender of that very message, never a claim on
 the wire; a command from anyone but the attested session, a command that
 arrives before any session has been attested, and a frame that does not
@@ -100,8 +102,11 @@ reached", "Activity is full") on the controls they disable.
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
   no service-enumeration query; its queries cover processes, CPU time, and
   memory pressure.
-- **System actions** — there is no power or session-lock interface this
-  service may drive, so it offers no shut-down, restart, or lock button.
+- **In-panel system actions** — the machine's power transitions are not
+  rows *in this window*: they live in the taskbar's quick-actions menu,
+  where the user confirms them, and reach this service as the `Power`
+  command below. Session lock is the desktop session's own surface (it
+  keeps the session running behind it), never this service's.
 - **Disk and network pressure cards and resource rows** — the API exposes
   no disk-throughput query at all, and while a per-interface network-rates
   query exists (`NET_INTERFACE_RATES`), no tray latch is derived from it,
@@ -128,6 +133,7 @@ honest absence, so these stay empty.
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — requires `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |
+| `Power` command (from the session) | `system_power(action)` — requires `CAP_SYSTEM_POWER`; see below |
 
 Every row's availability reflects what this service can *genuinely* do: it
 queries its own effective capability set through `cap_query`, compares each
@@ -139,6 +145,33 @@ the `signal`/`sched_set_priority` signed width is refused rather than
 truncated into a different, arbitrary process. A refusal from the kernel or
 the session is stated on `stderr` and leaves the model untouched; it never
 ends the service.
+
+### Power transitions
+
+Restart and Shut Down are drawn by the taskbar, confirmed by the user in the
+session's modal dialog, and **performed here**. The desktop session
+deliberately holds no power authority: it is the largest, most exposed
+process on the seat, so the widest-blast-radius capability in the system
+stays out of it. It relays the confirmed choice as one `Power` command on
+this service's authenticated mailbox, and this service — already seat-scoped,
+already authenticating that mailbox, already stating its refusals — performs
+the capability-gated `system_power` syscall under its own identity.
+
+The check happens twice on purpose. This service refuses without
+`CAP_SYSTEM_POWER` before asking the kernel anything, and the kernel checks
+the caller again on the far side of the trap. A granted transition never
+returns; a refusal (an absent capability, a platform with no primitive for
+the transition) is stated on `stderr` naming the transition that did not
+happen, and the machine keeps running.
+
+Whether the capability is genuinely held is **published, never assumed**:
+every tray summary carries a `power_capable` flag re-read from this
+service's own effective capability set at that moment, so an authority the
+user's ceiling withholds — or one dropped since start-up — stops being
+advertised on the very next publish. The session passes the flag through to
+the taskbar, which renders the two rows with the Authority Mark and emits
+nothing while it is false. An absent, dead, or not-yet-published service
+leaves them denied: fail closed, never optimistic.
 
 ## Waiting
 
@@ -157,12 +190,15 @@ system-wide metrics expose no change event to park on.
 
 The manifest requests exactly `CAP_CONSOLE_WRITE`, `CAP_SYSINFO_GLOBAL`,
 `CAP_SYSINFO_KERNEL`, `CAP_SHM` (the zero-copy window frame region the
-session maps, as for any windowed app), and `CAP_PROC_CONTROL` (delivering a
-control signal to a task this service did not spawn — the Force action); the
-kernel intersects them with the launching user's ceiling at spawn. The two
-optional sampling scopes are probed **once** at startup (capability sets are
-fixed at spawn; re-probing would only spam the audit log with denied audited
-queries):
+session maps, as for any windowed app), `CAP_PROC_CONTROL` (delivering a
+control signal to a task this service did not spawn — the Force action), and
+`CAP_SYSTEM_POWER` (the machine transition the session relays here rather
+than performing itself); the kernel intersects them with the launching
+user's ceiling at spawn, so an ordinary account's instance simply publishes
+that it is not power-capable and the desktop's power rows stay refused. The
+two optional sampling scopes are probed **once** at startup (capability sets
+are fixed at spawn; re-probing would only spam the audit log with denied
+audited queries):
 
 - an administrator's instance sees the system-wide process list and the
   memory-pressure gauge;

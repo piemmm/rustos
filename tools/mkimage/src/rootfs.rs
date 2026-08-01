@@ -29,6 +29,7 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, No
 use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
+use tairix_users::{HOME_MODE, HOME_SUBDIRS};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -121,11 +122,6 @@ pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 /// principal exists.
 const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
 
-/// Mode for a seeded `/Users/<name>` home directory: owner-only (`0o700`),
-/// so the account fully controls its home and no other ordinary principal
-/// reads it.
-const HOME_DIR_MODE: u32 = 0o700;
-
 /// Everything seeded onto the encrypted root beyond the directory
 /// skeleton. Every image profile seeds both account databases (the
 /// canonical default system/service set at minimum, `plans/USERS.md`), so
@@ -192,9 +188,10 @@ pub fn build_root_partition(
 }
 
 /// Create `/Users/<username>` owned by `(uid, gid)`, owner-only
-/// ([`HOME_DIR_MODE`]) — the same shape `users_admin` provisions a new
-/// account's home with, so a seeded account can enter and write its own
-/// home while no other ordinary principal can read it.
+/// ([`HOME_MODE`]) and carrying the fixed home shape ([`HOME_SUBDIRS`]) —
+/// the very layout `users_admin` provisions a new account's home with, read
+/// from the one shared definition so a seeded account and a created one can
+/// never get different homes.
 fn create_home_dir(
     fs: &mut ARXFS<MemBlock>,
     users: NodeId,
@@ -205,8 +202,15 @@ fn create_home_dir(
     let home = fs
         .create(users, username.as_bytes(), NodeKind::Directory)
         .map_err(MkimageError::RootPartition)?;
-    fs.set_security(home, Security::new(HOME_DIR_MODE, uid, gid))
+    fs.set_security(home, Security::new(HOME_MODE, uid, gid))
         .map_err(MkimageError::RootPartition)?;
+    for name in HOME_SUBDIRS {
+        let node = fs
+            .create(home, name.as_bytes(), NodeKind::Directory)
+            .map_err(MkimageError::RootPartition)?;
+        fs.set_security(node, Security::new(HOME_MODE, uid, gid))
+            .map_err(MkimageError::RootPartition)?;
+    }
     Ok(())
 }
 
@@ -755,9 +759,33 @@ mod tests {
         // Owned by the seeded account, owner-only: the account enters and
         // writes its own home; no other ordinary principal reads it.
         let sec = fs.security(home).expect("security present");
-        assert_eq!(sec.mode, HOME_DIR_MODE);
+        assert_eq!(sec.mode, HOME_MODE);
         assert_eq!(sec.uid, TEST_HOMES[0].1);
         assert_eq!(sec.gid, TEST_HOMES[0].2);
+    }
+
+    /// A seeded home carries the same fixed shape a provisioned one does,
+    /// so the first per-user write on a debug image lands instead of
+    /// failing on a missing ancestor.
+    #[test]
+    fn a_seeded_home_directory_carries_the_fixed_home_shape() {
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let users = fs.lookup(root, b"Users").expect("/Users exists");
+        let home = fs.lookup(users, b"root").expect("/Users/root exists");
+        for name in HOME_SUBDIRS {
+            let node = fs
+                .lookup(home, name.as_bytes())
+                .unwrap_or_else(|_| panic!("{name} exists in a seeded home"));
+            let sec = fs.security(node).expect("security present");
+            assert_eq!(sec.mode, HOME_MODE, "{name} is owner-only");
+            assert_eq!(sec.uid, TEST_HOMES[0].1, "{name} belongs to the account");
+            assert_eq!(sec.gid, TEST_HOMES[0].2, "{name} carries its group");
+        }
     }
 
     #[test]

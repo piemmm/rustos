@@ -155,6 +155,21 @@ no-login service account.
   - Range-aware `next_id(IdRange::{System,User}, …)` +
     `FIRST_USER_UID`/`FIRST_USER_GID` (§0.3); `useradd`/`groupadd`
     allocate from the user band.
+  - The **shape of a home** is policy too, held here once as
+    `HOME_MODE` (`0o700`) and `HOME_SUBDIRS` (`Apps`, `Desktop`,
+    `Documents`, `Library`, `Settings` — `AGENTS.md` §16.3). Every route
+    that lays a home down reads it: `provision_home`
+    (`kernel/tairix-kernel/src/user_admin_backing.rs`), the image
+    builder's seeded home, and the QEMU users-root fixture. The
+    directories are created **with the account**, because the per-user
+    paths the system writes to sit a level deeper (a settings store
+    under `Settings/<App>/`, a cache under `Library/<App>/`) and the
+    writers create only their immediate parent — without them the first
+    per-user write fails `NotFound`. Provisioning is idempotent: it fills
+    in a missing directory on a later call, never rewrites what the
+    account itself put there, and fills in the shape **only inside a home
+    the account owns**, so pointing a new account at an existing
+    directory never lays one principal's storage out inside another's.
   - Per-service ceilings in `grants.rs` (`DEVMGR_CEILING`,
     `SYSINFOD_CEILING`, `SEATMGR_CEILING`, `LOGIN_CEILING`,
     `NETSTACK_CEILING`), pinned and sibling-disjoint by test;

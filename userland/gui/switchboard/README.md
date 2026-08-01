@@ -115,8 +115,12 @@ exist**, not because they are unfinished:
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
   no service-enumeration query; its queries cover processes, CPU time, and
   memory pressure.
-- **System actions** — there is no power or session-lock interface this
-  service may drive, so it offers no shut-down, restart, or lock button.
+- **In-panel system actions** — the machine's power transitions are not
+  rows *in this window*. They are drawn by the taskbar's quick-actions
+  menu, confirmed by the user in the session's modal dialog, and arrive
+  here as the `Power` command below, which this service performs under its
+  own `CAP_SYSTEM_POWER`. Session lock is the desktop session's own
+  surface — it keeps the session running behind it — never this service's.
 - **Disk and network pressure cards and resource rows** — no
   disk-throughput query exists at all; a per-interface network-rates query
   exists (`NET_INTERFACE_RATES`) but no tray latch is derived from it, so
@@ -131,13 +135,14 @@ absence.
 ### Commands, and who may send them
 
 Commands arrive on the per-instance mailbox `command_endpoint_for(<own
-pid>)` this service binds: `OpenPanel { section }` and `SeatReport`. The
-session's identity is learned from the reply to this instance's first
-accepted publish (`decode_publish_reply`), and every command is
-authenticated against the **kernel-attested sender of that very message**,
-never a claim on the wire. Dropped with a stated reason, before the frame
-is even decoded: a command from any other sender, a command arriving before
-any session has been attested, and a frame that does not decode.
+pid>)` this service binds: `OpenPanel { section }`, `SeatReport`, and
+`Power { action }`. The session's identity is learned from the reply to
+this instance's first accepted publish (`decode_publish_reply`), and every
+command is authenticated against the **kernel-attested sender of that very
+message**, never a claim on the wire. Dropped with a stated reason, before
+the frame is even decoded: a command from any other sender, a command
+arriving before any session has been attested, and a frame that does not
+decode.
 
 ### Actions
 
@@ -154,6 +159,19 @@ any session has been attested, and a frame that does not decode.
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — needs `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |
+| `Power` command | `system_power(action)` — needs `CAP_SYSTEM_POWER` |
+
+The desktop session holds no power authority of its own: it is the largest,
+most exposed process on the seat, so the widest-blast-radius capability in
+the system stays out of it and the confirmed choice is relayed here
+instead. This service refuses the transition itself when it does not hold
+`CAP_SYSTEM_POWER`, before asking the kernel anything, and the kernel checks
+the caller again on the far side of the trap. A granted transition never
+returns; a refusal names the transition that did not happen on `stderr` and
+leaves the machine running. Every tray summary carries a `power_capable`
+flag re-read from this service's own effective set at that moment, so the
+taskbar renders those rows refused — never optimistically — whenever the
+authority is absent, dropped, or not yet published.
 
 Each control's verdict reflects what this service can *genuinely* do: it
 reads its own effective capability set through `cap_query` and compares
@@ -171,12 +189,15 @@ answer, not a fatal error.
 
 `AppInfo.toml` requests exactly `CAP_CONSOLE_WRITE`, `CAP_SYSINFO_GLOBAL`,
 `CAP_SYSINFO_KERNEL`, `CAP_SHM` (the zero-copy window frame region the
-session maps, as for any windowed app) and `CAP_PROC_CONTROL` (signalling a
-task this service did not spawn). The kernel grants the intersection with
-the launching user's ceiling, and the service probes the two optional
-sampling scopes **once** at startup (`probe_scopes`) — capability sets are
-fixed at spawn, so re-probing per sample could only rediscover the same
-answer while spamming the audit log with denied audited queries:
+session maps, as for any windowed app), `CAP_PROC_CONTROL` (signalling a
+task this service did not spawn) and `CAP_SYSTEM_POWER` (the machine
+transition the session relays here rather than performing itself). The
+kernel grants the intersection with the launching user's ceiling — so an
+ordinary account's instance simply publishes that it is not power-capable
+— and the service probes the two optional sampling scopes **once** at
+startup (`probe_scopes`) — capability sets are fixed at spawn, so
+re-probing per sample could only rediscover the same answer while spamming
+the audit log with denied audited queries:
 
 - an **administrator's** Switchboard sees the system-wide process list and
   the memory-pressure gauge;

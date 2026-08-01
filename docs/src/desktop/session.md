@@ -130,16 +130,74 @@ for — a `TaskActivated` outcome drives the compositor through the
 The bar's **context menu** is presented by the presenter as its own small
 rounded window (a third window beside the bar and popup).
 
+The capsule's system quick actions (`plans/NEW-TASKBAR.md` T13) arrive as
+the same kind of typed outcome — the bar decides nothing and holds no
+authority for any of them:
+
+- `OpenSwitchboard { section }` — both the capsule's own press *and* the
+  menu's two inspection rows (*About This System* → `Overview`, *System
+  Monitor* → `Tasks`). Relayed to the live monitor; with none live the press
+  is itself the demand for one, so an instance is brought up and the section
+  held until its first publish proves it is listening.
+- `LibraryLaunch { entry }` — the *Task Shell* row, which reuses the bar's
+  one launch path rather than inventing a second. The row is actionable only
+  while the terminal bundle resolves in the catalog the session handed the
+  bar, so choosing it can never ask for a program that is not installed.
+- `SetAppearance { appearance }` — the light/dark switch: re-theme the bar
+  model, bring the desktop background in step, repaint, and redraw a prompt
+  showing behind the menu, so nothing on screen is left in the appearance
+  just left behind.
+- `LockSession` — raise the [screen lock](#the-screen-lock). Any unanswered
+  prompt is taken down first: a question must not sit behind a lock where
+  the user cannot see what they would be agreeing to. A lock that could not
+  be raised says so rather than leaving the user believing the screen is
+  secured.
+- `LogOut` — abandon any prompt and any lock, then unwind through the one
+  owner-checked session release.
+- `ConfirmSystemPower { action }` — never acted on directly; it opens the
+  confirmation prompt below.
+
+### Confirming a power transition
+
+Restarting or powering the machine off ends every task of every principal on
+it, so neither may follow from a single click. The requirement is carried in
+the *type* of the outcome — the bar can only ask for a **confirmation**,
+never for the transition — so the session cannot apply one without asking
+first.
+
+`confirm::ConfirmPrompt` puts the choice in a window the **session** owns,
+drawn with the shared `lib/controls` dialog and modelled on the trusted file
+picker: one slot (a second request while one is showing is refused rather
+than stacking a second prompt), a session-owned compositor window at one
+deterministic spot clear of the window-cascade slots, and a typed conclusion
+the embedder acts on once the window is already closed. The safe button
+leads the action band and holds keyboard focus when the prompt opens, so the
+answer a stray `Enter` gives is "no"; the confirming button carries the
+danger role. Every path that is not an explicit confirmation — the safe
+button, `Escape`, or a request the session had to abandon for a lock or a
+log-out — concludes as a cancellation, so nothing irreversible can follow
+from a prompt the user did not answer. A prompt that cannot be shown asks
+nothing and relays nothing, and says so.
+
+Only a confirmed answer is relayed, and it is relayed rather than performed:
+`switchboard::relay_power` sends one `SwitchboardCommand::Power` to the
+monitor service's authenticated command mailbox, which performs the
+capability-gated `system_power` syscall under its own identity. The desktop
+session deliberately holds no power authority of its own — it is the
+largest, most exposed process on the seat — and a relay that could not be
+made states why on `stderr` instead of leaving the user thinking the machine
+is going down. See [Switchboard monitor service](./switchboard.md#power-transitions).
+
 ## Switching the theme
 
 `set_theme(ThemeId)` and `register_theme(Theme)` are the session's
-programmatic theme controls — the interactive light/dark switch lives in the
-Switchboard's System menu (`plans/NEW-TASKBAR.md` T13). `set_theme` switches
-the registry and re-themes the taskbar in place; it fails closed with
-`ThemeError::UnknownTheme` on an unregistered id, and `register_theme` with
-`ThemeError::DuplicateId`, each leaving the active theme and the taskbar
-untouched (`AGENTS.md` §5.4 / §2.9). An embedder that switches the theme
-(through `DesktopShell::session_mut`) then calls
+programmatic theme controls; the interactive light/dark switch is the
+`SetAppearance` outcome above, which resolves through the same path.
+`set_theme` switches the registry and re-themes the taskbar in place; it
+fails closed with `ThemeError::UnknownTheme` on an unregistered id, and
+`register_theme` with `ThemeError::DuplicateId`, each leaving the active
+theme and the taskbar untouched (`AGENTS.md` §5.4 / §2.9). An embedder that
+switches the theme (through `DesktopShell::session_mut`) then calls
 `DesktopShell::sync_background` and `present` to relay the switch to the
 screen.
 

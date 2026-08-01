@@ -30,6 +30,30 @@ pub fn default_home(username: &str) -> String {
     format!("/Users/{username}")
 }
 
+/// Permission mode a home directory, and every directory the OS creates
+/// inside it, is stamped with: owner-only.
+///
+/// A home is private by construction, so an account's files are unreadable
+/// to every other ordinary principal without needing per-file hardening.
+/// Every route that provisions a home — the account-administration path,
+/// the image builder, the test fixtures — stamps this one value, so none of
+/// them can quietly leave a home world-readable.
+pub const HOME_MODE: u32 = 0o700;
+
+/// The fixed shape of a home directory: the subdirectories provisioning
+/// creates inside `/Users/<name>`.
+///
+/// The installed-system contract fixes this set and forbids an application
+/// inventing a sibling beside it. They are created **with** the account
+/// rather than on first use, because the write paths that land in them are
+/// one level deeper — a per-user settings store under `Settings/`, an
+/// app-scoped cache under `Library/`, the user's own bundles under `Apps/`
+/// — and a writer that creates only its immediate parent would fail on a
+/// brand-new account the first time anything was saved.
+///
+/// Sorted and duplicate-free, so a fresh home lists deterministically.
+pub const HOME_SUBDIRS: [&str; 5] = ["Apps", "Desktop", "Documents", "Library", "Settings"];
+
 /// First uid the interactive-user range starts at; everything below is
 /// reserved for the system account (`uid 0`) and the service accounts.
 pub const FIRST_USER_UID: u32 = 1000;
@@ -96,7 +120,9 @@ pub fn next_id(range: IdRange, taken: impl IntoIterator<Item = u32>) -> Option<u
 
 #[cfg(test)]
 mod tests {
-    use super::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_UID};
+    use super::{
+        default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_UID, HOME_MODE, HOME_SUBDIRS,
+    };
     use alloc::format;
     use tairix_abi::{BUNDLE_SUFFIX, SYSTEM_APP_STORE};
 
@@ -111,6 +137,41 @@ mod tests {
     #[test]
     fn the_default_home_follows_the_users_layout() {
         assert_eq!(default_home("alice"), "/Users/alice");
+    }
+
+    /// Each entry must be a single, plain directory name: a component
+    /// carrying a separator, a dot segment, or nothing at all would have a
+    /// provisioner creating something other than a child of the home.
+    #[test]
+    fn every_home_subdirectory_is_one_plain_component() {
+        for name in HOME_SUBDIRS {
+            assert!(!name.is_empty(), "{name:?} is empty");
+            assert!(!name.contains('/'), "{name:?} is not one component");
+            assert!(name != "." && name != "..", "{name:?} is a dot segment");
+        }
+    }
+
+    /// Sorted and duplicate-free: a provisioner walks the table in order,
+    /// so a repeat would try to create the same child twice and an
+    /// out-of-order entry would list a fresh home unpredictably.
+    #[test]
+    fn the_home_shape_is_sorted_and_free_of_duplicates() {
+        let mut sorted = HOME_SUBDIRS;
+        sorted.sort_unstable();
+        assert_eq!(sorted, HOME_SUBDIRS, "the table is authored in order");
+        for (index, name) in HOME_SUBDIRS.iter().enumerate() {
+            assert!(
+                !HOME_SUBDIRS[index + 1..].contains(name),
+                "{name:?} appears twice"
+            );
+        }
+    }
+
+    /// A home is reachable by its owner alone: no group or other bits.
+    #[test]
+    fn a_home_is_owner_only() {
+        assert_eq!(HOME_MODE & 0o077, 0, "no group or other access");
+        assert_eq!(HOME_MODE & 0o700, 0o700, "the owner may enter and write");
     }
 
     #[test]

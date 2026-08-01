@@ -101,7 +101,7 @@ mod program {
         maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
         serve_switchboard_request, window_control_event, Answer, CliError, Command, ConcludedPick,
         ConfirmPrompt, DesktopShell, DeviceInputSource, HangTracker, IconCache, IconRasteriser,
-        InputSource, KeyboardInputSource, LaunchTable, LockOutcome, OwnerWindow, PickConclusion,
+        InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
         PinBridge, PinService, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
         SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
         ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
@@ -454,13 +454,8 @@ mod program {
     /// prompt while the screen is locked.
     ///
     /// Both channels are drained to empty even once a password has been
-    /// verified mid-batch, and everything after that point is **discarded**.
-    /// What is left in the queue at that instant is the tail of the gesture
-    /// that typed the password — the release of the `Enter` that submitted
-    /// it, a stray keystroke behind it — and delivering that into the
-    /// session the moment it becomes visible would leak part of a password
-    /// entry into whatever holds focus. Emptying the channels also keeps the
-    /// seat from waking the loop over events nobody will read.
+    /// verified mid-batch, and everything after that point is discarded by
+    /// the shared [`LockedDrain`] rule, which states why.
     fn drain_locked(
         lock: &mut ScreenLock,
         pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
@@ -469,30 +464,18 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Drained {
-        let mut unlocked = false;
+        let mut drain = LockedDrain::new();
         loop {
             match pointer.poll() {
                 Ok(None) => break,
-                Ok(Some(event)) => {
-                    if !unlocked
-                        && lock.handle(&event, unlocker, shell, compositor) == LockOutcome::Unlocked
-                    {
-                        unlocked = true;
-                    }
-                }
+                Ok(Some(event)) => drain.feed(lock, &event, unlocker, shell, compositor),
                 Err(_) => return Drained::Faulted,
             }
         }
         loop {
             match keyboard.poll_record() {
                 Ok(None) => break,
-                Ok(Some((event, _))) => {
-                    if !unlocked
-                        && lock.handle(&event, unlocker, shell, compositor) == LockOutcome::Unlocked
-                    {
-                        unlocked = true;
-                    }
-                }
+                Ok(Some((event, _))) => drain.feed(lock, &event, unlocker, shell, compositor),
                 Err(_) => return Drained::Faulted,
             }
         }

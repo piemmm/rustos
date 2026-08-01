@@ -348,11 +348,28 @@ pub fn build_users_root_image_with_key(
             fs.set_security(
                 home,
                 Security::new(
-                    0o700,
+                    tairix_users::HOME_MODE,
                     tairix_users::FIRST_USER_UID,
                     tairix_users::FIRST_USER_GID,
                 ),
             )?;
+            // …and the fixed home shape inside it, from the same shared
+            // definition the real provisioning path reads, so a fixture
+            // home is not a shape no installed system would ever have:
+            // the per-user stores a session writes (its settings, an app
+            // cache, the user's own bundles) live a level below these, and
+            // a writer creates only its immediate parent.
+            for subdir in tairix_users::HOME_SUBDIRS {
+                let node = fs.create(home, subdir.as_bytes(), NodeKind::Directory)?;
+                fs.set_security(
+                    node,
+                    Security::new(
+                        tairix_users::HOME_MODE,
+                        tairix_users::FIRST_USER_UID,
+                        tairix_users::FIRST_USER_GID,
+                    ),
+                )?;
+            }
             // A readable document in the account's home so the desktop
             // session's trusted file picker — which opens at the user's
             // home — shows a real regular file to choose, exercising the

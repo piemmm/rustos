@@ -336,6 +336,59 @@ impl ScreenLock {
     }
 }
 
+/// One pass of the embedder draining the seat into a locked screen.
+///
+/// The embedder empties the pointer and keyboard channels on every wake, and
+/// keeps emptying them even once a password has been verified part-way
+/// through the batch. What is still queued at that instant is the tail of the
+/// gesture that typed the password — the release of the `Enter` that
+/// submitted it, a stray keystroke landing behind it — and routing that into
+/// the session the moment it becomes visible would spill part of a password
+/// entry into whatever holds focus.
+///
+/// So the first unlock latches here and every event after it in the same
+/// drain is **dropped**: the channels still reach empty, so the seat cannot
+/// wake the loop over events nobody will read, and nothing typed at a locked
+/// screen is ever delivered onward. The next wake starts a fresh drain, by
+/// which time the desktop is genuinely visible and the user is typing at what
+/// they can see.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct LockedDrain {
+    unlocked: bool,
+}
+
+impl LockedDrain {
+    /// A drain that has not yet seen the lock come down.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { unlocked: false }
+    }
+
+    /// Whether the lock came down part-way through this drain.
+    #[must_use]
+    pub const fn unlocked(&self) -> bool {
+        self.unlocked
+    }
+
+    /// Apply one drained event to `lock`, or discard it because the lock has
+    /// already come down earlier in this same drain.
+    pub fn feed(
+        &mut self,
+        lock: &mut ScreenLock,
+        event: &InputEvent,
+        unlocker: &mut dyn Unlocker,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        if self.unlocked {
+            return;
+        }
+        if lock.handle(event, unlocker, shell, compositor) == LockOutcome::Unlocked {
+            self.unlocked = true;
+        }
+    }
+}
+
 impl Engaged {
     /// Show `verdict` under the field and mark the field as refused, so the
     /// answer is both readable and visible in the field's own rendering

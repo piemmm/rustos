@@ -148,14 +148,17 @@ built-in based on the *active* theme's `Appearance` (a custom dark theme
 toggles to the light built-in, and vice versa). Both return the now-active
 `ThemeId`. Unlike `set_active` they cannot fail: the two built-ins are always
 present, so there is no unknown-id path to surface. The interactive home of
-this control is the Switchboard's System menu (`plans/NEW-TASKBAR.md` T13);
-until that lands the session glue (`userland/gui/session`,
-`tairix-desktop-session`) switches themes programmatically
-(`DesktopSession::set_theme`) and re-applies the new theme: the taskbar is
+this control is the **Light / Dark Appearance** pair in the Switchboard
+capsule's quick-actions menu (`plans/NEW-TASKBAR.md` T13): the taskbar reports
+the chosen appearance as a typed response and the session glue
+(`userland/gui/session`, `tairix-desktop-session`) resolves it through
+`DesktopSession::set_theme`, which re-applies the new theme — the taskbar is
 re-themed in place and the window manager's desktop background is re-coloured
 through the compositor's runtime `set_background` (full-screen damage, so the
-next present repaints every pixel over the new colour). See
-[Desktop session glue](./session.md).
+next present repaints every pixel over the new colour). The active appearance
+carries a check bead in the menu and is not actionable, so the menu can never
+ask for the appearance already in use. See
+[Desktop session glue](./session.md) and [Taskbar](./taskbar.md).
 
 ## Tests
 

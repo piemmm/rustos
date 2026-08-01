@@ -64,7 +64,10 @@ pub use password::{
     PasswordRecord, Salt, StoredPassword, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN,
     MIN_ITERATIONS, NO_PASSWORD_MARKER, PASSWORD_SCHEME, SALT_LEN,
 };
-pub use policy::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID};
+pub use policy::{
+    default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID, HOME_MODE,
+    HOME_SUBDIRS,
+};
 pub use provision::{
     is_system_account_name, is_system_group_name, system_account_directory, system_account_uid,
     system_accounts, system_groups, DEVMGR_UID, DEVMGR_USERNAME, FONTD_UID, FONTD_USERNAME,
