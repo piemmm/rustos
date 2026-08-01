@@ -149,6 +149,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 103 | `hw_self_node` | —                                       | `u64` (node id) | —           | no    |
 | 104 | `sched_set_priority` | `i32 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
 | 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
+| 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -334,6 +335,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
 | `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant` |
+| `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
@@ -733,6 +735,34 @@ task's claim — so a server sizes its view of the shared bytes from the
 kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `tairix_rt::shm_map`;
 C stub `tairix_sys_shm_map`.
 
+`call_grant` (no. 106) is the **endpoint** half of the same delegation
+primitive (`plans/FIX-IO.md` IO6b): a task holding `CAP_IPC_ENDPOINT` and
+its own per-endpoint grant mints the **live serving task** of a second
+endpoint an unforgeable handle for the first, so a process can be assembled
+with client authority over several endpoints belonging to several matched
+hardware nodes — what a RAID service needs to drive the member disks an
+array is composed of. Without it, a per-endpoint grant could be acquired
+only by creating the endpoint or inheriting it from *one* matched node at
+spawn, so no such composing service could exist. It widens nothing: the
+caller's own grant is checked **before** any endpoint state is read, so a
+grant the caller does not hold and an unknown recipient endpoint are the
+same `NotFound` with nothing minted, and the reply is no existence oracle.
+As with `shm_grant`, the recipient is resolved from the endpoint at grant
+time — never a caller-supplied (recyclable) PID — the handle resolves only
+for the recipient task, and every mint is audited. Wrapper
+`tairix_rt::call_grant`; C stub `tairix_sys_call_grant`.
+
+A per-endpoint grant is authority over an endpoint **id**, and endpoint ids
+are numeric and re-creatable: the registry refuses only a *live* clash, so
+once a service dies a different task may bind the same number. Destroying an
+endpoint therefore revokes every grant naming its id in the same step
+(`AuditEvent::CallEndpointGrantsRevoked`, id 3052), so delegated authority
+can never outlive the endpoint *instance* it was issued against and a stale
+holder's next call fails closed rather than retargeting onto whatever bound
+the id next. Minting is also idempotent — granting a task a resource it
+already holds returns the handle it already has — so authority is a set and
+repeating a delegation cannot grow a recipient's kernel-side grant table.
+
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
 `plans/APPWIN.md` AW5 — the desktop's trusted-picker hand-off).
@@ -754,7 +784,15 @@ installing a delegated descriptor whose every read is re-authorised
 through the secured VFS under the **grantor's** captured identity, so a
 permission change against the grantor revokes the delegation's reach
 too; every other operation on the descriptor refuses, and an exited
-recipient's unredeemed grants are reclaimed with its records. Wrappers
+recipient's unredeemed grants are reclaimed with its records. Minting is
+idempotent for the same reason the resource grants are: re-granting a
+delegation that is **still pending** returns the pending handle rather than
+appending a duplicate, so a grantor cannot grow a recipient's kernel-side
+table by repeating one call — a pending delegation conveys exactly one
+right, and these descriptors carry no position (every read names its own
+offset), so a second identical entry conveys nothing the first does not.
+Once redeemed the entry is consumed, so a later grant of the same file
+legitimately mints afresh. Wrappers
 `tairix_rt::fd_grant` / `tairix_rt::fd_redeem`; C stubs
 `tairix_sys_fd_grant` / `tairix_sys_fd_redeem`.
 

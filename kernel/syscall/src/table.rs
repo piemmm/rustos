@@ -1864,6 +1864,35 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Grant the serving task of one call endpoint the right to *call*
+    /// another call endpoint the caller already holds, returning the minted
+    /// grant handle (`plans/FIX-IO.md` `IO6b` — the endpoint sibling of
+    /// [`Self::shm_grant`], so a composing service can drive the several
+    /// member devices an array is made of).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::IPC_ENDPOINT`] and audited the call. The
+    /// implementation confirms the caller itself holds an `Endpoint` grant
+    /// covering `endpoint` **before** reading any endpoint state (delegation
+    /// never widens authority), resolves the live serving task of
+    /// `recipient` at grant time — never a caller-supplied (recyclable) PID
+    /// — and mints that task its own unforgeable handle for `endpoint`. A
+    /// grant the caller does not hold and an unknown recipient endpoint are
+    /// the same [`Errno::NotFound`] with nothing minted, so the reply
+    /// confirms nothing about foreign endpoints.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_grant(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _recipient: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Delegate one of the caller's own open filesystem descriptors to
     /// another live task as a one-shot grant, returning the minted grant
     /// handle (`plans/CAPABILITY_USE.md` CU6 — the file picker's
@@ -2978,6 +3007,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // the call-endpoint id whose serving task receives the grant
                 // (both resolved and owner-checked by the handler).
                 self.handlers.shm_grant(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::CALL_GRANT => {
+                // args[0] is the call-endpoint id the caller already holds a
+                // grant for; args[1] is the call-endpoint id whose serving
+                // task receives the delegated grant (both resolved and
+                // owner-checked by the handler).
+                self.handlers.call_grant(caller, args.0[0], args.0[1])
             }
             SyscallNumber::CALL_PEER_SEAT => {
                 // args[0] is the endpoint id; args[1] the in-service ticket;
@@ -4261,6 +4297,19 @@ mod tests {
             Ok(0)
         }
 
+        fn call_grant(
+            &self,
+            _c: &CallerContext<'_>,
+            endpoint: u64,
+            _recipient: u64,
+        ) -> SyscallResult {
+            self.record("call_grant");
+            // Echo the delegated endpoint so the reachability test can assert
+            // the dispatcher decoded the argument without wiring a real grant
+            // table or endpoint registry here.
+            Ok(endpoint)
+        }
+
         fn shm_grant(&self, _c: &CallerContext<'_>, region: u64, _endpoint: u64) -> SyscallResult {
             self.record("shm_grant");
             // Echo the region id so the reachability test can assert the
@@ -4610,6 +4659,7 @@ mod tests {
                 CapabilityId::MEM_PIN,
                 CapabilityId::SCHED_REALTIME,
                 CapabilityId::SYSTEM_POWER,
+                CapabilityId::IPC_ENDPOINT,
             ],
             &sink,
         );

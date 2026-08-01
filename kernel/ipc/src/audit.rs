@@ -141,6 +141,13 @@ pub enum AuditEvent {
     CallEndpointRegisterDenied,
     /// A caller exited with calls still in flight; the kernel cancelled them.
     CallPosterVanished,
+    /// A destroyed endpoint's delegated per-endpoint grants were revoked.
+    ///
+    /// Endpoint ids are numeric and re-creatable, so a grant naming one must
+    /// not outlive the endpoint *instance* it was issued against: destroying
+    /// the endpoint withdraws every holder's authority over that id in the
+    /// same step, and this records how much authority the teardown withdrew.
+    CallEndpointGrantsRevoked,
 }
 
 impl AuditEvent {
@@ -181,6 +188,7 @@ impl AuditEvent {
             Self::CallReplyDenied => 3049,
             Self::CallEndpointRegisterDenied => 3050,
             Self::CallPosterVanished => 3051,
+            Self::CallEndpointGrantsRevoked => 3052,
         })
     }
 
@@ -224,7 +232,8 @@ impl AuditEvent {
             | Self::NotifySignalled
             | Self::CallEndpointCreated
             | Self::CallEndpointDestroyed
-            | Self::CallPosterVanished => Level::Info,
+            | Self::CallPosterVanished
+            | Self::CallEndpointGrantsRevoked => Level::Info,
             Self::MessageDelivered
             | Self::CallPosted
             | Self::CallReplied
@@ -287,6 +296,7 @@ impl AuditEvent {
             Self::CallReplyDenied => "ipc call reply denied",
             Self::CallEndpointRegisterDenied => "ipc call endpoint registration denied",
             Self::CallPosterVanished => "ipc calls cancelled, poster exited",
+            Self::CallEndpointGrantsRevoked => "ipc call endpoint grants revoked",
         }
     }
 }
@@ -407,6 +417,7 @@ mod tests {
         assert_eq!(AuditEvent::CallReplyDenied.id(), EventId(3049));
         assert_eq!(AuditEvent::CallEndpointRegisterDenied.id(), EventId(3050));
         assert_eq!(AuditEvent::CallPosterVanished.id(), EventId(3051));
+        assert_eq!(AuditEvent::CallEndpointGrantsRevoked.id(), EventId(3052));
     }
 
     #[test]
@@ -445,6 +456,7 @@ mod tests {
             AuditEvent::CallReplyDenied,
             AuditEvent::CallEndpointRegisterDenied,
             AuditEvent::CallPosterVanished,
+            AuditEvent::CallEndpointGrantsRevoked,
         ] {
             let id = ev.id().0;
             assert!(

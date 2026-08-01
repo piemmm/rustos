@@ -128,6 +128,7 @@ const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
 const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
+const NUM_CALL_GRANT: u64 = SyscallNumber::CALL_GRANT.as_u16() as u64;
 const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
@@ -1890,6 +1891,27 @@ pub extern "C" fn sys_shm_grant(region: u64, endpoint: u64) -> u64 {
     unsafe { raw_syscall(NUM_SHM_GRANT, [region, endpoint, 0, 0, 0, 0]) }
 }
 
+/// `call_grant`: grant the serving task of call endpoint `recipient` the
+/// right to *call* call endpoint `endpoint`, which the caller already holds
+/// (`SyscallNumber::CALL_GRANT`) — the endpoint sibling of
+/// [`sys_shm_grant`]. Returns the minted, unforgeable grant handle (>= 1),
+/// or a `TAIRIX_E_*` code reinterpreted into the result.
+///
+/// The kernel requires `TAIRIX_CAP_IPC_ENDPOINT`, confirms the caller itself
+/// holds a grant covering `endpoint` before reading any endpoint state
+/// (delegation never widens authority), and resolves the recipient as the
+/// endpoint's live serving task at grant time — never a caller-supplied PID.
+/// The caller forwards the handle in-band; it is owner-checked when the
+/// recipient uses it, so the number is useless to a bystander. Audited.
+#[must_use]
+#[export_name = "tairix_sys_call_grant"]
+pub extern "C" fn sys_call_grant(endpoint: u64, recipient: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // validates the capability, the caller's own endpoint grant, and the
+    // recipient endpoint before minting anything.
+    unsafe { raw_syscall(NUM_CALL_GRANT, [endpoint, recipient, 0, 0, 0, 0]) }
+}
+
 /// `call_peer_seat`: ask whether the in-flight caller of served call
 /// endpoint `endpoint` (ticket `ticket`, the value `tairix_sys_call_recv`
 /// wrote) holds seat `seat`'s live lease
@@ -2652,6 +2674,7 @@ mod tests {
         (NUM_SHM_MAP, "shm_map", 2),
         (NUM_SHM_UNMAP, "shm_unmap", 2),
         (NUM_SHM_GRANT, "shm_grant", 2),
+        (NUM_CALL_GRANT, "call_grant", 2),
         (NUM_CALL_PEER_SEAT, "call_peer_seat", 3),
         (NUM_WAITSET_CREATE, "waitset_create", 0),
         (NUM_WAITSET_CTL, "waitset_ctl", 5),

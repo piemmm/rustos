@@ -1384,9 +1384,9 @@ is fuzzed.
 ### The blocker, named
 
 An array is several devices driven as one, so **one process must hold client
-authority over N member block devices at once**. Nothing in the tree can do
-that today, and that — not the composition maths — is why the engine above has
-no consumer:
+authority over N member block devices at once**. That — not the composition
+maths — is why the engine above had no consumer, because a driver's authority
+came only from the single node it was matched to:
 
 - A driver is spawned for exactly **one** matched node and receives exactly
   that node's declared resources. The singular `node_id` runs unbroken from
@@ -1396,16 +1396,17 @@ no consumer:
   `KernelSpawnCtx`. Nothing unions two nodes' resources into one grant set.
 - Calling a `CAP_IPC_ENDPOINT`-gated endpoint requires a per-endpoint
   `HwResource::endpoint(id)` grant, obtainable only by creating the endpoint
-  (`call_create`) or by inheriting it from a matched node at spawn.
+  (`call_create`) or by inheriting it from a matched node at spawn — **or, now,
+  by delegation** (`call_grant`, IO6b), which is what unblocks the composer.
 - `shm_grant(region, endpoint)` delegates a **`Shared`** grant to the live task
   serving a named endpoint — narrowing-only, recipient named by a live endpoint
-  rather than a reusable pid. There is **no `Endpoint`-kind counterpart**: half
-  an abstraction (§27).
+  rather than a reusable pid. `call_grant(endpoint, recipient)` is its
+  `Endpoint`-kind sibling, completing the primitive (§27).
 
 ### Decisions
 
-1. **Complete the delegation primitive rather than widen authority.** Add
-   `call_grant(endpoint, recipient)` as the exact sibling of `shm_grant`: the
+1. **Complete the delegation primitive rather than widen authority.**
+   `call_grant(endpoint, recipient)` is the exact sibling of `shm_grant`: the
    donor must already hold `HwResource::endpoint(endpoint)`, the recipient is
    the *live server* of `recipient`, and the kernel mints the recipient its own
    grant. Narrowing-only, fail-closed, audited, **no new `CAP_*`** (§5.2) — the
@@ -1454,43 +1455,76 @@ no consumer:
 Each is complete and green on its own (§2.19); IO6a–IO6b are security work on
 the critical path and land first.
 
-- **IO6a — Close two authority defects in the existing grant machinery.**
-  Both are live today, both are prerequisites for any endpoint delegation, and
-  both carry a regression test that fails before and passes after (§2.18, §7).
+- **IO6a — Close the authority defects in the existing grant machinery.**
+  **done.** Three defects of one class — delegated authority outliving what it
+  names, and delegation growing a victim's kernel-side table without bound —
+  each closed with a regression test that fails before and passes after
+  (§2.18, §7).
   - **Stale endpoint-grant authority.** `callreg::register` refuses only a
     *live* id clash, so a numeric endpoint id is re-creatable by a **different**
-    task once the original is torn down — and endpoint teardown
-    (`callreg::teardown_owned_by`) never revokes the `HwResource::endpoint(id)`
-    grants other tasks hold for it (`AddressSpaceRegistry::withdraw` clears only
-    the *exiting* task's own grants). A holder's stale grant therefore silently
-    retargets to whatever task next binds that id. Fix: index minted
-    `Endpoint` grants by endpoint id and revoke every one of them in the same
-    teardown that destroys the endpoint, so delegated authority can never
-    outlive the endpoint *instance* it names and id reuse is safe by
-    construction. Fails closed: a call on a revoked grant is
-    `PermissionDenied`, never a retarget.
-  - **Unbounded grant minting.** `mint_grant` inserts a fresh handle on every
-    call into the *recipient's* growable table, so a donor holding one grant can
-    call `shm_grant` in a loop and grow a victim's kernel-side map without limit
-    (§4 kernel memory, §26.3). Fix: make delegation **idempotent** — a recipient
-    that already holds a grant *covering* the resource gets that handle back,
-    not a second entry. Authority is a set, not a multiset, so this is the
-    correct semantics and needs no invented ceiling (§24.4 does not apply: this
-    is duplicate suppression, not a capacity).
-- **IO6b — `call_grant`, the endpoint half of grant delegation.** Syscall 106
-  in `lib/abi/src/syscalls.rs` (two `IpcEndpoint` args, `U64` handle-or-`-errno`
-  return, `required_capability: CAP_IPC_ENDPOINT`, `audit: true`), the dispatch
-  arm and handler mirroring `shm_grant` exactly, the `lib/rt` and `lib/abi-sys`
-  wrappers, and the regenerated C header; `abi-check`/`c-header` enforce the
-  drift guards. Fail-closed order: the donor's own grant is checked **before**
-  any endpoint state is read (§5.4, §23.1), an unknown recipient endpoint is
-  `NotFound` with nothing minted (no existence oracle), and the minted grant is
-  owner-bound so it is useless to a bystander. Reserve
-  `RAID_REGISTRY_ENDPOINT` in `lib/abi/src/ipc.rs` and enrol it in
-  `is_reserved_endpoint`, so binding it demands `CAP_IPC_BIND_PRIVILEGED` and an
-  unprivileged task cannot squat the registry.
+    task once the original is torn down — and endpoint teardown never revoked
+    the `HwResource::endpoint(id)` grants other tasks held for it
+    (`AddressSpaceRegistry::withdraw` clears only the *exiting* task's own
+    grants), so a holder's stale grant silently retargeted onto whatever task
+    next bound that id. `AddressSpaceRegistry::revoke_endpoint_grants` now
+    withdraws every task's grant naming a destroyed id, and
+    `callreg::teardown_owned_by` **takes the registry as an argument** and calls
+    it before waking the cancelled callers — so the type system makes it
+    impossible to destroy an endpoint without withdrawing the authority naming
+    it, and id reuse is safe by construction. A call on a revoked grant fails
+    closed, never retargets; the withdrawal is audited
+    (`AuditEvent::CallEndpointGrantsRevoked`, 3052). Deliberately a single pass
+    over the grant tables rather than a reverse `endpoint -> holders` index:
+    teardown is a cold path, and an index would be a second source of truth to
+    keep in step across every mint/withdrawal/revocation whose desync would
+    silently reopen the hole.
+  - **Unbounded grant minting.** `mint_grant` inserted a fresh handle on every
+    call into the *recipient's* growable table, so a donor holding one grant
+    could call a delegation syscall in a loop and grow a victim's kernel-side
+    map without limit (§4 kernel memory, §26.3). Delegation is now
+    **idempotent**: a recipient already holding the resource gets that handle
+    back. Authority is a set, not a multiset, so this is the correct semantics
+    and needs no invented ceiling (§24.4 does not apply: duplicate suppression,
+    not a capacity). The match is **exact, never `covers`** — returning the
+    handle of a *wider* grant would hand back authority the donor did not name
+    and let the recipient's later map reach further than the delegation said.
+  - **The same hole in the file-delegation table** (found while fixing the
+    above, so owned by the same change, §2.18): `mint_fd_delegation` appended
+    unconditionally, so any `CAP_FS_ACCESS` holder could grow a victim's pending
+    `fd_grant` table without limit. Same rule, one shared definition
+    (`aspace::existing_handle`, so the two tables' notion of "already held"
+    cannot drift): re-granting a delegation that is **still pending** returns
+    the pending handle. Sound because a pending delegation conveys exactly one
+    right and these descriptors carry no position (every read names its own
+    offset), so a second identical entry conveys nothing the first does not;
+    once redeemed the entry is consumed, so a later grant of the same file
+    legitimately mints afresh.
+- **IO6b — `call_grant`, the endpoint half of grant delegation. done.**
+  Syscall 106 (two `IpcEndpoint` args, `U64` handle-or-`-errno` return,
+  `required_capability: CAP_IPC_ENDPOINT` — the capability
+  `HwResourceKind::Endpoint` itself declares, exactly as `shm_grant` is gated on
+  the shared region's `CAP_SHM` — `audit: true`), with the dispatch arm and
+  handler mirroring `shm_grant`, the `lib/rt` and `lib/abi-sys` wrappers, and
+  the regenerated C header; `abi-check`/`c-header` enforce the drift guards.
+  Fail-closed order: the donor's own grant is checked **before** any endpoint
+  state is read (§5.4, §23.1), an unknown recipient endpoint is `NotFound` with
+  nothing minted (no existence oracle), and the minted grant is owner-bound so
+  it is useless to a bystander. The *delegated* endpoint need not be live: a bus
+  driver publishes a child node carrying `HwResource::endpoint(id)` before the
+  serving process binds it, and the grant is authority over the id, not a
+  reference to an instance — IO6a's revocation is what keeps that safe.
+  - `RAID_REGISTRY_ENDPOINT` is **not** reserved here. A reserved id with no
+    protocol module and no binder is speculative surface (§2.3, §2.4), and every
+    other reserved id lives in its own protocol module rather than in
+    `lib/abi/src/ipc.rs`. It is reserved by IO6c, the stage that creates that
+    module and binds the id.
 - **IO6c — The member agent.** `volmgr` emits the `tairix,raid-member` node
-  (decision 4). The RAID `Run` binary, when matched to such a node, is an
+  (decision 4). This stage also introduces the array-composition protocol
+  module in `lib/abi` and with it `RAID_REGISTRY_ENDPOINT`, enrolled in
+  `is_reserved_endpoint` so binding it demands `CAP_IPC_BIND_PRIVILEGED` and an
+  unprivileged task cannot squat the registry (moved here from IO6b: a reserved
+  id is declared by the stage that gives it a protocol and a binder, never
+  ahead of one). The RAID `Run` binary, when matched to such a node, is an
   *agent*: it `call_grant`s its member's block endpoint and `shm_grant`s its
   window to `RAID_REGISTRY_ENDPOINT`, registers (array UUID and slot are read by
   the composer from the member itself — the emitter is never trusted for them,
@@ -1537,10 +1571,16 @@ the critical path and land first.
 
 ### Tests (§7)
 
-Host-side: the two IO6a regressions (a re-created id does not resurrect a
-revoked grant; delegating twice yields one handle); `call_grant`'s fail-closed
-matrix mirroring `shm_grant_delegates_only_a_held_region_to_the_endpoints_server`
-(unheld grant, unknown recipient, owner-bound handle, bystander refused); the
+Host-side, **landed with IO6a/IO6b**: the three IO6a regressions — a re-created
+id does not resurrect a revoked grant (`kernel/core` `syscalls.rs`), granting a
+held resource again returns the same handle, and re-granting a pending file
+delegation returns the pending handle (`aspace.rs`), each demonstrated to fail
+before the fix — plus revocation scoped to exactly the named ids and kinds, a
+revoked handle number never re-issued, a narrower resource not swallowed by a
+wider held one, and `call_grant`'s fail-closed matrix mirroring
+`shm_grant_delegates_only_a_held_region_to_the_endpoints_server` (unheld grant,
+unknown recipient, owner-bound handle, bystander refused, idempotent repeat).
+Still to come with their stages: the
 composer's registration→assembly→publication decision logic over member doubles,
 including a foreign/duplicate/stale registrant refused and an array that stays
 degraded rather than assembling short. QEMU vertical: several emulated members
@@ -1577,8 +1617,9 @@ HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
 composition **engine** (`drivers/storage/raid`) is independent of ARXFS and has
 landed host-side; what remains is the live array service, whose authority model
 is decided and staged in §2.6 (IO6a–IO6f). That reaches further than the stages
-above — it adds a syscall (`call_grant`), fixes two defects in the kernel's
+above — it adds a syscall (`call_grant`), fixes the defects in the kernel's
 grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
-bootstrap — so it is staged the same way: IO6a–IO6b are the security
-prerequisites and land first, each stage complete and green on its own. One
-placement question inside it is flagged for the User (§2.6 decision 6).
+bootstrap — so it is staged the same way. IO6a–IO6b, the security
+prerequisites, have landed; IO6c onward remain, each stage complete and green
+on its own. One placement question inside it is flagged for the User (§2.6
+decision 6).

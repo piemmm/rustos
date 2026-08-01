@@ -49,7 +49,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::hwtree::{GrantedResource, HwResource};
+use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
 use tairix_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
@@ -722,6 +722,27 @@ struct TaskFdDelegations {
     by_handle: BTreeMap<u64, (DelegatedFile, OpenFlags)>,
 }
 
+/// The handle already naming `value` in `by_handle`, if any — the
+/// duplicate suppression both delegation tables share.
+///
+/// Delegation conveys a *set* of authority, so re-granting something a
+/// recipient already holds must hand back the handle it already has rather
+/// than append a second, identical entry. That is what bounds these
+/// kernel-side tables: without it a donor can drive an unbounded allocation
+/// in a victim's address-space record simply by repeating one delegation
+/// syscall. Both minting paths call this so their notion of "already held"
+/// cannot drift apart.
+///
+/// Linear over a table whose length is, by virtue of this very check, the
+/// number of *distinct* authorities the task holds — a handful for a driver,
+/// and never grown by repetition.
+fn existing_handle<V: PartialEq>(by_handle: &BTreeMap<u64, V>, value: &V) -> Option<u64> {
+    by_handle
+        .iter()
+        .find(|(_, held)| *held == value)
+        .map(|(&handle, _)| handle)
+}
+
 impl AddressSpaceRegistry {
     /// Construct an empty registry.
     #[must_use]
@@ -972,14 +993,31 @@ impl AddressSpaceRegistry {
     /// reaches only the resources its matched node requested).
     ///
     /// Called by the driver-admission path when a node's requested
-    /// resources are granted to the driver task it loads. The returned
-    /// handle is unique for `task`'s whole lifetime (monotonic from `1`),
-    /// so it never aliases a previously reclaimed grant, and is meaningful
-    /// only when presented by `task` itself: [`Self::grant`] is keyed by
-    /// the kernel-trusted caller id, so another task passing the same
-    /// numeric value resolves to nothing (handle forgery is refused).
+    /// resources are granted to the driver task it loads, and by the
+    /// delegation syscalls when one task passes a resource it holds to
+    /// another. The returned handle is meaningful only when presented by
+    /// `task` itself: [`Self::grant`] is keyed by the kernel-trusted caller
+    /// id, so another task passing the same numeric value resolves to
+    /// nothing (handle forgery is refused).
+    ///
+    /// **Idempotent.** Granting `task` a resource it already holds returns
+    /// the handle it already has; only a resource new to `task` mints a
+    /// fresh handle (monotonic from `1`, so a handle number never aliases a
+    /// reclaimed grant). Authority is a set: repetition must not be able to
+    /// grow a recipient's kernel-side table.
     pub fn mint_grant(&mut self, task: TaskId, resource: HwResource) -> u64 {
         let entry = self.grants.entry(task).or_default();
+        // Authority is a set, not a multiset: a task that already holds
+        // exactly this resource is handed the handle it already has rather
+        // than a second entry naming the same thing. Without this, a donor
+        // holding one grant could call a delegation syscall in a loop and
+        // grow the *recipient's* kernel-side table without limit — an
+        // unbounded kernel allocation an unprivileged peer can drive. The
+        // match is exact, never `covers`: returning the handle of a *wider*
+        // grant would hand back authority the donor did not name.
+        if let Some(handle) = existing_handle(&entry.by_handle, &resource) {
+            return handle;
+        }
         // Handle 0 is the reserved invalid value; the first minted handle
         // is 1. `next_handle` only ever increases within a task's life, so
         // a handle is never reused even after its grant is reclaimed.
@@ -987,6 +1025,41 @@ impl AddressSpaceRegistry {
         let handle = entry.next_handle;
         entry.by_handle.insert(handle, resource);
         handle
+    }
+
+    /// Withdraw every task's per-endpoint grant naming any call endpoint in
+    /// `endpoints`, returning how many grants were revoked.
+    ///
+    /// A [`HwResourceKind::Endpoint`] grant names an endpoint by its
+    /// **numeric id**, and that id is re-creatable: once an endpoint is
+    /// destroyed, a *different* task may bind the same number. A grant that
+    /// survived its endpoint would therefore silently retarget onto the new
+    /// instance and let its holder call a service it was never granted. The
+    /// endpoint teardown path calls this in the same step that destroys the
+    /// endpoints, so delegated authority can never outlive the endpoint
+    /// *instance* it was issued against and id reuse is safe by construction.
+    /// A holder's next call fails closed (`grant_covers` no longer matches),
+    /// never retargets.
+    ///
+    /// Deliberately a single pass over the grant tables rather than a
+    /// reverse `endpoint -> holders` index: teardown is a cold path (a
+    /// service process ending), while an index would be a second source of
+    /// truth to keep in step across every mint, withdrawal, and revocation —
+    /// and a desync in it would silently reopen exactly the hole this closes.
+    pub fn revoke_endpoint_grants(&mut self, endpoints: &BTreeSet<u64>) -> usize {
+        if endpoints.is_empty() {
+            return 0;
+        }
+        let mut revoked = 0;
+        for entry in self.grants.values_mut() {
+            entry.by_handle.retain(|_, resource| {
+                let doomed = resource.kind() == Some(HwResourceKind::Endpoint)
+                    && endpoints.contains(&resource.base());
+                revoked += usize::from(doomed);
+                !doomed
+            });
+        }
+        revoked
     }
 
     /// Resolve the device-resource grant identified by `handle` for the
@@ -1631,8 +1704,9 @@ impl AddressSpaceRegistry {
     /// grantor's own descriptor and captured the grantor's identity into
     /// `file`, so this records an already-checked delegation; it grants no
     /// authority of its own. The handle follows the [`Self::mint_grant`]
-    /// discipline — unique for `recipient`'s whole lifetime, meaningful
-    /// only when presented by `recipient` itself
+    /// discipline — idempotent (re-granting a delegation still pending
+    /// returns the pending handle rather than appending a duplicate) and
+    /// meaningful only when presented by `recipient` itself
     /// ([`Self::redeem_fd_delegation`] is keyed by the kernel-trusted
     /// caller id, so another task presenting the same numeric value
     /// resolves to nothing).
@@ -1643,11 +1717,24 @@ impl AddressSpaceRegistry {
         flags: OpenFlags,
     ) -> u64 {
         let entry = self.fd_delegations.entry(recipient).or_default();
+        let pending = (file, flags);
+        // A delegation still pending conveys exactly one right: "open this
+        // path under this captured authority". Re-granting it while the
+        // first is unredeemed adds nothing — descriptors here carry no
+        // position (every read names its own offset), so a second identical
+        // descriptor would be indistinguishable from the first — and letting
+        // it append would let a grantor grow the recipient's kernel-side
+        // table without limit by repeating one call. Hand back the pending
+        // handle instead; once redeemed the entry is consumed, so a later
+        // grant of the same file legitimately mints afresh.
+        if let Some(handle) = existing_handle(&entry.by_handle, &pending) {
+            return handle;
+        }
         // Handle 0 is the reserved invalid value; the first minted handle
         // is 1. `next_handle` only ever increases within a task's life.
         entry.next_handle += 1;
         let handle = entry.next_handle;
-        entry.by_handle.insert(handle, (file, flags));
+        entry.by_handle.insert(handle, pending);
         handle
     }
 
@@ -2432,6 +2519,157 @@ mod tests {
         // exit).
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.grant(TaskId(4), handle), None);
+    }
+
+    /// Regression: delegation is idempotent, so repeating it cannot grow a
+    /// recipient's kernel-side grant table.
+    ///
+    /// Minting appended a fresh entry on every call, so a donor holding one
+    /// resource could drive an unbounded kernel allocation in a *victim's*
+    /// record simply by calling a delegation syscall in a loop. Authority is
+    /// a set: re-granting something already held returns the handle already
+    /// issued.
+    #[test]
+    fn granting_a_held_resource_again_returns_the_same_handle() {
+        let mut reg = AddressSpaceRegistry::new();
+        let first = reg.mint_grant(TaskId(2), window());
+        for _ in 0..1_000 {
+            assert_eq!(
+                reg.mint_grant(TaskId(2), window()),
+                first,
+                "repetition must not append a second entry naming the same resource"
+            );
+        }
+        assert_eq!(
+            reg.grants_to_le_bytes(TaskId(2)).len(),
+            GrantedResource::WIRE_LEN
+        );
+        // A *different* resource is still new authority and mints its own
+        // handle: suppression is exact, never a collapse of distinct grants.
+        let other = HwResource::mmio(0x3F20_0000, 0x1000);
+        assert_ne!(reg.mint_grant(TaskId(2), other), first);
+    }
+
+    /// A grant naming a *narrower* resource than one already held is still
+    /// new authority in its own right and mints its own handle.
+    ///
+    /// Suppression matches exactly, never on coverage: handing back the
+    /// handle of a wider grant would return authority the donor did not
+    /// name, and the recipient's later map would reach further than the
+    /// delegation said.
+    #[test]
+    fn a_narrower_resource_is_not_suppressed_by_a_wider_held_one() {
+        let mut reg = AddressSpaceRegistry::new();
+        let wide = HwResource::mmio(0xFE98_0000, 0x4000);
+        let narrow = HwResource::mmio(0xFE98_0000, 0x1000);
+        assert!(wide.covers(&narrow), "the wider window covers the narrower");
+        let wide_handle = reg.mint_grant(TaskId(2), wide);
+        let narrow_handle = reg.mint_grant(TaskId(2), narrow);
+        assert_ne!(wide_handle, narrow_handle);
+        assert_eq!(reg.grant(TaskId(2), narrow_handle), Some(narrow));
+    }
+
+    /// Regression: a per-endpoint grant must not outlive the endpoint
+    /// instance it names.
+    ///
+    /// Endpoint ids are numeric and re-creatable, so a grant that survived
+    /// its endpoint's destruction would silently retarget onto whatever task
+    /// next binds that id. Teardown revokes every grant naming the destroyed
+    /// ids — and only those.
+    #[test]
+    fn revoking_a_destroyed_endpoint_withdraws_only_the_grants_naming_it() {
+        let mut reg = AddressSpaceRegistry::new();
+        let doomed = HwResource::endpoint(0xCA11_0001);
+        let survivor = HwResource::endpoint(0xCA11_0002);
+        let holder_a = reg.mint_grant(TaskId(2), doomed);
+        let holder_b = reg.mint_grant(TaskId(3), doomed);
+        let unrelated_endpoint = reg.mint_grant(TaskId(3), survivor);
+        // A same-numbered resource of a *different kind* must survive: the
+        // revocation is scoped to endpoints, not to the number.
+        let same_number_region = reg.mint_grant(TaskId(3), HwResource::shared(0xCA11_0001));
+        let mmio = reg.mint_grant(TaskId(4), window());
+
+        let mut destroyed = BTreeSet::new();
+        destroyed.insert(0xCA11_0001_u64);
+        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 2);
+
+        // Every holder of the destroyed endpoint lost it, whichever task.
+        assert_eq!(reg.grant(TaskId(2), holder_a), None);
+        assert_eq!(reg.grant(TaskId(3), holder_b), None);
+        assert!(!reg.grant_covers(TaskId(2), &doomed));
+        // Nothing else was touched.
+        assert_eq!(reg.grant(TaskId(3), unrelated_endpoint), Some(survivor));
+        assert_eq!(
+            reg.grant(TaskId(3), same_number_region),
+            Some(HwResource::shared(0xCA11_0001))
+        );
+        assert_eq!(reg.grant(TaskId(4), mmio), Some(window()));
+        // Idempotent, and an empty set is a no-op.
+        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 0);
+        assert_eq!(reg.revoke_endpoint_grants(&BTreeSet::new()), 0);
+    }
+
+    /// A handle number freed by revocation is never re-issued: the next
+    /// grant to the same task draws a fresh number, so a holder that kept a
+    /// stale handle value cannot have it alias a later grant.
+    #[test]
+    fn a_revoked_handle_number_is_not_reissued() {
+        let mut reg = AddressSpaceRegistry::new();
+        let revoked = reg.mint_grant(TaskId(2), HwResource::endpoint(0xCA11_0003));
+        let mut destroyed = BTreeSet::new();
+        destroyed.insert(0xCA11_0003_u64);
+        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 1);
+        let fresh = reg.mint_grant(TaskId(2), window());
+        assert_ne!(fresh, revoked);
+        assert_eq!(reg.grant(TaskId(2), revoked), None);
+    }
+
+    /// Regression: re-granting a file delegation that is still pending
+    /// returns the pending handle instead of appending a duplicate.
+    ///
+    /// Minting appended unconditionally, so a grantor could grow a
+    /// *recipient's* kernel-side delegation table without limit by repeating
+    /// one `fd_grant`. A pending delegation conveys exactly one right, and
+    /// descriptors here carry no position, so a second identical entry
+    /// conveys nothing the first does not. Once redeemed the entry is
+    /// consumed, so a later grant of the same file legitimately mints afresh.
+    #[test]
+    fn regranting_a_pending_delegation_returns_the_pending_handle() {
+        let mut reg = AddressSpaceRegistry::new();
+        let file = DelegatedFile {
+            path: String::from("/Users/ada/Documents/report.txt"),
+            uid: 1000,
+            caps: CapabilitySet::empty(),
+        };
+        let first = reg.mint_fd_delegation(TaskId(2), file.clone(), OpenFlags::READ);
+        for _ in 0..1_000 {
+            assert_eq!(
+                reg.mint_fd_delegation(TaskId(2), file.clone(), OpenFlags::READ),
+                first,
+                "repetition must not append a second pending delegation"
+            );
+        }
+        // A different file is a distinct right and mints its own handle.
+        let other = DelegatedFile {
+            path: String::from("/Users/ada/Documents/other.txt"),
+            uid: 1000,
+            caps: CapabilitySet::empty(),
+        };
+        assert_ne!(
+            reg.mint_fd_delegation(TaskId(2), other, OpenFlags::READ),
+            first
+        );
+        // One redemption consumes the one pending right; the duplicate
+        // suppression never turned two grants into one *redeemable*
+        // descriptor that outlives its consumption.
+        assert!(reg.redeem_fd_delegation(TaskId(2), first).is_ok());
+        assert_eq!(
+            reg.redeem_fd_delegation(TaskId(2), first),
+            Err(Errno::NotFound)
+        );
+        // With nothing pending, granting the same file again mints anew.
+        let renewed = reg.mint_fd_delegation(TaskId(2), file, OpenFlags::READ);
+        assert_ne!(renewed, first);
     }
 
     #[test]

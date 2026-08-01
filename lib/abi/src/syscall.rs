@@ -2061,6 +2061,38 @@ impl SyscallNumber {
     /// assuming the machine went down.
     pub const SYSTEM_POWER: Self = Self(105);
 
+    /// Grant the serving task of one call endpoint the right to *call*
+    /// another call endpoint the caller already holds — the endpoint half of
+    /// grant delegation, and the exact sibling of [`Self::SHM_GRANT`]
+    /// (`plans/FIX-IO.md` `IO6b`).
+    ///
+    /// A grant-restricted endpoint is reachable only by a task holding the
+    /// per-endpoint [`crate::HwResource::endpoint`] grant, which until now
+    /// could be acquired only by creating the endpoint or inheriting it from
+    /// a matched hardware node at spawn. A process that must drive several
+    /// devices as one — a RAID array composing its member disks — could
+    /// therefore never be assembled, because no task can hold client
+    /// authority over endpoints belonging to several matched nodes. This
+    /// completes the delegation primitive rather than widening authority.
+    ///
+    /// Arguments: `endpoint` (the endpoint id the caller already holds a
+    /// grant for) and `recipient` (the endpoint whose **live serving task**
+    /// receives the delegated grant — never a caller-supplied, recyclable
+    /// PID). Returns the minted grant handle, which the caller forwards
+    /// in-band to the recipient; the handle resolves only when presented by
+    /// the recipient task itself, so the number is useless to a bystander.
+    ///
+    /// Narrowing-only and fail closed: the caller's *own* grant is checked
+    /// before any endpoint state is read, so a task can delegate only an
+    /// endpoint it may already call. A grant the caller does not hold and an
+    /// unknown recipient endpoint are the same [`Errno::NotFound`] with
+    /// nothing minted, so the reply confirms nothing about foreign
+    /// endpoints. Gated on [`crate::CapabilityId::IPC_ENDPOINT`] — the
+    /// capability the endpoint resource itself declares, exactly as
+    /// [`Self::SHM_GRANT`] is gated on the shared-region resource's
+    /// `CAP_SHM` — and audited on every mint.
+    pub const CALL_GRANT: Self = Self(106);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

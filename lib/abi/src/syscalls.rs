@@ -2607,6 +2607,39 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SYSTEM_POWER),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::CALL_GRANT,
+        name: "call_grant",
+        arg_count: 2,
+        args: [
+            // The call-endpoint id the caller already holds a grant for,
+            // then the call-endpoint id whose serving task receives the
+            // delegated grant. Both are resolved and owner-checked by the
+            // handler; neither is a PID, so a grant can never land on a
+            // recycled task identity.
+            AbiType::IpcEndpoint,
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the minted grant handle (or a negated errno) back to
+        // the caller, who forwards it in-band to the recipient; the handle is
+        // owner-checked when the recipient presents it, so the value is
+        // useless to a bystander — the `shm_grant` shape.
+        ret: AbiType::U64,
+        // The endpoint half of `shm_grant`, gated the same way: on the
+        // capability the delegated resource itself declares
+        // (`HwResourceKind::Endpoint::required_capability`), so delegating
+        // per-endpoint call authority is gated exactly as exercising it. It
+        // widens nothing — the handler refuses an endpoint the caller does
+        // not already hold — and every mint is audited: it is a
+        // security-relevant grant and low-volume (once per member at array
+        // assembly), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::IPC_ENDPOINT),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

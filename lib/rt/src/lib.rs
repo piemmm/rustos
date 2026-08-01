@@ -289,6 +289,9 @@ const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 /// `shm_grant` syscall number (as above).
 const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
 
+/// `call_grant` syscall number (as above).
+const NUM_CALL_GRANT: u64 = SyscallNumber::CALL_GRANT.as_u16() as u64;
+
 /// `call_peer_seat` syscall number (as above).
 const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
 
@@ -3447,6 +3450,32 @@ pub fn shm_grant(region: u64, endpoint: u64) -> i64 {
     // pointers, and the kernel validates `CAP_SHM`, the caller's own region
     // grant, and the endpoint before minting anything.
     let ret = unsafe { raw_syscall(NUM_SHM_GRANT, [region, endpoint, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Grant the serving task of call endpoint `recipient` the right to *call*
+/// call endpoint `endpoint`, which the caller already holds
+/// (`SyscallNumber::CALL_GRANT`, `plans/FIX-IO.md` `IO6b` — the endpoint
+/// sibling of [`shm_grant`], so a composing service can drive the several
+/// member devices an array is made of), returning the minted grant handle
+/// (≥ 1) or `-errno`.
+///
+/// The kernel requires `CAP_IPC_ENDPOINT`, confirms the caller itself holds
+/// an `Endpoint` grant covering `endpoint` **before** reading any endpoint
+/// state (delegation never widens authority), resolves the **live serving
+/// task** of `recipient` at grant time — never a caller-supplied
+/// (recyclable) PID — and mints that task its own unforgeable handle; the
+/// mint is audited. The caller forwards the returned handle in-band (an IPC
+/// request field). A grant the caller does not hold and an unknown
+/// recipient endpoint both fail closed with `-errno` (`NotFound`), so the
+/// reply confirms nothing about foreign endpoints.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
+pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel validates `CAP_IPC_ENDPOINT`, the caller's own
+    // endpoint grant, and the recipient endpoint before minting anything.
+    let ret = unsafe { raw_syscall(NUM_CALL_GRANT, [endpoint, recipient, 0, 0, 0, 0]) };
     ret as i64
 }
 

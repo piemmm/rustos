@@ -55,6 +55,17 @@ impl Sink for NullSink {
 }
 static SINK: NullSink = NullSink;
 
+/// The address-space registry endpoint teardown revokes per-endpoint
+/// grants against.
+///
+/// Destroying an endpoint and withdrawing the authority naming its id are
+/// one step, so the teardown takes the registry that holds those grants.
+/// These scenarios drive the block service directly rather than through a
+/// granted task, so it stays empty and nothing is revoked; it exists so the
+/// scenarios exercise the production teardown, not a variant of it.
+static ASPACES: tairix_sync::RwLock<tairix_kernel_core::aspace::AddressSpaceRegistry> =
+    tairix_sync::RwLock::new(tairix_kernel_core::aspace::AddressSpaceRegistry::new());
+
 /// A fixed, ample memory source for the pressure gauge.
 struct AmpleSource;
 impl FreeMemorySource for AmpleSource {
@@ -584,7 +595,7 @@ fn attach_then_yank(
     }
     // Yank the stick: the serving driver dies and the kernel tears its
     // endpoint down, which drives the vanish observer synchronously.
-    tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &SINK);
+    tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("scenario server thread");
     identity
@@ -758,7 +769,7 @@ fn dirty_yank_round(
     FS_SERVICE
         .write(0, &NoCaps, &path, 0, false, b"D")
         .expect("write dirties the journal");
-    tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &SINK);
+    tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("re-insert round server thread");
     let at_yank = device.lock().unwrap().block.data.clone();

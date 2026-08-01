@@ -1767,7 +1767,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // in-flight calls, waking `CALL_WAITQ` re-runs each parked caller's
         // poll so it abandons fail-closed, and the vanish observer lets the
         // volume layer react to an unplugged disk's dead block service.
-        crate::callreg::teardown_owned_by(handle, self.audit);
+        crate::callreg::teardown_owned_by(handle, self.aspaces, self.audit);
 
         // Drop every wait-set the driver owned, mirroring the `exit` syscall.
         // A wait-set holds no resource of its own (its members only *name* the

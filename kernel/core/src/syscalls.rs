@@ -2218,8 +2218,10 @@ where
         // cancels their in-flight calls, waking `CALL_WAITQ` re-runs
         // each parked caller's poll so it abandons fail-closed, and the
         // vanish observer lets the volume layer react to an unplugged
-        // disk's dead block service.
-        crate::callreg::teardown_owned_by(task.0, self.audit);
+        // disk's dead block service. The same step revokes every
+        // per-endpoint grant naming those ids, so a later task binding a
+        // recycled endpoint id can never inherit this service's callers.
+        crate::callreg::teardown_owned_by(task.0, self.aspaces, self.audit);
         // The converse: cancel every call this task *posted* that is still
         // in flight on someone else's endpoint. A dead caller's queued
         // request must never be handed to a server as if live — it would
@@ -7499,6 +7501,54 @@ where
         // handle value travels back to the caller (who forwards it in-band
         // to the service); it resolves only when presented by the recipient
         // task itself, so the number is useless to a bystander.
+        let handle = self
+            .aspaces
+            .write()
+            .mint_grant(SecTaskId(ep.owner()), wanted);
+        Ok(handle)
+    }
+
+    fn call_grant(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        recipient: u64,
+    ) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the `call_grant`
+        // spec carries `CAP_IPC_ENDPOINT`, and the mint is dispatcher-audited
+        // exactly as `shm_grant`. Step 3 (validate every input): the caller
+        // must itself hold an `Endpoint` grant covering the endpoint it is
+        // passing on — delegation never widens authority, a task can share
+        // only a call right it already has. This is checked *before* any
+        // endpoint state is read, so a caller lacking the grant learns
+        // nothing about either endpoint. An endpoint the caller cannot call
+        // and one that does not exist are the same `NotFound`, so the error
+        // shape confirms nothing about foreign endpoints.
+        //
+        // The delegated endpoint need not be live: a bus driver publishes a
+        // child node carrying `HwResource::endpoint(id)` before the serving
+        // process binds that id, and the grant is authority over the id, not
+        // a reference to an instance. Calling it is still gated at
+        // `ipc_call`/`call_post`, and destroying an endpoint revokes every
+        // grant naming its id, so a delegated grant can never outlive the
+        // instance it was issued against.
+        let wanted = HwResource::endpoint(endpoint);
+        if !self.aspaces.read().grant_covers(caller.task_id, &wanted) {
+            return Err(Errno::NotFound);
+        }
+        // Resolve the recipient as the live serving task of `recipient` at
+        // grant time — never a caller-supplied (recyclable) PID, so the grant
+        // cannot land on a reused task id. An unknown endpoint fails closed
+        // before any state changes.
+        let Some(ep) = crate::callreg::lookup(EndpointId(recipient)) else {
+            return Err(Errno::NotFound);
+        };
+        // Mint the recipient its own unforgeable handle for the endpoint. The
+        // handle value travels back to the caller (who forwards it in-band to
+        // the service); it resolves only when presented by the recipient task
+        // itself, so the number is useless to a bystander. Minting is
+        // idempotent, so repeating the delegation cannot grow the recipient's
+        // grant table.
         let handle = self
             .aspaces
             .write()
@@ -26376,7 +26426,21 @@ mod tests {
     /// Register a grant-restricted endpoint (required send cap
     /// `CAP_IPC_ENDPOINT`) owned by task 1, returning it for unregistration.
     fn register_grant_restricted_endpoint(id: u64, sink: &(dyn Sink + Sync)) -> Arc<CallEndpoint> {
-        let creator = make_caps_record(1, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        register_grant_restricted_endpoint_owned_by(1, id, sink)
+    }
+
+    /// [`register_grant_restricted_endpoint`] with the serving task chosen by
+    /// the caller, for a test that tears endpoints down by owner.
+    ///
+    /// The endpoint registry is process-global, so a test that drives
+    /// `teardown_owned_by` picks an owner no other test uses: tearing down a
+    /// shared owner would destroy a concurrently-running test's endpoint.
+    fn register_grant_restricted_endpoint_owned_by(
+        owner: u64,
+        id: u64,
+        sink: &(dyn Sink + Sync),
+    ) -> Arc<CallEndpoint> {
+        let creator = make_caps_record(owner, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
         let mut send = CapabilitySet::empty();
         send.insert(CapabilityId::IPC_ENDPOINT);
         let ep = Arc::new(
@@ -26488,6 +26552,81 @@ mod tests {
         handle.join().expect("server thread joins");
         assert_eq!(written, 4);
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Regression: a per-endpoint grant must not outlive the endpoint
+    /// *instance* it names.
+    ///
+    /// An endpoint id is a number, and the registry refuses only a *live*
+    /// clash — so once a service dies, a different task may bind the same
+    /// number. A holder whose grant survived that teardown would silently
+    /// retarget onto the new instance and be able to call a service it was
+    /// never granted. Destroying the endpoint revokes every grant naming its
+    /// id in the same step, so the stale holder's next call fails closed
+    /// rather than landing on the impostor.
+    #[test]
+    fn a_recreated_endpoint_id_does_not_resurrect_a_revoked_grant() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // Owners unique to this test: the registry is process-global and this
+        // test tears endpoints down by owner.
+        let first_owner = 0x9E11_0001;
+        let second_owner = 0x9E11_0002;
+        let holder = 0x9E11_0003;
+        aspaces
+            .write()
+            .register(SecTaskId(holder), space, physmap)
+            .expect("registration succeeds");
+        // An endpoint id no other test binds: the call-endpoint registry is
+        // process-global and these tests run in parallel, so a shared id
+        // would make either test fail whenever the two happened to overlap.
+        let id = 0xCA11_4005;
+        let endpoint = tairix_abi::HwResource::endpoint(id);
+        // The holder is granted exactly this endpoint, as an autoloaded class
+        // driver inherits it from its matched node.
+        aspaces.write().mint_grant(SecTaskId(holder), endpoint);
+        let _serving = register_grant_restricted_endpoint_owned_by(first_owner, id, sink);
+        assert!(
+            aspaces.read().grant_covers(SecTaskId(holder), &endpoint),
+            "the holder starts out able to reach the endpoint it was granted"
+        );
+
+        // The serving task dies: the endpoint is destroyed and the authority
+        // naming its id goes with it.
+        crate::callreg::teardown_owned_by(first_owner, &aspaces, sink);
+        assert!(
+            !aspaces.read().grant_covers(SecTaskId(holder), &endpoint),
+            "a destroyed endpoint's grants are revoked, so its id is safe to reuse"
+        );
+
+        // A *different* task now binds the very same numeric id.
+        let _impostor = register_grant_restricted_endpoint_owned_by(second_owner, id, sink);
+
+        // The stale holder cannot reach it: the grant check fails before any
+        // buffer is copied, so the call never lands on the new instance.
+        let caps = make_caps_record(holder, &[CapabilityId::IPC_ENDPOINT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(holder),
+            caps: &caps,
+        };
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64),
+            Err(Errno::PermissionDenied),
+            "a revoked grant must not retarget onto a re-created endpoint id"
+        );
+        crate::callreg::teardown_owned_by(second_owner, &aspaces, sink);
     }
 
     /// A recording [`crate::devres::SharedMemFacility`] double: it hands out
@@ -26739,6 +26878,96 @@ mod tests {
         // (owner-checked at `shm_map`; the number is useless to a bystander).
         assert_eq!(aspaces.read().grant(SecTaskId(9), handle), None);
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_grant` delegates the right to call only an endpoint the caller
+    /// itself holds, only to the live serving task of a real endpoint, and
+    /// the minted handle resolves only for that recipient — the endpoint
+    /// sibling of `shm_grant` (`plans/FIX-IO.md` `IO6b`).
+    #[test]
+    fn call_grant_delegates_only_a_held_endpoint_to_the_recipients_server() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x6A11_0007, &[CapabilityId::IPC_ENDPOINT], sink);
+        let donor = SecTaskId(0x6A11_0007);
+        let ctx = CallerContext {
+            task_id: donor,
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let member = 0xD15_3001;
+        let registry = 0xD15_3002;
+
+        // An endpoint the caller holds no grant for is refused before any
+        // endpoint state is read — indistinguishable from one that does not
+        // exist, so the reply is no existence oracle.
+        assert_eq!(h.call_grant(&ctx, member, registry), Err(Errno::NotFound));
+
+        // The caller now holds the member endpoint's grant, but the
+        // recipient endpoint is unknown: still refused, nothing minted.
+        let _own = aspaces
+            .write()
+            .mint_grant(donor, tairix_abi::HwResource::endpoint(member));
+        assert_eq!(h.call_grant(&ctx, member, registry), Err(Errno::NotFound));
+
+        // A live recipient endpoint owned by the composing service: the
+        // grant lands on that endpoint's *server*, resolved kernel-side at
+        // grant time rather than from a caller-supplied pid.
+        let composer = 0x6A11_C0FF;
+        let server_caps = make_caps_record(composer, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(registry),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+        let handle = h
+            .call_grant(&ctx, member, registry)
+            .expect("grant mints a handle");
+        // The recipient resolves it to exactly the delegated endpoint…
+        assert_eq!(
+            aspaces.read().grant(SecTaskId(composer), handle),
+            Some(tairix_abi::HwResource::endpoint(member))
+        );
+        // …and to nothing else: delegation conveys one endpoint, not the
+        // caller's whole authority.
+        assert!(!aspaces.read().grant_covers(
+            SecTaskId(composer),
+            &tairix_abi::HwResource::endpoint(member + 1)
+        ));
+        // The handle is meaningless when presented by anyone else, so the
+        // number the donor forwards in-band is useless to a bystander.
+        // (Handles are per-task, so the donor's *own* grant table has its own
+        // numbering; the bystander here holds nothing at all.)
+        assert_eq!(aspaces.read().grant(SecTaskId(0x6A11_B75A), handle), None);
+        // Delegating again returns the same handle rather than growing the
+        // recipient's grant table — authority is a set.
+        assert_eq!(
+            h.call_grant(&ctx, member, registry),
+            Ok(handle),
+            "repeating a delegation must not mint a second entry"
+        );
+        crate::callreg::unregister(EndpointId(registry));
     }
 
     /// `fd_grant` delegates only a descriptor the caller itself holds, only

@@ -31,7 +31,7 @@
 //! which the handler maps to [`Errno::NotFound`] and audits at that
 //! boundary (mirroring [`tairix_kernel_ipc::registry::PortRegistry`]).
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -39,8 +39,10 @@ use tairix_abi::Errno;
 use tairix_kernel_ipc::audit::record;
 use tairix_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
 use tairix_log::{Field, Sink};
-use tairix_sync::SpinLock;
-use tairix_util::fmt::format_hex_u64;
+use tairix_sync::{RwLock, SpinLock};
+use tairix_util::fmt::{format_hex_u64, format_u64};
+
+use crate::aspace::AddressSpaceRegistry;
 
 /// The global call-endpoint registry (set-up by the boot path's kthread
 /// server, read by the `ipc_call` syscall handler). Pure data behind a
@@ -144,7 +146,8 @@ pub fn install_vanish_observer(observer: &'static dyn EndpointVanishObserver) {
 }
 
 /// Tear down every endpoint owned by the exiting task `owner`, wake the
-/// callers its destruction cancelled, and notify the vanish observer.
+/// callers its destruction cancelled, revoke the per-endpoint grants those
+/// endpoints' ids named, and notify the vanish observer.
 ///
 /// A user-space service may exit (cleanly, by fault, or killed) while
 /// callers are blocked in `ipc_call` awaiting its replies. Without this,
@@ -154,18 +157,65 @@ pub fn install_vanish_observer(observer: &'static dyn EndpointVanishObserver) {
 /// fail-closed. The observer is notified strictly **after**
 /// [`crate::waitq::call_wake`]: a caller parked mid-call on the dead
 /// endpoint may hold a lock the observer needs, and the wake is what lets
-/// that caller finish and release it.
-pub fn teardown_owned_by(owner: u64, audit: &dyn Sink) {
+/// that caller finish and release it. The per-endpoint grants naming the
+/// destroyed ids are revoked *before* the wake, so no woken caller can re-post
+/// to an id that is about to be re-bindable by someone else.
+pub fn teardown_owned_by(owner: u64, aspaces: &RwLock<AddressSpaceRegistry>, audit: &dyn Sink) {
     let removed = unregister_owned_by(owner, audit);
     if removed.is_empty() {
         return;
     }
+    revoke_grants_for(owner, &removed, aspaces, audit);
     crate::waitq::call_wake();
     if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
         for id in removed {
             observer.endpoint_vanished(id);
         }
     }
+}
+
+/// Withdraw every per-endpoint grant naming one of the just-destroyed
+/// `endpoints`, recording what was withdrawn.
+///
+/// An endpoint id is a number, and a number is re-creatable: once these
+/// endpoints are gone another task may bind the same ids. A holder's grant
+/// that outlived its endpoint would then silently retarget onto the new
+/// instance, handing it the authority to call a service it was never
+/// granted. Revoking in the same teardown that destroyed the endpoints is
+/// what makes id reuse safe; taking the registry as an argument is what
+/// makes it impossible to destroy an endpoint without doing so.
+fn revoke_grants_for(
+    owner: u64,
+    endpoints: &[EndpointId],
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    audit: &dyn Sink,
+) {
+    let ids: BTreeSet<u64> = endpoints.iter().map(|id| id.0).collect();
+    // The write guard is released with this statement, so the audit record
+    // below is emitted with no registry lock held.
+    let revoked = aspaces.write().revoke_endpoint_grants(&ids);
+    if revoked == 0 {
+        return;
+    }
+    let mut owner_buf = [0u8; 16];
+    let mut count_buf = [0u8; 20];
+    record(
+        audit,
+        AuditEvent::CallEndpointGrantsRevoked,
+        &[
+            // The task whose teardown withdrew the authority; the ids it lost
+            // are the `CallEndpointDestroyed` records emitted immediately
+            // before this one.
+            Field {
+                key: "owner",
+                value: tairix_log::FieldValue::Str(format_hex_u64(owner, &mut owner_buf)),
+            },
+            Field {
+                key: "grants",
+                value: tairix_log::FieldValue::Str(format_u64(revoked as u64, &mut count_buf)),
+            },
+        ],
+    );
 }
 
 /// Cancel every in-flight call the exiting task `sender` posted, on every

@@ -336,6 +336,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn call_grant(&self, _c: &CallerContext<'_>, _endpoint: u64, _recipient: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn shm_grant(&self, _c: &CallerContext<'_>, _region: u64, _endpoint: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
