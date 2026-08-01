@@ -1156,7 +1156,15 @@ name = "tairix-drv-storage-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-blkclient",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-partition",
  "tairix-raid",
+ "tairix-raidmeta",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
