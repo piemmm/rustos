@@ -245,6 +245,12 @@
 //! target, never an immediate read source — so the array can never serve a
 //! reader data from a copy known to be out of date (`AGENTS.md` §5.4, §26.5).
 //!
+//! Turning the whole [`SlotDisposition`] table into a
+//! redundant engine's member buffer is the shared [`fill_members`] bridge, so
+//! every consumer that assembles a discovered array places its members
+//! identically (through [`MemberRole::for_slot`]) rather than hand-rolling the
+//! stale/absent/device-tag loop (`AGENTS.md` §2.2, §27).
+//!
 //! # Composed-device dispatch ([`RaidArray`])
 //!
 //! Once a serve process has *discovered* an array and resolved its
@@ -276,6 +282,7 @@
 #![deny(missing_docs)]
 
 mod array;
+mod assemble;
 mod dualparity;
 mod gf256;
 mod health;
@@ -287,6 +294,7 @@ mod superblock;
 mod triple;
 
 pub use array::{RaidArray, RaidError};
+pub use assemble::{fill_members, AssembleError, AssembleMember};
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use parity::{ParityArray, ParityError, ParityMember};

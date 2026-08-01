@@ -1005,17 +1005,44 @@ filesystems). The member superblock's block-0 placement is the contract this
 recognition reads; how the array's data is laid out relative to it is fixed by
 the assembling serve process below.
 
+**Landed (the reassembly→member bridge):** the pure link between the metadata
+layer (which resolves a discovered array to a `SlotDisposition` per slot) and
+the composition engines (which each borrow a caller-owned member buffer) is the
+shared, host-tested `raid::fill_members` + `AssembleMember` bridge
+(`drivers/storage/raid`, §2.2, §27). Every consumer that assembles a
+*discovered* array — the autoloaded serve process and the ARXFS-native
+multi-device composition alike — would otherwise hand-roll the same placement
+loop, and a slip is a data-integrity fault, not a cosmetic one: admitting a
+slot the generation counter proved stale (`in_sync == false`) as a trusted read
+source, or losing a copy when the buffer width and the slot table disagree
+(§5.4, §26.5 "a disk that missed writes is a disk that can lie"). `fill_members`
+places each slot through the single role authority `MemberRole::for_slot`, so a
+stale copy joins `Stale` (a rebuild target admitted `Resyncing`, never a read
+source), a missing slot becomes an absent member so the array knows its true
+width, and a present slot whose device the caller cannot supply, or a member
+buffer the wrong width, fails closed (`AssembleError::{MissingDevice,
+WidthMismatch}`) rather than composing a partial array. It is defined over the
+redundant member types that carry the current/stale/absent vocabulary
+(`MirrorMember` — shared by the mirror and RAID10 — `ParityMember`,
+`DualParityMember`, `TripleParityMember`); the no-redundancy RAID0 stripe is
+deliberately excluded (its `assemble` fails closed on a gap). `no_std`,
+`forbid(unsafe_code)`, allocation-free, proven host-side (current/stale/absent
+placement, cross-type uniformity, and the width-mismatch/missing-device
+fail-closed cases). Design: `docs/src/drivers/raid.md`.
+
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
   groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
-  wraps it in the shared `RaidArray` dispatch (above), drives `resync_step` off
-  the members' IO3 recovery signals, and publishes the composed device as its
-  own block-service node — plus the ARXFS-native multi-device composition that
-  consumes the same engine and dispatch. This rides with the multi-device
-  volume-assembly work; the engine, its metadata, and the `RaidArray` dispatch
-  are the single shared definition all consumers reuse (§2.2), proven host-side
-  first exactly as the other FIX-IO primitives landed their shared logic before
-  their live wiring.
+  populates each engine's member buffer through the shared `raid::fill_members`
+  bridge (above), wraps it in the shared `RaidArray` dispatch (above), drives
+  `resync_step` off the members' IO3 recovery signals, and publishes the
+  composed device as its own block-service node — plus the ARXFS-native
+  multi-device composition that consumes the same engine and dispatch. This
+  rides with the multi-device volume-assembly work; the engine, its metadata,
+  the `fill_members` reassembly bridge, and the `RaidArray` dispatch are the
+  single shared definition all consumers reuse (§2.2), proven host-side first
+  exactly as the other FIX-IO primitives landed their shared logic before their
+  live wiring.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size

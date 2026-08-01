@@ -544,6 +544,39 @@ probed is `Faulted`. A copy the generation counter proved is behind therefore
 can **never** be served to a reader as if it were current (`AGENTS.md` §5.4,
 §26.5) — a disk that missed writes is a disk that can lie.
 
+### Building the member buffer (`fill_members`)
+
+`MemberRole::for_slot` maps *one* slot; turning the whole
+`SlotDisposition` table into a redundant engine's member buffer is the shared
+`fill_members` bridge, so every consumer that assembles a discovered array —
+the autoloaded serve process and the ARXFS-native multi-device composition
+alike — places its members through one definition instead of hand-rolling the
+stale/absent/device-tag loop (`AGENTS.md` §2.2, §27). Getting that loop subtly
+wrong is a data-integrity fault, not a cosmetic one: admitting a stale slot as a
+trusted read source, or dropping a copy when the buffer width and the slot table
+disagree, is exactly the stale-read / lost-copy hazard the metadata layer exists
+to prevent (`AGENTS.md` §5.4, §26.5).
+
+`fill_members(slots, members, take_device)` populates a caller-owned member
+buffer from the reassembled slot table, placing each slot through
+`MemberRole::for_slot`: a present in-sync copy joins `Current`, a present stale
+copy joins `Stale` (a rebuild target, never an immediate read source), and a
+missing slot becomes an absent member so the array knows its true width. It
+takes each present slot's device from the caller's `take_device(tag)` supplier
+(consulted once per present slot, never for a gap) and **fails closed** rather
+than composing a partial array: a present slot whose device the supplier cannot
+resolve is `AssembleError::MissingDevice` (never silently demoted to absent,
+which would drop a copy), and a member buffer that is not the slot table's width
+is `AssembleError::WidthMismatch`. The bridge is defined through the
+`AssembleMember` trait over the redundant member types that carry the
+current/stale/absent vocabulary (`MirrorMember` — shared by the mirror and
+RAID10 — `ParityMember`, `DualParityMember`, `TripleParityMember`); the
+no-redundancy RAID0 stripe is deliberately excluded, since its `assemble` fails
+closed on a gap rather than composing around one, and a `StripeMember` has
+neither a stale nor an absent state. The engine's own `assemble` still
+re-derives each present member's real state from a live geometry probe, so this
+bridge fixes only the *role* each slot joins with.
+
 ### Metadata updates (membership changes)
 
 Reassembly *reads* the generation counter; the write side *advances* it. When
