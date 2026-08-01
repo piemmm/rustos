@@ -79,6 +79,24 @@ impl ContextSwitch for TestContextSwitch {
 /// or [`crate::kernel_main`] reached `halt`.
 pub const HALT_SENTINEL: &str = "tairix-kernel-core: TestArch::halt called";
 
+/// Monotonic ordering clock shared by the host doubles.
+///
+/// Two effects observed through *different* doubles — a filesystem flush
+/// and a platform power-off, say — cannot be ordered from their own
+/// private records. Each double stamps this one counter as it records, so
+/// a smaller stamp really did happen earlier: the counter is global and
+/// strictly increasing, so tests running in parallel only widen the gap
+/// between two stamps, never swap them.
+static HOST_EVENT_CLOCK: AtomicU64 = AtomicU64::new(0);
+
+/// Take the next stamp from the shared host-double ordering clock.
+///
+/// Never zero, so a double can use zero to mean "this never happened".
+#[must_use]
+pub fn next_event_stamp() -> u64 {
+    HOST_EVENT_CLOCK.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// In-memory `KernelArch` implementation used by host-side tests.
 ///
 /// The mock is intentionally minimal: it exposes one counter per
@@ -116,6 +134,13 @@ pub struct TestArch {
     /// host tests of `clock_get` get a deterministic, strictly
     /// increasing reading without depending on wall-clock time.
     monotonic_ns: AtomicU64,
+    /// Number of [`KernelArch::poweroff`] calls observed.
+    poweroffs: AtomicU64,
+    /// Number of [`KernelArch::reboot`] calls observed.
+    reboots: AtomicU64,
+    /// [`next_event_stamp`] taken by the most recent power primitive, or
+    /// `0` while neither has been reached.
+    power_stamp: AtomicU64,
     /// Number of [`SchedulerArch::set_wakeup`] calls observed.
     wakeup_calls: AtomicU64,
     /// Last [`SchedulerArch::set_wakeup`] argument, encoded as `0` for
@@ -145,6 +170,9 @@ impl TestArch {
             interrupt_waits: AtomicU64::new(0),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
+            poweroffs: AtomicU64::new(0),
+            reboots: AtomicU64::new(0),
+            power_stamp: AtomicU64::new(0),
             wakeup_calls: AtomicU64::new(0),
             last_wakeup: AtomicU64::new(0),
         }
@@ -231,6 +259,31 @@ impl TestArch {
     /// known monotonic reading.
     pub fn set_ticks(&self, value: u64) {
         self.ticks.store(value, Ordering::Relaxed);
+    }
+
+    /// Number of times the platform was asked to power off.
+    #[must_use]
+    pub fn poweroff_count(&self) -> u64 {
+        self.poweroffs.load(Ordering::Relaxed)
+    }
+
+    /// Number of times the platform was asked to reset.
+    #[must_use]
+    pub fn reboot_count(&self) -> u64 {
+        self.reboots.load(Ordering::Relaxed)
+    }
+
+    /// The shared-clock stamp of the most recent power primitive, or
+    /// `None` while the platform has not been asked to stop.
+    ///
+    /// Lets a test order the power request against work recorded by a
+    /// different double — that every volume was flushed first, say.
+    #[must_use]
+    pub fn power_stamp(&self) -> Option<u64> {
+        match self.power_stamp.load(Ordering::Relaxed) {
+            0 => None,
+            stamp => Some(stamp),
+        }
     }
 
     /// Number of [`SchedulerArch::set_wakeup`] calls observed.
@@ -336,5 +389,21 @@ impl KernelArch for TestArch {
         // dispatch loop reached the seam so a test can assert the
         // per-dispatch console-transmit top-up happens.
         self.pump_tx_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn poweroff(&self) {
+        self.poweroffs.fetch_add(1, Ordering::Relaxed);
+        self.power_stamp
+            .store(next_event_stamp(), Ordering::Relaxed);
+        // Returning is the honest host answer: no test machine may be
+        // stopped, which is exactly what a port with no power-off
+        // primitive does, so the caller sees the unsupported path.
+    }
+
+    fn reboot(&self) {
+        self.reboots.fetch_add(1, Ordering::Relaxed);
+        self.power_stamp
+            .store(next_event_stamp(), Ordering::Relaxed);
+        // Returns for the same reason [`Self::poweroff`] does.
     }
 }

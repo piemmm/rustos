@@ -12,7 +12,7 @@
 use alloc::string::ToString;
 
 use tairix_abi::Errno;
-use tairix_users::UsersDb;
+use tairix_users::{Uid, UserRecord, UsersDb};
 
 use crate::session::{AuthenticatedUser, Authenticator, Credentials};
 
@@ -29,27 +29,43 @@ impl<'a> UsersAuthenticator<'a> {
     }
 }
 
+/// Adapt a matched, verified [`UserRecord`] to the [`Authenticator`]
+/// contract shared by [`UsersAuthenticator::authenticate`] and
+/// [`UsersAuthenticator::authenticate_uid`].
+///
+/// Only an active account authenticates, and the record format guarantees
+/// an active account carries both a home and a shell — but a session
+/// without them is refused rather than fabricated (fail closed).
+fn authenticated_user(record: &UserRecord) -> Result<AuthenticatedUser, Errno> {
+    let (Some(home), Some(shell)) = (record.home(), record.shell()) else {
+        return Err(Errno::PermissionDenied);
+    };
+    Ok(AuthenticatedUser {
+        username: record.username().to_string(),
+        uid: record.uid(),
+        primary_gid: record.primary_gid(),
+        supplementary_gids: record.supplementary_gids().to_vec(),
+        capabilities: record.capabilities(),
+        home: home.to_string(),
+        shell: shell.to_string(),
+    })
+}
+
 impl Authenticator for UsersAuthenticator<'_> {
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
         let record = self
             .db
             .authenticate(credentials.username, credentials.password.as_bytes())
             .map_err(|_| Errno::PermissionDenied)?;
-        // Only an active account authenticates, and the record format
-        // guarantees an active account carries both paths — but a session
-        // without them is refused rather than fabricated (fail closed).
-        let (Some(home), Some(shell)) = (record.home(), record.shell()) else {
-            return Err(Errno::PermissionDenied);
-        };
-        Ok(AuthenticatedUser {
-            username: record.username().to_string(),
-            uid: record.uid(),
-            primary_gid: record.primary_gid(),
-            supplementary_gids: record.supplementary_gids().to_vec(),
-            capabilities: record.capabilities(),
-            home: home.to_string(),
-            shell: shell.to_string(),
-        })
+        authenticated_user(record)
+    }
+
+    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+        let record = self
+            .db
+            .authenticate_uid(Uid(uid), password.as_bytes())
+            .map_err(|_| Errno::PermissionDenied)?;
+        authenticated_user(record)
     }
 }
 
@@ -64,6 +80,10 @@ pub struct DenyAll;
 
 impl Authenticator for DenyAll {
     fn authenticate(&self, _credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
         Err(Errno::PermissionDenied)
     }
 }
@@ -170,6 +190,35 @@ mod tests {
                 auth.authenticate(&credentials(username, password)),
                 Err(Errno::PermissionDenied),
                 "credentials {username:?}/{password:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uid_authentication_yields_the_same_identity_as_the_username_path() {
+        let db = db();
+        let auth = UsersAuthenticator::new(&db);
+        let by_uid = auth.authenticate_uid(1000, "byron").expect("authenticates");
+        let by_name = auth
+            .authenticate(&credentials("ada", "byron"))
+            .expect("authenticates");
+        assert_eq!(by_uid, by_name);
+    }
+
+    #[test]
+    fn uid_authentication_refusals_are_the_same_error() {
+        let db = db();
+        let auth = UsersAuthenticator::new(&db);
+        for (uid, password) in [
+            (1000, "wrong"), // right account, wrong password
+            (9999, "byron"), // no account owns this uid
+            (1001, "evil"),  // a locked account's own uid
+            (10, ""),        // a no-login service account
+        ] {
+            assert_eq!(
+                auth.authenticate_uid(uid, password),
+                Err(Errno::PermissionDenied),
+                "uid {uid:?}/password {password:?}"
             );
         }
     }

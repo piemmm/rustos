@@ -3,7 +3,7 @@
 use tairix_cursor::CursorTheme;
 use tairix_icon::IconSet;
 use tairix_taskbar::{Taskbar, TaskbarConfig};
-use tairix_theme::{Theme, ThemeError, ThemeId, ThemeRegistry};
+use tairix_theme::{Appearance, Theme, ThemeError, ThemeId, ThemeRegistry};
 
 use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 
@@ -70,6 +70,20 @@ impl DesktopSession {
         self.themes.set_active(id)?;
         self.taskbar.apply_theme(self.themes.active());
         Ok(())
+    }
+
+    /// Switch the desktop to the built-in theme carrying `appearance` and
+    /// re-theme the taskbar — what the system menu's *Light Appearance* and
+    /// *Dark Appearance* rows ask for.
+    ///
+    /// The choice names an appearance rather than a particular theme's
+    /// identity, and both built-ins are always registered, so the switch has
+    /// no failure mode to surface (contrast [`set_theme`](Self::set_theme),
+    /// which can name an unregistered id). Returns the now-active id.
+    pub fn set_appearance(&mut self, appearance: Appearance) -> ThemeId {
+        let id = self.themes.set_appearance(appearance);
+        self.taskbar.apply_theme(self.themes.active());
+        id
     }
 
     /// Load the active theme's cursor set from the on-disk SVG assets under

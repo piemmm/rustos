@@ -48,16 +48,19 @@
 //! the task list, and a middle press over the capsule switches back to the
 //! previous task.
 
+use tairix_abi::PowerAction;
 use tairix_controls::{Section, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
+use tairix_theme::Appearance;
 
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
 use crate::pins::PinView;
 use crate::repaint::TaskbarRepaint;
+use crate::system::{self, SystemAction};
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
 
@@ -85,8 +88,11 @@ pub enum TaskbarResponse {
     /// Library button toggled it shut, a press outside dismissed it, or
     /// `Escape` was pressed.
     LibraryDismissed,
-    /// An entry in the program-library popup was chosen, closing the popup.
-    /// The embedder resolves the entry's bundle and launches it.
+    /// A bundle was chosen to launch — an entry in the program-library
+    /// popup (closing it), or a launch row of the system quick-actions menu.
+    /// The embedder resolves the entry's bundle and launches it. Both
+    /// origins report the same outcome, so there is exactly one launch path
+    /// behind the bar.
     LibraryLaunch {
         /// The catalog identifier of the chosen entry.
         entry: EntryId,
@@ -140,6 +146,25 @@ pub enum TaskbarResponse {
     OpenSwitchboard {
         /// Which section the window should open showing.
         section: Section,
+    },
+    /// An appearance row of the system quick-actions menu was chosen. The
+    /// embedder switches the desktop's active theme and repaints.
+    SetAppearance {
+        /// The appearance to switch to.
+        appearance: Appearance,
+    },
+    /// *Log Out* was chosen. The embedder ends this desktop session
+    /// cleanly; the login supervisor that started it prompts again.
+    LogOut,
+    /// A power row of the system quick-actions menu was chosen. The embedder
+    /// **must** put the choice to the user before anything happens, and only
+    /// then relay it to the one process that holds the authority to perform
+    /// it — the bar holds none. The variant is named for that obligation so
+    /// a caller cannot apply it while believing it had already been
+    /// confirmed.
+    ConfirmSystemPower {
+        /// The transition the user asked for.
+        action: PowerAction,
     },
 }
 
@@ -484,12 +509,21 @@ impl TaskbarInput {
 
     /// Handle a secondary-button press at the current pointer position with
     /// the popup and menu closed: a press on a pinned shortcut opens its
-    /// context menu; anywhere else on the bar is claimed and does nothing.
+    /// context menu, a press on the Switchboard capsule opens the desktop's
+    /// system quick-actions menu; anywhere else on the bar is claimed and
+    /// does nothing.
+    ///
+    /// Opening a menu acts on nothing by itself — the response is always
+    /// `Ignored`, and only choosing a row reports an outcome.
     fn press_secondary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
         let layout = taskbar.layout(scale);
-        if let Some(Hit::Pin(index)) = layout.hit_test(self.pointer) {
-            let anchor = layout.pins.get(index).copied().unwrap_or(Rect::EMPTY);
-            taskbar.open_pin_menu(index, anchor);
+        match layout.hit_test(self.pointer) {
+            Some(Hit::Pin(index)) => {
+                let anchor = layout.pins.get(index).copied().unwrap_or(Rect::EMPTY);
+                taskbar.open_pin_menu(index, anchor);
+            }
+            Some(Hit::Switchboard) => taskbar.open_system_menu(layout.switchboard),
+            _ => {}
         }
         TaskbarResponse::Ignored
     }
@@ -589,6 +623,41 @@ impl TaskbarInput {
                 TaskbarResponse::LibraryLaunch { entry }
             }
             MenuChoice::PinEntry(entry) => TaskbarResponse::PinEntry { entry },
+            MenuChoice::System(action) => Self::apply_system_action(action),
+        }
+    }
+
+    /// Translate a chosen system quick action into the typed response the
+    /// session applies under its own authority.
+    ///
+    /// The two inspection rows reuse the capsule's own Switchboard-opening
+    /// response and the launch row reuses the bar's one launch response, so
+    /// no command here introduces a second path to a destination the bar
+    /// already reaches.
+    fn apply_system_action(action: SystemAction) -> TaskbarResponse {
+        match action {
+            SystemAction::About => TaskbarResponse::OpenSwitchboard {
+                section: Section::Overview,
+            },
+            SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
+                section: Section::Tasks,
+            },
+            // The row is only actionable when this identifier resolved
+            // against the catalog, so a refusal here cannot happen through
+            // the menu; reporting nothing rather than a launch that must
+            // fail is still the honest answer if it ever did.
+            SystemAction::TaskShell => match EntryId::new(system::TASK_SHELL_BUNDLE) {
+                Ok(entry) => TaskbarResponse::LibraryLaunch { entry },
+                Err(_) => TaskbarResponse::Ignored,
+            },
+            SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
+            SystemAction::LogOut => TaskbarResponse::LogOut,
+            SystemAction::Restart => TaskbarResponse::ConfirmSystemPower {
+                action: PowerAction::Restart,
+            },
+            SystemAction::ShutDown => TaskbarResponse::ConfirmSystemPower {
+                action: PowerAction::PowerOff,
+            },
         }
     }
 

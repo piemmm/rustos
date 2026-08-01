@@ -51,6 +51,14 @@ pub enum MenuAction {
 /// A [`ControlRole::Destructive`] item draws a danger rail on its own row only.
 /// A denied item keeps its slot and shows an Authority Mark rather than looking
 /// merely disabled (spec §13). The row renders state and never dispatches.
+///
+/// An item may additionally open a *group*, drawing a divider rule in the gap
+/// above it (see [`with_group_break`](Self::with_group_break)). Grouping is a
+/// property of the row that begins the group rather than a row of its own, so
+/// a divider can never be highlighted, hit-tested, or activated — the
+/// invariant holds by construction instead of by a runtime guard — and every
+/// index a [`Menu`] reports stays a direct index into the owner's own command
+/// list, with no separator slots to translate around.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MenuItem {
     label: String,
@@ -60,6 +68,7 @@ pub struct MenuItem {
     reason: Option<String>,
     role: ControlRole,
     state: ControlState,
+    group_break: bool,
 }
 
 impl MenuItem {
@@ -74,6 +83,7 @@ impl MenuItem {
             reason: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
+            group_break: false,
         }
     }
 
@@ -110,6 +120,18 @@ impl MenuItem {
     #[must_use]
     pub fn with_role(mut self, role: ControlRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// This item marked as the first of a new group, drawing a divider rule
+    /// in the gap above it.
+    ///
+    /// A group break on the first row draws nothing: there is no preceding
+    /// group to divide it from, and a rule flush against the plate rim would
+    /// read as a second rim.
+    #[must_use]
+    pub fn with_group_break(mut self, group_break: bool) -> Self {
+        self.group_break = group_break;
         self
     }
 
@@ -153,6 +175,12 @@ impl MenuItem {
     #[must_use]
     pub fn is_submenu(&self) -> bool {
         self.submenu
+    }
+
+    /// Whether the item opens a new group (drawing a divider above it).
+    #[must_use]
+    pub fn is_group_break(&self) -> bool {
+        self.group_break
     }
 
     /// Whether activating this row (by pointer or keyboard) will dispatch.
@@ -344,6 +372,21 @@ impl MenuItem {
     }
 }
 
+/// One row's laid-out vertical geometry, relative to a [`Menu`]'s inner
+/// content top.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct RowBand {
+    /// The row's index in the menu.
+    index: usize,
+    /// The height of the group-divider band immediately above the row, or `0`
+    /// when the row does not open a group.
+    divider: u32,
+    /// The row's own top edge, below any divider band.
+    top: u32,
+    /// The row's height.
+    height: u32,
+}
+
 /// A pinned command plate carrying a column of [`MenuItem`] rows (spec §11.10).
 ///
 /// The menu owns highlight state and input: Up/Down move the current row
@@ -438,15 +481,71 @@ impl Menu {
         scale.scale_length(theme.metrics().control_height).max(1)
     }
 
+    /// The scaled height of the band a group divider occupies: the rule with
+    /// a gap either side, so groups read as separated bands rather than a
+    /// hairline crowded between two labels.
+    fn divider_band(scale: Scale, theme: &Theme) -> u32 {
+        Self::divider_rule(scale, theme)
+            .saturating_add(Self::divider_gap(scale, theme).saturating_mul(2))
+    }
+
+    /// The scaled thickness of the divider rule itself.
+    fn divider_rule(scale: Scale, theme: &Theme) -> u32 {
+        scale
+            .scale_length(theme.metrics().border_thickness)
+            .max(1)
+            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+    }
+
+    /// The scaled clearance between the divider rule and the rows either side.
+    fn divider_gap(scale: Scale, theme: &Theme) -> u32 {
+        scale.scale_length(theme.metrics().control_gap).max(1)
+    }
+
+    /// Walk the rows in order, yielding each one's vertical geometry relative
+    /// to the inner content top.
+    ///
+    /// The single definition of where a row sits: sizing, hit-testing, and
+    /// painting all read this walk, so a divider band can never shift the
+    /// rows one of them draws out of step with the rows another clicks.
+    fn layout(&self, scale: Scale, theme: &Theme) -> impl Iterator<Item = RowBand> + '_ {
+        let height = Self::row_height(scale, theme);
+        let band = Self::divider_band(scale, theme);
+        let mut cursor = 0u32;
+        self.items.iter().enumerate().map(move |(index, item)| {
+            // The first row opens no group: a rule flush against the plate
+            // rim would read as a second rim, not as a division.
+            let divider = if index > 0 && item.group_break {
+                band
+            } else {
+                0
+            };
+            let top = cursor.saturating_add(divider);
+            cursor = top.saturating_add(height);
+            RowBand {
+                index,
+                divider,
+                top,
+                height,
+            }
+        })
+    }
+
+    /// The total height every row and divider band occupies, inside the rims.
+    fn content_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        self.layout(scale, theme)
+            .last()
+            .map_or(0, |band| band.top.saturating_add(band.height))
+    }
+
     /// The menu's preferred height for the active theme (plate rims plus every
-    /// row), so the owner can size the popup surface exactly.
+    /// row and every group divider), so the owner can size the popup surface
+    /// exactly.
     #[must_use]
     pub fn preferred_height(&self, scale: Scale, theme: &Theme) -> u32 {
-        let border = plate_border(theme, scale);
-        let rows = u32::try_from(self.items.len()).unwrap_or(u32::MAX);
-        border
+        plate_border(theme, scale)
             .saturating_mul(2)
-            .saturating_add(rows.saturating_mul(Self::row_height(scale, theme)))
+            .saturating_add(self.content_height(scale, theme))
     }
 
     /// The menu's preferred width for the active theme: wide enough for the
@@ -490,6 +589,10 @@ impl Menu {
     }
 
     /// The row index under `point`, if any, for the given bounds.
+    ///
+    /// A point inside a group divider's band belongs to no row and answers
+    /// [`None`], so the gap between two groups is inert rather than
+    /// activating whichever neighbour happens to be nearer.
     #[must_use]
     pub fn row_at(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> Option<usize> {
         let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
@@ -498,13 +601,10 @@ impl Menu {
         if px < to_i32(ix) || px >= to_i32(ix + iw) || py < to_i32(iy) || py >= to_i32(iy + ih) {
             return None;
         }
-        let row_h = Self::row_height(scale, theme);
-        if row_h == 0 {
-            return None;
-        }
         let rel = u32::try_from(py - to_i32(iy)).ok()?;
-        let index = usize::try_from(rel / row_h).ok()?;
-        (index < self.items.len()).then_some(index)
+        self.layout(scale, theme)
+            .find(|band| rel >= band.top && rel < band.top.saturating_add(band.height))
+            .map(|band| band.index)
     }
 
     /// The surface rectangle row `index` occupies for the given bounds, or
@@ -523,20 +623,13 @@ impl Menu {
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
-        if index >= self.items.len() {
-            return None;
-        }
         let (ix, iy, iw, _ih) = Self::inner(bounds, scale, theme)?;
-        let row_h = Self::row_height(scale, theme);
-        if row_h == 0 {
-            return None;
-        }
-        let offset = u32::try_from(index).ok()?.checked_mul(row_h)?;
+        let band = self.layout(scale, theme).nth(index)?;
         Some(Rect::new(
             to_i32(ix),
-            to_i32(iy).saturating_add(to_i32(offset)),
+            to_i32(iy).saturating_add(to_i32(band.top)),
             iw,
-            row_h,
+            band.height,
         ))
     }
 
@@ -576,17 +669,34 @@ impl Menu {
             Color::from(palette.surface_raised),
         );
 
-        let row_h = Self::row_height(scale, theme);
-        for (i, item) in self.items.iter().enumerate() {
-            let row_top = iy + u32::try_from(i).unwrap_or(0).saturating_mul(row_h);
-            if row_top.saturating_add(row_h) > iy + ih {
+        let rule = Self::divider_rule(scale, theme);
+        let gap = Self::divider_gap(scale, theme);
+        for band in self.layout(scale, theme) {
+            let row_top = iy.saturating_add(band.top);
+            if row_top.saturating_add(band.height) > iy + ih {
                 break;
             }
-            let current = self.current == Some(i);
+            if band.divider > 0 {
+                // The rule sits centred in its band, inset from both plate
+                // rims so it reads as a division between groups rather than
+                // as a full-width edge of the plate itself.
+                let inset_x = gap.min(iw / 2);
+                surface.fill_rect(
+                    ix.saturating_add(inset_x),
+                    row_top.saturating_sub(band.divider).saturating_add(gap),
+                    iw.saturating_sub(inset_x.saturating_mul(2)),
+                    rule,
+                    Color::from(palette.border),
+                );
+            }
+            let Some(item) = self.items.get(band.index) else {
+                break;
+            };
+            let current = self.current == Some(band.index);
             let focused = current && self.keyboard_focus;
             item.paint(
                 surface,
-                (ix, row_top, iw, row_h),
+                (ix, row_top, iw, band.height),
                 scale,
                 theme,
                 font,

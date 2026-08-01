@@ -1,11 +1,13 @@
 //! The bar's one right-click context surface, composed from the shared
 //! `lib/controls` menu.
 //!
-//! A secondary press on a pinned shortcut, or on a program-library entry row
-//! while the popup is open, opens this menu. It is pure presentation over a
-//! typed subject: choosing a row only reports a typed [`TaskbarResponse`]
-//! outcome through the input router — the session performs the action (a
-//! launch, a pin-store edit) under its own authority. While open the menu is
+//! A secondary press on a pinned shortcut, on the Switchboard capsule, or on
+//! a program-library entry row while the popup is open, opens this menu. It
+//! is pure presentation over a typed subject: choosing a row only reports a
+//! typed [`TaskbarResponse`] outcome through the input router — the session
+//! performs the action (a launch, a pin-store edit, a power transition it
+//! relays to the one process that holds that authority) under its own
+//! authority, and the bar holds none of it. While open the menu is
 //! modal exactly like the library popup: every event routes here first, a
 //! click away dismisses without acting on what it hit, and Escape dismisses
 //! from the keyboard.
@@ -20,6 +22,7 @@ use tairix_proglib::EntryId;
 use tairix_theme::Theme;
 
 use crate::edge::Edge;
+use crate::system::{self, SystemAction, SystemPermits};
 
 /// What an open context menu is about.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,6 +43,14 @@ pub enum MenuSubject {
         /// so the menu offers *Unpin from taskbar* instead of *Pin*.
         pinned: Option<usize>,
     },
+    /// The desktop itself — the system quick-actions menu the Switchboard
+    /// capsule opens.
+    System {
+        /// What the rows may offer, as attested by the processes that would
+        /// carry each command out. The bar renders this; it never decides
+        /// it.
+        permits: SystemPermits,
+    },
 }
 
 /// What choosing a menu row asks for; the input router translates this into
@@ -56,6 +67,8 @@ pub(crate) enum MenuChoice {
     OpenEntry(EntryId),
     /// Pin this program-library entry to the strip.
     PinEntry(EntryId),
+    /// Perform this system quick action.
+    System(SystemAction),
 }
 
 /// The outcome of routing one input event into the open menu.
@@ -276,14 +289,21 @@ impl BarMenu {
                 },
                 1,
             ) => MenuChoice::PinEntry(entry),
+            (MenuSubject::System { .. }, row) => match system::action_at(row) {
+                Some(action) => MenuChoice::System(action),
+                None => return MenuOutcome::Dismissed,
+            },
             _ => return MenuOutcome::Dismissed,
         };
         MenuOutcome::Choose(choice)
     }
 }
 
-/// The rows a subject offers, in fixed order: *Open* first, then the pin
-/// affordance.
+/// The rows a subject offers, in fixed order.
+///
+/// A pin or entry subject offers *Open* first, then the pin affordance; the
+/// desktop subject offers the system quick actions, whose one ordered
+/// definition lives in [`crate::system::ROWS`].
 fn rows_for(subject: &MenuSubject) -> alloc::vec::Vec<MenuItem> {
     let pin_row = match subject {
         MenuSubject::Pin { .. } => MenuItem::new("Unpin"),
@@ -291,6 +311,7 @@ fn rows_for(subject: &MenuSubject) -> alloc::vec::Vec<MenuItem> {
             pinned: Some(_), ..
         } => MenuItem::new("Unpin from taskbar"),
         MenuSubject::Entry { pinned: None, .. } => MenuItem::new("Pin to taskbar"),
+        MenuSubject::System { permits } => return system::rows(*permits),
     };
     alloc::vec![MenuItem::new("Open"), pin_row]
 }

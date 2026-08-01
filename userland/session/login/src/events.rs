@@ -56,16 +56,23 @@ pub const FONTD_STARTED: EventId = EventId(10_010);
 /// launches — but desktop text will not render until a font service is up,
 /// so the refusal is audited loudly (`AGENTS.md` §2.24).
 pub const FONTD_UNAVAILABLE: EventId = EventId(10_011);
+/// A [`tairix_abi::elevate::ElevateRequest::Verify`] request re-authenticated
+/// the caller's own attested account; nothing was run.
+pub const VERIFY_GRANTED: EventId = EventId(10_012);
+/// A [`tairix_abi::elevate::ElevateRequest::Verify`] request was refused — an
+/// attested uid with no account, a failed re-authentication, or an
+/// unattested caller (cause never disclosed to the caller, only audited).
+pub const VERIFY_REFUSED: EventId = EventId(10_013);
 
 #[cfg(test)]
 mod tests {
     use super::{
         AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
         FONTD_STARTED, FONTD_UNAVAILABLE, LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START,
-        SESSION_ENDED, SESSION_LAUNCH_FAILED, SESSION_STARTED,
+        SESSION_ENDED, SESSION_LAUNCH_FAILED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 11] = [
+    const ALL: [u32; 13] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -77,6 +84,8 @@ mod tests {
         ELEVATE_UNAVAILABLE.0,
         FONTD_STARTED.0,
         FONTD_UNAVAILABLE.0,
+        VERIFY_GRANTED.0,
+        VERIFY_REFUSED.0,
     ];
 
     #[test]

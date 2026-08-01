@@ -11,6 +11,17 @@
 //! child's set is derived kernel-side as
 //! `its manifest ∩ the target account's ceiling`, exactly as at login.
 //!
+//! The same endpoint also answers a narrower [`ElevateRequest::Verify`]
+//! request: re-authenticate the **caller's own** kernel-attested account and
+//! run nothing. This is the primitive a graphical session's screen lock
+//! needs, reusing every part of the broker — the same timing-equalised
+//! authenticator, the same indistinguishable refusal, the same per-attempt
+//! audit — rather than a second authenticator existing anywhere in the tree.
+//! It is strictly weaker than a `Run` request (it never spawns a program)
+//! and narrower still (it can only ever check the caller's *own* account,
+//! never one it names), so it grants no authority a `Run` request did not
+//! already carry.
+//!
 //! Like the [`Login`](crate::Login) state machine this is pure decision
 //! logic over injected seams, so every branch is host-tested; the `Run`
 //! binary owns the IPC serve loop (`call_recv` → this → `call_reply`) and
@@ -55,21 +66,29 @@ pub trait ElevateLauncher {
 ///    is refused before its bytes are even parsed.
 /// 2. **Shape** — the request must decode ([`ElevateRequest::decode`],
 ///    fail-closed).
-/// 3. **Re-authentication** — the offered credentials must verify through
-///    `authenticator`; a wrong password, an unknown account, and a locked
-///    account are refused indistinguishably
+/// 3. **Re-authentication** — for [`ElevateRequest::Run`], the offered
+///    `(username, password)` must verify through `authenticator`; for
+///    [`ElevateRequest::Verify`], `password` must verify against the
+///    account owned by the caller's kernel-attested `peer_uid` — never a
+///    name the request supplies. Either way a wrong password, an unknown
+///    account, and a locked account are refused indistinguishably
 ///    ([`Errno::PermissionDenied`] — the cause is audited, never
 ///    disclosed).
-/// 4. **Run** — the program is spawned as the target account and waited
-///    for; a spawn refusal is reported verbatim.
+/// 4. **Run** — for [`ElevateRequest::Run`] only, the program is spawned as
+///    the target account and waited for; a spawn refusal is reported
+///    verbatim. A [`ElevateRequest::Verify`] request never reaches the
+///    launcher: a successful re-authentication answers
+///    [`ElevateReply::Verified`] directly.
 ///
 /// Every grant and every refusal emits its audit event
-/// ([`events::ELEVATE_GRANTED`] / [`events::ELEVATE_REFUSED`]). The caller
-/// owns the request buffer and zeroises it (it carries the offered
-/// password) as soon as this returns.
+/// ([`events::ELEVATE_GRANTED`] / [`events::ELEVATE_REFUSED`] for a `Run`
+/// request, [`events::VERIFY_GRANTED`] / [`events::VERIFY_REFUSED`] for a
+/// `Verify` request). The caller owns the request buffer and zeroises it
+/// (it carries the offered password) as soon as this returns.
 pub fn handle_elevate_request(
     bytes: &[u8],
     peer_console: u64,
+    peer_uid: Option<u32>,
     own_console: u64,
     authenticator: &dyn Authenticator,
     launcher: &dyn ElevateLauncher,
@@ -86,10 +105,29 @@ pub fn handle_elevate_request(
             return ElevateReply::Refused(err);
         }
     };
-    let credentials = Credentials {
-        username: request.username,
-        password: request.password,
-    };
+    match request {
+        ElevateRequest::Run {
+            username,
+            password,
+            program,
+        } => handle_run(username, password, program, authenticator, launcher, sink),
+        ElevateRequest::Verify { password } => {
+            handle_verify(peer_uid, password, authenticator, sink)
+        }
+    }
+}
+
+/// Decide a [`ElevateRequest::Run`] request: re-authenticate `username`
+/// and, on success, spawn `program` as that account.
+fn handle_run(
+    username: &str,
+    password: &str,
+    program: &str,
+    authenticator: &dyn Authenticator,
+    launcher: &dyn ElevateLauncher,
+    sink: &dyn Sink,
+) -> ElevateReply {
+    let credentials = Credentials { username, password };
     let Ok(user) = authenticator.authenticate(&credentials) else {
         // The cause (wrong password / unknown / locked) is deliberately not
         // recorded beyond the offered username: refusals stay
@@ -97,21 +135,53 @@ pub fn handle_elevate_request(
         audit_refused(
             sink,
             "authentication failed",
-            Some(request.username),
+            Some(username),
             Errno::PermissionDenied,
         );
         return ElevateReply::Refused(Errno::PermissionDenied);
     };
-    match launcher.run_as(request.program, user.uid.0) {
+    match launcher.run_as(program, user.uid.0) {
         Ok(exit_code) => {
-            audit_granted(sink, &request, user.uid.0, exit_code);
+            audit_granted(sink, username, program, user.uid.0, exit_code);
             ElevateReply::Completed { exit_code }
         }
         Err(err) => {
-            audit_refused(sink, "launch failed", Some(request.username), err);
+            audit_refused(sink, "launch failed", Some(username), err);
             ElevateReply::Refused(err)
         }
     }
+}
+
+/// Decide a [`ElevateRequest::Verify`] request: re-authenticate the
+/// account owned by `peer_uid` against `password`; run nothing.
+///
+/// `peer_uid` is `None` when the caller's identity could not be attested
+/// (the `call_peer_origin` read failed) — this is refused before any
+/// password comparison is attempted, exactly like the console-placement
+/// check above, since there is no account to check against. An attested
+/// uid that resolves to no account is a different case and is refused
+/// through the identical `authenticate_uid` call every other uid takes, so
+/// it costs the same derivation and cannot be timed apart from a wrong
+/// password on a real account.
+fn handle_verify(
+    peer_uid: Option<u32>,
+    password: &str,
+    authenticator: &dyn Authenticator,
+    sink: &dyn Sink,
+) -> ElevateReply {
+    let Some(uid) = peer_uid else {
+        audit_verify_refused(sink, "no attested uid", Errno::PermissionDenied);
+        return ElevateReply::Refused(Errno::PermissionDenied);
+    };
+    if authenticator.authenticate_uid(uid, password).is_ok() {
+        audit_verify_granted(sink, uid);
+        return ElevateReply::Verified;
+    }
+    // As with `handle_run`, the cause is not recorded beyond the attested
+    // uid: an unresolvable uid and a wrong password on a real account both
+    // land here, indistinguishably.
+    audit_verify_refused(sink, "authentication failed", Errno::PermissionDenied);
+    ElevateReply::Refused(Errno::PermissionDenied)
 }
 
 fn emit(sink: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Field<'_>]) {
@@ -126,7 +196,7 @@ fn emit(sink: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Fie
     );
 }
 
-fn audit_granted(sink: &dyn Sink, request: &ElevateRequest<'_>, uid: u32, exit_code: i32) {
+fn audit_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, exit_code: i32) {
     let mut uid_buf = DecBuf::new();
     let mut code_buf = DecBuf::new();
     emit(
@@ -137,7 +207,7 @@ fn audit_granted(sink: &dyn Sink, request: &ElevateRequest<'_>, uid: u32, exit_c
         &[
             Field {
                 key: "user",
-                value: tairix_log::FieldValue::Str(request.username),
+                value: tairix_log::FieldValue::Str(username),
             },
             Field {
                 key: "uid",
@@ -145,7 +215,7 @@ fn audit_granted(sink: &dyn Sink, request: &ElevateRequest<'_>, uid: u32, exit_c
             },
             Field {
                 key: "program",
-                value: tairix_log::FieldValue::Str(request.program),
+                value: tairix_log::FieldValue::Str(program),
             },
             Field {
                 key: "exit_code",
@@ -179,6 +249,40 @@ fn audit_refused(sink: &dyn Sink, cause: &str, username: Option<&str>, err: Errn
     );
 }
 
+fn audit_verify_granted(sink: &dyn Sink, uid: u32) {
+    let mut uid_buf = DecBuf::new();
+    emit(
+        sink,
+        Level::Info,
+        events::VERIFY_GRANTED,
+        "verify-only elevation granted",
+        &[Field {
+            key: "uid",
+            value: tairix_log::FieldValue::Str(uid_buf.format(i128::from(uid))),
+        }],
+    );
+}
+
+fn audit_verify_refused(sink: &dyn Sink, cause: &str, err: Errno) {
+    let mut errno_buf = DecBuf::new();
+    emit(
+        sink,
+        Level::Warn,
+        events::VERIFY_REFUSED,
+        "verify-only elevation refused",
+        &[
+            Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str(cause),
+            },
+            Field {
+                key: "errno",
+                value: tairix_log::FieldValue::Str(errno_buf.format(i128::from(err.as_i32()))),
+            },
+        ],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -194,8 +298,23 @@ mod tests {
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Sink};
 
-    /// Authenticator accepting exactly `root`/`correct` as uid 0.
+    /// Authenticator accepting exactly `root`/`correct` as uid 0, by name or
+    /// by uid.
     struct FixedAuth;
+
+    impl FixedAuth {
+        fn root() -> AuthenticatedUser {
+            AuthenticatedUser {
+                username: "root".to_string(),
+                uid: Uid(0),
+                primary_gid: Gid(0),
+                supplementary_gids: Vec::new(),
+                capabilities: CapabilitySet::empty(),
+                home: "/Users/root".to_string(),
+                shell: "/System/Services/shell".to_string(),
+            }
+        }
+    }
 
     impl Authenticator for FixedAuth {
         fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
@@ -203,15 +322,17 @@ mod tests {
             // indistinguishable refusal, exactly as the production
             // `UsersAuthenticator` behaves.
             if credentials.username == "root" && credentials.password == "correct" {
-                Ok(AuthenticatedUser {
-                    username: "root".to_string(),
-                    uid: Uid(0),
-                    primary_gid: Gid(0),
-                    supplementary_gids: Vec::new(),
-                    capabilities: CapabilitySet::empty(),
-                    home: "/Users/root".to_string(),
-                    shell: "/System/Services/shell".to_string(),
-                })
+                Ok(Self::root())
+            } else {
+                Err(Errno::PermissionDenied)
+            }
+        }
+
+        fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+            // Mirrors `authenticate`: an unresolvable uid and a wrong
+            // password on the real one are the identical refusal.
+            if uid == 0 && password == "correct" {
+                Ok(Self::root())
             } else {
                 Err(Errno::PermissionDenied)
             }
@@ -258,13 +379,13 @@ mod tests {
         }
     }
 
-    fn encoded(
+    fn encoded_run(
         username: &str,
         password: &str,
         program: &str,
     ) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
-        let len = ElevateRequest {
+        let len = ElevateRequest::Run {
             username,
             password,
             program,
@@ -274,12 +395,21 @@ mod tests {
         (buf, len)
     }
 
+    fn encoded_verify(password: &str) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = ElevateRequest::Verify { password }
+            .encode(&mut buf)
+            .expect("encodes");
+        (buf, len)
+    }
+
     #[test]
     fn correct_password_runs_the_program_as_the_account_and_audits() {
-        let (buf, len) = encoded("root", "correct", "/System/Apps/users.app/Run");
+        let (buf, len) = encoded_run("root", "correct", "/System/Apps/users.app/Run");
         let launcher = MockLauncher::new(Ok(7));
         let sink = CountSink::default();
-        let reply = handle_elevate_request(&buf[..len], 1, 1, &FixedAuth, &launcher, &sink);
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
         assert_eq!(reply, ElevateReply::Completed { exit_code: 7 });
         assert_eq!(
             launcher.runs.borrow().as_slice(),
@@ -293,12 +423,27 @@ mod tests {
     fn wrong_password_and_unknown_account_are_refused_indistinguishably() {
         let launcher = MockLauncher::new(Ok(0));
         let sink = CountSink::default();
-        let (wrong, wrong_len) = encoded("root", "wrong", "/System/Apps/users.app/Run");
-        let (unknown, unknown_len) = encoded("mallory", "correct", "/System/Apps/users.app/Run");
-        let refused_wrong =
-            handle_elevate_request(&wrong[..wrong_len], 1, 1, &FixedAuth, &launcher, &sink);
-        let refused_unknown =
-            handle_elevate_request(&unknown[..unknown_len], 1, 1, &FixedAuth, &launcher, &sink);
+        let (wrong, wrong_len) = encoded_run("root", "wrong", "/System/Apps/users.app/Run");
+        let (unknown, unknown_len) =
+            encoded_run("mallory", "correct", "/System/Apps/users.app/Run");
+        let refused_wrong = handle_elevate_request(
+            &wrong[..wrong_len],
+            1,
+            Some(0),
+            1,
+            &FixedAuth,
+            &launcher,
+            &sink,
+        );
+        let refused_unknown = handle_elevate_request(
+            &unknown[..unknown_len],
+            1,
+            Some(0),
+            1,
+            &FixedAuth,
+            &launcher,
+            &sink,
+        );
         // One reply for both causes: the requester learns nothing about
         // which part of the credentials failed.
         assert_eq!(
@@ -313,10 +458,11 @@ mod tests {
 
     #[test]
     fn a_caller_on_another_console_is_refused_before_parsing() {
-        let (buf, len) = encoded("root", "correct", "/System/Apps/users.app/Run");
+        let (buf, len) = encoded_run("root", "correct", "/System/Apps/users.app/Run");
         let launcher = MockLauncher::new(Ok(0));
         let sink = CountSink::default();
-        let reply = handle_elevate_request(&buf[..len], 2, 1, &FixedAuth, &launcher, &sink);
+        let reply =
+            handle_elevate_request(&buf[..len], 2, Some(0), 1, &FixedAuth, &launcher, &sink);
         assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
         assert!(launcher.runs.borrow().is_empty());
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
@@ -326,7 +472,8 @@ mod tests {
     fn a_malformed_request_is_refused_without_authentication() {
         let launcher = MockLauncher::new(Ok(0));
         let sink = CountSink::default();
-        let reply = handle_elevate_request(&[0xFF; 10], 1, 1, &FixedAuth, &launcher, &sink);
+        let reply =
+            handle_elevate_request(&[0xFF; 10], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
         assert!(matches!(reply, ElevateReply::Refused(_)));
         assert!(launcher.runs.borrow().is_empty());
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
@@ -334,12 +481,100 @@ mod tests {
 
     #[test]
     fn a_spawn_refusal_is_reported_verbatim_and_audited() {
-        let (buf, len) = encoded("root", "correct", "/missing");
+        let (buf, len) = encoded_run("root", "correct", "/missing");
         let launcher = MockLauncher::new(Err(Errno::NotFound));
         let sink = CountSink::default();
-        let reply = handle_elevate_request(&buf[..len], 1, 1, &FixedAuth, &launcher, &sink);
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
         assert_eq!(reply, ElevateReply::Refused(Errno::NotFound));
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
         assert_eq!(sink.count(events::ELEVATE_GRANTED), 0);
+    }
+
+    #[test]
+    fn verify_with_the_right_password_answers_verified_and_runs_nothing() {
+        let (buf, len) = encoded_verify("correct");
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Verified);
+        assert!(
+            launcher.runs.borrow().is_empty(),
+            "a Verify request must never invoke the launcher"
+        );
+        assert_eq!(sink.count(events::VERIFY_GRANTED), 1);
+        assert_eq!(sink.count(events::VERIFY_REFUSED), 0);
+    }
+
+    #[test]
+    fn verify_with_the_wrong_password_is_refused_and_runs_nothing() {
+        let (buf, len) = encoded_verify("wrong");
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+        assert!(launcher.runs.borrow().is_empty());
+        assert_eq!(sink.count(events::VERIFY_REFUSED), 1);
+        assert_eq!(sink.count(events::VERIFY_GRANTED), 0);
+    }
+
+    #[test]
+    fn verify_with_an_attested_uid_owning_no_account_is_indistinguishable_from_wrong_password() {
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let (unowned, unowned_len) = encoded_verify("correct");
+        let (wrong, wrong_len) = encoded_verify("wrong");
+        let no_account = handle_elevate_request(
+            &unowned[..unowned_len],
+            1,
+            Some(9999),
+            1,
+            &FixedAuth,
+            &launcher,
+            &sink,
+        );
+        let wrong_password = handle_elevate_request(
+            &wrong[..wrong_len],
+            1,
+            Some(0),
+            1,
+            &FixedAuth,
+            &launcher,
+            &sink,
+        );
+        // Both take the identical `authenticate_uid` path and answer the
+        // identical refusal — an unresolvable uid never runs any faster or
+        // differently than a wrong password on a real one.
+        assert_eq!(no_account, ElevateReply::Refused(Errno::PermissionDenied));
+        assert_eq!(no_account, wrong_password);
+        assert!(launcher.runs.borrow().is_empty());
+        assert_eq!(sink.count(events::VERIFY_REFUSED), 2);
+    }
+
+    #[test]
+    fn verify_without_an_attested_uid_is_refused_before_authenticating() {
+        let (buf, len) = encoded_verify("correct");
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let reply = handle_elevate_request(&buf[..len], 1, None, 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+        assert!(launcher.runs.borrow().is_empty());
+        assert_eq!(sink.count(events::VERIFY_REFUSED), 1);
+        assert_eq!(sink.count(events::VERIFY_GRANTED), 0);
+    }
+
+    #[test]
+    fn a_verify_caller_on_another_console_is_refused_before_parsing() {
+        let (buf, len) = encoded_verify("correct");
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 2, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+        assert!(launcher.runs.borrow().is_empty());
+        assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
+        assert_eq!(sink.count(events::VERIFY_REFUSED), 0);
     }
 }

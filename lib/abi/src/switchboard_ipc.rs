@@ -65,6 +65,7 @@
 use crate::bounded_text::BoundedText;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
+use crate::power::PowerAction;
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the desktop session's
@@ -314,6 +315,13 @@ pub struct TraySummary {
     pub pressure: Option<TrayPressure>,
     /// The busiest task, if any is known.
     pub top_task: Option<TrayTask>,
+    /// Whether the publishing Switchboard instance has attested that it
+    /// holds `CAP_SYSTEM_POWER`. The taskbar's system menu fails closed on
+    /// its Restart/Shut Down rows whenever this is `false` — including
+    /// before the first publish, when no summary exists at all — so a
+    /// service that never requested (or was refused) the capability never
+    /// lets the desktop offer an action it cannot perform.
+    pub power_capable: bool,
 }
 
 /// One Switchboard channel operation the desktop session serves
@@ -373,11 +381,14 @@ const TOP_TASK_NAME_LEN_OFFSET: usize = 18;
 const TOP_TASK_NAME_OFFSET: usize = 19;
 /// Byte offset of the top-task CPU fraction.
 const TOP_TASK_CPU_OFFSET: usize = TOP_TASK_NAME_OFFSET + TRAY_TASK_NAME_MAX;
+/// Byte offset of the power-authority flag (`0`/`1`), the last field of the
+/// `PublishSummary` block.
+const POWER_CAPABLE_OFFSET: usize = TOP_TASK_CPU_OFFSET + 2;
 
 impl SwitchboardRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and the
     /// fixed `PublishSummary` block — the only operation today.
-    pub const WIRE_LEN: usize = TOP_TASK_CPU_OFFSET + 2;
+    pub const WIRE_LEN: usize = POWER_CAPABLE_OFFSET + 1;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -412,6 +423,7 @@ impl SwitchboardRequest {
                         top_task.cpu_permille.as_u16(),
                     );
                 }
+                out[POWER_CAPABLE_OFFSET] = u8::from(summary.power_capable);
             }
             Self::ActivateOwner { owner } => {
                 put_u16(&mut out, 6, OP_ACTIVATE_OWNER);
@@ -439,8 +451,9 @@ impl SwitchboardRequest {
     /// * [`Errno::OutOfRange`] — an unknown operation, a pressure kind
     ///   outside the closed set, a pressured-resource count of zero or
     ///   above [`TRAY_PRESSURE_KIND_COUNT`] beside a named pressure, a
-    ///   permille fraction above `1000`, or the reserved zero owner id on
-    ///   an owner-directed operation.
+    ///   permille fraction above `1000`, the reserved zero owner id on
+    ///   an owner-directed operation, or the power-authority flag byte
+    ///   holding anything but `0`/`1`.
     /// * [`Errno::LengthOutOfRange`] — a top-task name length outside
     ///   `1..=TRAY_TASK_NAME_MAX`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -461,6 +474,7 @@ impl SwitchboardRequest {
                 let cpu_busy_permille = TrayPermille::new(read_u16(bytes, CPU_BUSY_OFFSET))?;
                 let pressure = decode_pressure(bytes)?;
                 let top_task = decode_top_task(bytes)?;
+                let power_capable = decode_bool(bytes[POWER_CAPABLE_OFFSET])?;
                 Ok(Self::PublishSummary {
                     summary: TraySummary {
                         jobs,
@@ -468,6 +482,7 @@ impl SwitchboardRequest {
                         cpu_busy_permille,
                         pressure,
                         top_task,
+                        power_capable,
                     },
                 })
             }
@@ -479,6 +494,17 @@ impl SwitchboardRequest {
             }),
             _ => Err(Errno::OutOfRange),
         }
+    }
+}
+
+/// Decode a wire boolean flag: exactly `0` or `1`, never a truthy-nonzero
+/// convention that would let a malformed frame silently mean something the
+/// sender never wrote.
+fn decode_bool(byte: u8) -> Result<bool, Errno> {
+    match byte {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Errno::OutOfRange),
     }
 }
 
@@ -752,6 +778,8 @@ const SWITCHBOARD_COMMAND_MAGIC: u32 = 0x3143_5753;
 const OP_OPEN_PANEL: u16 = 1;
 /// Wire operation discriminant of [`SwitchboardCommand::SeatReport`].
 const OP_SEAT_REPORT: u16 = 2;
+/// Wire operation discriminant of [`SwitchboardCommand::Power`].
+const OP_POWER: u16 = 3;
 
 /// Byte offset of an [`SwitchboardCommand::OpenPanel`] section.
 const SECTION_OFFSET: usize = 8;
@@ -762,6 +790,10 @@ const REPORT_COUNT_OFFSET: usize = 12;
 /// Byte offset of a report's named-owner ids, aligned so each id sits on
 /// its natural boundary within the frame.
 const REPORT_OWNERS_OFFSET: usize = 16;
+/// Byte offset of a [`SwitchboardCommand::Power`] operation's action code.
+/// Shares the same base as [`SECTION_OFFSET`]: each operation reads only its
+/// own fields, so the two never observe each other's bytes.
+const POWER_ACTION_OFFSET: usize = 8;
 
 /// One command the desktop session sends a Switchboard instance on its
 /// per-instance mailbox ([`command_endpoint_for`]).
@@ -776,6 +808,15 @@ pub enum SwitchboardCommand {
     SeatReport {
         /// The report.
         report: SeatReport,
+    },
+    /// Perform the machine power transition `action`. Sent only after the
+    /// desktop session's own confirmation prompt has been accepted — the
+    /// session holds no authority to act itself, so it relays the user's
+    /// explicit choice to the one instance that requested
+    /// `CAP_SYSTEM_POWER`.
+    Power {
+        /// Which power transition to perform.
+        action: PowerAction,
     },
 }
 
@@ -803,6 +844,10 @@ impl SwitchboardCommand {
                     put_u64(&mut out, REPORT_OWNERS_OFFSET + index * 8, owner);
                 }
             }
+            Self::Power { action } => {
+                put_u16(&mut out, 6, OP_POWER);
+                put_u32(&mut out, POWER_ACTION_OFFSET, action.as_u32());
+            }
         }
         out
     }
@@ -818,7 +863,8 @@ impl SwitchboardCommand {
     /// * [`Errno::AbiVersionUnsupported`] — not `switchboard-v1`.
     /// * [`Errno::OutOfRange`] — an unknown operation, a section outside
     ///   the closed set, a total below the named count, the reserved zero
-    ///   task id, or a repeated owner.
+    ///   task id, a repeated owner, or an unrecognised power-action
+    ///   discriminant.
     /// * [`Errno::LengthOutOfRange`] — a named-owner count above
     ///   [`SEAT_REPORT_OWNERS_MAX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -846,6 +892,17 @@ impl SwitchboardCommand {
             OP_SEAT_REPORT => Ok(Self::SeatReport {
                 report: decode_seat_report(bytes)?,
             }),
+            OP_POWER => {
+                if bytes[POWER_ACTION_OFFSET + 4..Self::WIRE_LEN]
+                    .iter()
+                    .any(|&byte| byte != 0)
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Power {
+                    action: PowerAction::from_u32(read_u32(bytes, POWER_ACTION_OFFSET))?,
+                })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }

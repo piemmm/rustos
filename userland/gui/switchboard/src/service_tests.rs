@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardCommand};
 use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
-use tairix_abi::{Errno, ProcId};
+use tairix_abi::{Errno, PowerAction, ProcId};
 use tairix_controls::Section;
 
 use super::{CycleOutcome, Service, MAX_CONSECUTIVE_PUBLISH_FAILURES};
@@ -16,7 +16,7 @@ use crate::publish::KEEPALIVE_NS;
 use crate::sample::{DegradedField, ScopeVerdicts};
 use crate::test_host::{
     process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
-    PROC_CONTROL_AUTHORITY,
+    PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
 };
 use crate::wait::required_members;
 
@@ -522,6 +522,145 @@ fn an_unchanged_sample_one_period_later_presents_nothing_new() {
     service.panel_mut().flush(&mut host);
 
     assert_eq!(host.presents, presents);
+}
+
+// ---- power transitions -------------------------------------------------
+
+#[test]
+fn a_power_command_acts_only_under_the_power_capability() {
+    for action in [PowerAction::PowerOff, PowerAction::Restart] {
+        let mut host = RecordingHost::new();
+        let mut service = service();
+
+        service.command(
+            &mut host,
+            SwitchboardCommand::Power { action },
+            &SYSTEM_POWER_AUTHORITY,
+        );
+
+        assert_eq!(host.powered, alloc::vec![action]);
+        assert!(
+            host.refusals.is_empty(),
+            "a granted transition states no refusal"
+        );
+    }
+}
+
+#[test]
+fn a_power_command_without_the_capability_is_refused_and_never_attempted() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::Power {
+            action: PowerAction::PowerOff,
+        },
+        &NO_AUTHORITY,
+    );
+
+    assert!(
+        host.powered.is_empty(),
+        "the machine is never asked to stop without the authority to stop it"
+    );
+    assert_eq!(
+        host.refusals,
+        alloc::vec![(
+            String::from("power the machine off"),
+            Errno::PermissionDenied
+        )]
+    );
+}
+
+#[test]
+fn a_capability_that_is_not_the_power_one_still_refuses() {
+    // Holding some other authority is not holding this one: the check names
+    // the capability it needs rather than settling for "privileged enough".
+    let mut host = RecordingHost::new();
+    let mut service = service();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::Power {
+            action: PowerAction::Restart,
+        },
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert!(host.powered.is_empty());
+    assert_eq!(
+        host.refused_actions(),
+        alloc::vec!["restart the machine"],
+        "the refusal names the transition that did not happen"
+    );
+}
+
+#[test]
+fn a_kernel_refusal_of_a_permitted_transition_is_stated_and_the_service_lives_on() {
+    // The capability is held, so the call is made — and comes back, which
+    // only happens when the kernel refused (a platform with no reset
+    // primitive, say). The user is told and the service keeps monitoring.
+    let mut host = RecordingHost::new();
+    host.power_refusal = Some(Errno::NotSupported);
+    let mut service = service();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::Power {
+            action: PowerAction::Restart,
+        },
+        &SYSTEM_POWER_AUTHORITY,
+    );
+
+    assert_eq!(host.powered, alloc::vec![PowerAction::Restart]);
+    assert_eq!(
+        host.refusals,
+        alloc::vec![(String::from("restart the machine"), Errno::NotSupported)]
+    );
+
+    // Still a live monitor: the next cycle still publishes.
+    assert_eq!(cycle(&mut service, &mut host, 0), CycleOutcome::Continue);
+    assert_eq!(host.published.len(), 1);
+}
+
+#[test]
+fn the_published_power_flag_tracks_the_live_capability() {
+    // Unheld: the summary says so, so the desktop's Restart and Shut Down
+    // rows render refused rather than offering an action nothing can carry
+    // out.
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    service.cycle(&mut host, &DeadTransport, 0, &NO_AUTHORITY);
+    assert_eq!(host.published.len(), 1);
+    assert!(!host.published[0].power_capable);
+
+    // Held: the very next publish attests it, without waiting for a
+    // restart — the flag is re-read every cycle rather than cached.
+    service.cycle(
+        &mut host,
+        &DeadTransport,
+        KEEPALIVE_NS,
+        &SYSTEM_POWER_AUTHORITY,
+    );
+    assert_eq!(host.published.len(), 2);
+    assert!(host.published[1].power_capable);
+
+    // Dropped again: the attestation is withdrawn just as promptly.
+    service.cycle(&mut host, &DeadTransport, KEEPALIVE_NS * 2, &NO_AUTHORITY);
+    assert_eq!(host.published.len(), 3);
+    assert!(!host.published[2].power_capable);
+}
+
+#[test]
+fn a_derived_summary_never_claims_power_authority_on_its_own() {
+    // The derivation reads measurements, which carry no authority, so its
+    // own answer is always the denied one; only the service's live check
+    // can raise it.
+    let summary = crate::derive::derive_summary(
+        &crate::sample::Sample::default(),
+        &mut crate::derive::Hysteresis::new(),
+    );
+    assert!(!summary.power_capable);
 }
 
 #[test]

@@ -157,6 +157,7 @@ extern crate alloc;
 pub mod assets;
 pub mod cli;
 pub mod config;
+pub mod confirm;
 pub mod device;
 pub mod input;
 pub mod keyboard;
@@ -181,6 +182,7 @@ pub use assets::{
 };
 pub use cli::{parse, CliError, Command, USAGE};
 pub use config::{FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH};
+pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
@@ -198,7 +200,7 @@ pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    command_section, deliver_pending_open, maybe_send_seat_report, open_tray,
+    command_section, deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,
     serve_switchboard_request, OwnerWindow, SwitchboardMailbox, SwitchboardOutcome,
     SwitchboardRefusal, SwitchboardServe,
 };

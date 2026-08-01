@@ -281,6 +281,41 @@ the authority at the right granularity and, if so, uses it.
   An ordinary user's Switchboard controls only that user's own processes
   (the same-uid rule, no capability needed); the capability exists for the
   administrative overview acting across principals.
+- Machine-power authority for the quick-actions menu's **Restart** and
+  **Shut Down** rows. The check for an existing capability is **resolved**
+  (T13): no capability expressed it — `CAP_PROC_CONTROL` reaches other
+  principals' *processes* but never the platform, `CAP_SEAT_ADMIN`
+  administers seats on a machine that stays running, `CAP_DRV_KERNEL` loads
+  code rather than ending execution — so T13 mints `CAP_SYSTEM_POWER` (id 41)
+  together with its live enforcement point, the new capability-gated
+  `system_power` syscall (number 105), and its live holder, the Switchboard
+  service manifest plus the administrative ceiling in `lib/users`. It guards
+  a class (the machine's power state), not one object, and is granted in the
+  administrative ceiling only, so an ordinary account's desktop renders the
+  power rows with the Authority Mark and never attempts them.
+  - **The desktop session deliberately does not hold it.** The session is the
+    largest, most exposed process on the seat — it composites, parses input,
+    decodes untrusted image assets, and serves IPC — so the widest-blast-radius
+    authority in the system stays out of it. The session relays a confirmed
+    power request to the small Switchboard service, which performs the syscall
+    under its own capability check and reports a refusal on `stderr`.
+  - **Authority is attested by the holder, never guessed by the renderer.**
+    The Switchboard publishes whether it actually holds `CAP_SYSTEM_POWER` in
+    the tray summary it already sends; the session passes that through to the
+    taskbar, which renders the rows accordingly. An absent, dead, or
+    not-yet-published service leaves the rows **denied** — fail closed, never
+    optimistic.
+- Session **Lock** re-authentication mints **no capability**, and no second
+  authenticator is written (landed; the lock *surface* is still outstanding —
+  see T13). The per-console elevation broker
+  (`lib/abi/src/elevate.rs`, served by the login supervisor, which already
+  holds `CAP_SPAWN_AS_USER` + `CAP_USERS_READ`) already performs exactly this
+  work — timing-equalised re-authentication through the same `Authenticator`
+  the login prompt uses, indistinguishable refusals, per-attempt audit, secret
+  zeroisation. T13 therefore adds one **narrower** request kind to that
+  protocol, `ElevateRequest::Verify`, which verifies the **caller's own
+  kernel-attested uid** and runs nothing. It is strictly weaker than the
+  `Run` request the same endpoint already serves, so it widens no authority.
 
 ## 5. On-disk stores (data, never code)
 
@@ -1057,27 +1092,86 @@ proptest oracles cover it end to end.
 
 Where System Settings lives (issue requirement: **not** in the library).
 
-**Deliverables**
-- The Switchboard's SYSTEM section / quick-actions menu (desktop2a §4 +
-  desktop1 panel 5): About, System monitor, Task shell, New command;
-  **Services, Permissions, Configure** (System Settings surfaces); and the
-  session/power controls **Lock, Log Out, Restart, Shut Down** — the controls
-  that used to live on the start menu (T4). Rendered with `lib/controls`
-  `Menu`/`MenuItem`/`Button`; destructive/power actions carry the danger +
-  confirmation posture (`Dialog`).
-- System Settings itself is reached here (Configure → the settings surfaces),
-  invoking the existing `configure` path (`lib/sysconfig`) and the
-  permissions/services tools under their capabilities. Settings is a Switchboard
-  responsibility, never a program-library folder.
-- The appearance (light/dark) toggle (retired from the start menu in T4) lands
-  here too, resolved through the session's `ThemeRegistry` (§10).
+The quick-actions menu opens on a **secondary press on the Switchboard
+capsule** (desktop1 panel 5) and reuses the bar's one modal `BarMenu`
+machinery — there is no second popup surface. The taskbar holds no
+authority: each row reports a typed outcome and the session resolves it.
 
-**Tests**: menu renders + routes each action; power actions confirm and
-fail closed on denial; Configure opens the settings surface; appearance toggle
-re-themes the desktop.
+**Rows, in order** (`—` marks a group divider):
 
-**Done when**: the system menu exposes tools, settings, and session/power
-controls; System Settings is reachable only here; gate green.
+| Row | Resolved by | Backing |
+|---|---|---|
+| About This System | session → Switchboard `Overview` | the T11 overview (identity, uptime, load, memory) |
+| System Monitor | session → Switchboard `Tasks` | the T11 open panel |
+| Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
+| — | | |
+| Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one carries a check bead and is not actionable |
+| — | | |
+| Log Out | session exits cleanly | the login supervisor re-prompts |
+| Restart | session → Switchboard → `system_power(Restart)` | `CAP_SYSTEM_POWER` |
+| Shut Down | session → Switchboard → `system_power(PowerOff)` | `CAP_SYSTEM_POWER` |
+
+**Design decisions**
+
+- **Grouping is a row property, not a row.** `lib/controls`'s `MenuItem`
+  gained `with_group_break(true)`, which draws a divider rule in the gap
+  *above* that row. Modelling a divider as a pseudo-row would have made
+  "a separator cannot be focused, hit-tested, or activated" a runtime guard;
+  as a property it holds by construction, keyboard navigation needs no
+  skipping, and every index the control reports stays a direct index into the
+  owner's own command list. A point inside a divider band belongs to no row.
+- **Destructive rows confirm.** Restart and Shut Down carry
+  `ControlRole::Destructive` (leading danger rail) and act only through a
+  modal `Dialog` whose safe choice holds the default focus and where Escape
+  cancels — a single click never ends the machine.
+- **Launch rows resolve through the catalog, never a compiled-in path.** A row
+  whose bundle is absent from the program-library catalog is disabled with a
+  stated reason rather than emitting a launch that would fail.
+
+**Rows deliberately not shipped, and what each waits on.** A row that cannot
+act must not exist, so these are absent rather than present-but-dead:
+
+- **Lock** — its *authentication* half is **done**: the per-console elevation
+  broker now serves `ElevateRequest::Verify`, which re-authenticates the
+  caller's own kernel-attested uid and runs nothing, reusing the login
+  prompt's own `Authenticator` (timing-equalised, refusals indistinguishable,
+  audited as `VERIFY_GRANTED` / `VERIFY_REFUSED`, secret zeroised on every
+  path). Its **surface** half remains: a full-screen session-owned modal that
+  captures every input class so no event reaches the window manager, the
+  taskbar, or any application; a masked password field in `lib/controls`
+  (`TextField` has no secret mode yet); the client call; and zeroisation of
+  the typed buffer on every path including cancel and teardown. The row lands
+  with that surface — a Lock row that cannot lock is worse than none.
+- **New command** — the session's spawn path passes no argv and the terminal
+  bundle accepts no command to run, so there is nothing for the row to
+  invoke. It needs an argv-carrying launch path (`plans/APPS.md`,
+  `plans/PTY.md`), not a menu entry.
+- **Services** — the System Information API has no service-enumeration query,
+  so the Switchboard's `services` list is honestly empty. It lands with the
+  service manager (`plans/NEW-SERVICEMANAGER.md`), which owns that query.
+- **Permissions** — there is no graphical capability-inspection surface, and
+  `cap_query` answers only about the caller itself. It needs a real
+  permissions view before it can have a menu row.
+- **Configure** — `configure` is a console command app; with no argv-passing
+  launch path the desktop cannot run it in a window, and a settings *surface*
+  is separate work. System Settings therefore remains reached from the shell
+  until that surface exists; it is still **not** a program-library folder.
+
+**Tests**: the row table renders the expected labels, groups, roles and check
+marks for both appearances; a secondary press on the Switchboard capsule opens the menu
+and a press elsewhere does not; the menu is modal and a click away dismisses
+without acting; keyboard navigation reaches every row; an unpermitted power
+row is non-actionable, carries the Authority Mark and states its reason;
+power rows are denied when no authority has been published; a launch row with
+no catalog entry is disabled and emits nothing; each row maps to exactly the
+expected typed outcome; the confirmation dialog relays exactly once on
+confirm and nothing on cancel or Escape; the power relay round-trips and
+rejects malformed input; the Switchboard acts only when it holds the
+capability.
+
+**Done when**: the quick-actions menu exposes the session/power controls and
+the Switchboard/appearance surfaces above, every shipped row acts for real,
+and the gate is green.
 
 ## T14 — Reactive Alloy fidelity pass
 

@@ -39,6 +39,7 @@ use tairix_abi::net::{
     SocketStreamEvent,
 };
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
+use tairix_abi::power::PowerAction;
 use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
@@ -958,6 +959,7 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
                 name: TrayTaskName::new("compositor").expect("a valid name"),
                 cpu_permille: TrayPermille::new(250).expect("a valid fraction"),
             }),
+            power_capable: true,
         },
     }
     .to_le_bytes();
@@ -990,8 +992,8 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
 fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
     // The session -> monitor direction is decoded from an unreserved
     // mailbox any process can send to, so walk the accepted/rejected
-    // boundary of both commands: a flipped section, count, total, or owner
-    // slot must fail closed, never panic.
+    // boundary of every command: a flipped section, count, total, owner
+    // slot, or power-action discriminant must fail closed, never panic.
     let open = SwitchboardCommand::OpenPanel {
         section: CommandSection::Recovery,
     }
@@ -1000,7 +1002,11 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
         report: SeatReport::new(5, &[3, 9, 0x0102_0304]).expect("a truthful report"),
     }
     .to_le_bytes();
-    for mut base in [open, report] {
+    let power = SwitchboardCommand::Power {
+        action: PowerAction::Restart,
+    }
+    .to_le_bytes();
+    for mut base in [open, report, power] {
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

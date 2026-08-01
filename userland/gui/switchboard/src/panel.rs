@@ -5,9 +5,8 @@
 //! The service is a monitor first and a window host second: it keeps
 //! sampling and publishing its tray summary whether or not a window is
 //! open, and a window is only ever opened because the session asked for one
-//! ([`SwitchboardCommand::OpenPanel`]). At most one window exists at a
-//! time — a second request raises the one already open rather than stacking
-//! another.
+//! ([`Panel::open_section`]). At most one window exists at a time — a second
+//! request raises the one already open rather than stacking another.
 //!
 //! Everything that touches the outside world — the window channel, the
 //! session's request endpoint, the `signal` syscall, and the diagnostic
@@ -18,7 +17,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::switchboard_ipc::{SeatReport, SwitchboardCommand, SwitchboardRequest};
+use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
 use tairix_abi::{CapabilityQuery, Errno, Signal};
 use tairix_controls::{Section, Switchboard, SwitchboardAction};
 
@@ -42,16 +41,6 @@ pub enum PanelOutcome {
         /// The committed name.
         name: String,
     },
-}
-
-/// What the caller must do after handing the panel a command.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CommandOutcome {
-    /// The panel's inputs are unchanged; nothing further is required.
-    Unchanged,
-    /// The panel's inputs changed (a fresh seat report). The caller must
-    /// rebuild the live model and hand it to [`Panel::refresh`].
-    Rebuild,
 }
 
 /// Exactly what [`Panel::flush`] last presented: the composition value plus
@@ -125,22 +114,19 @@ impl Panel {
         self.view.as_mut()
     }
 
-    /// Apply one authenticated command from the desktop session.
-    pub fn command(
-        &mut self,
-        host: &mut dyn ServiceHost,
-        command: SwitchboardCommand,
-    ) -> CommandOutcome {
-        match command {
-            SwitchboardCommand::OpenPanel { section } => {
-                self.open(host, map_section(section));
-                CommandOutcome::Unchanged
-            }
-            SwitchboardCommand::SeatReport { report } => {
-                self.seat_report = report;
-                CommandOutcome::Rebuild
-            }
-        }
+    /// Show the panel on the wire `section`, opening the window if none is
+    /// open.
+    pub fn open_section(&mut self, host: &mut dyn ServiceHost, section: CommandSection) {
+        self.open(host, map_section(section));
+    }
+
+    /// Adopt the seat's latest unresponsive-owner report.
+    ///
+    /// The report changes which owners the recovery rows call out, so the
+    /// caller rebuilds the model from the sample already in hand rather than
+    /// leaving the panel stale until the next cycle.
+    pub fn set_seat_report(&mut self, report: SeatReport) {
+        self.seat_report = report;
     }
 
     /// Show the panel on `section`: create the window if none is open, or

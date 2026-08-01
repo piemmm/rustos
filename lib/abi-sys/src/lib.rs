@@ -81,6 +81,7 @@ const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
 const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
 const NUM_SCHED_SET_PRIORITY: u64 = SyscallNumber::SCHED_SET_PRIORITY.as_u16() as u64;
+const NUM_SYSTEM_POWER: u64 = SyscallNumber::SYSTEM_POWER.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
@@ -1019,6 +1020,35 @@ pub extern "C" fn sys_sched_set_priority(pid: i32, priority: u32) -> i32 {
         ret_i32(raw_syscall(
             NUM_SCHED_SET_PRIORITY,
             [i32_arg(pid), u64::from(priority), 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `system_power`: power the machine off or restart it — `action` is a
+/// `TAIRIX_POWER_ACTION_*` discriminant (`SyscallNumber::SYSTEM_POWER`,
+/// `plans/NEW-TASKBAR.md` T13). Returns a `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_SYSTEM_POWER`: stopping the machine ends every
+/// other principal's session, so it is an administrator's authority. The
+/// kernel flushes every mounted volume first and abandons the transition
+/// if one will not flush, rather than losing writes that never reached
+/// stable media.
+///
+/// **This returns only when the transition was refused** — a transition
+/// the platform performs never comes back. `0` and unknown action values
+/// are rejected with `TAIRIX_E_OUT_OF_RANGE`, a caller without the
+/// capability with `TAIRIX_E_PERMISSION_DENIED`, and a port with no
+/// power-off or reset primitive with `TAIRIX_E_NOT_SUPPORTED`.
+#[must_use]
+#[export_name = "tairix_sys_system_power"]
+pub extern "C" fn sys_system_power(action: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel checks the capability and decodes the action on the far side
+    // of the trap.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_SYSTEM_POWER,
+            [u64::from(action), 0, 0, 0, 0, 0],
         ))
     }
 }
@@ -2669,6 +2699,7 @@ mod tests {
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
         (NUM_SCHED_SET_REALTIME, "sched_set_realtime", 1),
         (NUM_SCHED_SET_PRIORITY, "sched_set_priority", 2),
+        (NUM_SYSTEM_POWER, "system_power", 1),
     ];
 
     #[test]
@@ -2747,6 +2778,21 @@ mod tests {
         });
         assert_eq!(number, NUM_SCHED_SET_PRIORITY);
         assert_eq!(args[0], u64::MAX);
+    }
+
+    #[test]
+    fn system_power_marshals_the_action_discriminant() {
+        for action in [
+            tairix_abi::PowerAction::PowerOff,
+            tairix_abi::PowerAction::Restart,
+        ] {
+            let (number, args) = capture(0, || {
+                let _ = sys_system_power(action.as_u32());
+            });
+            assert_eq!(number, NUM_SYSTEM_POWER);
+            assert_eq!(args[0], u64::from(action.as_u32()));
+            assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        }
     }
 
     #[test]

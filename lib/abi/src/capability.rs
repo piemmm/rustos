@@ -542,6 +542,27 @@ impl CapabilityId {
     /// (capability checks before state touches), and audits the decision.
     pub const PROC_CONTROL: Self = Self(40);
 
+    /// End the machine's power state — power it off, or reset it — through
+    /// the `system_power` syscall (`abi-v1` number 105).
+    ///
+    /// This is the widest-blast-radius authority in the system: it stops
+    /// every task of every principal at once, on every seat, whether or not
+    /// the holder owns them. It guards a whole class of authority — the
+    /// machine's power state itself, not one device or one process — and no
+    /// existing capability expresses it at that granularity:
+    /// `CAP_PROC_CONTROL` reaches other principals' *processes* but never
+    /// the platform, `CAP_SEAT_ADMIN` administers seats on a machine that
+    /// stays running, and `CAP_DRV_KERNEL` loads code rather than ending
+    /// execution. Owning the console, holding a seat lease, or running as
+    /// the system user grants nothing here — there is no ambient path.
+    ///
+    /// It is granted in the administrative ceiling only, so an ordinary
+    /// account's desktop renders its power actions with the Authority Mark
+    /// and never attempts them. The kernel checks it at dispatch, before the
+    /// handler touches any state, and audits every call — allowed or
+    /// refused.
+    pub const SYSTEM_POWER: Self = Self(41);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -592,6 +613,7 @@ impl CapabilityId {
         (Self::NET_BIND_PRIVILEGED, "CAP_NET_BIND_PRIVILEGED"),
         (Self::FS_CHOWN, "CAP_FS_CHOWN"),
         (Self::PROC_CONTROL, "CAP_PROC_CONTROL"),
+        (Self::SYSTEM_POWER, "CAP_SYSTEM_POWER"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -726,6 +748,7 @@ mod tests {
         assert_eq!(CapabilityId::NET_BIND_PRIVILEGED.as_u16(), 38);
         assert_eq!(CapabilityId::FS_CHOWN.as_u16(), 39);
         assert_eq!(CapabilityId::PROC_CONTROL.as_u16(), 40);
+        assert_eq!(CapabilityId::SYSTEM_POWER.as_u16(), 41);
     }
 
     #[test]
@@ -750,6 +773,7 @@ mod tests {
         assert_eq!(CapabilityId::SEAT_ADMIN.name(), Some("CAP_SEAT_ADMIN"));
         assert_eq!(CapabilityId::MEM_PIN.name(), Some("CAP_MEM_PIN"));
         assert_eq!(CapabilityId::PROC_CONTROL.name(), Some("CAP_PROC_CONTROL"));
+        assert_eq!(CapabilityId::SYSTEM_POWER.name(), Some("CAP_SYSTEM_POWER"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -760,9 +784,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=40 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=41 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=40 {
+        for raw in 1..=41 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

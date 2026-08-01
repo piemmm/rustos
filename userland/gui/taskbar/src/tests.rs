@@ -2846,6 +2846,7 @@ fn tray_summary(jobs: u16, recovery: u16, cpu_permille: u16) -> TraySummary {
         cpu_busy_permille: TrayPermille::new(cpu_permille).expect("permille"),
         pressure: None,
         top_task: None,
+        power_capable: false,
     }
 }
 
@@ -3989,4 +3990,389 @@ fn routing_a_pointer_sample_over_the_open_popup_latches_only_what_changed() {
         TaskbarRepaint::NONE,
         "routing borrows the popup mutably, but only a real change may latch it"
     );
+}
+
+// ---- the system quick-actions menu ------------------------------------
+
+/// A taskbar whose catalog holds the terminal bundle the *Task Shell* row
+/// launches, so that row is actionable.
+fn bar_with_task_shell() -> Taskbar {
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let mut catalog = office_and_games();
+    catalog
+        .insert(entry("terminal", "Terminal", LibraryCategory::Utilities))
+        .expect("fits");
+    bar.library_mut().set_catalog(catalog);
+    let _ = bar.take_repaint();
+    bar
+}
+
+/// A published summary that attests the service can power the machine.
+fn power_capable_summary() -> TraySummary {
+    let mut summary = tray_summary(0, 0, 100);
+    summary.power_capable = true;
+    summary
+}
+
+/// Move the pointer to `at` and press the secondary button there.
+fn secondary_press_at(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    at: Point,
+) -> TaskbarResponse {
+    input.handle(
+        InputEvent::PointerMoved { to: at },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    )
+}
+
+/// Open the system menu by right-clicking the Switchboard capsule,
+/// asserting it opened.
+fn open_system_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) {
+    let capsule = centre_of(taskbar.layout(Scale::ONE).switchboard);
+    assert_eq!(
+        secondary_press_at(input, taskbar, capsule),
+        TaskbarResponse::Ignored,
+        "opening the menu acts on nothing by itself"
+    );
+    assert!(taskbar.menu().is_open());
+}
+
+/// Choose the row at `index` with the keyboard: walk Down to it from the
+/// top, then press Enter.
+fn choose_row(input: &mut TaskbarInput, taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
+    for _ in 0..=index {
+        press_key(input, taskbar, Key::Named(NamedKey::Down));
+    }
+    assert_eq!(
+        taskbar.menu().control().current(),
+        Some(index),
+        "the keyboard highlight reached row {index}"
+    );
+    press_key(input, taskbar, Key::Named(NamedKey::Enter))
+}
+
+#[test]
+fn the_row_table_renders_its_labels_groups_and_roles() {
+    let mut bar = bar_with_task_shell();
+    bar.set_tray_summary(Some(power_capable_summary()));
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    let rows: Vec<(&str, bool, tairix_controls::ControlRole)> = bar
+        .menu()
+        .control()
+        .items()
+        .iter()
+        .map(|item| (item.label(), item.is_group_break(), item.role()))
+        .collect();
+    assert_eq!(
+        rows,
+        alloc::vec![
+            (
+                "About This System",
+                false,
+                tairix_controls::ControlRole::Neutral
+            ),
+            (
+                "System Monitor",
+                false,
+                tairix_controls::ControlRole::Neutral
+            ),
+            ("Task Shell", false, tairix_controls::ControlRole::Neutral),
+            (
+                "Light Appearance",
+                true,
+                tairix_controls::ControlRole::Neutral
+            ),
+            (
+                "Dark Appearance",
+                false,
+                tairix_controls::ControlRole::Neutral
+            ),
+            ("Log Out", true, tairix_controls::ControlRole::Neutral),
+            ("Restart", false, tairix_controls::ControlRole::Destructive),
+            (
+                "Shut Down",
+                false,
+                tairix_controls::ControlRole::Destructive
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_active_appearance_row_carries_the_check_and_is_not_actionable() {
+    // Every row index is a direct index into the command table, whichever
+    // appearance is active: a group break draws a divider above a row, it is
+    // never a row of its own.
+    for (appearance, active_row, inactive_row) in
+        [(Appearance::Dark, 4, 3), (Appearance::Light, 3, 4)]
+    {
+        let mut bar = Taskbar::new(
+            TaskbarConfig::bottom_bar(1000, 800),
+            &if appearance == Appearance::Dark {
+                Theme::dark()
+            } else {
+                Theme::light()
+            },
+        );
+        let mut input = TaskbarInput::new();
+        open_system_menu(&mut input, &mut bar);
+        let items = bar.menu().control().items();
+
+        let active = &items[active_row];
+        assert_eq!(active.state().activity, ActivityState::Complete);
+        assert!(
+            !active.state().is_actionable(),
+            "the appearance already in use cannot be chosen again ({appearance:?})"
+        );
+        assert_eq!(active.reason(), Some("Already in use"));
+
+        let inactive = &items[inactive_row];
+        assert!(
+            inactive.state().is_actionable(),
+            "the other appearance is the one worth choosing ({appearance:?})"
+        );
+        assert_ne!(inactive.state().activity, ActivityState::Complete);
+        assert_eq!(inactive.reason(), None);
+    }
+}
+
+#[test]
+fn a_secondary_press_elsewhere_on_the_bar_opens_no_system_menu() {
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    let clock = centre_of(bar.layout(Scale::ONE).clock);
+
+    assert_eq!(
+        secondary_press_at(&mut input, &mut bar, clock),
+        TaskbarResponse::Ignored
+    );
+    assert!(
+        !bar.menu().is_open(),
+        "only the capsule opens the system menu"
+    );
+}
+
+#[test]
+fn the_system_menu_is_modal_and_a_click_away_dismisses_without_acting() {
+    let mut bar = bar_with_task_shell();
+    bar.set_tray_summary(Some(power_capable_summary()));
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    // A press well clear of the plate: it dismisses the menu and nothing
+    // else acts on it.
+    let away = Point::new(5, 5);
+    assert_eq!(
+        press_at(&mut input, &mut bar, away.x, away.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn escape_dismisses_the_system_menu_without_acting() {
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn keyboard_navigation_reaches_every_row_and_enter_activates_the_highlighted_one() {
+    let mut bar = bar_with_task_shell();
+    bar.set_tray_summary(Some(power_capable_summary()));
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    // Down visits each row in turn, including the non-actionable one: a
+    // group break is a divider drawn above a row, never a row to skip.
+    for expected in 0..crate::system::ROWS.len() {
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+        assert_eq!(bar.menu().control().current(), Some(expected));
+    }
+
+    // Enter on the last row (Shut Down) activates exactly it.
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::ConfirmSystemPower {
+            action: tairix_abi::PowerAction::PowerOff,
+        }
+    );
+    assert!(!bar.menu().is_open(), "activating closes the menu");
+}
+
+#[test]
+fn every_row_maps_to_exactly_its_expected_response() {
+    let expected = alloc::vec![
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Overview,
+        },
+        TaskbarResponse::OpenSwitchboard {
+            section: Section::Tasks,
+        },
+        TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new("os.tairix.terminal").expect("id"),
+        },
+        TaskbarResponse::SetAppearance {
+            appearance: Appearance::Light,
+        },
+        // The dark row is the one in use under the dark theme, so it is not
+        // actionable and reports nothing; the light row above it is.
+        TaskbarResponse::Ignored,
+        TaskbarResponse::LogOut,
+        TaskbarResponse::ConfirmSystemPower {
+            action: tairix_abi::PowerAction::Restart,
+        },
+        TaskbarResponse::ConfirmSystemPower {
+            action: tairix_abi::PowerAction::PowerOff,
+        },
+    ];
+    assert_eq!(
+        expected.len(),
+        crate::system::ROWS.len(),
+        "the table and the expectations describe the same menu"
+    );
+
+    for (index, want) in expected.into_iter().enumerate() {
+        let mut bar = bar_with_task_shell();
+        bar.set_tray_summary(Some(power_capable_summary()));
+        let mut input = TaskbarInput::new();
+        open_system_menu(&mut input, &mut bar);
+        assert_eq!(
+            choose_row(&mut input, &mut bar, index),
+            want,
+            "row {index} ({})",
+            crate::system::ROWS[index].label
+        );
+    }
+}
+
+#[test]
+fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
+    // The service published, and said it cannot power the machine.
+    let mut bar = bar_with_task_shell();
+    bar.set_tray_summary(Some(tray_summary(0, 0, 100)));
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    for row in [6, 7] {
+        let item = &bar.menu().control().items()[row];
+        assert_eq!(
+            item.state().authority,
+            tairix_controls::AuthorityState::NeedsCapability,
+            "{} carries the Authority Mark",
+            item.label()
+        );
+        assert!(!item.state().is_actionable());
+        assert_eq!(
+            item.reason(),
+            Some("The system service cannot power this machine")
+        );
+    }
+
+    // Choosing one reports nothing: a refused row acts on nothing at all.
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 6),
+        TaskbarResponse::Ignored
+    );
+    assert!(
+        bar.menu().is_open(),
+        "a non-actionable row neither acts nor closes the menu"
+    );
+}
+
+#[test]
+fn the_power_rows_are_denied_when_no_authority_has_been_published() {
+    // No summary at all — the service has not published yet, or has died.
+    // Silence is not permission.
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    for row in [6, 7] {
+        let item = &bar.menu().control().items()[row];
+        assert_eq!(
+            item.state().authority,
+            tairix_controls::AuthorityState::NeedsCapability,
+            "{} fails closed before anything is attested",
+            item.label()
+        );
+        assert!(!item.state().is_actionable());
+    }
+
+    // A summary that arrives claiming the authority permits the rows, and a
+    // service that then dies withdraws them again.
+    bar.close_menu();
+    bar.set_tray_summary(Some(power_capable_summary()));
+    open_system_menu(&mut input, &mut bar);
+    assert!(bar.menu().control().items()[6].state().is_actionable());
+
+    bar.close_menu();
+    bar.set_tray_summary(None);
+    open_system_menu(&mut input, &mut bar);
+    assert!(!bar.menu().control().items()[6].state().is_actionable());
+}
+
+#[test]
+fn a_launch_row_whose_bundle_is_absent_is_disabled_and_emits_nothing() {
+    // The standard fixture has no terminal bundle.
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    let item = &bar.menu().control().items()[2];
+    assert_eq!(item.label(), "Task Shell");
+    assert!(!item.state().is_actionable());
+    assert_eq!(item.reason(), Some("Not installed"));
+
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 2),
+        TaskbarResponse::Ignored,
+        "a launch that must fail is never emitted"
+    );
+}
+
+#[test]
+fn opening_the_system_menu_latches_only_the_menu_surface() {
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
+
+    // Settle the hover the move itself causes, so what is measured is the
+    // press alone.
+    input.handle(
+        InputEvent::PointerMoved { to: capsule },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let _ = bar.take_repaint();
+
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 }

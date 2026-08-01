@@ -6,6 +6,7 @@ use super::{
     TrayPressureKind, TraySummary, TrayTask, TrayTaskName, SEAT_REPORT_OWNERS_MAX,
     SWITCHBOARD_PUBLISH_REPLY_LEN, TRAY_PRESSURE_KIND_COUNT, TRAY_TASK_NAME_MAX,
 };
+use crate::power::PowerAction;
 use crate::{Errno, ProcId};
 
 fn bare_summary() -> TraySummary {
@@ -15,6 +16,7 @@ fn bare_summary() -> TraySummary {
         cpu_busy_permille: TrayPermille::new(420).expect("within bounds"),
         pressure: None,
         top_task: None,
+        power_capable: false,
     }
 }
 
@@ -32,6 +34,7 @@ fn full_summary() -> TraySummary {
             name: TrayTaskName::new("compositor").expect("a valid name"),
             cpu_permille: TrayPermille::new(310).expect("within bounds"),
         }),
+        power_capable: true,
     }
 }
 
@@ -46,6 +49,30 @@ fn round_trip(summary: TraySummary) -> TraySummary {
 #[test]
 fn round_trips_no_pressure_and_no_top_task() {
     assert_eq!(round_trip(bare_summary()), bare_summary());
+}
+
+#[test]
+fn round_trips_the_power_capable_flag_both_ways() {
+    let mut capable = bare_summary();
+    capable.power_capable = true;
+    assert_eq!(round_trip(capable), capable);
+
+    let mut denied = bare_summary();
+    denied.power_capable = false;
+    assert_eq!(round_trip(denied), denied);
+}
+
+#[test]
+fn rejects_an_out_of_range_power_capable_byte() {
+    let mut frame = SwitchboardRequest::PublishSummary {
+        summary: bare_summary(),
+    }
+    .to_le_bytes();
+    frame[super::POWER_CAPABLE_OFFSET] = 2;
+    assert_eq!(
+        SwitchboardRequest::from_bytes(&frame),
+        Err(Errno::OutOfRange)
+    );
 }
 
 #[test]
@@ -508,6 +535,40 @@ fn round_trips_open_panel_for_every_section() {
             Ok(command)
         );
     }
+}
+
+#[test]
+fn round_trips_every_power_action() {
+    for action in [PowerAction::PowerOff, PowerAction::Restart] {
+        let command = SwitchboardCommand::Power { action };
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(command)
+        );
+    }
+}
+
+#[test]
+fn power_command_rejects_a_dirty_tail_and_an_unknown_action() {
+    let mut frame = SwitchboardCommand::Power {
+        action: PowerAction::PowerOff,
+    }
+    .to_le_bytes();
+    frame[super::POWER_ACTION_OFFSET + 4] = 1;
+    assert_eq!(SwitchboardCommand::from_bytes(&frame), Err(Errno::BadMagic));
+
+    let mut frame = SwitchboardCommand::Power {
+        action: PowerAction::Restart,
+    }
+    .to_le_bytes();
+    frame[super::POWER_ACTION_OFFSET] = 9;
+    frame[super::POWER_ACTION_OFFSET + 1] = 0;
+    frame[super::POWER_ACTION_OFFSET + 2] = 0;
+    frame[super::POWER_ACTION_OFFSET + 3] = 0;
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&frame),
+        Err(Errno::OutOfRange)
+    );
 }
 
 #[test]

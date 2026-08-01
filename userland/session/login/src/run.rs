@@ -36,10 +36,14 @@
 //!   endpoint, so an `elevate <user> <program>` request from the session's
 //!   shell is re-authenticated (same authenticator as the prompt,
 //!   timing-equalised, refusals indistinguishable) and its command run as
-//!   the target account while the shell blocks in its `ipc_call`. Binding
-//!   the reserved id requires login's `CAP_IPC_BIND_PRIVILEGED`; when no
-//!   rendezvous can be bound the failure is audited and sessions simply run
-//!   without a broker (requests fail closed at the missing endpoint).
+//!   the target account while the shell blocks in its `ipc_call`. The same
+//!   endpoint also answers a caller's own `Verify`-only request — no
+//!   program runs, and the account checked is the caller's kernel-attested
+//!   uid (read off the same `call_peer_origin` result as the console),
+//!   never a name the request supplies. Binding the reserved id requires
+//!   login's `CAP_IPC_BIND_PRIVILEGED`; when no rendezvous can be bound the
+//!   failure is audited and sessions simply run without a broker (requests
+//!   fail closed at the missing endpoint).
 //!
 //! Each completed session (or exhausted attempt budget) loops back to a
 //! fresh `login:` prompt — login supervises this console's sessions. A dead
@@ -351,20 +355,24 @@ mod program {
                 request.fill(0);
                 return;
             };
-            // Attest the caller's placement. A failure to read the peer
-            // origin fails closed as "no console", which the broker refuses.
+            // Attest the caller's placement and identity from the same
+            // origin read. A failure to read it fails closed to "no
+            // console" / "no attested uid", which the broker refuses for
+            // both a `Run` and a `Verify` request — never a guessed or
+            // defaulted real uid.
             let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
-            let peer_console =
+            let (peer_console, peer_uid) =
                 match tairix_rt::call_peer_origin(self.endpoint, ticket, &mut origin_buf) {
                     Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                        Ok(origin) => origin.console(),
-                        Err(_) => ORIGIN_CONSOLE_NONE,
+                        Ok(origin) => (origin.console(), Some(origin.uid())),
+                        Err(_) => (ORIGIN_CONSOLE_NONE, None),
                     },
-                    Err(_) => ORIGIN_CONSOLE_NONE,
+                    Err(_) => (ORIGIN_CONSOLE_NONE, None),
                 };
             let reply = handle_elevate_request(
                 &request[..len],
                 peer_console,
+                peer_uid,
                 self.own_console,
                 authenticator,
                 &RtElevateLauncher,

@@ -129,7 +129,7 @@ pub use model::{
     apply_action, build_model, derive_self_uid, map_section, signal_pid, Effect, GroupingEdit,
     LiveMeters, PanelModel,
 };
-pub use panel::{refusal_notice, CommandOutcome, Panel, PanelOutcome, PANEL_TITLE};
+pub use panel::{refusal_notice, Panel, PanelOutcome, PANEL_TITLE};
 pub use publish::Publisher;
 pub use sample::{
     probe_scopes, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,

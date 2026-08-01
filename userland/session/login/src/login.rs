@@ -480,6 +480,24 @@ mod tests {
                 Err(Errno::PermissionDenied)
             }
         }
+
+        // The `Login` state machine tested here never posts a `Verify`
+        // request; this fixture only needs to satisfy the trait.
+        fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+            if uid == 1000 && password == self.password {
+                Ok(AuthenticatedUser {
+                    username: self.username.to_string(),
+                    uid: Uid(1000),
+                    primary_gid: Gid(1000),
+                    supplementary_gids: Vec::new(),
+                    capabilities: self.caps,
+                    home: "/Users/ada".to_string(),
+                    shell: "/System/Apps/elsh.app/Run".to_string(),
+                })
+            } else {
+                Err(Errno::PermissionDenied)
+            }
+        }
     }
 
     /// Launcher that records the launch and returns a scripted result.

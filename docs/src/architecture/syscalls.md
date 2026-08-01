@@ -148,6 +148,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 102 | `hw_node_health` | `u64 state` (`FaultDomainState`)      | `errno`       | `CAP_HW_EMIT` | yes   |
 | 103 | `hw_self_node` | —                                       | `u64` (node id) | —           | no    |
 | 104 | `sched_set_priority` | `i32 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
+| 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -343,6 +344,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
+| `CAP_SYSTEM_POWER` | `system_power`             |
 | `CAP_PROC_CONTROL` | `signal`, `sched_set_priority` (both enforced *in the handler*: the capability is one tier of the per-target rule — own child, else same principal, else this capability — so the dispatcher cannot gate the call flat; `sched_set_priority` additionally requires it for any *raise*) |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
@@ -1070,6 +1072,30 @@ the C stub is `tairix_sys_signal_intake` and the header defines
 `TAIRIX_SIGNAL_INTAKE_OP_ENABLE` / `TAIRIX_SIGNAL_INTAKE_OP_DISABLE` /
 `TAIRIX_SIGNAL_INTAKE_OP_TAKE` beside the `TAIRIX_WAITSET_OP_*` and
 `TAIRIX_WAIT_SOURCE_*` member vocabulary.
+
+`system_power` (no. 105) requests a **platform power transition** — the
+`reboot(2)` analogue. The action is the closed `tairix_abi::PowerAction` wire
+discriminant: `1` = `PowerOff` (shut down the machine), `2` = `Restart` (reboot
+the machine); the reserved `0` or any unknown value fails closed with
+`OutOfRange` before the transition is attempted, so a zeroed or garbage
+register can never resolve to a power-off. The handler **flushes every mounted
+volume** first, then asks the platform to stop — in that order. If a flush
+fails, the transition is abandoned, the flush's own error is returned to the
+caller, and the machine keeps running; a shutdown never abandons buffered
+writes. It **does not return on success**, because the platform stops. Every
+value a caller can observe is a refusal with the machine still running:
+`OutOfRange` (unknown action), `PermissionDenied` (missing capability), the
+flush's own error, or `NotSupported` when the port has no primitive for the
+requested transition (e.g. `Restart` on a target that can only `PowerOff`). It
+is gated on **`CAP_SYSTEM_POWER`** (the administrative ceiling) and
+**audited**: the dispatcher emits one `SYSTEM_POWER` record (audit id 4133,
+[kernel audit events](kernel.md)) before the platform stops, naming the caller
+task id and the requested action, so the trail survives the shutdown; refusals
+are audited by the dispatcher's existing path. The first-party Rust wrapper is
+`tairix_rt::system_power` (returning the raw `0`/`-errno` convention); the C
+stub is `tairix_sys_system_power` and the header defines
+`TAIRIX_POWER_ACTION_POWER_OFF` and `TAIRIX_POWER_ACTION_RESTART` beside the
+`TAIRIX_SYS_SYSTEM_POWER` and `TAIRIX_CAP_SYSTEM_POWER` constants.
 
 `sched_set_priority` (no. 104) moves a process to a **time-shared
 scheduling service level** (`plans/NEW-TASKBAR.md` T12) — the `nice`

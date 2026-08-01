@@ -20,6 +20,7 @@ use tairix_controls::Section;
 use tairix_wm::{Compositor, WindowId};
 
 use crate::config::SWITCHBOARD_RUN_PATH;
+use crate::confirm::Answer;
 use crate::launch::LaunchTable;
 use crate::shell::DesktopShell;
 
@@ -241,6 +242,35 @@ pub fn deliver_pending_open(
     if let Some(section) = pending_open.take() {
         mailbox.send(pid, SwitchboardCommand::OpenPanel { section });
     }
+}
+
+/// Relay a **confirmed** power transition to the live Switchboard instance
+/// named by `live` — the one process that requested the authority to
+/// perform it. The desktop holds no power capability of its own, so it
+/// asks the holder rather than acting.
+///
+/// A declined prompt relays nothing, so the send can only ever follow a
+/// deliberate confirmation. With no live instance there is no holder to
+/// ask: nothing is sent and the caller is handed the reason to state.
+///
+/// Returns the `stderr` diagnosis line — without the leading `desktop: `
+/// prefix or trailing newline the caller adds in its own house style —
+/// when a confirmed transition could not be relayed, and `None` when the
+/// command was sent or the user declined.
+#[must_use]
+pub fn relay_power(
+    answer: Answer,
+    live: Option<u64>,
+    mailbox: &mut dyn SwitchboardMailbox,
+) -> Option<&'static str> {
+    let Answer::Confirmed(action) = answer else {
+        return None;
+    };
+    let Some(pid) = live else {
+        return Some("system service is not running; nothing was done");
+    };
+    mailbox.send(pid, SwitchboardCommand::Power { action });
+    None
 }
 
 /// Fold one responsiveness-tracker change into a seat-report send: sends

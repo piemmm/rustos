@@ -13,7 +13,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::{Contrast, Rgba, Theme};
 
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::state::{AuthorityState, ControlRole, ControlState};
@@ -425,5 +425,192 @@ fn hit_test_bookkeeping_is_invisible_to_a_menu() {
         render(&latched, &theme, h).pixels(),
         render(&hovered, &theme, h).pixels(),
         "…and the two must therefore paint identically"
+    );
+}
+
+/// A menu whose middle row opens a second group.
+fn grouped_menu() -> Menu {
+    Menu::new(vec![
+        MenuItem::new("Open"),
+        MenuItem::new("Configure").with_group_break(true),
+        MenuItem::new("Shut Down").with_role(ControlRole::Destructive),
+    ])
+}
+
+#[test]
+fn a_group_break_adds_its_band_to_the_preferred_height() {
+    let theme = Theme::dark();
+    let plain = three_item_menu().preferred_height(Scale::ONE, &theme);
+    let grouped = grouped_menu().preferred_height(Scale::ONE, &theme);
+    assert!(
+        grouped > plain,
+        "the divider band must claim height of its own: {grouped} vs {plain}"
+    );
+    // One break only, so exactly one band is added.
+    let band = grouped - plain;
+    let two_breaks = Menu::new(vec![
+        MenuItem::new("Open"),
+        MenuItem::new("Configure").with_group_break(true),
+        MenuItem::new("Shut Down").with_group_break(true),
+    ])
+    .preferred_height(Scale::ONE, &theme);
+    assert_eq!(two_breaks, plain + band * 2, "each break adds one band");
+}
+
+#[test]
+fn a_group_break_on_the_first_row_draws_nothing() {
+    let theme = Theme::dark();
+    let broken = Menu::new(vec![
+        MenuItem::new("Open").with_group_break(true),
+        MenuItem::new("Save").with_shortcut("Ctrl+S"),
+        MenuItem::new("Close"),
+    ]);
+    let h = three_item_menu().preferred_height(Scale::ONE, &theme);
+    assert_eq!(
+        broken.preferred_height(Scale::ONE, &theme),
+        h,
+        "there is no preceding group to divide from"
+    );
+    assert_eq!(
+        render(&broken, &theme, h).pixels(),
+        render(&three_item_menu(), &theme, h).pixels(),
+        "…and it must therefore paint as an unbroken menu"
+    );
+}
+
+#[test]
+fn the_divider_paints_a_rule_between_the_two_groups() {
+    let theme = Theme::dark();
+    let menu = grouped_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let surface = render(&menu, &theme, h);
+
+    // The rule sits in the gap between the row that closes the first group
+    // and the row that opens the second.
+    let above = menu.row_rect(0, bounds, Scale::ONE, &theme).expect("row 0");
+    let below = menu.row_rect(1, bounds, Scale::ONE, &theme).expect("row 1");
+    let gap_top = u32::try_from(above.top()).expect("in range") + above.height;
+    let gap_bottom = u32::try_from(below.top()).expect("in range");
+    assert!(gap_bottom > gap_top, "the divider band separates the rows");
+    assert!(
+        region_has(
+            &surface,
+            (BORDER, W - BORDER),
+            (gap_top, gap_bottom),
+            premul(theme.palette().border),
+        ),
+        "the divider rule is drawn in the band between the groups"
+    );
+}
+
+#[test]
+fn a_point_in_the_divider_band_belongs_to_no_row() {
+    let theme = Theme::dark();
+    let menu = grouped_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let above = menu.row_rect(0, bounds, Scale::ONE, &theme).expect("row 0");
+    let below = menu.row_rect(1, bounds, Scale::ONE, &theme).expect("row 1");
+    let gap_top = above.top() + xi(above.height);
+    let gap_bottom = below.top();
+    for y in gap_top..gap_bottom {
+        assert_eq!(
+            menu.row_at(bounds, Scale::ONE, &theme, Point::new(xi(W) / 2, y)),
+            None,
+            "the divider band at y={y} is inert"
+        );
+    }
+}
+
+#[test]
+fn a_click_landing_in_the_divider_band_activates_nothing() {
+    let theme = Theme::dark();
+    let mut menu = grouped_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let above = menu.row_rect(0, bounds, Scale::ONE, &theme).expect("row 0");
+    let y = above.top() + xi(above.height);
+    let at = moved(xi(W) / 2, y);
+    assert_eq!(menu.on_pointer(&at, bounds, Scale::ONE, &theme), None);
+    assert_eq!(menu.current(), None, "no row highlights from the gap");
+    assert_eq!(menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    assert_eq!(menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+}
+
+#[test]
+fn keyboard_navigation_is_unaffected_by_a_group_break() {
+    // The divider is a property of the row that opens the group, not a row of
+    // its own, so there is no separator slot for Down/Up to skip over.
+    let mut menu = grouped_menu();
+    for expected in [0, 1, 2, 0] {
+        menu.on_key(Key::Named(NamedKey::Down));
+        assert_eq!(menu.current(), Some(expected));
+    }
+    menu.on_key(Key::Named(NamedKey::End));
+    assert_eq!(menu.current(), Some(2), "End reaches the last command");
+    menu.on_key(Key::Named(NamedKey::Home));
+    assert_eq!(menu.current(), Some(0), "Home reaches the first command");
+    assert_eq!(
+        menu.on_key(Key::Named(NamedKey::Enter)),
+        Some(MenuAction::Activated { index: 0 }),
+        "reported indices stay indices into the caller's command list"
+    );
+}
+
+#[test]
+fn grouped_row_rects_still_mirror_hit_testing() {
+    let theme = Theme::dark();
+    let menu = grouped_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    for index in 0..3 {
+        let rect = menu
+            .row_rect(index, bounds, Scale::ONE, &theme)
+            .expect("row rect");
+        let centre = Point::new(
+            rect.left() + xi(rect.width / 2),
+            rect.top() + xi(rect.height / 2),
+        );
+        assert_eq!(
+            menu.row_at(bounds, Scale::ONE, &theme, centre),
+            Some(index),
+            "grouped row {index} rect round-trips"
+        );
+    }
+    assert_eq!(menu.row_rect(3, bounds, Scale::ONE, &theme), None);
+}
+
+/// A theme identical to [`Theme::dark`] but with [`Contrast::High`], so the
+/// high-contrast rendering path can be exercised without a second built-in.
+fn high_contrast() -> Theme {
+    let base = Theme::dark();
+    Theme::new(
+        base.id(),
+        "Test High Contrast",
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        Contrast::High,
+    )
+}
+
+#[test]
+fn a_heavier_contrast_theme_thickens_the_divider() {
+    let theme = Theme::dark();
+    let heavy = high_contrast();
+    let plain_rows = three_item_menu();
+    let grouped = grouped_menu();
+    let band = grouped.preferred_height(Scale::ONE, &theme)
+        - plain_rows.preferred_height(Scale::ONE, &theme);
+    let heavy_band = grouped.preferred_height(Scale::ONE, &heavy)
+        - plain_rows.preferred_height(Scale::ONE, &heavy);
+    assert!(
+        heavy_band > band,
+        "high contrast must widen the rule: {heavy_band} vs {band}"
     );
 }

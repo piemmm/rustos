@@ -32,8 +32,8 @@ use core::cell::RefCell;
 
 use proptest::prelude::*;
 use tairix_abi::{
-    AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, RandomFlags, SyscallNumber, SyscallSpec,
-    UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, PowerAction, RandomFlags, SyscallNumber,
+    SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -782,6 +782,10 @@ impl SyscallHandlers for CountingHandlers {
         _request: u64,
         _request_len: usize,
     ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn system_power(&self, _c: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
         self.bump();
         Ok(0)
     }

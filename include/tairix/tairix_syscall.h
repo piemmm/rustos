@@ -128,6 +128,7 @@ extern "C" {
 #define TAIRIX_SYS_HW_NODE_HEALTH 102u
 #define TAIRIX_SYS_HW_SELF_NODE 103u
 #define TAIRIX_SYS_SCHED_SET_PRIORITY 104u
+#define TAIRIX_SYS_SYSTEM_POWER 105u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -251,6 +252,15 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_SCHED_PRIORITY_NORMAL 2u
 #define TAIRIX_SCHED_PRIORITY_LOW 3u
 
+/* system_power() transitions (the `action` argument, uint32_t). 0 is reserved
+* and never valid; a value outside this set is rejected with
+* TAIRIX_E_OUT_OF_RANGE. The call requires TAIRIX_CAP_SYSTEM_POWER, flushes
+* every mounted volume first (a volume that will not flush abandons the
+* transition and returns its error), and returns only when the transition
+* was refused: TAIRIX_E_NOT_SUPPORTED on a port with no such primitive. */
+#define TAIRIX_POWER_ACTION_POWER_OFF 1u
+#define TAIRIX_POWER_ACTION_RESTART 2u
+
 /* waitset_ctl() operations (the `op` argument, uint32_t) and member source
 * kinds (the `kind` argument, uint32_t). A value outside either set is
 * rejected with TAIRIX_E_OUT_OF_RANGE; every member is owner-checked against the
@@ -371,6 +381,7 @@ int32_t tairix_sys_call_cancel(uint64_t a0, uint64_t a1);
 int32_t tairix_sys_hw_node_health(uint64_t a0);
 uint64_t tairix_sys_hw_self_node(void);
 int32_t tairix_sys_sched_set_priority(int32_t a0, uint32_t a1);
+int32_t tairix_sys_system_power(uint32_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

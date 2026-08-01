@@ -532,13 +532,30 @@ exist from CU3).
   as the target account; its exit code becomes `$?`. The requesting
   shell's set is untouched; the elevated child's set is derived kernel-side
   as `its manifest ∩ the target account's ceiling`, exactly as at login.
-- Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest`/`ElevateReply`
-  (fail-closed decode, version-checked) and the per-console rendezvous
-  `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console`, which
-  refuses the "no console" sentinel. Both ends derive the endpoint from
-  their **own** kernel-attested `Origin::console` (never a claim), and the
-  supervisor additionally refuses any caller whose attested console is not
-  its own — before the request bytes are even parsed.
+- The same rendezvous also serves a narrower, verify-only request that
+  re-authenticates the **calling principal's own** account and runs
+  nothing — the primitive a graphical session's screen lock needs, so no
+  second authenticator exists anywhere in the tree. It is strictly weaker
+  than the run request (it never spawns a program) and narrower still (the
+  account checked is always the caller's own kernel-attested uid, never a
+  name the request supplies), so it grants no authority the run request
+  did not already carry.
+- Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest` is a
+  two-variant enum (`Run { username, password, program }` /
+  `Verify { password }`, an opcode byte after the version word) and
+  `ElevateReply` is a three-variant enum (`Completed { exit_code }` /
+  `Verified` / `Refused(Errno)`, encoded as a result-discriminant word — `0`
+  completed, `1` verified, negative `-errno` refused — plus the exit-code
+  word); both decode fail-closed (wrong version, unknown opcode/status,
+  over-long buffer, a field past the end, non-UTF-8, an empty field,
+  trailing bytes). The per-console rendezvous
+  `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console` refuses the
+  "no console" sentinel. Both ends derive the endpoint from their **own**
+  kernel-attested `Origin::console` (never a claim), and the supervisor
+  additionally refuses any caller whose attested console is not its own —
+  before the request bytes are even parsed; a `Verify` request is decided
+  against the caller's kernel-attested `Origin::uid` from that same
+  attestation, read off the identical `call_peer_origin` result.
 - Kernel extensions (the original "no new kernel primitive" clause was
   unsatisfiable — single-threaded login could not wait on "request posted"
   and "child exited" at once, and one global endpoint id cannot serve N
@@ -558,18 +575,33 @@ exist from CU3).
   squatter can never receive a service's traffic (an elevation request
   carries an offered password). `LOGIN_MANIFEST` and `SYSINFOD_MANIFEST`
   carry the capability; the kernel-side binders already held it.
-- Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE`
-  (login's 10_007–10_009); refusal causes (wrong password, unknown or
-  locked account) are audited but never disclosed — the requester sees one
+- Authentication: `Authenticator::authenticate_uid(uid, password)` is the
+  uid-keyed counterpart of `authenticate(credentials)`, sharing the same
+  timing-equalised comparison — `lib/users`' `UsersDb::authenticate_uid`
+  reuses the identical dummy-derivation burn `authenticate` pays, so an
+  attested uid owning no account costs and looks exactly like a wrong
+  password on a real one. `UsersAuthenticator` and the fail-closed
+  `DenyAll` both implement it; no second credential-verification path
+  exists.
+- Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE` /
+  `VERIFY_GRANTED` / `VERIFY_REFUSED` (login's 10_007–10_009, 10_012–10_013);
+  refusal causes (wrong password, unknown or locked account, no attested
+  uid) are audited but never disclosed — the requester sees one
   indistinguishable `PermissionDenied`.
-- Tests: abi encode/decode round-trip and fail-closed rejects; the login
-  broker decision table host-tested (grant + audit, foreign console
-  refused before parsing, malformed refused without authentication,
-  indistinguishable auth refusals, spawn refusal reported verbatim); the
-  shell builtin host-tested over the shared fixture (prompt + post +
-  exit-code, refusal reporting, no post after a failed secret read, usage
-  fail-closed, fail-closed default seam); kernel tests for the reserved-id
-  squat denial / privileged allow and the `Child` wait-set member.
+- Tests: abi encode/decode round-trip and fail-closed rejects for both
+  request variants and all three reply variants; the login broker decision
+  table host-tested (grant + audit, foreign console refused before
+  parsing, malformed refused without authentication, indistinguishable
+  auth refusals, spawn refusal reported verbatim, a verify-only request
+  answered without ever invoking the launcher, an attested uid owning no
+  account refused indistinguishably from a wrong password, an unattested
+  caller refused before authenticating); `lib/users` and the login
+  `Authenticator` implementations tested for `authenticate_uid` parity
+  with the username path; the shell builtin host-tested over the shared
+  fixture (prompt + post + exit-code, refusal reporting, no post after a
+  failed secret read, usage fail-closed, fail-closed default seam); kernel
+  tests for the reserved-id squat denial / privileged allow and the
+  `Child` wait-set member.
 
 ### CU6 — desktop session capabilities
 

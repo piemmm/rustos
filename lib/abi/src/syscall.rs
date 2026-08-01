@@ -2039,6 +2039,28 @@ impl SyscallNumber {
     /// Cross-principal outcomes and every raise attempt are audited.
     pub const SCHED_SET_PRIORITY: Self = Self(104);
 
+    /// End the machine's power state: flush every mounted volume, then
+    /// power the platform off or reset it (`plans/NEW-TASKBAR.md` T13).
+    ///
+    /// Argument: `action` (a [`crate::PowerAction`] wire discriminant; `0`
+    /// and unknown values fail closed with [`Errno::OutOfRange`]).
+    ///
+    /// Gated flat on [`crate::CapabilityId::SYSTEM_POWER`] — unlike
+    /// [`Self::SIGNAL`] there is no per-target tier to decide, because the
+    /// target is the whole machine — and audited on every call, allowed or
+    /// refused. The handler flushes **every** mounted volume before it asks
+    /// the platform to stop (where [`Self::FS_SYNC`] flushes only the one
+    /// filesystem behind a caller's handle), so a shutdown never abandons
+    /// buffered writes.
+    ///
+    /// On success the platform stops and the call never returns. It returns
+    /// only when the machine is still running: [`Errno::NotSupported`] when
+    /// the port has no primitive for the requested transition, or the
+    /// flush's own error when a device fault means the volumes are not
+    /// durable — in both cases the caller reports the refusal rather than
+    /// assuming the machine went down.
+    pub const SYSTEM_POWER: Self = Self(105);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

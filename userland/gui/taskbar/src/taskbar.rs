@@ -37,6 +37,7 @@ use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::pins::{PinStrip, PinView};
 use crate::repaint::TaskbarRepaint;
+use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
 use crate::tray::SwitchboardTray;
 
@@ -624,6 +625,27 @@ impl Taskbar {
     pub(crate) fn open_entry_menu(&mut self, entry: EntryId, anchor: Rect) {
         let pinned = self.pins.position_of_entry(&entry);
         self.menu.open(MenuSubject::Entry { entry, pinned }, anchor);
+        self.repaint |= TaskbarRepaint::MENU;
+    }
+
+    /// Open the desktop's system quick-actions menu, anchored at the
+    /// Switchboard capsule's slot. Latches only
+    /// [`menu`](TaskbarRepaint::menu).
+    ///
+    /// The rows' postures are read from what the bar already knows: the
+    /// appearance it is painting with, whether the publishing service
+    /// attested that it can power the machine, and whether the terminal
+    /// bundle is in the catalog the session handed it. None of that is
+    /// authority the bar holds — it renders what it was told, and every
+    /// unknown reads as refused.
+    pub(crate) fn open_system_menu(&mut self, anchor: Rect) {
+        let permits = SystemPermits {
+            appearance: self.theme.appearance(),
+            power: self.tray.power_capable(),
+            task_shell_installed: EntryId::new(system::TASK_SHELL_BUNDLE)
+                .is_ok_and(|id| self.library.catalog().entry(&id).is_some()),
+        };
+        self.menu.open(MenuSubject::System { permits }, anchor);
         self.repaint |= TaskbarRepaint::MENU;
     }
 

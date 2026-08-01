@@ -160,7 +160,46 @@ impl UsersDb {
     /// [`AuthError::InvalidCredentials`] — the only refusal this method can
     /// express, by design.
     pub fn authenticate(&self, username: &str, password: &[u8]) -> Result<&UserRecord, AuthError> {
-        match self.lookup(username) {
+        self.verify(self.lookup(username), password)
+    }
+
+    /// Verify a `(uid, password)` pair, returning the matched record.
+    ///
+    /// The uid-keyed counterpart of [`Self::authenticate`]: it exists so a
+    /// caller that only holds a kernel-attested uid — never a
+    /// caller-supplied name, as when a screen lock re-verifies the account
+    /// already sitting at the console — can re-authenticate without
+    /// re-deriving the same timing-equalised comparison
+    /// [`Self::authenticate`] already performs. Refusals are
+    /// indistinguishable in exactly the same way: an unknown uid, a locked
+    /// or no-login account, and a wrong password all cost one PBKDF2
+    /// derivation and all return the same [`AuthError::InvalidCredentials`].
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidCredentials`] — the only refusal this method can
+    /// express, by design.
+    pub fn authenticate_uid(&self, uid: Uid, password: &[u8]) -> Result<&UserRecord, AuthError> {
+        self.verify(self.lookup_uid(uid), password)
+    }
+
+    /// The record owning `uid`, if any.
+    #[must_use]
+    pub fn lookup_uid(&self, uid: Uid) -> Option<&UserRecord> {
+        self.records.iter().find(|record| record.uid() == uid)
+    }
+
+    /// The shared decision behind [`Self::authenticate`] and
+    /// [`Self::authenticate_uid`]: verify `password` against `record` when
+    /// present and active, else burn the same derivation cost and refuse —
+    /// one definition of the indistinguishable-refusal timing posture,
+    /// regardless of how the record was looked up.
+    fn verify<'a>(
+        &self,
+        record: Option<&'a UserRecord>,
+        password: &[u8],
+    ) -> Result<&'a UserRecord, AuthError> {
+        match record {
             Some(record) if record.state() == AccountState::Active => {
                 if record.password().verify(password) {
                     Ok(record)
@@ -173,12 +212,6 @@ impl UsersDb {
                 Err(AuthError::InvalidCredentials)
             }
         }
-    }
-
-    /// The record owning `uid`, if any.
-    #[must_use]
-    pub fn lookup_uid(&self, uid: Uid) -> Option<&UserRecord> {
-        self.records.iter().find(|record| record.uid() == uid)
     }
 
     /// Pay the PBKDF2 cost a real verification would have paid, so a refusal
@@ -408,5 +441,40 @@ mod tests {
             Some("mallory")
         );
         assert!(db.lookup_uid(Uid(42)).is_none());
+    }
+
+    #[test]
+    fn uid_authentication_accepts_only_the_right_password_on_an_active_account() {
+        let db = db();
+        assert_eq!(
+            db.authenticate_uid(Uid(1000), b"byron")
+                .map(UserRecord::username),
+            Ok("ada")
+        );
+        assert_eq!(
+            db.authenticate_uid(Uid(1000), b"wrong"),
+            Err(AuthError::InvalidCredentials)
+        );
+    }
+
+    #[test]
+    fn uid_authentication_refuses_an_unknown_or_locked_uid_indistinguishably() {
+        let db = db();
+        // No account owns this uid at all.
+        assert_eq!(
+            db.authenticate_uid(Uid(9999), b"anything"),
+            Err(AuthError::InvalidCredentials)
+        );
+        // A locked account's own uid, correct password included.
+        assert_eq!(
+            db.authenticate_uid(Uid(1001), b"evil"),
+            Err(AuthError::InvalidCredentials)
+        );
+        // Both refusals carry the identical error the username path
+        // returns — there is no separate "no such uid" outcome to probe.
+        assert_eq!(
+            db.authenticate_uid(Uid(9999), b"anything"),
+            db.authenticate("nobody", b"anything")
+        );
     }
 }

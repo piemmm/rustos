@@ -2580,6 +2580,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SYSTEM_POWER,
+        name: "system_power",
+        arg_count: 1,
+        args: [
+            // The `PowerAction` discriminant. The handler decodes it against
+            // the closed set and fails closed on `0` or anything unknown.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: the call does not return on success —
+        // the platform stops — so every value the caller can observe is a
+        // refusal (`-errno`) with the machine still running.
+        ret: AbiType::Errno,
+        // Unlike `signal` and `sched_set_priority`, the target is not a
+        // process whose owner decides the tier: it is the whole machine, so
+        // one flat capability expresses the authority exactly and the
+        // dispatcher gates the call before the handler runs. Audited on
+        // every call — ending every principal's execution is the most
+        // security-relevant decision the kernel takes.
+        required_capability: Some(CapabilityId::SYSTEM_POWER),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

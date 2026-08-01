@@ -10,9 +10,9 @@
 
 use tairix_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
-    RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
-    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
-    SYSCALL_MAX_ARGS,
+    PowerAction, RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec,
+    UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
+    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{TaskCapabilities, TaskId};
@@ -2402,6 +2402,20 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// End the machine's power state: flush every mounted volume, then
+    /// power the platform off or reset it (`plans/NEW-TASKBAR.md` T13).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SYSTEM_POWER`] and decoded `action` against the
+    /// closed [`PowerAction`] set. The implementation flushes every
+    /// mounted volume before it asks the platform to stop; a flush failure
+    /// aborts the transition with the machine still running.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn system_power(&self, _caller: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2635,6 +2649,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
                 let priority = SchedPriority::from_u32(decode_u32(args.0[1]))?;
                 self.handlers.sched_set_priority(caller, pid, priority)
+            }
+            SyscallNumber::SYSTEM_POWER => {
+                // args[0] is the `PowerAction` discriminant, rejected before
+                // dispatch if it is not one of the closed set (fail closed on
+                // an unknown or zeroed value).
+                let action = PowerAction::from_u32(decode_u32(args.0[0]))?;
+                self.handlers.system_power(caller, action)
             }
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
@@ -4513,6 +4534,11 @@ mod tests {
             Ok(0)
         }
 
+        fn system_power(&self, _c: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
+            self.record("system_power");
+            Ok(0)
+        }
+
         fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_chdir");
             Ok(0)
@@ -4583,6 +4609,7 @@ mod tests {
                 CapabilityId::FS_MOUNT,
                 CapabilityId::MEM_PIN,
                 CapabilityId::SCHED_REALTIME,
+                CapabilityId::SYSTEM_POWER,
             ],
             &sink,
         );

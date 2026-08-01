@@ -60,5 +60,6 @@
 #define TAIRIX_CAP_NET_BIND_PRIVILEGED ((uint16_t)38u)
 #define TAIRIX_CAP_FS_CHOWN ((uint16_t)39u)
 #define TAIRIX_CAP_PROC_CONTROL ((uint16_t)40u)
+#define TAIRIX_CAP_SYSTEM_POWER ((uint16_t)41u)
 
 #endif /* TAIRIX_CAPABILITY_H */

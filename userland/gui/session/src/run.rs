@@ -97,13 +97,14 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
         build_pin_views, command_section, deliver_pending_open, load_library,
-        maybe_send_seat_report, open_tray, parse, reap_launched, serve_switchboard_request,
-        window_control_event, CliError, Command, ConcludedPick, DesktopShell, DeviceInputSource,
-        HangTracker, IconCache, IconRasteriser, KeyboardInputSource, LaunchTable, OwnerWindow,
-        PickConclusion, PinBridge, PinService, ResolvedPin, SeatEventReader, SeatInputChannel,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, FILES_LABEL,
-        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
+        serve_switchboard_request, window_control_event, Answer, CliError, Command, ConcludedPick,
+        ConfirmPrompt, DesktopShell, DeviceInputSource, HangTracker, IconCache, IconRasteriser,
+        KeyboardInputSource, LaunchTable, OwnerWindow, PickConclusion, PinBridge, PinService,
+        ResolvedPin, SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter,
+        SessionPicker, SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -181,6 +182,11 @@ mod program {
     /// two, so the session exits fail-loud rather than run a desktop whose
     /// monitor cannot publish.
     const EXIT_NO_SWITCHBOARD_ENDPOINT: i32 = 100;
+
+    /// Exit code when the user chose *Log Out*. The session ended because it
+    /// was asked to, so it is a success: nothing failed, and the login
+    /// supervisor that started the desktop prompts again.
+    const EXIT_LOGGED_OUT: i32 = 0;
 
     /// Frames in the shared region: a double buffer, so the session renders
     /// into one frame while the service scans out the other.
@@ -854,6 +860,11 @@ mod program {
             })
         })
         .starting_at(picker_start);
+        // The trusted confirmation prompt for a power transition. It is the
+        // session's own window, so the question the user answers is asked by
+        // the desktop itself rather than by the bar, which holds no
+        // authority; an unanswered prompt relays nothing.
+        let mut confirm = ConfirmPrompt::new();
 
         let mut token = 0u64;
         loop {
@@ -1049,7 +1060,7 @@ mod program {
                     Err(err) => return drain_fault(err),
                 };
                 for outcome in outcomes {
-                    route_outcome(
+                    if route_outcome(
                         outcome,
                         None,
                         &mut focused,
@@ -1060,18 +1071,22 @@ mod program {
                         &mut sink,
                         &identity,
                         &mut picker,
+                        &mut confirm,
                         &mut launched,
                         &mut pins,
                         &mut switchboard_pid,
                         &mut pending_open,
-                    );
+                    ) == Routed::EndSession
+                    {
+                        return EXIT_LOGGED_OUT;
+                    }
                 }
                 loop {
                     match keyboard.poll_record() {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
                             let outcome = shell.handle(event, &mut compositor, now_ns);
-                            route_outcome(
+                            if route_outcome(
                                 outcome,
                                 Some(record),
                                 &mut focused,
@@ -1082,11 +1097,15 @@ mod program {
                                 &mut sink,
                                 &identity,
                                 &mut picker,
+                                &mut confirm,
                                 &mut launched,
                                 &mut pins,
                                 &mut switchboard_pid,
                                 &mut pending_open,
-                            );
+                            ) == Routed::EndSession
+                            {
+                                return EXIT_LOGGED_OUT;
+                            }
                         }
                         Err(err) => return drain_fault(err),
                     }
@@ -1275,11 +1294,21 @@ mod program {
         shell.set_pins(compositor, views);
     }
 
+    /// Whether the serve loop carries on after an outcome was routed.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Routed {
+        /// Keep serving.
+        Continue,
+        /// The user asked to log out. The loop unwinds so the one
+        /// owner-checked release runs and the login supervisor prompts again.
+        EndSession,
+    }
+
     /// Route one shell outcome onward: mirror focus changes and pointer
     /// presses to the owning app over the window channel, hand the raw
-    /// key record to the focused served window (or the showing picker),
-    /// and spawn the launcher selection. Everything else is complete
-    /// inside the shell.
+    /// key record to the focused served window (or the showing picker,
+    /// or the showing confirmation prompt), and spawn the launcher
+    /// selection. Everything else is complete inside the shell.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     #[allow(clippy::too_many_lines)] // One linear match over every outcome; splitting it would hide the routing policy.
     fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
@@ -1293,11 +1322,12 @@ mod program {
         sink: &mut RtEventSink,
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
+        confirm: &mut ConfirmPrompt,
         launched: &mut LaunchTable,
         pins: &mut PinPanel,
         switchboard: &mut Option<u64>,
         pending_open: &mut Option<CommandSection>,
-    ) {
+    ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
             ShellOutcome::WindowManager(response) => match response {
@@ -1373,6 +1403,14 @@ mod program {
                                 concluded, server, sink, shell, compositor, windows, identity,
                                 picker, pins,
                             );
+                        }
+                    }
+                    // A press on the showing confirmation prompt answers it:
+                    // only the confirming button relays the transition, and
+                    // the prompt window is already gone by then.
+                    if confirm.wm_id() == Some(window) {
+                        if let Some(answer) = confirm.handle_click(local, shell, compositor) {
+                            report_power_relay(answer, *switchboard);
                         }
                     }
                 }
@@ -1468,6 +1506,15 @@ mod program {
                                     concluded, server, sink, shell, compositor, windows, identity,
                                     picker, pins,
                                 );
+                            }
+                        }
+                    } else if confirm.wm_id() == Some(window) {
+                        // The focused prompt consumes its own keys the same
+                        // way, so `Escape` declines and no key reaches an app
+                        // while the question is unanswered.
+                        if let Some(record) = key {
+                            if let Some(answer) = confirm.handle_key(&record, shell, compositor) {
+                                report_power_relay(answer, *switchboard);
                             }
                         }
                     } else if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
@@ -1705,7 +1752,58 @@ mod program {
                     *switchboard = Some(revived);
                 }
             }
-            _ => {}
+            ShellOutcome::Taskbar(TaskbarResponse::SetAppearance { appearance }) => {
+                // The desktop's own appearance: re-theme the taskbar model,
+                // bring the desktop background in step, and repaint. A prompt
+                // showing behind the menu is redrawn too, so nothing on
+                // screen is left in the appearance just left behind.
+                shell.session_mut().set_appearance(appearance);
+                shell.sync_background(compositor);
+                shell.present(compositor);
+                confirm.repaint(shell, compositor);
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
+                // The user asked for the session to end: take the prompt down
+                // unanswered (so nothing irreversible follows a log-out) and
+                // unwind through the one owner-checked release.
+                confirm.abandon(shell, compositor);
+                return Routed::EndSession;
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::ConfirmSystemPower { action }) => {
+                // Never on the strength of the click alone: put the
+                // consequence to the user first. A prompt that cannot be
+                // shown asks nothing and relays nothing.
+                if !confirm.ask(action, shell, compositor) {
+                    let _ = tairix_rt::stderr(
+                        b"desktop: could not ask for confirmation; nothing was done\n",
+                    );
+                }
+            }
+            // An event no router acted on, and outcomes the shell has
+            // already fully applied with its own state: the
+            // click-to-activate/minimise rule, clearing a dismissed
+            // notification from the model, and the popup's own open/close.
+            // Nothing here needs a capability the shell lacks, so the
+            // session adds nothing. Listed rather than caught by a wildcard
+            // so a new outcome fails the build instead of being dropped in
+            // silence.
+            ShellOutcome::Ignored
+            | ShellOutcome::Taskbar(
+                TaskbarResponse::Ignored
+                | TaskbarResponse::LibraryDismissed
+                | TaskbarResponse::TaskActivated { .. }
+                | TaskbarResponse::DismissNotification { .. }
+                | TaskbarResponse::ClockPressed,
+            ) => {}
+        }
+        Routed::Continue
+    }
+
+    /// Relay a confirmed power transition over the production mailbox and
+    /// state loudly why nothing happened when it could not be relayed.
+    fn report_power_relay(answer: Answer, switchboard: Option<u64>) {
+        if let Some(reason) = relay_power(answer, switchboard, &mut RtSwitchboardMailbox) {
+            let _ = tairix_rt::stderr(alloc::format!("desktop: {reason}\n").as_bytes());
         }
     }
 

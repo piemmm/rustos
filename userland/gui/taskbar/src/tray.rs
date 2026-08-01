@@ -108,6 +108,17 @@ impl SwitchboardTray {
         self.signal.is_expanded()
     }
 
+    /// Whether the publishing service has attested that it can power this
+    /// machine off or restart it.
+    ///
+    /// No summary at all — the service has not published yet, or has died —
+    /// reads as `false`: silence is never permission, so the desktop's power
+    /// rows stay refused until something actually claims the authority.
+    #[must_use]
+    pub fn power_capable(&self) -> bool {
+        self.summary.is_some_and(|summary| summary.power_capable)
+    }
+
     /// Feed a pointer `event` (motion, press, or release) to the capsule and
     /// its open readout — hover tracking plus the readout's "Open
     /// Switchboard" safe action — reporting whether the capsule's visual

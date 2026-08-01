@@ -120,6 +120,7 @@ shared-memory region against its owner). An
 administrator is an account whose grant additionally includes the
 administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_CHOWN` — the
 `chown(2)` privilege to reassign a file's owner, `CAP_FS_MOUNT`,
+`CAP_SYSTEM_POWER` — the authority to shut down or restart the machine,
 `CAP_RLIMIT_RAISE`, `CAP_AUDIT_READ`, the global `CAP_SYSINFO_*` queries,
 `CAP_TIME_SET`, `CAP_TIME_HIRES`, `CAP_MEM_PIN`, the
 network-administration set `CAP_NET_ADMIN`, `CAP_NET_BIND_PRIVILEGED`, and
@@ -152,6 +153,17 @@ is untouched, refusal causes are audited but indistinguishable to the
 requester, and binding the reserved rendezvous requires
 `CAP_IPC_BIND_PRIVILEGED` so a squatter can never receive an elevation
 request.
+
+The same rendezvous also answers a narrower, verify-only request
+(`ElevateRequest::Verify`) that re-authenticates the **caller's own**
+kernel-attested account and runs nothing — the primitive a graphical
+session's screen lock uses to unlock itself, so no second authenticator
+exists anywhere in the tree. It carries no username or uid on the wire:
+the supervisor authenticates against the caller's `Origin::uid` (the same
+`call_peer_origin` read the console placement check already uses), so a
+caller can only ever re-verify itself. It is strictly weaker than a `Run`
+request — it never spawns a program — and grants no authority a `Run`
+request did not already carry.
 
 The two sets are policy with one definition: `lib/users` (the `grants`
 module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the

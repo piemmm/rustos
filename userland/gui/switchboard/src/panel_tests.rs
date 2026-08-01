@@ -1,9 +1,7 @@
 //! Unit tests for the overview panel's window lifecycle and effect
 //! application, driven entirely through the recording host.
 
-use tairix_abi::switchboard_ipc::{
-    CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest,
-};
+use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{Errno, SchedPriority, Signal};
 use tairix_controls::{
@@ -15,7 +13,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
-use super::{refusal_notice, CommandOutcome, Panel, PANEL_TITLE};
+use super::{refusal_notice, Panel, PANEL_TITLE};
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
 use crate::model::{build_model, LiveMeters, PanelModel};
@@ -185,10 +183,9 @@ fn activity_model(first_pid: u64, second_pid: u64) -> PanelModel {
     )
 }
 
-fn open(panel: &mut Panel, host: &mut RecordingHost, section: CommandSection) -> CommandOutcome {
-    let outcome = panel.command(host, SwitchboardCommand::OpenPanel { section });
+fn open(panel: &mut Panel, host: &mut RecordingHost, section: CommandSection) {
+    panel.open_section(host, section);
     panel.flush(host);
-    outcome
 }
 
 /// The window rectangle the scrolling test lays the composition out in.
@@ -243,10 +240,7 @@ fn opening_shows_the_requested_section_and_arms_the_window_source() {
     ] {
         let mut host = RecordingHost::new();
         let mut panel = Panel::new(OWN_PID, empty_model());
-        assert_eq!(
-            open(&mut panel, &mut host, command),
-            CommandOutcome::Unchanged
-        );
+        open(&mut panel, &mut host, command);
         assert!(panel.is_open());
         assert_eq!(panel.section(), Some(expected));
         assert_eq!(host.opened, 1);
@@ -345,17 +339,17 @@ fn closing_an_already_closed_panel_does_nothing() {
 }
 
 #[test]
-fn a_seat_report_is_stored_and_asks_the_caller_to_rebuild() {
-    let mut host = RecordingHost::new();
+fn a_seat_report_is_stored_for_the_callers_next_rebuild() {
+    let host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
     let report = SeatReport::new(3, &[11, 12]).expect("valid report");
 
-    let outcome = panel.command(&mut host, SwitchboardCommand::SeatReport { report });
+    panel.set_seat_report(report);
 
-    assert_eq!(outcome, CommandOutcome::Rebuild);
     assert_eq!(panel.seat_report().owners(), &[11, 12]);
     assert_eq!(panel.seat_report().total(), 3);
     assert!(!panel.is_open());
+    assert_eq!(host.opened, 0, "a seat report opens no window");
 }
 
 #[test]
@@ -674,12 +668,7 @@ fn the_first_flush_after_opening_always_presents() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
 
-    panel.command(
-        &mut host,
-        SwitchboardCommand::OpenPanel {
-            section: CommandSection::Tasks,
-        },
-    );
+    panel.open_section(&mut host, CommandSection::Tasks);
     panel.flush(&mut host);
 
     assert_eq!(host.presents, 1);
@@ -711,12 +700,7 @@ fn flushing_an_unchanged_panel_presents_nothing() {
 fn repeated_unchanged_flushes_present_only_once_in_total() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
-    panel.command(
-        &mut host,
-        SwitchboardCommand::OpenPanel {
-            section: CommandSection::Tasks,
-        },
-    );
+    panel.open_section(&mut host, CommandSection::Tasks);
 
     // The first flush presents the initial paint; every later one, with
     // nothing having changed in between, must not.

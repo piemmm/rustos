@@ -709,7 +709,7 @@ mod program {
             // stream-fed shell (a pipe, a network session) cannot name a
             // rendezvous it is not sitting on.
             let endpoint = elevate_endpoint(console)?;
-            let request = ElevateRequest {
+            let request = ElevateRequest::Run {
                 username,
                 password,
                 program,
@@ -731,6 +731,12 @@ mod program {
             match ElevateReply::decode(&reply_buf[..reply_len])? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),
                 ElevateReply::Refused(err) => Err(err),
+                // The builtin only ever posts a `Run` request, which the
+                // broker never answers with `Verified` — that reply is
+                // reserved for a `Verify` request this call site never
+                // sends. Reachable only through a protocol mismatch, so it
+                // fails closed rather than being treated as success.
+                ElevateReply::Verified => Err(Errno::OutOfRange),
             }
         }
     }

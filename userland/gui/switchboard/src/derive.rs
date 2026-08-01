@@ -92,6 +92,11 @@ pub fn memory_pressured(sample: &Sample) -> bool {
 ///   as a [`TrayTaskName`]; a name that fails validation (empty, over-long,
 ///   invalid UTF-8, or containing a control character) yields no top task
 ///   rather than a fabricated one.
+/// * `power_capable` is always `false` here: a sample carries measurements,
+///   not authority, so this derivation cannot honestly attest to holding
+///   `CAP_SYSTEM_POWER`. The service overwrites it from its own live
+///   capability check immediately before publishing, which keeps the
+///   unattested state denied rather than optimistic.
 #[must_use]
 pub fn derive_summary(sample: &Sample, hysteresis: &mut Hysteresis) -> TraySummary {
     let cpu_busy_raw = sample.cpu_busy_permille.unwrap_or(0);
@@ -132,6 +137,7 @@ pub fn derive_summary(sample: &Sample, hysteresis: &mut Hysteresis) -> TraySumma
         cpu_busy_permille: permille(cpu_busy_raw),
         pressure,
         top_task,
+        power_capable: false,
     }
 }
 

@@ -60,10 +60,10 @@ use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, CapabilityId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags,
-    Origin, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
-    TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN,
-    CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
-    TERMINAL_SIZE_WIRE_LEN,
+    Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp,
+    SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO,
+    STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 
@@ -126,6 +126,9 @@ const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() a
 
 /// `sched_set_priority` syscall number (as above).
 const NUM_SCHED_SET_PRIORITY: u64 = SyscallNumber::SCHED_SET_PRIORITY.as_u16() as u64;
+
+/// `system_power` syscall number (as above).
+const NUM_SYSTEM_POWER: u64 = SyscallNumber::SYSTEM_POWER.as_u16() as u64;
 
 /// `mem_unpin` syscall number (as above).
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
@@ -2075,6 +2078,42 @@ pub fn sched_set_priority(pid: i32, priority: SchedPriority) -> i64 {
         raw_syscall(
             NUM_SCHED_SET_PRIORITY,
             [i32_arg(pid), u64::from(priority.as_u32()), 0, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Power the machine off or restart it
+/// (`SyscallNumber::SYSTEM_POWER`, `plans/NEW-TASKBAR.md` T13).
+///
+/// The kernel identifies the caller from its own current-task slot (never a
+/// caller-supplied identity) and admits the transition only to a holder of
+/// `CAP_SYSTEM_POWER` — stopping the machine ends every other principal's
+/// session, so it is an administrator's authority. It then flushes every
+/// mounted volume before asking the platform to stop: a volume that will
+/// not flush aborts the transition and the machine keeps running, rather
+/// than losing writes that never reached stable media.
+///
+/// **This call returns only when the transition was refused.** A transition
+/// the platform performs never comes back, so there is no success value to
+/// report. The kernel encodes a refusal as a signed register following the
+/// standard `abi-v1` convention: a negative value is `-errno` (recover the
+/// [`tairix_abi::Errno`] discriminant as `-ret`) —
+/// `Errno::PermissionDenied` when the caller does not hold the capability,
+/// the flush's own error when a volume could not be flushed, and
+/// `Errno::NotSupported` on a port with no power-off or reset primitive.
+/// The wrapper surfaces that raw signed value; it adds no authority and
+/// hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn system_power(action: PowerAction) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel checks the
+    // caller's capability and decodes the action on the far side of the
+    // trap. `system_power` dereferences no user pointer.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SYSTEM_POWER,
+            [u64::from(action.as_u32()), 0, 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -5345,6 +5384,29 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(sched_set_priority(9, SchedPriority::High), want);
+        });
+    }
+
+    #[test]
+    fn system_power_marshals_the_action_discriminant() {
+        for action in [PowerAction::PowerOff, PowerAction::Restart] {
+            let (number, args) = capture(0, || {
+                let _ = system_power(action);
+            });
+            assert_eq!(number, NUM_SYSTEM_POWER);
+            assert_eq!(args[0], u64::from(action.as_u32()));
+            assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn system_power_surfaces_negative_errno_encoding() {
+        // A caller without `CAP_SYSTEM_POWER` is refused and the call comes
+        // back; the wrapper hands the signed encoding on unchanged.
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(system_power(PowerAction::PowerOff), want);
         });
     }
 

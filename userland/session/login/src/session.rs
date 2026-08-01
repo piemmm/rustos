@@ -271,6 +271,23 @@ pub trait Authenticator {
     /// caller cannot probe for valid usernames (fail closed,
     /// no information leak). Login does not inspect the cause.
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno>;
+
+    /// Verify `password` against the account already identified by `uid`,
+    /// returning the authenticated identity on success.
+    ///
+    /// The uid-keyed counterpart of [`Self::authenticate`], used to decide a
+    /// [`tairix_abi::elevate::ElevateRequest::Verify`] request: the caller
+    /// is re-authenticated against its own **kernel-attested** account,
+    /// never a name it supplies, so this method takes no username at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Errno`] (typically [`Errno::PermissionDenied`]) when the
+    /// credentials are rejected. The implementation must return the
+    /// **same** error whether `uid` owns no account or the password is
+    /// wrong, so a caller cannot probe for which uids exist (fail closed,
+    /// no information leak). Login does not inspect the cause.
+    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno>;
 }
 
 /// Starts a session under an authenticated user's identity.

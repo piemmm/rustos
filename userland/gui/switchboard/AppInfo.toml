@@ -15,6 +15,18 @@
 # CAP_PROC_CONTROL the Force control simply renders refused and is never
 # attempted.
 #
+# CAP_SYSTEM_POWER makes this service the desktop's one power-transition
+# holder: it already runs for the whole seat, already authenticates the
+# session on its command mailbox, and already reports refusals, so the
+# desktop needs no second privileged process to shut the machine down. The
+# taskbar and the session hold nothing — the taskbar only draws the rows and
+# the session only relays a choice the user confirmed — and this service
+# publishes whether it truly holds the capability so those rows render
+# refused, rather than optimistically, whenever it does not. A user whose
+# ceiling withholds CAP_SYSTEM_POWER simply gets a service that publishes
+# "not capable": the Restart and Shut Down rows are then never actionable
+# and nothing is ever attempted.
+#
 # The service requests no filesystem, spawn, or network authority: it samples
 # through the ungated/gated sysinfo queries, posts to the seat-scoped
 # SWITCHBOARD_ENDPOINT the desktop session itself binds, and asks that
@@ -23,4 +35,4 @@ id = "os.tairix.switchboard"
 name = "switchboard"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SHM", "CAP_PROC_CONTROL"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER"]

@@ -43,6 +43,7 @@ pub mod net;
 pub mod net_ipc;
 pub mod notify_ipc;
 pub mod origin;
+pub mod power;
 pub mod process;
 pub mod random;
 pub mod reply;
@@ -140,6 +141,7 @@ pub use origin::{
     CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN, ORIGIN_CONSOLE_NONE,
     ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
 };
+pub use power::PowerAction;
 pub use process::{
     encoded_len as process_start_encoded_len, load_failure_reason, load_failure_status,
     write_into as process_start_write_into, DescriptorTable, FdWire, ProcessStart,

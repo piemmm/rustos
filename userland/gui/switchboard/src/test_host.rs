@@ -12,7 +12,9 @@ use tairix_abi::switchboard_ipc::{SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
     ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
 };
-use tairix_abi::{CapabilityId, CapabilityQuery, Errno, ProcId, SchedPriority, Signal};
+use tairix_abi::{
+    CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
+};
 use tairix_controls::Switchboard;
 use tairix_procinfo::Transport;
 
@@ -95,6 +97,11 @@ pub(crate) const NO_AUTHORITY: FixedAuthority = FixedAuthority(&[]);
 /// needs.
 pub(crate) const PROC_CONTROL_AUTHORITY: FixedAuthority =
     FixedAuthority(&[CapabilityId::PROC_CONTROL]);
+
+/// Holds only the power capability the desktop's Restart and Shut Down rows
+/// need.
+pub(crate) const SYSTEM_POWER_AUTHORITY: FixedAuthority =
+    FixedAuthority(&[CapabilityId::SYSTEM_POWER]);
 
 /// A `sysinfo` transport that answers nothing.
 ///
@@ -213,6 +220,8 @@ pub(crate) struct RecordingHost {
     pub(crate) signals: Vec<(i32, Signal)>,
     /// Every priority lowering attempted, in order.
     pub(crate) lowered: Vec<i32>,
+    /// Every power transition attempted, in order.
+    pub(crate) powered: Vec<PowerAction>,
     /// Every refusal stated, in order.
     pub(crate) refusals: Vec<(String, Errno)>,
     /// Every degradation noted, in order.
@@ -229,6 +238,8 @@ pub(crate) struct RecordingHost {
     pub(crate) signal_refusal: Option<Errno>,
     /// Refusal to answer a priority lowering with.
     pub(crate) lower_refusal: Option<Errno>,
+    /// Refusal to answer a power transition with.
+    pub(crate) power_refusal: Option<Errno>,
     /// The client bounds a present would use while a window is open, as
     /// `(left, top, width, height)`. Tests mutate this directly to
     /// simulate a resize.
@@ -253,6 +264,7 @@ impl RecordingHost {
             published: Vec::new(),
             signals: Vec::new(),
             lowered: Vec::new(),
+            powered: Vec::new(),
             refusals: Vec::new(),
             degradations: Vec::new(),
             open_refusal: None,
@@ -261,6 +273,7 @@ impl RecordingHost {
             publish_refusal: None,
             signal_refusal: None,
             lower_refusal: None,
+            power_refusal: None,
             bounds: (0, 0, 600, 400),
             theme_id: 1,
             scale_percent: 100,
@@ -323,6 +336,11 @@ impl ServiceHost for RecordingHost {
     fn lower_priority(&mut self, pid: i32) -> Result<(), Errno> {
         self.lowered.push(pid);
         self.lower_refusal.map_or(Ok(()), Err)
+    }
+
+    fn power(&mut self, action: PowerAction) -> Result<(), Errno> {
+        self.powered.push(action);
+        self.power_refusal.map_or(Ok(()), Err)
     }
 
     fn report_refusal(&mut self, action: &str, refusal: Errno) {

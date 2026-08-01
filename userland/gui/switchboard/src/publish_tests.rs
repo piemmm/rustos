@@ -11,6 +11,7 @@ fn summary(cpu_busy: u16) -> TraySummary {
         cpu_busy_permille: TrayPermille::new(cpu_busy).expect("within bounds"),
         pressure: None,
         top_task: None,
+        power_capable: false,
     }
 }
 

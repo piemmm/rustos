@@ -58,6 +58,7 @@ for filesystems, the feature section below.
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
 | User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
+| Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |

@@ -72,7 +72,7 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        CapabilityId, CapabilityQuery, Errno, Origin, ProcId, SchedPriority, Signal,
+        CapabilityId, CapabilityQuery, Errno, Origin, PowerAction, ProcId, SchedPriority, Signal,
         SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
     use tairix_controls::{Switchboard, SwitchboardAction};
@@ -486,6 +486,19 @@ mod program {
 
         fn lower_priority(&mut self, pid: i32) -> Result<(), Errno> {
             let ret = tairix_rt::sched_set_priority(pid, SchedPriority::Low);
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Errno::from_syscall(ret))
+            }
+        }
+
+        fn power(&mut self, action: PowerAction) -> Result<(), Errno> {
+            // A granted transition flushes every volume and stops the
+            // machine, so this call does not come back; a return at all
+            // means the kernel refused, and the reason is passed up to be
+            // stated.
+            let ret = tairix_rt::system_power(action);
             if ret == 0 {
                 Ok(())
             } else {

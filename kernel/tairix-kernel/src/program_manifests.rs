@@ -967,9 +967,13 @@ mod tests {
     // zero-copy frame region the desktop session maps for its overview
     // window, exactly as any other windowed program; `CAP_PROC_CONTROL`
     // carries the overview's force-quit of an owner it did not spawn, and
-    // without it that control simply renders refused. It publishes over the
-    // ungated `ipc_call` and holds no filesystem or spawn authority — a
-    // window is raised or re-launched by asking the session, never the
+    // without it that control simply renders refused. `CAP_SYSTEM_POWER`
+    // makes this small service — not the large, exposed desktop session —
+    // the one holder of the authority to end the machine's power state, on
+    // behalf of the session's confirmed quick-actions choice; an ordinary
+    // account's ceiling strips it and the rows render refused. It publishes
+    // over the ungated `ipc_call` and holds no filesystem or spawn authority
+    // — a window is raised or re-launched by asking the session, never the
     // kernel. Not an embedded spawn-floor program, so the list lives only in
     // this pin.
     const SWITCHBOARD_MONITOR_REQUEST: &[CapabilityId] = &[
@@ -978,6 +982,7 @@ mod tests {
         CapabilityId::SYSINFO_KERNEL,
         CapabilityId::SHM,
         CapabilityId::PROC_CONTROL,
+        CapabilityId::SYSTEM_POWER,
     ];
 
     /// Every program crate's on-disk `AppInfo.toml` manifest source

@@ -1,0 +1,197 @@
+//! The desktop's system quick-actions vocabulary: the closed set of
+//! commands the Switchboard capsule's context menu offers, and the one
+//! ordered table that defines the menu's shape.
+//!
+//! [`ROWS`] is the single definition of what the menu is: each entry names
+//! the command, its label, whether it opens a new visual group, and its
+//! role. The rendered rows, the row → command mapping, and the tests all
+//! read that table, so a row can never exist without a command behind it (or
+//! the reverse).
+//!
+//! A command that destroys work in progress carries its confirmation
+//! requirement in the *type* of the outcome it reports rather than in a
+//! column here, so the session cannot apply it without asking first.
+//!
+//! Nothing here holds or checks authority. A row renders permitted only
+//! because a process that *does* hold the authority attested to it, and a
+//! row whose backing is absent renders non-actionable with a stated reason
+//! rather than being offered and then failing.
+
+use tairix_controls::{ActivityState, AuthorityState, ControlRole, ControlState, MenuItem};
+use tairix_theme::Appearance;
+
+/// One system quick action the menu can offer.
+///
+/// A closed set: every variant has a row in [`ROWS`] and a typed outcome the
+/// session knows how to apply. There is no "other" or free-form command.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SystemAction {
+    /// Show what this machine is, in the Switchboard's overview.
+    About,
+    /// Show what the machine is doing, in the Switchboard's task list.
+    SystemMonitor,
+    /// Launch the terminal.
+    TaskShell,
+    /// Switch the desktop to this appearance.
+    Appearance(Appearance),
+    /// End this desktop session and return to the login prompt.
+    LogOut,
+    /// Restart the machine.
+    Restart,
+    /// Power the machine off.
+    ShutDown,
+}
+
+/// One row of the system menu: its command, its wording, and its posture.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SystemRow {
+    /// The command choosing this row asks for.
+    pub action: SystemAction,
+    /// The row's label.
+    pub label: &'static str,
+    /// Whether this row opens a new visual group (a divider is drawn in the
+    /// gap above it).
+    pub group_break: bool,
+    /// The row's role, which decides whether it carries the danger rail.
+    pub role: ControlRole,
+}
+
+/// The catalog identifier of the terminal bundle the *Task Shell* row
+/// launches.
+///
+/// The row is only actionable when this bundle is in the catalog the session
+/// handed the bar, so choosing it can never ask for a program that is not
+/// installed.
+pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
+
+/// The system menu, in order. This is the single definition of the menu's
+/// shape; the rendered rows and the row → command mapping are both derived
+/// from it, never written out a second time.
+///
+/// The grouping separates what the rows *do*: inspecting the machine, then
+/// changing how it looks, then leaving or stopping it. The two power rows
+/// are destructive and confirmed; nothing above them is.
+pub const ROWS: &[SystemRow] = &[
+    SystemRow {
+        action: SystemAction::About,
+        label: "About This System",
+        group_break: false,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::SystemMonitor,
+        label: "System Monitor",
+        group_break: false,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::TaskShell,
+        label: "Task Shell",
+        group_break: false,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::Appearance(Appearance::Light),
+        label: "Light Appearance",
+        group_break: true,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::Appearance(Appearance::Dark),
+        label: "Dark Appearance",
+        group_break: false,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::LogOut,
+        label: "Log Out",
+        group_break: true,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::Restart,
+        label: "Restart",
+        group_break: false,
+        role: ControlRole::Destructive,
+    },
+    SystemRow {
+        action: SystemAction::ShutDown,
+        label: "Shut Down",
+        group_break: false,
+        role: ControlRole::Destructive,
+    },
+];
+
+/// Why the appearance already in use cannot be chosen again.
+pub const REASON_ALREADY_IN_USE: &str = "Already in use";
+
+/// Why a launch row is offered but cannot act: the desktop found no such
+/// bundle installed, so choosing it could only fail.
+pub const REASON_NOT_INSTALLED: &str = "Not installed";
+
+/// Why the power rows cannot act: no process has attested that it can
+/// perform the transition.
+///
+/// This is the state before the system-overview service has published, as
+/// well as after it has published that it holds no power authority — the
+/// desktop treats "not told" and "told no" alike, because neither is
+/// permission.
+pub const REASON_NO_POWER_AUTHORITY: &str = "The system service cannot power this machine";
+
+/// What the menu is allowed to offer, as attested by the processes that
+/// would actually carry each command out.
+///
+/// The taskbar holds none of this authority itself; it renders what it was
+/// told. Every field defaults to the refusing answer, so a menu built
+/// before anything has been attested offers nothing it cannot deliver.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SystemPermits {
+    /// The appearance the desktop is showing right now, so the matching row
+    /// is marked as the one in use.
+    pub appearance: Appearance,
+    /// Whether a process has attested that it holds the authority to
+    /// restart or power off this machine.
+    pub power: bool,
+    /// Whether the terminal bundle the Task Shell row launches is present
+    /// in the desktop's catalog.
+    pub task_shell_installed: bool,
+}
+
+/// Build the menu's rows for `permits`.
+///
+/// Every row in [`ROWS`] is rendered, in order: a command whose backing is
+/// missing is shown non-actionable with the reason stated, never hidden and
+/// never silently offered. Hiding it would leave the user guessing why the
+/// desktop cannot do something it plainly should; offering it would promise
+/// an action that cannot happen.
+#[must_use]
+pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
+    ROWS.iter()
+        .map(|row| {
+            let item = MenuItem::new(row.label)
+                .with_group_break(row.group_break)
+                .with_role(row.role);
+            match row.action {
+                SystemAction::Appearance(choice) if choice == permits.appearance => item
+                    .with_state(ControlState::disabled().with_activity(ActivityState::Complete))
+                    .with_reason(REASON_ALREADY_IN_USE),
+                SystemAction::TaskShell if !permits.task_shell_installed => item
+                    .with_state(ControlState::disabled())
+                    .with_reason(REASON_NOT_INSTALLED),
+                SystemAction::Restart | SystemAction::ShutDown if !permits.power => item
+                    .with_state(
+                        ControlState::default().with_authority(AuthorityState::NeedsCapability),
+                    )
+                    .with_reason(REASON_NO_POWER_AUTHORITY),
+                _ => item,
+            }
+        })
+        .collect()
+}
+
+/// The command the row at `index` asks for, or `None` for an index the
+/// table does not name (fail closed — never guess at a command).
+#[must_use]
+pub fn action_at(index: usize) -> Option<SystemAction> {
+    ROWS.get(index).map(|row| row.action)
+}

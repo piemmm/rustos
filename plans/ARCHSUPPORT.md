@@ -272,7 +272,21 @@ with that increment instead. Same-change docs: `docs/src/platform/` x86_64
 page brought to the aarch64 page's level, README feature/architecture
 matrix rows updated (§13).
 
-### A7 — x86_64 hardening unblock (`blocked` on Stage 6 page-table boundary)
+### A7 — ACPI power-off (`planned`)
+
+`system_power` (`abi-v1` 105, `CAP_SYSTEM_POWER`) restarts an x86_64 machine
+through the legacy PC reset hardware (the 8042 pulse-reset, then the `0xCF9`
+reset-control register), but **power-off answers `NotSupported`** and leaves
+the machine running: the port keeps the Arch-HAL `poweroff` default rather
+than poking a guessed chipset control port. Closing it needs an ACPI
+power-management path that parses the FADT (and the DSDT `\_S5` object) for
+the PM1a/PM1b control block and sleep-type values, then writes the `SLP_TYP`
++ `SLP_EN` sequence — real firmware parsing, not a constant. aarch64 (PSCI
+`SYSTEM_OFF`) and riscv64 (SBI SRST) already power off. Vertical: a QEMU
+x86_64 scenario asserting the guest exits on `PowerOff`, mirroring the
+equivalents on the two ports that have it.
+
+### A8 — x86_64 hardening unblock (`blocked` on Stage 6 page-table boundary)
 
 KPTI + IBRS/IBPB/STIBP/SSBD move from `Pending` to `Supported` in the
 port's §19.1 profile the moment the Stage 6 user/kernel page-table
@@ -316,5 +330,5 @@ because its blocker is not an aarch64-parity item.
   live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (the production
   MSI-X kthread disk-completion never wakes the parked bring-up), a separate
   A2 defect.
-- **A1, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
+- **A1, A4, A5, A6, A7 `planned`**; **A8 `blocked`** on the Stage 6
   user/kernel page-table boundary.

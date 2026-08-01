@@ -86,11 +86,11 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
     Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
-    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal,
-    SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags,
-    WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
-    CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
-    LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    OpenFlags, PortName, PowerAction, ProcId, ProcessStart, RandomFlags, ResourceLimit,
+    SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize,
+    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
+    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
     PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
     SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
@@ -3248,6 +3248,32 @@ where
             ],
         );
     }
+
+    /// Emit the one [`AuditEvent::SystemPower`] record for an admitted
+    /// `system_power` transition.
+    ///
+    /// Always `Info`: by the time this runs the capability gate has passed
+    /// and the flush has succeeded, so there is no allow/deny distinction
+    /// left to carry here. The record names the kernel-attested caller and
+    /// the requested action so the trail states who ended the machine's
+    /// power state and how — never a capability token.
+    fn audit_system_power(&self, caller: SecTaskId, action: PowerAction) {
+        crate::audit::emit(
+            self.audit,
+            Level::Info,
+            AuditEvent::SystemPower,
+            &[
+                Field {
+                    key: "caller",
+                    value: tairix_log::FieldValue::UnsignedInt(caller.0),
+                },
+                Field {
+                    key: "action",
+                    value: tairix_log::FieldValue::Str(action.name()),
+                },
+            ],
+        );
+    }
 }
 
 /// Which rule decided the caller's authority over a process target
@@ -5875,6 +5901,34 @@ where
             // closed rather than pretend the level changed.
             Err(_) => Err(Errno::NotFound),
         }
+    }
+
+    /// `system_power(action)` — flush every mounted volume, then power the
+    /// platform off or reset it (`plans/NEW-TASKBAR.md` T13).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// `CAP_SYSTEM_POWER` and decoded `action` against the closed
+    /// `PowerAction` set, so neither is re-checked here. The flush runs
+    /// first: a volume that will not flush leaves its error to the caller
+    /// and the platform untouched, rather than stopping the machine over
+    /// writes that never reached stable media. The audit record is emitted
+    /// only once the flush has succeeded, and before the platform primitive
+    /// runs, so a transition that actually stops the machine still leaves
+    /// its record on the trail. A refusal earlier in the pipeline (the
+    /// capability gate, an unknown action) is the dispatcher's own audited
+    /// refusal; there is nothing further to record for those cases.
+    fn system_power(&self, caller: &CallerContext<'_>, action: PowerAction) -> SyscallResult {
+        let uid = caller.caps.owner().0;
+        self.filesystem.sync(uid, caller.caps.effective())?;
+        self.audit_system_power(caller.task_id, action);
+        match action {
+            PowerAction::PowerOff => self.arch.poweroff(),
+            PowerAction::Restart => self.arch.reboot(),
+        }
+        // A transition the platform actually performs never returns.
+        // Reaching here means the port has no primitive for it; the flush
+        // already ran, but the machine itself is otherwise unchanged.
+        Err(Errno::NotSupported)
     }
 
     fn rlimit_get(&self, caller: &CallerContext<'_>, kind: u32, out: u64) -> SyscallResult {
@@ -22059,13 +22113,13 @@ mod tests {
         }
     }
 
-    /// Build the handler fixture every `signal` test shares: an empty
-    /// capability table plus the surrounding registries.
+    /// Build the handler fixture the process-control and power tests
+    /// share: an empty capability table plus the surrounding registries.
     ///
     /// Each test owns the returned parts and assembles its own handler, so
     /// one fixture serves the whole set without any test's table, sink, or
     /// producer leaking into another's.
-    fn signal_fixture() -> (
+    fn handler_fixture() -> (
         Arc<TestArch>,
         RwLock<CapTable>,
         RwLock<PortRegistry>,
@@ -22107,7 +22161,7 @@ mod tests {
     /// without an owner or capability question ever being asked.
     #[test]
     fn signal_of_own_child_needs_no_capability() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22138,7 +22192,7 @@ mod tests {
     /// delivery) propagates verbatim from the `signal` handler.
     #[test]
     fn signal_propagates_producer_error() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22164,7 +22218,7 @@ mod tests {
     /// without any capability: the same user controls its own processes.
     #[test]
     fn signal_of_a_same_uid_non_child_is_allowed() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22198,7 +22252,7 @@ mod tests {
     /// refusal reaches the audit log.
     #[test]
     fn signal_of_another_principal_is_denied_without_the_capability() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22239,7 +22293,7 @@ mod tests {
     /// process, and the allowed decision is audited as such.
     #[test]
     fn signal_of_another_principal_is_allowed_with_proc_control() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22274,7 +22328,7 @@ mod tests {
     /// `CAP_PROC_CONTROL` turns it into a delivery.
     #[test]
     fn signal_of_an_unknown_pid_is_not_found() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22303,7 +22357,7 @@ mod tests {
     /// rather than being read as a process-group or broadcast selector.
     #[test]
     fn signal_of_a_non_positive_pid_fails_closed() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22339,7 +22393,7 @@ mod tests {
     /// question.
     #[test]
     fn signal_without_producer_is_not_implemented() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22389,7 +22443,7 @@ mod tests {
     /// signal delivery — and the scheduler records the new level.
     #[test]
     fn sched_set_priority_of_own_child_lowers_silently() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22419,7 +22473,7 @@ mod tests {
     /// the plain target rule — an equal level never counts as a raise.
     #[test]
     fn sched_set_priority_restating_the_level_is_not_a_raise() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22451,7 +22505,7 @@ mod tests {
     /// the refusal is audited as a raise under the own-child rule.
     #[test]
     fn sched_set_priority_raise_of_own_child_needs_proc_control() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22488,7 +22542,7 @@ mod tests {
     /// still under the own-child rule.
     #[test]
     fn sched_set_priority_raise_with_proc_control_is_allowed_and_audited() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22521,7 +22575,7 @@ mod tests {
     /// as `signal`'s is.
     #[test]
     fn sched_set_priority_of_a_same_uid_non_child_is_allowed() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22558,7 +22612,7 @@ mod tests {
     /// touched and the refusal reaches the audit log.
     #[test]
     fn sched_set_priority_of_another_principal_is_denied_without_the_capability() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22598,7 +22652,7 @@ mod tests {
     /// principal's process, and the allowed decision is audited as such.
     #[test]
     fn sched_set_priority_of_another_principal_is_allowed_with_proc_control() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let (target, pid) = spawn_priority_target(&sched);
         let rng = unseeded_rng();
@@ -22634,7 +22688,7 @@ mod tests {
     /// a table at all — neither leaves an audit record.
     #[test]
     fn sched_set_priority_of_unknown_or_non_positive_pid_fails_closed() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22666,7 +22720,7 @@ mod tests {
     /// changed.
     #[test]
     fn sched_set_priority_of_a_task_the_scheduler_dropped_is_not_found() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22700,7 +22754,7 @@ mod tests {
     /// inert interface as a target question.
     #[test]
     fn sched_set_priority_without_producer_is_not_implemented() {
-        let (arch, table, ipc, aspaces, irq, ctl) = signal_fixture();
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
         let rng = unseeded_rng();
         let sink = make_sink();
@@ -22719,6 +22773,196 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert!(priority_records(sink).is_empty());
+    }
+
+    /// Every admitted power transition the sink captured, in arrival order.
+    fn power_records(sink: &TestSink) -> Vec<crate::test_sink::CapturedEvent> {
+        sink.snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::SystemPower.id())
+            .collect()
+    }
+
+    /// A recording filesystem whose whole-system flush either succeeds or
+    /// fails with `err`, leaked for the handler's `'static` service borrow.
+    fn power_filesystem(err: Option<Errno>) -> &'static RecordingFs {
+        let mut fs = RecordingFs::new();
+        fs.sync_err = err;
+        Box::leak(Box::new(fs))
+    }
+
+    /// A power-off flushes every mounted volume, records the transition,
+    /// and only then asks the platform to stop — proved by the shared
+    /// ordering clock, so a future handler that stopped the machine first
+    /// (losing the unflushed writes) would fail here.
+    #[test]
+    fn system_power_flushes_every_volume_before_stopping_the_platform() {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::SYSTEM_POWER], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let fs = power_filesystem(None);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(
+            h.system_power(&ctx, PowerAction::PowerOff),
+            Err(Errno::NotSupported)
+        );
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from("sync uid=1000")],
+            "the flush ran once under the caller's attested uid"
+        );
+        let flushed = fs.sync_stamp().expect("the flush was asked for");
+        let stopped = arch.power_stamp().expect("the platform was asked to stop");
+        assert!(
+            flushed < stopped,
+            "the flush must complete before the machine is stopped"
+        );
+
+        let records = power_records(sink);
+        assert_eq!(records.len(), 1, "one record per admitted transition");
+        assert_eq!(records[0].level, Level::Info);
+        assert_eq!(field_of(&records[0], "caller"), "2");
+        assert_eq!(field_of(&records[0], "action"), "power-off");
+    }
+
+    /// Each action reaches its own platform primitive exactly once and
+    /// never the other, so a restart can never power the machine down.
+    #[test]
+    fn system_power_reaches_only_the_requested_platform_primitive() {
+        for (action, poweroffs, reboots) in
+            [(PowerAction::PowerOff, 1, 0), (PowerAction::Restart, 0, 1)]
+        {
+            let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+            let sched = make_sched(arch.clone());
+            let rng = unseeded_rng();
+            let sink = make_sink();
+            let caps = make_caps_record(2, &[CapabilityId::SYSTEM_POWER], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(2),
+                caps: &caps,
+            };
+            sink.clear();
+
+            let h = KernelSyscallHandlers::new(
+                &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+            )
+            .with_filesystem(power_filesystem(None));
+
+            assert_eq!(h.system_power(&ctx, action), Err(Errno::NotSupported));
+            assert_eq!(arch.poweroff_count(), poweroffs, "{}", action.name());
+            assert_eq!(arch.reboot_count(), reboots, "{}", action.name());
+            assert_eq!(field_of(&power_records(sink)[0], "action"), action.name());
+        }
+    }
+
+    /// A volume that will not flush aborts the transition: the caller gets
+    /// the flush error, the platform is never asked to stop, and nothing is
+    /// recorded as admitted — the machine keeps running rather than losing
+    /// the writes that never reached stable media.
+    #[test]
+    fn system_power_flush_failure_leaves_the_platform_untouched() {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::SYSTEM_POWER], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        sink.clear();
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(power_filesystem(Some(Errno::DeviceFault)));
+
+        assert_eq!(
+            h.system_power(&ctx, PowerAction::PowerOff),
+            Err(Errno::DeviceFault)
+        );
+        assert_eq!(arch.poweroff_count(), 0);
+        assert_eq!(arch.reboot_count(), 0);
+        assert_eq!(arch.power_stamp(), None);
+        assert!(power_records(sink).is_empty());
+    }
+
+    /// A port whose primitive returns instead of stopping the machine —
+    /// the host arch, and any real port without a reset channel — yields
+    /// `NotSupported`, so the caller reports the refusal and the system
+    /// carries on rather than halting silently.
+    #[test]
+    fn system_power_on_a_port_without_the_primitive_is_not_supported() {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::SYSTEM_POWER], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(power_filesystem(None));
+
+        assert_eq!(
+            h.system_power(&ctx, PowerAction::Restart),
+            Err(Errno::NotSupported)
+        );
+        assert_eq!(arch.halt_count(), 0, "an unsupported reset never halts");
+    }
+
+    /// An action outside the closed `PowerAction` set — zero, or any
+    /// unassigned discriminant — is refused by the dispatcher's decode
+    /// before the handler runs: no volume is flushed and the platform is
+    /// never touched, even though the caller holds the capability.
+    #[test]
+    fn system_power_rejects_an_unknown_action_before_any_effect() {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[CapabilityId::SYSTEM_POWER], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let fs = power_filesystem(None);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        let d = Dispatcher::new(&h, sink);
+
+        for action in [0, 3, u64::from(u32::MAX)] {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = action;
+            assert_eq!(
+                d.dispatch(&ctx, SyscallNumber::SYSTEM_POWER.as_u16(), args),
+                Err(Errno::OutOfRange),
+                "action {action} is not one of the closed set"
+            );
+        }
+        assert!(fs.calls().is_empty(), "no volume was flushed");
+        assert_eq!(arch.poweroff_count(), 0);
+        assert_eq!(arch.reboot_count(), 0);
+        assert!(power_records(sink).is_empty());
     }
 
     /// A producer error (e.g. `pid` is not a child of the caller) propagates
@@ -28919,6 +29163,11 @@ mod tests {
         entries: Vec<crate::fs::ReaddirEntry>,
         stat: FileStat,
         open_err: Option<Errno>,
+        sync_err: Option<Errno>,
+        /// Shared-clock stamp of the whole-system flush, or `0` while no
+        /// flush has been asked for, so a test can order the flush against
+        /// an effect another double records.
+        sync_stamp: core::sync::atomic::AtomicU64,
         log: std::sync::Mutex<Vec<String>>,
     }
 
@@ -28938,7 +29187,18 @@ mod tests {
                     times: tairix_abi::NodeTimes::default(),
                 },
                 open_err: None,
+                sync_err: None,
+                sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 log: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The shared-clock stamp of the flush, or `None` while none has
+        /// been asked for.
+        fn sync_stamp(&self) -> Option<u64> {
+            match self.sync_stamp.load(core::sync::atomic::Ordering::Relaxed) {
+                0 => None,
+                stamp => Some(stamp),
             }
         }
 
@@ -29034,7 +29294,14 @@ mod tests {
 
         fn sync(&self, uid: u32, _caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
             self.record(alloc::format!("sync uid={uid}"));
-            Ok(())
+            self.sync_stamp.store(
+                crate::test_arch::next_event_stamp(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            match self.sync_err {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
         }
 
         fn mkdir(

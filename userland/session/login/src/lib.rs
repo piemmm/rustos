@@ -56,7 +56,10 @@
 //! * [`login`] — the [`Login`] state machine.
 //! * [`elevate`](mod@elevate) — [`handle_elevate_request`], the
 //!   per-invocation elevation broker a running session's shell drives
-//!   (`plans/CAPABILITY_USE.md` CU5), over the same [`Authenticator`].
+//!   (`plans/CAPABILITY_USE.md` CU5), over the same [`Authenticator`]. The
+//!   same broker answers a caller's own verify-only re-authentication
+//!   request — the primitive a graphical session's screen lock needs,
+//!   without a second authenticator anywhere in the tree.
 //! * [`supervise`](mod@supervise) — [`supervise()`], the per-round
 //!   database-reload loop that keeps a `login` spawned before the encrypted
 //!   root is unlocked from caching a stale "no database" answer.

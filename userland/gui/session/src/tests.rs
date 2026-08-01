@@ -2199,7 +2199,9 @@ impl DirectorySource for RefusingSource {
     }
 }
 
-fn picker_desktop() -> (DesktopShell, Compositor) {
+/// A headless desktop for the session's own trusted windows: a shell over a
+/// bottom taskbar and a compositor at a small fixed mode.
+fn headless_desktop() -> (DesktopShell, Compositor) {
     let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480));
     let mode = DisplayMode {
         width_px: 640,
@@ -2222,7 +2224,7 @@ fn pressed(key: KeyValue) -> KeyInput {
 /// refuses a second pick while one is showing.
 #[test]
 fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
@@ -2242,7 +2244,7 @@ fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
 /// idle for a later request.
 #[test]
 fn picker_begin_fails_closed_when_the_listing_is_refused() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(|| RefusingSource);
     assert_eq!(
         picker.begin(7, &mut shell, &mut comp),
@@ -2256,7 +2258,7 @@ fn picker_begin_fails_closed_when_the_listing_is_refused() {
 /// choosing the file directly, without first descending from the root.
 #[test]
 fn picker_starting_at_opens_at_the_named_directory() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker =
         SessionPicker::new(TreeSource::fixture).starting_at(vec![String::from("Docs")]);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
@@ -2276,7 +2278,7 @@ fn picker_starting_at_opens_at_the_named_directory() {
 /// rather than refusing the pick, so the user can still choose a file.
 #[test]
 fn picker_starting_at_unlistable_home_falls_back_to_root() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture)
         .starting_at(vec![String::from("Nowhere"), String::from("missing")]);
     picker
@@ -2293,7 +2295,7 @@ fn picker_starting_at_unlistable_home_falls_back_to_root() {
 /// picker window.
 #[test]
 fn picker_keys_navigate_and_choose_the_selected_file() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
     let wm = picker.wm_id().expect("showing");
@@ -2318,7 +2320,7 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
 /// descending; Backspace climbs back up after a descent.
 #[test]
 fn picker_selection_and_climb_track_the_browser() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
@@ -2338,7 +2340,7 @@ fn picker_selection_and_climb_track_the_browser() {
 /// entry row descends into `Docs/`, and the file row inside concludes.
 #[test]
 fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
@@ -2380,7 +2382,7 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
     use tairix_browse::render::toolbar_height;
     use tairix_browse::WIN_WIDTH;
 
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
@@ -2406,7 +2408,7 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
 /// and the slot is free for the next pick.
 #[test]
 fn picker_escape_cancels_and_frees_the_slot() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
@@ -2425,7 +2427,7 @@ fn picker_escape_cancels_and_frees_the_slot() {
 /// delivering no conclusion.
 #[test]
 fn picker_abort_is_scoped_to_the_requesting_window() {
-    let (mut shell, mut comp) = picker_desktop();
+    let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
@@ -3399,6 +3401,7 @@ fn tray_summary(jobs: u16) -> tairix_abi::switchboard_ipc::TraySummary {
         cpu_busy_permille: tairix_abi::switchboard_ipc::TrayPermille::new(120).expect("permille"),
         pressure: None,
         top_task: None,
+        power_capable: false,
     }
 }
 
@@ -4086,4 +4089,252 @@ fn a_refused_mailbox_send_is_dropped_rather_than_retried() {
     maybe_send_seat_report(true, Some(MONITOR_PID), 1, &[11], &mut mailbox);
     assert_eq!(mailbox.attempts, 2, "one change is one attempt");
     assert_eq!(pending, None, "a live instance leaves nothing pending");
+}
+
+// --- The system quick-actions menu's session half (T13) -----------------
+
+use crate::confirm::{
+    build_dialog, prompt_font, Answer, ConfirmPrompt, CONFIRM_ORIGIN, WIN_HEIGHT, WIN_WIDTH,
+};
+use crate::relay_power;
+use tairix_abi::PowerAction;
+
+/// The prompt-local centre of the action button at `index`, resolved through
+/// the very dialog and font the prompt draws, so a test presses the button
+/// rather than a re-derived guess at where it sits.
+fn prompt_action_centre(action: PowerAction, index: usize, shell: &DesktopShell) -> Point {
+    let theme = shell.session().active_theme();
+    let rects = build_dialog(action).action_rects(
+        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
+        Scale::ONE,
+        theme,
+        prompt_font(theme),
+    );
+    let rect = rects[index];
+    assert!(rect.width > 0, "the button fitted the action band");
+    Point::new(
+        rect.origin.x + i32::try_from(rect.width / 2).expect("a small button width"),
+        rect.origin.y + i32::try_from(rect.height / 2).expect("a small button height"),
+    )
+}
+
+/// `ask` opens exactly one prompt, at its deterministic origin; a second
+/// request while one is showing is refused rather than stacking a prompt
+/// over the question already asked.
+#[test]
+fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let wm = confirm.wm_id().expect("a prompt window is showing");
+    assert_eq!(comp.window(wm).expect("live").origin(), CONFIRM_ORIGIN);
+    assert_eq!(confirm.pending(), Some(PowerAction::PowerOff));
+
+    assert!(
+        !confirm.ask(PowerAction::Restart, &mut shell, &mut comp),
+        "one prompt at a time"
+    );
+    assert_eq!(
+        confirm.pending(),
+        Some(PowerAction::PowerOff),
+        "the question already asked stands"
+    );
+}
+
+/// `Escape` declines: the prompt closes, the answer is a decline, and a
+/// decline relays nothing to the holder of the authority.
+#[test]
+fn escape_declines_the_prompt_and_relays_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    let wm = confirm.wm_id().expect("showing");
+
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    assert_eq!(
+        confirm.handle_key(&escape, &mut shell, &mut comp),
+        Some(Answer::Declined)
+    );
+    assert_eq!(confirm.wm_id(), None, "the prompt window is closed");
+    assert!(comp.window(wm).is_none(), "and gone from the compositor");
+
+    let mut mailbox = RecordingMailbox::default();
+    assert_eq!(
+        relay_power(Answer::Declined, Some(MONITOR_PID), &mut mailbox),
+        None
+    );
+    assert!(mailbox.sent.is_empty(), "a decline sends nothing");
+}
+
+/// The safe button holds keyboard focus when the prompt opens, so `Enter`
+/// without a deliberate move to the other button answers "no".
+#[test]
+fn enter_on_an_untouched_prompt_declines() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        confirm.handle_key(&enter, &mut shell, &mut comp),
+        Some(Answer::Declined),
+        "the answer a stray Enter gives is the safe one"
+    );
+}
+
+/// Moving focus to the destructive button and pressing `Enter` confirms the
+/// transition that was asked about, and confirming relays exactly one
+/// command to the holder.
+#[test]
+fn moving_focus_then_enter_confirms_and_relays_exactly_once() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    assert_eq!(
+        confirm.handle_key(&tab, &mut shell, &mut comp),
+        None,
+        "moving focus is not an answer"
+    );
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let answer = confirm
+        .handle_key(&enter, &mut shell, &mut comp)
+        .expect("the focused button answers");
+    assert_eq!(answer, Answer::Confirmed(PowerAction::Restart));
+    assert_eq!(confirm.wm_id(), None, "the prompt is already down");
+
+    let mut mailbox = RecordingMailbox::default();
+    assert_eq!(relay_power(answer, Some(MONITOR_PID), &mut mailbox), None);
+    assert_eq!(
+        mailbox.sent,
+        vec![(
+            MONITOR_PID,
+            SwitchboardCommand::Power {
+                action: PowerAction::Restart
+            }
+        )],
+        "one confirmation is one command"
+    );
+}
+
+/// A press on the safe button declines; a press on the destructive one
+/// confirms. Both resolve through the shared dialog's own button geometry.
+#[test]
+fn prompt_clicks_answer_through_the_shared_button_geometry() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let cancel = prompt_action_centre(PowerAction::PowerOff, 0, &shell);
+    assert_eq!(
+        confirm.handle_click(cancel, &mut shell, &mut comp),
+        Some(Answer::Declined)
+    );
+
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let accept = prompt_action_centre(PowerAction::PowerOff, 1, &shell);
+    assert_eq!(
+        confirm.handle_click(accept, &mut shell, &mut comp),
+        Some(Answer::Confirmed(PowerAction::PowerOff))
+    );
+}
+
+/// A press inside the prompt but on neither button changes nothing and
+/// leaves the question up, so no transition follows an idle click.
+#[test]
+fn a_press_off_the_prompt_buttons_answers_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+
+    assert_eq!(
+        confirm.handle_click(Point::new(4, 4), &mut shell, &mut comp),
+        None
+    );
+    assert_eq!(
+        confirm.pending(),
+        Some(PowerAction::Restart),
+        "the question is still being asked"
+    );
+}
+
+/// An abandoned prompt (the session tearing down, a log-out) is never a
+/// confirmation: the window closes and nothing is left pending.
+#[test]
+fn an_abandoned_prompt_is_not_a_confirmation() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let wm = confirm.wm_id().expect("showing");
+
+    confirm.abandon(&mut shell, &mut comp);
+
+    assert_eq!(confirm.pending(), None);
+    assert_eq!(confirm.wm_id(), None);
+    assert!(comp.window(wm).is_none());
+}
+
+/// A confirmed transition with no live holder is not attempted here: the
+/// desktop holds no power capability, so nothing is sent and the caller is
+/// handed the reason to state.
+#[test]
+fn a_confirmation_with_no_live_holder_sends_nothing_and_says_why() {
+    let mut mailbox = RecordingMailbox::default();
+
+    let reason = relay_power(Answer::Confirmed(PowerAction::PowerOff), None, &mut mailbox)
+        .expect("a reason to state");
+
+    assert!(
+        reason.contains("nothing was done"),
+        "the diagnosis says the machine is untouched: {reason}"
+    );
+    assert!(mailbox.sent.is_empty(), "and nothing was relayed");
+}
+
+/// A theme switch behind a showing prompt redraws it, so nothing on screen
+/// is left in the appearance just left behind.
+#[test]
+fn the_prompt_repaints_on_a_theme_switch() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let wm = confirm.wm_id().expect("showing");
+    let before: Vec<_> = comp.window(wm).expect("live").surface().pixels().to_vec();
+
+    shell.session_mut().set_appearance(Appearance::Light);
+    confirm.repaint(&mut shell, &mut comp);
+
+    let after = comp.window(wm).expect("still live").surface().pixels();
+    assert_ne!(
+        before.as_slice(),
+        after,
+        "the prompt is drawn in the appearance now in use"
+    );
+}
+
+/// The menu's appearance rows switch the desktop's theme in place: the
+/// registry's active theme changes and the taskbar is re-themed with it, so
+/// the bar and the desktop never disagree about which appearance is in use.
+#[test]
+fn setting_an_appearance_switches_the_theme_and_re_themes_the_bar() {
+    let mut session = DesktopSession::new(TaskbarConfig::bottom_bar(640, 480));
+    assert_eq!(
+        session.active_theme().appearance(),
+        Appearance::Dark,
+        "dark is the default"
+    );
+
+    assert_eq!(session.set_appearance(Appearance::Light), ThemeId::LIGHT);
+    assert_eq!(session.active_theme().appearance(), Appearance::Light);
+    assert_eq!(
+        session.taskbar().theme().id(),
+        ThemeId::LIGHT,
+        "the bar re-themed with the desktop"
+    );
+
+    assert_eq!(session.set_appearance(Appearance::Dark), ThemeId::DARK);
+    assert_eq!(session.active_theme().appearance(), Appearance::Dark);
+    assert_eq!(session.taskbar().theme().id(), ThemeId::DARK);
 }

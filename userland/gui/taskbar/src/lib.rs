@@ -74,6 +74,7 @@ pub mod notifications;
 pub mod pins;
 pub mod render;
 pub mod repaint;
+pub mod system;
 pub mod taskbar;
 pub mod tasks;
 pub mod tray;
@@ -93,6 +94,7 @@ pub use notifications::{
 pub use pins::{PinStrip, PinView};
 pub use render::TaskbarRenderer;
 pub use repaint::TaskbarRepaint;
+pub use system::{SystemAction, SystemPermits, SystemRow};
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};
 pub use tray::SwitchboardTray;

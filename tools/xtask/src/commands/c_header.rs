@@ -51,11 +51,11 @@ use tairix_abi::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LoadAverage, LoadHeader,
     ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode,
-    NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
-    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit,
-    ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal, SignalIntakeOp,
-    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64,
-    UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp,
+    NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction,
+    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
+    ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal,
+    SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+    Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp,
     WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
     BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
@@ -2259,6 +2259,7 @@ fn generate_syscall() -> String {
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
     emit_signal_contract(&mut out);
+    emit_power_contract(&mut out);
     emit_waitset_contract(&mut out);
 
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
@@ -2348,6 +2349,31 @@ fn emit_signal_contract(out: &mut String) {
         out,
         "#define TAIRIX_SCHED_PRIORITY_LOW {}u",
         SchedPriority::Low.as_u32()
+    );
+    out.push('\n');
+}
+
+/// Emit the power-call contract items into `tairix_syscall.h`: the
+/// `system_power()` transitions, read from `lib/abi` and never re-typed.
+fn emit_power_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* system_power() transitions (the `action` argument, uint32_t). 0 is reserved\n\
+         * and never valid; a value outside this set is rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE. The call requires TAIRIX_CAP_SYSTEM_POWER, flushes\n\
+         * every mounted volume first (a volume that will not flush abandons the\n\
+         * transition and returns its error), and returns only when the transition\n\
+         * was refused: TAIRIX_E_NOT_SUPPORTED on a port with no such primitive. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_POWER_ACTION_POWER_OFF {}u",
+        PowerAction::PowerOff.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_POWER_ACTION_RESTART {}u",
+        PowerAction::Restart.as_u32()
     );
     out.push('\n');
 }
@@ -3059,6 +3085,25 @@ mod tests {
             s.contains("uint32_t priority;"),
             "process record mirror carries the service level: {s}"
         );
+    }
+
+    /// The `system_power()` contract: the prototype carries its `action`
+    /// argument and the transition discriminants are read from `lib/abi`,
+    /// never re-typed.
+    #[test]
+    fn syscall_header_carries_the_system_power_contract() {
+        let h = body("tairix_syscall.h");
+        assert!(
+            h.contains("int32_t tairix_sys_system_power(uint32_t a0);"),
+            "system_power prototype carries the action argument: {h}"
+        );
+        for (name, action) in [
+            ("TAIRIX_POWER_ACTION_POWER_OFF", PowerAction::PowerOff),
+            ("TAIRIX_POWER_ACTION_RESTART", PowerAction::Restart),
+        ] {
+            let line = format!("#define {name} {}u", action.as_u32());
+            assert!(h.contains(&line), "action constant pinned: {line}");
+        }
     }
 
     /// The reserved load-failure exit statuses are read from `lib/abi` and

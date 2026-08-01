@@ -22,14 +22,14 @@ use alloc::string::String;
 use tairix_abi::switchboard_ipc::{
     SeatReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
 };
-use tairix_abi::{CapabilityQuery, Errno, Signal};
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
 use tairix_controls::Switchboard;
 use tairix_procinfo::Transport;
 
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{build_model, derive_self_uid, GroupingEdit, LiveMeters};
-use crate::panel::{CommandOutcome, Panel, PanelOutcome, PANEL_TITLE};
+use crate::panel::{Panel, PanelOutcome, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
 
@@ -150,6 +150,20 @@ pub trait ServiceHost {
     /// authority over.
     fn lower_priority(&mut self, pid: i32) -> Result<(), Errno>;
 
+    /// Ask the kernel to move the machine to the power state `action`
+    /// names.
+    ///
+    /// The service checks its own authority before calling this, and the
+    /// kernel checks the caller's again on the far side of the trap: this
+    /// seam marshals the request, it never stands in for either check.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's typed refusal — a caller without the power capability,
+    /// or a platform with no primitive for the requested transition. A
+    /// successful power-off never returns at all.
+    fn power(&mut self, action: PowerAction) -> Result<(), Errno>;
+
     /// State, in plain words, that `action` was refused with `refusal`.
     ///
     /// The service keeps running: the user is told which action did not
@@ -260,7 +274,13 @@ impl Service {
         for field in &sample.degradations {
             host.note_degradation(*field);
         }
-        let summary = derive_summary(&sample, &mut self.hysteresis);
+        let mut summary = derive_summary(&sample, &mut self.hysteresis);
+        // The desktop's Restart and Shut Down rows are only offered when a
+        // process has said it can actually perform them, so the flag is a
+        // live re-read of this service's own capability rather than a value
+        // cached at start-up: an authority dropped since then stops being
+        // advertised on the very next publish.
+        summary.power_capable = authority.holds(CapabilityId::SYSTEM_POWER);
         self.meters.record(&sample, self.hysteresis);
         // A process list that degraded to its honest empty form this cycle
         // is a query failure, not "every process exited" — pruning against
@@ -319,8 +339,38 @@ impl Service {
         command: SwitchboardCommand,
         authority: &dyn CapabilityQuery,
     ) {
-        if self.panel.command(host, command) == CommandOutcome::Rebuild {
-            self.rebuild(authority);
+        match command {
+            SwitchboardCommand::OpenPanel { section } => self.panel.open_section(host, section),
+            SwitchboardCommand::SeatReport { report } => {
+                self.panel.set_seat_report(report);
+                self.rebuild(authority);
+            }
+            SwitchboardCommand::Power { action } => Self::power(host, action, authority),
+        }
+    }
+
+    /// Move the machine to the power state `action` names, under this
+    /// service's own authority.
+    ///
+    /// The desktop session relays the user's confirmed choice but holds no
+    /// power authority itself, so the check belongs here, before anything is
+    /// asked of the kernel. A service that does not hold the capability
+    /// states the refusal and leaves the machine running rather than
+    /// attempting a call it knows will be denied, and the kernel checks
+    /// again regardless. Either way the user is told which transition did
+    /// not happen.
+    ///
+    /// A granted power-off or restart never returns; a refusal from the
+    /// kernel (an unsupported platform primitive, say) is stated like any
+    /// other and the service keeps running.
+    fn power(host: &mut dyn ServiceHost, action: PowerAction, authority: &dyn CapabilityQuery) {
+        let attempted = power_phrase(action);
+        if !authority.holds(CapabilityId::SYSTEM_POWER) {
+            host.report_refusal(attempted, Errno::PermissionDenied);
+            return;
+        }
+        if let Err(refusal) = host.power(action) {
+            host.report_refusal(attempted, refusal);
         }
     }
 
@@ -440,6 +490,19 @@ impl Service {
             self_uid,
         );
         self.panel.refresh(model);
+    }
+}
+
+/// Name a power transition the way a refusal notice reads it: "could not
+/// power the machine off", "could not restart the machine".
+///
+/// [`PowerAction::name`] is the stable log spelling, which does not fit an
+/// English sentence; this is the sentence form and the only place it is
+/// written.
+const fn power_phrase(action: PowerAction) -> &'static str {
+    match action {
+        PowerAction::PowerOff => "power the machine off",
+        PowerAction::Restart => "restart the machine",
     }
 }
 

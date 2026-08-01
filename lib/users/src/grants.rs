@@ -138,6 +138,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   live children, or any other process it itself owns, without this
 ///   capability; controlling a process that belongs to someone else is an
 ///   administrative act, not an ordinary session's.
+/// * `CAP_SYSTEM_POWER` — power the machine off or restart it
+///   (`system_power`, `plans/NEW-TASKBAR.md` T13). Ending every other
+///   principal's session and every service on the machine reaches far
+///   beyond the caller's own processes, so it is administrative; an
+///   ordinary session ends only its own work.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -154,6 +159,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::NET_BIND_PRIVILEGED,
     CapabilityId::NET_RAW,
     CapabilityId::PROC_CONTROL,
+    CapabilityId::SYSTEM_POWER,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -301,7 +307,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 23);
+        assert_eq!(set.len(), 24);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -321,6 +327,7 @@ mod tests {
             CapabilityId::NET_BIND_PRIVILEGED,
             CapabilityId::NET_RAW,
             CapabilityId::PROC_CONTROL,
+            CapabilityId::SYSTEM_POWER,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
@@ -396,5 +403,14 @@ mod tests {
     #[test]
     fn session_baseline_excludes_proc_control() {
         assert!(!session_baseline().contains(CapabilityId::PROC_CONTROL));
+    }
+
+    /// Stopping the machine ends every principal's session, so it is an
+    /// administrator's grant alone: the ordinary interactive ceiling must
+    /// not carry it, or any logged-in user could power the system down.
+    #[test]
+    fn only_the_administrative_ceiling_carries_system_power() {
+        assert!(administrator_ceiling().contains(CapabilityId::SYSTEM_POWER));
+        assert!(!session_baseline().contains(CapabilityId::SYSTEM_POWER));
     }
 }

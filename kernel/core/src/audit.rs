@@ -43,6 +43,7 @@
 //! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
 //! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
 //! | 4132 | Info | `VOLUME_RECOVERED`  | audit | A degraded/recovering volume returned to healthy service (the disk came back). Emitted once on the edge back to `Available`; `dev` names the block-service endpoint. |
+//! | 4133 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -504,6 +505,18 @@ pub enum AuditEvent {
     /// Logged as a recovery, not a fault, and emitted once on the return
     /// edge so a disk that comes back to life is noted in the health trail.
     VolumeRecovered,
+    /// An admitted `system_power` transition: the caller's capability was
+    /// accepted, every mounted volume flushed, and the platform is about to
+    /// be asked to power off or restart.
+    ///
+    /// Emitted immediately before the platform primitive is called — the
+    /// machine stops inside that call, so a record written afterwards would
+    /// never reach the trail. The `caller` and `action` fields name the
+    /// kernel-attested requester and the requested transition
+    /// (`power-off`/`restart`), never a capability token. A refused call is
+    /// already recorded by the dispatcher's own audited refusal, so this id
+    /// marks only transitions that were allowed to proceed.
+    SystemPower,
 }
 
 impl AuditEvent {
@@ -562,6 +575,7 @@ impl AuditEvent {
             Self::VolumeDegraded => 4130,
             Self::VolumeRecovering => 4131,
             Self::VolumeRecovered => 4132,
+            Self::SystemPower => 4133,
         })
     }
 
@@ -622,6 +636,7 @@ impl AuditEvent {
             Self::VolumeDegraded => "volume backing device degraded",
             Self::VolumeRecovering => "volume backing device recovering",
             Self::VolumeRecovered => "volume backing device recovered",
+            Self::SystemPower => "system power transition admitted",
         }
     }
 }
@@ -697,6 +712,7 @@ mod tests {
             AuditEvent::VolumeDegraded,
             AuditEvent::VolumeRecovering,
             AuditEvent::VolumeRecovered,
+            AuditEvent::SystemPower,
         ] {
             let id = ev.id().0;
             assert!(
@@ -760,6 +776,7 @@ mod tests {
             AuditEvent::VolumeDegraded.id().0,
             AuditEvent::VolumeRecovering.id().0,
             AuditEvent::VolumeRecovered.id().0,
+            AuditEvent::SystemPower.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
